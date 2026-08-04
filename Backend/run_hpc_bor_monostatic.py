@@ -58,6 +58,8 @@ import workflow_provenance as _workflow_provenance
 from geometry_io import material_sidecar_paths
 from workflow_provenance import (
     backend_source_fingerprint,
+    backend_source_inventory,
+    describe_source_mismatch,
     manifest_solve_spec_fingerprint,
     runtime_environment_fingerprint,
     sha256_file,
@@ -158,13 +160,22 @@ _SBATCH = shutil.which("sbatch") or "sbatch"
 
 # ─── shared helpers ────────────────────────────────────────────────────────
 
+def _solver_source_records():
+    # type: () -> Tuple[str, Dict[str, str]]
+    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
+    return backend_dir, {"driver_configured.py": str(Path(__file__).resolve())}
+
+
 def _solver_source_fingerprint():
     # type: () -> str
-    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
-    return backend_source_fingerprint(
-        backend_dir,
-        {"driver_configured.py": str(Path(__file__).resolve())},
-    )
+    backend_dir, extra = _solver_source_records()
+    return backend_source_fingerprint(backend_dir, extra)
+
+
+def _solver_source_inventory():
+    # type: () -> Dict[str, str]
+    backend_dir, extra = _solver_source_records()
+    return backend_source_inventory(backend_dir, extra)
 
 
 def _verify_run_provenance(manifest):
@@ -179,9 +190,20 @@ def _verify_run_provenance(manifest):
     current_source = _solver_source_fingerprint()
     current_runtime = runtime_environment_fingerprint()
     if current_source != expected_source:
+        # Name the files: "something under Backend/ differs" is not actionable,
+        # and the usual cause is a tree that was only partly updated.
+        recorded = manifest.get("solver_source_inventory") or {}
+        detail = (
+            describe_source_mismatch(recorded, _solver_source_inventory())
+            if recorded else
+            "this run predates per-file inventories, so the differing file "
+            "cannot be named -- run tests/diagnose_provenance.py"
+        )
         raise RuntimeError(
             "Solver source/native artifacts differ from the HPC run manifest; "
-            "no cached or new field will be used from this mixed source state."
+            "no cached or new field will be used from this mixed source state. "
+            f"({detail}). Either restore the recorded source or submit a new "
+            "run with the code you actually want to execute."
         )
     if current_runtime != expected_runtime:
         raise RuntimeError(
@@ -633,6 +655,7 @@ def submit():
         "n_slots":         int(N_NODES) * int(N_JOBS),
         "n_units":         len(units),
         "solver_source_sha256": _solver_source_fingerprint(),
+        "solver_source_inventory": _solver_source_inventory(),
         "runtime_environment_sha256":
             runtime_environment_fingerprint(),
         "solver_config": {

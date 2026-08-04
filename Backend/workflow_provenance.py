@@ -73,18 +73,86 @@ def source_bundle_fingerprint(records: 'Dict[str, str]') -> 'str':
     return hashlib.sha256(raw).hexdigest()
 
 
-def backend_source_fingerprint(
+def backend_source_records(
     backend_dir: 'str',
     extra_records: 'Dict[str, str]' = None,
-) -> 'str':
-    """Hash a backend tree plus logically named runner/config files."""
+) -> 'Dict[str, str]':
+    """Logical name -> path for everything a solve's identity depends on."""
 
     records = {
         f"Backend/{os.path.basename(path)}": path
         for path in backend_source_paths(backend_dir)
     }
     records.update(extra_records or {})
-    return source_bundle_fingerprint(records)
+    return records
+
+
+def backend_source_inventory(
+    backend_dir: 'str',
+    extra_records: 'Dict[str, str]' = None,
+) -> 'Dict[str, str]':
+    """Per-file hashes behind `backend_source_fingerprint`.
+
+    The fingerprint alone can only say that *something* under Backend/ differs
+    from what a run recorded, which is not enough to act on -- the usual cause
+    is a partially updated tree, and the useful question is which file.
+    Recording the inventory beside the fingerprint lets the mismatch name the
+    files that were added, removed, or edited.
+    """
+
+    return {
+        name: sha256_file(os.path.abspath(path))
+        for name, path in sorted(backend_source_records(
+            backend_dir, extra_records
+        ).items())
+    }
+
+
+def compare_source_inventories(
+    expected: 'Dict[str, str]',
+    actual: 'Dict[str, str]',
+) -> 'Dict[str, List[str]]':
+    """(changed, added, removed) logical names between two inventories."""
+
+    expected = dict(expected or {})
+    actual = dict(actual or {})
+    return {
+        "changed": sorted(
+            name for name in set(expected) & set(actual)
+            if expected[name] != actual[name]
+        ),
+        "added": sorted(set(actual) - set(expected)),
+        "removed": sorted(set(expected) - set(actual)),
+    }
+
+
+def describe_source_mismatch(
+    expected: 'Dict[str, str]',
+    actual: 'Dict[str, str]',
+) -> 'str':
+    """One-line summary of an inventory difference, or '' when identical."""
+
+    diff = compare_source_inventories(expected, actual)
+    parts = []
+    for label in ("changed", "added", "removed"):
+        names = diff[label]
+        if names:
+            shown = ", ".join(names[:6])
+            if len(names) > 6:
+                shown += f", ... (+{len(names) - 6} more)"
+            parts.append(f"{label}: {shown}")
+    return "; ".join(parts)
+
+
+def backend_source_fingerprint(
+    backend_dir: 'str',
+    extra_records: 'Dict[str, str]' = None,
+) -> 'str':
+    """Hash a backend tree plus logically named runner/config files."""
+
+    return source_bundle_fingerprint(
+        backend_source_records(backend_dir, extra_records)
+    )
 
 
 def write_output_attestation(

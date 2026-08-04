@@ -65,6 +65,8 @@ from geometry_io import material_sidecar_paths
 from solver_quality import validate_mesh_convergence_policy
 from workflow_provenance import (
     backend_source_fingerprint,
+    backend_source_inventory,
+    describe_source_mismatch,
     manifest_solve_spec_fingerprint,
     runtime_environment_fingerprint,
     stable_json_fingerprint,
@@ -203,13 +205,29 @@ _SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
 
 # ─── shared helpers ────────────────────────────────────────────────────────
 
+def _solver_source_records():
+    # type: () -> Tuple[str, Dict[str, str]]
+    """(backend directory, extra logical records) the fingerprint is built from.
+
+    The running driver is recorded under a fixed logical name so that submit
+    (which runs the configured copy) and the worker (which runs the copy SLURM
+    execs out of the run directory) hash the same bytes under the same name.
+    """
+
+    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
+    return backend_dir, {"driver_configured.py": str(Path(__file__).resolve())}
+
+
 def _solver_source_fingerprint():
     # type: () -> str
-    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
-    return backend_source_fingerprint(
-        backend_dir,
-        {"driver_configured.py": str(Path(__file__).resolve())},
-    )
+    backend_dir, extra = _solver_source_records()
+    return backend_source_fingerprint(backend_dir, extra)
+
+
+def _solver_source_inventory():
+    # type: () -> Dict[str, str]
+    backend_dir, extra = _solver_source_records()
+    return backend_source_inventory(backend_dir, extra)
 
 
 def _verify_run_provenance(context):
@@ -231,9 +249,21 @@ def _verify_run_provenance(context):
             "legacy runs must be regenerated before reuse."
         )
     if _solver_source_fingerprint() != expected_source:
+        # Name the files. "Something under Backend/ differs" is not actionable,
+        # and the usual cause is a tree that was only partly updated.
+        detail = describe_source_mismatch(
+            context.get("solver_source_inventory") or {},
+            _solver_source_inventory(),
+        )
+        if not context.get("solver_source_inventory"):
+            detail = ("this run predates per-file inventories, so the "
+                      "differing file cannot be named -- run "
+                      "tests/diagnose_provenance.py for what is checked")
         raise RuntimeError(
             "Solver source/native artifacts differ from the HPC run manifest; "
-            "no cached or new field will be used from this mixed source state."
+            "no cached or new field will be used from this mixed source state. "
+            f"({detail}). Either restore the recorded source or submit a new "
+            "run with the code you actually want to execute."
         )
     if runtime_environment_fingerprint() != expected_runtime:
         raise RuntimeError(
@@ -575,6 +605,9 @@ def submit():
         "n_slots":         int(N_NODES) * int(N_JOBS),
         "n_units":         len(units),
         "solver_source_sha256": _solver_source_fingerprint(),
+        # Per-file hashes behind that fingerprint, so a later mismatch can say
+        # which file moved instead of only that one did.
+        "solver_source_inventory": _solver_source_inventory(),
         "runtime_environment_sha256": runtime_environment_fingerprint(),
         "solver_config": {
             "geometry_units":          GEOMETRY_UNITS,
@@ -792,6 +825,7 @@ def worker(run_dir_str, submission_index, task_index):
         "run_id": manifest["run_id"],
         "solver_source_sha256": manifest["solver_source_sha256"],
         "runtime_environment_sha256": manifest["runtime_environment_sha256"],
+        "solver_source_inventory": manifest.get("solver_source_inventory") or {},
         "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
         "solver_config_sha256": stable_json_fingerprint(solver_config),
         "geometry_units": solver_config["geometry_units"],

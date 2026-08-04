@@ -227,7 +227,51 @@ equivalent switch.
 
 ---
 
-## 5. Per-unit overhead
+## 5. "Solver source ... differ from the HPC run manifest"
+
+Every unit re-checks that the solver source still matches what the run
+recorded at submit time — a hash over every top-level `.py`/`.so`/`.c`/... in
+`Backend/`, plus the driver being executed. If it fires, the run and the code
+on disk have diverged.
+
+The message now names the files:
+
+```
+Solver source/native artifacts differ from the HPC run manifest ...
+(changed: Backend/solver_utils.py; added: Backend/my_patch.py;
+ removed: Backend/occluder.py). Either restore the recorded source or submit
+a new run with the code you actually want to execute.
+```
+
+For a run submitted before per-file inventories existed, or to check a compute
+node directly:
+
+```bash
+python tests/diagnose_provenance.py <run_dir> [--backend /path/to/Backend]
+```
+
+Usual causes, in order of likelihood:
+
+1. **Code edited after submitting.** The manifest froze the old source; the
+   worker sees the new one. Resubmit — the existing run's finished results
+   stay valid, because they were produced by the source that run recorded.
+2. **A partially updated tree.** A file copied to the cluster and one missed,
+   so the file *set* differs. `removed:` and `added:` entries point straight
+   at it.
+3. **Login node and compute node see different trees** — different mount,
+   different `PYTHONPATH`, a stale copy under a different prefix. The
+   diagnostic prints the Backend directory it actually checked, which is
+   usually enough to spot this.
+
+Note that `.so` artifacts count: rebuilding `fmm_near.so` on a different host
+changes the fingerprint even with identical sources.
+
+Restoring the old tree and resubmitting are both valid; the check exists so a
+run cannot silently mix fields from two different solver builds.
+
+---
+
+## 6. Per-unit overhead
 
 Provenance is verified before and after every unit, which is correct and stays.
 What changed is the cost of doing it:
@@ -248,7 +292,7 @@ What changed is the cost of doing it:
 
 ---
 
-## 6. Solver performance
+## 7. Solver performance
 
 Everything below is bit-comparable with the previous solver to floating-point
 reassociation; `tests/test_assembly_equivalence.py` and
@@ -330,7 +374,7 @@ shared L3 is thrashing; grow it for a few large solves with threads.
 
 ---
 
-## 7. Tests
+## 8. Tests
 
 ```bash
 python tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
@@ -338,6 +382,7 @@ python tests/test_solver_equivalence.py  <pristine rcs_solver.py>
 python tests/test_assembly_equivalence.py <pristine rcs_solver.py>
 python tests/benchmark_assembly.py      [pristine rcs_solver.py]
 python tests/measure_far_quadrature.py  [geometry.geo ...]
+python tests/diagnose_provenance.py     <run_dir>       # why a source check failed
 ```
 
 The two equivalence tests need a copy of the solver from before these changes
@@ -345,7 +390,7 @@ to compare against; keep one outside the tree.
 
 ---
 
-## 8. Rules of thumb
+## 9. Rules of thumb
 
 - **Many geometries or frequencies:** leave everything at defaults, set
   `N_NODES` to what you can get, and let the planner and stealing do the work.
