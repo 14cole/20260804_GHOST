@@ -191,19 +191,20 @@ def install_fingerprint_cache(full_recheck_seconds: 'float' = 300.0) -> 'None':
 # Cost and memory model
 # ─────────────────────────────────────────────────────────────────────────────
 
-def predict_2d_nodes(
+def predict_2d_profile(
     geometry_path: 'str',
     frequency_ghz: 'float',
     polarization: 'str',
     geometry_units: 'str',
     max_panels: 'int',
-) -> 'int':
-    """Boundary-node count the 2-D solver will actually discretize to.
+) -> 'Dict[str, Any]':
+    """Predict the mesh and dense formulation used by one 2-D unit.
 
     Uses the solver's own meshing rule rather than a proxy, so the cost and
-    memory numbers below track what the solve really does (including
-    material-dependent wavelength shortening inside dielectrics).  Returns 0
-    when the geometry cannot be meshed, which the caller treats as "unknown".
+    memory numbers below track what the solve really does, including
+    material-dependent wavelength shortening, interface-aware node splitting,
+    doubled dielectric unknowns, and repeated per-medium operator assembly.
+    A zero-node profile means prediction failed and is treated as "unknown".
     """
 
     try:
@@ -228,12 +229,118 @@ def predict_2d_nodes(
             lambda_min,
             max_panels=int(max_panels),
         )
-        return int(len(panels))
+        pol = rcs_solver._normalize_polarization(polarization)
+        k0 = (
+            2.0 * math.pi * float(frequency_ghz) * 1.0e9
+            / float(rcs_solver.C0)
+        )
+        preview_infos = rcs_solver._build_coupled_panel_info(
+            panels, materials, float(frequency_ghz), pol, k0
+        )
+        mesh, _ = rcs_solver._build_linear_mesh_interface_aware(
+            panels, preview_infos
+        )
+        infos = rcs_solver._build_linear_coupled_infos(
+            mesh, materials, float(frequency_ghz), pol, k0
+        )
+        regions = {
+            int(region)
+            for info in infos
+            for region in (info.minus_region, info.plus_region)
+            if int(region) >= 0
+        }
+        n_regions = max(1, len(regions))
+        interface_nodes = {}
+        interface_wavenumbers = set()
+        for element, info in zip(mesh.elements, infos):
+            interface = (int(info.minus_region), int(info.plus_region))
+            interface_nodes.setdefault(interface, set()).update(element.node_ids)
+            if int(info.minus_region) >= 0:
+                interface_wavenumbers.add((interface, complex(info.k_minus)))
+            if int(info.plus_region) >= 0:
+                interface_wavenumbers.add((interface, complex(info.k_plus)))
+
+        multi_region_dofs = 0
+        for (minus_region, plus_region), node_ids in interface_nodes.items():
+            density_count = int(minus_region >= 0) + int(plus_region >= 0)
+            multi_region_dofs += density_count * len(node_ids)
+        multi_region_dof_scale = (
+            float(multi_region_dofs) / float(max(1, len(mesh.nodes)))
+        )
+
+        # One Robin/sheet operator traversal and an N-unknown system are the
+        # reference cost. A transmission problem has two trace densities and
+        # assembles operators at multiple wavenumbers; a layered/mixed body
+        # repeats that work per participating medium.
+        if rcs_solver._is_all_sheet(infos):
+            formulation = "sheet"
+            assembly_weight = 1.0
+            system_dofs_per_node = 1.0
+        elif rcs_solver._is_sheet_plus_pec(infos):
+            formulation = "mixed_sheet_pec"
+            assembly_weight = 1.0
+            system_dofs_per_node = 1.0
+        elif rcs_solver._is_multi_region(infos):
+            formulation = "multi_region"
+            assembly_weight = max(1.0, float(len(interface_wavenumbers)))
+            system_dofs_per_node = max(1.0, multi_region_dof_scale)
+        elif rcs_solver._is_single_dielectric_body(infos):
+            formulation = "single_dielectric"
+            assembly_weight = 3.0
+            system_dofs_per_node = 2.0
+        elif rcs_solver._is_all_robin(infos):
+            formulation = "robin"
+            assembly_weight = 1.0
+            system_dofs_per_node = 1.0
+        else:
+            formulation = "coupled_trace"
+            assembly_weight = max(2.0, float(len(interface_wavenumbers)))
+            system_dofs_per_node = max(1.0, multi_region_dof_scale)
+
+        return {
+            "nodes": int(len(mesh.nodes)),
+            "panels": int(len(panels)),
+            "formulation": formulation,
+            "assembly_weight": float(assembly_weight),
+            "system_dofs_per_node": float(system_dofs_per_node),
+            "n_regions": int(n_regions),
+        }
     except Exception:
-        return 0
+        return {
+            "nodes": 0,
+            "panels": 0,
+            "formulation": "unknown",
+            "assembly_weight": 1.0,
+            "system_dofs_per_node": 1.0,
+            "n_regions": 1,
+        }
 
 
-def unit_cost(nodes: 'int', n_angles: 'int', fine_factor: 'float' = 2.0) -> 'float':
+def predict_2d_nodes(
+    geometry_path: 'str',
+    frequency_ghz: 'float',
+    polarization: 'str',
+    geometry_units: 'str',
+    max_panels: 'int',
+) -> 'int':
+    """Backward-compatible boundary-node prediction wrapper."""
+
+    return int(predict_2d_profile(
+        geometry_path,
+        frequency_ghz,
+        polarization,
+        geometry_units,
+        max_panels,
+    )["nodes"])
+
+
+def unit_cost(
+    nodes: 'int',
+    n_angles: 'int',
+    fine_factor: 'float' = 2.0,
+    assembly_weight: 'float' = 1.0,
+    system_dofs_per_node: 'float' = 1.0,
+) -> 'float':
     """Relative wall-clock cost of one certified unit.
 
     Only ratios matter -- this feeds bin packing, not a walltime request.  The
@@ -245,10 +352,16 @@ def unit_cost(nodes: 'int', n_angles: 'int', fine_factor: 'float' = 2.0) -> 'flo
     """
 
     angles = max(1.0, float(n_angles))
+    assembly_scale = max(1.0, float(assembly_weight))
+    dof_scale = max(1.0, float(system_dofs_per_node))
 
     def _one(n_nodes: 'float') -> 'float':
         n = max(1.0, float(n_nodes))
-        return n * n * (1.0 + angles / 1500.0) + (n ** 3) / 13000.0
+        dofs = n * dof_scale
+        assembly = assembly_scale * n * n
+        multi_rhs = dofs * dofs * angles / 1500.0
+        factorization = (dofs ** 3) / 13000.0
+        return assembly + multi_rhs + factorization
 
     base = _one(nodes)
     if float(fine_factor) <= 1.0:

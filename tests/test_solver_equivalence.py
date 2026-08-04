@@ -40,6 +40,7 @@ def load_reference(path):
 
 
 CASES = [
+    ("tests/fixtures/coated_rectangle_24x6_eps50.geo", [0.05], "TM", "inches"),
     ("geometries/body.geo", [3.0, 9.0], "TM", "meters"),
     ("geometries/body.geo", [3.0, 9.0], "TE", "meters"),
     ("geometries/body.geo", [18.0], "TM", "meters"),

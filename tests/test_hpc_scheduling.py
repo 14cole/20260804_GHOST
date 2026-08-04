@@ -29,12 +29,16 @@ import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
+
 REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "Backend"
 sys.path.insert(0, str(BACKEND))
 
 import hpc_common  # noqa: E402
 import hpc_scheduler  # noqa: E402
+import rcs_solver  # noqa: E402
+import run_hpc_monostatic as hpc_driver  # noqa: E402
 
 FAILURES = []
 
@@ -193,6 +197,77 @@ def test_survey_mode_cost():
     big_s = hpc_scheduler.unit_peak_gb(5000, 1.0)
     check(1.9 < big_c / big_s < 2.3,
           f"the refined mesh drives the memory reservation ({big_c / big_s:.2f}x)")
+
+
+def test_dielectric_profile_and_cost():
+    print("\ndielectric-aware planning")
+    geometry = REPO / "tests" / "fixtures" / "coated_rectangle_24x6_eps50.geo"
+    profile = hpc_scheduler.predict_2d_profile(
+        str(geometry), 0.1, "TM", "inches", 50_000
+    )
+    check(profile["nodes"] > 0, "the coated rectangle is pre-meshed")
+    check(profile["formulation"] == "multi_region",
+          "the dielectric coating plus PEC core routes to multi-region")
+    check(profile["n_regions"] == 2,
+          "air and coating media are included in the memory model")
+    check(1.0 < profile["system_dofs_per_node"] <= 2.0,
+          "the coating's multiple trace densities are represented")
+
+    pec_like = hpc_scheduler.unit_cost(profile["nodes"], 181, 1.5)
+    coated = hpc_scheduler.unit_cost(
+        profile["nodes"], 181, 1.5,
+        assembly_weight=profile["assembly_weight"],
+        system_dofs_per_node=profile["system_dofs_per_node"],
+    )
+    check(coated > 2.5 * pec_like,
+          f"coated work is no longer costed like PEC ({coated / pec_like:.2f}x)")
+
+
+def test_reused_lu_condition_estimate():
+    print("\nreused LU condition estimate")
+    rng = np.random.default_rng(20260804)
+    matrix = (
+        rng.standard_normal((48, 48))
+        + 1j * rng.standard_normal((48, 48))
+        + 48.0 * np.eye(48)
+    )
+    rhs = rng.standard_normal((48, 7)) + 1j * rng.standard_normal((48, 7))
+    diagnostics = {}
+    solution = rcs_solver._solve_dense_with_condition_estimate(
+        matrix, rhs, diagnostics, "test system"
+    )
+    reference = np.linalg.solve(matrix, rhs)
+    check(np.allclose(solution, reference, rtol=1e-11, atol=1e-12),
+          "LU reuse preserves the dense multi-RHS solution")
+    check(np.linalg.norm(matrix @ solution - rhs) / np.linalg.norm(rhs) < 1e-11,
+          "the reused-LU solution has a small residual")
+    check(np.isfinite(diagnostics.get("condition_est", np.nan)),
+          "the condition estimate is finite")
+    check(diagnostics.get("condition_est_method") ==
+          rcs_solver._dense_condition_estimate_method(),
+          "condition telemetry records the estimation method")
+
+
+def test_memory_limited_pool_threads():
+    print("\nmemory-limited assembly parallelism")
+    candidates = [
+        {
+            "geometry_stem": f"coated_{index}",
+            "frequency_ghz": 1.0,
+            "polarization": "TM",
+        }
+        for index in range(5)
+    ]
+    peaks = {
+        hpc_driver._unit_name(unit): 40.0 for unit in candidates
+    }
+    pool_size = hpc_driver._memory_limited_pool_size(
+        candidates, peaks, budget_gb=100.0, process_cap=64
+    )
+    check(pool_size == 2,
+          "a 100 GB budget caps 40 GB dielectric solves at two processes")
+    check(hpc_driver._resolve_assembly_threads(64, pool_size) == 32,
+          "cores unavailable to extra processes accelerate operator assembly")
 
 
 def test_resource_detection():
@@ -379,6 +454,9 @@ def main():
     test_claims()
     test_memory_admission()
     test_survey_mode_cost()
+    test_dielectric_profile_and_cost()
+    test_reused_lu_condition_estimate()
+    test_memory_limited_pool_threads()
     test_resource_detection()
     test_fingerprint_cache()
     test_end_to_end()

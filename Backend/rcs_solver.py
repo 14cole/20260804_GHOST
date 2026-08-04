@@ -5511,22 +5511,85 @@ def _cond_estimate(a_mat: 'np.ndarray') -> 'float':
     except np.linalg.LinAlgError:
         return float("inf")
 
-def _record_condition_estimate(
-    diagnostics: 'Optional[Dict[str, Any]]',
-    a_mat: 'np.ndarray',
-    label: 'str',
-) -> 'None':
-    """Record an explicitly requested dense condition estimate.
 
-    Callers pass ``None`` when no estimate was requested.  Keeping this
-    opt-in avoids silently doubling the cost of every dense solve, while
-    ensuring ``compute_condition_number=True`` cannot remain a no-op.
+def _dense_condition_estimate_method() -> 'str':
+    """Condition telemetry method used by condition-reporting dense solves."""
+
+    return (
+        "lapack_gecon_1norm_reused_lu"
+        if _SCIPY_LINALG is not None
+        else "numpy_svd_2norm_separate_solve"
+    )
+
+
+def _solve_dense_with_condition_estimate(
+    a_mat: 'np.ndarray',
+    rhs: 'np.ndarray',
+    diagnostics: 'Optional[Dict[str, Any]]',
+    label: 'str',
+) -> 'np.ndarray':
+    """Solve a dense system and, when requested, reuse its LU for ``gecon``.
+
+    ``np.linalg.cond`` computes an SVD and ``np.linalg.solve`` then performs a
+    separate LU factorization.  Production mesh certification requests both,
+    so the old path paid two cubic linear-algebra costs for every base/fine
+    solve.  LAPACK's ``gecon`` estimates the matrix 1-norm condition number
+    from the LU factors in O(N^2), while ``getrs`` solves every RHS column from
+    those same factors.  This is the same fail-closed pattern used by the BoR
+    production solver.
+
+    The NumPy fallback preserves the historical SVD telemetry when SciPy is
+    unavailable.  Callers still validate finite inputs before reaching here.
     """
 
+    a_eval = np.asarray(a_mat, dtype=np.complex128)
+    rhs_eval = np.asarray(rhs, dtype=np.complex128)
     if diagnostics is None:
-        return
-    diagnostics["condition_est"] = _cond_estimate(a_mat)
+        return np.linalg.solve(a_eval, rhs_eval)
+
+    if _SCIPY_LINALG is None:
+        diagnostics["condition_est"] = _cond_estimate(a_eval)
+        diagnostics["condition_label"] = str(label)
+        diagnostics["condition_est_method"] = _dense_condition_estimate_method()
+        return np.linalg.solve(a_eval, rhs_eval)
+
+    getrf, getrs, gecon = _SCIPY_LINALG.get_lapack_funcs(
+        ("getrf", "getrs", "gecon"), (a_eval,)
+    )
+    matrix_one_norm = float(np.linalg.norm(a_eval, ord=1))
+    if not math.isfinite(matrix_one_norm) or matrix_one_norm <= 0.0:
+        raise np.linalg.LinAlgError(
+            f"{label} has an invalid matrix 1-norm {matrix_one_norm!r}."
+        )
+
+    lu, piv, factor_info = getrf(
+        np.array(a_eval, dtype=np.complex128, order="F", copy=True)
+    )
+    if factor_info != 0:
+        raise np.linalg.LinAlgError(
+            f"{label} LU factorization failed (LAPACK info={factor_info})."
+        )
+    solution, solve_info = getrs(lu, piv, rhs_eval)
+    if solve_info != 0:
+        raise np.linalg.LinAlgError(
+            f"{label} LU solve failed (LAPACK info={solve_info})."
+        )
+    reciprocal_condition, condition_info = gecon(lu, matrix_one_norm)
+    rcond = float(reciprocal_condition)
+    if (
+        condition_info != 0
+        or not math.isfinite(rcond)
+        or rcond <= 0.0
+    ):
+        raise np.linalg.LinAlgError(
+            f"{label} condition estimation failed "
+            f"(LAPACK info={condition_info}, rcond={rcond!r})."
+        )
+
+    diagnostics["condition_est"] = 1.0 / rcond
     diagnostics["condition_label"] = str(label)
+    diagnostics["condition_est_method"] = _dense_condition_estimate_method()
+    return np.asarray(solution, dtype=np.complex128)
 
 def _consume_condition_estimate(
     values: 'List[float]',
@@ -6010,10 +6073,9 @@ def _solve_te_robin_mfie(
             # for the simultaneously assembled double-layer operator.
             a_mfie += alpha_nodes[:, None] * s_mat
         _ensure_finite_linear_system(a_mfie, rhs_mfie, label="TE Robin MFIE system")
-        _record_condition_estimate(
-            condition_diagnostics, a_mfie, "TE Robin MFIE system"
+        sigma_mat = _solve_dense_with_condition_estimate(
+            a_mfie, rhs_mfie, condition_diagnostics, "TE Robin MFIE system"
         )
-        sigma_mat = np.linalg.solve(a_mfie, rhs_mfie)
         residual = np.linalg.norm(a_mfie @ sigma_mat - rhs_mfie, axis=0)
     else:
         # FMM path.
@@ -6233,14 +6295,10 @@ def _solve_dielectric_indirect(
     # Assemble operators.
     S0, K0 = _assemble_linear_operator_matrices(mesh, k0, obs_normal_deriv=False,
         obs_order=obs_order, src_order=src_order)
-    _, Kp1 = _assemble_linear_operator_matrices(
+    S1, Kp1 = _assemble_linear_operator_matrices(
         mesh, k1, obs_normal_deriv=True,
         obs_order=obs_order, src_order=src_order,
-        compute_single_layer=False,
     )
-    S1, _ = _assemble_linear_operator_matrices(mesh, k1, obs_normal_deriv=False,
-        obs_order=obs_order, src_order=src_order,
-        compute_double_layer=False)
     D0 = _assemble_linear_hypersingular_matrix(mesh, k0, obs_order=obs_order, src_order=src_order)
     M = _assemble_linear_mass_matrix(mesh)
 
@@ -6263,10 +6321,9 @@ def _solve_dielectric_indirect(
         rhs_sys[nnodes + ids, :] -= load_dn
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="dielectric indirect system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "dielectric indirect system"
+    sol = _solve_dense_with_condition_estimate(
+        a_sys, rhs_sys, condition_diagnostics, "dielectric indirect system"
     )
-    sol = np.linalg.solve(a_sys, rhs_sys)
     if sol.ndim == 1:
         sol = sol.reshape(-1, 1)
 
@@ -6410,10 +6467,9 @@ def _solve_tm_sheet(
         rhs_sys[ids, :] -= load_u
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="TM sheet system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "TM sheet system"
+    sigma_mat = _solve_dense_with_condition_estimate(
+        a_sys, rhs_sys, condition_diagnostics, "TM sheet system"
     )
-    sigma_mat = np.linalg.solve(a_sys, rhs_sys)
     if sigma_mat.ndim == 1:
         sigma_mat = sigma_mat.reshape(-1, 1)
 
@@ -6529,10 +6585,9 @@ def _solve_te_sheet(
         rhs_sys[endpoint_nodes, :] = 0.0
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="TE sheet system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "TE sheet system"
+    mu_mat = _solve_dense_with_condition_estimate(
+        a_sys, rhs_sys, condition_diagnostics, "TE sheet system"
     )
-    mu_mat = np.linalg.solve(a_sys, rhs_sys)
     if mu_mat.ndim == 1:
         mu_mat = mu_mat.reshape(-1, 1)
 
@@ -6668,8 +6723,8 @@ def _solve_mixed_sheet_pec(
             )
             rhs_sys[ids, :] -= load_u
 
-        _ensure_finite_linear_system(a_sys, rhs_sys, label="mixed sheet+PEC TM system")
-        sol_mat = np.linalg.solve(a_sys, rhs_sys)
+        label = "mixed sheet+PEC TM system"
+        _ensure_finite_linear_system(a_sys, rhs_sys, label=label)
 
     else:   # TE
         N_mat = _assemble_linear_hypersingular_matrix(
@@ -6699,16 +6754,12 @@ def _solve_mixed_sheet_pec(
             a_sys[endpoint_nodes, endpoint_nodes] = 1.0
             rhs_sys[endpoint_nodes, :] = 0.0
 
-        _ensure_finite_linear_system(a_sys, rhs_sys, label="mixed sheet+PEC TE system")
-        _record_condition_estimate(
-            condition_diagnostics, a_sys, "mixed sheet+PEC TE system"
-        )
-        sol_mat = np.linalg.solve(a_sys, rhs_sys)
+        label = "mixed sheet+PEC TE system"
+        _ensure_finite_linear_system(a_sys, rhs_sys, label=label)
 
-    if pol == "TM":
-        _record_condition_estimate(
-            condition_diagnostics, a_sys, "mixed sheet+PEC TM system"
-        )
+    sol_mat = _solve_dense_with_condition_estimate(
+        a_sys, rhs_sys, condition_diagnostics, label
+    )
 
     if sol_mat.ndim == 1:
         sol_mat = sol_mat.reshape(-1, 1)
@@ -6930,10 +6981,9 @@ def _solve_robin_bie(
     rhs_sys = _robin_bie_rhs_many(mesh, alpha_nodes, pec_node, pol, k0, elev)
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="Robin-BIE IBC system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "Robin-BIE IBC system"
+    sigma_mat = _solve_dense_with_condition_estimate(
+        a_sys, rhs_sys, condition_diagnostics, "Robin-BIE IBC system"
     )
-    sigma_mat = np.linalg.solve(a_sys, rhs_sys)
     if sigma_mat.ndim == 1:
         sigma_mat = sigma_mat.reshape(-1, 1)
 
@@ -7282,10 +7332,9 @@ def _solve_multi_region_indirect(
 
         # 6. Solve (dense).
         _ensure_finite_linear_system(Asys, Brhs, label="multi-region indirect system")
-        _record_condition_estimate(
-            condition_diagnostics, Asys, "multi-region indirect system"
+        sol = _solve_dense_with_condition_estimate(
+            Asys, Brhs, condition_diagnostics, "multi-region indirect system"
         )
-        sol = np.linalg.solve(Asys, Brhs)
         if sol.ndim == 1: sol = sol.reshape(-1, 1)
         residual = np.linalg.norm(Asys @ sol - Brhs, axis=0)
         rhs_norm = np.linalg.norm(Brhs, axis=0)
@@ -8173,6 +8222,10 @@ def solve_monostatic_rcs_2d(
         "condition_est_max": float(np.max(cond_values)) if cond_values else float("nan"),
         "condition_est_mean": float(np.mean(cond_values)) if cond_values else float("nan"),
         "condition_est_computed": bool(condition_est_computed),
+        "condition_est_method": (
+            _dense_condition_estimate_method()
+            if condition_est_computed else "not_requested"
+        ),
         "warnings": list(materials.warnings),
         "warning_count": int(len(materials.warnings)),
         "math_backend_real_bessel": _BESSEL.backend_name,
@@ -8580,10 +8633,17 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 sheet_a_sys, rhs_all, label="bistatic sheet system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(sheet_a_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_with_condition_estimate(
+                sheet_a_sys, rhs_all, condition_diagnostics,
+                "bistatic sheet system",
+            )
+            if condition_diagnostics is not None:
+                _consume_condition_estimate(
+                    cond_values, condition_diagnostics,
+                    "bistatic sheet formulation",
+                )
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(sheet_a_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 sheet_a_sys, batch_solution, rhs_all
             )
@@ -8633,10 +8693,17 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 mfie_sys, rhs_all, label="bistatic TE Robin MFIE system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(mfie_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_with_condition_estimate(
+                mfie_sys, rhs_all, condition_diagnostics,
+                "bistatic TE Robin MFIE system",
+            )
+            if condition_diagnostics is not None:
+                _consume_condition_estimate(
+                    cond_values, condition_diagnostics,
+                    "bistatic TE Robin MFIE formulation",
+                )
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(mfie_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 mfie_sys, batch_solution, rhs_all
             )
@@ -8653,10 +8720,17 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 robin_sys, rhs_all, label="bistatic TM Robin BIE system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(robin_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_with_condition_estimate(
+                robin_sys, rhs_all, condition_diagnostics,
+                "bistatic TM Robin BIE system",
+            )
+            if condition_diagnostics is not None:
+                _consume_condition_estimate(
+                    cond_values, condition_diagnostics,
+                    "bistatic TM Robin BIE formulation",
+                )
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(robin_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 robin_sys, batch_solution, rhs_all
             )
@@ -8678,13 +8752,8 @@ def solve_bistatic_rcs_2d(
             S0, K0 = _assemble_linear_operator_matrices(
                 mesh, k0, obs_normal_deriv=False
             )
-            _, Kp1 = _assemble_linear_operator_matrices(
+            S1, Kp1 = _assemble_linear_operator_matrices(
                 mesh, k1, obs_normal_deriv=True,
-                compute_single_layer=False,
-            )
-            S1, _ = _assemble_linear_operator_matrices(
-                mesh, k1, obs_normal_deriv=False,
-                compute_double_layer=False,
             )
             D0 = _assemble_linear_hypersingular_matrix(mesh, k0)
             M = _assemble_linear_mass_matrix(mesh)
@@ -8712,10 +8781,17 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 diel_sys, rhs_all, label="bistatic dielectric indirect system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(diel_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_with_condition_estimate(
+                diel_sys, rhs_all, condition_diagnostics,
+                "bistatic dielectric indirect system",
+            )
+            if condition_diagnostics is not None:
+                _consume_condition_estimate(
+                    cond_values, condition_diagnostics,
+                    "bistatic dielectric indirect formulation",
+                )
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(diel_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 diel_sys, batch_solution, rhs_all
             )
@@ -8815,6 +8891,10 @@ def solve_bistatic_rcs_2d(
         "condition_est_max": float(np.max(cond_values)) if cond_values else float("nan"),
         "condition_est_mean": float(np.mean(cond_values)) if cond_values else float("nan"),
         "condition_est_computed": bool(compute_condition_number),
+        "condition_est_method": (
+            _dense_condition_estimate_method()
+            if compute_condition_number else "not_requested"
+        ),
         "warnings": list(materials.warnings),
         "warning_count": int(len(materials.warnings)),
         "preflight": dict(preflight_report),
@@ -9228,12 +9308,7 @@ def compute_boundary_densities(
         k1 = k1_vals.pop() if k1_vals else k0
         factor = complex(info0.mu_minus / info0.mu_plus) if pol == 'TM' else complex(info0.eps_minus / info0.eps_plus)
         S0, K0 = _assemble_linear_operator_matrices(mesh, k0, False)
-        _, Kp1 = _assemble_linear_operator_matrices(
-            mesh, k1, True, compute_single_layer=False
-        )
-        S1, _ = _assemble_linear_operator_matrices(
-            mesh, k1, False, compute_double_layer=False
-        )
+        S1, Kp1 = _assemble_linear_operator_matrices(mesh, k1, True)
         D0 = _assemble_linear_hypersingular_matrix(mesh, k0)
         M = _assemble_linear_mass_matrix(mesh)
         a = np.zeros((2*nnodes, 2*nnodes), dtype=np.complex128)

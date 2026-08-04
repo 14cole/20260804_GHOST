@@ -439,31 +439,49 @@ def _plan_schedule(units, n_slots, fine_factor):
     # type: (List[Dict[str, Any]], int, float) -> Dict[str, Any]
     """Cost every unit, size its memory, and deal the units out to slots.
 
-    The mesh is built once per (geometry, frequency) -- polarization does not
-    change the discretization -- so this stays cheap for a large sweep.
+    The mesh/formulation profile is built once per (geometry, frequency,
+    polarization), so dielectric unknown counts and operator passes influence
+    both load balancing and memory admission.
     """
 
-    node_cache = {}  # type: Dict[Tuple[str, float], int]
+    profile_cache = {}  # type: Dict[Tuple[str, float, str], Dict[str, Any]]
     records = []     # type: List[Dict[str, Any]]
     for unit in units:
-        key = (str(unit["geometry"]), float(unit["frequency_ghz"]))
-        if key not in node_cache:
-            node_cache[key] = hpc_scheduler.predict_2d_nodes(
-                key[0], key[1], str(unit["polarization"]),
+        key = (
+            str(unit["geometry"]),
+            float(unit["frequency_ghz"]),
+            str(unit["polarization"]),
+        )
+        if key not in profile_cache:
+            profile_cache[key] = hpc_scheduler.predict_2d_profile(
+                key[0], key[1], key[2],
                 GEOMETRY_UNITS, MAX_PANELS,
             )
-        nodes = int(node_cache[key])
+        profile = profile_cache[key]
+        nodes = int(profile["nodes"])
         records.append({
             "unit": _unit_name(unit),
             "nodes": nodes,
+            "panels": int(profile["panels"]),
+            "formulation": str(profile["formulation"]),
+            "assembly_weight": float(profile["assembly_weight"]),
+            "system_dofs_per_node": float(profile["system_dofs_per_node"]),
+            "n_regions": int(profile["n_regions"]),
             "cost": (
                 hpc_scheduler.unit_cost(
-                    nodes, len(unit["azimuths_deg"]), fine_factor
+                    nodes,
+                    len(unit["azimuths_deg"]),
+                    fine_factor,
+                    assembly_weight=float(profile["assembly_weight"]),
+                    system_dofs_per_node=float(profile["system_dofs_per_node"]),
                 ) if nodes > 0 else 1.0
             ),
             "peak_gb": (
                 hpc_scheduler.unit_peak_gb(
-                    nodes, fine_factor, safety=float(MEMORY_SAFETY)
+                    nodes,
+                    fine_factor,
+                    n_regions=int(profile["n_regions"]),
+                    safety=float(MEMORY_SAFETY),
                 ) if nodes > 0 else 0.0
             ),
         })
@@ -809,6 +827,27 @@ def _resolve_assembly_threads(cores, pool_size):
     return max(1, int(cores) // max(1, int(pool_size)))
 
 
+def _memory_limited_pool_size(candidates, peaks, budget_gb, process_cap):
+    # type: (List[Dict[str, Any]], Dict[str, float], float, int) -> int
+    """Largest useful process pool under the submit-time memory estimates.
+
+    The dispatcher still performs exact admission for each mix of units. This
+    up-front cap prevents an all-dielectric queue from creating one process per
+    core when RAM permits only one or two solves; the released cores can then
+    accelerate each solve's operator assembly.
+    """
+
+    known = [
+        float(peaks.get(_unit_name(unit), 0.0))
+        for unit in candidates
+        if float(peaks.get(_unit_name(unit), 0.0)) > 0.0
+    ]
+    if not known:
+        return max(1, int(process_cap))
+    memory_cap = max(1, int(float(budget_gb) // min(known)))
+    return max(1, min(int(process_cap), memory_cap))
+
+
 def worker(run_dir_str, submission_index, task_index):
     # type: (str, int, int) -> None
     hpc_scheduler.pin_blas_threads(BLAS_THREADS_PER_WORKER)
@@ -853,7 +892,10 @@ def worker(run_dir_str, submission_index, task_index):
     memory_gb = hpc_scheduler.detect_memory_gb()
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = cores if MAX_WORKERS_PER_NODE is None else max(1, int(MAX_WORKERS_PER_NODE))
-    pool_size = max(1, min(cores, worker_cap, len(candidates)))
+    process_cap = max(1, min(cores, worker_cap, len(candidates)))
+    pool_size = _memory_limited_pool_size(
+        candidates, peaks, budget_gb, process_cap
+    )
     assembly_threads = _resolve_assembly_threads(cores, pool_size)
 
     print("=" * 70)
