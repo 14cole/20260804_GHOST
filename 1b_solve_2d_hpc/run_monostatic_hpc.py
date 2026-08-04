@@ -358,9 +358,13 @@ def submit() -> 'None':
     args.extend(["--wrap", command])
     print(
         f"Step 1 HPC: {len(jobs)} solve unit(s), {ARRAY_TASKS} array task(s)\n"
-        f"  Plan balance : slowest task holds {summary['imbalance']:.2f}x the mean "
-        "predicted load (1.00 is perfect; stealing absorbs the rest)"
+        f"  Plan balance : {summary['imbalance']:.2f}x the best any schedule could "
+        "do (1.00 = optimal; stealing absorbs the rest)"
     )
+    idle = int(summary.get("idle_slots", 0))
+    if idle:
+        print(f"  {idle} of {ARRAY_TASKS} task(s) have no planned work -- fewer "
+              "units than tasks, so those exit at once")
     if peaks:
         print(f"  Unit peak RAM: {min(peaks):.2f}-{max(peaks):.2f} GB estimated "
               f"(incl. {MEMORY_SAFETY:g}x safety)")

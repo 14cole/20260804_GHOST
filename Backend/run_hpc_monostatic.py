@@ -628,8 +628,12 @@ def submit():
         print(f"  [warn] {unknown} unit(s) could not be pre-meshed; they carry "
               "unit cost and no memory reservation, so they may schedule "
               "poorly. Check those geometries parse.")
-    print(f"  Plan balance  : slowest slot holds {summary['imbalance']:.2f}x the "
-          f"mean predicted load (1.00 is perfect; stealing absorbs the rest)")
+    idle = int(summary.get("idle_slots", 0))
+    print(f"  Plan balance  : {summary['imbalance']:.2f}x the best any schedule "
+          f"could do (1.00 = optimal; stealing absorbs the rest)")
+    if idle:
+        print(f"                  {idle} of {n_slots} slot(s) have no planned "
+              "work -- fewer units than nodes, so those tasks exit at once")
     print(f"  Slurm scripts : {len(slurm_paths)} files in {run_dir}")
 
     if not SUBMIT:

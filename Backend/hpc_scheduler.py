@@ -380,19 +380,36 @@ def slot_plan_summary(
     assignment: 'Sequence[int]',
     n_slots: 'int',
 ) -> 'Dict[str, Any]':
-    """Predicted per-slot load, for the submit-time report."""
+    """Predicted per-slot load, for the submit-time report.
 
-    loads = [0.0] * max(1, int(n_slots))
-    counts = [0] * max(1, int(n_slots))
+    ``imbalance`` is the plan's makespan against the best any schedule could
+    do, not against the mean load.  The mean is the wrong yardstick whenever a
+    single unit costs more than an even share -- with 6 units across 50 slots,
+    or with one dominant high-frequency unit, a perfect plan still shows a
+    large max/mean ratio, and reporting that as imbalance would send you
+    tuning a scheduler that is already optimal.  Against the lower bound
+    max(total/slots, dearest unit), 1.00 means "nothing left to gain".
+    """
+
+    slots = max(1, int(n_slots))
+    loads = [0.0] * slots
+    counts = [0] * slots
     for unit, slot in zip(units, assignment):
         loads[slot] += float(unit.get("cost", 1.0))
         counts[slot] += 1
-    total = sum(loads) or 1.0
+    total = sum(loads)
+    dearest = max((float(u.get("cost", 1.0)) for u in units), default=0.0)
+    lower_bound = max(total / slots, dearest)
+    makespan = max(loads) if loads else 0.0
     return {
         "slot_units": counts,
-        "max_slot_share": max(loads) / total,
-        "mean_slot_share": (total / len(loads)) / total,
-        "imbalance": (max(loads) / (total / len(loads))) if total > 0 else 1.0,
+        "idle_slots": sum(1 for count in counts if count == 0),
+        "makespan": makespan,
+        "lower_bound": lower_bound,
+        "imbalance": (makespan / lower_bound) if lower_bound > 0 else 1.0,
+        # Kept for anyone reading the raw plan: this is the ratio the old
+        # report printed, which is only meaningful when units outnumber slots.
+        "max_over_mean": (makespan / (total / slots)) if total > 0 else 1.0,
     }
 
 

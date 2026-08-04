@@ -126,12 +126,18 @@ fingerprint that per-unit attestations bind to must cover only the latter.
 Submission prints the predicted balance:
 
 ```
-Plan balance  : slowest slot holds 1.03x the mean predicted load
+Plan balance  : 1.00x the best any schedule could do (1.00 = optimal)
 ```
 
+That is the plan's makespan against `max(total / slots, dearest unit)` — not
+against the mean load. The mean is the wrong yardstick when one unit costs more
+than an even share, or when you ask for more nodes than you have units: a
+perfect plan still shows a large max/mean ratio there, and reading that as
+imbalance would send you tuning a scheduler that is already optimal. If more
+slots than units were requested, the report says how many will exit immediately.
+
 For comparison, index round-robin on a four-frequency sweep across four slots
-lands around 2.1× — i.e. it would have burned roughly twice the node-hours for
-the same sweep.
+lands at 2.13× optimal — roughly twice the node-hours for the same sweep.
 
 ### Work stealing
 

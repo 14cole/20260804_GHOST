@@ -70,15 +70,32 @@ def test_balance():
     for index, unit in enumerate(units):
         rr[index % n_slots] += unit["cost"]
 
-    lpt_imbalance = max(lpt) / (sum(lpt) / n_slots)
-    rr_imbalance = max(rr) / (sum(rr) / n_slots)
+    # Measured against the makespan lower bound the reporting uses, so the
+    # test and the number printed at submit time mean the same thing.
+    total = sum(u["cost"] for u in units)
+    lower_bound = max(total / n_slots, max(u["cost"] for u in units))
+    lpt_imbalance = max(lpt) / lower_bound
+    rr_imbalance = max(rr) / lower_bound
     print(f"       round-robin makespan factor {rr_imbalance:.2f}, "
           f"LPT {lpt_imbalance:.2f}")
-    check(lpt_imbalance <= 1.02, "LPT plan is within 2% of a perfect split")
+    check(lpt_imbalance <= 1.02, "LPT plan is within 2% of optimal")
     check(rr_imbalance > 1.5,
           "round-robin really is badly imbalanced on this shape "
           f"({rr_imbalance:.2f}x)")
     check(len(set(assignment)) == n_slots, "every slot receives work")
+
+    summary = hpc_scheduler.slot_plan_summary(units, assignment, n_slots)
+    check(abs(summary["imbalance"] - lpt_imbalance) < 1e-9,
+          "the reported balance matches the plan actually produced")
+
+    # More slots than units: a perfect plan still has a large max/mean ratio,
+    # so the report must not read that as imbalance.
+    sparse = [{"cost": c} for c in (100.0, 100.0, 25.0, 4.0)]
+    sparse_assignment = hpc_scheduler.balance_units(sparse, 50)
+    sparse_summary = hpc_scheduler.slot_plan_summary(sparse, sparse_assignment, 50)
+    check(abs(sparse_summary["imbalance"] - 1.0) < 1e-9,
+          "50 slots for 4 units reports optimal, not spurious imbalance")
+    check(sparse_summary["idle_slots"] == 46, "idle slots are reported")
 
 
 def test_claims():
