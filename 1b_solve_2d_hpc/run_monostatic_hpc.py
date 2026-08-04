@@ -57,6 +57,19 @@ SOLVER_METHOD = "auto"
 MAX_PANELS = 50_000
 FORCE = False
 
+# Mesh-convergence certification. True solves every unit twice -- the requested
+# mesh and one refined by the policy's fine_factor -- and publishes the fine
+# result only if they agree. That second solve is where most of the wall clock
+# and all of the peak memory go: turning it off is about 3x faster per unit and
+# roughly halves the memory, so more units fit per node too.
+#
+# SURVEY OUTPUT IS NOT PRODUCTION DATA. The algebraic quality gate still runs,
+# but nothing establishes that the discretization is fine enough. Survey grims
+# carry no mesh-convergence block, so the body/delta pipeline rejects them, and
+# the flag is part of each unit's fingerprint -- a survey file will not be
+# accepted as a completed unit once you switch back. Screening only.
+MESH_CERTIFICATION = True
+
 ARRAY_TASKS = 1               # number of simultaneously scheduled nodes
 MAX_WORKERS_PER_TASK = None   # None = allocated CPU count
 BLAS_THREADS_PER_WORKER = 1
@@ -97,6 +110,7 @@ def _configuration():
         solver_method=SOLVER_METHOD,
         max_panels=MAX_PANELS,
         runner_path=__file__,
+        certify=bool(MESH_CERTIFICATION),
     )
 
 
@@ -127,7 +141,11 @@ def _plan(jobs, n_angles, n_slots):
 
     from solver_quality import validate_mesh_convergence_policy
 
-    fine_factor = float(validate_mesh_convergence_policy()["fine_factor"])
+    # fine_factor <= 1 tells the cost model there is only one mesh to solve.
+    fine_factor = (
+        float(validate_mesh_convergence_policy()["fine_factor"])
+        if MESH_CERTIFICATION else 1.0
+    )
     nodes_cache = {}
     records = []
     for job in jobs:
@@ -372,6 +390,10 @@ def submit() -> 'None':
     if unknown:
         print(f"  [warn] {unknown} unit(s) could not be pre-meshed; they carry "
               "unit cost and no memory reservation.")
+    if not MESH_CERTIFICATION:
+        print("  Certification: OFF (survey mode) -- base mesh only, ~3x faster.\n"
+              "                 Results carry NO mesh-convergence certificate and are\n"
+              "                 rejected by the body/delta pipeline. Screening only.")
     print("Results write directly to results/{FRD,OPN}; logs write to hpc_logs/.")
     if not SUBMIT:
         print("SUBMIT=False. Command:\n" + " ".join(shlex.quote(x) for x in args))

@@ -149,6 +149,23 @@ SOLVER_METHOD           = "auto"         # "auto" | "direct"
 # production control.
 CFIE_ALPHA              = 0.0
 MAX_PANELS              = 50_000
+
+# Mesh-convergence certification. True solves every unit twice -- the requested
+# mesh and one refined by the policy's fine_factor -- and publishes the fine
+# result only if the two agree. That second solve is where most of the wall
+# clock and all of the peak memory go, because cost scales with the square of
+# the node count: turning it off is about 3x faster per unit and roughly halves
+# the memory, so more units fit per node as well.
+#
+# SURVEY OUTPUT IS NOT PRODUCTION DATA. The algebraic quality gate still runs
+# (a badly conditioned or non-converged solve still fails closed), but nothing
+# establishes that the discretization is fine enough -- the error that biases
+# an RCS number quietly instead of announcing itself. Survey grims carry no
+# mesh-convergence block, which is what feature_sum requires before a field may
+# enter a body or a delta, so the downstream pipeline rejects them on its own.
+# Use this for trade studies and screening, then re-run what matters with
+# MESH_CERTIFICATION = True.
+MESH_CERTIFICATION      = True
 BLAS_THREADS_PER_WORKER = 1              # keeps N workers x BLAS threads sane
 
 # Threads each solve may use inside the boundary-operator assembly.
@@ -333,8 +350,7 @@ def _solve_and_export(unit, context, run_dir_str):
 
     snapshot, material_base = _load_snapshot(str(unit["geometry"]))
 
-    from rcs_solver import solve_monostatic_rcs_2d_certified
-    result = solve_monostatic_rcs_2d_certified(
+    solve_kwargs = dict(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(unit["frequency_ghz"])],
         elevations_deg=[float(a) for a in unit["azimuths_deg"]],
@@ -344,8 +360,16 @@ def _solve_and_export(unit, context, run_dir_str):
         max_panels=context["max_panels"],
         cfie_alpha=context["cfie_alpha"],
         solver_method=context["solver_method"],
-        mesh_convergence_policy=context["mesh_convergence_policy"],
     )
+    if context["mesh_certification"]:
+        from rcs_solver import solve_monostatic_rcs_2d_certified
+        result = solve_monostatic_rcs_2d_certified(
+            mesh_convergence_policy=context["mesh_convergence_policy"],
+            **solve_kwargs
+        )
+    else:
+        from rcs_solver import solve_monostatic_rcs_2d_survey
+        result = solve_monostatic_rcs_2d_survey(**solve_kwargs)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
 
@@ -560,6 +584,7 @@ def submit():
             "blas_threads_per_worker": BLAS_THREADS_PER_WORKER,
             "cores_per_node":          CORES_PER_NODE,
             "mesh_convergence_policy": mesh_policy,
+            "mesh_certification": bool(MESH_CERTIFICATION),
         },
         "units": units,
     }
@@ -569,7 +594,11 @@ def submit():
     # where work should run, not what is solved, and the manifest fingerprint
     # that per-unit attestations bind to must cover only the latter.
     n_slots = int(N_NODES) * int(N_JOBS)
-    schedule = _plan_schedule(units, n_slots, float(mesh_policy["fine_factor"]))
+    # fine_factor <= 1 tells the cost model there is only one mesh to solve.
+    schedule = _plan_schedule(
+        units, n_slots,
+        float(mesh_policy["fine_factor"]) if MESH_CERTIFICATION else 1.0,
+    )
     (run_dir / "schedule.json").write_text(json.dumps(schedule, indent=2))
 
     script_path = run_dir / "driver_configured.py"
@@ -634,6 +663,11 @@ def submit():
     if idle:
         print(f"                  {idle} of {n_slots} slot(s) have no planned "
               "work -- fewer units than nodes, so those tasks exit at once")
+    if not MESH_CERTIFICATION:
+        print("  Certification : OFF (survey mode) — base mesh only, ~3x faster")
+        print("                  Results carry NO mesh-convergence certificate and")
+        print("                  are rejected by the body/delta pipeline. Screening")
+        print("                  only; re-run with MESH_CERTIFICATION = True to publish.")
     print(f"  Slurm scripts : {len(slurm_paths)} files in {run_dir}")
 
     if not SUBMIT:
@@ -765,6 +799,8 @@ def worker(run_dir_str, submission_index, task_index):
         "cfie_alpha": solver_config["cfie_alpha"],
         "max_panels": solver_config["max_panels"],
         "mesh_convergence_policy": solver_config["mesh_convergence_policy"],
+        # Older manifests predate the switch and were always certified.
+        "mesh_certification": bool(solver_config.get("mesh_certification", True)),
     }
     _verify_run_provenance(context)
 

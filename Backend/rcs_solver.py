@@ -9023,6 +9023,86 @@ def solve_monostatic_rcs_2d_certified(
     )
 
 
+def solve_monostatic_rcs_2d_survey(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    elevations_deg: 'List[float]',
+    polarization: 'str',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
+    max_panels: 'int' = MAX_PANELS_DEFAULT,
+    mesh_reference_ghz: 'Optional[float]' = None,
+    rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
+    cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
+    abort_event: 'Optional[threading.Event]' = None,
+    solver_method: 'str' = "auto",
+) -> 'Dict[str, Any]':
+    """Single-mesh monostatic solve: algebraically gated, NOT mesh-certified.
+
+    `solve_monostatic_rcs_2d_certified` solves the geometry twice -- once on
+    the requested mesh and once refined by the policy's ``fine_factor`` -- and
+    publishes the fine result only if the two agree.  That second solve is
+    where most of the wall clock and all of the peak memory go, because cost
+    scales with the square of the node count.
+
+    This entry runs the base mesh alone, for screening: trade studies, sanity
+    checks, picking which configurations are worth a real run.  The discrete
+    linear system is still certified (the algebraic quality gate is untouched,
+    so a badly conditioned or non-converged solve still fails closed); what is
+    missing is any evidence that the *discretization* is fine enough, which is
+    the error that silently biases an RCS number rather than announcing
+    itself.
+
+    The result is deliberately made unusable as production input.  It carries
+    no ``metadata["mesh_convergence"]`` block, which is exactly what
+    `feature_sum` requires before a field may enter a body or a delta, so the
+    downstream pipeline rejects it on its own rather than trusting a label.
+    Metadata and warnings say so explicitly as well, so an artifact found
+    later identifies itself without needing this docstring.
+    """
+
+    result = solve_monostatic_rcs_2d(
+        geometry_snapshot=geometry_snapshot,
+        frequencies_ghz=frequencies_ghz,
+        elevations_deg=elevations_deg,
+        polarization=polarization,
+        geometry_units=geometry_units,
+        material_base_dir=material_base_dir,
+        progress_callback=progress_callback,
+        quality_thresholds=quality_thresholds,
+        strict_quality_gate=True,
+        compute_condition_number=True,
+        max_panels=max_panels,
+        mesh_reference_ghz=mesh_reference_ghz,
+        rcs_normalization_mode=rcs_normalization_mode,
+        cfie_alpha=cfie_alpha,
+        abort_event=abort_event,
+        solver_method=solver_method,
+    )
+    metadata = result.setdefault("metadata", {})
+    metadata["mesh_convergence_certified"] = False
+    metadata["certified_entry_point"] = False
+    metadata["published_mesh"] = "base"
+    metadata["survey_mode"] = True
+    warning = (
+        "SURVEY MODE: solved on the base mesh only. No mesh-convergence "
+        "certificate exists for this field -- the discretization was never "
+        "compared against a refined one, so its error is unmeasured. Use "
+        "solve_monostatic_rcs_2d_certified for anything published, compared, "
+        "or fed into a body or delta."
+    )
+    warnings = metadata.setdefault("warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
+    quality_gate = metadata.get("quality_gate")
+    if isinstance(quality_gate, dict):
+        quality_gate["mesh_convergence_certified"] = False
+        quality_gate["certification_scope"] = "discrete_linear_system_only"
+    return result
+
+
 def solve_bistatic_rcs_2d_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',

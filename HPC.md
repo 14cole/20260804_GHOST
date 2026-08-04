@@ -164,7 +164,70 @@ different inputs or a different solver build.
 
 ---
 
-## 4. Per-unit overhead
+## 4. Skipping mesh certification for quick results
+
+`solve_monostatic_rcs_2d_certified` — what the drivers call — solves every unit
+**twice**: once on the requested mesh and once refined by the policy's
+`fine_factor` (default **1.5**), publishing the fine result only if the two
+agree. Cost scales with the square of the node count, so that second solve is
+most of the wall clock and all of the peak memory.
+
+Set `MESH_CERTIFICATION = False` in either 2-D driver to solve the base mesh
+only:
+
+```python
+MESH_CERTIFICATION = False   # survey mode: screening, not production
+```
+
+Measured on `body.geo`, solve time only:
+
+| | Certified | Survey | |
+|---|---:|---:|---|
+| 6 GHz, 135 panels | 1.02 s | 0.34 s | 3.00× |
+| 18 GHz, 328 panels | 3.86 s | 1.34 s | 2.88× |
+| 30 GHz, 520 panels | 7.52 s | 2.54 s | 2.96× |
+
+End to end through the driver, small units see less (1.8× on a two-unit run)
+because per-unit overhead — import, preflight, provenance — stops being
+negligible. Big units get close to the 3×.
+
+Memory follows the same shape: the reservation is built on the **fine** mesh,
+so survey mode roughly halves it and about twice as many units fit per node.
+At N = 5000 that is 15.4 GB reserved versus 7.4 GB.
+
+**Survey output is not production data.** The algebraic quality gate still runs
+— a badly conditioned or non-converged solve still fails closed — but nothing
+establishes that the discretization is fine enough, which is the error that
+biases an RCS number quietly rather than announcing itself. On the shipped
+geometry the base mesh happened to land within 0.04 dB of the certified one;
+that is a property of that geometry at that frequency, not a guarantee.
+
+Three things keep survey results out of the production path:
+
+- the grim carries **no `mesh_convergence` block**, and `feature_sum` requires
+  `mesh_convergence.passed is True` with `published_mesh == "fine"` before a
+  field may enter a body or a delta — so the pipeline rejects it on structure,
+  not on a label it has to trust;
+- metadata says so explicitly (`survey_mode: true`,
+  `mesh_convergence_certified: false`, `published_mesh: "base"`) and the
+  solve's warnings carry the reason, so an artifact found later identifies
+  itself;
+- in the coupon pipeline the flag is part of each unit's fingerprint, so
+  switching back to `MESH_CERTIFICATION = True` will **not** accept the survey
+  files as completed units — they get re-solved properly.
+
+There is no way to weaken certification without switching it off: the policy
+enforces `fine_factor > 1.0`, so you cannot quietly shrink the refinement and
+keep the certificate. If you want the low-level uncertified entry directly, it
+is `rcs_solver.solve_monostatic_rcs_2d_survey` (or the raw
+`solve_monostatic_rcs_2d`).
+
+The BoR driver has its own certification inside `bor_dispatch` and no
+equivalent switch.
+
+---
+
+## 5. Per-unit overhead
 
 Provenance is verified before and after every unit, which is correct and stays.
 What changed is the cost of doing it:
@@ -185,7 +248,7 @@ What changed is the cost of doing it:
 
 ---
 
-## 5. Solver performance
+## 6. Solver performance
 
 Everything below is bit-comparable with the previous solver to floating-point
 reassociation; `tests/test_assembly_equivalence.py` and
@@ -267,7 +330,7 @@ shared L3 is thrashing; grow it for a few large solves with threads.
 
 ---
 
-## 6. Tests
+## 7. Tests
 
 ```bash
 python tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
@@ -282,7 +345,7 @@ to compare against; keep one outside the tree.
 
 ---
 
-## 7. Rules of thumb
+## 8. Rules of thumb
 
 - **Many geometries or frequencies:** leave everything at defaults, set
   `N_NODES` to what you can get, and let the planner and stealing do the work.
@@ -292,6 +355,8 @@ to compare against; keep one outside the tree.
   make sure `MEM_PER_NODE` is `"0"` or an explicit large value. If a single unit
   genuinely does not fit, the solver's own memory gate will say so with a
   number rather than the node dying.
+- **Screening a trade study:** `MESH_CERTIFICATION = False` for ~3x throughput,
+  then re-run the configurations you care about with it back on.
 - **A run that got interrupted:** resubmit the same driver copy against the same
   run directory. Finished units are verified and skipped; unclaimed ones are
   picked up.

@@ -180,6 +180,21 @@ def test_memory_admission():
     check(len(seen) == len(units) - 2, "declined units are skipped cleanly")
 
 
+def test_survey_mode_cost():
+    print("\nsurvey mode (MESH_CERTIFICATION = False)")
+    # fine_factor <= 1 means "one mesh", not "a second mesh the same size".
+    certified = hpc_scheduler.unit_cost(2000, 19, 1.5)
+    survey = hpc_scheduler.unit_cost(2000, 19, 1.0)
+    check(abs(survey - hpc_scheduler.unit_cost(2000, 19, 0.5)) < 1e-9,
+          "any fine_factor <= 1 costs a single mesh")
+    check(2.5 < certified / survey < 4.0,
+          f"certification is modelled as ~3x the work ({certified / survey:.2f}x)")
+    big_c = hpc_scheduler.unit_peak_gb(5000, 1.5)
+    big_s = hpc_scheduler.unit_peak_gb(5000, 1.0)
+    check(1.9 < big_c / big_s < 2.3,
+          f"the refined mesh drives the memory reservation ({big_c / big_s:.2f}x)")
+
+
 def test_resource_detection():
     print("\nresource detection")
     saved = {name: os.environ.get(name) for name in
@@ -363,6 +378,7 @@ def main():
     test_balance()
     test_claims()
     test_memory_admission()
+    test_survey_mode_cost()
     test_resource_detection()
     test_fingerprint_cache()
     test_end_to_end()

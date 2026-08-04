@@ -251,6 +251,9 @@ def unit_cost(nodes: 'int', n_angles: 'int', fine_factor: 'float' = 2.0) -> 'flo
         return n * n * (1.0 + angles / 1500.0) + (n ** 3) / 13000.0
 
     base = _one(nodes)
+    if float(fine_factor) <= 1.0:
+        # Survey mode: one mesh, no convergence pair.
+        return base
     return base + _one(max(1.0, float(nodes) * float(fine_factor)))
 
 

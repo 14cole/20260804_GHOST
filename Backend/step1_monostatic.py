@@ -117,6 +117,7 @@ def prepare_jobs(
     max_panels: 'int',
     runner_path: 'str | os.PathLike[str]',
     mesh_convergence_policy: 'dict[str, Any]' = None,
+    certify: 'bool' = True,
 ) -> 'list[dict[str, Any]]':
     source_sha = source_fingerprint(runner_path)
     runtime_sha = runtime_environment_fingerprint()
@@ -141,7 +142,11 @@ def prepare_jobs(
             "solver_method": str(solver_method).strip().lower(),
             "max_panels": int(max_panels),
             "mesh_convergence_policy": mesh_policy,
-            "published_mesh": "fine",
+            # Part of the unit fingerprint, so a survey result can never be
+            # reused to satisfy a certified request or the other way round --
+            # solve_job compares the stored fingerprint before reusing a file.
+            "mesh_certified": bool(certify),
+            "published_mesh": "fine" if certify else "base",
         }
         specification["unit_sha256"] = stable_json_fingerprint(specification)
         job["specification"] = specification
@@ -258,7 +263,10 @@ def solve_job(
         )
 
     from grim_io import export_result_to_grim
-    from rcs_solver import solve_monostatic_rcs_2d_certified
+    from rcs_solver import (
+        solve_monostatic_rcs_2d_certified,
+        solve_monostatic_rcs_2d_survey,
+    )
 
     geometry = Path(job["geometry"])
     snapshot = load_snapshot(geometry)
@@ -268,7 +276,7 @@ def solve_job(
         else job["specification"].get("mesh_convergence_policy")
     )
 
-    result = solve_monostatic_rcs_2d_certified(
+    solve_kwargs = dict(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(job["frequency_ghz"])],
         elevations_deg=[float(value) for value in angles_deg],
@@ -277,8 +285,13 @@ def solve_job(
         material_base_dir=str(geometry.parent),
         solver_method=solver_method,
         max_panels=int(max_panels),
-        mesh_convergence_policy=mesh_policy,
     )
+    if bool(job["specification"].get("mesh_certified", True)):
+        result = solve_monostatic_rcs_2d_certified(
+            mesh_convergence_policy=mesh_policy, **solve_kwargs
+        )
+    else:
+        result = solve_monostatic_rcs_2d_survey(**solve_kwargs)
     for warning in result.get("metadata", {}).get("warnings", []) or []:
         print(
             f"[warn] {geometry.name} {job['frequency_ghz']:g} GHz "
