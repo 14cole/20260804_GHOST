@@ -83,10 +83,13 @@ With at least one unit per core — the normal case for a many-geometry sweep �
 leave both alone. One process per unit with single-threaded BLAS is the right
 shape, and `"auto"` resolves to 1.
 
-`"auto"` only does something when a node holds fewer units than it has cores (a
-couple of geometries at one frequency, or the tail of a sweep): each concurrent
-solve then gets `cores // concurrency` threads inside the operator assembly.
-Set an integer if you want to pin it.
+`"auto"` gives each pool worker `cores // pool_size` assembly threads, so
+threads x processes never exceeds the allocation. It resolves to 1 whenever the
+run has at least one unit per core, and only opens up when the run itself is
+small — a couple of geometries at one frequency. It is keyed on the pool size
+rather than on a task's planned share on purpose: a task that runs dry falls
+through to stealing and can end up with a full pool, so sizing threads for the
+planned share would oversubscribe the node exactly when it got busiest.
 
 Scaling is real but sub-linear — only the tiled far-field pass is threaded, and
 the scatter into the global matrices is serialized behind a lock. Measured on a

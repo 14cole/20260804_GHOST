@@ -721,11 +721,21 @@ def _ordered_candidates(units, costs, slots, slot, n_slots):
     return sorted(mine, key=_key) + sorted(others, key=_key)
 
 
-def _resolve_assembly_threads(cores, concurrency):
+def _resolve_assembly_threads(cores, pool_size):
     # type: (int, int) -> int
+    """Threads per solve, sized so threads x processes never exceeds the cores.
+
+    Deliberately keyed on the pool size rather than on this slot's planned
+    share: a task that runs dry falls through to stealing and can end up with
+    a full pool, so sizing threads for the planned share would oversubscribe
+    the node exactly when it got busiest. The pool is only smaller than the
+    core count when the run itself has few units -- which is the case this
+    exists for.
+    """
+
     if ASSEMBLY_THREADS != "auto":
         return max(1, int(ASSEMBLY_THREADS))
-    return max(1, int(cores) // max(1, int(concurrency)))
+    return max(1, int(cores) // max(1, int(pool_size)))
 
 
 def worker(run_dir_str, submission_index, task_index):
@@ -770,7 +780,7 @@ def worker(run_dir_str, submission_index, task_index):
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = cores if MAX_WORKERS_PER_NODE is None else max(1, int(MAX_WORKERS_PER_NODE))
     pool_size = max(1, min(cores, worker_cap, len(candidates)))
-    assembly_threads = _resolve_assembly_threads(cores, min(pool_size, planned))
+    assembly_threads = _resolve_assembly_threads(cores, pool_size)
 
     print("=" * 70)
     print(f"  Slot {slot}/{n_slots - 1}  "

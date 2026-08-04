@@ -167,10 +167,18 @@ def _claim_key(job) -> 'str':
     return f"{job['role']}__{Path(job['output']).name}"
 
 
-def _resolve_assembly_threads(cores: 'int', concurrency: 'int') -> 'int':
+def _resolve_assembly_threads(cores: 'int', pool_size: 'int') -> 'int':
+    """Threads per solve, sized so threads x processes never exceeds the cores.
+
+    Keyed on the pool size rather than on this task's planned share: a task
+    that runs dry falls through to stealing and can end up with a full pool,
+    so sizing threads for the planned share would oversubscribe the node
+    exactly when it got busiest.
+    """
+
     if ASSEMBLY_THREADS != "auto":
         return max(1, int(ASSEMBLY_THREADS))
-    return max(1, int(cores) // max(1, int(concurrency)))
+    return max(1, int(cores) // max(1, int(pool_size)))
 
 
 def _pool_initializer(blas_threads: 'int', assembly_threads: 'int') -> 'None':
@@ -206,9 +214,7 @@ def worker(task_index: 'int') -> 'None':
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_limit = cores if MAX_WORKERS_PER_TASK is None else int(MAX_WORKERS_PER_TASK)
     pool_size = max(1, min(cores, worker_limit, len(candidates)))
-    assembly_threads = _resolve_assembly_threads(
-        cores, min(pool_size, max(1, len(mine)))
-    )
+    assembly_threads = _resolve_assembly_threads(cores, pool_size)
 
     kwargs = {
         "angles_deg": angles,
