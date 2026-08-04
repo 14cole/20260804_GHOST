@@ -34,13 +34,14 @@ Scheduling notes -- what makes a big sweep finish sooner:
   On a 96-core / 750 GB node that runs many small units at once and narrows to
   a few when the expensive ones come up, rather than OOM-killing pool workers
   (a cgroup kill, unlike a Python MemoryError, can wedge the pool).
-- CHEAP PER-UNIT PROVENANCE.  The before/after source and input checks stay,
-  but repeat hashes come from a stat-keyed cache that expires on a timer, so a
+- CHEAP SAFETY CHECKS.  The before/after source and input checks stay, but
+  repeat hashes come from a stat-keyed cache that expires on a timer, so a
   sweep of thousands of units does not spend its time re-reading the backend
-  tree over a shared filesystem.
+  tree over a shared filesystem. Results contain only .grim files; no
+  per-output provenance sidecars are written.
 
-Restartable: a unit whose .grim already exists is skipped once its attestation
-verifies, so cancelling and resubmitting is always safe.
+Restartable: a unit whose .grim already exists is skipped, so cancelling and
+resubmitting does not recompute completed units.
 
 Internal worker invocation (called by SLURM, not by the user):
     python run_hpc_monostatic.py --worker <run_dir> <submission_index> <task_index>
@@ -67,12 +68,7 @@ from workflow_provenance import (
     backend_source_fingerprint,
     backend_source_inventory,
     describe_source_mismatch,
-    manifest_solve_spec_fingerprint,
     runtime_environment_fingerprint,
-    stable_json_fingerprint,
-    unit_solve_spec_fingerprint,
-    verify_output_attestation,
-    write_output_attestation,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -272,23 +268,6 @@ def _verify_run_provenance(context):
         )
 
 
-def _unit_attestation_fields(context, unit):
-    # type: (Dict[str, Any], Dict[str, Any]) -> Dict[str, Any]
-    return {
-        "run_id": str(context["run_id"]),
-        "solver_source_sha256": str(context["solver_source_sha256"]),
-        "runtime_environment_sha256": str(context["runtime_environment_sha256"]),
-        "geometry_input_sha256": str(unit["geometry_input_sha256"]),
-        "run_solve_spec_sha256": str(context["run_solve_spec_sha256"]),
-        "unit_solve_spec_sha256": unit_solve_spec_fingerprint(unit),
-        "solver_config_sha256": str(context["solver_config_sha256"]),
-        "angular_grid_kind": "azimuths_deg",
-        "angular_grid_deg": [float(value) for value in unit["azimuths_deg"]],
-        "polarization": str(unit["polarization"]),
-        "frequency_ghz": float(unit["frequency_ghz"]),
-    }
-
-
 def _verify_unit_input(unit, context):
     # type: (Dict[str, Any], Dict[str, Any]) -> None
     from feature_sum import geometry_input_fingerprint
@@ -373,9 +352,7 @@ def _solve_and_export(unit, context, run_dir_str):
     out_path = _unit_output_path(run_dir, unit)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
-    attestation = _unit_attestation_fields(context, unit)
     if out_path.exists():
-        verify_output_attestation(str(out_path), attestation)
         return ("skipped", str(out_path))
 
     snapshot, material_base = _load_snapshot(str(unit["geometry"]))
@@ -411,7 +388,6 @@ def _solve_and_export(unit, context, run_dir_str):
                  f"freq={unit['frequency_ghz']}GHz"),
     )
     actual_path = str(written[0]) if written else str(out_path)
-    write_output_attestation(actual_path, attestation)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
     return ("written", actual_path)
@@ -624,8 +600,7 @@ def submit():
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
     # The schedule lives beside the manifest rather than inside it: it says
-    # where work should run, not what is solved, and the manifest fingerprint
-    # that per-unit attestations bind to must cover only the latter.
+    # where work should run, not what is solved.
     n_slots = int(N_NODES) * int(N_JOBS)
     # fine_factor <= 1 tells the cost model there is only one mesh to solve.
     schedule = _plan_schedule(
@@ -826,8 +801,6 @@ def worker(run_dir_str, submission_index, task_index):
         "solver_source_sha256": manifest["solver_source_sha256"],
         "runtime_environment_sha256": manifest["runtime_environment_sha256"],
         "solver_source_inventory": manifest.get("solver_source_inventory") or {},
-        "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
-        "solver_config_sha256": stable_json_fingerprint(solver_config),
         "geometry_units": solver_config["geometry_units"],
         "solver_method": solver_config["solver_method"],
         "cfie_alpha": solver_config["cfie_alpha"],
@@ -902,12 +875,8 @@ def worker(run_dir_str, submission_index, task_index):
             (_solve_and_export_star, ((unit, context, str(run_dir)),)),
         )
         if name in done:
-            # An already-written result is dispatched, not skipped outright, so
-            # its attestation is verified before the run is called complete --
-            # that check is what makes reusing an interrupted run safe. Only
-            # the slot that owns the unit does it, so across the whole run each
-            # output is verified exactly once and no claim is needed (the check
-            # is read-only and the result is already final).
+            # An already-written result is dispatched so the owning slot records
+            # it as skipped. No claim is needed because the .grim is final.
             if name not in mine:
                 counters["passed"] += 1
                 return None

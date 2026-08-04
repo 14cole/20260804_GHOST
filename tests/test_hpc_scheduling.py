@@ -9,8 +9,8 @@ on a cluster:
 * Submission builds a manifest, a schedule, and sbatch scripts, and the
   scheduling plan is genuinely balanced by cost rather than by index.
 * Several array tasks working the same run in parallel each solve every unit at
-  most once (atomic claims), between them cover the run exactly, and the
-  results verify their attestations.
+  most once (atomic claims), between them cover the run exactly, and write only
+  .grim files to results/.
 * A task that re-joins a finished run skips everything.
 * Stale claims are stealable, so a killed task's units are not stranded.
 * The memory-aware dispatcher respects its budget and still makes progress on
@@ -343,15 +343,18 @@ def test_end_to_end():
         results = sorted(p.name for p in (run_dir / "results").glob("*.grim"))
         check(len(results) == expected_units,
               f"results/ holds exactly {expected_units} grims (got {len(results)})")
+        result_entries = sorted(p.name for p in (run_dir / "results").iterdir())
+        check(result_entries == results,
+              "results/ contains only .grim files")
         check(written == expected_units,
               f"each unit was solved exactly once across tasks (got {written})")
         check(all(int(out.split("wrote=")[1].split(",")[0]) > 0 for out in outputs),
               "both tasks did real work rather than one doing everything")
 
-        # Attestations must verify, which is what makes a restart safe.
+        # The run-level manifest remains outside results/ and still records the
+        # exact solver/runtime state used for the sweep.
         hpc_common.require_hpc_run_provenance(manifest, "ghost.hpc.2d-run.v1")
-        hpc_common.require_hpc_output_attestations(run_dir, manifest)
-        check(True, "manifest provenance and every output attestation verify")
+        check(True, "manifest provenance verifies")
 
         status = hpc_common.run_status(run_dir)
         check(status["pending"] == 0, "run_status reports the run complete")
@@ -360,11 +363,11 @@ def test_end_to_end():
         rerun = _run(driver, ["--worker", str(run_dir), "0", "0"])
         skipped = int(rerun.stdout.split("skipped=")[1].split(",")[0])
         check(rerun.returncode == 0 and skipped > 0,
-              f"a task re-joining a finished run re-verifies and skips its share "
+              f"a task re-joining a finished run skips its completed share "
               f"({skipped} units)")
         check("wrote=0" in rerun.stdout, "no unit is solved twice on a restart")
         check("failed=0" in rerun.stdout,
-              "every completed output still passes its attestation check")
+              "every completed output is reused without sidecar checks")
 
         units = hpc_common.read_unit_grims(run_dir / "results")
         check(len(units) == expected_units, "every grim reads back cleanly")
