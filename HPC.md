@@ -1,0 +1,288 @@
+# Running GHOST sweeps on HPC
+
+This describes how the 2-D RCS solver and the SLURM drivers are set up for
+throughput on nodes with 64–96 cores and 375–750 GB, across 0–50 nodes, and
+what to turn when a sweep is not filling the machine.
+
+The short version: **units are costed and packed by cost, claimed atomically at
+run time, and admitted against the node's memory allocation rather than its
+core count.** Array tasks are interchangeable, so a task that never starts, is
+cancelled, or is preempted cannot strand work.
+
+---
+
+## 1. Which driver to run
+
+| Path | Entry point | Output |
+|---|---|---|
+| Coupon library, numbered pipeline | `1b_solve_2d_hpc/run_monostatic_hpc.py` | straight into `results/{FRD,OPN}/` |
+| Manifest-tracked 2-D sweep | `Backend/run_hpc_monostatic.py` | `<OUTPUT_DIR>/run_*/results/` |
+| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `<OUTPUT_DIR>/run_*/results/` |
+| One machine, no SLURM | `1a_solve_2d_local/run_monostatic_local.py` | `results/{FRD,OPN}/` |
+
+All three HPC drivers share `Backend/hpc_scheduler.py`, so the tuning knobs
+below mean the same thing in each.
+
+Edit the CONFIG block at the top of a driver and run it with no arguments to
+submit. `hpc_common.configure_driver` still works the same way: it rewrites
+those top-level constants in a copy of the driver, and submitting that copy is
+what carries the settings to the compute nodes.
+
+---
+
+## 2. Sizing a run
+
+### Nodes and array tasks
+
+```python
+N_NODES = 25        # array size per submission
+N_JOBS  = 2         # separate submissions (e.g. two partitions)
+ARRAY_THROTTLE = None   # or an int to cap concurrent tasks
+```
+
+`N_NODES x N_JOBS` is just how much parallelism you are asking for. Because
+tasks pull work from a shared claim directory rather than owning a fixed
+slice, you can:
+
+- submit a second job array later and have it join the run in progress;
+- cancel part of an array without stranding its units;
+- let SLURM preempt and requeue tasks (the scripts set `--requeue`) and lose
+  only the units that were mid-flight.
+
+There is no benefit to matching `N_NODES` to the unit count. More tasks than
+units simply means some exit immediately.
+
+### Cores and memory per node
+
+```python
+CORES_PER_NODE = None     # None -> --exclusive, whole node
+MEM_PER_NODE   = "0"      # "0" -> all node memory (SLURM idiom)
+MAX_WORKERS_PER_NODE = None   # ceiling on concurrent solves; memory usually binds first
+MEMORY_HEADROOM = 0.85    # fraction of the allocation the scheduler may reserve
+MEMORY_SAFETY   = 1.35    # multiplier on the solver's own peak estimate
+```
+
+Leave `MEM_PER_NODE = "0"` with `--exclusive`. Omitting the directive lets the
+cluster default (often `DefMemPerCPU` ≈ 3.5 GB × CPUs) apply, which on a 750 GB
+node is a fraction of what is there and will OOM-kill workers.
+
+**Do not set `MAX_WORKERS_PER_NODE` to throttle memory.** The scheduler already
+sizes concurrency from each unit's predicted peak: it runs many cheap units at
+once and narrows to a few when the expensive ones come up. A fixed cap is the
+wrong control because unit footprints in a frequency sweep differ by two orders
+of magnitude.
+
+### Threads
+
+```python
+BLAS_THREADS_PER_WORKER = 1
+ASSEMBLY_THREADS        = "auto"
+```
+
+With at least one unit per core — the normal case for a many-geometry sweep —
+leave both alone. One process per unit with single-threaded BLAS is the right
+shape, and `"auto"` resolves to 1.
+
+`"auto"` only does something when a node holds fewer units than it has cores (a
+couple of geometries at one frequency, or the tail of a sweep): each concurrent
+solve then gets `cores // concurrency` threads inside the operator assembly.
+Set an integer if you want to pin it.
+
+Scaling is real but sub-linear — only the tiled far-field pass is threaded, and
+the scatter into the global matrices is serialized behind a lock. Measured on a
+contended 4-core test host (1299 elements, S + K):
+
+| Threads | Speedup |
+|---:|---:|
+| 1 | 1.00× |
+| 2 | 1.78× |
+| 3 | 2.09× |
+
+Beyond that the host was oversubscribed. Treat a few threads per solve as a way
+to use cores that would otherwise idle, not as a substitute for running more
+units at once — processes are always the better parallelism when you have the
+units to fill them.
+
+---
+
+## 3. How the work is scheduled
+
+### Cost-aware planning
+
+Assembly cost grows as the square of the boundary-node count, and node count
+grows linearly with frequency, so across a 2–18 GHz sweep the most expensive
+unit is roughly **80×** the cheapest.
+
+At submit time each unit is meshed with the solver's own rule (once per
+`(geometry, frequency)` — polarization does not change the discretization),
+costed, and dealt out longest-processing-time-first. The plan is written to
+`schedule.json` beside the manifest. It is deliberately *not* part of the
+manifest: it says where work should run, not what is solved, and the manifest
+fingerprint that per-unit attestations bind to must cover only the latter.
+
+Submission prints the predicted balance:
+
+```
+Plan balance  : slowest slot holds 1.03x the mean predicted load
+```
+
+For comparison, index round-robin on a four-frequency sweep across four slots
+lands around 2.1× — i.e. it would have burned roughly twice the node-hours for
+the same sweep.
+
+### Work stealing
+
+Each task works its own planned share first (dearest first, which is what keeps
+the makespan down), then falls through to everyone else's as a steal pool.
+Claims are `O_CREAT | O_EXCL` files in `<run_dir>/claims/`, which is atomic on
+any filesystem a run directory lives on, so no coordinating process is needed.
+
+A claim carries a heartbeat. If a task dies, its claims go quiet and become
+stealable after `CLAIM_STALE_SECONDS` (default 3600 for 2-D, 7200 for BoR — set
+it comfortably above your longest single unit). The result file remains the real
+idempotency guard, so the worst case for a wrongly stolen unit is that it is
+solved twice and written once.
+
+To force a completely fresh sweep, delete `claims/`.
+
+### Restarts
+
+A unit whose result already exists is re-dispatched for its attestation check
+rather than skipped on filename alone, but only by the task that owns it in the
+plan — so across a restart every output is verified exactly once, not once per
+node. A mismatch fails loudly instead of silently reusing a file produced from
+different inputs or a different solver build.
+
+---
+
+## 4. Per-unit overhead
+
+Provenance is verified before and after every unit, which is correct and stays.
+What changed is the cost of doing it:
+
+- **Source hashing** goes through `hpc_scheduler.FingerprintCache`, keyed on
+  each file's identity, size, and mtime, and flushed every 300 s so full
+  re-reads keep happening inside long-lived workers. Previously every unit
+  re-read the whole backend tree three times, from every worker, over a shared
+  filesystem.
+- **The manifest is parsed once per node**, not once per unit. It carries every
+  unit's record, so the old pattern made a node's JSON cost quadratic in the
+  size of the sweep.
+- **Geometries are parsed once per node** and inherited by forked pool workers.
+- **The solver is imported in the parent** before the pool forks. It used to be
+  imported inside the worker function with `maxtasksperchild=1`, so every unit
+  paid a fresh import of numpy, SciPy, and an 8 000-line module. Worker
+  recycling is kept (`TASKS_PER_CHILD`, default 4) — a respawn now costs a fork.
+
+---
+
+## 5. Solver performance
+
+Everything below is bit-comparable with the previous solver to floating-point
+reassociation; `tests/test_assembly_equivalence.py` and
+`tests/test_solver_equivalence.py` check that against a pristine copy.
+
+### Operator assembly
+
+Element pairs are processed in cache-sized tiles rather than as whole
+`N_elem x N_elem` arrays, the kernel is evaluated once per *unordered* pair
+(G is symmetric, and the two double-layer orientations share one Hankel
+evaluation), and the real-wavenumber path uses `J_n`/`Y_n` directly with no
+complex temporaries.
+
+Measured on `body.geo` (single-layer + adjoint double-layer, one core):
+
+| Elements | Before | After | Speedup | Extra peak RAM before → after |
+|---:|---:|---:|---:|---|
+| 338 | 2.7 s | 2.0 s | 1.4× | 17 MB → ~0 |
+| 670 | 9.7 s | 5.7 s | 1.7× | 62 MB → ~0 |
+| 1299 | 37.1 s | 17.3 s | 2.1× | 232 MB → ~0 |
+
+The speedup grows with mesh size, and the memory column matters as much as the
+time one: the old formulation held eight complex `N^2` accumulators plus about
+six `N^2` temporaries live at once — 3.2 GB + 1.2 GB at 5 000 elements — which
+capped how many solves fit on a node far more tightly than the matrices
+themselves do.
+
+### Hypersingular operator (TE sheet / dielectric paths)
+
+This was an O(N²) interpreted loop calling a per-pair quadrature routine. The
+pairs that the recursion resolves with a plain tensor-Gauss box — all but O(N)
+of them — are now batched over the same tiles at the same order:
+
+| Elements | Before (measured/extrapolated) | After | Speedup |
+|---:|---:|---:|---:|
+| 88 | 30 s | 0.7 s | 42× |
+| 228 | 199 s | 2.8 s | 72× |
+| 430 | 709 s | 7.3 s | 97× |
+| 820 | 2579 s | 18.8 s | 137× |
+
+### Optional: far-pair quadrature order
+
+Roughly half of a large assembly is Hankel evaluations, and their count is
+exactly `N_elem^2 x Q^2`. The default `Q = 8` is inherited from the near-field
+rule; across a far pair the integrand is smooth and it is over-resolved.
+
+```bash
+export GHOST_FAR_QUAD_ORDER=5     # or rcs_solver.set_far_quadrature_order(5)
+```
+
+**This is off by default because it changes computed values** — a different
+quadrature rule, not a faster evaluation of the same one. Measured on
+`body.geo` at 40 GHz (670 elements) with `tests/measure_far_quadrature.py`:
+
+| Order | Speedup | Max RCS shift |
+|---:|---:|---:|
+| 8 (default) | 1.00× | — |
+| 6 | 1.35× | 2.7e-13 dB |
+| 5 | 1.69× | 2.9e-11 dB |
+| 4 | 1.94× | 4.1e-09 dB |
+| 3 | 2.29× | 6.3e-07 dB |
+
+Those shifts are far below anything physically meaningful, but they were
+measured on one body at one frequency — run the script on your own geometries
+before relying on it. Near-field and singular quadrature are untouched. A solve
+that used the override records it in its warnings, so the fact travels with the
+published `.grim`.
+
+### Other environment knobs
+
+| Variable | Default | Effect |
+|---|---|---|
+| `GHOST_ASSEMBLY_THREADS` | 1 | Threads for tiled assembly (drivers set this per-solve via `ASSEMBLY_THREADS`) |
+| `GHOST_ASSEMBLY_TILE` | auto | Element-tile edge; auto targets a ~24 MB working set |
+| `GHOST_FAR_QUAD_ORDER` | 0 (off) | Far-pair quadrature order override |
+
+Shrink `GHOST_ASSEMBLY_TILE` if you are packing many solves per node and the
+shared L3 is thrashing; grow it for a few large solves with threads.
+
+---
+
+## 6. Tests
+
+```bash
+python tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
+python tests/test_solver_equivalence.py  <pristine rcs_solver.py>
+python tests/test_assembly_equivalence.py <pristine rcs_solver.py>
+python tests/benchmark_assembly.py      [pristine rcs_solver.py]
+python tests/measure_far_quadrature.py  [geometry.geo ...]
+```
+
+The two equivalence tests need a copy of the solver from before these changes
+to compare against; keep one outside the tree.
+
+---
+
+## 7. Rules of thumb
+
+- **Many geometries or frequencies:** leave everything at defaults, set
+  `N_NODES` to what you can get, and let the planner and stealing do the work.
+- **A few large geometries:** set `ASSEMBLY_THREADS = "auto"` (the default) so
+  idle cores go into the assembly instead of sitting unused.
+- **Sweeps that OOM-killed before:** stop capping `MAX_WORKERS_PER_NODE` and
+  make sure `MEM_PER_NODE` is `"0"` or an explicit large value. If a single unit
+  genuinely does not fit, the solver's own memory gate will say so with a
+  number rather than the node dying.
+- **A run that got interrupted:** resubmit the same driver copy against the same
+  run directory. Finished units are verified and skipped; unclaimed ones are
+  picked up.

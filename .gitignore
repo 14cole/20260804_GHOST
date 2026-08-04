@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+rcs_runs/
+rcs_runs_bor/
+claims/
+hpc_logs/
+results/
