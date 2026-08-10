@@ -173,42 +173,24 @@ def require_hpc_run_provenance(
         "ghost.hpc.2d-run.v1": "azimuths_deg",
         "ghost.hpc.bor-run.v1": "aspects_deg",
     }.get(expected_schema)
+    # The angular grid is declared once for the run rather than repeated in
+    # every unit: identical per unit, and repeating it dominated the file.
+    raw_angles = manifest.get(expected_angle_key) if expected_angle_key else None
+    if (
+        not isinstance(raw_angles, (list, tuple))
+        or not raw_angles
+        or not all(
+            not isinstance(value, bool) and math.isfinite(float(value))
+            for value in raw_angles
+        )
+    ):
+        raise ValueError(
+            f"HPC manifest has no valid {expected_angle_key!r} grid."
+        )
+
     for unit in units:
         if not isinstance(unit, dict):
             raise ValueError("Every HPC unit must be an object.")
-        angle_keys = [
-            key for key in ("azimuths_deg", "aspects_deg")
-            if key in unit
-        ]
-        if len(angle_keys) != 1:
-            raise ValueError(
-                "Every HPC unit must declare exactly one angular grid."
-            )
-        if (
-            expected_angle_key is not None
-            and angle_keys[0] != expected_angle_key
-        ):
-            raise ValueError(
-                f"HPC unit angular grid is {angle_keys[0]!r}, expected "
-                f"{expected_angle_key!r} for {expected_schema!r}."
-            )
-        raw_angles = unit.get(angle_keys[0])
-        if (
-            not isinstance(raw_angles, (list, tuple))
-            or not raw_angles
-        ):
-            raise ValueError(
-                "HPC unit has an empty or malformed angular grid."
-            )
-        angles = list(raw_angles)
-        if not angles or not all(
-            not isinstance(value, bool)
-            and math.isfinite(float(value))
-            for value in angles
-        ):
-            raise ValueError(
-                "HPC unit has an empty or non-finite angular grid."
-            )
         path = str(unit.get("geometry", ""))
         expected = str(unit.get("geometry_input_sha256", ""))
         if (
@@ -275,13 +257,21 @@ def require_hpc_output_attestations(
     run_dir: 'os.PathLike',
     manifest: 'Dict[str, Any]',
 ) -> 'None':
-    """Require the exact expected result set and byte-level attestations."""
+    """Require the exact expected result set, each bound to this run.
+
+    The binding travels inside each .grim rather than in a
+    `<name>.provenance.json` beside it: a sweep of thousands of units would
+    otherwise put thousands of extra tiny files in results/. Integrity is not
+    lost with the sidecar -- a .grim is an npz, npz is a zip, and numpy
+    validates a CRC-32 per member on read, so a corrupted result raises on
+    open instead of verifying.
+    """
 
     from workflow_provenance import (
         manifest_solve_spec_fingerprint,
         stable_json_fingerprint,
         unit_solve_spec_fingerprint,
-        verify_output_attestation,
+        verify_embedded_attestation,
     )
 
     results_dir = Path(run_dir) / "results"
@@ -331,9 +321,26 @@ def require_hpc_output_attestations(
     solver_config = manifest.get("solver_config")
     if not isinstance(solver_config, dict):
         raise ValueError("HPC manifest solver_config must be an object.")
-    expected_paths = []
-    records = []
-    seen_names = set()
+
+    raw_angles = manifest.get(expected_angle_key)
+    if (
+        not isinstance(raw_angles, (list, tuple))
+        or not raw_angles
+        or not all(
+            not isinstance(value, bool) and math.isfinite(float(value))
+            for value in raw_angles
+        )
+    ):
+        raise ValueError(
+            f"HPC manifest has no valid {expected_angle_key!r} grid."
+        )
+    angular_grid_sha256 = stable_json_fingerprint(
+        [float(value) for value in raw_angles]
+    )
+    run_spec = manifest_solve_spec_fingerprint(manifest)
+    config_sha = stable_json_fingerprint(solver_config)
+
+    expected_names = set()
     for unit in units:
         if not isinstance(unit, dict):
             raise ValueError("Every HPC unit must be an object.")
@@ -356,107 +363,38 @@ def require_hpc_output_attestations(
             or float(frequency) <= 0.0
         ):
             raise ValueError("HPC unit cannot form a safe output filename.")
-        name = (
-            f"{polarization}_"
-            f"{float(frequency):.3f}GHz_"
-            f"{stem}.grim"
-        )
-        if name in seen_names:
+        name = f"{polarization}_{float(frequency):.3f}GHz_{stem}.grim"
+        if name in expected_names:
             raise ValueError(
                 "HPC manifest contains colliding result filenames."
             )
-        seen_names.add(name)
-        path = results_dir / name
-        expected_paths.append(path)
-        angle_keys = [
-            key for key in ("azimuths_deg", "aspects_deg")
-            if key in unit
-        ]
-        if len(angle_keys) != 1:
-            raise ValueError(
-                f"HPC unit for {name} must have exactly one angular grid."
-            )
-        angle_key = angle_keys[0]
-        if angle_key != expected_angle_key:
-            raise ValueError(
-                f"HPC unit for {name} uses {angle_key!r}, expected "
-                f"{expected_angle_key!r} for {schema!r}."
-            )
-        raw_angles = unit.get(angle_key)
-        if (
-            not isinstance(raw_angles, (list, tuple))
-            or not raw_angles
-            or not all(
-                not isinstance(value, bool)
-                and math.isfinite(float(value))
-                for value in raw_angles
-            )
-        ):
-            raise ValueError(
-                f"HPC unit for {name} has an invalid angular grid."
-            )
+        expected_names.add(name)
         geometry_hash = unit.get("geometry_input_sha256")
         if (
             not isinstance(geometry_hash, str)
             or len(geometry_hash) != 64
-            or any(
-                char not in "0123456789abcdef"
-                for char in geometry_hash
-            )
+            or any(char not in "0123456789abcdef" for char in geometry_hash)
         ):
-            raise ValueError(
-                f"HPC unit for {name} has no input fingerprint."
-            )
-        records.append(
-            (
-                unit,
-                name,
-                path,
-                angle_key,
-                raw_angles,
-                geometry_hash,
-                polarization,
-                frequency,
-            )
-        )
-
-    for (
-        unit,
-        name,
-        path,
-        angle_key,
-        raw_angles,
-        geometry_hash,
-        polarization,
-        frequency,
-    ) in records:
-        verify_output_attestation(
-            str(path),
+            raise ValueError(f"HPC unit for {name} has no input fingerprint.")
+        verify_embedded_attestation(
+            str(results_dir / name),
             {
                 "run_id": str(manifest["run_id"]),
                 "solver_source_sha256":
                     str(manifest["solver_source_sha256"]),
                 "runtime_environment_sha256":
                     str(manifest["runtime_environment_sha256"]),
-                "geometry_input_sha256":
-                    geometry_hash,
-                "run_solve_spec_sha256":
-                    manifest_solve_spec_fingerprint(manifest),
-                "unit_solve_spec_sha256":
-                    unit_solve_spec_fingerprint(unit),
-                "solver_config_sha256":
-                    stable_json_fingerprint(
-                        manifest.get("solver_config", {})
-                    ),
-                "angular_grid_kind": angle_key,
-                "angular_grid_deg": [
-                    float(value) for value in raw_angles
-                ],
+                "geometry_input_sha256": geometry_hash,
+                "run_solve_spec_sha256": run_spec,
+                "unit_solve_spec_sha256": unit_solve_spec_fingerprint(unit),
+                "solver_config_sha256": config_sha,
+                "angular_grid_kind": expected_angle_key,
+                "angular_grid_sha256": angular_grid_sha256,
                 "polarization": polarization,
                 "frequency_ghz": float(frequency),
             },
         )
-    expected_names = {path.name for path in expected_paths}
+
     actual_names = {path.name for path in results_dir.glob("*.grim")}
     if actual_names != expected_names:
         raise ValueError(
@@ -464,24 +402,7 @@ def require_hpc_output_attestations(
             f"(missing={sorted(expected_names - actual_names)[:8]}, "
             f"unexpected={sorted(actual_names - expected_names)[:8]})."
         )
-    expected_sidecars = {
-        f"{name}.provenance.json" for name in expected_names
-    }
-    actual_sidecars = {
-        path.name
-        for path in results_dir.glob("*.grim.provenance.json")
-    }
-    if actual_sidecars != expected_sidecars:
-        raise ValueError(
-            "HPC results do not contain the exact attestation set "
-            f"(missing={sorted(expected_sidecars - actual_sidecars)[:8]}, "
-            f"unexpected={sorted(actual_sidecars - expected_sidecars)[:8]})."
-        )
 
-
-# -----------------------------------------------------------------------------
-# 3. collect: read the per-unit grims back
-# -----------------------------------------------------------------------------
 
 def read_unit_grims(results_dir: 'os.PathLike') -> 'List[Dict[str, Any]]':
     """Parse results/<POL>_<FREQ>GHz_<stem>.grim into

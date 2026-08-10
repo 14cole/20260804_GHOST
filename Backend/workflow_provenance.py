@@ -183,6 +183,82 @@ def write_output_attestation(
     return attestation_path
 
 
+def embed_output_attestation(
+    result: 'Dict[str, Any]',
+    provenance: 'Dict[str, Any]',
+) -> 'Dict[str, Any]':
+    """Bind a result to its run state *inside* the result, before export.
+
+    The sidecar form (`write_output_attestation`) doubles the file count in a
+    results directory -- for a sweep of thousands of units that is thousands of
+    extra files on a shared filesystem, all of them tiny. Carrying the same
+    fields in the artifact keeps the binding and leaves one file per unit.
+
+    The one field a sidecar can hold and this cannot is a hash of the finished
+    bytes, which would be circular here. That costs less than it appears: a
+    .grim is an npz, npz is a zip, and zip validates a CRC-32 per member on
+    read, so byte-level corruption already surfaces as a BadZipFile rather than
+    as wrong numbers. What the attestation is really for -- catching a result
+    produced by a different source build, runtime, geometry, or solve spec --
+    is fully covered by the embedded fields.
+    """
+
+    payload = dict(provenance)
+    payload["schema"] = "ghost.workflow.embedded-attestation.v1"
+    result.setdefault("metadata", {})["output_attestation"] = payload
+    return result
+
+
+def read_embedded_attestation(output_path: 'str') -> 'Dict[str, Any]':
+    """Attestation carried inside a .grim, or {} when there is none."""
+
+    import numpy as np
+
+    try:
+        with np.load(output_path, allow_pickle=False) as payload:
+            raw = np.asarray(
+                payload["solver_metadata_json"]
+            ).reshape(()).item()
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        audit = json.loads(str(raw))
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{os.path.basename(output_path)} has no readable solver audit; "
+            "it may be truncated or from an older run."
+        ) from exc
+    metadata = audit.get("metadata", audit)
+    found = metadata.get("output_attestation")
+    return dict(found) if isinstance(found, dict) else {}
+
+
+def verify_embedded_attestation(
+    output_path: 'str',
+    expected: 'Dict[str, Any]',
+) -> 'Dict[str, Any]':
+    """Verify every caller-specified provenance field carried in the artifact.
+
+    Reading the file at all is the integrity check: numpy validates the zip
+    CRC-32 of each member, so a corrupted result raises rather than verifying.
+    """
+
+    payload = read_embedded_attestation(output_path)
+    name = os.path.basename(output_path)
+    if payload.get("schema") != "ghost.workflow.embedded-attestation.v1":
+        raise ValueError(
+            f"{name} carries no embedded run attestation; it predates this "
+            "format or was written by a different tool."
+        )
+    for field, want in expected.items():
+        got = payload.get(field)
+        if _stable_json_value(got) != _stable_json_value(want):
+            raise ValueError(
+                f"{name} was produced under a different {field}: "
+                f"recorded {got!r}, expected {want!r}."
+            )
+    return payload
+
+
 def verify_output_attestation(
     output_path: 'str',
     expected: 'Dict[str, Any]',

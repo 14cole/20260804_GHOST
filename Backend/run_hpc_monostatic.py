@@ -70,9 +70,9 @@ from workflow_provenance import (
     manifest_solve_spec_fingerprint,
     runtime_environment_fingerprint,
     stable_json_fingerprint,
+    embed_output_attestation,
     unit_solve_spec_fingerprint,
-    verify_output_attestation,
-    write_output_attestation,
+    verify_embedded_attestation,
 )
 
 # ===============================================================================
@@ -283,7 +283,7 @@ def _unit_attestation_fields(context, unit):
         "unit_solve_spec_sha256": unit_solve_spec_fingerprint(unit),
         "solver_config_sha256": str(context["solver_config_sha256"]),
         "angular_grid_kind": "azimuths_deg",
-        "angular_grid_deg": [float(value) for value in unit["azimuths_deg"]],
+        "angular_grid_sha256": str(context["angular_grid_sha256"]),
         "polarization": str(unit["polarization"]),
         "frequency_ghz": float(unit["frequency_ghz"]),
     }
@@ -375,7 +375,7 @@ def _solve_and_export(unit, context, run_dir_str):
     _verify_unit_input(unit, context)
     attestation = _unit_attestation_fields(context, unit)
     if out_path.exists():
-        verify_output_attestation(str(out_path), attestation)
+        verify_embedded_attestation(str(out_path), attestation)
         return ("skipped", str(out_path))
 
     snapshot, material_base = _load_snapshot(str(unit["geometry"]))
@@ -383,7 +383,7 @@ def _solve_and_export(unit, context, run_dir_str):
     solve_kwargs = dict(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(unit["frequency_ghz"])],
-        elevations_deg=[float(a) for a in unit["azimuths_deg"]],
+        elevations_deg=[float(a) for a in context["azimuths_deg"]],
         polarization=unit["polarization"],
         geometry_units=context["geometry_units"],
         material_base_dir=material_base,
@@ -403,6 +403,10 @@ def _solve_and_export(unit, context, run_dir_str):
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
 
+    # Bind the result to its run state inside the artifact, before export, so
+    # results/ holds one file per unit instead of a .grim and a sidecar.
+    embed_output_attestation(result, attestation)
+
     from grim_io import export_result_to_grim
     written = export_result_to_grim(
         result, str(out_path),
@@ -411,7 +415,6 @@ def _solve_and_export(unit, context, run_dir_str):
                  f"freq={unit['frequency_ghz']}GHz"),
     )
     actual_path = str(written[0]) if written else str(out_path)
-    write_output_attestation(actual_path, attestation)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
     return ("written", actual_path)
@@ -435,7 +438,7 @@ def _solve_and_export_star(args):
 
 # --- submit mode (user-invoked) --------------------------------------------
 
-def _plan_schedule(units, n_slots, fine_factor):
+def _plan_schedule(units, n_slots, fine_factor, n_angles):
     # type: (List[Dict[str, Any]], int, float) -> Dict[str, Any]
     """Cost every unit, size its memory, and deal the units out to slots.
 
@@ -458,7 +461,7 @@ def _plan_schedule(units, n_slots, fine_factor):
             "nodes": nodes,
             "cost": (
                 hpc_scheduler.unit_cost(
-                    nodes, len(unit["azimuths_deg"]), fine_factor
+                    nodes, n_angles, fine_factor
                 ) if nodes > 0 else 1.0
             ),
             "peak_gb": (
@@ -578,6 +581,10 @@ def submit():
         input_fingerprint = geometry_input_fingerprint(str(geom), GEOMETRY_UNITS)
         for pol in pols:
             for f in FREQUENCIES_GHZ:
+                # The angular grid is identical for every unit and is
+                # recorded once at manifest level. Repeating it per unit made
+                # the file 13x larger than it needed to be -- 52 MB for a
+                # 9 100-unit sweep, 93% of it the same list over and over.
                 units.append({
                     "geometry":      str(geom.resolve()),
                     "geometry_stem": geom.stem,
@@ -585,7 +592,6 @@ def submit():
                     "geometry_input_sha256": input_fingerprint,
                     "polarization":  pol,
                     "frequency_ghz": float(f),
-                    "azimuths_deg":  [float(a) for a in AZIMUTHS_DEG],
                 })
 
     mesh_policy = validate_mesh_convergence_policy()
@@ -631,6 +637,7 @@ def submit():
     schedule = _plan_schedule(
         units, n_slots,
         float(mesh_policy["fine_factor"]) if MESH_CERTIFICATION else 1.0,
+        len(AZIMUTHS_DEG),
     )
     (run_dir / "schedule.json").write_text(json.dumps(schedule, indent=2))
 
@@ -833,6 +840,10 @@ def worker(run_dir_str, submission_index, task_index):
         "cfie_alpha": solver_config["cfie_alpha"],
         "max_panels": solver_config["max_panels"],
         "mesh_convergence_policy": solver_config["mesh_convergence_policy"],
+        "azimuths_deg": list(manifest["azimuths_deg"]),
+        "angular_grid_sha256": stable_json_fingerprint(
+            [float(value) for value in manifest["azimuths_deg"]]
+        ),
         # Older manifests predate the switch and were always certified.
         "mesh_certification": bool(solver_config.get("mesh_certification", True)),
     }

@@ -154,6 +154,38 @@ solved twice and written once.
 
 To force a completely fresh sweep, delete `claims/`.
 
+### What lands in results/
+
+One `.grim` per unit. Nothing else.
+
+Each result is bound to its run -- source build, runtime, geometry inputs,
+solve spec, angular grid -- by fields carried **inside** the artifact, not by a
+`<name>.provenance.json` beside it. A sweep of thousands of units would
+otherwise put thousands of extra tiny files in the results directory.
+
+Integrity does not depend on the dropped sidecar hash. A `.grim` is an npz, npz
+is a zip, and numpy validates a CRC-32 per member on read, so a corrupted
+result raises `BadZipFile` on open rather than verifying and returning wrong
+numbers. What the attestation is for -- catching a result produced by a
+different source build, runtime, or input -- is fully covered by the embedded
+fields, and `hpc_common.require_hpc_output_attestations` still checks the exact
+expected file set.
+
+### What the manifest holds
+
+The run header and one compact record per unit: geometry, polarization,
+frequency, input hash. Anything identical across units -- the angular grid
+above all -- is recorded once at manifest level.
+
+That matters at scale, because the grid was the bulk of the file:
+
+| Sweep | Old manifest | Now |
+|---|---:|---:|
+| 10 geom x 91 freq x 2 pol, 361 azimuths | 7.6 MB | 0.67 MB |
+| 50 geom x 91 freq x 2 pol, 361 azimuths | ~52 MB | ~4 MB |
+
+93% of the old file was the same azimuth list repeated once per unit.
+
 ### Restarts
 
 A unit whose result already exists is re-dispatched for its attestation check

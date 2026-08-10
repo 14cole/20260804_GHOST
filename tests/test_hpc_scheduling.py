@@ -353,6 +353,22 @@ def test_end_to_end():
         hpc_common.require_hpc_output_attestations(run_dir, manifest)
         check(True, "manifest provenance and every output attestation verify")
 
+        sidecars = list((run_dir / "results").glob("*.provenance.json"))
+        check(not sidecars,
+              f"results/ holds no sidecar files (found {len(sidecars)})")
+        check(len(list((run_dir / "results").iterdir())) == expected_units,
+              "results/ holds exactly one file per unit")
+        first_unit = manifest["units"][0]
+        check("azimuths_deg" not in first_unit,
+              "units do not repeat the shared angular grid")
+        check(isinstance(manifest.get("azimuths_deg"), list),
+              "the angular grid is recorded once at manifest level")
+        from workflow_provenance import read_embedded_attestation
+        sample = sorted((run_dir / "results").glob("*.grim"))[0]
+        embedded = read_embedded_attestation(str(sample))
+        check(embedded.get("run_id") == manifest["run_id"],
+              "each result carries its run binding inside the artifact")
+
         status = hpc_common.run_status(run_dir)
         check(status["pending"] == 0, "run_status reports the run complete")
 
