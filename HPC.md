@@ -355,9 +355,27 @@ quadrature rule, not a faster evaluation of the same one. Measured on
 | 4 | 1.94× | 4.1e-09 dB |
 | 3 | 2.29× | 6.3e-07 dB |
 
+Measured again on a coated multi-region body (24 in PEC trapezoid with a
+0.1 in lossy dielectric layer, 3 GHz), where the payoff is larger because that
+path assembles three operator sets and a complex wavenumber makes each Hankel
+evaluation ~10x dearer than a real one:
+
+| Configuration | Speedup | Max RCS shift |
+|---|---:|---:|
+| certified, order 8 (default) | 1.00× | — |
+| certified, order 4 | 3.09× | 0.000 dB |
+| survey, order 8 | 3.11× | 0.017 dB |
+| survey, order 4 | 8.49× | 0.017 dB |
+
 Those shifts are far below anything physically meaningful, but they were
-measured on one body at one frequency — run the script on your own geometries
-before relying on it. Near-field and singular quadrature are untouched. A solve
+measured on specific geometries at specific frequencies — run the script on
+your own before relying on it.
+
+Why the order matters so much: linear Galerkin with an 8x8 rule spends 64
+kernel evaluations per element pair, and the assembly is ~88% of a solve
+(every quality gate, the condition estimate, the preflight, and the
+mesh-convergence comparison together come to under 1.5%). Order 4 is 16
+evaluations per pair — a quarter of the dominant cost. Near-field and singular quadrature are untouched. A solve
 that used the override records it in its warnings, so the fact travels with the
 published `.grim`.
 
