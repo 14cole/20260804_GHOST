@@ -672,13 +672,21 @@ def export_result_to_grim(
     return written
 
 def save_bor_az_el_grim(grid: 'Dict[str, Any]', output_path: 'str',
-                        source_path: 'str' = '', history: 'str' = '') -> 'List[str]':
+                        source_path: 'str' = '', history: 'str' = '',
+                        channel_metadata: 'Dict[str, Any]' = None) -> 'List[str]':
     """
     Write a bor_dispatch.bor_az_el_grid radar-frame polarimetric grid as
     .grim files -- one per channel (VV, HH, VH), each with REAL azimuth and
     elevation axes (unlike the single-cut aspect exports).  sigma_3d in m^2
     (dBsm); complex amplitudes preserved.
+
+    ``channel_metadata`` maps a channel name to a metadata dict stored in that
+    channel's file as ``solver_metadata_json``.  The HPC driver uses it to
+    carry each derived product's run attestation inside the artifact rather
+    than in a sidecar beside it.
     """
+
+    channel_metadata = dict(channel_metadata or {})
 
     az = np.asarray(grid['azimuths_deg'], dtype=float)
     el = np.asarray(grid['elevations_deg'], dtype=float)
@@ -728,6 +736,11 @@ def save_bor_az_el_grim(grid: 'Dict[str, Any]', output_path: 'str',
             'rcs_amp_imag': amp_imag,
             'complex_field_domain': 'solver_raw_far_field_amplitude',
         }
+        if ch in channel_metadata:
+            payload['solver_metadata_json'] = json.dumps(
+                {'metadata': channel_metadata[ch]},
+                sort_keys=True, allow_nan=False,
+            )
         written.append(os.path.abspath(_save_grim_npz(payload, f'{root}_{ch}')))
     return written
 

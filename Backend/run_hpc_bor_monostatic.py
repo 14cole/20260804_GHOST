@@ -65,8 +65,8 @@ from workflow_provenance import (
     sha256_file,
     stable_json_fingerprint,
     unit_solve_spec_fingerprint,
-    verify_output_attestation,
-    write_output_attestation,
+    embed_output_attestation,
+    verify_embedded_attestation,
 )
 
 # ===============================================================================
@@ -229,7 +229,7 @@ def _unit_attestation_fields(manifest, unit):
             stable_json_fingerprint(manifest.get("solver_config", {})),
         "angular_grid_kind": "aspects_deg",
         "angular_grid_deg":
-            [float(value) for value in unit["aspects_deg"]],
+            [float(value) for value in manifest["aspects_deg"]],
         "polarization": str(unit["polarization"]),
         "frequency_ghz": float(unit["frequency_ghz"]),
     }
@@ -336,7 +336,7 @@ def _build_azel_pair(run_dir, stem, freq, azel_cfg):
                 f"Cannot identify one {polarization} unit attestation for "
                 f"{stem} at {freq:g} GHz."
             )
-        verify_output_attestation(
+        verify_embedded_attestation(
             str(path), _unit_attestation_fields(manifest, matching[0])
         )
 
@@ -349,7 +349,7 @@ def _build_azel_pair(run_dir, stem, freq, azel_cfg):
     if all(path.exists() for path in outs):
         try:
             for path in outs:
-                verify_output_attestation(
+                verify_embedded_attestation(
                     str(path), expected_by_path[path]
                 )
             return False
@@ -369,15 +369,21 @@ def _build_azel_pair(run_dir, stem, freq, azel_cfg):
     out_dir = run_dir / "azel"
     out_dir.mkdir(exist_ok=True)
     tmp_stem = out_dir / f".tmp_{os.getpid()}_{freq:.3f}GHz_{stem}.grim"
+    # Each channel carries its own attestation inside the file it is written
+    # into, so the derived products need no sidecars either.
+    channel_metadata = {
+        channel: {"output_attestation": dict(
+            expected_by_path[path],
+            schema="ghost.workflow.embedded-attestation.v1",
+        )}
+        for path, channel in zip(outs, ("VV", "HH", "VH"))
+    }
     written = save_bor_az_el_grim(
         grid, str(tmp_stem), source_path=stem,
-        history=f"run_hpc_bor_monostatic.py azel {freq}GHz")
+        history=f"run_hpc_bor_monostatic.py azel {freq}GHz",
+        channel_metadata=channel_metadata)
     for tmp, final in zip(sorted(written), sorted(str(p) for p in outs)):
         os.replace(tmp, final)
-    for path in outs:
-        write_output_attestation(
-            str(path), expected_by_path[path]
-        )
     return True
 
 
@@ -413,14 +419,14 @@ def _solve_and_export(unit, snapshot, material_base, run_dir_str):
     _verify_unit_input(unit, manifest)
     attestation = _unit_attestation_fields(manifest, unit)
     if out_path.exists():
-        verify_output_attestation(str(out_path), attestation)
+        verify_embedded_attestation(str(out_path), attestation)
         return ("skipped", str(out_path))
 
     from bor_dispatch import solve_monostatic_rcs_bor
     result = solve_monostatic_rcs_bor(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(unit["frequency_ghz"])],
-        elevations_deg=[float(a) for a in unit["aspects_deg"]],
+        elevations_deg=[float(a) for a in manifest["aspects_deg"]],
         polarization=unit["polarization"],
         geometry_units=GEOMETRY_UNITS,
         material_base_dir=material_base,
@@ -439,6 +445,10 @@ def _solve_and_export(unit, snapshot, material_base, run_dir_str):
     _verify_run_provenance(manifest)
     _verify_unit_input(unit, manifest)
 
+    # Bind the result to its run state inside the artifact, before export, so
+    # results/ holds one file per unit instead of a .grim and a sidecar.
+    embed_output_attestation(result, attestation)
+
     from grim_io import export_result_to_grim
     written = export_result_to_grim(
         result, str(out_path),
@@ -447,7 +457,6 @@ def _solve_and_export(unit, snapshot, material_base, run_dir_str):
                  f"freq={unit['frequency_ghz']}GHz"),
     )
     actual_path = str(written[0]) if written else str(out_path)
-    write_output_attestation(actual_path, attestation)
     _verify_run_provenance(manifest)
     _verify_unit_input(unit, manifest)
 
@@ -634,7 +643,6 @@ def submit():
                     "geometry_input_sha256": input_fingerprint,
                     "polarization":  pol,
                     "frequency_ghz": float(f),
-                    "aspects_deg":   [float(a) for a in ASPECTS_DEG],
                 })
 
     source_driver = Path(__file__).resolve()
@@ -739,8 +747,8 @@ def _unit_claim_key(unit):
             f"{unit['geometry_stem']}")
 
 
-def _plan_units(units, n_slots):
-    # type: (List[Dict[str, Any]], int) -> Tuple[Dict[str, float], Dict[str, int]]
+def _plan_units(units, n_slots, manifest_aspects):
+    # type: (List[Dict[str, Any]], int, List[float]) -> Tuple[Dict[str, float], Dict[str, int]]
     """Cost every unit and deal them out longest-processing-time-first.
 
     Extents are read straight off the .geo, so the whole plan costs one parse
@@ -758,7 +766,7 @@ def _plan_units(units, n_slots):
             "unit": _unit_claim_key(unit),
             "cost": hpc_scheduler.bor_unit_cost(
                 arc, radius, float(unit["frequency_ghz"]),
-                len(unit.get("aspects_deg", []) or []),
+                len(manifest_aspects),
             ),
         })
     assignment = hpc_scheduler.balance_units(records, n_slots)
@@ -782,7 +790,7 @@ def worker(run_dir_str, job_index, node_index):
     n_slots  = max(1, n_nodes * n_jobs)
     slot_id  = job_index * n_nodes + node_index
 
-    costs, slots = _plan_units(units, n_slots)
+    costs, slots = _plan_units(units, n_slots, manifest["aspects_deg"])
     mine_keys = {k for k, v in slots.items() if v == slot_id}
 
     def _order_key(unit):
