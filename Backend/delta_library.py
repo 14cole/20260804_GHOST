@@ -86,9 +86,9 @@ class Resolution(NamedTuple):
         return [e.path for e in self.entries]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Names
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def parse_name(path: 'str') -> 'Tuple[Dict[str, float], Dict[str, int]]':
     """Parse a library filename -> (values, decimals) keyed by variable name.
@@ -156,9 +156,9 @@ def format_name(params: 'Dict[str, float]', decimals: 'Dict[str, int]',
     return "_".join(toks) + ".grim"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # The library
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class DeltaLibrary:
     """One seam family = one directory of filename-indexed delta .grim files."""
@@ -170,7 +170,7 @@ class DeltaLibrary:
         self.root = str(root)
         self.unindexed: 'List[Tuple[str, str]]' = list(unindexed)
 
-    # ── construction ────────────────────────────────────────────────────────
+    # -- construction --------------------------------------------------------
     @classmethod
     def from_dir(cls, directory: 'str', decimals: 'Optional[Dict[str, int]]' = None
                  ) -> "DeltaLibrary":
@@ -250,7 +250,7 @@ class DeltaLibrary:
             seen[key] = e.path
         return cls(entries, decimals, root, unindexed)
 
-    # ── description ─────────────────────────────────────────────────────────
+    # -- description ---------------------------------------------------------
     def __len__(self) -> 'int':
         return len(self.entries)
 
@@ -314,7 +314,7 @@ class DeltaLibrary:
         print(text)
         return text
 
-    # ── selection (on-grid, no snapping) ────────────────────────────────────
+    # -- selection (on-grid, no snapping) ------------------------------------
     def select(self, **constraints) -> "DeltaLibrary":
         """Subset by exact value, explicit list, ``Range``/2-tuple, or predicate.
 
@@ -364,7 +364,7 @@ class DeltaLibrary:
             return any(abs(v - float(x)) <= tol for x in spec)
         return abs(v - float(spec)) <= tol
 
-    # ── resolution (may snap OFF-grid requests) ─────────────────────────────
+    # -- resolution (may snap OFF-grid requests) -----------------------------
     def resolve(self, n: 'Optional[int]' = None, off_grid: 'str' = "snap",
                 prefer_rev: 'str' = "highest", **spec) -> 'Resolution':
         """Turn a TOLERANCE request into an ordered list of library entries.
@@ -481,7 +481,7 @@ class DeltaLibrary:
     def paths(self) -> 'List[str]':
         return [e.path for e in self.entries]
 
-    # ── payload sanity (reads the files, NOT for metadata) ───────────────────
+    # -- payload sanity (reads the files, NOT for metadata) -------------------
     def validate(self, frequencies_ghz: 'Sequence[float]' = (), require: 'bool' = True
                  ) -> 'List[str]':
         """Open every entry and check it is USABLE: readable, and (if given) that
@@ -537,9 +537,9 @@ def families(root: 'str') -> 'Dict[str, DeltaLibrary]':
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Spreading a tolerance around a perimeter
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def arc_slices(perimeter, n_arcs: 'int') -> 'List[np.ndarray]':
     """Split a perimeter into ``n_arcs`` contiguous, non-overlapping arcs of

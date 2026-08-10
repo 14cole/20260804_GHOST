@@ -453,7 +453,33 @@ shared L3 is thrashing; grow it for a few large solves with threads.
 
 ---
 
-## 8. Tests
+## 8. Source encoding
+
+Every Python file in this repo is **pure ASCII**, and
+`tests/test_source_is_ascii.py` enforces it.
+
+The reason is a failure mode that only shows up after a file has been copied
+somewhere. UTF-8 source that passes through a Windows editor, an FTP client in
+text mode, or anything else that re-encodes on save comes back in a local
+codepage. An em dash in a comment becomes a lone `0x97` byte, and Python 3
+refuses the file outright:
+
+```
+SyntaxError: (unicode error) 'utf-8' codec can't decode byte 0x97
+in position 0: invalid start byte
+```
+
+The module is then unimportable on the machine it was copied to, and the error
+points at a decorative character rather than anything meaningful. If you hit
+this on a file from elsewhere, restore it with `git checkout` or re-copy in
+binary mode (`scp`, `rsync`, `git`) rather than through an editor.
+
+Data files are exempt -- `.geo` and `.csv` inputs are read with an explicit
+encoding and are yours, not ours.
+
+---
+
+## 9. Tests
 
 ```bash
 python tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
@@ -462,6 +488,7 @@ python tests/test_assembly_equivalence.py <pristine rcs_solver.py>
 python tests/benchmark_assembly.py      [pristine rcs_solver.py]
 python tests/measure_far_quadrature.py  [geometry.geo ...]
 python tests/diagnose_provenance.py     <run_dir>       # why a source check failed
+python tests/test_source_is_ascii.py                    # source stays copy-safe
 ```
 
 The two equivalence tests need a copy of the solver from before these changes
@@ -469,7 +496,7 @@ to compare against; keep one outside the tree.
 
 ---
 
-## 9. Rules of thumb
+## 10. Rules of thumb
 
 - **Many geometries or frequencies:** leave everything at defaults, set
   `N_NODES` to what you can get, and let the planner and stealing do the work.

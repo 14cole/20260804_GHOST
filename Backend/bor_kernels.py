@@ -11,7 +11,7 @@ cos(xi)- and sin(xi)-weighted kernels needed by the EFIE dyad follow from
 neighbors:  Gc_m = (G_{m-1}+G_{m+1})/2,  Gs_m = (G_{m-1}-G_{m+1})/(2j).
 
 Evaluation strategy:
-- Far point pairs: uniform xi sampling + FFT — all modes at once,
+- Far point pairs: uniform xi sampling + FFT -- all modes at once,
   spectrally accurate for the periodic smooth integrand.
 - Near point pairs (R can be small): sinh-graded quadrature concentrated
   at xi = 0, evaluated for all modes by direct projection.
@@ -31,9 +31,9 @@ ETA0 = 376.730313668
 AXIS_TOL = 1e-12
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Generatrix
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass
 class Generatrix:
@@ -125,15 +125,15 @@ def gauss_on_generatrix(gen: 'Generatrix', order: 'int' = 4) -> 'GaussData':
     return GaussData(E, S, W, RHO, Z, TR, TZ, T0, T1, dRT0, dRT1)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Modal kernels
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 # Peak transient bytes any one FFT table builder may allocate for its
 # [pair-chunk, n_xi] sampling grids.  The gap-aware n_xi floor (below) can
 # reach thousands of points on fine meshes; building all pairs at once then
 # costs O(pairs * n_xi * intermediates) and has OOM-killed whole validation
-# batteries.  Chunking is exact — results are bit-identical to one-shot.
+# batteries.  Chunking is exact -- results are bit-identical to one-shot.
 FFT_BUILD_BUDGET = 256e6
 
 
@@ -265,10 +265,10 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
 
     # Two-piece quadrature (both pieces evaluated for every pair; the core
     # collapses to zero width when the pair is not actually singular):
-    #   core:  s in [0, s0], s0 = min(1, 20 d/a), sinh-graded toward s = 0 —
+    #   core:  s in [0, s0], s0 = min(1, 20 d/a), sinh-graded toward s = 0 --
     #          resolves the 1/R spike;
     #   tail:  xi in [xi0, pi], plain Gauss with order scaled to the
-    #          cos(m xi) and e^{-jkR} oscillation — the single sinh map
+    #          cos(m xi) and e^{-jkR} oscillation -- the single sinh map
     #          starves this region and capped accuracy at ~1e-2.
     # Core must stay a NARROW singular patch: if it grows to cover the whole
     # range, the fixed-order sinh grid cannot resolve the cos(m xi)/e^{-jkR}
@@ -278,7 +278,7 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     u01 = 0.5 * (xg + 1.0)
     w01 = 0.5 * wg
 
-    # ── core ──
+    # -- core --
     vmax = np.arcsinh((a / d) * s0)
     v = u01[None, :] * vmax[:, None]
     wv = w01[None, :] * vmax[:, None]
@@ -295,7 +295,7 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     acc = 2.0 * (np.einsum("pv,pvm->pm", gw.real, cosmx)
                  + 1j * np.einsum("pv,pvm->pm", gw.imag, cosmx))
 
-    # ── tail ──
+    # -- tail --
     osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
     n_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
     xt, wt = np.polynomial.legendre.leggauss(n_tail)
@@ -317,7 +317,7 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # MFIE kernels.
 #
 # The MFIE K-term integrand  -p(R) [ (W_u.Rvec)(n.f_v) - (W_u.f_v)(n.Rvec) ]
@@ -328,7 +328,7 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
 # the azimuthal integrand and modes are projected from the assembled
 # function.  Component pairs uv in {tt, tf, ft, ff}; the bracket has mixed
 # parity in xi, so tables span m = -m_max..+m_max (centered index m + m_max).
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _mfie_brackets(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, xi):
     """The four MFIE bracket functions at azimuth offsets xi.
@@ -504,7 +504,7 @@ def mfie_for_mode(K: 'np.ndarray', m: 'int', m_max: 'int') -> 'np.ndarray':
     return K[..., m + m_max]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # IBC kernels: the magnetic-current operator of the IBC-EFIE.
 #
 # Eliminating M = -Z_s n_hat' x J' gives the extra operator
@@ -512,7 +512,7 @@ def mfie_for_mode(K: 'np.ndarray', m: 'int', m_max: 'int') -> 'np.ndarray':
 # (source-point normal, Z_s applied at the source during assembly).  Same
 # only-weakly-singular-as-a-whole structure as the MFIE bracket, so the same
 # assembled-integrand strategy applies.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _ibc_brackets_grid(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, xi):
     """Four IBC bracket functions on per-pair xi grids ([n_pairs, n_xi])."""

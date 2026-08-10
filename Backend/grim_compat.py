@@ -96,9 +96,9 @@ def rcsgrid_class():
     return RcsGrid
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # the one conversion that matters: power <-> field amplitude
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def amp_scale(grim: 'Dict[str, Any] | str',
               frequencies_ghz: 'Optional[Sequence[float]]' = None) -> 'np.ndarray':
@@ -143,9 +143,9 @@ def field_amplitude(grid, grim_or_path) -> 'np.ndarray':
     return np.asarray(grid.rcs) / (s if s.size == 1 else s[None, None, :, None])
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # hand a file over and get it back
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def to_grid(path: 'str'):
     """Load one of this repo's .grim files as an RcsGrid.
@@ -190,9 +190,9 @@ def from_grid(grid, out_path: 'str', *, amp: 'Optional[np.ndarray]' = None,
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # read the viewer tool's import formats as a point-scatterer pattern
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _LOADERS = {".grim": "load", ".out": "load_out", ".ss": "load_ss",
             ".pio": "load_pio", ".csv": "load_theta_phi_csv",
@@ -273,7 +273,7 @@ def load_pattern_any(path: 'str', *, pol_map: 'Optional[Dict[str, str]]' = None,
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 def describe(path: 'str') -> 'str':
     """One-screen summary of a .grim in both tools' terms: axes, tags, and the
     power/amplitude relationship that applies to it."""

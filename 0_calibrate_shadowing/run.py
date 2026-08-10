@@ -70,7 +70,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = os.path.join(os.path.dirname(HERE), "Backend")
 sys.path.insert(0, BACKEND)
 
-# ─── KNOBS ──────────────────────────────────────────────────────────────────
+# --- KNOBS ------------------------------------------------------------------
 FREQ_GHZ = 6.0
 ASPECT_DEG = 90.0                          # broadside, so roll does the work
 ROLLS_DEG = np.arange(0.0, 359.1, 30.0)    # spin the vehicle past the component
@@ -79,7 +79,7 @@ BIAS_SWEEP_M = [2e-5, 5e-5, 1e-4, 3e-4, None, 4e-3]   # metres; None = default
 UNITS = "meters"                           # units the .stl and .txt are drawn in
 DATASETS_DIR = os.path.join("..", "1c_build_deltas", "Deltas")
 BODY_GRIM = os.path.join("..", "2b_solve_body_hpc", "results", "body.grim")
-# ────────────────────────────────────────────────────────────────────────────
+# ----------------------------------------------------------------------------
 
 from frame import scale_for, to_axis_frame                            # noqa: E402
 from feature_sum import (sum_features, directions_from_aspect_roll,  # noqa: E402

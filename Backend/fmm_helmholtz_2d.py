@@ -42,9 +42,9 @@ def _warn_no_native():
         RuntimeWarning, stacklevel=2,
     )
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # Quadtree
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 @dataclass
 class Box:
@@ -132,7 +132,7 @@ def _build_lists(tree: 'QuadTree'):
                     if not _near(box, cn):
                         interact[bid].append(cn_id)
 
-    # ── Completeness fix: ensure every leaf pair is covered ─────────────
+    # -- Completeness fix: ensure every leaf pair is covered -------------
     # Check which leaf pairs are handled by M2L at some ancestor level.
     # Leaf pair (li, lj) is covered if:
     #   1. lj is in near[li], OR
@@ -151,7 +151,7 @@ def _build_lists(tree: 'QuadTree'):
     ancestor_cache = {lid: _get_ancestors(lid) for lid in leaves}
 
     # Precompute the set of leaves in each box's subtree (bottom-up). A box that
-    # appears in an interaction list "covers" — via M2L — every leaf beneath it.
+    # appears in an interaction list "covers" -- via M2L -- every leaf beneath it.
     leaves_under: 'Dict[int, set]' = {}
     for lev in range(tree.n_levels - 1, -1, -1):
         for bid in level_boxes[lev]:
@@ -165,7 +165,7 @@ def _build_lists(tree: 'QuadTree'):
                 leaves_under[bid] = acc
 
     # A leaf pair (li, lj) is M2L-covered iff some ancestor aj of lj sits in
-    # interact[ai] for some ancestor ai of li — equivalently, lj lies under one
+    # interact[ai] for some ancestor ai of li -- equivalently, lj lies under one
     # of the boxes in the union of li's ancestors' interaction lists. Any leaf
     # that is neither adjacent (already in near[li]) nor M2L-covered is added to
     # near[li] so the near + M2L partition stays complete. This is the set-based
@@ -184,9 +184,9 @@ def _build_lists(tree: 'QuadTree'):
 
     return near, interact
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # Translation operators (fully vectorized)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 def _trunc_order(k, diam, n_digits=6, domain_diam=None):
     """
@@ -275,9 +275,9 @@ def _l2p_dlp_normal(L, targets, normals, center, k, p):
     grad_y = k * dJn * sin_t[None, :] * e_int + (1j * ns[:, None] / rho_safe[None, :]) * cos_t[None, :] * Jn * e_int
     return 0.25j * np.sum(L[:, None] * (normals[:,0][None,:]*grad_x + normals[:,1][None,:]*grad_y), axis=0)
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # FMM Operator
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 class FMMOperator:
     """
@@ -286,13 +286,13 @@ class FMMOperator:
     Parameters
     ----------
     mesh : LinearMesh
-    k : complex — wavenumber
-    obs_normal_deriv : bool — False=SLP, True=K'
+    k : complex -- wavenumber
+    obs_normal_deriv : bool -- False=SLP, True=K'
     source_element_mask : optional bool array
-    n_digits : int — FMM accuracy digits (default 6)
-    max_leaf : int — max panels per tree leaf
-    quad_order : int — far-field quadrature order
-    near_quad_order : int — near-field quadrature order
+    n_digits : int -- FMM accuracy digits (default 6)
+    max_leaf : int -- max panels per tree leaf
+    quad_order : int -- far-field quadrature order
+    near_quad_order : int -- near-field quadrature order
     """
     def __init__(self, mesh, k, obs_normal_deriv=False, source_element_mask=None,
                  n_digits=6, max_leaf=40, quad_order=4, near_quad_order=8,
@@ -378,8 +378,8 @@ class FMMOperator:
 
         # Collect all unique near pairs, classify as special or regular.
         computed = set()
-        special = []     # self + touching → Python recursive quadrature
-        regular = {}     # quadrature_order → [(obs_idx, src_idx), ...]
+        special = []     # self + touching -> Python recursive quadrature
+        regular = {}     # quadrature_order -> [(obs_idx, src_idx), ...]
         for leaf_id in self.tree.get_leaves():
             leaf = self.tree.boxes[leaf_id]
             if not leaf.panel_ids: continue
@@ -436,14 +436,14 @@ class FMMOperator:
 
         Candidate .so/.dll names are tried platform/arch-specific first
         (e.g. ``fmm_near.darwin-arm64.so``) so a binary committed for one
-        platform — such as the HPC Linux x86-64 build named ``fmm_near.so`` —
+        platform -- such as the HPC Linux x86-64 build named ``fmm_near.so`` --
         does not shadow the matching local build. A ctypes library is accepted
         only if it actually exports ``compute_sk_blocks_batch_q``; a
         wrong-architecture file is rejected at load (raises OSError) and a file
         missing the symbol is skipped, rather than silently forcing the ~100x
         slower Python near-field path at call time.
         """
-        # Try Cython first (preferred — no manual compile step)
+        # Try Cython first (preferred -- no manual compile step)
         try:
             import fmm_near_cy
             return ("cython", fmm_near_cy)
@@ -631,7 +631,7 @@ class FMMOperator:
         tree = self.tree; boxes = tree.boxes; k = self.k
         if tree.n_levels < 2: return
 
-        # ── P2M ─────────────────────────────────────────────────────────
+        # -- P2M ---------------------------------------------------------
         multipole: 'Dict[int, np.ndarray]' = {}
         for lid in tree.get_leaves():
             leaf = boxes[lid]; p = self.p_level[leaf.level]
@@ -650,7 +650,7 @@ class FMMOperator:
             pts = np.vstack(pts_list); strs = np.concatenate(str_list)
             multipole[lid] = _p2m(pts, strs, leaf.center, k, p)
 
-        # ── M2M upward ──────────────────────────────────────────────────
+        # -- M2M upward --------------------------------------------------
         for lev in range(tree.n_levels - 1, 0, -1):
             for bid in tree.get_level_boxes(lev):
                 box = boxes[bid]
@@ -673,7 +673,7 @@ class FMMOperator:
                 lo = max(-p_use, -pp); hi = min(p_use, pp)
                 multipole[pid][lo+pp:hi+pp+1] += O_sh[lo+p_use:hi+p_use+1]
 
-        # ── M2L ─────────────────────────────────────────────────────────
+        # -- M2L ---------------------------------------------------------
         local: 'Dict[int, np.ndarray]' = {}
         for lev in range(2, tree.n_levels):
             for bid in tree.get_level_boxes(lev):
@@ -693,7 +693,7 @@ class FMMOperator:
                     L[lo+p_lev:hi+p_lev+1] += L_c[lo+p_use:hi+p_use+1]
                 local[bid] = L
 
-        # ── L2L downward ────────────────────────────────────────────────
+        # -- L2L downward ------------------------------------------------
         for lev in range(2, tree.n_levels):
             for bid in tree.get_level_boxes(lev):
                 box = boxes[bid]
@@ -712,7 +712,7 @@ class FMMOperator:
                 lo = max(-p_use, -pc); hi = min(p_use, pc)
                 local[bid][lo+pc:hi+pc+1] += Lsh[lo+p_use:hi+p_use+1]
 
-        # ── L2P ─────────────────────────────────────────────────────────
+        # -- L2P ---------------------------------------------------------
         for lid in tree.get_leaves():
             leaf = boxes[lid]
             L = local.get(lid)
@@ -734,7 +734,7 @@ class FMMOperator:
 
             field = field.reshape(len(pids), Q)  # (n_panels, Q)
 
-            # Accumulate into result: result[node_a] += Σ_q w*L*phi_a * field
+            # Accumulate into result: result[node_a] += Sigma_q w*L*phi_a * field
             # Vectorized accumulation over panel endpoints (single einsum pass).
             pids_arr = np.asarray(pids, dtype=int)
             # wl_phi[pid, q, a] * field[pi, q] -> contribs[pi, a]

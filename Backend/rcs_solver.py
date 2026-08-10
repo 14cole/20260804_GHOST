@@ -1694,7 +1694,7 @@ def validate_geometry_snapshot_for_solver(
     if high_degree_nodes > 0:
         warnings.append(f'Geometry contains {high_degree_nodes} high-degree node(s) (>2 connected primitives).')
 
-    # ── Crack detection ───────────────────────────────────────────────────
+    # -- Crack detection ---------------------------------------------------
     # Endpoints that nearly coincide (within the validator's drawing
     # tolerance) but sit farther apart than the mesh node-snap tolerance
     # (1e-9 m absolute) will NOT be merged during meshing: a visually closed
@@ -1715,7 +1715,7 @@ def validate_geometry_snapshot_for_solver(
             if gap > snap_tol_raw:
                 raise ValueError(
                     f"Geometry crack: endpoints ({px:.9g}, {py:.9g}) and ({qx:.9g}, {qy:.9g}) "
-                    f"are {gap * meters_scale:.3g} m apart — close enough to look connected, but "
+                    f"are {gap * meters_scale:.3g} m apart -- close enough to look connected, but "
                     "beyond the 1e-9 m mesh node-snap tolerance, so they would mesh as an OPEN "
                     "gap. Make the endpoints exactly coincident (or separate them intentionally)."
                 )
@@ -1769,14 +1769,14 @@ def validate_geometry_snapshot_for_solver(
 
         # Duplicate primitive (same endpoints, either order): the boundary
         # would be discretized twice, doubling the equivalent currents.
-        # Checked before the adjacency skip — a duplicate is never legal.
+        # Checked before the adjacency skip -- a duplicate is never legal.
         same_fwd = _points_close(a1, b1, tol) and _points_close(a2, b2, tol)
         same_rev = _points_close(a1, b2, tol) and _points_close(a2, b1, tol)
         if same_fwd or same_rev:
             raise ValueError(
                 f"Duplicate primitive: '{name_i}' primitive {prim_i + 1} and "
                 f"'{name_j}' primitive {prim_j + 1} have identical endpoints. "
-                "Remove one — a doubled boundary doubles the surface currents."
+                "Remove one -- a doubled boundary doubles the surface currents."
             )
 
         # Collinear overlap through a shared endpoint (e.g. (0,0)-(1,0)
@@ -2259,7 +2259,7 @@ def _integrate_linear_pair_box_sk_vectorized(
     compute_double_layer: 'bool' = True,
 ) -> 'Tuple[np.ndarray, np.ndarray]':
     """
-    Vectorized tensor-Gauss 2×2 S and K block assembly for one element pair.
+    Vectorized tensor-Gauss 2x2 S and K block assembly for one element pair.
 
     Evaluates all quadrature point pairs at once using array Hankel functions,
     avoiding per-point Python-loop overhead.  Returns (S_block, K_block).
@@ -2322,7 +2322,7 @@ def _integrate_linear_pair_box_sk_vectorized(
     # Weight tensor: (nobs, nsrc)
     w_outer = np.outer(np.asarray(qw_obs, dtype=float), np.asarray(qw_src, dtype=float))
 
-    # Accumulate 2×2 blocks using einsum.
+    # Accumulate 2x2 blocks using einsum.
     # weighted_g = w * G, shape (nobs, nsrc)
     if compute_single_layer:
         weighted_g = w_outer * g_vals
@@ -2362,7 +2362,7 @@ def _single_layer_self_block_exact(
 
         Int u^p du = 1/(p+1)        Int u^p ln(u) du = -1/(p+1)^2
 
-    so the whole block is a rapidly convergent series — machine precision,
+    so the whole block is a rapidly convergent series -- machine precision,
     unlike the (u, uv) "Duffy" map, whose unresolved log singularity along
     the diagonal capped the self block at ~0.1-1% error.
 
@@ -2937,7 +2937,7 @@ def _sk_blocks_near_linear(
     compute_double_layer: 'bool' = True,
 ) -> 'Tuple[np.ndarray, np.ndarray]':
     """
-    Compute S and K 2×2 blocks for a near element pair.
+    Compute S and K 2x2 blocks for a near element pair.
 
     Uses Duffy transforms for self and touching pairs (via the existing recursive
     path), and the vectorized tensor-Gauss path for separated-near pairs.
@@ -3024,7 +3024,7 @@ def _hypersingular_block_from_s_block(
     denom = max(float(obs_length) * float(src_length), EPS * EPS)
     return -k2 * n_dot_n * s_block + _TANGENT_OUTER * (raw_integral / denom)
 
-# ─── Batched far-pair quadrature engine ─────────────────────────────────────
+# --- Batched far-pair quadrature engine -------------------------------------
 #
 # Assembling the dense boundary-integral operators is the whole cost of a large
 # 2-D solve: the linear solve is O(N^3) with threaded BLAS behind it, while the
@@ -5054,16 +5054,16 @@ def _surface_robin_alpha(
 
     TM (E_z, Dirichlet-like for PEC):
       E_z + Z_s * H_phi = 0
-      → du/dn + j*k*eta/Z_s * u = 0
-      → alpha = j * k * eta / Z_s
-      Limits: Z_s→0 → alpha→∞ (u=0, PEC TM)
-              Z_s→∞ → alpha→0 (q=0, PMC TM)
+      -> du/dn + j*k*eta/Z_s * u = 0
+      -> alpha = j * k * eta / Z_s
+      Limits: Z_s->0 -> alpha->inf (u=0, PEC TM)
+              Z_s->inf -> alpha->0 (q=0, PMC TM)
 
     TE (H_z, Neumann-like for PEC):
-      → du/dn + j*k*Z_s/eta * u = 0
-      → alpha = +j * k * Z_s / eta
-      Limits: Z_s→0 → alpha→0 (q=0, PEC TE)
-              Z_s→∞ → alpha→∞ (u=0, PMC TE)
+      -> du/dn + j*k*Z_s/eta * u = 0
+      -> alpha = +j * k * Z_s / eta
+      Limits: Z_s->0 -> alpha->0 (q=0, PEC TE)
+              Z_s->inf -> alpha->inf (u=0, PMC TE)
       Sign pinned by the flat-interface reflection coefficient
       R_H = (eta - Z_s) / (eta + Z_s) (matched absorber Z_s = eta must
       absorb, not amplify) and validated against the impedance-cylinder
@@ -5422,7 +5422,7 @@ def _single_layer_self_term(k0: 'Union[complex, float]', panel_length: 'float') 
     asym = (l / (2.0 * math.pi)) * (cmath.log(x) + EULER_GAMMA - 1.0) + 0.25j * l
 
     # Correction integral for finite kL effects:
-    # 2 * ∫_0^{L/2} [G(r) - G_asym(r)] dr
+    # 2 * Int_0^{L/2} [G(r) - G_asym(r)] dr
     a = 0.5 * l
     kl = abs(kz) * l
     if kl < 0.5:
@@ -6062,7 +6062,7 @@ def _estimate_memory_gb(
     """
 
     bytes_per_complex = 16  # complex128
-    # 2N×2N system matrix + factorization copy
+    # 2Nx2N system matrix + factorization copy
     sys_size = 2 * nnodes
     sys_bytes = 2 * sys_size * sys_size * bytes_per_complex
     # Region operators: 2 matrices (S, K) per side per region, plus CFIE extras
@@ -6166,9 +6166,9 @@ def _solve_te_robin_mfie(
     Uses the single-layer potential representation u_scat = SLP(sigma).
     The exterior-limit Robin BC gives:
 
-        (-½ M + K' + α·S) σ = -(∂u_inc/∂n + α·u_inc)
+        (-1/2 M + K' + alpha.S) sigma = -(du_inc/dn + alpha.u_inc)
 
-    where α is the per-node Robin coefficient (0 for PEC, nonzero for IBC).
+    where alpha is the per-node Robin coefficient (0 for PEC, nonzero for IBC).
     K' is the adjoint double-layer operator (obs_normal_deriv=True).
 
     When solver_method="fmm", uses FMM-accelerated GMRES instead of dense LU.
@@ -6282,7 +6282,7 @@ def _has_sheet(infos: 'List[PanelCoupledInfo]') -> 'bool':
 
     Sheets carry their impedance via q_plus_gamma = 1/Z_s, and correctly
     modelling them requires a formulation that uses that term.  The
-    dielectric-indirect and multi-region-indirect solvers do not — and
+    dielectric-indirect and multi-region-indirect solvers do not -- and
     neither does the current coupled trace formulation, which also has
     pre-existing sign/normalization issues in the sheet case that produce
     unphysical results.
@@ -6292,7 +6292,7 @@ def _has_sheet(infos: 'List[PanelCoupledInfo]') -> 'bool':
     dielectric body, or layered coating rather than silently sending that
     combination through an operator that omits the sheet admittance. For a
     tapered resistance treatment on a conducting body, use TYPE 2 with a
-    tapered IBC instead—that path is validated.
+    tapered IBC instead--that path is validated.
     """
     return any(int(info.seg_type) == 1 for info in infos)
 
@@ -6319,7 +6319,7 @@ def _assert_air_exterior(infos: 'List[PanelCoupledInfo]') -> 'None':
         "non-air media (e.g. a TYPE 5 dielectric/dielectric contour with no "
         "enclosing TYPE 2/3 boundary). This solver poses scattering in a "
         "free-space background, so the unbounded exterior region must be "
-        "air — add the body's outer air boundary (TYPE 2/3), or model the "
+        "air -- add the body's outer air boundary (TYPE 2/3), or model the "
         "background medium explicitly as an enclosing region."
     )
 
@@ -6347,8 +6347,8 @@ def _assert_no_type1_sheet_for_mixed(infos: 'List[PanelCoupledInfo]') -> 'None':
       - All-sheet (solved by _solve_tm_sheet / _solve_te_sheet)
       - Sheet + pure-PEC TYPE 2 body (solved by _solve_mixed_sheet_pec)
 
-    Everything else — sheet + IBC-coated body, sheet + dielectric body,
-    sheet + layered coating — still needs bespoke coupling work and is
+    Everything else -- sheet + IBC-coated body, sheet + dielectric body,
+    sheet + layered coating -- still needs bespoke coupling work and is
     rejected.  The error message points at the workaround (TYPE 2 with
     tapered IBC for edge treatments on bodies).
     """
@@ -6360,7 +6360,7 @@ def _assert_no_type1_sheet_for_mixed(infos: 'List[PanelCoupledInfo]') -> 'None':
             "each with its own Z_s), or sheet + pure-PEC TYPE 2 body (mixed "
             "sheet+PEC is handled by _solve_mixed_sheet_pec).  For a "
             "tapered resistive treatment on a coated body, use TYPE 2 with "
-            "a tapered IBC row — that's the physically correct model for "
+            "a tapered IBC row -- that's the physically correct model for "
             "'resistance transitioning from air to a conducting body'."
         )
 
@@ -6373,7 +6373,7 @@ def _assert_no_type1_sheet(infos: 'List[PanelCoupledInfo]') -> 'None':
     ``_solve_mixed_sheet_pec``) reached through ``solve_monostatic_rcs_2d``
     and ``solve_bistatic_rcs_2d``.  This guard only protects
     ``compute_boundary_densities``, whose dispatch covers just the robin /
-    multi-region / coupled-trace solvers — none of which build the sheet
+    multi-region / coupled-trace solvers -- none of which build the sheet
     representation, so they would ignore or mishandle the sheet admittance
     q_plus_gamma.  Rather than return wrong densities, fail fast here and
     point the user at the RCS entry points.
@@ -6430,10 +6430,10 @@ def _solve_dielectric_indirect(
     # Determine flux scaling factor.
     info0 = infos[0]
     if pol == 'TM':
-        # E_z: flux uses 1/mu → factor = mu_ext/mu_int
+        # E_z: flux uses 1/mu -> factor = mu_ext/mu_int
         factor = complex(info0.mu_minus / info0.mu_plus) if abs(info0.mu_plus) > EPS else 1.0
     else:
-        # H_z: flux uses 1/eps → factor = eps_ext/eps_int
+        # H_z: flux uses 1/eps -> factor = eps_ext/eps_int
         factor = complex(info0.eps_minus / info0.eps_plus) if abs(info0.eps_plus) > EPS else 1.0
 
     # Assemble operators.
@@ -6517,10 +6517,10 @@ def _geometric_sheet_endpoint_nodes(
     geometrically-coincident panels that have different material signatures
     (e.g., adjacent stair-step tapered-IBC segments with different flags);
     per-node incidence counting would wrongly flag every such node as an
-    endpoint and pin μ=0 everywhere.  Counting by geometric key avoids this.
+    endpoint and pin mu=0 everywhere.  Counting by geometric key avoids this.
 
     When ``infos`` is provided, only elements with ``info.seg_type == 1``
-    contribute — so sheet endpoints that touch a PEC body are still flagged
+    contribute -- so sheet endpoints that touch a PEC body are still flagged
     as endpoints (correct for Meixner), while PEC-body-internal nodes don't
     qualify.  When ``infos`` is None, all elements contribute (appropriate
     for all-sheet geometries).
@@ -6561,19 +6561,19 @@ def _solve_tm_sheet(
 
     Derivation under e^{+jwt}:
         - E_z is continuous across the sheet; J_z = E_z / Z_s on the sheet.
-        - Scattered field from an axial current:  u_s = jkη · ∫ G · J_z dr'.
-        - SIBC on the sheet:                      u_inc + u_s = Z_s · J_z.
+        - Scattered field from an axial current:  u_s = jketa . Int G . J_z dr'.
+        - SIBC on the sheet:                      u_inc + u_s = Z_s . J_z.
 
-    Introducing σ = jkη · J_z so that u_s = SLP(σ) matches the existing SLP
+    Introducing sigma = jketa . J_z so that u_s = SLP(sigma) matches the existing SLP
     far-field projector, the SIBC becomes
-        (S - (Z_s / jkη) M) σ = -RHS_uinc
+        (S - (Z_s / jketa) M) sigma = -RHS_uinc
     in nodal Galerkin form, where S is the single-layer operator at k0 and
     M is the consistent boundary mass matrix.  Per-node Z_s (which may
     vary on a tapered sheet) enters as a diagonal scaling on M.
 
     Limit cases:
-        Z_s -> 0  (PEC sheet):        S σ = -u_inc          (TM EFIE)
-        Z_s -> inf (transparent):     σ -> 0                (no scattering)
+        Z_s -> 0  (PEC sheet):        S sigma = -u_inc          (TM EFIE)
+        Z_s -> inf (transparent):     sigma -> 0                (no scattering)
 
     Returns (rcs_lin, amp, residual_norm_max).  Far field uses the standard
     SLP projector already validated for TM PEC Mie cases.
@@ -6664,30 +6664,30 @@ def _solve_te_sheet(
         - H_z jumps across the sheet by the induced tangential surface
           current K:  [H_z]+ - [H_z]- = K.
         - Ohm's law: K = E_tangent / Z_s.
-        - E_tangent related to H_z via E_x = -(1/jωε) ∂H_z/∂y, which is
+        - E_tangent related to H_z via E_x = -(1/jomegaeps) dH_z/dy, which is
           continuous across the sheet (same on both sides).
 
-    Represent u_s by a double-layer potential with density μ = K:
-        u_s(r) = ∫ (∂G(r,r')/∂n_src) · μ(r') dr'.
-    Then u_s jumps across the sheet by exactly μ (as required), and the
-    normal derivative of u_s is continuous and equals (N μ)(r), where N
+    Represent u_s by a double-layer potential with density mu = K:
+        u_s(r) = Int (dG(r,r')/dn_src) . mu(r') dr'.
+    Then u_s jumps across the sheet by exactly mu (as required), and the
+    normal derivative of u_s is continuous and equals (N mu)(r), where N
     is the hypersingular operator obtainable from S via the Maue identity.
 
-    At the sheet:  q = q_inc + N μ,  E_tangent relates to q through the
-    local frame, and K = Y · E_tangent gives:
-        (N - jωε · Z_s · I) μ = -q_inc    →   (N - jk/η · Z_s · M) μ = -RHS_qinc
+    At the sheet:  q = q_inc + N mu,  E_tangent relates to q through the
+    local frame, and K = Y . E_tangent gives:
+        (N - jomegaeps . Z_s . I) mu = -q_inc    ->   (N - jk/eta . Z_s . M) mu = -RHS_qinc
 
-    (Using ωε = k/η with η = free-space impedance.  The sign of the Z_s
-    term mirrors the validated TM sheet system S - (Z_s/jkη)·M: this
-    code's Green's function is G = +(j/4)H0^(2) — the negative of the
-    textbook e^{+jωt} fundamental solution — which flips the sign of the
+    (Using omegaeps = k/eta with eta = free-space impedance.  The sign of the Z_s
+    term mirrors the validated TM sheet system S - (Z_s/jketa).M: this
+    code's Green's function is G = +(j/4)H0^(2) -- the negative of the
+    textbook e^{+jomegat} fundamental solution -- which flips the sign of the
     operator terms relative to the mass term.  Validated against the
     analytic resistive-sheet jump-BC series; the naive '+' sign makes a
     passive sheet scatter above the PEC level.)
 
     Limit cases:
-        Z_s -> 0  (PEC sheet):        N μ = -q_inc          (TE PEC Neumann)
-        Z_s -> inf (transparent):     μ -> 0                (no scattering)
+        Z_s -> 0  (PEC sheet):        N mu = -q_inc          (TE PEC Neumann)
+        Z_s -> inf (transparent):     mu -> 0                (no scattering)
 
     Returns (rcs_lin, amp, residual_norm_max).  Far field uses the standard
     DLP projector.
@@ -6712,19 +6712,19 @@ def _solve_te_sheet(
         mesh, k0, obs_order=obs_order, src_order=src_order)
     M_mat = _assemble_linear_mass_matrix(mesh)
 
-    # Coefficient: jωε · Z_s = (jk/η) · Z_s.
+    # Coefficient: jomegaeps . Z_s = (jk/eta) . Z_s.
     coeff_nodes = (1j * float(k0) / ETA0) * z_nodes
 
     a_sys = N_mat - coeff_nodes[:, None] * M_mat
 
-    # RHS: -<phi, ∂u_inc/∂n>.
+    # RHS: -<phi, du_inc/dn>.
     rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
     for elem in mesh.elements:
         ids = np.asarray(elem.node_ids, dtype=int)
         load_dn = _linear_element_incident_dn_load_many(elem, k_air=float(k0), elevations_deg=elev)
         rhs_sys[ids, :] -= load_dn
 
-    # Meixner edge condition: at open-strip endpoints μ → 0 (H_z is
+    # Meixner edge condition: at open-strip endpoints mu -> 0 (H_z is
     # continuous across the strip edge, so the jump density vanishes).
     # See _geometric_sheet_endpoint_nodes for the subtle point about
     # signature-split nodes in stair-stepped tapers.
@@ -6772,7 +6772,7 @@ def _is_sheet_plus_pec(infos: 'List[PanelCoupledInfo]') -> 'bool':
 
     "Pure-PEC TYPE 2" means bc_kind == 'robin' with zero impedance, i.e., the
     Leontovich coefficient reduces to the Dirichlet (TM) / Neumann (TE)
-    limit.  Such elements have no IBC layer — they're hard PEC surfaces.
+    limit.  Such elements have no IBC layer -- they're hard PEC surfaces.
     """
     if not infos:
         return False
@@ -6808,21 +6808,21 @@ def _solve_mixed_sheet_pec(
 
         TM (single-layer representation, u_s = S sigma):
             PEC   nodes:  row = S                          RHS = -<phi, u_inc>
-            sheet nodes:  row = S - (Z_s / jkη) M          RHS = -<phi, u_inc>
+            sheet nodes:  row = S - (Z_s / jketa) M          RHS = -<phi, u_inc>
 
             Unified: (S - diag(alpha_TM) M) sigma = -RHS_u
-            where alpha_TM[i] = 0 on PEC, Z_s[i]/(jkη) on sheet.
+            where alpha_TM[i] = 0 on PEC, Z_s[i]/(jketa) on sheet.
 
         TE (double-layer representation, u_s = D mu):
             PEC   nodes:  row = N                          RHS = -<phi, dn_u_inc>
-            sheet nodes:  row = N - (jk/η) Z_s M           RHS = -<phi, dn_u_inc>
+            sheet nodes:  row = N - (jk/eta) Z_s M           RHS = -<phi, dn_u_inc>
 
             Unified: (N - diag(alpha_TE) M) mu = -RHS_dn_u
-            where alpha_TE[i] = 0 on PEC, (jk/η) Z_s[i] on sheet.
+            where alpha_TE[i] = 0 on PEC, (jk/eta) Z_s[i] on sheet.
 
     Because both the sheet and the PEC body share the same representation,
     the cross-coupling between sources on one and observations on the other
-    is automatic — the S (resp. N) matrix is assembled over ALL elements
+    is automatic -- the S (resp. N) matrix is assembled over ALL elements
     (sheet + PEC), and the BC is applied row-by-row.
 
     Caveat: the TM PEC body is solved via plain SLP-EFIE here, which can
@@ -6881,11 +6881,11 @@ def _solve_mixed_sheet_pec(
         N_mat = _assemble_linear_hypersingular_matrix(
             mesh, k0, obs_order=obs_order, src_order=src_order,
         )
-        # Sign matches _solve_te_sheet: N - (jk/η)Z_s·M (see derivation there).
+        # Sign matches _solve_te_sheet: N - (jk/eta)Z_s.M (see derivation there).
         alpha_nodes = (1j * float(k0) / ETA0) * z_nodes
         a_sys = N_mat - alpha_nodes[:, None] * M_mat
 
-        # RHS: -<phi, ∂u_inc/∂n>
+        # RHS: -<phi, du_inc/dn>
         rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
         for elem in mesh.elements:
             ids = np.asarray(elem.node_ids, dtype=int)
@@ -6894,9 +6894,9 @@ def _solve_mixed_sheet_pec(
             )
             rhs_sys[ids, :] -= load_dn
 
-        # Meixner edge condition on open sheet endpoints: μ=0 (H_z continuous
+        # Meixner edge condition on open sheet endpoints: mu=0 (H_z continuous
         # at the strip edge).  Applied only to nodes that are geometric
-        # endpoints of sheet elements — not to closed-PEC-body nodes, and not
+        # endpoints of sheet elements -- not to closed-PEC-body nodes, and not
         # to stair-step-segment-boundary nodes that are geometrically interior
         # but have distinct signatures.  See _geometric_sheet_endpoint_nodes.
         endpoint_nodes = _geometric_sheet_endpoint_nodes(mesh, infos)
@@ -6977,7 +6977,7 @@ def _assemble_robin_bie_system(
     resonance set), but with the INDIRECT SLP ansatz the exterior far field
     is immune: a resonant null density sigma_0 has S sigma_0 = 0 on the
     contour, so by exterior uniqueness S sigma_0 vanishes IDENTICALLY
-    outside — the null space radiates nothing, and a direct solve stays
+    outside -- the null space radiates nothing, and a direct solve stays
     accurate (validated at the discrete resonance of a PEC circle:
     <= 0.01 dB vs the Mie series with cond spiked 40x;
     tests/validate_2d_resonance.py).  A Robin-style "CFIE" combination of
@@ -6986,7 +6986,7 @@ def _assemble_robin_bie_system(
     (u = 0 for TE, du/dn = 0 for TM) and shifts the RCS by ~9.5 dB
     everywhere.  A genuine resonance-free indirect scheme needs the
     Brakhage-Werner combined-SOURCE ansatz (double-layer + hypersingular
-    operators) — only worth building if iterative (GMRES/FMM) solves near
+    operators) -- only worth building if iterative (GMRES/FMM) solves near
     dense resonance spectra ever stall; direct solves do not need it.
     solve_monostatic_rcs_2d warns when cfie_alpha is requested on this path.
     """
@@ -7184,7 +7184,7 @@ def _count_distinct_regions(infos):
 def _is_multi_region(infos):
     """True if geometry needs multi-region solver (layered, coated, or mixed PEC+diel).
 
-    Excludes any geometry containing a TYPE 1 sheet — the multi-region
+    Excludes any geometry containing a TYPE 1 sheet -- the multi-region
     indirect solver treats its transmission interfaces as pure-medium
     boundaries and would ignore the sheet's impedance.  In the RCS dispatch,
     supported sheet geometries are routed to the dedicated sheet solvers
@@ -7287,7 +7287,7 @@ def _solve_multi_region_indirect(
         if ifc['r_p'] >= 0:
             dof_map[(mi, 'plus')] = (n_dof, ifc['n']); n_dof += ifc['n']
 
-    # 4. Operator cache — dense or FMM depending on solver_method.
+    # 4. Operator cache -- dense or FMM depending on solver_method.
     use_fmm = (isinstance(solver_method, str) and solver_method.strip().lower() == "fmm")
     if use_fmm and condition_diagnostics is not None:
         raise ValueError(
@@ -7431,7 +7431,7 @@ def _solve_multi_region_indirect(
                 Brhs[d_tau[0]:d_tau[0]+nm]     += bu[obs_n]
 
     if not use_fmm:
-        # ── Dense assembly path ──────────────────────────────────────────
+        # -- Dense assembly path ------------------------------------------
         Asys = np.zeros((n_dof, n_dof), dtype=np.complex128)
         def sub(mat, obs_n, src_n):
             return mat[np.ix_(obs_n, src_n)]
@@ -7525,7 +7525,7 @@ def _solve_multi_region_indirect(
         rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
         max_res = float(np.max(residual / rhs_norm))
     else:
-        # ── FMM matvec path ──────────────────────────────────────────────
+        # -- FMM matvec path ----------------------------------------------
         def _fmm_apply(fmm_op, src_nodes, obs_nodes, x_block):
             """Embed block density into global, apply FMM, extract obs nodes."""
             x_global = np.zeros(nnodes, dtype=np.complex128)
@@ -7571,7 +7571,7 @@ def _solve_multi_region_indirect(
                     x_blk = x_vec[dm[0]:dm[0]+nm]
                     S_y = _fmm_apply(fmm_S, obs_n, obs_n, x_blk)
                     Kp_y = _fmm_apply(fmm_Kp, obs_n, obs_n, x_blk)
-                    # Default Robin BIE rows: jump*½M + K' + alpha*S.
+                    # Default Robin BIE rows: jump*1/2M + K' + alpha*S.
                     y_block = jump_sign * 0.5 * (M_s @ x_blk) + Kp_y + alpha * S_y
                     # TM PEC override: those rows use S sigma instead.
                     if np.any(tm_pec_mask):
@@ -7640,7 +7640,7 @@ def _solve_multi_region_indirect(
 
         # 6. Build block-diagonal preconditioner from near-field self-interaction.
         # One dense block per interface (its dof ranges are contiguous by
-        # construction of dof_map), factored independently — storing the full
+        # construction of dof_map), factored independently -- storing the full
         # (n_dof x n_dof) matrix here would reintroduce the dense-memory
         # footprint the FMM path exists to avoid.
         precond_blocks: 'List[Tuple[int, np.ndarray]]' = []  # (dof_start, block)
@@ -7679,7 +7679,7 @@ def _solve_multi_region_indirect(
                 fmm_Sm, fmm_Kpm = get_fmm_ops(k_m_val, ifc['mask'])
                 fmm_Sp, fmm_Kpp = get_fmm_ops(k_p_val, ifc['mask'])
                 M_s = M_global[np.ix_(obs_n, obs_n)]
-                # Dense submatrix extracts — see comment above for why .toarray() is required.
+                # Dense submatrix extracts -- see comment above for why .toarray() is required.
                 Sm_sub = fmm_Sm._near_mat[np.ix_(obs_n, obs_n)].toarray()
                 Sp_sub = fmm_Sp._near_mat[np.ix_(obs_n, obs_n)].toarray()
                 Kpm_sub = fmm_Kpm._near_mat[np.ix_(obs_n, obs_n)].toarray()
@@ -7898,7 +7898,7 @@ def solve_monostatic_rcs_2d(
             "solves: every supported geometry routes to an indirect "
             "single-layer formulation (Robin BIE / TE MFIE / sheet / "
             "dielectric / multi-region) whose exterior far field is immune "
-            "to interior cavity resonances — a resonant null density "
+            "to interior cavity resonances -- a resonant null density "
             "radiates nothing outside, so direct solves stay accurate even "
             "where conditioning spikes (monitor linear_residual in the "
             "samples). The Burton-Miller CFIE term exists only in the "
@@ -8103,7 +8103,7 @@ def solve_monostatic_rcs_2d(
 
         nnodes = len(mesh.nodes)
 
-        # Memory estimation — refuse before allocating multi-GB matrices.
+        # Memory estimation -- refuse before allocating multi-GB matrices.
         # The estimate models DENSE operator storage; when the run is routed
         # to an FMM-capable formulation (TE all-Robin MFIE or the multi-region
         # solver) with solver_method="fmm", memory scales O(N) (sparse
@@ -8745,7 +8745,7 @@ def solve_bistatic_rcs_2d(
         # Pre-assemble sheet system operators once (reused across inc angles).
         # Handles both pure-sheet (all TYPE 1) and mixed sheet+PEC geometries.
         # Mixed uses the unified SLP (TM) / DLP (TE) representation with
-        # per-node alpha_i = Z_i/(jkη) on sheet nodes, alpha_i = 0 on PEC nodes.
+        # per-node alpha_i = Z_i/(jketa) on sheet nodes, alpha_i = 0 on PEC nodes.
         sheet_a_sys = None
         sheet_endpoint_nodes = None
         if use_sheet or use_mixed_sheet:
@@ -8772,10 +8772,10 @@ def solve_bistatic_rcs_2d(
                 sheet_a_sys = S_sheet - sigma_factor_sheet[:, None] * M_sheet
             else:
                 N_sheet = _assemble_linear_hypersingular_matrix(mesh, k0)
-                # Sign matches _solve_te_sheet: N - (jk/η)Z_s·M.
+                # Sign matches _solve_te_sheet: N - (jk/eta)Z_s.M.
                 coeff_sheet = (1j * float(k0) / ETA0) * z_nodes_sheet
                 sheet_a_sys = N_sheet - coeff_sheet[:, None] * M_sheet
-                # Meixner pin: μ=0 at OPEN-STRIP endpoints only.  See
+                # Meixner pin: mu=0 at OPEN-STRIP endpoints only.  See
                 # _geometric_sheet_endpoint_nodes for why we count by geometric
                 # key (handles signature-split nodes in stair-stepped tapers).
                 sheet_endpoint_nodes = _geometric_sheet_endpoint_nodes(mesh, coupled_infos)
@@ -9487,7 +9487,7 @@ def compute_boundary_densities(
 
     elif use_robin:
         # Shared Robin-BIE assembly: per-node averaged alpha (tapered IBC),
-        # adjacent-medium wavenumber, per-row TM-PEC EFIE override — the same
+        # adjacent-medium wavenumber, per-row TM-PEC EFIE override -- the same
         # system _solve_robin_bie / the bistatic dispatch solve.  For pure
         # PEC this reduces to the EFIE (TM) / MFIE (TE) exactly.
         a_sys, alpha_nodes, pec_node = _assemble_robin_bie_system(mesh, coupled_infos, pol, k0)
@@ -9503,7 +9503,7 @@ def compute_boundary_densities(
         )
 
     else:
-        # Safety net — the dispatch above is exhaustive (all-Robin,
+        # Safety net -- the dispatch above is exhaustive (all-Robin,
         # single-dielectric, multi-region), so this should be unreachable.
         raise ValueError(
             "compute_boundary_densities: geometry did not match any supported "

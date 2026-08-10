@@ -35,9 +35,9 @@ C0 = 299_792_458.0
 ETA0 = 376.730313668
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Riccati–Bessel machinery (complex-capable)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Riccati-Bessel machinery (complex-capable)
+# -----------------------------------------------------------------------------
 
 def _riccati_psi(nmax: 'int', z: 'complex') -> 'Tuple[np.ndarray, np.ndarray]':
     """psi_n(z) = z j_n(z) and psi_n'(z), n = 0..nmax."""
@@ -96,11 +96,11 @@ def _causal_index(eps_r: 'complex', mu_r: 'complex') -> 'complex':
     return m
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Modal coefficients: exterior expansion U = psi_n(x) + A_n xi_n(x) (TM)
 #                                        U = psi_n(x) + B_n xi_n(x) (TE)
 # per unit modal incident amplitude.  A_n/B_n solved per mode from BCs.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _coeffs_pec(x: 'float', nmax: 'int') -> 'Tuple[np.ndarray, np.ndarray]':
     psi, dpsi = _riccati_psi(nmax, x)
@@ -119,7 +119,7 @@ def _coeffs_impedance(x: 'float', zs: 'complex', nmax: 'int') -> 'Tuple[np.ndarr
     a Z_s = eta0 impedance sphere has identically zero backscatter
     (A_n == B_n for every mode).  The same-sign variant violates it by
     +28 dB above PEC (physically impossible for a passive matched
-    absorber) — the exact analog of the TE sign bug found in the 2D
+    absorber) -- the exact analog of the TE sign bug found in the 2D
     solver.  zs -> 0 reduces both to the PEC conditions.
     """
     psi, dpsi = _riccati_psi(nmax, x)
@@ -180,9 +180,9 @@ def _coeffs_coated_pec(x_out: 'float', x_core_layer: 'complex', x_out_layer: 'co
     return a, b
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Cross sections from modal coefficients
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _backscatter_sigma(k: 'float', a_n: 'np.ndarray', b_n: 'np.ndarray') -> 'float':
     """sigma_back = (lambda^2/4pi) |sum (-1)^n (2n+1)(A_n - B_n)|^2, n>=1."""
@@ -233,9 +233,9 @@ def _bistatic_sigma(k: 'float', a_n: 'np.ndarray', b_n: 'np.ndarray', theta_bis_
     return float(pref * abs(s2) ** 2), float(pref * abs(s1) ** 2)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Public API (sigma in m^2)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def sigma_pec_sphere(radius_m: 'float', freq_hz: 'float') -> 'float':
     k = 2.0 * math.pi * freq_hz / C0
@@ -283,7 +283,7 @@ def _coeffs_multilayer_pec(radii_m, eps_list, mu_list, k0: 'float',
         exterior:  U_0 = psi_n(k0 r) + A xi_n(k0 r)
     matched with the Debye rules (TM: U and (k/eps) U' continuous; TE with
     mu; PEC core: TM U' = 0, TE U = 0) and solved per mode as a small
-    linear system — same solve-from-BCs discipline as every other
+    linear system -- same solve-from-BCs discipline as every other
     coefficient set in this module.
     """
 
@@ -383,7 +383,7 @@ def sigma_bistatic_pec_sphere(radius_m: 'float', freq_hz: 'float', theta_bis_deg
 
 def cross_sections_dielectric_sphere(radius_m: 'float', eps_r: 'complex', mu_r: 'complex',
                                      freq_hz: 'float') -> 'Tuple[float, float]':
-    """(sigma_scattering, sigma_extinction) in m^2 — optical-theorem gates."""
+    """(sigma_scattering, sigma_extinction) in m^2 -- optical-theorem gates."""
     k = 2.0 * math.pi * freq_hz / C0
     x = k * radius_m
     m = _causal_index(eps_r, mu_r)

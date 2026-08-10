@@ -48,7 +48,7 @@ from step1_monostatic import (  # noqa: E402
     validate_config,
 )
 
-# ── USER SETTINGS ──────────────────────────────────────────────────────────
+# -- USER SETTINGS ----------------------------------------------------------
 FREQUENCIES_GHZ = [3.0, 6.0]
 ANGLES_DEG = np.arange(0.0, 180.1, 5.0)
 POLARIZATIONS = ["TM", "TE"]
@@ -85,7 +85,7 @@ SLURM_TIME = None
 SLURM_MEMORY = "0"            # all node memory; use None for cluster default
 SLURM_CPUS = None             # None requests an exclusive node
 SUBMIT = True
-# ───────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 
 def _configuration():

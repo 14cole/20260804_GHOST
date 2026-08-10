@@ -42,9 +42,9 @@ TWOD_DRIVER = BACKEND / "run_hpc_monostatic.py"
 _UNIT_RE = re.compile(r"^(?P<pol>[A-Z]{2})_(?P<freq>[0-9.]+)GHz_(?P<stem>.+)\.grim$")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. configure a copy of a driver
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def configure_driver(driver: 'Path', out_path: 'Path', settings: 'Dict[str, Any]') -> 'Path':
     """Copy ``driver`` to ``out_path`` with each CONFIG constant in ``settings``
@@ -479,9 +479,9 @@ def require_hpc_output_attestations(
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. collect: read the per-unit grims back
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def read_unit_grims(results_dir: 'os.PathLike') -> 'List[Dict[str, Any]]':
     """Parse results/<POL>_<FREQ>GHz_<stem>.grim into

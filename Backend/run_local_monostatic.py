@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Local monostatic RCS sweep — same naming/streaming as run_hpc_monostatic.py,
+Local monostatic RCS sweep -- same naming/streaming as run_hpc_monostatic.py,
 no SLURM. Defaults to (cpu_count - 1) workers and exports one .grim per
 (geometry, frequency, polarization) unit as soon as it finishes.
 
@@ -36,9 +36,9 @@ from workflow_provenance import (
     write_output_attestation,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # CONFIG
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 # Geometry folders. Every *.geo file under these (recursively) is included.
 FRD_DIR = "geometries/FRD"
@@ -52,7 +52,7 @@ POLARIZATIONS   = ["VV", "HH"]          # any subset of: VV, HH, TM, TE
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "rcs_runs"
 
-# Worker pool size. None → max(1, cpu_count() - 1).
+# Worker pool size. None -> max(1, cpu_count() - 1).
 WORKERS = None
 
 # Solver knobs (mirror run_monostatic.py).
@@ -64,7 +64,7 @@ BLAS_THREADS_PER_WORKER = 1
 
 GEOMETRY_EXTS = (".geo",)
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 def _solver_source_fingerprint() -> 'str':
     return backend_source_fingerprint(
@@ -286,7 +286,7 @@ def main() -> 'None':
     print(f"  Frequencies   : {len(FREQUENCIES_GHZ)}  "
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Azimuths      : {len(AZIMUTHS_DEG)}")
-    print(f"  Units total   : {len(units)}  (geom × freq × pol)")
+    print(f"  Units total   : {len(units)}  (geom x freq x pol)")
     print(f"  Workers       : {n_workers} of {cpu} cpus  "
           f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER})")
     print("=" * 70, flush=True)

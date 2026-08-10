@@ -24,7 +24,7 @@ from step1_monostatic import (  # noqa: E402
     validate_config,
 )
 
-# ── USER SETTINGS ──────────────────────────────────────────────────────────
+# -- USER SETTINGS ----------------------------------------------------------
 FREQUENCIES_GHZ = [3.0, 6.0]
 ANGLES_DEG = np.arange(0.0, 180.1, 5.0)
 POLARIZATIONS = ["TM", "TE"]
@@ -33,7 +33,7 @@ WORKERS = None                 # None = all but one CPU core
 SOLVER_METHOD = "auto"
 MAX_PANELS = 50_000
 FORCE = False
-# ───────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 
 def main() -> 'None':

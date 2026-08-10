@@ -75,7 +75,7 @@ def main():
         print("\nFiles the check covers right now:")
         for name in sorted(wp.backend_source_records(str(backend_dir), extra)):
             print(f"  {name}")
-        print("\nCompare that list against the tree you submitted from — a "
+        print("\nCompare that list against the tree you submitted from -- a "
               "file present in one and not the other is the usual cause.")
         return 0 if recorded == current else 1
 
@@ -84,7 +84,7 @@ def main():
     ))
     if not any(diff.values()):
         print("Every recorded file matches. If the worker still fails, the "
-              "runtime fingerprint is the other half of the check — compare "
+              "runtime fingerprint is the other half of the check -- compare "
               "Python, NumPy, SciPy, and BLAS versions against the submit host.")
         return 0
 
@@ -101,7 +101,7 @@ def main():
             print()
     print("Fix either way round: restore the tree the run recorded, or submit "
           "a new run from the code you actually want to execute. Finished "
-          "results in the old run stay valid — they were produced by the "
+          "results in the old run stay valid -- they were produced by the "
           "source that run recorded.")
     return 1
 

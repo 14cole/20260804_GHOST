@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
-# IBCS row shape constants — see TAPERED_IBC.md for the full spec.
+# IBCS row shape constants -- see TAPERED_IBC.md for the full spec.
 IBC_KINDS = ("constant", "linear", "cosine", "exp")
 # Legacy compatibility only: a one-token flag above this threshold resolves
 # to the historical whitespace/GHz ``mat.<flag>`` sidecar.  New file-backed
@@ -318,7 +318,7 @@ def build_geometry_text(
     for seg in segments:
         props = list(seg.properties)
         # Prefer the segment's declared type; fall back to properties[0] only if
-        # seg_type is missing. This keeps load → save idempotent when the Segment:
+        # seg_type is missing. This keeps load -> save idempotent when the Segment:
         # header and properties[0] disagree.
         effective_type = seg.seg_type
         if not effective_type and props and str(props[0]).strip():
@@ -421,7 +421,7 @@ def material_sidecar_paths(geometry_path: 'str') -> 'List[str]':
     return paths
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Orientation / material-side consistency checks (shared by the GUI validator
 # and the solver preflight).
 #
@@ -432,11 +432,11 @@ def material_sidecar_paths(geometry_path: 'str') -> 'List[str]':
 #   TYPE 4 (diel|PEC):   normal points INTO the pos_mat dielectric; PEC behind.
 #   TYPE 5 (diel|diel):  normal points INTO pos_mat; neg_mat behind.
 #
-# The TM formulations are winding-insensitive, but the TE rows carry a ±1/2
+# The TM formulations are winding-insensitive, but the TE rows carry a +/-1/2
 # mass jump tied to the normal direction, so a wrong winding or an
 # inconsistent air side silently corrupts TE results.  These checks make
 # that a loud, named error instead.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 @dataclass
@@ -541,7 +541,7 @@ def check_orientation_consistency(
             if cidx != exclude_idx and _point_in_polygon(rep[0], rep[1], poly)
         )
 
-    # ── 1 & 2: closed-chain winding ──────────────────────────────────────
+    # -- 1 & 2: closed-chain winding --------------------------------------
     for idx, poly in closed_polys:
         ch = chains[idx]
         drawn_ccw = _chain_area2(poly) > 0.0
@@ -578,7 +578,7 @@ def check_orientation_consistency(
                     "Reverse the segment's endpoint order.",
                 ))
 
-    # ── 3: air-side continuity at degree-2 junctions of open T2/T3 chains ─
+    # -- 3: air-side continuity at degree-2 junctions of open T2/T3 chains -
     def _key(p: 'Tuple[float, float]') -> 'Tuple[int, int]':
         return (int(round(p[0] / tol)), int(round(p[1] / tol)))
 
@@ -592,7 +592,7 @@ def check_orientation_consistency(
     adjacency: 'Dict[int, List[Tuple[str, int, str]]]' = {i: [] for i in open_air_chains}
     for key, members in ends.items():
         if len(members) != 2:
-            continue  # free end, or junction of degree > 2 — no pairing implied
+            continue  # free end, or junction of degree > 2 -- no pairing implied
         (ia, ea), (ib, eb) = members
         if ia == ib:
             continue
@@ -610,7 +610,7 @@ def check_orientation_consistency(
                 "Reverse one segment's endpoint order so the chains run head-to-tail.",
             ))
 
-    # ── 4: winding of loops stitched from consistently-oriented open chains ─
+    # -- 4: winding of loops stitched from consistently-oriented open chains -
     visited: 'set' = set()
     for start_idx in open_air_chains:
         if start_idx in visited or len(adjacency[start_idx]) != 2:
@@ -632,7 +632,7 @@ def check_orientation_consistency(
                 break
             if jdx in loop or joint_end != "start":
                 # revisited chain mid-walk, or an inconsistent junction
-                # (already reported by check 3) — skip loop-level check.
+                # (already reported by check 3) -- skip loop-level check.
                 ok = False
                 break
             loop.append(jdx)

@@ -14,13 +14,13 @@ def canonical_polarization(label: 'str | None') -> 'str':
     """
     Normalize polarization label to 'TM' or 'TE'.
 
-    Convention: 2D geometries are ELEVATION cuts — the out-of-plane (z) axis
+    Convention: 2D geometries are ELEVATION cuts -- the out-of-plane (z) axis
     is HORIZONTAL, so E_z (the TM branch) corresponds to horizontal polarization.
 
     Accepted aliases:
-    - TM, HH, H, HORIZONTAL → 'TM'   (E along horizontal z-axis)
-    - TE, VV, V, VERTICAL   → 'TE'   (H along z, E has vertical component)
-    - None or empty → 'TM' (default)
+    - TM, HH, H, HORIZONTAL -> 'TM'   (E along horizontal z-axis)
+    - TE, VV, V, VERTICAL   -> 'TE'   (H along z, E has vertical component)
+    - None or empty -> 'TM' (default)
 
     Raises ValueError for unrecognized labels.
     """

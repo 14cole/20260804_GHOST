@@ -47,7 +47,7 @@ def check(condition, message):
         print(f"  FAIL {message}")
 
 
-# ─── unit-level checks ──────────────────────────────────────────────────────
+# --- unit-level checks ------------------------------------------------------
 
 def test_balance():
     print("\nload balancing")
@@ -234,7 +234,7 @@ def test_fingerprint_cache():
               "a changed file is re-hashed, not served from cache")
 
 
-# ─── end-to-end sweep ───────────────────────────────────────────────────────
+# --- end-to-end sweep -------------------------------------------------------
 
 DRIVER_SETTINGS = {
     "FREQUENCIES_GHZ": [2.0, 3.0, 4.0],

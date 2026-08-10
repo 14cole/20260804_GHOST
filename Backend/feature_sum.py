@@ -7,7 +7,7 @@ Pipeline the user drives:
   1.  Solve a 2D CROSS-SECTION of the joint twice with rcs_solver: the CLEAN
       background and the FEATURED one (same mesh, same units, same pols),
       export each to .grim.
-  2.  ``make_delta_grim(clean, featured, "seam.grim")`` — coherently subtracts
+  2.  ``make_delta_grim(clean, featured, "seam.grim")`` -- coherently subtracts
       the complex amplitudes into a reusable, VEHICLE-INDEPENDENT delta .grim.
   3.  For each place the joint appears on a vehicle, supply its perimeter file
       (segmented ``x1 y1 z1 x2 y2 z2`` in the vehicle frame) and hand a list of
@@ -29,7 +29,7 @@ Conventions the delta MUST honour (all satisfied automatically if the coupon is
 drawn per the guide below):
 
   * The 2D coupon's OUTER FACE is at y = 0 with the seam centred on x = 0, so
-    the delta's phase centre is the seam line on the outer skin — the same
+    the delta's phase centre is the seam line on the outer skin -- the same
     point the perimeter coordinates trace.
   * The coupon's cut angle is the solver's elevation angle, 90 deg = normal
     incidence on the outer face.  (Drawn outer-face-up, this is automatic.)
@@ -147,9 +147,9 @@ def geometry_input_fingerprint(path: 'str', geometry_units: 'str') -> 'str':
     return h.hexdigest()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # .grim I/O (mirrors grim_io.py's NPZ layout)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def convention_scale(grim: 'Dict[str, Any]',
                      frequencies_ghz=None) -> 'np.ndarray':
@@ -594,7 +594,7 @@ def _coeffs_from_tables(tab, frequency_ghz, tol_ghz, label):
 def load_coefficients_from_grim(paths: 'PathOrList', frequency_ghz: 'float',
                                 tol_ghz: 'float' = 1e-6) -> 'SeamCoefficients':
     """Load a FULL-OBJECT coefficient (a wing/fin airfoil 2D solve) from plain
-    2D monostatic .grim export(s) — the wing analog of load_seam_from_grim
+    2D monostatic .grim export(s) -- the wing analog of load_seam_from_grim
     (which is for differential deltas).  Accepts one multi-pol file or a list
     (e.g. one per polarization)."""
     source_paths = [paths] if isinstance(paths, str) else list(paths)
@@ -720,9 +720,9 @@ def tag_as_delta(path: 'str', *, source_2d_grim: 'Optional[str]' = None) -> 'str
     return saved
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Vehicle body from a .geo (WITH MATERIALS) -> combine-ready body + generatrix
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _stitch_chains(chains):
     """Order directed ChainSpec chains head-to-tail into one (rho, z) polyline.
@@ -923,9 +923,9 @@ def solve_vehicle_body(geometry, frequencies_ghz, aspects_deg,
     return bodies, gen
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # The body solve as a .grim (so it opens in the viewer like every other dataset)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _BODY_AZ_MEANING = ("BoR aspect from the +z rotation axis (0 = nose-on, "
                     "90 = broadside, 180 = tail-on) -- NOT radar azimuth")
@@ -1396,9 +1396,9 @@ def load_body_grim(path: 'str') -> 'Dict[float, Dict[str, Any]]':
             for kf, f in enumerate(np.asarray(g["frequencies"], dtype=float))}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Wing-body (dihedral) corner double-bounce ESTIMATE
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def corner_amplitude(fold, n_wing, n_body, face_width: 'float',
                      directions: 'np.ndarray', frequency_ghz: 'float',
@@ -1616,10 +1616,10 @@ def corner_amplitude(fold, n_wing, n_body, face_width: 'float',
     return F
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Point scatterer: a precomputed 3-D delta pattern placed at one coordinate
 # (e.g. a blind cavity solved by an EXTERNAL 3-D MoM as featured - clean)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 
 class PreparedPointPattern(NamedTuple):
@@ -1786,10 +1786,10 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
 
     Unlike the line-expanded features (distributed along a perimeter/span), a
     compact feature such as a blind cavity is a POINT scatterer: its full 3-D
-    differential far field ``ΔS(az, el, f)`` is computed once by an external
+    differential far field ``DeltaS(az, el, f)`` is computed once by an external
     3-D solver (featured - clean, same background) and simply relocated:
 
-        F(d) = [ ΔS(d in cavity frame), rotated into the body pol basis ]
+        F(d) = [ DeltaS(d in cavity frame), rotated into the body pol basis ]
                * exp(+2jk d.r_c) * shadow(d)
 
     ``pattern``          .grim path or dict of the delta (see _load_pattern).
@@ -1899,9 +1899,9 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
     return F
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Placement + multi-feature sum
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _bor_amp_interp(bor_result: 'Dict[str, Any]', key: 'str',
                     theta_deg: 'np.ndarray') -> 'np.ndarray':
@@ -2143,9 +2143,9 @@ def sum_features(bor_result: 'Dict[str, Any]',
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Export a combined vehicle signature to .grim
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def export_signature_grim(out_path: 'str', *,
                           bor_result: 'Optional[Dict[str, Any]]',
@@ -2168,7 +2168,7 @@ def export_signature_grim(out_path: 'str', *,
     VH), mirroring save_bor_az_el_grim.
 
     Axes are BODY-FRAME: ``azimuth`` = roll about the body axis, ``elevation``
-    = aspect from +axis (0 = nose-on).  This is NOT a radar az/el frame — no
+    = aspect from +axis (0 = nose-on).  This is NOT a radar az/el frame -- no
     earth-vertical rotation is applied, so the VV/HH labels are the body's
     meridian pols and avoid the radar-frame V/H swap trap.  Reuse
     bor_dispatch.bor_az_el_grid downstream if a true radar frame is needed.
@@ -2248,9 +2248,9 @@ def export_signature_grim(out_path: 'str', *,
     return written
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Radar-frame export: monostatic RCS over (azimuth, elevation, frequency, pol)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _direction(az_deg: 'float', el_deg: 'float') -> 'np.ndarray':
     a, e = math.radians(az_deg), math.radians(el_deg)

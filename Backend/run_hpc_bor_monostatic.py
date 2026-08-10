@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HPC monostatic BoR RCS sweep driver (SLURM) — the body-of-revolution
+HPC monostatic BoR RCS sweep driver (SLURM) -- the body-of-revolution
 counterpart of run_hpc_monostatic.py.
 
 Edit the CONFIG block below and run:
@@ -10,10 +10,10 @@ Edit the CONFIG block below and run:
 Workflow (mirrors the 2D driver):
 - Discover geometry files under FRD_DIR + OPN_DIR (BoR .geo files: x = rho,
   y = z, generatrices traversed +z -> -z; see bor_dispatch).
-- Expand into a (geometry × frequency × polarization) unit list. All ASPECT
+- Expand into a (geometry x frequency x polarization) unit list. All ASPECT
   angles for a unit are solved in one call (each azimuthal mode is factored
   once; extra aspects are RHS columns).
-- Distribute units round-robin across N_NODES × N_JOBS slots, write sbatch
+- Distribute units round-robin across N_NODES x N_JOBS slots, write sbatch
   job-array scripts, submit. Restartable: units whose .grim exists are
   skipped.
 - Each unit exports "<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim" (sigma_3d,
@@ -28,7 +28,7 @@ BoR-specific notes:
   STREAM_BUDGET_GB if needed.
 - EXPAND_TO_360 mirrors each aspect sweep about the axis (exact for a BoR).
 
-Radar-frame (azimuth, elevation) polarimetric grids — VV/HH/VH — are built
+Radar-frame (azimuth, elevation) polarimetric grids -- VV/HH/VH -- are built
 AUTOMATICALLY during the sweep: as each (geometry, frequency) pair's second
 polarization finishes, that worker writes the pair's az/el grids to
 <run_dir>/azel/ (AZEL_ENABLE / AZEL_* in the config).  A manual backfill
@@ -69,9 +69,9 @@ from workflow_provenance import (
     write_output_attestation,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CONFIG — the only section most users need to edit
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
+# CONFIG -- the only section most users need to edit
+# ===============================================================================
 
 FRD_DIR = "geometries/FRD"
 OPN_DIR = "geometries/OPN"
@@ -91,9 +91,9 @@ OUTPUT_DIR = "rcs_runs_bor"
 N_NODES = 1
 N_JOBS  = 1
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ADVANCED — fine tuning (SLURM resources, solver knobs, az/el product)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
+# ADVANCED -- fine tuning (SLURM resources, solver knobs, az/el product)
+# ===============================================================================
 
 SLURM_PARTITION = "compute"
 SLURM_ACCOUNT   = None
@@ -153,12 +153,12 @@ GEOMETRY_EXTS = (".geo",)
 PYTHON_EXE    = sys.executable
 SUBMIT        = True
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 _SBATCH = shutil.which("sbatch") or "sbatch"
 
 
-# ─── shared helpers ────────────────────────────────────────────────────────
+# --- shared helpers --------------------------------------------------------
 
 def _solver_source_records():
     # type: () -> Tuple[str, Dict[str, str]]
@@ -478,7 +478,7 @@ def _solve_and_export_star(args):
         return ("err", traceback.format_exc(), "", u)
 
 
-# ─── submit mode (user-invoked) ────────────────────────────────────────────
+# --- submit mode (user-invoked) --------------------------------------------
 
 def _build_slurm(script_path, run_dir, job_index):
     # type: (Path, Path, int) -> str
@@ -701,15 +701,15 @@ def submit():
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Aspects       : {len(ASPECTS_DEG)}  (0-180 from the axis"
           f"{', mirrored to 360 on export' if EXPAND_TO_360 else ''})")
-    print(f"  Units total   : {len(units)}  (geom × freq × pol)")
-    print(f"  Slots         : {N_JOBS} job(s) × {N_NODES} node(s)")
+    print(f"  Units total   : {len(units)}  (geom x freq x pol)")
+    print(f"  Slots         : {N_JOBS} job(s) x {N_NODES} node(s)")
     print(f"  Per unit      : {WORKERS_PER_UNIT} threads (modes + streaming "
           f"tiles), assembly={ASSEMBLY}, precision={TABLE_PRECISION}")
     print(f"  Slurm scripts : {len(slurm_paths)} files in {run_dir}")
 
     if not SUBMIT or shutil.which("sbatch") is None:
         why = "SUBMIT=False" if not SUBMIT else "[warn] sbatch not on PATH"
-        print(f"\n  {why} — submit manually with:")
+        print(f"\n  {why} -- submit manually with:")
         for sp in slurm_paths:
             print(f"    sbatch {sp}")
         return
@@ -731,7 +731,7 @@ def submit():
           + (f"  (+ az/el grids in {run_dir}/azel/)" if AZEL_ENABLE else ""))
 
 
-# ─── worker mode (invoked by SLURM) ────────────────────────────────────────
+# --- worker mode (invoked by SLURM) ----------------------------------------
 
 def _unit_claim_key(unit):
     # type: (Dict[str, Any]) -> str
@@ -924,7 +924,7 @@ def _pool_initializer(blas_threads):
     hpc_scheduler.install_fingerprint_cache()
 
 
-# ─── az/el post-processing mode (login node, after the sweep) ──────────────
+# --- az/el post-processing mode (login node, after the sweep) --------------
 
 def _result_from_grim(path, pol):
     # type: (Path, str) -> Dict[str, Any]
@@ -960,7 +960,7 @@ def _result_from_grim(path, pol):
 
 def azel(run_dir_str):
     # type: (str) -> None
-    """Manual backfill: normally unnecessary — the workers build each pair's
+    """Manual backfill: normally unnecessary -- the workers build each pair's
     az/el product automatically as the second polarization finishes.  Use
     this only to (re)build after editing the AZEL_* grid in the manifest, or
     if AZEL_ENABLE was off during the sweep."""
@@ -986,7 +986,7 @@ def azel(run_dir_str):
           f"built or missing a polarization).  Outputs: {run_dir / 'azel'}/")
 
 
-# ─── entry point ───────────────────────────────────────────────────────────
+# --- entry point -----------------------------------------------------------
 
 def main():
     # type: () -> None

@@ -675,7 +675,7 @@ def save_bor_az_el_grim(grid: 'Dict[str, Any]', output_path: 'str',
                         source_path: 'str' = '', history: 'str' = '') -> 'List[str]':
     """
     Write a bor_dispatch.bor_az_el_grid radar-frame polarimetric grid as
-    .grim files — one per channel (VV, HH, VH), each with REAL azimuth and
+    .grim files -- one per channel (VV, HH, VH), each with REAL azimuth and
     elevation axes (unlike the single-cut aspect exports).  sigma_3d in m^2
     (dBsm); complex amplitudes preserved.
     """

@@ -30,7 +30,7 @@ from step2_monostatic import (  # noqa: E402
     validate_radar_grid,
 )
 
-# ── USER SETTINGS ──────────────────────────────────────────────────────────
+# -- USER SETTINGS ----------------------------------------------------------
 FREQUENCIES_GHZ = [3.0, 6.0]
 AZIMUTHS_DEG = np.arange(0.0, 360.1, 10.0)
 ELEVATIONS_DEG = np.arange(-60.0, 60.1, 15.0)
@@ -48,7 +48,7 @@ SLURM_TIME = None
 SLURM_MEMORY = "0"
 SLURM_CPUS = None
 SUBMIT = True
-# ───────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 
 def _configuration():

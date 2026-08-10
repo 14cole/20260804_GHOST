@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Door / feature trade study — compare delta designs at ONE perimeter.
+Door / feature trade study -- compare delta designs at ONE perimeter.
 
 Hold the perimeter (and body) fixed, sweep the feature delta.  For each design
 this computes the ISOLATED feature response (rank the designs) and, if a body is
@@ -120,7 +120,7 @@ def _print_table(rows: 'List[Dict[str, Any]]', has_body: 'bool') -> 'None':
     print("=" * (92 if has_body else 74))
 
 
-# ── self-contained demo (fabricated delta designs; no solver) ─────────────────
+# -- self-contained demo (fabricated delta designs; no solver) -----------------
 
 def _fab_delta(path: 'str', freqs, scale: 'float') -> 'str':
     """Write a synthetic delta .grim (rcs_domain='delta') for the demo."""
@@ -188,7 +188,7 @@ def main() -> 'None':
             fh.write("%.6f %.6f %.6f %.6f %.6f %.6f\n" % (*pts[i], *pts[i + 1]))
 
     print("=" * 74)
-    print("trade_study.py demo — 3 fabricated door deltas at one perimeter")
+    print("trade_study.py demo -- 3 fabricated door deltas at one perimeter")
     print("=" * 74)
     door_trade_study(deltas, door, gen, freqs,
                      aspects_deg=np.arange(0.0, 180.1, 5.0), rolls_deg=[0.0],

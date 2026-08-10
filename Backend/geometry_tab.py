@@ -156,7 +156,7 @@ class GeometryTab(QWidget):
         ibc_btn_row = QHBoxLayout()
         self.btn_ibc_add = QPushButton("+")
         self.btn_ibc_add_csv = QPushButton("+ CSV")
-        self.btn_ibc_remove = QPushButton("−")
+        self.btn_ibc_remove = QPushButton("-")
         ibc_btn_row.addWidget(self.btn_ibc_add)
         ibc_btn_row.addWidget(self.btn_ibc_add_csv)
         ibc_btn_row.addWidget(self.btn_ibc_remove)
@@ -173,7 +173,7 @@ class GeometryTab(QWidget):
         diel_btn_row = QHBoxLayout()
         self.btn_diel_add = QPushButton("+")
         self.btn_diel_add_csv = QPushButton("+ CSV")
-        self.btn_diel_remove = QPushButton("−")
+        self.btn_diel_remove = QPushButton("-")
         diel_btn_row.addWidget(self.btn_diel_add)
         diel_btn_row.addWidget(self.btn_diel_add_csv)
         diel_btn_row.addWidget(self.btn_diel_remove)
@@ -787,7 +787,7 @@ class GeometryTab(QWidget):
             return list(seg.x), list(seg.y)
         return xs, ys
 
-    # ── Material side semantics (drawing convention) ──────────────────────
+    # -- Material side semantics (drawing convention) ----------------------
     # TYPE 1 sheet:  air | air        TYPE 2: air | PEC
     # TYPE 3:        air | diel N     TYPE 4: diel N | PEC
     # TYPE 5:        diel N | diel M
@@ -891,7 +891,7 @@ class GeometryTab(QWidget):
         self._render_normals()
         self.canvas.draw_idle()
 
-    # ── Material region fills ─────────────────────────────────────────────
+    # -- Material region fills ---------------------------------------------
 
     def _clear_fills(self):
         for art in self.fill_artists:
@@ -942,7 +942,7 @@ class GeometryTab(QWidget):
                 open_chains.append(ch)
 
         # Stitch open chains at shared endpoints (degree-2 nodes only),
-        # allowing either joining orientation — direction is tracked per member.
+        # allowing either joining orientation -- direction is tracked per member.
         ends: 'Dict[Tuple[int, int], List[Tuple[int, str]]]' = {}
         for i, ch in enumerate(open_chains):
             ends.setdefault(key(ch["pts"][0]), []).append((i, "start"))
@@ -1071,7 +1071,7 @@ class GeometryTab(QWidget):
         self._render_fills()
         self.canvas.draw_idle()
 
-    # ── IBCS resolution + visualization ───────────────────────────────────
+    # -- IBCS resolution + visualization -----------------------------------
 
     def _ibcs_lookup(self) -> 'Dict[int, Dict[str, Any]]':
         """Build a {flag: info} map from the live IBCS table.
@@ -1121,7 +1121,7 @@ class GeometryTab(QWidget):
     def _format_z(self, z: 'Optional[complex]') -> 'str':
         if z is None:
             return "?"
-        return f"{z.real:g}{'+' if z.imag >= 0 else '-'}{abs(z.imag):g}j Ω"
+        return f"{z.real:g}{'+' if z.imag >= 0 else '-'}{abs(z.imag):g}j ohm"
 
     def _resolve_segment_bc(self, seg: 'Segment', lookup: 'Optional[Dict[int, Dict[str, Any]]]' = None) -> 'str':
         """Human-readable resolved boundary condition for a segment."""
@@ -1133,12 +1133,12 @@ class GeometryTab(QWidget):
 
         # Materialize the base-type description first, then append any IBC.
         if seg_type == 1:
-            base = "TYPE 1 · free-floating sheet"
+            base = "TYPE 1 . free-floating sheet"
         elif seg_type == 2:
-            base = "TYPE 2 · PEC" if ibc == 0 else f"TYPE 2 · IBC-coated PEC"
+            base = "TYPE 2 . PEC" if ibc == 0 else f"TYPE 2 . IBC-coated PEC"
         elif seg_type in (3, 4, 5):
             dstr = f"pos_mat={pos_mat}" + (f", neg_mat={neg_mat}" if seg_type == 5 else "")
-            base = f"TYPE {seg_type} · dielectric interface ({dstr})"
+            base = f"TYPE {seg_type} . dielectric interface ({dstr})"
         else:
             base = f"TYPE {seg_type}"
 
@@ -1147,30 +1147,30 @@ class GeometryTab(QWidget):
         lut = lookup if lookup is not None else self._ibcs_lookup()
         info = lut.get(ibc)
         if info is None:
-            return f"{base}  ·  IBC {ibc} (NOT DEFINED)"
+            return f"{base}  |  IBC {ibc} (NOT DEFINED)"
         kind = info["kind"]
         if kind == "tabulated":
             return (
-                f"{base}  ·  IBC {ibc} → tabulated "
+                f"{base}  |  IBC {ibc} -> tabulated "
                 f"({info.get('filename', '?')})"
             )
         if kind == "undefined":
-            return f"{base}  ·  IBC {ibc} (malformed row)"
+            return f"{base}  |  IBC {ibc} (malformed row)"
         z1, z2 = info["z_start"], info["z_end"]
         if z1 == z2:
-            return f"{base}  ·  IBC {ibc} → constant {self._format_z(z1)}"
+            return f"{base}  |  IBC {ibc} -> constant {self._format_z(z1)}"
         return (
-            f"{base}  ·  IBC {ibc} → taper({kind})  "
-            f"start {self._format_z(z1)}  →  end {self._format_z(z2)}"
+            f"{base}  |  IBC {ibc} -> taper({kind})  "
+            f"start {self._format_z(z1)}  ->  end {self._format_z(z2)}"
         )
 
     def _z_to_color(self, z: 'Optional[complex]', z_ref_mag: 'float') -> 'Tuple[float, float, float]':
         """Map an impedance value to an RGB colour.
 
-        * |Z| near zero  → near-black (PEC-like)
-        * |Z| near 377 Ω → mid-blue (free-space-like)
-        * |Z| large      → light blue / washed out
-        Reactance tints warm (|X| large → toward magenta).
+        * |Z| near zero  -> near-black (PEC-like)
+        * |Z| near 377 ohm -> mid-blue (free-space-like)
+        * |Z| large      -> light blue / washed out
+        Reactance tints warm (|X| large -> toward magenta).
         """
         if z is None:
             return (0.55, 0.55, 0.55)  # neutral grey for unknown/tabulated
@@ -1226,12 +1226,12 @@ class GeometryTab(QWidget):
                     c_start = self._z_to_color(info["z_start"], 377.0)
                     c_end = self._z_to_color(info["z_end"], 377.0)
             elif seg_type in (1, 2, 3, 4, 5) and ibc == 0:
-                # PEC — near-black
+                # PEC -- near-black
                 c_start = c_end = (0.05, 0.05, 0.08)
             else:
                 c_start = c_end = (0.55, 0.55, 0.55)
 
-            # Arc-length parameter along the whole segment (s ∈ [0, 1]).
+            # Arc-length parameter along the whole segment (s  in  [0, 1]).
             seg_lens = []
             for x1, y1, x2, y2 in primitives:
                 seg_lens.append(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
@@ -1261,7 +1261,7 @@ class GeometryTab(QWidget):
                     )
                     self.impedance_artists.extend(line)
 
-            # Start / end markers (green → red) for drawn direction.
+            # Start / end markers (green -> red) for drawn direction.
             sx, sy, _, _ = primitives[0]
             _, _, ex, ey = primitives[-1]
             m_start = ax.scatter([sx], [sy], s=marker_size, marker="o",
@@ -1281,7 +1281,7 @@ class GeometryTab(QWidget):
             self.lbl_status.setText("")
             return
         seg = self.segments[row]
-        self.lbl_status.setText(f"{seg.name}  ·  {self._resolve_segment_bc(seg)}")
+        self.lbl_status.setText(f"{seg.name}  |  {self._resolve_segment_bc(seg)}")
 
     def _parse_int_token(self, token: 'str', default: 'int' = 0) -> 'int':
         text = (token or "").strip().lower()
@@ -1483,12 +1483,12 @@ class GeometryTab(QWidget):
                 orient = "CCW" if area2 > 0 else "CW"
                 findings.append(("INFO", row, f"{label}: closed chain, orientation {orient}."))
                 # Winding correctness (nesting-aware) is checked globally by
-                # check_orientation_consistency below — no blanket CCW warning
+                # check_orientation_consistency below -- no blanket CCW warning
                 # here (a nested void is legitimately CCW, TYPE 5 winding is a
                 # labeling choice, etc.).
             else:
                 # An open chain is fine when both free ends land on another
-                # segment's endpoint (the boundary continues there) — only a
+                # segment's endpoint (the boundary continues there) -- only a
                 # genuinely dangling end is worth a warning for body types.
                 other_end_keys: 'Set[Tuple[int, int]]' = set()
                 for other_row, other_seg in enumerate(self.segments):

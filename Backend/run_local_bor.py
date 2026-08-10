@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Local BoR monostatic RCS aspect sweep — same naming/streaming pattern as
+Local BoR monostatic RCS aspect sweep -- same naming/streaming pattern as
 run_local_monostatic.py, but each unit is a true 3-D (dBsm) BoR solve over
 the ASPECT angles (degrees from the +z rotation axis: 0 = nose-on,
 90 = broadside, 180 = tail-on).
@@ -40,9 +40,9 @@ from workflow_provenance import (
     write_output_attestation,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 # CONFIG
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 GEOMETRY_DIRS = ["geometries/BOR"]      # every *.geo under these, recursively
 
@@ -61,7 +61,7 @@ GEOMETRY_UNITS = "inches"               # "inches" or "meters"
 CFIE_ALPHA     = 0.5
 BLAS_THREADS_PER_WORKER = 1
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 def _solver_source_fingerprint() -> 'str':
     return backend_source_fingerprint(
@@ -274,8 +274,8 @@ def main() -> 'None':
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Aspects       : {len(ASPECTS_DEG)}  "
           f"({min(ASPECTS_DEG):g}-{max(ASPECTS_DEG):g} deg from +z axis)")
-    print(f"  Units total   : {len(units)}  (geom × freq × pol)")
-    print(f"  Workers       : {n_workers} procs × {SOLVER_WORKERS} mode threads "
+    print(f"  Units total   : {len(units)}  (geom x freq x pol)")
+    print(f"  Workers       : {n_workers} procs x {SOLVER_WORKERS} mode threads "
           f"of {cpu} cpus")
     print("=" * 70, flush=True)
 

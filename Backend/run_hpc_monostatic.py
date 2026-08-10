@@ -75,13 +75,13 @@ from workflow_provenance import (
     write_output_attestation,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CONFIG — the only section most users need to edit
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
+# CONFIG -- the only section most users need to edit
+# ===============================================================================
 
 # Input geometry folders. Every *.geo file found under these paths
 # (recursively) is added to the sweep. Source folder is NOT injected into
-# output filenames — the geometry filename is preserved verbatim.
+# output filenames -- the geometry filename is preserved verbatim.
 FRD_DIR = "geometries/FRD"
 OPN_DIR = "geometries/OPN"
 
@@ -109,9 +109,9 @@ N_JOBS  = 1
 # Cap on array tasks running at once (SLURM's `--array=...%N`). None = no cap.
 ARRAY_THROTTLE = None
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ADVANCED — fine tuning (SLURM resources, solver knobs, env setup)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
+# ADVANCED -- fine tuning (SLURM resources, solver knobs, env setup)
+# ===============================================================================
 
 # --- SLURM resources (per array task = one node) ---------------------------
 SLURM_PARTITION = "compute"
@@ -190,9 +190,9 @@ CLAIM_STALE_SECONDS = 3600
 # --- Geometry discovery & submission ---------------------------------------
 GEOMETRY_EXTS = (".geo",)
 PYTHON_EXE    = sys.executable           # interpreter used inside the job
-SUBMIT        = True                     # False → write .slurm files but don't sbatch
+SUBMIT        = True                     # False -> write .slurm files but don't sbatch
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ===============================================================================
 
 _SBATCH = shutil.which("sbatch") or "sbatch"
 MANIFEST_SCHEMA = "ghost.hpc.2d-run.v1"
@@ -203,7 +203,7 @@ SCHEDULE_SCHEMA = "ghost.hpc.2d-schedule.v1"
 _SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
 
 
-# ─── shared helpers ────────────────────────────────────────────────────────
+# --- shared helpers --------------------------------------------------------
 
 def _solver_source_records():
     # type: () -> Tuple[str, Dict[str, str]]
@@ -433,7 +433,7 @@ def _solve_and_export_star(args):
         return ("err", traceback.format_exc(), "")
 
 
-# ─── submit mode (user-invoked) ────────────────────────────────────────────
+# --- submit mode (user-invoked) --------------------------------------------
 
 def _plan_schedule(units, n_slots, fine_factor):
     # type: (List[Dict[str, Any]], int, float) -> Dict[str, Any]
@@ -697,14 +697,14 @@ def submit():
         print(f"                  {idle} of {n_slots} slot(s) have no planned "
               "work -- fewer units than nodes, so those tasks exit at once")
     if not MESH_CERTIFICATION:
-        print("  Certification : OFF (survey mode) — base mesh only, ~3x faster")
+        print("  Certification : OFF (survey mode) -- base mesh only, ~3x faster")
         print("                  Results carry NO mesh-convergence certificate and")
         print("                  are rejected by the body/delta pipeline. Screening")
         print("                  only; re-run with MESH_CERTIFICATION = True to publish.")
     print(f"  Slurm scripts : {len(slurm_paths)} files in {run_dir}")
 
     if not SUBMIT:
-        print("\n  SUBMIT=False — submit manually with:")
+        print("\n  SUBMIT=False -- submit manually with:")
         for sp in slurm_paths:
             print(f"    sbatch {sp}")
         return
@@ -731,7 +731,7 @@ def submit():
     print(f"Outputs in:    {run_dir}/results/")
 
 
-# ─── worker mode (invoked by SLURM) ────────────────────────────────────────
+# --- worker mode (invoked by SLURM) ----------------------------------------
 
 def _read_schedule(run_dir):
     # type: (Path) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, int]]
@@ -966,7 +966,7 @@ def worker(run_dir_str, submission_index, task_index):
         raise SystemExit(1)
 
 
-# ─── entry point ───────────────────────────────────────────────────────────
+# --- entry point -----------------------------------------------------------
 
 def main():
     # type: () -> None

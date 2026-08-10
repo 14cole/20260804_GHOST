@@ -288,7 +288,7 @@ class _SolveWorker(QObject):
 
     def _run_bor(self):
         """BoR (axisymmetric) route: elevations are ASPECT angles from the +z
-        rotation axis.  CFIE alpha 0 (the 2D default) is promoted to 0.5 —
+        rotation axis.  CFIE alpha 0 (the 2D default) is promoted to 0.5 --
         closed PEC BoR bodies need CFIE against interior resonances."""
 
         if self.scattering_mode == "bistatic":
@@ -430,7 +430,7 @@ class SolverTab(QWidget):
         self.cmb_units.setCurrentText("inches")
 
         self.cmb_pol = QComboBox()
-        # Elevation-cut convention: HH ↔ TM (E along horizontal z), VV ↔ TE.
+        # Elevation-cut convention: HH <-> TM (E along horizontal z), VV <-> TE.
         self.cmb_pol.addItem("HH", userData="HH")
         self.cmb_pol.addItem("VV", userData="VV")
 
@@ -1121,7 +1121,7 @@ class SolverTab(QWidget):
                 [
                     "Frequency (GHz)",
                     "Aspect (deg)",
-                    "RCS (m²)",
+                    "RCS (m^2)",
                     "RCS (dBsm)",
                 ]
             )
@@ -1189,7 +1189,7 @@ class SolverTab(QWidget):
             ]
             label = f"{freq:g} GHz"
             if incidence is not None:
-                label += f", incidence {incidence:g}°"
+                label += f", incidence {incidence:g}deg"
             ax.plot(x, y, linewidth=1.8, label=label)
 
         if kind == "bor":

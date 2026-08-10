@@ -7,7 +7,7 @@ rotation axis, drawn vertically).  A closed body of revolution is an OPEN
 generatrix polyline whose two endpoints lie ON the axis, traversed from the
 +z end (nose) to the -z end (tail) so the left-of-travel normal faces the
 exterior (BOR_CONVENTIONS.md).  Wrong traversal or non-axis endpoints are
-hard preflight errors, never silently corrected — same philosophy as the 2D
+hard preflight errors, never silently corrected -- same philosophy as the 2D
 solver's orientation checks.
 
 Supported material configurations (segment TYPE semantics shared with the
@@ -24,8 +24,8 @@ Supported material configurations (segment TYPE semantics shared with the
   * supported TYPE 2/3/4/5 band layouts
                                 -> side-by-side coating bands
 
-Anything else—including TYPE 1 sheets and arbitrary mixed PEC/dielectric
-graphs—raises with a named error. TYPE 5 is accepted only in the explicitly
+Anything else--including TYPE 1 sheets and arbitrary mixed PEC/dielectric
+graphs--raises with a named error. TYPE 5 is accepted only in the explicitly
 classified layouts above, not as a general interface graph.
 
 Entry points mirror rcs_solver.solve_monostatic_rcs_2d so the GUI, the
@@ -270,7 +270,7 @@ def _mesh_generatrix(ordered: 'List[_SegChain]', lam_target: 'float',
                      max_elements: 'int', axis_tol: 'float'):
     """Subdivide the ordered chains into elements.  Returns (points [Nn,2],
     elem_seg [Ne] chain index, elem_arc_s [Ne] normalized arc position of the
-    element midpoint along its own segment — the taper coordinate)."""
+    element midpoint along its own segment -- the taper coordinate)."""
 
     points: 'List[Tuple[float, float]]' = []
     elem_seg: 'List[int]' = []
@@ -416,7 +416,7 @@ def solve_monostatic_rcs_bor(
     `polarization` selects which one the samples report.
 
     expand_to_360=True mirrors the samples about the axis to fill the full
-    polar cut: sigma(360 - theta) = sigma(theta) — EXACT for a body of
+    polar cut: sigma(360 - theta) = sigma(theta) -- EXACT for a body of
     revolution (rotating the problem 180 deg about z maps the body, the
     directions, and the polarization basis onto themselves), including the
     complex amplitudes.  The seam directions 0/360 and 180 are not
@@ -608,7 +608,7 @@ def solve_monostatic_rcs_bor(
     elif kind == "banded":
         # Side-by-side coating bands: one region per TYPE 4 covered run,
         # discovered by endpoint connectivity (safe under repeated material
-        # flags on non-adjacent bands — their boundaries never touch).
+        # flags on non-adjacent bands -- their boundaries never touch).
         def runs_of(pred, what):
             subset = [c for c in chains if pred(c)]
             return _stitch_pieces(subset, what, tol) if subset else []
@@ -832,7 +832,7 @@ def solve_monostatic_rcs_bor(
                 return lam0
 
             # mesh every piece; build the surface list (interfaces first,
-            # then conductors — order is arbitrary but stable)
+            # then conductors -- order is arbitrary but stable)
             surfaces = []
             piece_ends = []
             piece_tag = []          # ("out", flag) | ("wall", (po, ne)) | ("cov", flag) | ("bare", None)
@@ -894,7 +894,7 @@ def solve_monostatic_rcs_bor(
                 if len(bounds) < 2:
                     raise ValueError(
                         f"Band (mat {flag}) covered piece has no attached "
-                        "TYPE 3/5 boundary — check junction coordinates "
+                        "TYPE 3/5 boundary -- check junction coordinates "
                         "coincide exactly.")
                 eps_b, mu_b = materials.get_medium(flag, freq_ghz)
                 regions.append({"medium": (eps_b, mu_b), "bounds": bounds})
@@ -1367,7 +1367,7 @@ def bor_az_el_grid(res_vv: 'Dict[str, Any]', res_hh: 'Dict[str, Any]',
     COMPLEX amplitudes: for each (az, el) it maps to theta, interpolates
     F_VV(theta), F_HH(theta) linearly in the complex amplitude, and rotates
     the diagonal scattering matrix from the meridian basis into the radar's
-    earth-vertical V/H basis — producing radar-frame VV, HH, and the
+    earth-vertical V/H basis -- producing radar-frame VV, HH, and the
     cross-pol VH that appears off the waterline:
 
         S_radar = M^T diag(F_VV, F_HH) M,   M[i,j] = (target basis_i . radar basis_j)
@@ -1378,7 +1378,7 @@ def bor_az_el_grid(res_vv: 'Dict[str, Any]', res_hh: 'Dict[str, Any]',
     cheap relative to a new geometry).  The aspect grid must be dense enough
     that linear interpolation of the complex amplitudes resolves the pattern
     lobes.  axis_az/el_deg orient the rotation axis in the earth frame
-    (default: horizontal, pointing along azimuth 0).  MONOSTATIC only —
+    (default: horizontal, pointing along azimuth 0).  MONOSTATIC only --
     bistatic out-of-plane cuts are outside the BoR principal-plane result.
 
     Returns a dict with axes, per-channel complex amplitude and sigma arrays

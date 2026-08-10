@@ -14,15 +14,15 @@ reduced-order vehicle signature.
 
 Two quantities, in this order:
 
-1.  **Seam coefficient** ``dA(phi_cut, pol)`` — the DIFFERENTIAL 2D far-field
+1.  **Seam coefficient** ``dA(phi_cut, pol)`` -- the DIFFERENTIAL 2D far-field
     amplitude of the joint: the featured cross-section minus the identical
     smooth one.  Differencing is what keeps the smooth skin from being counted
     twice (it is already in the BoR body) and cancels the coupon's own edge
     diffraction to first order.  The cut must be drawn with the feature
     centred on the 2D origin (0, 0) so the coefficient carries no placement
-    phase of its own — the placement phase comes from the perimeter.
+    phase of its own -- the placement phase comes from the perimeter.
 
-2.  **Perimeter expansion** — with the coefficient in hand,
+2.  **Perimeter expansion** -- with the coefficient in hand,
 
         F(d) = (1 / 4pi) * Int_perimeter
                [w_TM e^{j psi_TM} dA_TM + w_TE e^{j psi_TE} dA_TE]
@@ -38,7 +38,7 @@ Two quantities, in this order:
 cannot derive between the 2D solver's bare-integral amplitudes and the BoR
 far-field convention. They are measured jointly by
 ``tests/validate_line_expansion.py`` (ring gate) and applied before the
-polarization contributions are added. Magnitudes are absolute—the
+polarization contributions are added. Magnitudes are absolute--the
 |A|^2/(4k) and 4pi|F|^2
 normalisations are both pinned, and the resulting broadside limit reproduces
 the 2L^2/lambda strip relation already gated in validate_bor_phase1.py.
@@ -65,7 +65,7 @@ C0 = 299792458.0
 # and TE coefficients BEFORE their projections are added. A finite perimeter
 # mixes both local coefficients into an HH/VV channel away from broadside, so a
 # phase measured from an already-summed output channel cannot simply be applied
-# back to one coefficient. Magnitudes are absolute—there is no fitted
+# back to one coefficient. Magnitudes are absolute--there is no fitted
 # amplitude scale. Re-measure if either solver's far-field convention changes.
 PSI_VV_DEG = -9.2       # theta-pol-dominant channel (2D TE coefficient)
 PSI_HH_DEG = 166.9      # phi-pol-dominant channel   (2D TM coefficient)
@@ -80,9 +80,9 @@ PSI_HH_DEG = 166.9      # phi-pol-dominant channel   (2D TM coefficient)
 VALIDITY_HALF_ANGLE_DEG = 20.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 1. Seam coefficients from a paired 2D cross-section solve
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 @dataclass
 class SeamCoefficients:
@@ -168,7 +168,7 @@ def coefficients_from_2d(snapshot: 'Dict',
 
     Unlike ``seam_coefficients_from_2d`` (which differences a featured and a
     smooth coupon for a perturbation), this returns the raw 2D far-field
-    amplitude of a stand-alone object — the airfoil/strip cross-section of a
+    amplitude of a stand-alone object -- the airfoil/strip cross-section of a
     wing or fin, line-expanded along its span.  The ``2L^2/lambda`` strip
     factor is produced automatically by expand_perimeter's 1/(4pi) prefactor:
     with sigma_2d = |A|^2/(4k),  sigma_3d = 4pi|F|^2 = (2 L^2 / lambda) sigma_2d
@@ -233,9 +233,9 @@ def seam_coefficients_from_2d(featured_snapshot: 'Dict',
                             dA["TM"], dA["TE"], label=label)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 2. Perimeters and surface normals
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def read_perimeter_txt(path: 'str', scale: 'float' = 1.0) -> 'np.ndarray':
     """Read a segmented perimeter file: one segment per line,
@@ -364,9 +364,9 @@ def perimeter_surface_deviation(segments: 'np.ndarray',
     return float(np.sqrt(np.min(np.sum((q[:, None, :] - foot) ** 2, axis=-1), axis=1)).max())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 3. The expansion
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _pol_unit_vectors(d: 'np.ndarray') -> 'Tuple[np.ndarray, np.ndarray]':
     """Incident E unit vectors for VV (theta-pol) and HH (phi-pol).
@@ -544,7 +544,7 @@ def expand_perimeter(segments: 'np.ndarray',
     t_hat = t_hat - (np.sum(t_hat * n_hat, axis=1)[:, None] * n_hat)
     tn = np.linalg.norm(t_hat, axis=1)
     if np.any(tn < 1e-9):
-        raise ValueError("a perimeter segment is normal to the skin — check that "
+        raise ValueError("a perimeter segment is normal to the skin -- check that "
                          "the perimeter and the generatrix share a frame.")
     t_hat /= tn[:, None]
     b_hat = np.cross(t_hat, n_hat)
@@ -607,9 +607,9 @@ def expand_perimeter(segments: 'np.ndarray',
     return F
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # 4. Vehicle signature
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def combine(body_amp: 'Dict[str, np.ndarray]',
             feature_amps: 'Sequence[Dict[str, np.ndarray]]',
@@ -617,12 +617,12 @@ def combine(body_amp: 'Dict[str, np.ndarray]',
     """Body + features -> sigma_3d per channel.
 
     mode:
-      ``"coherent"`` — everything summed in amplitude.  The truthful product
+      ``"coherent"`` -- everything summed in amplitude.  The truthful product
         when the relative phase is trustworthy; lobe positions carry
         millimetre sensitivity (2k*delta) and depend on the calibrated psi.
-      ``"envelope"`` — powers added.  The angular average of the coherent
+      ``"envelope"`` -- powers added.  The angular average of the coherent
         product; immune to phase error, blind to interference.
-      ``"hybrid"`` — features summed coherently WITH EACH OTHER,
+      ``"hybrid"`` -- features summed coherently WITH EACH OTHER,
         then power-added to the body.  The feature-feature phase depends only
         on their separation and is psi-independent only for components sharing
         the same calibrated convention. Common phase origin, time sign,

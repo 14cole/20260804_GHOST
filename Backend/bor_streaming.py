@@ -1,8 +1,8 @@
 """
 Phase-7b streaming far assembly for the BoR solver.
 
-The table path stores modal kernels at GAUSS-POINT pairs — [P, P, modes]
-with P = gauss_order * N_t — which is the memory bound at scale.  This
+The table path stores modal kernels at GAUSS-POINT pairs -- [P, P, modes]
+with P = gauss_order * N_t -- which is the memory bound at scale.  This
 module keeps the FFT-over-azimuth amortization (one xi sweep yields every
 mode) but contracts BOTH Galerkin sides immediately, tile by tile, so the
 persistent storage is per-mode NODAL blocks:
@@ -11,7 +11,7 @@ persistent storage is per-mode NODAL blocks:
     MFIE   4 * (2 m_max + 1) * Nn^2 (brackets have mixed parity)
     IBC    4 * (2 m_max + 1) * Nn^2 (source Z_s baked into the contraction)
 
-— a 16x reduction versus the tables (32x with single-precision blocks).
+-- a 16x reduction versus the tables (32x with single-precision blocks).
 
 For each tile of test elements the azimuthal integrand is sampled on the
 same uniform xi grid the table path uses ([rows, P, n_xi]), FFT'd, near
@@ -24,7 +24,7 @@ functions:
 with L/R the per-point nodal weights (shape value x rho w x tangent
 component, or the (rho T)' divergence weights).  Because tiles use the same
 xi grid, the same FFT, and the same Galerkin points as the table path, the
-streamed blocks match the table-path contraction to float roundoff — the
+streamed blocks match the table-path contraction to float roundoff -- the
 equivalence gate in tests/validate_bor_streaming.py checks exactly that.
 
 The near/self machinery (graded cells, adaptive kernels) is untouched: the
@@ -45,7 +45,7 @@ import numpy as np
 from bor_kernels import _mfie_brackets, _ibc_brackets_grid
 
 
-# ── phase-7c native sampling kernel (ctypes; NumPy fallback if absent) ──
+# -- phase-7c native sampling kernel (ctypes; NumPy fallback if absent) --
 
 def _load_native():
     sysname = platform.system().lower()
@@ -91,7 +91,7 @@ def _notice_numpy_fallback():
     others = [f for f in sorted(os.listdir(here))
               if f.startswith("bor_stream_kernel.") and f.endswith(".so")
               and tag not in f]
-    hint = (f" (found {', '.join(others)} — built for a DIFFERENT platform, "
+    hint = (f" (found {', '.join(others)} -- built for a DIFFERENT platform, "
             "so it was correctly skipped)" if others else "")
     print(
         "bor_streaming: native sampling kernel not available for this "
@@ -142,7 +142,7 @@ class StreamingFarBlocks:
         k = solver.k
         Nn, go, mm = self.Nn, self.go, self.m_max
 
-        # ── per-point nodal weight vectors [2, P] ──
+        # -- per-point nodal weight vectors [2, P] --
         wrho = g.w * g.rho
         self._lv = {
             "r": np.stack([g.T0 * wrho * g.trho, g.T1 * wrho * g.trho]),
@@ -155,7 +155,7 @@ class StreamingFarBlocks:
         if ibc_zs_pt is not None:
             rv_ibc = np.stack([g.T0 * wrho * ibc_zs_pt, g.T1 * wrho * ibc_zs_pt])
 
-        # ── configuration (block storage is allocated per MODE RANGE) ──
+        # -- configuration (block storage is allocated per MODE RANGE) --
         # EFIE: 9 order-primitives (the Gc/Gs neighbor relations and the
         # mode-dependent scalars commute with contraction, so per-mode blocks
         # are combined on retrieval): rr, zz, r1, 1r, 11, dd, ds, sd, ss.
@@ -195,7 +195,7 @@ class StreamingFarBlocks:
         # The one-element tile floor above can still blow the budget by a
         # large factor once the far-gap criterion pushes n_xi into the
         # thousands (fine meshes): a single [go, P, n_xi] grid may be tens
-        # of GB.  The samplers therefore ALSO chunk over source columns —
+        # of GB.  The samplers therefore ALSO chunk over source columns --
         # FFT + mode binning happen per chunk (row/column independent, so
         # bit-identical), and only the small kept [rows, P, modes] slices
         # persist.  cols == P when the row tiling alone meets the budget.
@@ -203,7 +203,7 @@ class StreamingFarBlocks:
                                        (self._te * go * nx_worst *
                                         176.0 * workers))))
 
-        # native (ctypes) sampling kernel: real-k only (the air region —
+        # native (ctypes) sampling kernel: real-k only (the air region --
         # exactly what the solve_bor streaming path serves)
         self._native = (_NATIVE if (_NATIVE is not None and
                                     abs(complex(k).imag) == 0.0) else None)
@@ -219,7 +219,7 @@ class StreamingFarBlocks:
         self._sidx: 'Dict[int, int]' = {}
         self._ensure(0)
 
-    # ── mode-range machinery ──
+    # -- mode-range machinery --
     def _ensure(self, am: 'int') -> 'None':
         if self.lo <= am <= self.hi:
             return
@@ -329,7 +329,7 @@ class StreamingFarBlocks:
             k, np.broadcast_to(xi, (nr * P, nx_b)))
         return tuple(F.reshape(nr, P, nx_b) for F in Fs)
 
-    # ── sampling / masking ──
+    # -- sampling / masking --
     def _sample_G(self, rows, k, n_xi, phase, ord_lo, hi):
         g = self.solver.g
         xi = 2.0 * np.pi * np.arange(n_xi) / n_xi - np.pi
@@ -362,7 +362,7 @@ class StreamingFarBlocks:
             c1 = min(ne, e + span + 1) * go
             Kt[(e - e0) * go:(e - e0 + 1) * go, c0:c1] = 0.0
 
-    # ── contraction: ALL modes/orders in one einsum per weight pair ──
+    # -- contraction: ALL modes/orders in one einsum per weight pair --
     def _contract_all(self, Kn, lv_rows, rv, e0, re, out):
         """out[n_modes, Nn, Nn] += nodal contraction of Kn [rows, P, n_modes]
         with per-point left weights lv_rows [2, rows], right weights rv [2, P]."""
@@ -398,7 +398,7 @@ class StreamingFarBlocks:
             self._zero_near(Km_all, e0, e0 + re)
             self._contract_all(Km_all, lv_rows, rv, e0, re, store[uv])
 
-    # ── per-mode block retrieval (complex128 copies; near loops add onto them) ──
+    # -- per-mode block retrieval (complex128 copies; near loops add onto them) --
     def efie_blocks(self, m: 'int'):
         # primitive order: 0 rr, 1 zz, 2 r1, 3 1r, 4 11, 5 dd, 6 ds, 7 sd, 8 ss
         am = abs(m)

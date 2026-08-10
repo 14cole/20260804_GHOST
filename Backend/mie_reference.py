@@ -9,13 +9,13 @@ Results are returned as sigma_2D (meters), the 2D scattering width per unit
 length, which is what the solver returns as "rcs_linear".
 
 Conventions:
-- 2D geometries are treated as ELEVATION cuts — the cylinder axis (z) is
+- 2D geometries are treated as ELEVATION cuts -- the cylinder axis (z) is
   HORIZONTAL (out-of-plane = cross-range), so the radar aliases flip
   relative to the textbook "z is vertical" convention.
 - TM = E_z polarization (electric field along cylinder axis) = Dirichlet-like
-  on PEC.  E is horizontal → matches the solver's "TM" / "HH" label.
+  on PEC.  E is horizontal -> matches the solver's "TM" / "HH" label.
 - TE = H_z polarization (magnetic field along cylinder axis) = Neumann-like
-  on PEC.  E is in-plane with vertical component → matches "TE" / "VV".
+  on PEC.  E is in-plane with vertical component -> matches "TE" / "VV".
 
 References:
 - Balanis, "Advanced Engineering Electromagnetics," 2nd ed., Ch. 11.

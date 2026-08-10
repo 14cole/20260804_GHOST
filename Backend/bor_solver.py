@@ -51,10 +51,10 @@ BOR_LINEAR_RESIDUAL_MAX = 1.0e-8
 BOR_CONDITION_EST_MAX = 1.0e12
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Refined near-pair Galerkin integration (log singularity along diagonal /
 # shared corner) via quadtree grading toward the singular set.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _graded_cells(kind: 'str', depth: 'int' = 4) -> 'List[Tuple[float, float, float, float]]':
     """Cells (s0, s1, sp0, sp1) covering [0,1]^2 refined toward the singular
@@ -131,9 +131,9 @@ def _regular_cell_points(gorder: 'int' = 12) -> 'Tuple[np.ndarray, np.ndarray, n
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Point-level geometry helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _points_on_element(gen: 'Generatrix', e: 'int', s: 'np.ndarray'):
     n0, n1 = gen.elem_n0[e], gen.elem_n1[e]
@@ -175,9 +175,9 @@ def _pair_blocks(m: 'int', k: 'float',
     return ztt, ztf, zft, zff
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Solver
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _causal_medium(eps_r: 'complex', mu_r: 'complex') -> 'Tuple[complex, complex]':
     """(m, eta_r) for a homogeneous medium: refractive index with Im(m) <= 0
@@ -267,7 +267,7 @@ class BorPecSolver:
     """Single-surface BoR operator factory + PEC/IBC solver.
 
     With medium=(eps_r, mu_r) the EFIE (T) and rotated-PV (P) operators are
-    assembled in that homogeneous medium (complex k, medium eta) — the
+    assembled in that homogeneous medium (complex k, medium eta) -- the
     building blocks of the phase-3 PMCHWT systems.  Excitation and far-field
     methods always refer to the EXTERIOR (air) and are only meaningful on an
     instance with medium=None."""
@@ -352,7 +352,7 @@ class BorPecSolver:
             tile_budget_gb=tile_budget_gb, workers=workers,
             mode_block=mode_block)
 
-    # ── base-point kernel table (far pairs only; near pairs zeroed) ──
+    # -- base-point kernel table (far pairs only; near pairs zeroed) --
     def _build_point_matrices(self):
         g = self.g
         P = len(g.rho)
@@ -477,7 +477,7 @@ class BorPecSolver:
         self._m_max_table = m_max
         return self._G_table
 
-    # ── near element pairs: refined kernels cached per (e, f) ──
+    # -- near element pairs: refined kernels cached per (e, f) --
     def _near_pair_data(self, e: 'int', f: 'int', m_max: 'int'):
         key = (e, f)
         cache = self._near_cache.setdefault(m_max, {})
@@ -504,7 +504,7 @@ class BorPecSolver:
         cache[key] = data
         return data
 
-    # ── full node-based Z for mode m ──
+    # -- full node-based Z for mode m --
     def assemble_mode(self, m: 'int', m_max: 'int') -> 'np.ndarray':
         k = self.k
         g = self.g
@@ -559,7 +559,7 @@ class BorPecSolver:
         Z[Nn:, Nn:] = C * zff
         return Z
 
-    # ── MFIE machinery (Phase 2) ──
+    # -- MFIE machinery (Phase 2) --
     def _mfie_tables(self, m_max: 'int'):
         """Four modal MFIE kernel tables [P, P, 2*m_max+1] at base Gauss
         points; near element-pair entries zeroed (refined path adds them)."""
@@ -610,7 +610,7 @@ class BorPecSolver:
 
     def mass_blocks(self, weight=None) -> 'np.ndarray':
         """2pi * Int w(t) rho T_i T_j dt  (node-based [Nn, Nn]); weight is a
-        per-Gauss-point array (default 1) — used for the MFIE J/2 term and
+        per-Gauss-point array (default 1) -- used for the MFIE J/2 term and
         the IBC Z_s term (with weight = Z_s at the Gauss points)."""
 
         g = self.g
@@ -682,7 +682,7 @@ class BorPecSolver:
         vf = self.B_T @ (g.w * g.rho * P * ef)
         return np.concatenate([vt, vf])
 
-    # ── IBC operator (Phase 2): 0.5 Z_s mass + magnetic-current K' term ──
+    # -- IBC operator (Phase 2): 0.5 Z_s mass + magnetic-current K' term --
     def _ibc_tables(self, m_max: 'int'):
         if getattr(self, "_KI_tables", None) is not None:
             return self._KI_tables
@@ -803,7 +803,7 @@ class BorPecSolver:
         P[Nn:, Nn:] = Bft
         return P
 
-    # ── cache warm-up (thread safety for parallel mode assembly) ──
+    # -- cache warm-up (thread safety for parallel mode assembly) --
     def prepare_operators(self, m_max: 'int', efie: 'bool' = True,
                           mfie: 'bool' = False, ibc: 'bool' = False,
                           workers: 'int' = 1) -> 'None':
@@ -840,7 +840,7 @@ class BorPecSolver:
             with ThreadPoolExecutor(max_workers=int(workers)) as ex:
                 list(ex.map(lambda job: job[0](job[1][0], job[1][1], m_max), jobs))
 
-    # ── active-basis mask per mode ──
+    # -- active-basis mask per mode --
     def basis_mask(self, m: 'int') -> 'np.ndarray':
         Nn = self.Nn
         t_act = np.ones(Nn, dtype=bool)
@@ -854,7 +854,7 @@ class BorPecSolver:
                 f_act[end] = True
         return np.concatenate([t_act, f_act])
 
-    # ── excitation ──
+    # -- excitation --
     def rhs_mode(self, m: 'int', theta_inc_deg: 'float', pol: 'str') -> 'np.ndarray':
         g = self.g
         k = self.k
@@ -888,7 +888,7 @@ class BorPecSolver:
             return -self.rhs_mode(m, theta_inc_deg, "HH") / ETA0
         return self.rhs_mode(m, theta_inc_deg, "VV") / ETA0
 
-    # ── far field for one mode's solution ──
+    # -- far field for one mode's solution --
     def farfield_mode(self, m: 'int', sol: 'np.ndarray', theta_s_deg: 'float',
                       zs_pt: 'Optional[np.ndarray]' = None,
                       msol: 'Optional[np.ndarray]' = None) -> 'Tuple[complex, complex]':
@@ -898,7 +898,7 @@ class BorPecSolver:
             M_t = Z_s J_phi,  M_phi = -Z_s J_t
             F_theta^M = -(jk/4pi) Int M . phi_hat_s e^{jk r_hat . r'}
             F_phi^M   = +(jk/4pi) Int M . theta_hat_s e^{...}
-        (Weston's Z_s = eta0 null is exactly the J/M far-field cancellation —
+        (Weston's Z_s = eta0 null is exactly the J/M far-field cancellation --
         omitting this term leaves the operator right but the RCS wrong.)
         """
 
@@ -959,7 +959,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
     not expressible as a boolean mask).
 
     Each mode's system is factored ONCE: every (theta, pol) is a stacked RHS
-    column of a single np.linalg.solve — an aspect sweep at fixed frequency
+    column of a single np.linalg.solve -- an aspect sweep at fixed frequency
     costs one assembly + one LU per mode.  Modes are independent, so waves of
     `workers` modes run on threads (BLAS releases the GIL); call prepare
     first so kernel/near caches are read-only during the parallel section.
@@ -1324,7 +1324,7 @@ def _validate_solve_bor_generatrix(points, formulation: 'str') -> 'np.ndarray':
 def estimate_bor_table_gb(n_elems: 'int', m_max: 'int', formulation: 'str' = "cfie",
                           has_ibc: 'bool' = False, gauss_order: 'int' = 4,
                           single_tables: 'bool' = False) -> 'float':
-    """Persistent far-table memory (GB) — the scale bound of the current
+    """Persistent far-table memory (GB) -- the scale bound of the current
     all-modes-at-once FFT assembly (see the phase-7 streaming notes)."""
 
     P = float(gauss_order * n_elems)
@@ -1360,9 +1360,9 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     """
     Monostatic RCS of a closed BoR at aspect angles thetas_deg (from +z).
 
-    formulation: 'efie' (open shells / small bodies), 'cfie' (closed PEC —
+    formulation: 'efie' (open shells / small bodies), 'cfie' (closed PEC --
     interior-resonance free), 'mfie' (diagnostics only).
-    zs: surface impedance — None (PEC), a complex scalar, or a per-ELEMENT
+    zs: surface impedance -- None (PEC), a complex scalar, or a per-ELEMENT
     complex array (tapered IBC).  IBC uses the EFIE form E_tan = Z_s J;
     lossy Z_s also damps interior resonances.  Nonzero Z_s is implemented
     only by the EFIE formulation; CFIE/MFIE requests raise.
@@ -1411,7 +1411,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     alpha = float(cfie_alpha) if form == "cfie" else (1.0 if form == "efie" else 0.0)
     n_dofs = 2 * solver.Nn
 
-    # ── far-assembly strategy and memory budget ──
+    # -- far-assembly strategy and memory budget --
     from bor_streaming import estimate_streaming_gb
     tp = str(table_precision).strip().lower()
     if tp not in ("auto", "single", "double"):
@@ -1421,7 +1421,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
         raise ValueError("assembly must be 'auto', 'tables', or 'streaming'.")
     est_double = estimate_bor_table_gb(solver.gen.n_elems, m_max, form,
                                        zs_pt is not None, gauss_order, False)
-    # auto: switch to the phase-7b streaming path early — the TABLE builders
+    # auto: switch to the phase-7b streaming path early -- the TABLE builders
     # sample [P, P, n_xi] in one shot, so their construction PEAK is several
     # times the stored table size (a 7 GB table can thrash a 32 GB machine
     # while building); streamed nodal blocks are 16x smaller and build in
@@ -1551,9 +1551,9 @@ def solve_bor_pec(points, freq_hz: 'float', thetas_deg, n_modes: 'Optional[int]'
                      n_modes=n_modes, gauss_order=gauss_order, mode_tol=mode_tol)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Phase 3: PMCHWT (homogeneous dielectric body)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
                          mu_r: 'complex' = 1.0, n_modes: 'Optional[int]' = None,
@@ -1639,9 +1639,9 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Phase 3: cross-surface operators + coated-PEC multi-region solver
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def _segment_distance(p0, p1, q0, q1) -> 'float':
     """Min distance between two non-intersecting 2D segments (attained at an
@@ -1663,7 +1663,7 @@ class BorCrossOperators:
     bases on solver sq (both BorPecSolver instances with the same medium).
 
     Pairs closer than near_factor * max(element lengths) are re-integrated
-    on a dense tensor Gauss grid with the adaptive near kernels — this is
+    on a dense tensor Gauss grid with the adaptive near kernels -- this is
     what keeps thin coatings accurate.  The surfaces may TOUCH at shared
     endpoints (coating-termination junctions): element pairs sharing such a
     point are log-singular in the Galerkin sense and are routed to the same
@@ -1955,9 +1955,9 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Partial coatings: coating terminating ON the PEC surface (junctions).
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 _JN_DEBUG: 'Dict[str, object]' = {}   # debug-only switches for the gate harness
 
@@ -1975,7 +1975,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
     surface at junction circles where air, coating, and conductor meet.
 
     points_covered is the coated part of the core, bare_pieces the list of
-    uncovered PEC generatrix pieces (0, 1, or 2 — cap or band coatings).
+    uncovered PEC generatrix pieces (0, 1, or 2 -- cap or band coatings).
     All pieces are drawn in the global +z -> -z traversal with left-of-travel
     normals facing away from the surface they bound (exterior/air for S_d
     and the bare pieces, into the coating for the covered core).
@@ -1995,11 +1995,11 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         conductor), while M_phi(A) stays free with its natural half-triangle
         end basis (it carries the normal-E wedge behavior).
 
-    The constraints enter Galerkin-style: A_red = Q^T A_full Q — the tied
+    The constraints enter Galerkin-style: A_red = Q^T A_full Q -- the tied
     row is the sum of the piece rows, exactly the classical BoR junction
     treatment (Putnam / Medgyesi-Mitschang).
 
-    bare_zs (optional): per-piece Leontovich surface impedance — a list
+    bare_zs (optional): per-piece Leontovich surface impedance -- a list
     matching bare_pieces of None / complex scalar / per-element complex
     arrays (tapers).  The eliminated magnetic current M_1 = -Z_s n_hat x J_1
     keeps the piece's own operator on the validated Gauss-point IBC path
@@ -2028,7 +2028,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
     bares = [BorPecSolver(p, freq_hz, gauss_order=gauss_order)
              for p in bare_pieces]
 
-    # ── per-piece surface impedance (None = PEC) ──
+    # -- per-piece surface impedance (None = PEC) --
     if bare_zs is None:
         bare_zs = [None] * len(bares)
     if len(bare_zs) != len(bares):
@@ -2087,7 +2087,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
     diag = max(float(np.ptp(all_nodes[:, 0])) + float(np.ptp(all_nodes[:, 1])), 1e-9)
     jn_tol = 1e-8 * diag
 
-    # ── junction detection: cluster non-axis chain endpoints ──
+    # -- junction detection: cluster non-axis chain endpoints --
     def endpoints(solver):
         gen = solver.gen
         out = []
@@ -2145,7 +2145,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                 "zero at the junction "
                 "(the physical edge treatment) for converged results.")
 
-    # ── cross operators (touching allowed at the junctions) ──
+    # -- cross operators (touching allowed at the junctions) --
     xkw = dict(near_factor=near_factor, near_order=near_order)
     X_d2 = BorCrossOperators(sd_L, s2_L, **xkw)
     X_2d = BorCrossOperators(s2_L, sd_L, **xkw)
@@ -2185,7 +2185,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         for X in [X_d2, X_2d] + X_d1 + X_1d + list(X_11.values()):
             X.prepare(mm)
 
-    # ── junction-aware constraint matrix Q(m) ──
+    # -- junction-aware constraint matrix Q(m) --
     _Q_cache: 'Dict[int, np.ndarray]' = {}
 
     def build_Q(m):
@@ -2303,8 +2303,8 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         A[iH, sl_J2] = -ETA0 * X_d2.assemble_P(m, m_max)
         # The covered-core row is -LayEq (NOT +LayEq as in the junction-free
         # coated solver): every row block must carry the same region-equation
-        # orientation — rows here are -(AirEq) on air-bounded surfaces and
-        # -(AirEq - LayEq) on the interface — or the Q^T junction fold sums
+        # orientation -- rows here are -(AirEq) on air-bounded surfaces and
+        # -(AirEq - LayEq) on the interface -- or the Q^T junction fold sums
         # the layer-region equation with the wrong sign and the through-DOF
         # rows are inconsistent (caught by the eps=1 cap gate at +9 dB).
         A[sl_J2, sl_Jd] = -X_2d.assemble_T(m, m_max)
@@ -2379,7 +2379,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Generic multi-region assembly (phase 6: multi-layer coatings).
 #
 # The phase-5 lesson mechanized: every block and every junction tie follows
@@ -2396,7 +2396,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
 # interface, the phase-3/5 systems are special cases (including the phase-5
 # row-orientation fix, which this construction produces automatically), and
 # junction ties follow the sigma/traversal rule below.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 class _MultiRegionBor:
     """surfaces: list of (points, is_conductor).  regions: list of dicts
@@ -2463,7 +2463,7 @@ class _MultiRegionBor:
                 acc += 2 * self.Nn[si]
         self.n_full = acc
 
-        # ── junction detection over off-axis endpoints ──
+        # -- junction detection over off-axis endpoints --
         all_pts = np.vstack([self.solv[(si, self.adj[si][0])].gen.nodes
                              for si in range(self.n_surf)])
         diag = max(float(np.ptp(all_pts[:, 0])) + float(np.ptp(all_pts[:, 1])), 1e-9)
@@ -2501,7 +2501,7 @@ class _MultiRegionBor:
                                      "the junction master.")
         self._Q_cache: 'Dict[int, np.ndarray]' = {}
 
-    # ── operator plumbing ──
+    # -- operator plumbing --
     def prepare(self, m_max: 'int', workers: 'int' = 1) -> 'None':
         for (si, ri), s in self.solv.items():
             s.prepare_operators(m_max, efie=True, ibc=not self.is_cond[si],
@@ -2565,8 +2565,8 @@ class _MultiRegionBor:
         # ties: sigma/traversal rule via a region shared with the master.
         #   t:   sigma_rm dir_m J_m,t = -sigma_rs dir_s J_s,t
         #   phi: sigma_rm J_m,phi = sigma_rs J_s,phi
-        # (the phi relations around a 3-region cycle are inconsistent — the
-        # projection H.t_hat differs per surface — so each slave ties via a
+        # (the phi relations around a 3-region cycle are inconsistent -- the
+        # projection H.t_hat differs per surface -- so each slave ties via a
         # region it shares with the MASTER and the remaining pairwise
         # relation is left to the Galerkin system.)
         for jn in self.junctions:
@@ -2764,7 +2764,7 @@ def solve_bor_coating_patch(points_patch, points_mid_covered, points_mid_bare,
                             check_abort: 'Optional[Callable]' = None) -> 'Dict':
     """A second-layer coating PATCH terminating on a fully coated PEC body:
     the patch's outer interface (points_patch) meets the inner coating's
-    interface at dielectric triple junctions (air / patch / inner coating —
+    interface at dielectric triple junctions (air / patch / inner coating --
     no conductor on the junction line).  points_mid_covered is the part of
     the inner interface under the patch, points_mid_bare the exposed
     part(s) (a list); the PEC core stays fully covered by the inner layer."""
@@ -2795,9 +2795,9 @@ def solve_bor_coating_patch(points_patch, points_mid_covered, points_mid_bare,
                                "eps_patch": complex(eps_patch)})
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Canonical generatrices for gates
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
 def sphere_generatrix(a: 'float', n: 'int') -> 'np.ndarray':
     """North pole (+z) to south pole: outward left-normals per convention."""
