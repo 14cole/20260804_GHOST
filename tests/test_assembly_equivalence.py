@@ -149,6 +149,52 @@ def main():
                 else:
                     print(f"  ok  {tag}: {err:.3e}", flush=True)
 
+        # Source-axis compaction must be a pure optimization: assembling a
+        # masked operator over the compacted axis has to reproduce the
+        # full-width sweep exactly, for real and lossy wavenumbers alike.
+        for fraction in (0.10, 0.35):
+            mask = rng.random(nelems) < fraction
+            if not mask.any():
+                continue
+            for kval, klabel in ((k0, "real"), (complex(k0, -0.08 * k0), "lossy")):
+                new.set_assembly_compaction(0.0)
+                s_full, k_full = new._assemble_linear_operator_matrices(
+                    mesh_new, kval, obs_normal_deriv=True, source_element_mask=mask
+                )
+                new.set_assembly_compaction(0.5)
+                s_comp, k_comp = new._assemble_linear_operator_matrices(
+                    mesh_new, kval, obs_normal_deriv=True, source_element_mask=mask
+                )
+                checks += 1
+                err = max(rel_err(s_comp, s_full), rel_err(k_comp, k_full))
+                tag = f"  compaction {int(fraction * 100)}% active k={klabel}"
+                if not math.isfinite(err) or err > TOL:
+                    failures.append((f"{rel_geo} compaction {fraction}", err))
+                    print(f"  FAIL{tag}: {err:.3e}", flush=True)
+                else:
+                    print(f"  ok  {tag}: {err:.3e}", flush=True)
+        new.set_assembly_compaction(0.5)
+
+        # Several masks in one traversal must equal the same masks assembled
+        # one at a time -- that sharing is what makes a materials solve fast.
+        multi_masks = [rng.random(nelems) < 0.3, rng.random(nelems) < 0.3, None]
+        grouped = new._assemble_linear_operator_matrices_multi(
+            mesh=mesh_new, k0=k0, obs_normal_deriv=True,
+            source_element_masks=multi_masks,
+        )
+        for mask, (s_g, k_g) in zip(multi_masks, grouped):
+            s_i, k_i = new._assemble_linear_operator_matrices(
+                mesh_new, k0, obs_normal_deriv=True, source_element_mask=mask
+            )
+            checks += 1
+            err = max(rel_err(s_g, s_i), rel_err(k_g, k_i))
+            label = "all" if mask is None else f"{int(mask.sum())} elems"
+            if not math.isfinite(err) or err > TOL:
+                failures.append((f"{rel_geo} multi-mask {label}", err))
+                print(f"  FAIL  multi-mask ({label}): {err:.3e}", flush=True)
+            else:
+                print(f"  ok    multi-mask ({label}): {err:.3e}", flush=True)
+
         if do_hyper:
             for use_mask in (False, True):
                 mask = sub_mask if use_mask else None

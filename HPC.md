@@ -320,6 +320,35 @@ six `N^2` temporaries live at once — 3.2 GB + 1.2 GB at 5 000 elements — whi
 capped how many solves fit on a node far more tightly than the matrices
 themselves do.
 
+### Geometries with materials
+
+A coated or multi-region body assembles one operator per (region, interface
+side). Both sides of a region share its wavenumber and differ only in which
+elements are active — and masks are applied *after* the quadrature, so
+assembling them separately repeated the whole element-pair sweep. Two changes:
+
+- **One traversal per wavenumber.** The multi-region solver now prefetches
+  every (wavenumber, mask) the matrix build will ask for, groups them, and
+  assembles each group once.
+- **Compacted source axis.** A mask selecting a minority of the mesh — normal
+  for a thin coating — no longer pays a full-width sweep that is then masked
+  away. Below 50% active the source axis compacts, making the work
+  proportional to what is actually wanted. Above that the transposed-pair
+  shortcut wins instead, so the threshold is where the two break even.
+
+Measured on a 24 in PEC trapezoid with a 0.1 in lossy dielectric layer, versus
+the pre-optimization solver:
+
+| Elements | Before | After | Speedup |
+|---:|---:|---:|---:|
+| 234 | 6.8 s | 2.7 s | 2.5× |
+| 691 | 51.2 s | 14.8 s | 3.5× |
+| 1147 | 153.6 s | 36.8 s | 4.2× |
+
+Compaction is a pure optimization: `tests/test_assembly_equivalence.py` checks
+the compacted result against the full-width sweep, and grouped masks against
+one-at-a-time assembly, for both real and lossy wavenumbers.
+
 ### Hypersingular operator (TE sheet / dielectric paths)
 
 This was an O(N²) interpreted loop calling a per-pair quadrature routine. The

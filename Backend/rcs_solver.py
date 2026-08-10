@@ -3090,6 +3090,21 @@ _ASSEMBLY_TILE = _env_positive_int("GHOST_ASSEMBLY_TILE", 0)
 # published field always carries the fact.
 _FAR_QUAD_ORDER = _env_positive_int("GHOST_FAR_QUAD_ORDER", 0)
 
+# Compact the source axis when the active masks select less than this fraction
+# of the mesh.  Compaction and the transposed-pair shortcut are mutually
+# exclusive (one needs the axes to differ, the other needs them to match), and
+# they break even at one half.  Settable to 0 to force the full-width path,
+# which must produce identical matrices -- tests/test_assembly_equivalence.py
+# checks exactly that.
+_ASSEMBLY_COMPACT_BELOW = 0.5
+
+
+def set_assembly_compaction(fraction: 'float') -> 'None':
+    """Set the active-fraction threshold below which the source axis compacts."""
+
+    global _ASSEMBLY_COMPACT_BELOW
+    _ASSEMBLY_COMPACT_BELOW = float(fraction)
+
 
 def set_far_quadrature_order(order: 'int') -> 'None':
     """Override the far-pair quadrature order (0 restores the default rule)."""
@@ -3248,9 +3263,13 @@ def _run_tiled_obs_blocks(
 
 
 def _expand_near_chunks(
-    chunks: 'List[Tuple[int, int, int, np.ndarray, bool]]',
+    chunks: 'List[Tuple[int, np.ndarray, int, np.ndarray, bool]]',
 ) -> 'Tuple[np.ndarray, np.ndarray]':
     """Flatten recorded near-pair tiles into ascending (obs, src) index arrays.
+
+    Each chunk carries the tile's global source-element ids, because a masked
+    assembly compacts the source axis and the recorded column is an index into
+    that compacted axis rather than into the mesh.
 
     Sorting here is what keeps the near-field accumulation order independent of
     how tiles were scheduled, so a threaded assembly reproduces a serial one
@@ -3262,15 +3281,15 @@ def _expand_near_chunks(
         return empty, empty
     obs_parts: 'List[np.ndarray]' = []
     src_parts: 'List[np.ndarray]' = []
-    for row_base, col_base, ncols, flat, transposed in chunks:
+    for row_base, src_global, ncols, flat, transposed in chunks:
         rows = flat // ncols
-        cols = flat % ncols
+        cols = src_global[flat % ncols]
         if transposed:
-            obs_parts.append(col_base + cols)
+            obs_parts.append(cols)
             src_parts.append(row_base + rows)
         else:
             obs_parts.append(row_base + rows)
-            src_parts.append(col_base + cols)
+            src_parts.append(cols)
     obs_idx = np.concatenate(obs_parts)
     src_idx = np.concatenate(src_parts)
     order = np.lexsort((src_idx, obs_idx))
@@ -3297,50 +3316,66 @@ def _warn_far_quadrature_override(materials: 'MaterialLibrary') -> 'None':
     )
 
 
-def _assemble_linear_operator_matrices(
+def _assemble_linear_operator_matrices_multi(
     mesh: 'LinearMesh',
     k0: 'Union[complex, float]',
     obs_normal_deriv: 'bool',
+    source_element_masks: 'Sequence[Optional[np.ndarray]]',
     obs_order: 'int' = 8,
     src_order: 'int' = 8,
     far_ratio: 'float' = 3.0,
-    source_element_mask: 'Optional[np.ndarray]' = None,
     compute_single_layer: 'bool' = True,
     compute_double_layer: 'bool' = True,
-) -> 'Tuple[np.ndarray, np.ndarray]':
+) -> 'List[Tuple[np.ndarray, np.ndarray]]':
     """
-    Assemble dense linear-Galerkin S and K/K' matrices on global nodal DOFs.
+    Assemble S and K/K' for several source-element masks in ONE traversal.
 
-    ``compute_single_layer`` and ``compute_double_layer`` let formulation
-    callers skip an operator they do not consume.  A zero matrix is returned
-    for a skipped operator so the long-standing two-array return contract is
-    preserved.
+    The masks select which source elements contribute, but they are applied to
+    the finished tile accumulators -- the quadrature itself does not depend on
+    them.  Assembling each mask separately therefore repeats every Hankel
+    evaluation, which is most of the cost of a solve.  The multi-region
+    formulation asks for exactly this: one operator per (region, interface
+    side), where both sides of a region share a wavenumber and differ only in
+    which elements are active.
 
-    Uses a two-pass approach:
+    Returns one (S, K) pair per mask, in the order given.  A mask selecting no
+    element gets zero matrices without costing anything.
+
+    Two passes, as before:
     1. Far interactions: batched numpy quadrature over cache-sized element
        tiles, one kernel evaluation per unordered pair.
-    2. Near interactions: per-element-pair recursive/Duffy quadrature.
+    2. Near interactions: per-element-pair recursive/Duffy quadrature.  Masks
+       are disjoint in practice, so this pass does not duplicate work either.
     """
 
     if not bool(compute_single_layer) and not bool(compute_double_layer):
         raise ValueError("At least one linear operator must be requested.")
 
     nnodes = len(mesh.nodes)
-    s_mat = np.zeros((nnodes, nnodes), dtype=np.complex128)
-    k_mat = np.zeros((nnodes, nnodes), dtype=np.complex128)
     elements = list(mesh.elements)
     nelems = len(elements)
+    n_masks = len(source_element_masks)
+    if n_masks == 0:
+        raise ValueError("At least one source-element mask must be requested.")
+    s_mats = [np.zeros((nnodes, nnodes), dtype=np.complex128) for _ in range(n_masks)]
+    k_mats = [np.zeros((nnodes, nnodes), dtype=np.complex128) for _ in range(n_masks)]
     if not elements:
-        return s_mat, k_mat
+        return list(zip(s_mats, k_mats))
 
-    if source_element_mask is None:
-        src_mask = np.ones(nelems, dtype=bool)
-    else:
-        src_mask = np.asarray(source_element_mask, dtype=bool).reshape(-1)
-        if src_mask.size != nelems:
+    src_masks = []
+    for mask in source_element_masks:
+        if mask is None:
+            src_masks.append(np.ones(nelems, dtype=bool))
+            continue
+        resolved = np.asarray(mask, dtype=bool).reshape(-1)
+        if resolved.size != nelems:
             raise ValueError("source_element_mask length must match mesh element count.")
-    if not np.any(src_mask):
-        return s_mat, k_mat
+        src_masks.append(resolved)
+    # An empty mask contributes nothing; drop it from the traversal entirely
+    # rather than paying a tile sweep to produce zeros.
+    active = [index for index, mask in enumerate(src_masks) if bool(np.any(mask))]
+    if not active:
+        return list(zip(s_mats, k_mats))
 
     centers = np.stack([e.center for e in elements], axis=0)
     lengths = np.asarray([e.length for e in elements], dtype=float)
@@ -3366,10 +3401,36 @@ def _assemble_linear_operator_matrices(
     all_obs_pts = p0_arr[:, None, :] + t_obs_f[None, :, None] * seg_arr[:, None, :]
     all_src_pts = p0_arr[:, None, :] + t_src_f[None, :, None] * seg_arr[:, None, :]
 
+    # Source-axis compaction.  A mask that selects a minority of the elements
+    # -- normal for a coating or a small dielectric region -- otherwise pays a
+    # full-width sweep whose result is then masked away.  Restricting the
+    # source axis to the union of the active masks makes the work proportional
+    # to what is actually wanted.
+    #
+    # It costs the transposed-pair shortcut, which needs both axes to index the
+    # same set, so it is only worth it when the active set is under half the
+    # mesh: compacted work is nelems * n_active, symmetric work nelems^2 / 2.
+    union_mask = src_masks[active[0]].copy()
+    for index in active[1:]:
+        union_mask |= src_masks[index]
+    n_active = int(np.count_nonzero(union_mask))
+    compact = n_active < _ASSEMBLY_COMPACT_BELOW * nelems
+    src_sel = (
+        np.flatnonzero(union_mask) if compact
+        else np.arange(nelems, dtype=np.int64)
+    )
+    n_src = int(src_sel.size)
+    src_centers = centers[src_sel]
+    src_lengths = lengths[src_sel]
+    src_node_ids = node_ids[src_sel]
+    src_normals = normals_arr[src_sel]
+
     # The transposed-pair shortcut needs both directions to share one
-    # quadrature rule; if a caller ever asks for mixed orders, fall back to
-    # visiting every ordered tile.
-    symmetric = int(max(2, far_obs_order)) == int(max(2, far_src_order))
+    # quadrature rule, and both axes to index the same elements.
+    symmetric = (
+        int(max(2, far_obs_order)) == int(max(2, far_src_order))
+        and not compact
+    )
 
     n_acc = 4 * (int(want_s) + (2 if want_k else 0))
     n_kernel = int(want_s) + (2 if want_k else 0)
@@ -3378,7 +3439,10 @@ def _assemble_linear_operator_matrices(
     real_k = _wavenumber_is_real(k0)
     # `_dgreen_dn_obs` carries the minus sign; `_dgreen_dn_src` does not.
     dgreen_sign = -1.0 if obs_normal_deriv else 1.0
-    near_chunks: 'List[Tuple[int, int, int, np.ndarray, bool]]' = []
+    # One near-pair list per mask: the masks are disjoint in the formulations
+    # that use them, so the near pass costs the same in total as one assembly
+    # over their union.
+    near_chunks = [[] for _ in range(n_masks)]  # type: List[List[Tuple[int, int, int, np.ndarray, bool]]]
     write_lock = threading.Lock()
 
     def _far_pass(i0: 'int', i1: 'int') -> 'None':
@@ -3387,24 +3451,22 @@ def _assemble_linear_operator_matrices(
         obs_nid = node_ids[obs_slice]
         obs_norm = normals_arr[obs_slice]
         obs_len = lengths[obs_slice]
-        obs_msk = src_mask[obs_slice]
         obs_pts = all_obs_pts[obs_slice]
         obs_ctr = centers[obs_slice]
-        local_near: 'List[Tuple[int, int, int, np.ndarray, bool]]' = []
+        local_near = [[] for _ in range(n_masks)]
 
-        for j0 in range(i0 if symmetric else 0, nelems, tile):
-            j1 = min(j0 + tile, nelems)
+        for j0 in range(i0 if symmetric else 0, n_src, tile):
+            j1 = min(j0 + tile, n_src)
             nb = j1 - j0
             mirrored = symmetric and j0 > i0
             src_slice = slice(j0, j1)
-            src_nid = node_ids[src_slice]
-            src_len = lengths[src_slice]
-            src_norm = normals_arr[src_slice]
-            src_msk = src_mask[src_slice]
-
+            src_global = src_sel[src_slice]
+            src_nid = src_node_ids[src_slice]
+            src_len = src_lengths[src_slice]
+            src_norm = src_normals[src_slice]
             # Orientation-independent part of the far predicate.
-            mdx = obs_ctr[:, 0][:, None] - centers[src_slice, 0][None, :]
-            mdy = obs_ctr[:, 1][:, None] - centers[src_slice, 1][None, :]
+            mdx = obs_ctr[:, 0][:, None] - src_centers[src_slice, 0][None, :]
+            mdy = obs_ctr[:, 1][:, None] - src_centers[src_slice, 1][None, :]
             centre_dist = np.sqrt(mdx * mdx + mdy * mdy)
             scale = np.maximum(np.maximum(obs_len[:, None], src_len[None, :]), EPS)
             far_sym = (centre_dist / scale) >= float(far_ratio)
@@ -3414,31 +3476,46 @@ def _assemble_linear_operator_matrices(
                 | (obs_nid[:, 1][:, None] == src_nid[None, :, 0])
                 | (obs_nid[:, 1][:, None] == src_nid[None, :, 1])
             )
-            for diag in range(max(i0, j0), min(i1, j1)):
-                far_sym[diag - i0, diag - j0] = False
+            # Self pairs are never far. With a compacted source axis the two
+            # axes no longer share an index, so match on the global element id.
+            np.logical_and(
+                far_sym,
+                np.arange(i0, i1)[:, None] != src_global[None, :],
+                out=far_sym,
+            )
 
-            # Column activity is the only orientation-dependent term.
-            far_ij = far_sym & src_msk[None, :]
-            near = ~far_ij
-            near &= src_msk[None, :]
-            flat = np.flatnonzero(near.ravel())
-            if flat.size:
-                local_near.append((i0, j0, nb, flat, False))
-            far_ji = None
-            if mirrored:
-                far_ji = far_sym & obs_msk[:, None]
-                near_t = ~far_ji
-                near_t &= obs_msk[:, None]
-                flat_t = np.flatnonzero(near_t.ravel())
-                if flat_t.size:
-                    local_near.append((i0, j0, nb, flat_t, True))
+            # Which elements are active is the only mask-dependent term, and
+            # the only orientation-dependent one: everything above is shared.
+            far_ij = {}
+            far_ji = {}
+            any_ij = False
+            any_ji = False
+            for mi in active:
+                mask = src_masks[mi]
+                src_msk = mask[src_global]
+                fij = far_sym & src_msk[None, :]
+                far_ij[mi] = fij
+                any_ij = any_ij or bool(fij.any())
+                near = ~fij
+                near &= src_msk[None, :]
+                flat = np.flatnonzero(near.ravel())
+                if flat.size:
+                    local_near[mi].append((i0, src_global, nb, flat, False))
+                if mirrored:
+                    obs_msk = mask[obs_slice]
+                    fji = far_sym & obs_msk[:, None]
+                    far_ji[mi] = fji
+                    any_ji = any_ji or bool(fji.any())
+                    near_t = ~fji
+                    near_t &= obs_msk[:, None]
+                    flat_t = np.flatnonzero(near_t.ravel())
+                    if flat_t.size:
+                        local_near[mi].append((i0, src_global, nb, flat_t, True))
 
-            any_ij = bool(far_ij.any())
-            any_ji = bool(far_ji.any()) if mirrored else False
             if not (any_ij or any_ji):
                 continue
 
-            src_pts = all_src_pts[src_slice]
+            src_pts = all_src_pts[src_global]
             acc_s = (
                 [np.zeros((mb, nb), dtype=np.complex128) for _ in range(4)]
                 if want_s else None
@@ -3533,68 +3610,110 @@ def _assemble_linear_operator_matrices(
                                 )
 
             len_prod = obs_len[:, None] * src_len[None, :]
-            scale_ij = len_prod * far_ij if any_ij else None
-            scale_ji = len_prod * far_ji if any_ji else None
             with write_lock:
-                if any_ij:
-                    for a in range(2):
-                        rows = obs_nid[:, a][:, None]
-                        for b in range(2):
-                            cols = src_nid[None, :, b]
-                            if acc_s is not None:
-                                np.add.at(s_mat, (rows, cols),
-                                          acc_s[2 * a + b] * scale_ij)
-                            if acc_k is not None:
-                                np.add.at(k_mat, (rows, cols),
-                                          acc_k[2 * a + b] * scale_ij)
-                if any_ji:
-                    for a in range(2):
-                        rows = src_nid[:, a][:, None]
-                        for b in range(2):
-                            cols = obs_nid[None, :, b]
-                            if acc_s is not None:
-                                # S is symmetric: block (j,i)[a][b] is the
-                                # transpose of block (i,j)[b][a].
-                                np.add.at(s_mat, (rows, cols),
-                                          (acc_s[2 * b + a] * scale_ji).T)
-                            if acc_kt is not None:
-                                np.add.at(k_mat, (rows, cols),
-                                          (acc_kt[2 * a + b] * scale_ji).T)
+                for mi in active:
+                    fij = far_ij[mi]
+                    if fij.any():
+                        scale_ij = len_prod * fij
+                        for a in range(2):
+                            rows = obs_nid[:, a][:, None]
+                            for b in range(2):
+                                cols = src_nid[None, :, b]
+                                if acc_s is not None:
+                                    np.add.at(s_mats[mi], (rows, cols),
+                                              acc_s[2 * a + b] * scale_ij)
+                                if acc_k is not None:
+                                    np.add.at(k_mats[mi], (rows, cols),
+                                              acc_k[2 * a + b] * scale_ij)
+                    fji = far_ji.get(mi)
+                    if fji is not None and fji.any():
+                        scale_ji = len_prod * fji
+                        for a in range(2):
+                            rows = src_nid[:, a][:, None]
+                            for b in range(2):
+                                cols = obs_nid[None, :, b]
+                                if acc_s is not None:
+                                    # S is symmetric: block (j,i)[a][b] is the
+                                    # transpose of block (i,j)[b][a].
+                                    np.add.at(s_mats[mi], (rows, cols),
+                                              (acc_s[2 * b + a] * scale_ji).T)
+                                if acc_kt is not None:
+                                    np.add.at(k_mats[mi], (rows, cols),
+                                              (acc_kt[2 * a + b] * scale_ji).T)
 
-        if local_near:
+        if any(local_near):
             with write_lock:
-                near_chunks.extend(local_near)
+                for mi in range(n_masks):
+                    near_chunks[mi].extend(local_near[mi])
 
     _run_tiled_obs_blocks(nelems, tile, _far_pass)
 
     # --- Pass 2: Near interactions (self, touching, close pairs) ---
-    obs_idx, src_idx = _expand_near_chunks(near_chunks)
-    last_obs = -1
-    obs_elem = None
-    obs_ids = None
-    for pos in range(obs_idx.size):
-        obs_index = int(obs_idx[pos])
-        if obs_index != last_obs:
-            last_obs = obs_index
-            obs_elem = elements[obs_index]
-            obs_ids = np.asarray(obs_elem.node_ids, dtype=int)
-        src_elem = elements[int(src_idx[pos])]
-        src_ids = src_elem.node_ids
-        s_blk, k_blk = _sk_blocks_near_linear(
-            obs_elem=obs_elem,
-            src_elem=src_elem,
-            k0=k0,
-            obs_normal_deriv=obs_normal_deriv,
-            obs_order=obs_order,
-            src_order=src_order,
-            compute_single_layer=compute_single_layer,
-            compute_double_layer=compute_double_layer,
-        )
-        if compute_single_layer:
-            s_mat[np.ix_(obs_ids, src_ids)] += s_blk
-        if compute_double_layer:
-            k_mat[np.ix_(obs_ids, src_ids)] += k_blk
-    return s_mat, k_mat
+    for mi in range(n_masks):
+        obs_idx, src_idx = _expand_near_chunks(near_chunks[mi])
+        last_obs = -1
+        obs_elem = None
+        obs_ids = None
+        for pos in range(obs_idx.size):
+            obs_index = int(obs_idx[pos])
+            if obs_index != last_obs:
+                last_obs = obs_index
+                obs_elem = elements[obs_index]
+                obs_ids = np.asarray(obs_elem.node_ids, dtype=int)
+            src_elem = elements[int(src_idx[pos])]
+            src_ids = src_elem.node_ids
+            s_blk, k_blk = _sk_blocks_near_linear(
+                obs_elem=obs_elem,
+                src_elem=src_elem,
+                k0=k0,
+                obs_normal_deriv=obs_normal_deriv,
+                obs_order=obs_order,
+                src_order=src_order,
+                compute_single_layer=compute_single_layer,
+                compute_double_layer=compute_double_layer,
+            )
+            if compute_single_layer:
+                s_mats[mi][np.ix_(obs_ids, src_ids)] += s_blk
+            if compute_double_layer:
+                k_mats[mi][np.ix_(obs_ids, src_ids)] += k_blk
+    return list(zip(s_mats, k_mats))
+
+
+def _assemble_linear_operator_matrices(
+    mesh: 'LinearMesh',
+    k0: 'Union[complex, float]',
+    obs_normal_deriv: 'bool',
+    obs_order: 'int' = 8,
+    src_order: 'int' = 8,
+    far_ratio: 'float' = 3.0,
+    source_element_mask: 'Optional[np.ndarray]' = None,
+    compute_single_layer: 'bool' = True,
+    compute_double_layer: 'bool' = True,
+) -> 'Tuple[np.ndarray, np.ndarray]':
+    """
+    Assemble dense linear-Galerkin S and K/K' matrices on global nodal DOFs.
+
+    ``compute_single_layer`` and ``compute_double_layer`` let formulation
+    callers skip an operator they do not consume.  A zero matrix is returned
+    for a skipped operator so the long-standing two-array return contract is
+    preserved.
+
+    Single-mask front end for `_assemble_linear_operator_matrices_multi`; a
+    caller wanting several masks at one wavenumber should use that directly
+    so the quadrature is shared.
+    """
+
+    return _assemble_linear_operator_matrices_multi(
+        mesh=mesh,
+        k0=k0,
+        obs_normal_deriv=obs_normal_deriv,
+        source_element_masks=[source_element_mask],
+        obs_order=obs_order,
+        src_order=src_order,
+        far_ratio=far_ratio,
+        compute_single_layer=compute_single_layer,
+        compute_double_layer=compute_double_layer,
+    )[0]
 
 def _assemble_linear_hypersingular_matrix(
     mesh: 'LinearMesh',
@@ -3713,7 +3832,7 @@ def _assemble_linear_hypersingular_matrix(
             scalar &= src_msk[None, :]
             flat = np.flatnonzero(scalar.ravel())
             if flat.size:
-                local_scalar.append((i0, j0, nb, flat, False))
+                local_scalar.append((i0, np.arange(j0, j1), nb, flat, False))
             batch_ji = None
             if mirrored:
                 batch_ji = batch_sym & obs_msk[:, None]
@@ -3721,7 +3840,7 @@ def _assemble_linear_hypersingular_matrix(
                 scalar_t &= obs_msk[:, None]
                 flat_t = np.flatnonzero(scalar_t.ravel())
                 if flat_t.size:
-                    local_scalar.append((i0, j0, nb, flat_t, True))
+                    local_scalar.append((i0, np.arange(j0, j1), nb, flat_t, True))
 
             any_ij = bool(batch_ij.any())
             any_ji = bool(batch_ji.any()) if mirrored else False
@@ -4373,48 +4492,34 @@ def _build_linear_coupled_region_operators(
         k_eval = k_region if abs(k_region) > EPS else (EPS + 0.0j)
         minus_mask = np.fromiter((info.minus_region == region for info in infos), dtype=bool, count=nelems)
         plus_mask = np.fromiter((info.plus_region == region for info in infos), dtype=bool, count=nelems)
-        entry: 'Dict[str, Any]' = {
-            'minus': _assemble_linear_operator_matrices(
-                mesh=mesh,
-                k0=k_eval,
-                obs_normal_deriv=False,
-                obs_order=obs_order,
-                src_order=src_order,
-                far_ratio=far_ratio,
-                source_element_mask=minus_mask,
-            ),
-            'plus': _assemble_linear_operator_matrices(
-                mesh=mesh,
-                k0=k_eval,
-                obs_normal_deriv=False,
-                obs_order=obs_order,
-                src_order=src_order,
-                far_ratio=far_ratio,
-                source_element_mask=plus_mask,
-            ),
-        }
+        # Both interface sides of a region share its wavenumber and differ
+        # only in which elements are active, so one traversal produces both.
+        # Assembling them separately repeated every Hankel evaluation, which
+        # is ~90% of a solve on a geometry with materials.
+        minus_ops, plus_ops = _assemble_linear_operator_matrices_multi(
+            mesh=mesh,
+            k0=k_eval,
+            obs_normal_deriv=False,
+            source_element_masks=[minus_mask, plus_mask],
+            obs_order=obs_order,
+            src_order=src_order,
+            far_ratio=far_ratio,
+        )
+        entry: 'Dict[str, Any]' = {'minus': minus_ops, 'plus': plus_ops}
         if compute_cfie:
             # K' (adjoint double layer): obs_normal_deriv=True
-            entry['kp_minus'] = _assemble_linear_operator_matrices(
+            kp_minus, kp_plus = _assemble_linear_operator_matrices_multi(
                 mesh=mesh,
                 k0=k_eval,
                 obs_normal_deriv=True,
+                source_element_masks=[minus_mask, plus_mask],
                 obs_order=obs_order,
                 src_order=src_order,
                 far_ratio=far_ratio,
-                source_element_mask=minus_mask,
                 compute_single_layer=False,
             )
-            entry['kp_plus'] = _assemble_linear_operator_matrices(
-                mesh=mesh,
-                k0=k_eval,
-                obs_normal_deriv=True,
-                obs_order=obs_order,
-                src_order=src_order,
-                far_ratio=far_ratio,
-                source_element_mask=plus_mask,
-                compute_single_layer=False,
-            )
+            entry['kp_minus'] = kp_minus
+            entry['kp_plus'] = kp_plus
             # D (hypersingular via Maue identity)
             entry['d_minus'] = _assemble_linear_hypersingular_matrix(
                 mesh=mesh,
@@ -7114,6 +7219,33 @@ def _solve_multi_region_indirect(
                 )
                 op_cache[key] = (S, Kp)
             return op_cache[key]
+
+        # Prefetch, grouped by wavenumber.  Every (k, mask) the matrix build
+        # will ask for is already determined by the region/interface structure:
+        # each region contributes its own wavenumber paired with the mask of
+        # every interface touching it.  The masks only select which source
+        # elements survive -- they are applied after the quadrature -- so
+        # assembling one interface at a time repeats the element-pair sweep,
+        # which is ~90% of the cost of a solve on a geometry with materials.
+        # Grouping them means that sweep runs once per distinct wavenumber.
+        _by_k = {}
+        for _rid, _mis in region_ifaces.items():
+            _k = complex(region_props[_rid]['k'])
+            _slot = _by_k.setdefault(_k, [])
+            for _mi in _mis:
+                _mask = ifaces[_mi]['mask']
+                _key = tuple(_mask.tolist())
+                if _key not in {tuple(m.tolist()) for m in _slot}:
+                    _slot.append(_mask)
+        for _k, _masks in _by_k.items():
+            if len(_masks) < 2:
+                continue          # nothing to share; let get_ops do it lazily
+            for _mask, _ops in zip(_masks, _assemble_linear_operator_matrices_multi(
+                mesh=mesh, k0=_k, obs_normal_deriv=True,
+                source_element_masks=_masks,
+                obs_order=obs_order, src_order=src_order,
+            )):
+                op_cache[(_k, tuple(_mask.tolist()))] = _ops
         def sub(mat, obs_n, src_n):
             return mat[np.ix_(obs_n, src_n)]
     else:
