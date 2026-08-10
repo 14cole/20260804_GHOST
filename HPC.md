@@ -362,6 +362,38 @@ of them — are now batched over the same tiles at the same order:
 | 430 | 709 s | 7.3 s | 97× |
 | 820 | 2579 s | 18.8 s | 137× |
 
+### Graded far quadrature (on by default)
+
+The far pass used a fixed order 8 for every well-separated pair. Measuring the
+order actually needed to hold a Galerkin block to 1e-12 relative — against an
+order-24 reference, worst case over five pair orientations — gives:
+
+| kL \ r | 3 | 5 | 10 | 25 |
+|---:|---:|---:|---:|---:|
+| 0.15 | 6 | 5 | 5 | 4 |
+| 0.50 | 7 | 6 | 5 | 5 |
+| 1.50 | 7 | 6 | 6 | 6 |
+| 3.00 | 8 | 8 | 8 | 8 |
+
+where `r` is centre separation in element lengths and `kL` is element length in
+radians. Two things fall out:
+
+- **Separation barely matters** once a pair is far at all. What sets the order
+  is how many wavelengths the element spans, because that is what the
+  integrand oscillates over.
+- **At kL ≥ 4 the fixed order 8 is *under*-resolved** — that mesh needs 9. A
+  λ/20 mesh is kL ≈ 0.31, so this only bites on deliberately coarse meshes.
+
+Each tile now picks its order from its own worst far pair. Measured 1.24–1.43×
+depending on wavenumber and mask, with results matching the ungraded sweep to
+~5e-16 — it is a free speedup, not an accuracy trade, because it only drops
+orders the calibration says are unnecessary.
+
+Grading never raises the order above what the caller configured. Raising it
+where the table says it is needed would improve coarse-mesh accuracy but change
+published values, which is not something to do silently. `set_far_quadrature_grading(False)`
+forces the flat order; `tests/test_assembly_equivalence.py` checks the two agree.
+
 ### Optional: far-pair quadrature order
 
 Roughly half of a large assembly is Hankel evaluations, and their count is

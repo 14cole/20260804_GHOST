@@ -175,6 +175,28 @@ def main():
                     print(f"  ok  {tag}: {err:.3e}", flush=True)
         new.set_assembly_compaction(0.5)
 
+        # Per-tile quadrature grading must be invisible: the graded sweep has
+        # to reproduce the ungraded one to well inside the comparison
+        # tolerance, since grading only drops orders the calibration says are
+        # unnecessary.
+        for kval, klabel in ((k0, "real"), (complex(k0, -0.08 * k0), "lossy")):
+            new.set_far_quadrature_grading(False)
+            s_flat, k_flat = new._assemble_linear_operator_matrices(
+                mesh_new, kval, obs_normal_deriv=True
+            )
+            new.set_far_quadrature_grading(True)
+            s_grad, k_grad = new._assemble_linear_operator_matrices(
+                mesh_new, kval, obs_normal_deriv=True
+            )
+            checks += 1
+            err = max(rel_err(s_grad, s_flat), rel_err(k_grad, k_flat))
+            tag = f"  graded vs ungraded quadrature k={klabel}"
+            if not math.isfinite(err) or err > TOL:
+                failures.append((f"{rel_geo} grading {klabel}", err))
+                print(f"  FAIL{tag}: {err:.3e}", flush=True)
+            else:
+                print(f"  ok  {tag}: {err:.3e}", flush=True)
+
         # Several masks in one traversal must equal the same masks assembled
         # one at a time -- that sharing is what makes a materials solve fast.
         multi_masks = [rng.random(nelems) < 0.3, rng.random(nelems) < 0.3, None]

@@ -3166,6 +3166,80 @@ def _assembly_tile_size(nelems: 'int', bytes_per_entry: 'int') -> 'int':
     return max(1, min(int(nelems), tile))
 
 
+# Distance- and wavelength-graded far quadrature.
+#
+# The far pass used a fixed order (8) for every well-separated pair.  Measuring
+# the order actually needed to hold a Galerkin block to 1e-12 relative --
+# against an order-24 reference, worst case over collinear, parallel,
+# perpendicular, and oblique pair orientations -- gives:
+#
+#     kL \ r      3    4    5    6    8   10   14   20   30   50
+#     0.10        6    6    5    5    5    5    4    4    4    4
+#     0.31        6    6    5    5    5    5    5    5    5    5
+#     1.00        7    6    6    6    6    6    6    6    6    6
+#     2.00        7    7    7    7    7    7    7    7    7    7
+#     4.00        9    9    9    9    9    9    9    9    9    9
+#
+# where r is the centre separation in element lengths and kL is the element
+# length in radians.  Two things fall out.  Separation barely matters once a
+# pair is far at all -- what sets the order is how many wavelengths the element
+# spans, because that is what the integrand oscillates over.  And at kL >= 4
+# the fixed order 8 is *under*-resolved: a mesh that coarse needs 9.
+#
+# The table below carries a +1 margin over those measurements, and the result
+# is clamped to the caller's configured order, so grading only ever reduces
+# work.  Raising the order past what the caller asked for would change
+# published values on coarse meshes -- worth doing, but not silently.
+#
+# The order is chosen per tile from the tile's *worst* pair, so it costs two
+# reductions per tile rather than a branch per element pair.
+
+# Each row is calibrated at its band's UPPER kL edge -- the worst case inside
+# the band -- over five pair orientations, so the band itself is the margin.
+# The r < 5 column carries one extra order as a hedge: centre separation can
+# understate how close two elements actually come when a mesh is irregular.
+_FAR_ORDER_TABLE = (
+    # (kL upper bound, order for r < 5, for r < 10, for r >= 10)
+    (0.15, 6, 5, 5),
+    (0.50, 7, 6, 5),
+    (1.50, 7, 6, 6),
+    (3.00, 8, 8, 8),
+    (float("inf"), 10, 10, 10),
+)
+
+_FAR_GRADED = _env_positive_int("GHOST_FAR_GRADED", 1) != 0
+
+
+def set_far_quadrature_grading(enabled: 'bool') -> 'None':
+    """Enable/disable per-tile far-quadrature grading (default on).
+
+    Grading only reduces the order below what the caller configured, and only
+    where a calibrated table says the reduction costs under 1e-12 relative on
+    the element-pair block, so turning it off should change nothing that
+    matters.  The switch exists to make that testable.
+    """
+
+    global _FAR_GRADED
+    _FAR_GRADED = bool(enabled)
+
+
+def _graded_far_order(kl_max: 'float', ratio_min: 'float', cap: 'int') -> 'int':
+    """Quadrature order for a tile whose worst far pair has these parameters."""
+
+    if not _FAR_GRADED:
+        return int(cap)
+    for bound, near, mid, far in _FAR_ORDER_TABLE:
+        if kl_max <= bound:
+            if ratio_min < 5.0:
+                order = near
+            elif ratio_min < 10.0:
+                order = mid
+            else:
+                order = far
+            return max(2, min(int(cap), int(order)))
+    return int(cap)
+
+
 def _wavenumber_is_real(k0: 'Union[complex, float]') -> 'bool':
     value = complex(k0)
     return value.imag == 0.0 and value.real > 0.0
@@ -3392,14 +3466,21 @@ def _assemble_linear_operator_matrices_multi(
     # enough for a lower order to be defensible.
     far_obs_order = _FAR_QUAD_ORDER or int(obs_order)
     far_src_order = _FAR_QUAD_ORDER or int(src_order)
-    qt_obs, qw_obs = _get_quadrature(max(2, far_obs_order))
-    qt_src, qw_src = _get_quadrature(max(2, far_src_order))
-    phi_obs_arr = np.array([_linear_shape_values(float(t)) for t in qt_obs])  # (Q_obs, 2)
-    phi_src_arr = np.array([_linear_shape_values(float(t)) for t in qt_src])  # (Q_src, 2)
-    t_obs_f = np.asarray(qt_obs, dtype=float)
-    t_src_f = np.asarray(qt_src, dtype=float)
-    all_obs_pts = p0_arr[:, None, :] + t_obs_f[None, :, None] * seg_arr[:, None, :]
-    all_src_pts = p0_arr[:, None, :] + t_src_f[None, :, None] * seg_arr[:, None, :]
+    # Grading picks a per-tile order, so the rule is cached rather than
+    # precomputed once; tile quadrature points are built from p0/segment inside
+    # the tile, which is cheap and avoids holding an (nelems, Q, 2) array per
+    # order that might be used.
+    _rule_cache: 'Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]]' = {}
+
+    def _rule(order: 'int') -> 'Tuple[np.ndarray, np.ndarray, np.ndarray]':
+        cached = _rule_cache.get(order)
+        if cached is None:
+            nodes, weights = _get_quadrature(max(2, int(order)))
+            phi = np.array([_linear_shape_values(float(t)) for t in nodes])
+            cached = (np.asarray(nodes, dtype=float),
+                      np.asarray(weights, dtype=float), phi)
+            _rule_cache[order] = cached
+        return cached
 
     # Source-axis compaction.  A mask that selects a minority of the elements
     # -- normal for a coating or a small dielectric region -- otherwise pays a
@@ -3431,6 +3512,7 @@ def _assemble_linear_operator_matrices_multi(
         int(max(2, far_obs_order)) == int(max(2, far_src_order))
         and not compact
     )
+    abs_k = abs(complex(k0))
 
     n_acc = 4 * (int(want_s) + (2 if want_k else 0))
     n_kernel = int(want_s) + (2 if want_k else 0)
@@ -3451,8 +3533,10 @@ def _assemble_linear_operator_matrices_multi(
         obs_nid = node_ids[obs_slice]
         obs_norm = normals_arr[obs_slice]
         obs_len = lengths[obs_slice]
-        obs_pts = all_obs_pts[obs_slice]
+        obs_p0 = p0_arr[obs_slice]
+        obs_seg = seg_arr[obs_slice]
         obs_ctr = centers[obs_slice]
+        obs_pts_cache: 'Dict[int, np.ndarray]' = {}
         local_near = [[] for _ in range(n_masks)]
 
         for j0 in range(i0 if symmetric else 0, n_src, tile):
@@ -3515,7 +3599,24 @@ def _assemble_linear_operator_matrices_multi(
             if not (any_ij or any_ji):
                 continue
 
-            src_pts = all_src_pts[src_global]
+            # Worst far pair in this tile decides the order for all of it.
+            any_far = far_sym
+            ratio_min = float(np.min(
+                np.where(any_far, centre_dist / scale, np.inf)
+            )) if any_far.any() else float("inf")
+            kl_max = abs_k * float(max(obs_len.max(), src_len.max()))
+            tile_order = _graded_far_order(kl_max, ratio_min, far_obs_order)
+            t_obs_f, qw_obs, phi_obs_arr = _rule(tile_order)
+            t_src_f, qw_src, phi_src_arr = _rule(tile_order)
+
+            obs_pts = obs_pts_cache.get(tile_order)
+            if obs_pts is None:
+                obs_pts = (obs_p0[:, None, :]
+                           + t_obs_f[None, :, None] * obs_seg[:, None, :])
+                obs_pts_cache[tile_order] = obs_pts
+            src_p0 = p0_arr[src_global]
+            src_seg = seg_arr[src_global]
+            src_pts = src_p0[:, None, :] + t_src_f[None, :, None] * src_seg[:, None, :]
             acc_s = (
                 [np.zeros((mb, nb), dtype=np.complex128) for _ in range(4)]
                 if want_s else None
