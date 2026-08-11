@@ -83,13 +83,12 @@ With at least one unit per core — the normal case for a many-geometry sweep �
 leave both alone. One process per unit with single-threaded BLAS is the right
 shape, and `"auto"` resolves to 1.
 
-`"auto"` gives each pool worker `cores // pool_size` assembly threads, so
-threads x processes never exceeds the allocation. It resolves to 1 whenever the
-run has at least one unit per core, and only opens up when the run itself is
-small — a couple of geometries at one frequency. It is keyed on the pool size
-rather than on a task's planned share on purpose: a task that runs dry falls
-through to stealing and can end up with a full pool, so sizing threads for the
-planned share would oversubscribe the node exactly when it got busiest.
+`"auto"` gives each pool worker `cores // pool_size` assembly threads, and the
+pool is sized from the task's planned share, so threads x processes equals the
+core count. It resolves to 1 whenever a task holds at least one unit per core,
+and opens up when it holds fewer — a 40-unit sweep across 10 nodes gives each
+of a task's 4 solves roughly `96/4 = 24` threads instead of one core out of 96.
+The steal phase reuses the same width, so neither phase oversubscribes.
 
 Scaling is real but sub-linear — only the tiled far-field pass is threaded, and
 the scatter into the global matrices is serialized behind a lock. Measured on a
@@ -160,8 +159,10 @@ left to other tasks=40.  0.2 s elapsed
 
 Every unit still gets solved, but on one node instead of ten.
 `tests/test_hpc_scheduling.py::test_no_task_starvation` covers it.
-Claims are `O_CREAT | O_EXCL` files in `<run_dir>/claims/`, which is atomic on
-any filesystem a run directory lives on, so no coordinating process is needed.
+
+Claims themselves are `O_CREAT | O_EXCL` files in `<run_dir>/claims/`, which is
+atomic on any filesystem a run directory lives on, so no coordinating process
+is needed.
 
 A claim carries a heartbeat. If a task dies, its claims go quiet and become
 stealable after `CLAIM_STALE_SECONDS` (default 3600 for 2-D, 7200 for BoR — set
