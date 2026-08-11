@@ -141,8 +141,25 @@ lands at 2.13× optimal — roughly twice the node-hours for the same sweep.
 
 ### Work stealing
 
-Each task works its own planned share first (dearest first, which is what keeps
-the makespan down), then falls through to everyone else's as a steal pool.
+Each task works its own planned share to completion first (dearest first, which
+is what keeps the makespan down), and only then falls through to everyone
+else's as a steal pool. The two phases are separate on purpose: a task's
+concurrency is sized from its **own share**, not from the whole sweep, so a
+fast starter cannot reach past its share and claim work planned for its peers.
+
+Getting this wrong is easy and looks like success. If concurrency is sized from
+the total unit count, the dispatcher fills its pool from the head of the
+candidate list -- which begins with the task's own units and continues into
+everyone else's -- so on a 96-core node with a 40-unit sweep the first task to
+start claims the entire run, and the other nine report
+
+```
+planned for this slot: 1 ... wrote=0 skipped=0 failed=0,
+left to other tasks=40.  0.2 s elapsed
+```
+
+Every unit still gets solved, but on one node instead of ten.
+`tests/test_hpc_scheduling.py::test_no_task_starvation` covers it.
 Claims are `O_CREAT | O_EXCL` files in `<run_dir>/claims/`, which is atomic on
 any filesystem a run directory lives on, so no coordinating process is needed.
 

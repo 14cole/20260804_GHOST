@@ -779,14 +779,18 @@ def _planned_names(units, slots, slot, n_slots):
 
 
 def _ordered_candidates(units, costs, slots, slot, n_slots):
-    # type: (List[Dict[str, Any]], Dict[str, float], Dict[str, int], int, int) -> List[Dict[str, Any]]
-    """This slot's planned units first (dearest first), then everyone else's.
+    # type: (List[Dict[str, Any]], Dict[str, float], Dict[str, int], int, int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]
+    """(this slot's planned units, everyone else's), each dearest first.
 
-    Working the plan first keeps nodes off each other's claim files in the
-    common case. The trailing steal list is what closes the gap when the cost
-    model was wrong, a node was slow, or an array task never started at all --
-    without it, an idle node has nothing to do while another still has hours
-    of backlog.
+    Returned as two lists, not one, and that separation matters. They used to
+    be concatenated, and the dispatcher fills its pool from the head of
+    whatever it is given -- so a task whose pool was wider than its own share
+    reached straight past it into other tasks' work on the very first fill.
+    With a 96-core node and a 40-unit sweep that meant the first task to start
+    claimed the entire run and the other nine exited having written nothing.
+
+    Stealing is for when a task has finished its own share, not for the moment
+    it starts.
     """
 
     def _key(unit):
@@ -796,19 +800,19 @@ def _ordered_candidates(units, costs, slots, slot, n_slots):
     mine_names = _planned_names(units, slots, slot, n_slots)
     mine = [u for u in units if _unit_name(u) in mine_names]
     others = [u for u in units if _unit_name(u) not in mine_names]
-    return sorted(mine, key=_key) + sorted(others, key=_key)
+    return sorted(mine, key=_key), sorted(others, key=_key)
 
 
 def _resolve_assembly_threads(cores, pool_size):
     # type: (int, int) -> int
     """Threads per solve, sized so threads x processes never exceeds the cores.
 
-    Deliberately keyed on the pool size rather than on this slot's planned
-    share: a task that runs dry falls through to stealing and can end up with
-    a full pool, so sizing threads for the planned share would oversubscribe
-    the node exactly when it got busiest. The pool is only smaller than the
-    core count when the run itself has few units -- which is the case this
-    exists for.
+    The pool is itself sized from this slot's planned share, and the steal
+    phase reuses that same width, so threads x processes equals the core count
+    in both phases and neither can oversubscribe the node. It opens up
+    precisely when a slot holds fewer units than the node has cores, which is
+    the case this exists for -- a 40-unit sweep across 10 nodes gives each
+    solve a real slice of its node instead of one core out of 96.
     """
 
     if ASSEMBLY_THREADS != "auto":
@@ -856,21 +860,29 @@ def worker(run_dir_str, submission_index, task_index):
     slot    = int(submission_index) * n_nodes + int(task_index)
 
     costs, peaks, slots = _read_schedule(run_dir)
-    candidates = _ordered_candidates(units, costs, slots, slot, n_slots)
+    planned_units, steal_units = _ordered_candidates(
+        units, costs, slots, slot, n_slots
+    )
+    candidates = planned_units + steal_units
     mine = _planned_names(units, slots, slot, n_slots)
-    planned = len(mine) or len(candidates)
+    planned = len(planned_units)
 
     cores = hpc_scheduler.detect_cores()
     memory_gb = hpc_scheduler.detect_memory_gb()
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = cores if MAX_WORKERS_PER_NODE is None else max(1, int(MAX_WORKERS_PER_NODE))
-    pool_size = max(1, min(cores, worker_cap, len(candidates)))
+    # Concurrency is sized from this task's OWN share, not from the whole
+    # sweep. Sizing it from the total let one task claim every unit before the
+    # others had started; it also left each solve with a sliver of the node
+    # when the run was smaller than the cluster.
+    pool_size = max(1, min(cores, worker_cap, max(1, planned)))
     assembly_threads = _resolve_assembly_threads(cores, pool_size)
 
     print("=" * 70)
     print(f"  Slot {slot}/{n_slots - 1}  "
           f"(submission={submission_index}, task={task_index})")
-    print(f"  Units in run   : {len(units)}   planned for this slot: {planned}")
+    print(f"  Units in run   : {len(units)}   planned for this slot: {planned}"
+          f"   (then {len(steal_units)} stealable)")
     print(f"  Cores detected : {cores}   pool size: {pool_size}   "
           f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
           f"assembly threads/solve: {assembly_threads})")
@@ -965,7 +977,11 @@ def worker(run_dir_str, submission_index, task_index):
             pool, budget_gb=budget_gb, max_concurrent=pool_size
         )
         try:
-            dispatcher.run(candidates, _prepare, _on_result, _on_error)
+            # Own share first. Only when it is finished does this task reach
+            # for anyone else's, so a fast starter cannot swallow the run.
+            dispatcher.run(planned_units, _prepare, _on_result, _on_error)
+            if steal_units:
+                dispatcher.run(steal_units, _prepare, _on_result, _on_error)
         finally:
             broker.stop_heartbeat()
 

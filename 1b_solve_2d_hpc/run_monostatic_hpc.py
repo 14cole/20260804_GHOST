@@ -188,10 +188,9 @@ def _claim_key(job) -> 'str':
 def _resolve_assembly_threads(cores: 'int', pool_size: 'int') -> 'int':
     """Threads per solve, sized so threads x processes never exceeds the cores.
 
-    Keyed on the pool size rather than on this task's planned share: a task
-    that runs dry falls through to stealing and can end up with a full pool,
-    so sizing threads for the planned share would oversubscribe the node
-    exactly when it got busiest.
+    The pool is itself sized from this task's planned share, and the steal
+    phase reuses that same width, so threads x processes equals the core count
+    in both phases and neither can oversubscribe the node.
     """
 
     if ASSEMBLY_THREADS != "auto":
@@ -221,17 +220,27 @@ def worker(task_index: 'int') -> 'None':
     def _order_key(job):
         return (-costs.get(str(job["output"]), 1.0), str(job["output"]))
 
-    mine = [j for j in jobs if slots.get(str(j["output"]), -1) == int(task_index)]
-    others = [j for j in jobs if slots.get(str(j["output"]), -1) != int(task_index)]
-    # Own share first (dearest first, which is what keeps the makespan down),
-    # then everyone else's as a steal pool for whoever finishes early.
-    candidates = sorted(mine, key=_order_key) + sorted(others, key=_order_key)
+    # Kept as two lists, not concatenated: the dispatcher fills its pool from
+    # the head of whatever it is given, so a task whose pool was wider than its
+    # own share would reach past it into other tasks' work on the first fill --
+    # one fast starter could claim the whole sweep and leave the rest idle.
+    mine = sorted(
+        [j for j in jobs if slots.get(str(j["output"]), -1) == int(task_index)],
+        key=_order_key,
+    )
+    others = sorted(
+        [j for j in jobs if slots.get(str(j["output"]), -1) != int(task_index)],
+        key=_order_key,
+    )
+    candidates = mine + others
 
     cores = hpc_scheduler.detect_cores()
     memory_gb = hpc_scheduler.detect_memory_gb()
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_limit = cores if MAX_WORKERS_PER_TASK is None else int(MAX_WORKERS_PER_TASK)
-    pool_size = max(1, min(cores, worker_limit, len(candidates)))
+    # Sized from this task's OWN share, so it cannot out-claim its peers and
+    # each solve gets a real slice of the node when the run is small.
+    pool_size = max(1, min(cores, worker_limit, max(1, len(mine))))
     assembly_threads = _resolve_assembly_threads(cores, pool_size)
 
     kwargs = {
@@ -320,7 +329,10 @@ def worker(task_index: 'int') -> 'None':
             pool, budget_gb=budget_gb, max_concurrent=pool_size
         )
         try:
-            dispatcher.run(candidates, _prepare, _on_result, _on_error)
+            # Own share first; steal only once it is finished.
+            dispatcher.run(mine, _prepare, _on_result, _on_error)
+            if others:
+                dispatcher.run(others, _prepare, _on_result, _on_error)
         finally:
             broker.stop_heartbeat()
 

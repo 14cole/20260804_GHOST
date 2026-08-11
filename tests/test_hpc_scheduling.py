@@ -278,6 +278,64 @@ def _run(driver, args, timeout=1800):
     )
 
 
+def test_no_task_starvation():
+    """A fast starter must not claim work planned for its peers.
+
+    Concurrency used to be sized from the whole sweep rather than from a
+    task's own share, and the dispatcher fills its pool from the head of the
+    candidate list -- so the first task to start reached straight past its
+    share into everyone else's. On a 96-core node with a 40-unit sweep that
+    meant one task took the entire run and the other nine exited having
+    written nothing.
+    """
+
+    print("\nstarvation (many tasks, one small sweep)")
+    root = Path(tempfile.mkdtemp(prefix="ghost-starve-"))
+    try:
+        geom_root = root / "geometries"
+        source = REPO / "geometries" / "body.geo"
+        hpc_common.stage_geometry([source], geom_root)
+        shutil.copyfile(str(source), str(geom_root / "FRD" / "body_two.geo"))
+        tasks = 6
+        settings = dict(DRIVER_SETTINGS)
+        settings.update({
+            "FRD_DIR": str(geom_root / "FRD"),
+            "OPN_DIR": str(geom_root / "OPN"),
+            "OUTPUT_DIR": str(root / "runs"),
+            "FREQUENCIES_GHZ": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "AZIMUTHS_DEG": [0.0, 90.0],
+            "POLARIZATIONS": ["TM"],
+            "N_NODES": tasks,
+            "MAX_WORKERS_PER_NODE": None,
+        })
+        driver = hpc_common.configure_driver(
+            BACKEND / "run_hpc_monostatic.py", root / "driver.py", settings
+        )
+        env = {**os.environ, "PYTHONPATH": str(BACKEND)}
+        if subprocess.run([sys.executable, str(driver)], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, env=env).returncode:
+            check(False, "submit failed")
+            return
+        run_dir = hpc_common.latest_run_dir(root / "runs")
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(driver), "--worker", str(run_dir), "0", str(t)],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                universal_newlines=True, env=env,
+            )
+            for t in range(tasks)
+        ]
+        outputs = [p.communicate()[0] for p in procs]
+        wrote = [int(o.split("wrote=")[1].split(",")[0]) for o in outputs
+                 if "wrote=" in o]
+        check(len(wrote) == tasks, f"all {tasks} tasks reported ({len(wrote)})")
+        check(sum(wrote) == 12, f"all 12 units solved (got {sum(wrote)})")
+        check(all(n > 0 for n in wrote),
+              f"no task was starved by a faster peer (per-task writes: {wrote})")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_end_to_end():
     print("\nend-to-end sweep")
     root = Path(tempfile.mkdtemp(prefix="ghost-hpc-test-"))
@@ -397,6 +455,7 @@ def main():
     test_survey_mode_cost()
     test_resource_detection()
     test_fingerprint_cache()
+    test_no_task_starvation()
     test_end_to_end()
     print(f"\n{len(FAILURES)} failure(s)")
     for message in FAILURES:
