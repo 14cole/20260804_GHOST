@@ -137,6 +137,21 @@ MEMORY_HEADROOM = 0.85            # Fraction of the node's memory allocation the
 MEMORY_SAFETY   = 1.35            # Multiplier on the solver's own dense-storage
                                   # estimate, covering allocator slack and the
                                   # transient copies a factorization makes.
+MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
+                                  # footprint, exported to the job as
+                                  # GHOST_MAX_SOLVE_GB. None = derive it from
+                                  # what the node reports (0.9 x detected,
+                                  # floored at 32 GB).
+                                  #
+                                  # Set it when you intend to run something
+                                  # very large. Detection needs a number it
+                                  # can trust: with MEM_PER_NODE = "0" SLURM
+                                  # reports 0, so the limit falls back to the
+                                  # cgroup or /proc/meminfo, and if neither is
+                                  # meaningful the ceiling collapses to 32 GB
+                                  # and a big solve is refused on a big node.
+                                  # Either set this, or give MEM_PER_NODE an
+                                  # explicit size like "750G".
 SLURM_MAIL_TYPE = None            # e.g. "END,FAIL"
 SLURM_MAIL_USER = None
 SLURM_EXTRA_SBATCH = []  # type: List[str]  # raw extra lines, e.g. "--constraint=intel"
@@ -538,6 +553,8 @@ def _validate_config():
         sys.exit("ERROR: ASSEMBLY_THREADS must be 'auto' or an integer >= 1.")
     if int(CLAIM_STALE_SECONDS) < 60:
         sys.exit("ERROR: CLAIM_STALE_SECONDS must be at least 60.")
+    if MAX_SOLVE_GB is not None and float(MAX_SOLVE_GB) <= 0.0:
+        sys.exit("ERROR: MAX_SOLVE_GB must be positive or None.")
     return pols, frequencies, azimuths
 
 
@@ -666,6 +683,10 @@ def submit():
             worker_args=f"--worker {run_dir} {j} ${{SLURM_ARRAY_TASK_ID}}",
             submission_index=j,
             blas_threads=int(BLAS_THREADS_PER_WORKER),
+            extra_env=(
+                {"GHOST_MAX_SOLVE_GB": f"{float(MAX_SOLVE_GB):g}"}
+                if MAX_SOLVE_GB else {}
+            ),
         ))
         sp.chmod(0o755)
         slurm_paths.append(sp)
@@ -692,6 +713,20 @@ def submit():
     if peaks:
         print(f"  Unit peak RAM : {min(peaks):.2f}-{max(peaks):.2f} GB "
               f"estimated (incl. {MEMORY_SAFETY:g}x safety)")
+        import rcs_solver as _solver
+        ceiling = (
+            float(MAX_SOLVE_GB) if MAX_SOLVE_GB
+            else _solver._solve_memory_limit_gb()
+        )
+        source = ("MAX_SOLVE_GB" if MAX_SOLVE_GB
+                  else f"{_solver._detect_available_gb():.0f} GB detected here")
+        print(f"  Solve ceiling : {ceiling:.1f} GB per solve ({source})")
+        if max(peaks) > ceiling:
+            print("  [warn] the heaviest planned unit exceeds that ceiling. It "
+                  "is evaluated on the COMPUTE node, not here, so this may be "
+                  "fine -- but if the node cannot report its own memory the "
+                  "ceiling falls back to 32 GB. Set MAX_SOLVE_GB, or give "
+                  "MEM_PER_NODE an explicit size, to be sure.")
     unknown = sum(1 for r in schedule["units"] if int(r["nodes"]) <= 0)
     if unknown:
         print(f"  [warn] {unknown} unit(s) could not be pre-meshed; they carry "

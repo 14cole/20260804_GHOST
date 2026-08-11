@@ -668,6 +668,7 @@ def build_sbatch_script(
     worker_args: 'str',
     submission_index: 'int',
     blas_threads: 'int',
+    extra_env: 'Optional[Dict[str, str]]' = None,
 ) -> 'str':
     """Write one array-job script.
 
@@ -728,6 +729,8 @@ def build_sbatch_script(
     # per core inside every pool worker.
     for name in _BLAS_THREAD_VARS:
         lines.append(f"export {name}={max(1, int(blas_threads))}")
+    for name, value in sorted((extra_env or {}).items()):
+        lines.append(f"export {name}={shlex.quote(str(value))}")
     lines += list(prologue)
     lines += [
         (f"exec {shlex.quote(python_exe)} {shlex.quote(str(script_path))} "

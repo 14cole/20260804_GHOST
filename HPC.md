@@ -98,7 +98,59 @@ overrides it outright.
 
 It used to be a flat 32 GB, which was wrong in both directions: it refused a
 feasible 40 GB solve on a 750 GB node and permitted a 32 GB one on a 16 GB
-laptop. On a 750 GB node the limit is now 675 GB.
+laptop.
+
+**Do not raise the 32 GB floor to run something large.** It is a *minimum* on
+the ceiling, not a cap -- `limit = max(floor, 0.9 x detected)` -- so raising it
+does nothing on a big node and removes the guard on a small one. What the
+ceiling resolves to:
+
+| Situation | Detected | Ceiling | 300 GB solve? |
+|---|---:|---:|---|
+| `--mem=750G` | 750 GB | 675 GB | yes |
+| `--mem-per-cpu=4G`, 96 cpus | 384 GB | 346 GB | yes |
+| `--mem=0` (driver default) | *cgroup or /proc/meminfo* | depends | **check it** |
+| detection returns nothing | 0 | 32 GB | no |
+
+`MEM_PER_NODE = "0"` means "all node memory", and SLURM then reports
+`SLURM_MEM_PER_NODE=0` -- so the ceiling falls back to the cgroup, then to
+/proc/meminfo. On an exclusive node that is normally the full node, but it
+depends on how the cluster configures cgroups, and if neither is meaningful the
+ceiling collapses to 32 GB and a large solve is refused on a large machine.
+
+For anything big, be explicit -- either
+
+```python
+MAX_SOLVE_GB = 400        # exported to the job as GHOST_MAX_SOLVE_GB
+```
+
+or give `MEM_PER_NODE` a real size (`"750G"`) so detection has a number it can
+trust. Submission prints what it resolved to:
+
+```
+Solve ceiling : 400.0 GB per solve (MAX_SOLVE_GB)
+```
+
+To check what a compute node reports before committing a long run:
+
+```bash
+srun --mem=0 --exclusive python -c \
+  "import sys; sys.path.insert(0,'Backend'); import rcs_solver as r; \
+   print(r._detect_available_gb(), '->', r._solve_memory_limit_gb())"
+```
+
+Worth sizing the ambition too. The dense footprint is ~128 bytes per boundary
+node squared, so on one node:
+
+| Footprint | Boundary nodes | Assembly | LU |
+|---:|---:|---:|---:|
+| 100 GB | ~29 000 | ~6 h | ~0.3 h |
+| 300 GB | ~50 000 | ~19 h | ~1.5 h |
+| 675 GB | ~75 000 | ~43 h | ~5 h |
+
+A 300 GB solve also sits right at the default `MAX_PANELS = 50_000`, so raise
+that too. Assembly dominates and is only partly threaded, so these are long
+single-unit runs -- worth a walltime that can hold them.
 
 **Do not set `MAX_WORKERS_PER_NODE` to throttle memory.** The scheduler already
 sizes concurrency from each unit's predicted peak: it runs many cheap units at
