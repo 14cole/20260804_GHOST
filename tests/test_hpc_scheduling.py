@@ -195,6 +195,66 @@ def test_survey_mode_cost():
           f"the refined mesh drives the memory reservation ({big_c / big_s:.2f}x)")
 
 
+def test_memory_heavy_geometry():
+    """Concurrency must follow per-unit memory, not the core count."""
+
+    print("\nmemory-heavy geometry")
+    import threading
+
+    class _Pool:
+        def __init__(self):
+            self.live = 0
+            self.peak = 0
+            self.lock = threading.Lock()
+
+        def apply_async(self, fn, args):
+            with self.lock:
+                self.live += 1
+                self.peak = max(self.peak, self.live)
+            handle = type("H", (), {})()
+            handle._n = 0
+            name = args[0]
+
+            def ready(_h=handle):
+                _h._n += 1
+                if _h._n > 2:
+                    with self.lock:
+                        self.live -= 1
+                    return True
+                return False
+
+            handle.ready = ready
+            handle.get = lambda: name
+            return handle
+
+    def peak_concurrency(budget, per_unit_gb, count):
+        pool = _Pool()
+        dispatcher = hpc_scheduler.MemoryAwareDispatcher(
+            pool, budget_gb=budget, max_concurrent=96, poll_seconds=0.0
+        )
+        units = [{"name": f"u{i}", "gb": per_unit_gb} for i in range(count)]
+        done = []
+        dispatcher.run(
+            units,
+            lambda u: (u["name"], u["gb"], (lambda a: a, (u["name"],))),
+            lambda k, v: done.append(v),
+            lambda k, e: done.append(("ERR", k)),
+        )
+        return pool.peak, len(done)
+
+    light, n_light = peak_concurrency(100.0, 0.7, 20)
+    heavy, n_heavy = peak_concurrency(100.0, 45.0, 20)
+    check(n_light == 20 and n_heavy == 20, "every unit runs at both weights")
+    check(light > heavy,
+          f"heavy units run less concurrently ({light} light vs {heavy} heavy)")
+    check(heavy * 45.0 <= 100.0,
+          f"the heavy case stays inside the budget ({heavy} x 45 GB)")
+
+    over, n_over = peak_concurrency(100.0, 400.0, 3)
+    check(over == 1 and n_over == 3,
+          "a unit larger than the whole budget runs alone, without deadlock")
+
+
 def test_resource_detection():
     print("\nresource detection")
     saved = {name: os.environ.get(name) for name in
@@ -453,6 +513,7 @@ def main():
     test_claims()
     test_memory_admission()
     test_survey_mode_cost()
+    test_memory_heavy_geometry()
     test_resource_detection()
     test_fingerprint_cache()
     test_no_task_starvation()

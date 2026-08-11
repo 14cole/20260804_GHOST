@@ -876,7 +876,19 @@ def worker(run_dir_str, submission_index, task_index):
     # others had started; it also left each solve with a sliver of the node
     # when the run was smaller than the cluster.
     pool_size = max(1, min(cores, worker_cap, max(1, planned)))
-    assembly_threads = _resolve_assembly_threads(cores, pool_size)
+    # Threads are sized from the concurrency memory will actually permit, not
+    # from the pool width. A memory-heavy geometry narrows admission -- eight
+    # planned units that peak at 45 GB each run two at a time on a 100 GB
+    # node -- and sizing threads for eight would leave three quarters of the
+    # cores idle for the whole run.
+    heaviest = max(
+        (peaks.get(_unit_name(u), 0.0) for u in planned_units), default=0.0
+    )
+    memory_concurrency = (
+        pool_size if heaviest <= 0.0
+        else max(1, min(pool_size, int(budget_gb // heaviest)))
+    )
+    assembly_threads = _resolve_assembly_threads(cores, memory_concurrency)
 
     print("=" * 70)
     print(f"  Slot {slot}/{n_slots - 1}  "
@@ -886,6 +898,9 @@ def worker(run_dir_str, submission_index, task_index):
     print(f"  Cores detected : {cores}   pool size: {pool_size}   "
           f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
           f"assembly threads/solve: {assembly_threads})")
+    if memory_concurrency < pool_size:
+        print(f"  Memory-limited : at most {memory_concurrency} concurrent "
+              f"solve(s); heaviest planned unit {heaviest:.1f} GB")
     print(f"  Memory         : {memory_gb:.1f} GB allocated, "
           f"{budget_gb:.1f} GB schedulable")
     print("=" * 70, flush=True)

@@ -6050,6 +6050,68 @@ def _te_robin_alpha_nodes(
     alpha_nodes[populated] /= alpha_counts[populated]
     return alpha_nodes
 
+def _detect_available_gb() -> 'float':
+    """Memory this process may actually use, in GB.
+
+    Checked in the order that reflects reality on a cluster: a SLURM
+    allocation binds before a cgroup limit, and both bind before what
+    /proc/meminfo says the machine has.
+    """
+
+    raw = os.environ.get("SLURM_MEM_PER_NODE", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return float(int(raw)) / 1024.0
+    raw = os.environ.get("SLURM_MEM_PER_CPU", "").strip()
+    cpus = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
+    if raw.isdigit() and int(raw) > 0 and cpus.isdigit() and int(cpus) > 0:
+        return float(int(raw)) * float(int(cpus)) / 1024.0
+    for path in (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ):
+        try:
+            with open(path) as stream:
+                text = stream.read().strip()
+        except OSError:
+            continue
+        if text.isdigit():
+            limit = float(text) / (1024.0 ** 3)
+            if 0.5 < limit < 1.0e6:
+                return limit
+    try:
+        with open("/proc/meminfo") as stream:
+            for line in stream:
+                if line.startswith("MemTotal:"):
+                    return float(line.split()[1]) / (1024.0 ** 2)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
+
+
+# Hard ceiling on one solve's estimated dense footprint.
+#
+# This used to be a flat 32 GB, which is the wrong constant in both directions:
+# it refuses a perfectly feasible 40 GB solve on a 750 GB node, and it permits
+# a 32 GB one on a 16 GB laptop. It is now derived from what the process can
+# actually use, floored at the old value so nothing that ran before stops
+# running, and overridable outright with GHOST_MAX_SOLVE_GB.
+_MEMORY_LIMIT_FLOOR_GB = 32.0
+_MEMORY_LIMIT_FRACTION = 0.9
+
+
+def _solve_memory_limit_gb() -> 'float':
+    override = os.environ.get("GHOST_MAX_SOLVE_GB", "").strip()
+    if override:
+        try:
+            value = float(override)
+        except ValueError:
+            value = 0.0
+        if value > 0.0:
+            return value
+    detected = _detect_available_gb()
+    return max(_MEMORY_LIMIT_FLOOR_GB, _MEMORY_LIMIT_FRACTION * detected)
+
+
 def _estimate_memory_gb(
     nnodes: 'int',
     use_cfie: 'bool',
@@ -8115,11 +8177,15 @@ def solve_monostatic_rcs_2d(
         fmm_requested = isinstance(solver_method, str) and solver_method.strip().lower() == "fmm"
         fmm_capable = (pol == 'TE' and _is_all_robin(coupled_infos)) or _is_multi_region(coupled_infos)
         dense_gate_active = not (fmm_requested and fmm_capable)
-        if est_gb > 32.0 and dense_gate_active:
+        memory_limit_gb = _solve_memory_limit_gb()
+        if est_gb > memory_limit_gb and dense_gate_active:
             raise MemoryError(
-                f"Estimated peak memory {est_gb:.1f} GB exceeds 32 GB safety limit "
-                f"({nnodes} nodes, {n_regions} region(s)). "
-                f"Reduce panel count, frequency, use mesh_reference_ghz, or "
+                f"Estimated peak memory {est_gb:.1f} GB exceeds the "
+                f"{memory_limit_gb:.1f} GB limit for this process "
+                f"({nnodes} nodes, {n_regions} region(s); "
+                f"{_detect_available_gb():.1f} GB detected). "
+                f"Reduce panel count, frequency, use mesh_reference_ghz, "
+                f"raise GHOST_MAX_SOLVE_GB if the memory really is there, or "
                 f"solver_method='fmm' for TE all-Robin / multi-region problems."
             )
         if est_gb > 8.0 and dense_gate_active:

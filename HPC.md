@@ -66,6 +66,40 @@ Leave `MEM_PER_NODE = "0"` with `--exclusive`. Omitting the directive lets the
 cluster default (often `DefMemPerCPU` ≈ 3.5 GB × CPUs) apply, which on a 750 GB
 node is a fraction of what is there and will OOM-kill workers.
 
+### Memory-heavy geometries
+
+Concurrency follows each unit's predicted peak, so a heavy geometry
+automatically runs fewer at a time. Measured against a 100 GB budget:
+
+| Per-unit peak | Concurrent solves | Reserved |
+|---:|---:|---:|
+| 0.7 GB | 20 | 14 GB |
+| 12 GB | 8 | 96 GB |
+| 45 GB | 2 | 90 GB |
+
+Threads follow the same number rather than the pool width, so those two 45 GB
+solves get `96/2 = 48` assembly threads each instead of a twelfth of the node.
+Submission prints the narrowing when it happens:
+
+```
+Memory-limited : at most 2 concurrent solve(s); heaviest planned unit 45.3 GB
+```
+
+A unit larger than the whole budget still runs, alone, rather than deadlocking
+the node -- verified, along with the table above, in
+`tests/test_hpc_scheduling.py`.
+
+Beyond that the solver has its own last-resort gate and refuses to allocate
+before it starts, so an impossible unit fails with a number instead of being
+OOM-killed. That ceiling is derived from what the process can actually use --
+a SLURM allocation, then a cgroup limit, then `/proc/meminfo` -- times 0.9, and
+floored at 32 GB so nothing that ran before stops running. `GHOST_MAX_SOLVE_GB`
+overrides it outright.
+
+It used to be a flat 32 GB, which was wrong in both directions: it refused a
+feasible 40 GB solve on a 750 GB node and permitted a 32 GB one on a 16 GB
+laptop. On a 750 GB node the limit is now 675 GB.
+
 **Do not set `MAX_WORKERS_PER_NODE` to throttle memory.** The scheduler already
 sizes concurrency from each unit's predicted peak: it runs many cheap units at
 once and narrows to a few when the expensive ones come up. A fixed cap is the
