@@ -54,6 +54,32 @@ Run one with no arguments:
 python Backend/run_local_monostatic.py
 ```
 
+### Naming polarizations
+
+Every driver, local and SLURM alike, takes either spelling of the same two
+physical channels:
+
+| Radar | 2-D | Why |
+|---|---|---|
+| `HH` | `TM` | these geometries are elevation cuts, so the out-of-plane z axis is *horizontal*; E along z is HH |
+| `VV` | `TE` | TE's in-plane E carries the vertical component |
+
+`V`, `H`, `VERTICAL`, and `HORIZONTAL` are accepted too. Which spelling reaches
+the output file names depends on the driver, and it is fixed per driver so that
+changing what you type in CONFIG never forks a sweep into two sets of files:
+
+- `run_hpc_monostatic.py` / `run_local_monostatic.py` name files with the label
+  you wrote, and default to `["VV", "HH"]`.
+- The step-1 runners (`1a_solve_2d_local`, `1b_solve_2d_hpc`) always name files
+  `TM_`/`TE_`, so a sweep configured as `["VV", "HH"]` reuses results a
+  `["TM", "TE"]` sweep already produced instead of re-solving them.
+- The BoR drivers always name files `VV_`/`HH_` -- a BoR unit's channels really
+  are theta-pol and phi-pol, and the az/el pairing looks for those names.
+
+Listing one channel under two names (`["VV", "TE"]`) is rejected rather than
+silently solving the same physics twice and publishing it under two names,
+which a downstream concatenation would then treat as independent channels.
+
 ---
 
 ## 2. Sizing a run

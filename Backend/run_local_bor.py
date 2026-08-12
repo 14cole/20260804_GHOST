@@ -54,7 +54,8 @@ GEOMETRY_DIRS = ["geometries/BOR"]      # every *.geo under these, recursively
 
 FREQUENCIES_GHZ = [1.0, 2.0, 4.0]
 ASPECTS_DEG     = [float(a) for a in range(0, 181, 5)]
-POLARIZATIONS   = ["VV", "HH"]
+POLARIZATIONS   = ["VV", "HH"]         # or TM/TE (TM = HH, TE = VV); either
+                                       # spelling is written out as VV/HH
 
 OUTPUT_DIR = "rcs_runs_bor"
 
@@ -341,6 +342,17 @@ def _validate_config() -> 'List[str]':
     if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not ASPECTS_DEG:     sys.exit("ERROR: ASPECTS_DEG is empty.")
+    try:
+        # A BoR unit's channels are theta-pol and phi-pol, so VV/HH is the
+        # canonical spelling here and TM/TE are the aliases -- the reverse of
+        # the 2-D elevation-cut convention. Either is accepted and both land on
+        # VV/HH names. Two spellings of one channel are rejected: ["VV", "TE"]
+        # looks like two polarizations and is one.
+        pols = hpc_scheduler.distinct_polarization_channels(
+            pols, hpc_scheduler.canonical_bor_polarization
+        )
+    except ValueError as exc:
+        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
     if str(ASSEMBLY).strip().lower() not in {"auto", "tables", "streaming"}:
         sys.exit("ERROR: ASSEMBLY must be auto, tables, or streaming.")
     if str(TABLE_PRECISION).strip().lower() not in {"auto", "single", "double"}:

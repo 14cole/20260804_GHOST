@@ -12,6 +12,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from feature_sum import geometry_input_fingerprint
+from hpc_scheduler import canonical_polarization
 from solver_quality import (
     evaluate_mesh_convergence,
     scale_snapshot_panel_density,
@@ -26,15 +27,28 @@ from workflow_provenance import (
 
 UNIT_SCHEMA = "ghost.workflow.2d-unit.v1"
 
-
 def validate_config(
     frequencies_ghz: 'Iterable[float]',
     angles_deg: 'Iterable[float]',
     polarizations: 'Iterable[str]',
 ) -> 'tuple[list[float], list[float], list[str]]':
+    """Check a runner's CONFIG block and return it in canonical form.
+
+    Polarizations come back as TM/TE whichever spelling was asked for. This
+    runner puts the label straight into the output file name and into each
+    unit's fingerprint, so canonicalizing here is what keeps a sweep written as
+    VV/HH landing on the same results as one written as TM/TE, instead of
+    re-solving the identical physics under a second set of names that the delta
+    step would then treat as separate channels.
+    """
+
     frequencies = [float(value) for value in frequencies_ghz]
     angles = [float(value) for value in angles_deg]
-    pols = [str(value).strip().upper() for value in polarizations]
+    requested = [str(value).strip() for value in polarizations if str(value).strip()]
+    try:
+        pols = [canonical_polarization(value) for value in requested]
+    except ValueError as exc:
+        raise ValueError(str(exc)) from None
     if (
         not frequencies
         or not all(math.isfinite(value) and value > 0.0 for value in frequencies)
@@ -53,8 +67,11 @@ def validate_config(
         raise ValueError("ANGLES_DEG must be non-empty, finite, and unique.")
     if len(pols) != 2 or set(pols) != {"TM", "TE"}:
         raise ValueError(
-            "POLARIZATIONS must contain exactly TM and TE; a complete feature "
-            "delta needs both physical channels."
+            "POLARIZATIONS must name both physical channels exactly once; a "
+            "complete feature delta needs both. Write them as TM and TE, or "
+            "as the radar aliases VV and HH (VV = TE, HH = TM) -- but not two "
+            f"spellings of the same channel. Got {requested!r}, which resolves "
+            f"to {pols!r}."
         )
     return frequencies, angles, pols
 

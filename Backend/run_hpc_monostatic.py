@@ -503,14 +503,14 @@ def _validate_config():
     if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
-    if (
-        len(set(pols)) != len(pols)
-        or not set(pols).issubset({"TM", "TE", "VV", "HH"})
-    ):
-        sys.exit(
-            "ERROR: POLARIZATIONS must be a unique subset of TM/TE (VV/HH "
-            "aliases are accepted)."
-        )
+    try:
+        # Rejects an unknown label and, just as importantly, two spellings of
+        # the same channel: ["VV", "TE"] looks like two polarizations and is
+        # one, so it would otherwise solve identical physics twice and publish
+        # it twice under different names.
+        pols = hpc_scheduler.distinct_polarization_channels(pols)
+    except ValueError as exc:
+        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
     if (
         not all(math.isfinite(value) and value > 0.0 for value in frequencies)

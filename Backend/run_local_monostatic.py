@@ -54,7 +54,9 @@ OPN_DIR = "geometries/OPN"
 # Sweep.
 FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
-POLARIZATIONS   = ["VV", "HH"]          # any subset of: VV, HH, TM, TE
+POLARIZATIONS   = ["VV", "HH"]          # any subset of VV, HH, TM, TE
+                                        # (VV = TE, HH = TM). Naming one
+                                        # channel twice is rejected.
 
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "rcs_runs"
@@ -398,6 +400,14 @@ def _validate_config() -> 'List[str]':
     if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
+    try:
+        # Accepts TM/TE and the radar aliases VV/HH, and rejects two spellings
+        # of the same channel: ["VV", "TE"] looks like two polarizations and is
+        # one, so it would otherwise solve identical physics twice and publish
+        # it twice under different names.
+        pols = hpc_scheduler.distinct_polarization_channels(pols)
+    except ValueError as exc:
+        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
     if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
         sys.exit("ERROR: MEMORY_HEADROOM must be in (0, 1].")
     if float(MEMORY_SAFETY) < 1.0:

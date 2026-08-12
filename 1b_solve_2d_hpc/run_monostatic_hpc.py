@@ -51,7 +51,11 @@ from step1_monostatic import (  # noqa: E402
 # -- USER SETTINGS ----------------------------------------------------------
 FREQUENCIES_GHZ = [3.0, 6.0]
 ANGLES_DEG = np.arange(0.0, 180.1, 5.0)
-POLARIZATIONS = ["TM", "TE"]
+POLARIZATIONS = ["TM", "TE"]   # or the radar aliases ["VV", "HH"]
+                               # (VV = TE, HH = TM). Both channels are
+                               # required; outputs are named TM/TE either
+                               # way, so the spelling you use here never
+                               # forks the results into two sets.
 GEOMETRY_UNITS = "meters"
 SOLVER_METHOD = "auto"
 MAX_PANELS = 50_000

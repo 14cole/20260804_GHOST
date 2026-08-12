@@ -545,11 +545,16 @@ def submit():
     if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not ASPECTS_DEG:     sys.exit("ERROR: ASPECTS_DEG is empty.")
-    if (
-        len(set(pols)) != len(pols)
-        or not set(pols).issubset({"VV", "HH"})
-    ):
-        sys.exit("ERROR: POLARIZATIONS must be a unique subset of VV/HH.")
+    try:
+        # A BoR unit's channels are theta-pol and phi-pol, so VV/HH is the
+        # canonical spelling here and TM/TE are the aliases -- the reverse of
+        # the 2-D elevation-cut convention. Either is accepted and both land on
+        # VV/HH names, which is what the az/el pairing below looks for.
+        pols = hpc_scheduler.distinct_polarization_channels(
+            pols, hpc_scheduler.canonical_bor_polarization
+        )
+    except ValueError as exc:
+        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
     if (
         not all(math.isfinite(value) and value > 0.0

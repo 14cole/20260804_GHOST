@@ -253,6 +253,81 @@ def test_step1_local(workspace):
     check("skipped=2" in second.stdout,
           f"finished units are skipped, not redone:\n{second.stdout.strip()}")
 
+    # The radar spellings name the same two physical channels, so a sweep
+    # written as VV/HH must land on the results the TM/TE sweep already
+    # produced rather than forking a second set of files under other names.
+    alias_script = script.replace(
+        f"driver.POLARIZATIONS = {['TM', 'TE']!r}",
+        f"driver.POLARIZATIONS = {['VV', 'HH']!r}",
+    )
+    if alias_script == script:
+        check(False, "could not reconfigure the run to VV/HH")
+        return
+    aliased = _run(alias_script, here)
+    check(aliased.returncode == 0,
+          f"a VV/HH run is accepted:\n{aliased.stdout}\n{aliased.stderr}")
+    check("skipped=2" in aliased.stdout,
+          f"VV/HH reuses the TM/TE results instead of re-solving:\n"
+          f"{aliased.stdout.strip()}")
+    after = [p for p in (here / "results").rglob("*") if p.is_file()]
+    check(len(after) == 2,
+          f"VV/HH added no second set of files (got {[p.name for p in after]})")
+    check(all(p.name.startswith(("TM_", "TE_")) for p in after),
+          f"outputs stay canonically named (got {[p.name for p in after]})")
+
+
+def test_polarization_aliases():
+    print("\npolarization aliases")
+    sys.path.insert(0, str(BACKEND))
+    import hpc_scheduler
+    from step1_monostatic import validate_config
+
+    canonical = hpc_scheduler.canonical_polarization
+    check(canonical("VV") == "TE" and canonical("HH") == "TM",
+          "VV maps to TE and HH maps to TM")
+    check(canonical(" vv ") == "TE",
+          "labels are case- and whitespace-insensitive")
+    # BoR channels are theta-pol/phi-pol, so there VV/HH is canonical and
+    # TM/TE are the aliases -- the same grouping, spelled the other way.
+    bor = hpc_scheduler.canonical_bor_polarization
+    check(bor("TE") == "VV" and bor("TM") == "HH" and bor("VV") == "VV",
+          "the BoR spelling maps TE to VV and TM to HH")
+
+    check(hpc_scheduler.distinct_polarization_channels(["VV", "HH"])
+          == ["VV", "HH"],
+          "labels come back as written when the driver names files with them")
+    check(hpc_scheduler.distinct_polarization_channels(["TM", "TE"], bor)
+          == ["HH", "VV"],
+          "and canonicalized when the driver's file names use a fixed spelling")
+
+    _f, _a, pols = validate_config([3.0], [0.0], ["VV", "HH"])
+    check(sorted(pols) == ["TE", "TM"],
+          f"a VV/HH step-1 config canonicalizes to TM/TE (got {pols})")
+
+    for bad, why in (
+        (["VV", "V"], "two spellings of the same channel"),
+        (["TM", "HH"], "two spellings of the same channel"),
+        (["TM"], "only one channel"),
+        (["TM", "TE", "VV"], "a repeated channel"),
+        (["RHCP", "LHCP"], "an unsupported label"),
+    ):
+        try:
+            validate_config([3.0], [0.0], bad)
+        except ValueError:
+            check(True, f"step-1 rejects {bad} ({why})")
+        else:
+            check(False, f"step-1 accepted {bad} but it is {why}")
+
+    # The same-channel-twice case is the one a plain uniqueness check misses,
+    # so assert it directly on the shared helper the 2-D drivers call.
+    for bad in (["VV", "TE"], ["HH", "TM"], ["V", "VERTICAL"]):
+        try:
+            hpc_scheduler.distinct_polarization_channels(bad)
+        except ValueError:
+            check(True, f"{bad} is rejected as one channel written twice")
+        else:
+            check(False, f"{bad} was accepted but is one channel twice")
+
 
 def test_bor_driver_loads():
     """No BoR geometry ships with the repo, so this is a config/import check."""
@@ -263,8 +338,19 @@ def test_bor_driver_loads():
         import sys
         sys.path.insert(0, {str(BACKEND)!r})
         import run_local_bor as driver
-        pols = driver._validate_config()
-        assert pols == ["VV", "HH"], pols
+        assert driver._validate_config() == ["VV", "HH"]
+        # TM/TE is accepted and lands on the VV/HH names the az/el pairing
+        # and the grim channel labels expect.
+        driver.POLARIZATIONS = ["TM", "TE"]
+        assert driver._validate_config() == ["HH", "VV"], driver._validate_config()
+        driver.POLARIZATIONS = ["VV", "TE"]
+        try:
+            driver._validate_config()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("one channel written twice was accepted")
+        driver.POLARIZATIONS = ["VV", "HH"]
         assert driver._plan([]) == {{}}
         # The knobs the worker forwards must all exist on the solver entry point.
         import inspect
@@ -296,6 +382,7 @@ def main():
         test_run_local_monostatic(workspace)
         test_resume_same_run_dir(workspace)
         test_step1_local(workspace)
+        test_polarization_aliases()
         test_bor_driver_loads()
 
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")

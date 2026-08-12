@@ -43,6 +43,82 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # -----------------------------------------------------------------------------
+# Polarization labels
+# -----------------------------------------------------------------------------
+
+# The radar spellings of the same two physical channels. These 2-D geometries
+# are elevation cuts, so the out-of-plane z axis is HORIZONTAL: E along z (TM)
+# is HH, and TE's in-plane E carries the vertical component, so TE is VV. This
+# mirrors rcs_solver._normalize_polarization and lives here so that a driver
+# can validate its CONFIG block without importing the solver -- which matters
+# on the submit path, where nothing else needs numpy loaded.
+_POLARIZATION_ALIASES = {
+    "TM": "TM", "HH": "TM", "H": "TM", "HORIZONTAL": "TM",
+    "TE": "TE", "VV": "TE", "V": "TE", "VERTICAL": "TE",
+}
+
+
+def canonical_polarization(label: 'str') -> 'str':
+    """Canonical TM/TE channel for a user-facing polarization label."""
+
+    text = str(label or "").strip().upper()
+    try:
+        return _POLARIZATION_ALIASES[text]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported polarization {label!r}. Use TM/TE or the radar "
+            "aliases VV/HH (VV = TE, HH = TM)."
+        ) from None
+
+
+def canonical_bor_polarization(label: 'str') -> 'str':
+    """Same two channels, named the way a BoR solve names them.
+
+    A BoR unit is a true 3-D solve whose channels are theta-pol and phi-pol, so
+    VV/HH is the canonical spelling there rather than an alias -- the reverse
+    of the 2-D elevation-cut convention. The grouping is identical either way,
+    which is why both share one alias table.
+    """
+
+    return "HH" if canonical_polarization(label) == "TM" else "VV"
+
+
+def distinct_polarization_channels(
+    labels: 'Sequence[str]',
+    canonical: 'Optional[Callable[[str], str]]' = None,
+) -> 'List[str]':
+    """Validate a POLARIZATIONS list and return one label per channel.
+
+    Rejects both an unknown label and two spellings of the *same* channel. That
+    second case is the one worth catching: ``["VV", "TE"]`` looks like two
+    polarizations and is one, so without this it would solve identical physics
+    twice and publish it under two different file names -- which a downstream
+    concatenation would then treat as independent channels.
+
+    Labels are returned as written by default, because a driver may put them
+    straight into output file names and rewriting them would orphan results
+    from earlier sweeps. Pass ``canonical`` when the driver's file names use a
+    fixed spelling instead; the returned labels are then canonicalized, so
+    either spelling in CONFIG lands on the same results.
+    """
+
+    resolved = []  # type: List[str]
+    seen = {}  # type: Dict[str, str]
+    for label in labels:
+        channel = canonical_polarization(label)
+        if channel in seen:
+            raise ValueError(
+                f"{label!r} and {seen[channel]!r} are the same physical "
+                f"channel ({channel}); list each channel once."
+            )
+        seen[channel] = str(label)
+        resolved.append(str(label) if canonical is None else canonical(label))
+    if not resolved:
+        raise ValueError("no polarizations given.")
+    return resolved
+
+
+# -----------------------------------------------------------------------------
 # Node resources
 # -----------------------------------------------------------------------------
 
