@@ -13,20 +13,46 @@ cancelled, or is preempted cannot strand work.
 
 ## 1. Which driver to run
 
-| Path | Entry point | Output |
-|---|---|---|
-| Coupon library, numbered pipeline | `1b_solve_2d_hpc/run_monostatic_hpc.py` | straight into `results/{FRD,OPN}/` |
-| Manifest-tracked 2-D sweep | `Backend/run_hpc_monostatic.py` | `<OUTPUT_DIR>/run_*/results/` |
-| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `<OUTPUT_DIR>/run_*/results/` |
-| One machine, no SLURM | `1a_solve_2d_local/run_monostatic_local.py` | `results/{FRD,OPN}/` |
+| Path | SLURM entry point | Same sweep, one machine | Output |
+|---|---|---|---|
+| Coupon library, numbered pipeline | `1b_solve_2d_hpc/run_monostatic_hpc.py` | `1a_solve_2d_local/run_monostatic_local.py` | straight into `results/{FRD,OPN}/` |
+| Manifest-tracked 2-D sweep | `Backend/run_hpc_monostatic.py` | `Backend/run_local_monostatic.py` | `<OUTPUT_DIR>/run_*/results/` |
+| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | `<OUTPUT_DIR>/run_*/results/` |
 
-All three HPC drivers share `Backend/hpc_scheduler.py`, so the tuning knobs
-below mean the same thing in each.
+Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
+knobs below mean the same thing in each.
 
 Edit the CONFIG block at the top of a driver and run it with no arguments to
 submit. `hpc_common.configure_driver` still works the same way: it rewrites
 those top-level constants in a copy of the driver, and submitting that copy is
 what carries the settings to the compute nodes.
+
+### Running without SLURM
+
+The `run_local` drivers in the right-hand column are the same code paths minus
+the array-task machinery: no manifest is copied to a compute node, no claim
+directory, no `sbatch`. What they keep is everything that decides how fast a
+sweep finishes and what it leaves behind --
+
+- units costed from the mesh the solver will actually build, run dearest-first;
+- concurrent solves admitted against a memory budget (section 2), not against
+  the core count -- which matters more on a workstation than on a compute node,
+  since there is far less headroom to absorb a wrong guess;
+- assembly threads sized from the concurrency memory will actually permit
+  (section 2, *Threads*);
+- one `.grim` per unit in `results/` and nothing beside it (section 3);
+- the shared angular grid stored once, not once per unit (section 3);
+- resumption by verifying the binding carried inside each existing result.
+
+Local defaults differ in two places, both because the machine is shared with
+whatever else you are doing: `MEMORY_HEADROOM` is `0.75` rather than `0.85`,
+and `WORKERS = None` means *all but one core* rather than *every core*.
+
+Run one with no arguments:
+
+```bash
+python Backend/run_local_monostatic.py
+```
 
 ---
 
@@ -619,6 +645,7 @@ encoding and are yours, not ours.
 
 ```bash
 python tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
+python tests/test_local_drivers.py                        # the run_local drivers, end to end
 python tests/test_solver_equivalence.py  <pristine rcs_solver.py>
 python tests/test_assembly_equivalence.py <pristine rcs_solver.py>
 python tests/benchmark_assembly.py      [pristine rcs_solver.py]

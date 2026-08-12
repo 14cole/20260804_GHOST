@@ -1,39 +1,46 @@
 #!/usr/bin/env python3
-"""
-Local monostatic RCS sweep -- same naming/streaming as run_hpc_monostatic.py,
-no SLURM. Defaults to (cpu_count - 1) workers and exports one .grim per
-(geometry, frequency, polarization) unit as soon as it finishes.
+"""Local monostatic RCS sweep -- run_hpc_monostatic.py without SLURM.
+
+One .grim per (geometry, frequency, polarization) unit is written to
+<OUTPUT_DIR>/run_YYYYMMDD_HHMMSS/results/ as soon as that unit finishes, named
+"<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim". Nothing else lands in results/:
+each file carries its own source/runtime/input attestation inside the artifact,
+so a resumed run verifies what it reuses without a sidecar per output.
+
+Scheduling matches the HPC path. Units are costed from the mesh the solver will
+actually build and run dearest-first, and concurrent solves are admitted
+against a memory budget rather than filling every core regardless of unit size
+-- one 40 GB geometry does not get eight copies of itself started on a 32 GB
+laptop.
 
 Edit the CONFIG block and run:
 
     python run_local_monostatic.py
-
-Outputs go to <OUTPUT_DIR>/run_YYYYMMDD_HHMMSS/results/ as files named
-"<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim". Every resumable output carries
-an exact byte/source/runtime/input attestation; an unverified existing file is
-rejected rather than reused.
 """
 
 import json
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import traceback
 from datetime import datetime
+from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+import hpc_scheduler
 import workflow_provenance as _workflow_provenance
 from solver_quality import validate_mesh_convergence_policy
 from workflow_provenance import (
     backend_source_fingerprint,
+    backend_source_inventory,
+    describe_source_mismatch,
+    embed_output_attestation,
     manifest_solve_spec_fingerprint,
     runtime_environment_fingerprint,
-    sha256_file,
     stable_json_fingerprint,
     unit_solve_spec_fingerprint,
-    verify_output_attestation,
-    write_output_attestation,
+    verify_embedded_attestation,
 )
 
 # ===============================================================================
@@ -52,7 +59,9 @@ POLARIZATIONS   = ["VV", "HH"]          # any subset of: VV, HH, TM, TE
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "rcs_runs"
 
-# Worker pool size. None -> max(1, cpu_count() - 1).
+# Hard ceiling on concurrent solves. None -> max(1, cpu_count() - 1). The
+# memory budget below is usually the binding constraint, so this rarely needs
+# setting.
 WORKERS = None
 
 # Solver knobs (mirror run_monostatic.py).
@@ -62,14 +71,79 @@ CFIE_ALPHA              = 0.0
 MAX_PANELS              = 50_000
 BLAS_THREADS_PER_WORKER = 1
 
+# Mesh-convergence certification. True solves every unit twice -- the requested
+# mesh and one refined by the policy's fine_factor -- and publishes the fine
+# result only if the two agree. That second solve is where most of the wall
+# clock and all of the peak memory go, because cost scales with the square of
+# the node count: turning it off is about 3x faster per unit and roughly halves
+# the memory, so more units fit in RAM at once as well.
+#
+# SURVEY OUTPUT IS NOT PRODUCTION DATA. The algebraic quality gate still runs
+# (a badly conditioned or non-converged solve still fails closed), but nothing
+# establishes that the discretization is fine enough -- the error that biases
+# an RCS number quietly instead of announcing itself. Survey grims carry no
+# mesh-convergence block, which is what feature_sum requires before a field may
+# enter a body or a delta, so the downstream pipeline rejects them on its own.
+# Use this for trade studies and screening, then re-run what matters with
+# MESH_CERTIFICATION = True.
+MESH_CERTIFICATION      = True
+
+# --- Memory admission ------------------------------------------------------
+# A local machine has far less RAM than a compute node and is usually running
+# other things, so the same guard the cluster path uses matters more here, not
+# less. Concurrent solves are admitted while their estimated peaks fit the
+# budget; one unit is always admitted, so a solve larger than the whole budget
+# still runs (and fails loudly from the solver's own gate) instead of hanging.
+MEMORY_HEADROOM = 0.75            # fraction of detected RAM the scheduler may
+                                  # reserve for solves. Lower than the cluster
+                                  # default of 0.85: a workstation has a
+                                  # desktop, a browser, and a page cache to
+                                  # leave room for.
+MEMORY_SAFETY   = 1.35            # multiplier on the solver's own dense-storage
+                                  # estimate, covering allocator slack and the
+                                  # transient copies a factorization makes.
+MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
+                                  # footprint (GHOST_MAX_SOLVE_GB). None =
+                                  # derive it from detected RAM (0.9 x detected,
+                                  # floored at 32 GB). Set it to run something
+                                  # deliberately larger than this machine's RAM
+                                  # against swap, or to refuse earlier.
+
+# Threads each solve may use inside the boundary-operator assembly. "auto"
+# gives every concurrent solve an equal share of the cores -- which is what a
+# local run usually wants, since it typically has fewer units in flight than
+# the machine has cores.
+ASSEMBLY_THREADS        = "auto"         # "auto", or an integer >= 1
+
+# Pool worker lifetime, in units, so allocator growth from a big solve cannot
+# accumulate across a long sweep. The solver is imported in the parent, so a
+# respawn costs a fork rather than a re-import of numpy, SciPy, and the solver.
+TASKS_PER_CHILD = 4
+
 GEOMETRY_EXTS = (".geo",)
 
 # ===============================================================================
 
+MANIFEST_SCHEMA = "ghost.local.2d-run.v2"
+
+# Parsed geometry snapshots, filled in the parent before the pool forks so
+# workers inherit them instead of unpickling one per unit.
+_SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
+
+
+def _solver_source_records() -> 'Tuple[str, Dict[str, str]]':
+    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
+    return backend_dir, {"driver_configured.py": str(Path(__file__).resolve())}
+
+
 def _solver_source_fingerprint() -> 'str':
-    return backend_source_fingerprint(
-        str(Path(_workflow_provenance.__file__).resolve().parent)
-    )
+    backend_dir, extra = _solver_source_records()
+    return backend_source_fingerprint(backend_dir, extra)
+
+
+def _solver_source_inventory() -> 'Dict[str, str]':
+    backend_dir, extra = _solver_source_records()
+    return backend_source_inventory(backend_dir, extra)
 
 
 def _write_json_atomic(path: 'Path', payload: 'Dict[str, Any]') -> 'None':
@@ -82,15 +156,25 @@ def _write_json_atomic(path: 'Path', payload: 'Dict[str, Any]') -> 'None':
     os.replace(str(temporary), str(path))
 
 
-def _verify_run_provenance(manifest: 'Dict[str, Any]') -> 'None':
-    if _solver_source_fingerprint() != manifest.get(
-        "solver_source_sha256"
-    ):
+def _verify_run_provenance(context: 'Dict[str, Any]') -> 'None':
+    """Re-check that the solver source and numerical runtime still match the run.
+
+    Called around every unit. The file hashes underneath come from
+    `hpc_scheduler.install_fingerprint_cache`, so a repeat check is a stat per
+    backend file rather than a full re-read, and the cache expires on a timer
+    so full re-reads keep happening inside long-lived workers.
+    """
+
+    if _solver_source_fingerprint() != context.get("solver_source_sha256"):
+        detail = describe_source_mismatch(
+            context.get("solver_source_inventory") or {},
+            _solver_source_inventory(),
+        )
         raise RuntimeError(
             "Local-run solver source/native artifacts changed; no mixed-state "
-            "field will be written or reused."
+            f"field will be written or reused. ({detail})"
         )
-    if runtime_environment_fingerprint() != manifest.get(
+    if runtime_environment_fingerprint() != context.get(
         "runtime_environment_sha256"
     ):
         raise RuntimeError(
@@ -99,34 +183,35 @@ def _verify_run_provenance(manifest: 'Dict[str, Any]') -> 'None':
 
 
 def _unit_attestation_fields(
-    manifest: 'Dict[str, Any]',
+    context: 'Dict[str, Any]',
     unit: 'Dict[str, Any]',
 ) -> 'Dict[str, Any]':
     return {
-        "run_id": str(manifest["run_id"]),
-        "solver_source_sha256": str(manifest["solver_source_sha256"]),
+        "run_id": str(context["run_id"]),
+        "solver_source_sha256": str(context["solver_source_sha256"]),
         "runtime_environment_sha256":
-            str(manifest["runtime_environment_sha256"]),
-        "geometry_input_sha256":
-            str(unit["geometry_input_sha256"]),
-        "run_solve_spec_sha256":
-            manifest_solve_spec_fingerprint(manifest),
-        "unit_solve_spec_sha256":
-            unit_solve_spec_fingerprint(unit),
-        "solver_config_sha256":
-            stable_json_fingerprint(manifest.get("solver_config", {})),
+            str(context["runtime_environment_sha256"]),
+        "geometry_input_sha256": str(unit["geometry_input_sha256"]),
+        "run_solve_spec_sha256": str(context["run_solve_spec_sha256"]),
+        "unit_solve_spec_sha256": unit_solve_spec_fingerprint(unit),
+        "solver_config_sha256": str(context["solver_config_sha256"]),
         "angular_grid_kind": "azimuths_deg",
-        "angular_grid_deg":
-            [float(value) for value in unit["azimuths_deg"]],
+        # The grid is a run-level property, so it is bound by hash here and
+        # stored once in the manifest instead of being repeated in every unit
+        # record and every attestation.
+        "angular_grid_sha256": str(context["angular_grid_sha256"]),
         "polarization": str(unit["polarization"]),
         "frequency_ghz": float(unit["frequency_ghz"]),
     }
 
 
-def _verify_unit_input(unit: 'Dict[str, Any]') -> 'None':
+def _verify_unit_input(
+    unit: 'Dict[str, Any]',
+    context: 'Dict[str, Any]',
+) -> 'None':
     from feature_sum import geometry_input_fingerprint
     current = geometry_input_fingerprint(
-        unit["geometry"], GEOMETRY_UNITS
+        str(unit["geometry"]), str(context["geometry_units"])
     )
     if current != unit.get("geometry_input_sha256"):
         raise RuntimeError(
@@ -153,50 +238,89 @@ def _discover_geometries() -> 'List[Path]':
     return found
 
 
-def _pin_blas_threads(n: 'int') -> 'None':
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-                "NUMEXPR_NUM_THREADS"):
-        os.environ[var] = str(n)
+def _unit_name(unit: 'Dict[str, Any]') -> 'str':
+    return (f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
+            f"{unit['geometry_stem']}.grim")
 
 
 def _unit_output_path(results_dir: 'Path', unit: 'Dict[str, Any]') -> 'Path':
-    pol  = unit["polarization"]
-    freq = float(unit["frequency_ghz"])
-    stem = unit["geometry_stem"]
-    return results_dir / f"{pol}_{freq:.3f}GHz_{stem}.grim"
+    return results_dir / _unit_name(unit)
 
 
-def _solve_and_export(unit, snapshot, material_base, results_dir_str):
+def _load_snapshot(geometry_path: 'str') -> 'Tuple[Dict[str, Any], str]':
+    """Parsed snapshot for one geometry, built at most once per process.
+
+    The parent fills this before forking the pool, so on a fork start method
+    every worker inherits the snapshots copy-on-write. The fallback parse keeps
+    the worker correct under a spawn start method, at the cost of one parse.
+    """
+
+    cached = _SNAPSHOT_CACHE.get(geometry_path)
+    if cached is not None:
+        return cached
+    from geometry_io import parse_geometry, build_geometry_snapshot
+
+    path = Path(geometry_path)
+    title, segments, ibcs, dielectrics = parse_geometry(path.read_text())
+    snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
+    snapshot["source_path"] = str(path)
+    entry = (snapshot, str(path.parent))
+    _SNAPSHOT_CACHE[geometry_path] = entry
+    return entry
+
+
+def _pool_initializer(blas_threads: 'int', assembly_threads: 'int') -> 'None':
+    hpc_scheduler.pin_blas_threads(blas_threads)
+    hpc_scheduler.install_fingerprint_cache()
+    import rcs_solver
+
+    rcs_solver.set_assembly_threads(assembly_threads)
+
+
+def _solve_and_export(
+    unit: 'Dict[str, Any]',
+    context: 'Dict[str, Any]',
+    results_dir_str: 'str',
+) -> 'Tuple[str, str]':
     """Pool-worker entry point: solve one unit, export .grim. Idempotent."""
+
     results_dir = Path(results_dir_str)
-    run_dir = results_dir.parent
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    _verify_run_provenance(manifest)
-    _verify_unit_input(unit)
-    attestation = _unit_attestation_fields(manifest, unit)
     out_path = _unit_output_path(results_dir, unit)
+    _verify_run_provenance(context)
+    _verify_unit_input(unit, context)
+    attestation = _unit_attestation_fields(context, unit)
     if out_path.exists():
-        verify_output_attestation(str(out_path), attestation)
+        verify_embedded_attestation(str(out_path), attestation)
         return ("skipped", str(out_path))
 
-    from rcs_solver import solve_monostatic_rcs_2d_certified
-    result = solve_monostatic_rcs_2d_certified(
+    snapshot, material_base = _load_snapshot(str(unit["geometry"]))
+
+    solve_kwargs = dict(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(unit["frequency_ghz"])],
-        elevations_deg=[float(a) for a in unit["azimuths_deg"]],
+        elevations_deg=[float(a) for a in context["azimuths_deg"]],
         polarization=unit["polarization"],
-        geometry_units=GEOMETRY_UNITS,
+        geometry_units=context["geometry_units"],
         material_base_dir=material_base,
-        max_panels=MAX_PANELS,
-        cfie_alpha=CFIE_ALPHA,
-        solver_method=SOLVER_METHOD,
-        mesh_convergence_policy=manifest["solver_config"][
-            "mesh_convergence_policy"
-        ],
+        max_panels=context["max_panels"],
+        cfie_alpha=context["cfie_alpha"],
+        solver_method=context["solver_method"],
     )
-    _verify_run_provenance(manifest)
-    _verify_unit_input(unit)
+    if context["mesh_certification"]:
+        from rcs_solver import solve_monostatic_rcs_2d_certified
+        result = solve_monostatic_rcs_2d_certified(
+            mesh_convergence_policy=context["mesh_convergence_policy"],
+            **solve_kwargs
+        )
+    else:
+        from rcs_solver import solve_monostatic_rcs_2d_survey
+        result = solve_monostatic_rcs_2d_survey(**solve_kwargs)
+    _verify_run_provenance(context)
+    _verify_unit_input(unit, context)
+
+    # Bind the result to its run state inside the artifact, before export, so
+    # results/ holds one file per unit instead of a .grim and a sidecar.
+    embed_output_attestation(result, attestation)
 
     from grim_io import export_result_to_grim
     written = export_result_to_grim(
@@ -206,22 +330,101 @@ def _solve_and_export(unit, snapshot, material_base, results_dir_str):
                  f"freq={unit['frequency_ghz']}GHz"),
     )
     actual_path = str(written[0]) if written else str(out_path)
-    write_output_attestation(actual_path, attestation)
+    _verify_run_provenance(context)
+    _verify_unit_input(unit, context)
     return ("written", actual_path)
 
 
-def main() -> 'None':
-    _pin_blas_threads(BLAS_THREADS_PER_WORKER)
-    from geometry_io import parse_geometry, build_geometry_snapshot
+def _solve_and_export_star(args: 'tuple') -> 'tuple':
+    """Pool entry point: unpack args and catch exceptions in-band.
 
-    geometries = _discover_geometries()
-    if not geometries:
-        sys.exit("ERROR: no geometry files (*.geo) found under FRD_DIR or OPN_DIR.")
+    The full traceback string is returned (not just str(exc)) so a failure
+    names the line it happened on rather than only its message.
+    """
 
+    unit, context, results_dir_str = args
+    try:
+        status, path = _solve_and_export(unit, context, results_dir_str)
+        return ("ok", status, path)
+    except Exception:
+        return ("err", traceback.format_exc(), "")
+
+
+def _plan(
+    units: 'List[Dict[str, Any]]',
+    fine_factor: 'float',
+    n_angles: 'int',
+) -> 'Tuple[Dict[str, float], Dict[str, float]]':
+    """Cost and size every unit from the mesh the solver will actually build.
+
+    The mesh depends on geometry and frequency but not polarization, so a
+    two-polarization sweep meshes each pair once.
+    """
+
+    nodes_cache: 'Dict[Tuple[str, float], int]' = {}
+    costs: 'Dict[str, float]' = {}
+    peaks: 'Dict[str, float]' = {}
+    for unit in units:
+        key = (str(unit["geometry"]), float(unit["frequency_ghz"]))
+        if key not in nodes_cache:
+            nodes_cache[key] = hpc_scheduler.predict_2d_nodes(
+                key[0], key[1], str(unit["polarization"]),
+                GEOMETRY_UNITS, MAX_PANELS,
+            )
+        nodes = int(nodes_cache[key])
+        name = _unit_name(unit)
+        costs[name] = (
+            hpc_scheduler.unit_cost(nodes, n_angles, fine_factor)
+            if nodes > 0 else 1.0
+        )
+        peaks[name] = (
+            hpc_scheduler.unit_peak_gb(
+                nodes, fine_factor, safety=float(MEMORY_SAFETY)
+            ) if nodes > 0 else 0.0
+        )
+    return costs, peaks
+
+
+def _resolve_assembly_threads(cores: 'int', concurrency: 'int') -> 'int':
+    """Threads per solve, sized so threads x processes never exceeds the cores."""
+
+    if ASSEMBLY_THREADS != "auto":
+        return max(1, int(ASSEMBLY_THREADS))
+    return max(1, int(cores) // max(1, int(concurrency)))
+
+
+def _validate_config() -> 'List[str]':
     pols = [p.strip().upper() for p in POLARIZATIONS if p and p.strip()]
     if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
+    if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
+        sys.exit("ERROR: MEMORY_HEADROOM must be in (0, 1].")
+    if float(MEMORY_SAFETY) < 1.0:
+        sys.exit("ERROR: MEMORY_SAFETY must be >= 1.")
+    if MAX_SOLVE_GB is not None and float(MAX_SOLVE_GB) <= 0.0:
+        sys.exit("ERROR: MAX_SOLVE_GB must be positive or None.")
+    if ASSEMBLY_THREADS != "auto" and int(ASSEMBLY_THREADS) < 1:
+        sys.exit("ERROR: ASSEMBLY_THREADS must be 'auto' or an integer >= 1.")
+    if int(TASKS_PER_CHILD) < 1:
+        sys.exit("ERROR: TASKS_PER_CHILD must be >= 1.")
+    if WORKERS is not None and int(WORKERS) < 1:
+        sys.exit("ERROR: WORKERS must be a positive integer or None.")
+    return pols
+
+
+def main() -> 'None':
+    pols = _validate_config()
+    if MAX_SOLVE_GB:
+        # Read by the solver's own memory gate, in this process and every
+        # forked worker.
+        os.environ["GHOST_MAX_SOLVE_GB"] = f"{float(MAX_SOLVE_GB):g}"
+    hpc_scheduler.pin_blas_threads(int(BLAS_THREADS_PER_WORKER))
+    hpc_scheduler.install_fingerprint_cache()
+
+    geometries = _discover_geometries()
+    if not geometries:
+        sys.exit("ERROR: no geometry files (*.geo) found under FRD_DIR or OPN_DIR.")
     stems = [geometry.stem for geometry in geometries]
     if len(stems) != len(set(stems)):
         sys.exit(
@@ -237,45 +440,108 @@ def main() -> 'None':
         )
         for pol in pols:
             for f in FREQUENCIES_GHZ:
+                # The azimuth grid is deliberately NOT repeated per unit: it is
+                # identical for every unit in the run, and carrying it here made
+                # the manifest grow with (units x azimuths) instead of with the
+                # sweep. It lives once at manifest level and is bound into each
+                # attestation by hash.
                 units.append({
                     "geometry":      str(geom.resolve()),
                     "geometry_stem": geom.stem,
                     "geometry_input_sha256": input_fingerprint,
                     "polarization":  pol,
                     "frequency_ghz": float(f),
-                    "azimuths_deg":  [float(a) for a in AZIMUTHS_DEG],
                 })
 
+    mesh_policy = validate_mesh_convergence_policy()
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
     run_dir     = Path(OUTPUT_DIR).resolve() / run_id
     results_dir = run_dir / "results"
     run_dir.mkdir(parents=True, exist_ok=False)
     results_dir.mkdir()
+    solver_config = {
+        "geometry_units": GEOMETRY_UNITS,
+        "solver_method": SOLVER_METHOD,
+        "cfie_alpha": float(CFIE_ALPHA),
+        "max_panels": int(MAX_PANELS),
+        "blas_threads_per_worker": int(BLAS_THREADS_PER_WORKER),
+        "mesh_convergence_policy": mesh_policy,
+        "mesh_certification": bool(MESH_CERTIFICATION),
+    }
     manifest: 'Dict[str, Any]' = {
-        "schema": "ghost.local.2d-run.v1",
+        "schema": MANIFEST_SCHEMA,
         "status": "running",
         "run_id": run_id,
+        "created": datetime.now().isoformat(),
+        "frequencies_ghz": [float(f) for f in FREQUENCIES_GHZ],
+        "azimuths_deg": [float(a) for a in AZIMUTHS_DEG],
+        "polarizations": pols,
+        "n_units": len(units),
         "solver_source_sha256": _solver_source_fingerprint(),
-        "runtime_environment_sha256":
-            runtime_environment_fingerprint(),
-        "solver_config": {
-            "geometry_units": GEOMETRY_UNITS,
-            "solver_method": SOLVER_METHOD,
-            "cfie_alpha": float(CFIE_ALPHA),
-            "max_panels": int(MAX_PANELS),
-            "blas_threads_per_worker":
-                int(BLAS_THREADS_PER_WORKER),
-            "mesh_convergence_policy":
-                validate_mesh_convergence_policy(),
-        },
+        # Per-file hashes behind that fingerprint, so a later mismatch can say
+        # which file moved instead of only that one did.
+        "solver_source_inventory": _solver_source_inventory(),
+        "runtime_environment_sha256": runtime_environment_fingerprint(),
+        "solver_config": solver_config,
         "units": units,
     }
     manifest_path = run_dir / "manifest.json"
     _write_json_atomic(manifest_path, manifest)
 
-    cpu = os.cpu_count() or 1
-    n_workers = WORKERS if WORKERS else max(1, cpu - 1)
-    n_workers = max(1, min(int(n_workers), len(units)))
+    # Everything a unit needs from the manifest, resolved once in the parent.
+    # Workers used to re-read and re-parse the whole manifest -- which carries
+    # every unit's record -- inside every unit, making the parsing cost
+    # quadratic in the size of the sweep.
+    context = {
+        "run_id": run_id,
+        "solver_source_sha256": manifest["solver_source_sha256"],
+        "solver_source_inventory": manifest["solver_source_inventory"],
+        "runtime_environment_sha256": manifest["runtime_environment_sha256"],
+        "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
+        "solver_config_sha256": stable_json_fingerprint(solver_config),
+        "geometry_units": GEOMETRY_UNITS,
+        "solver_method": SOLVER_METHOD,
+        "cfie_alpha": float(CFIE_ALPHA),
+        "max_panels": int(MAX_PANELS),
+        "mesh_convergence_policy": mesh_policy,
+        "mesh_certification": bool(MESH_CERTIFICATION),
+        "azimuths_deg": [float(a) for a in AZIMUTHS_DEG],
+        "angular_grid_sha256": stable_json_fingerprint(
+            [float(a) for a in AZIMUTHS_DEG]
+        ),
+    }
+
+    # Cost every unit from the real mesh, then run dearest-first: a frequency
+    # sweep's cost spread is large (it grows like the square of the node
+    # count), and starting with the cheap end leaves the expensive tail with
+    # nothing to overlap against.
+    fine_factor = (
+        float(mesh_policy["fine_factor"]) if MESH_CERTIFICATION else 1.0
+    )
+    costs, peaks = _plan(units, fine_factor, len(AZIMUTHS_DEG))
+    # Sorted into a new list, never in place: `units` is the same object the
+    # manifest holds, and reordering it after the run fingerprint was taken
+    # would make the manifest on disk hash differently from what every
+    # attestation recorded.
+    ordered = sorted(
+        units, key=lambda u: (-costs.get(_unit_name(u), 1.0), _unit_name(u))
+    )
+
+    cores = hpc_scheduler.detect_cores()
+    memory_gb = hpc_scheduler.detect_memory_gb()
+    budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
+    worker_cap = max(1, cores - 1) if WORKERS is None else int(WORKERS)
+    pool_size = max(1, min(cores, worker_cap, len(ordered)))
+    # Threads are sized from the concurrency memory will actually permit, not
+    # from the pool width. A memory-heavy geometry narrows admission, and
+    # sizing threads for a width that will never be reached leaves most of the
+    # cores idle for the whole run.
+    heaviest = max((peaks.get(_unit_name(u), 0.0) for u in ordered), default=0.0)
+    memory_concurrency = (
+        pool_size if heaviest <= 0.0
+        else max(1, min(pool_size, int(budget_gb // heaviest)))
+    )
+    assembly_threads = _resolve_assembly_threads(cores, memory_concurrency)
 
     print("=" * 70)
     print("Local monostatic RCS sweep")
@@ -286,69 +552,81 @@ def main() -> 'None':
     print(f"  Frequencies   : {len(FREQUENCIES_GHZ)}  "
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Azimuths      : {len(AZIMUTHS_DEG)}")
-    print(f"  Units total   : {len(units)}  (geom x freq x pol)")
-    print(f"  Workers       : {n_workers} of {cpu} cpus  "
-          f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER})")
+    print(f"  Units total   : {len(ordered)}  (geom x freq x pol)")
+    print(f"  Certification : {'on' if MESH_CERTIFICATION else 'OFF (survey)'}")
+    print(f"  Workers       : {pool_size} of {cores} cpus  "
+          f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
+          f"assembly threads/solve: {assembly_threads})")
+    if memory_concurrency < pool_size:
+        print(f"  Memory-limited: at most {memory_concurrency} concurrent "
+              f"solve(s); heaviest unit {heaviest:.1f} GB")
+    print(f"  Memory        : {memory_gb:.1f} GB detected, "
+          f"{budget_gb:.1f} GB schedulable")
+    if not MESH_CERTIFICATION:
+        print("  [warn] MESH_CERTIFICATION is off: results are survey-grade "
+              "and the")
+        print("         body/delta pipeline will reject them. Screening only.")
     print("=" * 70, flush=True)
 
-    # Parse each geometry once so workers share the snapshot via pickle.
-    snapshots: 'Dict[str, Tuple[Dict[str, Any], str]]' = {}
-    for u in units:
-        gpath = u["geometry"]
-        if gpath in snapshots:
-            continue
-        p = Path(gpath)
-        title, segments, ibcs, dielectrics = parse_geometry(p.read_text())
-        snap = build_geometry_snapshot(title, segments, ibcs, dielectrics)
-        snap["source_path"] = str(p)
-        snapshots[gpath] = (snap, str(p.parent))
+    # Parse each distinct geometry once, before the pool forks, so workers
+    # inherit the snapshots instead of unpickling one per unit. Import the
+    # solver here for the same reason: replacing a worker then costs a fork
+    # rather than a re-import of numpy, SciPy, and the solver module.
+    for unit in ordered:
+        _load_snapshot(str(unit["geometry"]))
+    import rcs_solver  # noqa: F401
+    import grim_io     # noqa: F401
 
-    t0 = time.time()
-    n_done = n_skipped = n_failed = 0
-    total = len(units)
-    # Python 3.6 ProcessPoolExecutor has no initializer/initargs. The parent
-    # environment was pinned above and is inherited by spawned workers.
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        fut_to_unit = {}
-        for u in units:
-            snap, mat_base = snapshots[u["geometry"]]
-            fut = pool.submit(_solve_and_export, u, snap, mat_base, str(results_dir))
-            fut_to_unit[fut] = u
+    counters = {"written": 0, "skipped": 0, "failed": 0}
+    started = time.time()
+    total = len(ordered)
 
-        for fut in as_completed(fut_to_unit):
-            u = fut_to_unit[fut]
-            tag = (f"{u['polarization']} {u['frequency_ghz']:7.3f}GHz "
-                   f"{u['geometry_stem']}")
-            try:
-                status, path = fut.result()
-                if status == "skipped":
-                    n_skipped += 1
-                else:
-                    n_done += 1
-                idx = n_done + n_skipped + n_failed
-                print(f"  [{idx:3d}/{total}] {status:7s}  {tag}  -> "
-                      f"{Path(path).name}", flush=True)
-            except Exception as exc:
-                n_failed += 1
-                idx = n_done + n_skipped + n_failed
-                print(f"  [{idx:3d}/{total}] FAILED   {tag}: {exc}", flush=True)
+    def _prepare(unit):
+        name = _unit_name(unit)
+        return (
+            name, peaks.get(name, 0.0),
+            (_solve_and_export_star, ((unit, context, str(results_dir)),)),
+        )
 
-    elapsed = time.time() - t0
-    print(f"\n  Done. wrote={n_done}, skipped={n_skipped}, failed={n_failed}.  "
+    def _finished():
+        return counters["written"] + counters["skipped"] + counters["failed"]
+
+    def _on_result(name, payload):
+        kind, first, _second = payload
+        if kind == "ok":
+            counters["skipped" if first == "skipped" else "written"] += 1
+            print(f"  [{_finished():4d}/{total}] {first:7s}  {name}", flush=True)
+        else:
+            counters["failed"] += 1
+            print(f"  [{_finished():4d}/{total}] FAILED   {name}", flush=True)
+            for line in str(first).rstrip().splitlines():
+                print(f"      {line}", flush=True)
+
+    def _on_error(name, exc):
+        counters["failed"] += 1
+        print(f"  [{_finished():4d}/{total}] FAILED (dispatch) {name}: {exc!r}",
+              flush=True)
+
+    with Pool(
+        processes=pool_size,
+        initializer=_pool_initializer,
+        initargs=(int(BLAS_THREADS_PER_WORKER), int(assembly_threads)),
+        maxtasksperchild=int(TASKS_PER_CHILD),
+    ) as pool:
+        dispatcher = hpc_scheduler.MemoryAwareDispatcher(
+            pool, budget_gb=budget_gb, max_concurrent=pool_size
+        )
+        dispatcher.run(ordered, _prepare, _on_result, _on_error)
+
+    elapsed = time.time() - started
+    print(f"\n  Done. wrote={counters['written']}, "
+          f"skipped={counters['skipped']}, failed={counters['failed']}.  "
           f"{elapsed:.1f} s elapsed.")
     print(f"  Outputs: {results_dir}/")
-    if n_failed:
-        manifest["status"] = "failed"
-        _write_json_atomic(manifest_path, manifest)
-        raise SystemExit(1)
-    expected_paths = [
-        _unit_output_path(results_dir, unit) for unit in units
-    ]
-    manifest["status"] = "complete"
-    manifest["output_sha256"] = {
-        path.name: sha256_file(str(path)) for path in expected_paths
-    }
+    manifest["status"] = "failed" if counters["failed"] else "complete"
     _write_json_atomic(manifest_path, manifest)
+    if counters["failed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
