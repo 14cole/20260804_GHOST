@@ -3071,7 +3071,11 @@ def _integrate_linear_pair_adaptive_sk(
         coarse: 'np.ndarray',
         children: 'List[np.ndarray]',
     ) -> 'float':
-        fine = sum(children, start=zero.copy())
+        # Do not pass ``start`` by keyword to the built-in sum.  Some Python
+        # versions deployed on HPC systems expose the second argument only as
+        # positional and raise ``TypeError: sum() takes no keyword arguments``
+        # when a close panel pair reaches this adaptive path.
+        fine = sum(children, zero.copy())
         scale_norm = sum(float(np.linalg.norm(block)) for block in children)
         floor = np.finfo(float).eps * max(
             1.0,
@@ -3112,8 +3116,8 @@ def _integrate_linear_pair_adaptive_sk(
         error = max(err_s, err_k)
         if error <= float(rtol):
             return (
-                sum(s_children, start=zero.copy()),
-                sum(k_children, start=zero.copy()),
+                sum(s_children, zero.copy()),
+                sum(k_children, zero.copy()),
             )
         if depth >= int(max_depth):
             gap_ratio = float(np.linalg.norm(obs_elem.center - src_elem.center)) / max(

@@ -10,6 +10,7 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -103,6 +104,27 @@ class NearPairQuadratureTests(unittest.TestCase):
         )
         error = np.linalg.norm(fixed - reference) / np.linalg.norm(reference)
         self.assertGreater(error, 0.05)
+
+    def test_adaptive_path_supports_legacy_positional_only_sum(self):
+        """Exercise the close-pair path with an HPC-style legacy built-in."""
+
+        obs = _linear_element(0.0, 0)
+        src = _linear_element(0.01, 1)
+        builtin_sum = sum
+
+        def positional_only_sum(iterable, *args, **kwargs):
+            if kwargs:
+                raise TypeError("sum() takes no keyword arguments")
+            return builtin_sum(iterable, *args)
+
+        with mock.patch("builtins.sum", side_effect=positional_only_sum):
+            s_block, k_block = rcs._integrate_linear_pair_adaptive_sk(
+                obs, src, 2.0 * np.pi, False, 16, 16,
+                compute_single_layer=True,
+                compute_double_layer=True,
+            )
+        self.assertTrue(np.all(np.isfinite(s_block)))
+        self.assertTrue(np.all(np.isfinite(k_block)))
 
 
 class WeightedGalerkinTests(unittest.TestCase):
