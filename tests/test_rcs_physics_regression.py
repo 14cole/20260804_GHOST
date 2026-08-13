@@ -19,7 +19,9 @@ sys.path.insert(0, str(REPO / "Backend"))
 
 import rcs_solver as rcs  # noqa: E402
 from mie_reference import (  # noqa: E402
+    sigma_coated_pec_cylinder,
     sigma_dielectric_cylinder,
+    sigma_impedance_cylinder,
     sigma_pec_cylinder,
 )
 
@@ -244,6 +246,166 @@ class CylinderPhysicsTests(unittest.TestCase):
             )
             self.assertLess(abs(10.0 * math.log10(got_pec / ref_pec)), 0.01)
             self.assertLess(abs(10.0 * math.log10(got_diel / ref_diel)), 0.01)
+
+    def test_impedance_cylinder_both_polarizations(self):
+        radius = 0.1
+        freq_hz = rcs.C0 / (2.0 * math.pi * radius)  # ka = 1
+        z_s = 75.0 - 20.0j
+        impedance = {
+            "segments": [_circle_segment(radius, 64, 2, ibc=1)],
+            "ibcs": [["1", "constant", "75", "-20", "0", "0"]],
+            "dielectrics": [],
+        }
+        for pol in ("TM", "TE"):
+            got = self._solve(impedance, pol, freq_hz)
+            reference = sigma_impedance_cylinder(
+                radius, z_s, freq_hz, pol
+            )
+            error_db = abs(10.0 * math.log10(got / reference))
+            self.assertLess(error_db, 0.01, msg=pol)
+
+    def test_coated_pec_cylinder_both_polarizations(self):
+        inner_radius = 0.07
+        outer_radius = 0.1
+        freq_hz = rcs.C0 / (2.0 * math.pi * outer_radius)  # k0*b = 1
+        eps_r = 3.0 - 0.12j
+        coated = {
+            "segments": [
+                _circle_segment(outer_radius, 64, 3, material=1),
+                _circle_segment(inner_radius, 64, 4, material=1),
+            ],
+            "ibcs": [],
+            "dielectrics": [["1", "3", "-0.12", "1", "0"]],
+        }
+        for pol in ("TM", "TE"):
+            got = self._solve(coated, pol, freq_hz)
+            reference = sigma_coated_pec_cylinder(
+                inner_radius, outer_radius, eps_r, 1.0 + 0.0j,
+                freq_hz, pol,
+            )
+            error_db = abs(10.0 * math.log10(got / reference))
+            self.assertLess(error_db, 0.01, msg=pol)
+
+
+class TaperedImpedanceTests(unittest.TestCase):
+    _ANGLES = [-40.0, 0.0, 35.0]
+
+    @staticmethod
+    def _snapshot(kind, start, end, reverse=False):
+        p0 = (-0.1, 0.0)
+        p1 = (0.1, 0.0)
+        z0 = complex(start)
+        z1 = complex(end)
+        if reverse:
+            p0, p1 = p1, p0
+            z0, z1 = z1, z0
+        return {
+            "segments": [{
+                "name": "sheet",
+                "seg_type": 1,
+                "properties": ["1", "40", "1", "0", "0"],
+                "point_pairs": [{
+                    "x1": p0[0], "y1": p0[1],
+                    "x2": p1[0], "y2": p1[1],
+                }],
+            }],
+            "ibcs": [[
+                "1", kind,
+                str(z0.real), str(z0.imag),
+                str(z1.real), str(z1.imag),
+            ]],
+            "dielectrics": [],
+        }
+
+    def _amplitudes(self, snapshot, pol):
+        result = rcs.solve_monostatic_rcs_2d(
+            snapshot,
+            frequencies_ghz=[1.0],
+            elevations_deg=self._ANGLES,
+            polarization=pol,
+            geometry_units="meters",
+            strict_quality_gate=False,
+            max_panels=1000,
+        )
+        return np.asarray([
+            complex(sample["rcs_amp_real"], sample["rcs_amp_imag"])
+            for sample in result["samples"]
+        ])
+
+    def test_reversing_sheet_and_taper_preserves_physics(self):
+        for pol in ("TM", "TE"):
+            forward = self._amplitudes(
+                self._snapshot("linear", 20.0 - 5.0j, 150.0 + 20.0j), pol
+            )
+            reverse = self._amplitudes(
+                self._snapshot(
+                    "linear", 20.0 - 5.0j, 150.0 + 20.0j,
+                    reverse=True,
+                ),
+                pol,
+            )
+            np.testing.assert_allclose(
+                reverse, forward, rtol=2e-12, atol=2e-12,
+                err_msg=pol,
+            )
+
+    def test_equal_endpoints_reduce_every_taper_to_constant(self):
+        z_s = 60.0 + 10.0j
+        for pol in ("TM", "TE"):
+            reference = self._amplitudes(
+                self._snapshot("constant", z_s, z_s), pol
+            )
+            for kind in ("linear", "cosine", "exp"):
+                actual = self._amplitudes(
+                    self._snapshot(kind, z_s, z_s), pol
+                )
+                np.testing.assert_allclose(
+                    actual, reference, rtol=2e-12, atol=2e-12,
+                    err_msg=f"{pol} {kind}",
+                )
+
+
+class BistaticReciprocityTests(unittest.TestCase):
+    def test_dielectric_triangle_reciprocity_both_polarizations(self):
+        points = [(-0.12, -0.08), (-0.02, 0.14), (0.15, -0.06),
+                  (-0.12, -0.08)]
+        triangle = {
+            "name": "triangle",
+            "seg_type": 3,
+            "properties": ["3", "50", "0", "1", "0"],
+            "point_pairs": [
+                {"x1": p0[0], "y1": p0[1], "x2": p1[0], "y2": p1[1]}
+                for p0, p1 in zip(points[:-1], points[1:])
+            ],
+        }
+        snapshot = {
+            "segments": [triangle],
+            "ibcs": [],
+            "dielectrics": [["1", "3.1", "-0.08", "1", "0"]],
+        }
+        angles = [20.0, 110.0]
+        for pol in ("TM", "TE"):
+            result = rcs.solve_bistatic_rcs_2d(
+                snapshot,
+                frequencies_ghz=[1.0],
+                incidence_angles_deg=angles,
+                observation_angles_deg=angles,
+                polarization=pol,
+                geometry_units="meters",
+                strict_quality_gate=False,
+                max_panels=1000,
+            )
+            amplitudes = {
+                (sample["theta_inc_deg"], sample["theta_scat_deg"]):
+                complex(sample["rcs_amp_real"], sample["rcs_amp_imag"])
+                for sample in result["samples"]
+            }
+            forward = amplitudes[(20.0, 110.0)]
+            reciprocal = amplitudes[(110.0, 20.0)]
+            relative_error = abs(forward - reciprocal) / max(
+                abs(forward), abs(reciprocal), np.finfo(float).tiny
+            )
+            self.assertLess(relative_error, 1.0e-4, msg=pol)
 
 
 if __name__ == "__main__":

@@ -65,8 +65,8 @@ The current solver also contains two intentional correctness changes: adaptive
 quadrature for separated but nearly touching panels, and element-weighted
 Galerkin assembly for spatially varying sheet/Robin impedances. Focused tests
 cover those corrections, their constant-coefficient limits, vectorized
-far-field equivalence, and PEC/dielectric cylinder solutions in both
-polarizations:
+far-field equivalence, PEC/IBC/homogeneous/coated cylinder references in both
+polarizations, tapered-impedance invariance, and bistatic reciprocity:
 
 ```bash
 python tests/test_rcs_physics_regression.py

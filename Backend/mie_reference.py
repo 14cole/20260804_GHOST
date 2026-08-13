@@ -31,6 +31,7 @@ from scipy import special as sp
 
 
 C0 = 299_792_458.0
+ETA0 = 376.730313668
 
 
 def _hankel2(n, z):
@@ -104,6 +105,46 @@ def sigma_pec_cylinder(radius_m, freq_hz, polarization):
     #   sigma_2D = (4 / k) * |sum a_n e^{j n phi}|^2
     sigma = (4.0 / k) * abs(amp)**2
     return float(sigma)
+
+
+def sigma_impedance_cylinder(radius_m, zs_ohm, freq_hz, polarization):
+    """Monostatic 2-D width of a Leontovich impedance cylinder in air.
+
+    ``zs_ohm`` uses the solver convention ``Zs = R + jX`` with
+    ``exp(+j*omega*t)``.  With the radial normal directed from the cylinder
+    into air, the scalar Robin coefficient is
+
+      TM: beta = -j*k*eta0/Zs
+      TE: beta = -j*k*Zs/eta0
+
+    and each cylindrical harmonic satisfies
+    ``d(u)/dr + beta*u = 0`` at ``r = radius_m``.  The PEC limits reduce to
+    the Dirichlet TM and Neumann TE coefficients used by
+    :func:`sigma_pec_cylinder`.
+    """
+
+    pol = polarization.upper()
+    z_s = complex(zs_ohm)
+    if abs(z_s) == 0.0:
+        return sigma_pec_cylinder(radius_m, freq_hz, pol)
+    k = 2.0 * np.pi * freq_hz / C0
+    ka = k * radius_m
+    N = _nmax_for_ka(ka)
+    n_arr = np.arange(-N, N + 1)
+    if pol == 'TM':
+        beta = -1j * k * ETA0 / z_s
+    elif pol == 'TE':
+        beta = -1j * k * z_s / ETA0
+    else:
+        raise ValueError(f"Unknown polarization {polarization}")
+
+    Jn = _jn(n_arr, ka)
+    Jnp = np.asarray([_jn_prime(int(n), ka) for n in n_arr])
+    Hn = _hankel2(n_arr, ka)
+    Hnp = np.asarray([_hankel2_prime(int(n), ka) for n in n_arr])
+    a_n = -(k * Jnp + beta * Jn) / (k * Hnp + beta * Hn)
+    amp = np.sum(a_n * (-1.0)**n_arr)
+    return float((4.0 / k) * abs(amp)**2)
 
 
 def sigma_dielectric_cylinder(radius_m, eps_r, mu_r, freq_hz, polarization):
