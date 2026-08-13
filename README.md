@@ -7,6 +7,10 @@ nodes.
 Start with **[HPC.md](HPC.md)** — how to size a run, what the tuning knobs do,
 and what the solver and scheduler changes actually bought.
 
+For `.geo` boundary types, material flags, inline/CSV dielectric and IBC
+definitions, impedance tapers, winding, and phasor signs, see
+**[GEOMETRY_INPUT_CHEATSHEET.md](GEOMETRY_INPUT_CHEATSHEET.md)**.
+
 ## Layout
 
 ```
