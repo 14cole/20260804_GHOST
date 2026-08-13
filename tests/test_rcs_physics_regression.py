@@ -66,6 +66,40 @@ def _circle_segment(radius, count, seg_type, ibc=0, material=0):
 
 
 class NearPairQuadratureTests(unittest.TestCase):
+    def test_geometrically_touching_split_nodes_use_duffy_rule(self):
+        """Interface-split DOFs must not hide a physical endpoint singularity."""
+
+        angle = 0.4
+        obs = _linear_element(0.0, 0)
+        obs.p0 = np.array([0.0, 0.0])
+        obs.p1 = np.array([1.0, 0.0])
+        obs.center = 0.5 * (obs.p0 + obs.p1)
+        obs.tangent = np.array([1.0, 0.0])
+        obs.normal = np.array([0.0, 1.0])
+        obs.length = 1.0
+        src = _linear_element(0.0, 1)
+        src.p0 = np.array([0.0, 0.0])
+        src.p1 = np.array([math.cos(angle), math.sin(angle)])
+        src.center = 0.5 * (src.p0 + src.p1)
+        src.tangent = src.p1.copy()
+        src.normal = np.array([-math.sin(angle), math.cos(angle)])
+        src.length = 1.0
+        # _linear_element assigned disjoint node IDs, as interface-aware
+        # meshing does for different physical boundary signatures.
+        self.assertFalse(set(obs.node_ids) & set(src.node_ids))
+
+        actual_s, actual_k = rcs._sk_blocks_near_linear(
+            obs, src, 2.0 * np.pi, False, 16, 16
+        )
+        reference_s, reference_k = (
+            rcs._integrate_linear_touching_duffy_sk_vectorized(
+                obs, src, 2.0 * np.pi, False,
+                (0.0, 1.0), (0.0, 1.0), True, True, 17, True, True,
+            )
+        )
+        np.testing.assert_allclose(actual_s, reference_s, rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(actual_k, reference_k, rtol=0.0, atol=0.0)
+
     def test_close_parallel_pair_converges(self):
         obs = _linear_element(0.0, 0)
         k0 = 2.0 * np.pi

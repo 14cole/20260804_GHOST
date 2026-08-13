@@ -2944,9 +2944,19 @@ def _sk_blocks_near_linear(
     """
 
     same_elem = obs_elem.panel_index == src_elem.panel_index
-    node_ids_obs = set(obs_elem.node_ids)
-    node_ids_src = set(src_elem.node_ids)
-    is_touching = bool(node_ids_obs & node_ids_src) and not same_elem
+    # Singularity classification is geometric, not algebraic.  The
+    # interface-aware mesh deliberately gives coincident endpoints distinct
+    # node IDs when their boundary/material signatures differ.  Such panels
+    # still share a physical endpoint and require touching-pair Duffy
+    # quadrature; treating them as separated makes tensor subdivision chase
+    # the endpoint singularity until max_depth without converging.
+    shared = (
+        None
+        if same_elem
+        else _linear_shared_interval_endpoint_info(
+            obs_elem, (0.0, 1.0), src_elem, (0.0, 1.0), tol=1.0e-9
+        )
+    )
 
     zero = np.zeros((2, 2), dtype=np.complex128)
     if same_elem:
@@ -2961,25 +2971,21 @@ def _sk_blocks_near_linear(
         )
         return s_blk, zero
 
-    if is_touching:
-        shared = _linear_shared_interval_endpoint_info(
-            obs_elem, (0.0, 1.0), src_elem, (0.0, 1.0)
+    if shared is not None:
+        order = max(6, int(max(obs_order, src_order)) + 1)
+        return _integrate_linear_touching_duffy_sk_vectorized(
+            obs_elem=obs_elem,
+            src_elem=src_elem,
+            k0=k0,
+            obs_normal_deriv=obs_normal_deriv,
+            obs_interval=(0.0, 1.0),
+            src_interval=(0.0, 1.0),
+            obs_start_is_shared=bool(shared[0]),
+            src_start_is_shared=bool(shared[1]),
+            order=order,
+            compute_single_layer=compute_single_layer,
+            compute_double_layer=compute_double_layer,
         )
-        if shared is not None:
-            order = max(6, int(max(obs_order, src_order)) + 1)
-            return _integrate_linear_touching_duffy_sk_vectorized(
-                obs_elem=obs_elem,
-                src_elem=src_elem,
-                k0=k0,
-                obs_normal_deriv=obs_normal_deriv,
-                obs_interval=(0.0, 1.0),
-                src_interval=(0.0, 1.0),
-                obs_start_is_shared=bool(shared[0]),
-                src_start_is_shared=bool(shared[1]),
-                order=order,
-                compute_single_layer=compute_single_layer,
-                compute_double_layer=compute_double_layer,
-            )
 
     # Separated-near pairs: a fixed tensor rule is not sufficient when two
     # panels are almost parallel and their gap is small compared with their
