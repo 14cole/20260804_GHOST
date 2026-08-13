@@ -51,10 +51,9 @@ cluster path, so units are cost-ordered and admitted against a memory budget
 rather than filling every core, and `results/` holds one `.grim` per unit and
 nothing else. See [HPC.md](HPC.md#running-without-slurm).
 
-## Numerical equivalence
+## Numerical validation
 
-The solver optimizations change how the element-pair quadrature is staged, not
-what it computes. Both entry points are checked against a pristine copy of the
+Performance-only changes are checked against a pristine copy of the
 pre-optimization module — operator by operator and end to end on published RCS:
 
 ```bash
@@ -62,7 +61,19 @@ python tests/test_assembly_equivalence.py /path/to/pristine/rcs_solver.py
 python tests/test_solver_equivalence.py   /path/to/pristine/rcs_solver.py
 ```
 
-Agreement is at floating-point reassociation level (~1e-16 relative on the
-operators, ~1e-13 dB on published RCS). The one setting that *does* change
-values, `GHOST_FAR_QUAD_ORDER`, is off by default and records itself in a
-solve's warnings; see [HPC.md](HPC.md#optional-far-pair-quadrature-order).
+The current solver also contains two intentional correctness changes: adaptive
+quadrature for separated but nearly touching panels, and element-weighted
+Galerkin assembly for spatially varying sheet/Robin impedances. Focused tests
+cover those corrections, their constant-coefficient limits, vectorized
+far-field equivalence, and PEC/dielectric cylinder solutions in both
+polarizations:
+
+```bash
+python tests/test_rcs_physics_regression.py
+```
+
+Away from the corrected close-gap and varying-impedance cases, agreement with
+the pristine solver remains at floating-point reassociation level. The optional
+`GHOST_FAR_QUAD_ORDER` setting can trade far-pair quadrature accuracy for speed;
+it is off by default and records itself in a solve's warnings. See
+[HPC.md](HPC.md#optional-far-pair-quadrature-order).

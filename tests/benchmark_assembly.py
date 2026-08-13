@@ -80,15 +80,23 @@ def main():
     for freq in FREQUENCIES:
         mesh, k0 = build_mesh(new, freq)
         nelems = len(mesh.elements)
-        for want_k, label in ((False, "S"), (True, "S+K")):
+        operator_cases = (
+            (True, False, "S"),
+            (False, True, "K"),
+            (True, True, "S+K"),
+        )
+        for want_s, want_k, label in operator_cases:
             new_time, new_mb = timed(lambda: new._assemble_linear_operator_matrices(
-                mesh, k0, obs_normal_deriv=True, compute_double_layer=want_k))
+                mesh, k0, obs_normal_deriv=True,
+                compute_single_layer=want_s,
+                compute_double_layer=want_k))
             row = f"{nelems:6d} {label:>10} {new_time:9.2f} {new_mb:8.1f}"
             if ref is not None:
                 ref_mesh, ref_k0 = build_mesh(ref, freq)
                 ref_time, ref_mb = timed(
                     lambda: ref._assemble_linear_operator_matrices(
                         ref_mesh, ref_k0, obs_normal_deriv=True,
+                        compute_single_layer=want_s,
                         compute_double_layer=want_k))
                 row += (f" {ref_time:9.2f} {ref_mb:8.1f} "
                         f"{ref_time / max(new_time, 1e-9):7.2f}x "

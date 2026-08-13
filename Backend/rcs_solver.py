@@ -2981,13 +2981,31 @@ def _sk_blocks_near_linear(
                 compute_double_layer=compute_double_layer,
             )
 
-    # Separated-near pairs: use vectorized box integrator with adaptive order.
+    # Separated-near pairs: a fixed tensor rule is not sufficient when two
+    # panels are almost parallel and their gap is small compared with their
+    # length.  In that limit the logarithmic S kernel (and the sharply peaked
+    # normal-derivative kernel) is concentrated in a narrow band around the
+    # projected diagonal.  Increasing the rule from 8 to 16 points without
+    # subdividing still leaves percent-to-order-one block errors for
+    # gap/length below a few percent.
     obs_mid = obs_elem.center
     src_mid = src_elem.center
     distance = float(np.linalg.norm(obs_mid - src_mid))
     scale = max(obs_elem.length, src_elem.length, EPS)
     adapt_order, _ = _near_singular_scheme(distance, scale)
     tensor_order = max(int(max(obs_order, src_order)), min(16, int(max(5, adapt_order))))
+
+    if distance / scale < 0.75:
+        return _integrate_linear_pair_adaptive_sk(
+            obs_elem=obs_elem,
+            src_elem=src_elem,
+            k0=k0,
+            obs_normal_deriv=obs_normal_deriv,
+            obs_order=tensor_order,
+            src_order=tensor_order,
+            compute_single_layer=compute_single_layer,
+            compute_double_layer=compute_double_layer,
+        )
 
     return _integrate_linear_pair_box_sk_vectorized(
         obs_elem, src_elem, k0, obs_normal_deriv,
@@ -2996,6 +3014,130 @@ def _sk_blocks_near_linear(
         compute_single_layer=compute_single_layer,
         compute_double_layer=compute_double_layer,
     )
+
+
+NEAR_PAIR_QUADRATURE_RTOL = 1.0e-9
+NEAR_PAIR_QUADRATURE_MAX_DEPTH = 12
+
+
+def _integrate_linear_pair_adaptive_sk(
+    obs_elem: 'LinearElement',
+    src_elem: 'LinearElement',
+    k0: 'Union[complex, float]',
+    obs_normal_deriv: 'bool',
+    obs_order: 'int',
+    src_order: 'int',
+    compute_single_layer: 'bool' = True,
+    compute_double_layer: 'bool' = True,
+    rtol: 'float' = NEAR_PAIR_QUADRATURE_RTOL,
+    max_depth: 'int' = NEAR_PAIR_QUADRATURE_MAX_DEPTH,
+) -> 'Tuple[np.ndarray, np.ndarray]':
+    """Converged S/K quadrature for separated, nearly singular panel pairs.
+
+    Each box is compared with its four-way bisection.  Only children whose
+    parent comparison has not converged are refined further, so a narrow
+    diagonal interaction costs O(2**depth), rather than uniformly applying a
+    very high tensor rule to the whole pair.  A child block already computed
+    for its parent's error estimate is reused as its own coarse estimate.
+
+    The error denominator is the sum of child-block norms, rather than the
+    norm of their possibly cancelling sum.  This prevents a physical null in
+    one 2x2 block from making the convergence test spuriously permissive.
+    Failure at ``max_depth`` is explicit: silently accepting an unresolved
+    close-gap interaction can produce a small linear-system residual for the
+    wrong discrete operator.
+    """
+
+    zero = np.zeros((2, 2), dtype=np.complex128)
+
+    def evaluate(
+        obs_interval: 'Tuple[float, float]',
+        src_interval: 'Tuple[float, float]',
+    ) -> 'Tuple[np.ndarray, np.ndarray]':
+        return _integrate_linear_pair_box_sk_vectorized(
+            obs_elem=obs_elem,
+            src_elem=src_elem,
+            k0=k0,
+            obs_normal_deriv=obs_normal_deriv,
+            obs_interval=obs_interval,
+            src_interval=src_interval,
+            obs_order=obs_order,
+            src_order=src_order,
+            compute_single_layer=compute_single_layer,
+            compute_double_layer=compute_double_layer,
+        )
+
+    def relative_error(
+        coarse: 'np.ndarray',
+        children: 'List[np.ndarray]',
+    ) -> 'float':
+        fine = sum(children, start=zero.copy())
+        scale_norm = sum(float(np.linalg.norm(block)) for block in children)
+        floor = np.finfo(float).eps * max(
+            1.0,
+            float(obs_elem.length) * float(src_elem.length),
+        )
+        return float(np.linalg.norm(fine - coarse)) / max(scale_norm, floor)
+
+    def recurse(
+        obs_interval: 'Tuple[float, float]',
+        src_interval: 'Tuple[float, float]',
+        depth: 'int',
+        coarse: 'Optional[Tuple[np.ndarray, np.ndarray]]' = None,
+    ) -> 'Tuple[np.ndarray, np.ndarray]':
+        coarse_s, coarse_k = coarse if coarse is not None else evaluate(
+            obs_interval, src_interval
+        )
+        oa, ob = map(float, obs_interval)
+        sa, sb = map(float, src_interval)
+        om = 0.5 * (oa + ob)
+        sm = 0.5 * (sa + sb)
+        child_intervals = [
+            ((oa, om), (sa, sm)),
+            ((oa, om), (sm, sb)),
+            ((om, ob), (sa, sm)),
+            ((om, ob), (sm, sb)),
+        ]
+        child_blocks = [evaluate(oi, si) for oi, si in child_intervals]
+        s_children = [block[0] for block in child_blocks]
+        k_children = [block[1] for block in child_blocks]
+        err_s = (
+            relative_error(coarse_s, s_children)
+            if compute_single_layer else 0.0
+        )
+        err_k = (
+            relative_error(coarse_k, k_children)
+            if compute_double_layer else 0.0
+        )
+        error = max(err_s, err_k)
+        if error <= float(rtol):
+            return (
+                sum(s_children, start=zero.copy()),
+                sum(k_children, start=zero.copy()),
+            )
+        if depth >= int(max_depth):
+            gap_ratio = float(np.linalg.norm(obs_elem.center - src_elem.center)) / max(
+                float(obs_elem.length), float(src_elem.length), EPS
+            )
+            raise FloatingPointError(
+                "Separated-near Galerkin quadrature did not converge: "
+                f"panel pair ({obs_elem.panel_index}, {src_elem.panel_index}), "
+                f"center-gap/length={gap_ratio:.6g}, estimated relative block "
+                f"error={error:.3e} after depth {depth}. Refine the boundary "
+                "mesh or increase NEAR_PAIR_QUADRATURE_MAX_DEPTH."
+            )
+
+        s_total = zero.copy()
+        k_total = zero.copy()
+        for (oi, si), child in zip(child_intervals, child_blocks):
+            child_s, child_k = recurse(
+                oi, si, depth + 1, coarse=child
+            )
+            s_total += child_s
+            k_total += child_k
+        return s_total, k_total
+
+    return recurse((0.0, 1.0), (0.0, 1.0), depth=0)
 
 _TANGENT_OUTER = np.array([[1.0, -1.0], [-1.0, 1.0]], dtype=np.complex128)
 
@@ -3400,6 +3542,7 @@ def _assemble_linear_operator_matrices_multi(
     far_ratio: 'float' = 3.0,
     compute_single_layer: 'bool' = True,
     compute_double_layer: 'bool' = True,
+    single_layer_observation_coefficients: 'Optional[np.ndarray]' = None,
 ) -> 'List[Tuple[np.ndarray, np.ndarray]]':
     """
     Assemble S and K/K' for several source-element masks in ONE traversal.
@@ -3413,7 +3556,16 @@ def _assemble_linear_operator_matrices_multi(
     which elements are active.
 
     Returns one (S, K) pair per mask, in the order given.  A mask selecting no
-    element gets zero matrices without costing anything.
+    element gets zero matrices without costing anything.  When
+    ``single_layer_observation_coefficients`` is supplied, the returned S
+    matrix is the Galerkin operator with the piecewise-constant element
+    coefficient inside the observation integral,
+
+        S_c[i,j] = sum_e integral_e phi_i(x) c_e (S phi_j)(x) ds,
+
+    while K/K' remains unweighted.  This is required for spatially varying
+    Robin and sheet coefficients: multiplying completed rows by a nodal
+    average is not the same weak form.
 
     Two passes, as before:
     1. Far interactions: batched numpy quadrature over cache-sized element
@@ -3431,8 +3583,23 @@ def _assemble_linear_operator_matrices_multi(
     n_masks = len(source_element_masks)
     if n_masks == 0:
         raise ValueError("At least one source-element mask must be requested.")
-    s_mats = [np.zeros((nnodes, nnodes), dtype=np.complex128) for _ in range(n_masks)]
-    k_mats = [np.zeros((nnodes, nnodes), dtype=np.complex128) for _ in range(n_masks)]
+    # Preserve the long-standing shaped-zero return contract for a skipped
+    # operator without allocating and zero-filling another dense N-by-N
+    # array.  The zero-stride views are read-only, which is intentional: a
+    # disabled output is a result placeholder, never an assembly target.
+    zero_view = np.broadcast_to(
+        np.zeros((), dtype=np.complex128), (nnodes, nnodes)
+    )
+    s_mats = [
+        np.zeros((nnodes, nnodes), dtype=np.complex128)
+        if compute_single_layer else zero_view
+        for _ in range(n_masks)
+    ]
+    k_mats = [
+        np.zeros((nnodes, nnodes), dtype=np.complex128)
+        if compute_double_layer else zero_view
+        for _ in range(n_masks)
+    ]
     if not elements:
         return list(zip(s_mats, k_mats))
 
@@ -3445,6 +3612,24 @@ def _assemble_linear_operator_matrices_multi(
         if resolved.size != nelems:
             raise ValueError("source_element_mask length must match mesh element count.")
         src_masks.append(resolved)
+
+    if single_layer_observation_coefficients is None:
+        slp_obs_coeff = None
+    else:
+        slp_obs_coeff = np.asarray(
+            single_layer_observation_coefficients, dtype=np.complex128
+        ).reshape(-1)
+        if slp_obs_coeff.size != nelems:
+            raise ValueError(
+                "single_layer_observation_coefficients length must match "
+                "mesh element count."
+            )
+        if not np.all(
+            np.isfinite(slp_obs_coeff.real) & np.isfinite(slp_obs_coeff.imag)
+        ):
+            raise ValueError(
+                "single-layer observation coefficients must all be finite."
+            )
     # An empty mask contributes nothing; drop it from the traversal entirely
     # rather than paying a tile sweep to produce zeros.
     active = [index for index, mask in enumerate(src_masks) if bool(np.any(mask))]
@@ -3716,19 +3901,33 @@ def _assemble_linear_operator_matrices_multi(
                     fij = far_ij[mi]
                     if fij.any():
                         scale_ij = len_prod * fij
+                        if slp_obs_coeff is not None:
+                            scale_s_ij = (
+                                scale_ij
+                                * slp_obs_coeff[obs_slice][:, None]
+                            )
+                        else:
+                            scale_s_ij = scale_ij
                         for a in range(2):
                             rows = obs_nid[:, a][:, None]
                             for b in range(2):
                                 cols = src_nid[None, :, b]
                                 if acc_s is not None:
                                     np.add.at(s_mats[mi], (rows, cols),
-                                              acc_s[2 * a + b] * scale_ij)
+                                              acc_s[2 * a + b] * scale_s_ij)
                                 if acc_k is not None:
                                     np.add.at(k_mats[mi], (rows, cols),
                                               acc_k[2 * a + b] * scale_ij)
                     fji = far_ji.get(mi)
                     if fji is not None and fji.any():
                         scale_ji = len_prod * fji
+                        if slp_obs_coeff is not None:
+                            scale_s_ji = (
+                                scale_ji
+                                * slp_obs_coeff[src_global][None, :]
+                            )
+                        else:
+                            scale_s_ji = scale_ji
                         for a in range(2):
                             rows = src_nid[:, a][:, None]
                             for b in range(2):
@@ -3737,7 +3936,7 @@ def _assemble_linear_operator_matrices_multi(
                                     # S is symmetric: block (j,i)[a][b] is the
                                     # transpose of block (i,j)[b][a].
                                     np.add.at(s_mats[mi], (rows, cols),
-                                              (acc_s[2 * b + a] * scale_ji).T)
+                                              (acc_s[2 * b + a] * scale_s_ji).T)
                                 if acc_kt is not None:
                                     np.add.at(k_mats[mi], (rows, cols),
                                               (acc_kt[2 * a + b] * scale_ji).T)
@@ -3774,7 +3973,11 @@ def _assemble_linear_operator_matrices_multi(
                 compute_double_layer=compute_double_layer,
             )
             if compute_single_layer:
-                s_mats[mi][np.ix_(obs_ids, src_ids)] += s_blk
+                coeff = (
+                    complex(slp_obs_coeff[obs_index])
+                    if slp_obs_coeff is not None else 1.0 + 0.0j
+                )
+                s_mats[mi][np.ix_(obs_ids, src_ids)] += coeff * s_blk
             if compute_double_layer:
                 k_mats[mi][np.ix_(obs_ids, src_ids)] += k_blk
     return list(zip(s_mats, k_mats))
@@ -3790,6 +3993,7 @@ def _assemble_linear_operator_matrices(
     source_element_mask: 'Optional[np.ndarray]' = None,
     compute_single_layer: 'bool' = True,
     compute_double_layer: 'bool' = True,
+    single_layer_observation_coefficients: 'Optional[np.ndarray]' = None,
 ) -> 'Tuple[np.ndarray, np.ndarray]':
     """
     Assemble dense linear-Galerkin S and K/K' matrices on global nodal DOFs.
@@ -3814,6 +4018,9 @@ def _assemble_linear_operator_matrices(
         far_ratio=far_ratio,
         compute_single_layer=compute_single_layer,
         compute_double_layer=compute_double_layer,
+        single_layer_observation_coefficients=(
+            single_layer_observation_coefficients
+        ),
     )[0]
 
 def _assemble_linear_hypersingular_matrix(
@@ -4231,6 +4438,89 @@ def _backscatter_rcs_coupled_many_linear(
     sigma_lin = _rcs_sigma_from_amp(amp, k_air)
     return np.asarray(sigma_lin, dtype=float), np.asarray(amp, dtype=np.complex128)
 
+
+def _farfield_linear_density_many(
+    mesh: 'LinearMesh',
+    density: 'np.ndarray',
+    k_air: 'float',
+    observation_angles_deg: 'np.ndarray',
+    potential: 'str',
+    order: 'int' = 8,
+    element_mask: 'Optional[np.ndarray]' = None,
+) -> 'np.ndarray':
+    """Vectorized SLP/DLP far field for one or matched-many densities.
+
+    ``density`` may contain one column (one incidence projected at every
+    observation angle) or one column per observation angle (the monostatic
+    batched-solve case). Element tiling bounds the temporary phase matrix.
+    """
+
+    obs = np.asarray(observation_angles_deg, dtype=float).reshape(-1)
+    rho = np.asarray(density, dtype=np.complex128)
+    if rho.ndim == 1:
+        rho = rho[:, None]
+    if rho.shape[0] != len(mesh.nodes):
+        raise ValueError("Far-field density height must match mesh node count.")
+    if rho.shape[1] not in (1, obs.size):
+        raise ValueError(
+            "Far-field density must have one column or one per observation angle."
+        )
+    kind = str(potential).strip().upper()
+    if kind not in {"SLP", "DLP"}:
+        raise ValueError("Far-field potential must be 'SLP' or 'DLP'.")
+
+    if element_mask is None:
+        elements = list(mesh.elements)
+    else:
+        mask = np.asarray(element_mask, dtype=bool).reshape(-1)
+        if mask.size != len(mesh.elements):
+            raise ValueError("Far-field element mask must match mesh element count.")
+        elements = [elem for elem, keep in zip(mesh.elements, mask) if keep]
+    if not elements:
+        return np.zeros(obs.size, dtype=np.complex128)
+    qt, qw = _get_quadrature(max(2, int(order)))
+    q = np.asarray(qt, dtype=float)
+    wq = np.asarray(qw, dtype=float)
+    phi_q = np.column_stack((1.0 - q, q))
+    dirs = np.column_stack((
+        np.cos(np.deg2rad(obs)), np.sin(np.deg2rad(obs))
+    ))
+    node_ids = np.asarray([elem.node_ids for elem in elements], dtype=int)
+    p0 = np.asarray([elem.p0 for elem in elements], dtype=float)
+    seg = np.asarray([elem.p1 - elem.p0 for elem in elements], dtype=float)
+    lengths = np.asarray([elem.length for elem in elements], dtype=float)
+    normals = np.asarray([elem.normal for elem in elements], dtype=float)
+
+    amp = np.zeros(obs.size, dtype=np.complex128)
+    phase_entries = 2_000_000  # about 32 MB of complex128 phase data
+    tile = max(1, min(
+        len(elements), phase_entries // max(1, obs.size * q.size)
+    ))
+    for start in range(0, len(elements), tile):
+        stop = min(start + tile, len(elements))
+        pts = (
+            p0[start:stop, None, :]
+            + q[None, :, None] * seg[start:stop, None, :]
+        )
+        phase = np.exp(
+            1j * float(k_air) * np.einsum('ad,eqd->aeq', dirs, pts)
+        )
+        local = rho[node_ids[start:stop], :]
+        rho_q = np.einsum('qi,eic->eqc', phi_q, local)
+        weights = lengths[start:stop, None] * wq[None, :]
+        if kind == "DLP":
+            dot_n = dirs @ normals[start:stop].T
+            phase *= (1j * float(k_air)) * dot_n[:, :, None]
+        if rho.shape[1] == 1:
+            amp += np.einsum(
+                'aeq,eq,eq->a', phase, rho_q[:, :, 0], weights
+            )
+        else:
+            amp += np.einsum(
+                'aeq,eqa,eq->a', phase, rho_q, weights
+            )
+    return amp
+
 def _linear_mass_block(elem: 'LinearElement') -> 'np.ndarray':
     """Consistent 2-node boundary mass matrix on one straight element."""
 
@@ -4434,6 +4724,63 @@ def _assemble_linear_mass_matrix(mesh: 'LinearMesh') -> 'np.ndarray':
         m_mat[np.ix_(ids, ids)] += _linear_mass_block(elem)
     return m_mat
 
+
+def _assemble_linear_weighted_mass_matrix(
+    mesh: 'LinearMesh',
+    element_coefficients: 'np.ndarray',
+) -> 'np.ndarray':
+    """Assemble ``integral phi_i c_h phi_j ds`` for elementwise-constant c.
+
+    Material tables and impedance tapers are sampled at element centers, so
+    the discrete coefficient represented by ``PanelCoupledInfo`` is naturally
+    piecewise constant. Keeping it inside each element weak integral is exact
+    for that discrete material model and avoids unweighted node averaging on
+    nonuniform meshes and at taper endpoints.
+    """
+
+    coeff = np.asarray(element_coefficients, dtype=np.complex128).reshape(-1)
+    if coeff.size != len(mesh.elements):
+        raise ValueError(
+            "Weighted mass coefficient count must match mesh element count."
+        )
+    if not np.all(np.isfinite(coeff.real) & np.isfinite(coeff.imag)):
+        raise ValueError("Weighted mass coefficients must all be finite.")
+    nnodes = len(mesh.nodes)
+    weighted = np.zeros((nnodes, nnodes), dtype=np.complex128)
+    for eidx, elem in enumerate(mesh.elements):
+        ids = np.asarray(elem.node_ids, dtype=int)
+        weighted[np.ix_(ids, ids)] += (
+            complex(coeff[eidx]) * _linear_mass_block(elem)
+        )
+    return weighted
+
+
+def _robin_alpha_elements(
+    mesh: 'LinearMesh',
+    infos: 'List[PanelCoupledInfo]',
+    pol: 'str',
+) -> 'Tuple[np.ndarray, np.ndarray]':
+    """Return per-element Robin alpha and the PEC-element mask."""
+
+    if len(mesh.elements) != len(infos):
+        raise ValueError(
+            "Robin coefficient construction requires matching elements and infos."
+        )
+    alpha = np.zeros(len(mesh.elements), dtype=np.complex128)
+    pec = np.zeros(len(mesh.elements), dtype=bool)
+    for eidx, info in enumerate(infos):
+        z_surf = complex(info.robin_impedance)
+        if abs(z_surf) <= EPS:
+            pec[eidx] = True
+            continue
+        eps_m = info.eps_minus if info.minus_region >= 0 else info.eps_plus
+        mu_m = info.mu_minus if info.minus_region >= 0 else info.mu_plus
+        k_m = info.k_minus if info.minus_region >= 0 else info.k_plus
+        alpha[eidx] = _surface_robin_alpha(
+            pol, eps_m, mu_m, k_m, z_surf
+        )
+    return alpha, pec
+
 @dataclass
 class LinearCoupledNodeInfo:
     """Per-node coupled metadata for the global linear/Galerkin assembly."""
@@ -4480,9 +4827,10 @@ def _build_linear_coupled_node_infos(
         'q_plus_beta',
     )
     # Fields that are allowed to vary across incident elements (e.g., a
-    # spatially tapered IBC or a tapered sheet admittance).  We average them
-    # over the elements sharing the node, matching the per-node alpha
-    # averaging done by `_solve_robin_bie` and `_solve_te_robin_mfie`.
+    # spatially tapered IBC or a tapered sheet admittance). This legacy
+    # coupled-trace node record retains a nodal average; the production Robin
+    # and sheet formulations instead keep these coefficients element-local in
+    # their Galerkin integrals.
     AVERAGED_KEYS = ('robin_impedance', 'q_plus_gamma')
 
     node_infos: 'List[Optional[LinearCoupledNodeInfo]]' = [None] * len(mesh.nodes)
@@ -6026,30 +6374,6 @@ def _assert_supported_te_type2_contours(
             "TYPE 1 sheet model for an open impedance card."
         )
 
-def _te_robin_alpha_nodes(
-    mesh: 'LinearMesh',
-    infos: 'List[PanelCoupledInfo]',
-    pol: 'str',
-) -> 'np.ndarray':
-    """Return the shared monostatic/bistatic node-averaged TE Robin coefficient."""
-
-    alpha_nodes = np.zeros(len(mesh.nodes), dtype=np.complex128)
-    alpha_counts = np.zeros(len(mesh.nodes), dtype=np.int64)
-    for elem, info in zip(mesh.elements, infos):
-        z_surf = complex(info.robin_impedance)
-        if abs(z_surf) <= EPS:
-            continue
-        eps_m = info.eps_minus if info.minus_region >= 0 else info.eps_plus
-        mu_m = info.mu_minus if info.minus_region >= 0 else info.mu_plus
-        k_m = info.k_minus if info.minus_region >= 0 else info.k_plus
-        alpha_elem = _surface_robin_alpha(pol, eps_m, mu_m, k_m, z_surf)
-        for nid in elem.node_ids:
-            alpha_nodes[int(nid)] += alpha_elem
-            alpha_counts[int(nid)] += 1
-    populated = alpha_counts > 0
-    alpha_nodes[populated] /= alpha_counts[populated]
-    return alpha_nodes
-
 def _detect_available_gb() -> 'float':
     """Memory this process may actually use, in GB.
 
@@ -6230,7 +6554,8 @@ def _solve_te_robin_mfie(
 
         (-1/2 M + K' + alpha.S) sigma = -(du_inc/dn + alpha.u_inc)
 
-    where alpha is the per-node Robin coefficient (0 for PEC, nonzero for IBC).
+    where alpha is retained as a piecewise-constant element coefficient inside
+    the Galerkin observation integral (0 for PEC, nonzero for IBC).
     K' is the adjoint double-layer operator (obs_normal_deriv=True).
 
     When solver_method="fmm", uses FMM-accelerated GMRES instead of dense LU.
@@ -6241,21 +6566,22 @@ def _solve_te_robin_mfie(
     nnodes = len(mesh.nodes)
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
 
-    # Per-node Robin alpha for TE, averaged over incident elements so that a
-    # spatially tapered impedance (tapered IBC) yields continuous alpha(s)
-    # across shared nodes rather than a "first-incident-element" jump.
-    alpha_nodes = _te_robin_alpha_nodes(mesh, infos, pol)
-    has_ibc = np.any(np.abs(alpha_nodes) > EPS)
+    # The impedance model is sampled at element centers, so alpha is a
+    # piecewise-constant coefficient in the discrete weak form.  Keep it
+    # inside the observation and RHS element integrals; nodal row scaling is
+    # not a Galerkin treatment when alpha varies spatially.
+    alpha_elements, _ = _robin_alpha_elements(mesh, infos, pol)
+    has_ibc = bool(np.any(np.abs(alpha_elements) > EPS))
 
     # RHS: -(du_inc/dn + alpha * u_inc)
     rhs_mfie = np.zeros((nnodes, elev.size), dtype=np.complex128)
-    for elem in mesh.elements:
+    for eidx, elem in enumerate(mesh.elements):
         ids = np.asarray(elem.node_ids, dtype=int)
         load_dn = _linear_element_incident_dn_load_many(elem, k_air=k0, elevations_deg=elev)
         rhs_mfie[ids, :] -= load_dn
         if has_ibc:
             load_u = _linear_element_incident_load_many(elem, k_air=k0, elevations_deg=elev)
-            rhs_mfie[ids, :] -= alpha_nodes[ids, None] * load_u
+            rhs_mfie[ids, :] -= complex(alpha_elements[eidx]) * load_u
 
     use_fmm = (solver_method.strip().lower() == "fmm")
     if use_fmm and condition_diagnostics is not None:
@@ -6266,17 +6592,18 @@ def _solve_te_robin_mfie(
         )
     if not use_fmm:
         # Dense path (original).
-        s_mat, kp_mat = _assemble_linear_operator_matrices(
+        s_alpha_mat, kp_mat = _assemble_linear_operator_matrices(
             mesh, k0, obs_normal_deriv=True,
             obs_order=obs_order, src_order=src_order,
             compute_single_layer=bool(has_ibc),
+            single_layer_observation_coefficients=(
+                alpha_elements if has_ibc else None
+            ),
         )
         mass_mat = _assemble_linear_mass_matrix(mesh)
         a_mfie = -0.5 * mass_mat + kp_mat
         if has_ibc:
-            # The single-layer operator is independent of which normal is used
-            # for the simultaneously assembled double-layer operator.
-            a_mfie += alpha_nodes[:, None] * s_mat
+            a_mfie += s_alpha_mat
         _ensure_finite_linear_system(a_mfie, rhs_mfie, label="TE Robin MFIE system")
         _record_condition_estimate(
             condition_diagnostics, a_mfie, "TE Robin MFIE system"
@@ -6285,6 +6612,17 @@ def _solve_te_robin_mfie(
         residual = np.linalg.norm(a_mfie @ sigma_mat - rhs_mfie, axis=0)
     else:
         # FMM path.
+        alpha_unique = np.unique(np.round(alpha_elements, decimals=14))
+        if alpha_unique.size > 1:
+            raise ValueError(
+                "Matrix-free TE Robin FMM currently supports only a spatially "
+                "constant Robin coefficient (including pure PEC). Tapered or "
+                "mixed PEC/IBC coefficients require the dense element-weighted "
+                "Galerkin path; no nodal row-scaling approximation was used."
+            )
+        alpha_constant = (
+            complex(alpha_elements[0]) if alpha_elements.size else 0.0 + 0.0j
+        )
         try:
             from fmm_helmholtz_2d import FMMOperator
         except ImportError:
@@ -6296,7 +6634,7 @@ def _solve_te_robin_mfie(
         def mfie_matvec(x):
             y = -0.5 * (mass_mat @ x) + fmm_kp.matvec(x)
             if has_ibc and fmm_s is not None:
-                y += alpha_nodes * fmm_s.matvec(x)
+                y += alpha_constant * fmm_s.matvec(x)
             return y
 
         if _SCIPY_SPARSE_LINALG is None:
@@ -6321,20 +6659,9 @@ def _solve_te_robin_mfie(
     rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
     residual_vec = residual / rhs_norm
 
-    # Far-field: SLP far-field projector.
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, obs_order))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        sigma_local = sigma_mat[ids, :]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * k0 * (dirs @ rp))
-            sigma_t = np.sum(shape * sigma_local, axis=0)
-            amp += float(w) * float(elem.length) * phase * sigma_t
+    amp = _farfield_linear_density_many(
+        mesh, sigma_mat, k0, elev, "SLP", order=obs_order
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, k0)
     return rcs_lin, amp, float(np.max(residual_vec))
@@ -6499,8 +6826,11 @@ def _solve_dielectric_indirect(
         factor = complex(info0.eps_minus / info0.eps_plus) if abs(info0.eps_plus) > EPS else 1.0
 
     # Assemble operators.
-    S0, K0 = _assemble_linear_operator_matrices(mesh, k0, obs_normal_deriv=False,
-        obs_order=obs_order, src_order=src_order)
+    _, K0 = _assemble_linear_operator_matrices(
+        mesh, k0, obs_normal_deriv=False,
+        obs_order=obs_order, src_order=src_order,
+        compute_single_layer=False,
+    )
     _, Kp1 = _assemble_linear_operator_matrices(
         mesh, k1, obs_normal_deriv=True,
         obs_order=obs_order, src_order=src_order,
@@ -6509,7 +6839,9 @@ def _solve_dielectric_indirect(
     S1, _ = _assemble_linear_operator_matrices(mesh, k1, obs_normal_deriv=False,
         obs_order=obs_order, src_order=src_order,
         compute_double_layer=False)
-    D0 = _assemble_linear_hypersingular_matrix(mesh, k0, obs_order=obs_order, src_order=src_order)
+    D0 = _assemble_linear_hypersingular_matrix(
+        mesh, k0, obs_order=obs_order, src_order=src_order,
+    )
     M = _assemble_linear_mass_matrix(mesh)
 
     # Build system: 2N x 2N.
@@ -6546,22 +6878,9 @@ def _solve_dielectric_indirect(
     rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
     residual_vec = residual / rhs_norm
 
-    # Far-field from DL density: A = integral jk0*(d.n)*mu * phase ds'.
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, obs_order))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        mu_local = mu_mat[ids, :]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * k0 * (dirs @ rp))
-            dot_n = dirs @ elem.normal
-            mu_t = np.sum(shape * mu_local, axis=0)
-            amp += float(w) * float(elem.length) * phase * 1j * k0 * dot_n * mu_t
+    amp = _farfield_linear_density_many(
+        mesh, mu_mat, k0, elev, "DLP", order=obs_order
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, k0)
     return rcs_lin, amp, float(np.max(residual_vec))
@@ -6644,31 +6963,24 @@ def _solve_tm_sheet(
     nnodes = len(mesh.nodes)
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
 
-    # Per-node surface impedance, averaged over incident elements so a
-    # tapered sheet gets a continuous Z(s) across shared nodes.
-    z_nodes = np.zeros(nnodes, dtype=np.complex128)
-    z_counts = np.zeros(nnodes, dtype=np.int64)
-    for elem, info in zip(mesh.elements, infos):
-        z_elem = complex(info.robin_impedance)
-        for nid in elem.node_ids:
-            z_nodes[int(nid)] += z_elem
-            z_counts[int(nid)] += 1
-    nonzero = z_counts > 0
-    z_nodes[nonzero] /= z_counts[nonzero]
+    z_elements = np.asarray(
+        [complex(info.robin_impedance) for info in infos],
+        dtype=np.complex128,
+    )
 
     # Operators and mass.
     S_mat, _ = _assemble_linear_operator_matrices(
         mesh, k0, obs_normal_deriv=False,
         obs_order=obs_order, src_order=src_order,
         compute_double_layer=False)
-    M_mat = _assemble_linear_mass_matrix(mesh)
-
-    # SIBC coefficient: sigma_factor_i = Z_s_i / (j k0 eta0).
+    # SIBC coefficient remains inside the element weak integral.
     denom = 1j * float(k0) * ETA0
-    sigma_factor_nodes = z_nodes / denom
+    sigma_factor_elements = z_elements / denom
+    weighted_mass = _assemble_linear_weighted_mass_matrix(
+        mesh, sigma_factor_elements
+    )
 
-    # Assemble: A = S - diag(sigma_factor) @ M
-    a_sys = S_mat - sigma_factor_nodes[:, None] * M_mat
+    a_sys = S_mat - weighted_mass
 
     # RHS: -<phi, u_inc>.
     rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
@@ -6690,20 +7002,9 @@ def _solve_tm_sheet(
     rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
     residual_vec = residual / rhs_norm
 
-    # Far field: SLP projector (matches RCS_NORM = 0.25 convention).
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, obs_order))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        sigma_local = sigma_mat[ids, :]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * float(k0) * (dirs @ rp))
-            sigma_t = np.sum(shape * sigma_local, axis=0)
-            amp += float(w) * float(elem.length) * phase * sigma_t
+    amp = _farfield_linear_density_many(
+        mesh, sigma_mat, float(k0), elev, "SLP", order=obs_order
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, float(k0))
     return rcs_lin, amp, float(np.max(residual_vec))
@@ -6758,26 +7059,22 @@ def _solve_te_sheet(
     nnodes = len(mesh.nodes)
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
 
-    # Per-node surface impedance (averaged across incident elements).
-    z_nodes = np.zeros(nnodes, dtype=np.complex128)
-    z_counts = np.zeros(nnodes, dtype=np.int64)
-    for elem, info in zip(mesh.elements, infos):
-        z_elem = complex(info.robin_impedance)
-        for nid in elem.node_ids:
-            z_nodes[int(nid)] += z_elem
-            z_counts[int(nid)] += 1
-    nonzero = z_counts > 0
-    z_nodes[nonzero] /= z_counts[nonzero]
+    z_elements = np.asarray(
+        [complex(info.robin_impedance) for info in infos],
+        dtype=np.complex128,
+    )
 
     # Operators: hypersingular via Maue, plus mass matrix.
     N_mat = _assemble_linear_hypersingular_matrix(
         mesh, k0, obs_order=obs_order, src_order=src_order)
-    M_mat = _assemble_linear_mass_matrix(mesh)
+    # Coefficient: jomegaeps . Z_s = (jk/eta) . Z_s, retained inside
+    # each element weak integral.
+    coeff_elements = (1j * float(k0) / ETA0) * z_elements
+    weighted_mass = _assemble_linear_weighted_mass_matrix(
+        mesh, coeff_elements
+    )
 
-    # Coefficient: jomegaeps . Z_s = (jk/eta) . Z_s.
-    coeff_nodes = (1j * float(k0) / ETA0) * z_nodes
-
-    a_sys = N_mat - coeff_nodes[:, None] * M_mat
+    a_sys = N_mat - weighted_mass
 
     # RHS: -<phi, du_inc/dn>.
     rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
@@ -6809,21 +7106,9 @@ def _solve_te_sheet(
     rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
     residual_vec = residual / rhs_norm
 
-    # Far field: DLP projector  A = integral jk*(d.n)*mu * exp(jk d.r') ds'.
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, obs_order))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        mu_local = mu_mat[ids, :]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * float(k0) * (dirs @ rp))
-            dot_n = dirs @ elem.normal
-            mu_t = np.sum(shape * mu_local, axis=0)
-            amp += float(w) * float(elem.length) * phase * 1j * float(k0) * dot_n * mu_t
+    amp = _farfield_linear_density_many(
+        mesh, mu_mat, float(k0), elev, "DLP", order=obs_order
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, float(k0))
     return rcs_lin, amp, float(np.max(residual_vec))
@@ -6866,7 +7151,7 @@ def _solve_mixed_sheet_pec(
 
     The key insight is that both the sheet BIE and the PEC body BIE can
     share a single boundary unknown and representation, differing only in a
-    per-node diagonal coefficient:
+    coefficient-weighted element mass term:
 
         TM (single-layer representation, u_s = S sigma):
             PEC   nodes:  row = S                          RHS = -<phi, u_inc>
@@ -6897,26 +7182,10 @@ def _solve_mixed_sheet_pec(
     nnodes = len(mesh.nodes)
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
 
-    # Per-node impedance (0 on PEC, Z_s on sheet) averaged across incident
-    # elements so a tapered sheet gets continuous Z(s) across shared nodes.
-    # We also track per-node "is on sheet" classification: if ANY incident
-    # element at node i is a sheet, then node i participates in the sheet
-    # BC.  (In practice sheets and PEC bodies don't share nodes under normal
-    # geometry, but the averaging gracefully handles edge cases too.)
-    z_nodes = np.zeros(nnodes, dtype=np.complex128)
-    z_counts = np.zeros(nnodes, dtype=np.int64)
-    for elem, info in zip(mesh.elements, infos):
-        z_elem = complex(info.robin_impedance)
-        # Only sheet elements contribute Z_s; PEC contributes 0.
-        if int(info.seg_type) != 1:
-            continue
-        for nid in elem.node_ids:
-            z_nodes[int(nid)] += z_elem
-            z_counts[int(nid)] += 1
-    nonzero = z_counts > 0
-    z_nodes[nonzero] /= z_counts[nonzero]
-
-    M_mat = _assemble_linear_mass_matrix(mesh)
+    z_elements = np.asarray([
+        complex(info.robin_impedance) if int(info.seg_type) == 1 else 0.0 + 0.0j
+        for info in infos
+    ], dtype=np.complex128)
 
     if pol == "TM":
         S_mat, _ = _assemble_linear_operator_matrices(
@@ -6924,8 +7193,10 @@ def _solve_mixed_sheet_pec(
             obs_order=obs_order, src_order=src_order,
             compute_double_layer=False,
         )
-        alpha_nodes = z_nodes / (1j * float(k0) * ETA0)
-        a_sys = S_mat - alpha_nodes[:, None] * M_mat
+        weighted_mass = _assemble_linear_weighted_mass_matrix(
+            mesh, z_elements / (1j * float(k0) * ETA0)
+        )
+        a_sys = S_mat - weighted_mass
 
         # RHS: -<phi, u_inc>
         rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
@@ -6944,8 +7215,10 @@ def _solve_mixed_sheet_pec(
             mesh, k0, obs_order=obs_order, src_order=src_order,
         )
         # Sign matches _solve_te_sheet: N - (jk/eta)Z_s.M (see derivation there).
-        alpha_nodes = (1j * float(k0) / ETA0) * z_nodes
-        a_sys = N_mat - alpha_nodes[:, None] * M_mat
+        weighted_mass = _assemble_linear_weighted_mass_matrix(
+            mesh, (1j * float(k0) / ETA0) * z_elements
+        )
+        a_sys = N_mat - weighted_mass
 
         # RHS: -<phi, du_inc/dn>
         rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
@@ -6986,25 +7259,10 @@ def _solve_mixed_sheet_pec(
     rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
     residual_vec = residual / rhs_norm
 
-    # Far field: SLP projector for TM (sigma is the single-layer density),
-    # DLP projector for TE (mu is the double-layer density).
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, obs_order))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        sol_local = sol_mat[ids, :]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * float(k0) * (dirs @ rp))
-            if pol == "TM":
-                contrib = phase * np.sum(shape * sol_local, axis=0)
-            else:
-                dot_n = dirs @ elem.normal
-                contrib = phase * 1j * float(k0) * dot_n * np.sum(shape * sol_local, axis=0)
-            amp += float(w) * float(elem.length) * contrib
+    amp = _farfield_linear_density_many(
+        mesh, sol_mat, float(k0), elev,
+        "SLP" if pol == "TM" else "DLP", order=obs_order,
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, float(k0))
     return rcs_lin, amp, float(np.max(residual_vec))
@@ -7029,9 +7287,10 @@ def _assemble_robin_bie_system(
     Assemble the all-Robin SLP BIE system shared by the monostatic and
     bistatic solvers (see `_solve_robin_bie` for the derivation).
 
-    Returns (a_sys, alpha_nodes, pec_node) where a_sys already contains the
-    per-row TM-PEC EFIE override, alpha_nodes is the node-averaged Robin
-    coefficient, and pec_node marks nodes incident on a PEC (Z_s = 0) element.
+    Returns (a_sys, alpha_elements, pec_node) where a_sys already contains the
+    per-row TM-PEC EFIE override, alpha_elements is the piecewise-constant
+    Robin coefficient used inside the weak observation integral, and pec_node
+    marks nodes incident on a PEC (Z_s = 0) element.
 
     INTERIOR RESONANCES (why there is deliberately NO CFIE here): the
     system's conditioning spikes at the cavity's interior Dirichlet
@@ -7055,45 +7314,35 @@ def _assemble_robin_bie_system(
 
     nnodes = len(mesh.nodes)
 
-    # Per-node Robin alpha (averaged over incident IBC elements) plus a
-    # boolean mask of nodes whose incident elements are PEC (Z_s = 0).
-    alpha_nodes = np.zeros(nnodes, dtype=np.complex128)
-    alpha_counts = np.zeros(nnodes, dtype=np.int64)
+    alpha_elements, pec_elements = _robin_alpha_elements(mesh, infos, pol)
     pec_node = np.zeros(nnodes, dtype=bool)
-    for elem, info in zip(mesh.elements, infos):
-        z_surf = complex(info.robin_impedance)
-        is_pec = abs(z_surf) <= EPS
-        if is_pec:
+    for eidx, elem in enumerate(mesh.elements):
+        if bool(pec_elements[eidx]):
             for nid in elem.node_ids:
                 pec_node[int(nid)] = True
-            continue
-        eps_m = info.eps_minus if info.minus_region >= 0 else info.eps_plus
-        mu_m = info.mu_minus if info.minus_region >= 0 else info.mu_plus
-        k_m = info.k_minus if info.minus_region >= 0 else info.k_plus
-        a_elem = _surface_robin_alpha(pol, eps_m, mu_m, k_m, z_surf)
-        for nid in elem.node_ids:
-            alpha_nodes[int(nid)] += a_elem
-            alpha_counts[int(nid)] += 1
-    nonzero = alpha_counts > 0
-    alpha_nodes[nonzero] /= alpha_counts[nonzero]
-    # A node touched by both PEC and IBC elements (e.g. at a stair-step
-    # taper boundary) is treated as PEC for TM (Dirichlet wins over Robin
-    # when Z_s -> 0 on either side), which keeps the limit consistent.
+
+    has_ibc = bool(np.any(np.abs(alpha_elements) > EPS))
+    all_tm_pec = bool(pol == 'TM' and np.all(pec_elements))
 
     # Assemble the single-layer and adjoint double-layer operators together.
     # S is independent of the normal-derivative selection, so the former two
     # full passes over every element pair were redundant.  Pure TM-PEC uses
     # only S because every row is replaced by the EFIE limit.
-    need_kp = not (pol == 'TM' and bool(np.all(pec_node)))
-    S_mat, Kp_mat = _assemble_linear_operator_matrices(
+    need_kp = not all_tm_pec
+    S_alpha, Kp_mat = _assemble_linear_operator_matrices(
         mesh, k0, obs_normal_deriv=True,
         obs_order=obs_order, src_order=src_order,
+        compute_single_layer=(has_ibc or all_tm_pec),
         compute_double_layer=need_kp,
+        single_layer_observation_coefficients=(
+            alpha_elements if has_ibc and not all_tm_pec else None
+        ),
     )
     M_mat = _assemble_linear_mass_matrix(mesh)
 
-    # System (default Robin BIE row): (-1/2 M + K' + diag(alpha)*S) sigma = -(bdn + alpha*bu)
-    a_sys = -0.5 * M_mat + Kp_mat + alpha_nodes[:, None] * S_mat
+    # Default Robin row: (-1/2 M + K' + S_alpha) sigma,
+    # where alpha remains inside each observation-element integral.
+    a_sys = -0.5 * M_mat + Kp_mat + (S_alpha if has_ibc else 0.0)
 
     # TM PEC override: replace those rows with the EFIE  S sigma = -u_inc.
     # This is the alpha -> infinity limit of the Robin BIE, divided by alpha
@@ -7101,14 +7350,22 @@ def _assemble_robin_bie_system(
     # gives the correct MFIE, so no override is needed there.
     tm_pec_rows = np.flatnonzero(pec_node) if pol == 'TM' else np.zeros(0, dtype=np.int64)
     if tm_pec_rows.size > 0:
-        a_sys[tm_pec_rows, :] = S_mat[tm_pec_rows, :]
+        if all_tm_pec:
+            S_plain = S_alpha
+        else:
+            S_plain, _ = _assemble_linear_operator_matrices(
+                mesh, k0, obs_normal_deriv=False,
+                obs_order=obs_order, src_order=src_order,
+                compute_double_layer=False,
+            )
+        a_sys[tm_pec_rows, :] = S_plain[tm_pec_rows, :]
 
-    return a_sys, alpha_nodes, pec_node
+    return a_sys, alpha_elements, pec_node
 
 
 def _robin_bie_rhs_many(
     mesh: 'LinearMesh',
-    alpha_nodes: 'np.ndarray',
+    alpha_elements: 'np.ndarray',
     pec_node: 'np.ndarray',
     pol: 'str',
     k0: 'float',
@@ -7128,7 +7385,10 @@ def _robin_bie_rhs_many(
     pec_rhs = (
         np.zeros_like(rhs_sys) if tm_pec_rows.size > 0 else None
     )
-    for elem in mesh.elements:
+    alpha_eval = np.asarray(alpha_elements, dtype=np.complex128).reshape(-1)
+    if alpha_eval.size != len(mesh.elements):
+        raise ValueError("Robin RHS coefficient count must match mesh elements.")
+    for eidx, elem in enumerate(mesh.elements):
         ids = np.asarray(elem.node_ids, dtype=int)
         load_u = _linear_element_incident_load_many(elem, k_air=k0, elevations_deg=elev)
         if not all_tm_pec:
@@ -7136,7 +7396,7 @@ def _robin_bie_rhs_many(
                 elem, k_air=k0, elevations_deg=elev
             )
             rhs_sys[ids, :] -= load_dn
-            rhs_sys[ids, :] -= alpha_nodes[ids, None] * load_u
+            rhs_sys[ids, :] -= complex(alpha_eval[eidx]) * load_u
         if pec_rhs is not None:
             for local_index, node_id in enumerate(ids):
                 if pec_node[int(node_id)]:
@@ -7163,14 +7423,14 @@ def _solve_robin_bie(
     Solve all-Robin (PEC, IBC, or mixed PEC+IBC) scattering with SLP representation.
 
     Uses u_scat = SLP(sigma) and the exterior-limit Robin BC
-    du/dn + alpha*u = 0 applied per node:
+    du/dn + alpha*u = 0 in its element-weighted Galerkin form:
 
-        (-1/2 M + K' + diag(alpha)*S) sigma = -(du_inc/dn + alpha*u_inc)
+        (-1/2 M + K' + S_alpha) sigma = -(du_inc/dn + alpha*u_inc)
 
     The Robin coefficient alpha is computed per element (function of pol, the
-    medium adjacent to the surface, and Z_s) and averaged over the elements
-    incident on each shared node.  Tapered IBC segments produce a continuous
-    alpha(s) across shared nodes via this average.
+    medium adjacent to the surface, and Z_s) and retained inside that
+    observation element's weak integral. This is the consistent Galerkin form
+    for the element-center-sampled impedance model, including tapered IBCs.
 
     Polarisation/PEC handling (per row, so mixed PEC + IBC at TYPE 2 / TYPE 4
     interfaces are supported correctly):
@@ -7193,9 +7453,11 @@ def _solve_robin_bie(
     """
 
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
-    a_sys, alpha_nodes, pec_node = _assemble_robin_bie_system(
+    a_sys, alpha_elements, pec_node = _assemble_robin_bie_system(
         mesh, infos, pol, k0, obs_order=obs_order, src_order=src_order)
-    rhs_sys = _robin_bie_rhs_many(mesh, alpha_nodes, pec_node, pol, k0, elev)
+    rhs_sys = _robin_bie_rhs_many(
+        mesh, alpha_elements, pec_node, pol, k0, elev
+    )
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="Robin-BIE IBC system")
     _record_condition_estimate(
@@ -7211,21 +7473,9 @@ def _solve_robin_bie(
     rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
     residual_vec = residual / rhs_norm
 
-    # Far-field: SLP projector.
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, obs_order))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        sigma_local = sigma_mat[ids, :]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * k0 * (dirs @ rp))
-            sigma_t = np.sum(shape * sigma_local, axis=0)
-            amp += float(w) * float(elem.length) * phase * sigma_t
+    amp = _farfield_linear_density_many(
+        mesh, sigma_mat, k0, elev, "SLP", order=obs_order
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, k0)
     return rcs_lin, amp, float(np.max(residual_vec))
@@ -7311,6 +7561,7 @@ def _solve_multi_region_indirect(
         pec_minus = (r_m < 0)
         pec_plus = (r_p < 0)
         robin_alpha = np.zeros(len(nodes), dtype=np.complex128)
+        robin_alpha_elements = np.zeros(nelems, dtype=np.complex128)
         if pec_minus or pec_plus:
             diel_rid = r_p if pec_minus else r_m
             if diel_rid >= 0 and diel_rid in region_props:
@@ -7324,16 +7575,30 @@ def _solve_multi_region_indirect(
                 # the side sign into the stored alpha so the matrix rows, RHS,
                 # FMM matvec, and preconditioner all stay consistent.
                 side_sign = -1.0 if pec_minus else 1.0
+                for ei in eids:
+                    z_s = complex(infos[ei].robin_impedance)
+                    if abs(z_s) > EPS:
+                        robin_alpha_elements[ei] = (
+                            side_sign
+                            * _surface_robin_alpha(
+                                pol, rp['eps'], rp['mu'], rp['k'], z_s
+                            )
+                        )
+                # Retained only for the constant-coefficient FMM matvec.  The
+                # dense path uses robin_alpha_elements inside the weak
+                # observation integral and never row-scales by this array.
                 for ni, nid in enumerate(nodes):
-                    for ei in eids:
-                        if nid in elements[ei].node_ids:
-                            z_s = complex(infos[ei].robin_impedance)
-                            if abs(z_s) > EPS:
-                                robin_alpha[ni] = side_sign * _surface_robin_alpha(pol, rp['eps'], rp['mu'], rp['k'], z_s)
-                            break
+                    incident = [
+                        robin_alpha_elements[ei]
+                        for ei in eids if nid in elements[ei].node_ids
+                    ]
+                    if incident:
+                        robin_alpha[ni] = sum(incident) / len(incident)
         ifaces.append({'r_m': r_m, 'r_p': r_p, 'eids': eids, 'nodes': nodes, 'n': len(nodes),
                        'pec_minus': pec_minus, 'pec_plus': pec_plus,
-                       'robin_alpha': robin_alpha, 'mask': _make_elem_mask(eids, nelems)})
+                       'robin_alpha': robin_alpha,
+                       'robin_alpha_elements': robin_alpha_elements,
+                       'mask': _make_elem_mask(eids, nelems)})
 
     region_ifaces = {}
     for mi, ifc in enumerate(ifaces):
@@ -7357,6 +7622,22 @@ def _solve_multi_region_indirect(
             "2-D FMM path. Use solver_method='auto' for a dense diagnostic "
             "solve, or explicitly disable the condition-number request."
         )
+    if use_fmm:
+        for ifc in ifaces:
+            if not (ifc['pec_minus'] or ifc['pec_plus']):
+                continue
+            vals = np.asarray(
+                [ifc['robin_alpha_elements'][ei] for ei in ifc['eids']],
+                dtype=np.complex128,
+            )
+            if np.unique(np.round(vals, decimals=14)).size > 1:
+                raise ValueError(
+                    "Multi-region FMM currently supports only a spatially "
+                    "constant Robin coefficient on each PEC-backed interface. "
+                    "Tapered or mixed coefficients require the dense "
+                    "element-weighted Galerkin path; no nodal row-scaling "
+                    "approximation was used."
+                )
     M_global = _assemble_linear_mass_matrix(mesh)
 
     if use_fmm:
@@ -7382,6 +7663,22 @@ def _solve_multi_region_indirect(
                 )
                 op_cache[key] = (S, Kp)
             return op_cache[key]
+
+        weighted_s_cache = {}
+        def get_weighted_s(k_val, src_mask, obs_coeff):
+            coeff_eval = np.asarray(obs_coeff, dtype=np.complex128)
+            key = (
+                complex(k_val), tuple(src_mask.tolist()), coeff_eval.tobytes()
+            )
+            if key not in weighted_s_cache:
+                S_alpha, _ = _assemble_linear_operator_matrices(
+                    mesh, k_val, True, obs_order, src_order,
+                    source_element_mask=src_mask,
+                    compute_double_layer=False,
+                    single_layer_observation_coefficients=coeff_eval,
+                )
+                weighted_s_cache[key] = S_alpha
+            return weighted_s_cache[key]
 
         # Prefetch, grouped by wavenumber.  Every (k, mask) the matrix build
         # will ask for is already determined by the region/interface structure:
@@ -7472,7 +7769,24 @@ def _solve_multi_region_indirect(
             tm_pec_mask = (np.abs(alpha) <= EPS) if pol == 'TM' else np.zeros(nm, dtype=bool)
             if region_props[rid].get('has_incident'):
                 # Default: Robin BIE RHS.
-                rhs_block = bdn[obs_n] + alpha[:, None] * bu[obs_n]
+                if use_fmm:
+                    # FMM reached here only for a constant alpha on this
+                    # interface, for which row scaling is the exact weak form.
+                    alpha_bu = alpha[:, None] * bu[obs_n]
+                else:
+                    alpha_bu_global = np.zeros_like(bu)
+                    alpha_e = ifc['robin_alpha_elements']
+                    for ei in ifc['eids']:
+                        elem = elements[ei]
+                        ids = np.asarray(elem.node_ids, dtype=int)
+                        alpha_bu_global[ids] += (
+                            complex(alpha_e[ei])
+                            * _linear_element_incident_load_many(
+                                elem, k_air=k0, elevations_deg=elev
+                            )
+                        )
+                    alpha_bu = alpha_bu_global[obs_n]
+                rhs_block = bdn[obs_n] + alpha_bu
                 # TM PEC override (per row).
                 if np.any(tm_pec_mask):
                     rhs_block[tm_pec_mask] = bu[obs_n][tm_pec_mask]
@@ -7503,6 +7817,9 @@ def _solve_multi_region_indirect(
             obs_n = ifc['nodes']; nm = ifc['n']
             k_d = region_props[region_id]['k']
             S_self, Kp_self = get_ops(k_d, ifc['mask'])
+            S_alpha_self = get_weighted_s(
+                k_d, ifc['mask'], ifc['robin_alpha_elements']
+            )
             M_s = sub(M_global, obs_n, obs_n)
             alpha = ifc['robin_alpha']
             # Per-node TM PEC mask: nodes where alpha = 0 and pol = TM use
@@ -7516,7 +7833,11 @@ def _solve_multi_region_indirect(
 
             S_sub = sub(S_self, obs_n, obs_n)
             Kp_sub = sub(Kp_self, obs_n, obs_n)
-            block = jump_sign * 0.5 * M_s + Kp_sub + alpha[:, None] * S_sub
+            block = (
+                jump_sign * 0.5 * M_s
+                + Kp_sub
+                + sub(S_alpha_self, obs_n, obs_n)
+            )
             if np.any(tm_pec_mask):
                 block[tm_pec_mask, :] = S_sub[tm_pec_mask, :]
             Asys[dm[0]:dm[0]+nm, dm[0]:dm[0]+nm] += block
@@ -7528,9 +7849,14 @@ def _solve_multi_region_indirect(
                 dj = dof_map.get((mj, side_j))
                 if dj is None: continue
                 S_x, Kp_x = get_ops(k_d, ifj['mask']); src_n = ifj['nodes']
+                S_alpha_x = get_weighted_s(
+                    k_d, ifj['mask'], ifc['robin_alpha_elements']
+                )
                 S_x_sub = sub(S_x, obs_n, src_n)
                 Kp_x_sub = sub(Kp_x, obs_n, src_n)
-                cross_block = Kp_x_sub + alpha[:, None] * S_x_sub
+                cross_block = (
+                    Kp_x_sub + sub(S_alpha_x, obs_n, src_n)
+                )
                 if np.any(tm_pec_mask):
                     cross_block[tm_pec_mask, :] = S_x_sub[tm_pec_mask, :]
                 Asys[dm[0]:dm[0]+nm, dj[0]:dj[0]+dj[1]] += cross_block
@@ -7817,20 +8143,15 @@ def _solve_multi_region_indirect(
             ext_elem_mask[eidx] = True
 
     # 8. Far-field from exterior SLP density.
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, obs_order))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-
-    for eidx in np.flatnonzero(ext_elem_mask):
-        elem = elements[eidx]
-        ids = np.asarray(elem.node_ids, dtype=int)
-        d_loc = ext_density_global[ids, :]
-        for t, w in zip(qt, qw):
-            sh = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * k0 * (dirs @ rp))
-            amp += float(w) * float(elem.length) * phase * np.sum(sh * d_loc, axis=0)
+    amp = _farfield_linear_density_many(
+        mesh,
+        ext_density_global,
+        k0,
+        elev,
+        "SLP",
+        order=obs_order,
+        element_mask=ext_elem_mask,
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, k0)
     return rcs_lin, amp, max_res, ext_density_global
@@ -8117,7 +8438,7 @@ def solve_monostatic_rcs_2d(
             continue
         # --- Mixed TYPE 1 sheet + TYPE 2 PEC dispatch ---
         # Handled with a unified SLP (TM) or DLP (TE) representation over
-        # both surface types with a per-node diagonal term.
+        # both surface types with an element-weighted impedance term.
         if _is_sheet_plus_pec(coupled_infos):
             formulation_label = (
                 "2D mixed sheet+PEC BIE (TM: unified SLP representation)"
@@ -8372,7 +8693,7 @@ def solve_monostatic_rcs_2d(
 
         if use_robin_bie:
             formulation_label = (
-                "2D Robin-BIE (SLP representation; per-node TM-PEC EFIE override)"
+                "2D Robin-BIE (SLP representation; element-weighted IBC, TM-PEC EFIE override)"
                 if pol == 'TM'
                 else "2D Robin-BIE IBC formulation (SLP representation)"
             )
@@ -8573,20 +8894,9 @@ def _farfield_at_angles_slp(
     """SLP far-field projector at arbitrary observation angles (for TE PEC MFIE)."""
 
     obs = np.asarray(obs_angles_deg, dtype=float).reshape(-1)
-    phi = np.deg2rad(obs)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, int(order)))
-    amp = np.zeros(obs.size, dtype=np.complex128)
-
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        sigma_local = density[ids]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * k_air * (dirs @ rp))
-            sigma_t = shape[0] * sigma_local[0] + shape[1] * sigma_local[1]
-            amp += float(w) * float(elem.length) * phase * sigma_t
+    amp = _farfield_linear_density_many(
+        mesh, density, k_air, obs, "SLP", order=order
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, k_air)
     return rcs_lin, amp
@@ -8602,21 +8912,9 @@ def _farfield_at_angles_dlp(
     """DLP far-field projector at arbitrary observation angles (for dielectric indirect)."""
 
     obs = np.asarray(obs_angles_deg, dtype=float).reshape(-1)
-    phi = np.deg2rad(obs)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, int(order)))
-    amp = np.zeros(obs.size, dtype=np.complex128)
-
-    for elem in mesh.elements:
-        ids = np.asarray(elem.node_ids, dtype=int)
-        mu_local = density[ids]
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * k_air * (dirs @ rp))
-            dot_n = dirs @ elem.normal
-            mu_t = shape[0] * mu_local[0] + shape[1] * mu_local[1]
-            amp += float(w) * float(elem.length) * phase * 1j * k_air * dot_n * mu_t
+    amp = _farfield_linear_density_many(
+        mesh, density, k_air, obs, "DLP", order=order
+    )
 
     rcs_lin = _rcs_sigma_from_amp(amp, k_air)
     return rcs_lin, amp
@@ -8782,65 +9080,59 @@ def solve_bistatic_rcs_2d(
 
         # --- TM Robin BIE pre-assembly (shared with _solve_robin_bie) ---
         robin_sys = None
-        robin_alpha_nodes = None
+        robin_alpha_elements = None
         robin_pec_node = None
         if use_tm_robin_bie:
-            robin_sys, robin_alpha_nodes, robin_pec_node = _assemble_robin_bie_system(
+            robin_sys, robin_alpha_elements, robin_pec_node = _assemble_robin_bie_system(
                 mesh, coupled_infos, pol, k0)
 
         # --- TE Robin MFIE pre-assembly ---
         mfie_sys = None
-        mfie_alpha_nodes = None
+        mfie_alpha_elements = None
         if use_te_robin_mfie:
-            # Compute the shared S/K' pair in one element-pair traversal.
-            mfie_alpha_nodes = _te_robin_alpha_nodes(
+            mfie_alpha_elements, _ = _robin_alpha_elements(
                 mesh, coupled_infos, pol
             )
-            has_mfie_ibc = bool(np.any(np.abs(mfie_alpha_nodes) > EPS))
-            s_std, Kp = _assemble_linear_operator_matrices(
+            has_mfie_ibc = bool(np.any(np.abs(mfie_alpha_elements) > EPS))
+            s_alpha, Kp = _assemble_linear_operator_matrices(
                 mesh, k0, obs_normal_deriv=True,
                 compute_single_layer=has_mfie_ibc,
+                single_layer_observation_coefficients=(
+                    mfie_alpha_elements if has_mfie_ibc else None
+                ),
             )
             M_mat = _assemble_linear_mass_matrix(mesh)
             mfie_sys = -0.5 * M_mat + Kp
-            # Use exactly the same incident-element average as the monostatic
-            # TE Robin MFIE so the bistatic diagonal is the monostatic result.
             if has_mfie_ibc:
-                mfie_sys = mfie_sys + mfie_alpha_nodes[:, None] * s_std
+                mfie_sys = mfie_sys + s_alpha
 
         # Pre-assemble sheet system operators once (reused across inc angles).
         # Handles both pure-sheet (all TYPE 1) and mixed sheet+PEC geometries.
         # Mixed uses the unified SLP (TM) / DLP (TE) representation with
-        # per-node alpha_i = Z_i/(jketa) on sheet nodes, alpha_i = 0 on PEC nodes.
+        # element coefficient Z/(jketa) on sheets and zero on PEC elements.
         sheet_a_sys = None
         sheet_endpoint_nodes = None
         if use_sheet or use_mixed_sheet:
-            # Per-node Z_s, averaged across SHEET-incident elements only.
-            # PEC elements contribute no impedance (Z = 0 is the PEC limit of the
-            # unified formulation, not an averaging contribution).
-            z_nodes_sheet = np.zeros(nnodes, dtype=np.complex128)
-            z_counts_sheet = np.zeros(nnodes, dtype=np.int64)
-            for elem, info in zip(mesh.elements, coupled_infos):
-                if int(info.seg_type) != 1:
-                    continue
-                z_elem = complex(info.robin_impedance)
-                for nid in elem.node_ids:
-                    z_nodes_sheet[int(nid)] += z_elem
-                    z_counts_sheet[int(nid)] += 1
-            nonzero_sh = z_counts_sheet > 0
-            z_nodes_sheet[nonzero_sh] /= z_counts_sheet[nonzero_sh]
-            M_sheet = _assemble_linear_mass_matrix(mesh)
+            z_elements_sheet = np.asarray([
+                complex(info.robin_impedance)
+                if int(info.seg_type) == 1 else 0.0 + 0.0j
+                for info in coupled_infos
+            ], dtype=np.complex128)
             if pol == "TM":
                 S_sheet, _ = _assemble_linear_operator_matrices(
                     mesh, k0, obs_normal_deriv=False,
                     compute_double_layer=False)
-                sigma_factor_sheet = z_nodes_sheet / (1j * float(k0) * ETA0)
-                sheet_a_sys = S_sheet - sigma_factor_sheet[:, None] * M_sheet
+                weighted_mass = _assemble_linear_weighted_mass_matrix(
+                    mesh, z_elements_sheet / (1j * float(k0) * ETA0)
+                )
+                sheet_a_sys = S_sheet - weighted_mass
             else:
                 N_sheet = _assemble_linear_hypersingular_matrix(mesh, k0)
                 # Sign matches _solve_te_sheet: N - (jk/eta)Z_s.M.
-                coeff_sheet = (1j * float(k0) / ETA0) * z_nodes_sheet
-                sheet_a_sys = N_sheet - coeff_sheet[:, None] * M_sheet
+                weighted_mass = _assemble_linear_weighted_mass_matrix(
+                    mesh, (1j * float(k0) / ETA0) * z_elements_sheet
+                )
+                sheet_a_sys = N_sheet - weighted_mass
                 # Meixner pin: mu=0 at OPEN-STRIP endpoints only.  See
                 # _geometric_sheet_endpoint_nodes for why we count by geometric
                 # key (handles signature-split nodes in stair-stepped tapers).
@@ -8914,17 +9206,17 @@ def solve_bistatic_rcs_2d(
             rhs_all = np.zeros(
                 (nnodes, inc_all_arr.size), dtype=np.complex128
             )
-            for elem in mesh.elements:
+            for eidx, elem in enumerate(mesh.elements):
                 ids = np.asarray(elem.node_ids, dtype=int)
                 rhs_all[ids, :] -= _linear_element_incident_dn_load_many(
                     elem, k_air=k0, elevations_deg=inc_all_arr,
                 )
                 if (
-                    mfie_alpha_nodes is not None
-                    and np.any(np.abs(mfie_alpha_nodes[ids]) > EPS)
+                    mfie_alpha_elements is not None
+                    and abs(complex(mfie_alpha_elements[eidx])) > EPS
                 ):
                     rhs_all[ids, :] -= (
-                        mfie_alpha_nodes[ids, None]
+                        complex(mfie_alpha_elements[eidx])
                         * _linear_element_incident_load_many(
                             elem, k_air=k0, elevations_deg=inc_all_arr,
                         )
@@ -8943,7 +9235,7 @@ def solve_bistatic_rcs_2d(
         elif use_tm_robin_bie:
             rhs_all = _robin_bie_rhs_many(
                 mesh,
-                robin_alpha_nodes,
+                robin_alpha_elements,
                 robin_pec_node,
                 pol,
                 k0,
@@ -8974,8 +9266,9 @@ def solve_bistatic_rcs_2d(
                 else complex(info0.eps_minus / info0.eps_plus)
             )
 
-            S0, K0 = _assemble_linear_operator_matrices(
-                mesh, k0, obs_normal_deriv=False
+            _, K0 = _assemble_linear_operator_matrices(
+                mesh, k0, obs_normal_deriv=False,
+                compute_single_layer=False,
             )
             _, Kp1 = _assemble_linear_operator_matrices(
                 mesh, k1, obs_normal_deriv=True,
@@ -9499,7 +9792,7 @@ def compute_boundary_densities(
     use_multi = _is_multi_region(coupled_infos)
     use_diel = _is_single_dielectric_body(coupled_infos) and not use_multi
     # All-Robin covers PEC, IBC (constant or tapered), and mixed PEC+IBC.
-    # It reuses the shared Robin-BIE assembly (node-averaged per-node alpha,
+    # It reuses the shared Robin-BIE assembly (element-weighted alpha,
     # adjacent-medium wavenumber, per-row TM-PEC EFIE override) so the
     # visualized layer densities come from exactly the formulation the RCS solvers
     # use.  The previous branches applied a single alpha from element 0 to
@@ -9519,14 +9812,17 @@ def compute_boundary_densities(
         formulation = "Multi-region indirect (exterior SLP density)"
 
     elif use_diel:
-        rcs_lin, amp, _ = _solve_dielectric_indirect(
-            mesh, coupled_infos, pol, k0, elev_arr)
-        # Re-solve to extract density (simplified: re-do the solve)
+        # Assemble once and retain the DLP density directly.  The previous
+        # implementation first called the complete RCS solver, discarded its
+        # field, then rebuilt every dense operator and solved the identical
+        # system a second time solely to expose this density.
         info0 = coupled_infos[0]
         k1_vals = {complex(i.k_plus) for i in coupled_infos if i.plus_region > 0}
         k1 = k1_vals.pop() if k1_vals else k0
         factor = complex(info0.mu_minus / info0.mu_plus) if pol == 'TM' else complex(info0.eps_minus / info0.eps_plus)
-        S0, K0 = _assemble_linear_operator_matrices(mesh, k0, False)
+        _, K0 = _assemble_linear_operator_matrices(
+            mesh, k0, False, compute_single_layer=False
+        )
         _, Kp1 = _assemble_linear_operator_matrices(
             mesh, k1, True, compute_single_layer=False
         )
@@ -9552,20 +9848,24 @@ def compute_boundary_densities(
         formulation = "Indirect dielectric (DLP density)"
 
     elif use_robin:
-        # Shared Robin-BIE assembly: per-node averaged alpha (tapered IBC),
+        # Shared Robin-BIE assembly: element-weighted alpha (tapered IBC),
         # adjacent-medium wavenumber, per-row TM-PEC EFIE override -- the same
         # system _solve_robin_bie / the bistatic dispatch solve.  For pure
         # PEC this reduces to the EFIE (TM) / MFIE (TE) exactly.
-        a_sys, alpha_nodes, pec_node = _assemble_robin_bie_system(mesh, coupled_infos, pol, k0)
-        rhs = _robin_bie_rhs_many(mesh, alpha_nodes, pec_node, pol, k0, elev_arr)
+        a_sys, alpha_elements, pec_node = _assemble_robin_bie_system(
+            mesh, coupled_infos, pol, k0
+        )
+        rhs = _robin_bie_rhs_many(
+            mesh, alpha_elements, pec_node, pol, k0, elev_arr
+        )
         sigma_nodes = np.linalg.solve(a_sys, rhs)[:, 0]
         density = np.asarray([
             0.5*(sigma_nodes[e.node_ids[0]]+sigma_nodes[e.node_ids[1]])
             for e in mesh.elements
         ], dtype=np.complex128)
         formulation = (
-            "Robin BIE (SLP density; per-node alpha, TM-PEC EFIE rows)"
-            if pol == "TM" else "Robin BIE / MFIE (SLP density; per-node alpha)"
+            "Robin BIE (SLP density; element-weighted alpha, TM-PEC EFIE rows)"
+            if pol == "TM" else "Robin BIE / MFIE (SLP density; element-weighted alpha)"
         )
 
     else:
