@@ -324,6 +324,80 @@ Dielectrics:
           "multi-region load balancing charges its larger system and operators")
 
 
+def test_batched_exact_resource_plan():
+    print("\nbatched exact resource planning")
+    import rcs_solver
+
+    with tempfile.TemporaryDirectory() as tmp:
+        closed = Path(tmp) / "closed_pec.geo"
+        closed.write_text(
+            """Title: closed PEC batch planner
+Segment: square 2
+properties: 2 0 0 0 0
+-1 -1  -1 1
+-1 1  1 1
+1 1  1 -1
+1 -1  -1 -1
+IBCS_Resistances:
+Dielectrics:
+"""
+        )
+
+        validate_original = rcs_solver.validate_geometry_snapshot_for_solver
+        mesh_original = rcs_solver._build_linear_mesh_interface_aware
+        info_original = rcs_solver._build_coupled_panel_info
+        calls = {"validate": 0, "mesh": 0, "info": 0}
+
+        def counted_validate(*args, **kwargs):
+            calls["validate"] += 1
+            return validate_original(*args, **kwargs)
+
+        def counted_mesh(*args, **kwargs):
+            calls["mesh"] += 1
+            return mesh_original(*args, **kwargs)
+
+        def counted_info(*args, **kwargs):
+            calls["info"] += 1
+            return info_original(*args, **kwargs)
+
+        rcs_solver.validate_geometry_snapshot_for_solver = counted_validate
+        rcs_solver._build_linear_mesh_interface_aware = counted_mesh
+        rcs_solver._build_coupled_panel_info = counted_info
+        progress = []
+        try:
+            batched = hpc_scheduler.predict_2d_resources_many(
+                str(closed), [1.0, 2.0], ["TM", "TE"], "meters", 50000,
+                fine_factor=1.0, n_angles=19,
+                progress=lambda frequency, polarization: progress.append(
+                    (frequency, polarization)
+                ),
+            )
+        finally:
+            rcs_solver.validate_geometry_snapshot_for_solver = validate_original
+            rcs_solver._build_linear_mesh_interface_aware = mesh_original
+            rcs_solver._build_coupled_panel_info = info_original
+
+        check(calls["validate"] == 1,
+              "survey planning validates geometry once, not once per unit")
+        check(calls["mesh"] == 2,
+              "TM/TE share one exact topology mesh per frequency")
+        check(calls["info"] == 4,
+              "each unit builds its material coefficients exactly once")
+        check(len(progress) == 4,
+              "progress reports every frequency/polarization resource record")
+
+        exact = True
+        for frequency in (1.0, 2.0):
+            for polarization in ("TM", "TE"):
+                single = hpc_scheduler.predict_2d_resources(
+                    str(closed), frequency, polarization, "meters", 50000,
+                    fine_factor=1.0, n_angles=19,
+                )
+                exact = exact and batched[(frequency, polarization)] == single
+        check(exact,
+              "batched reuse is numerically identical to isolated exact planning")
+
+
 def test_survey_mode_cost():
     print("\nsurvey mode (MESH_CERTIFICATION = False)")
     # fine_factor <= 1 means "one mesh", not "a second mesh the same size".
@@ -564,6 +638,11 @@ def test_end_to_end():
               f"manifest holds {expected_units} units")
         check((run_dir / "schedule.json").is_file(), "schedule.json was written")
         schedule = json.loads((run_dir / "schedule.json").read_text())
+        check(schedule.get("planning", {}).get("method") == "batched_exact",
+              "schedule records the batched exact planning method")
+        check("Planning exact resources" in result.stdout
+              and "Resource plan ready" in result.stdout,
+              "submit output reports resource-planning progress and timing")
         check(all(int(r["nodes"]) > 0 for r in schedule["units"]),
               "every unit was pre-meshed for its cost estimate")
         check(all(float(r["peak_gb"]) > 0 for r in schedule["units"]),
@@ -684,6 +763,7 @@ def main():
     test_memory_admission()
     test_memory_cpu_backfill()
     test_formulation_resource_plan()
+    test_batched_exact_resource_plan()
     test_survey_mode_cost()
     test_memory_heavy_geometry()
     test_resource_detection()

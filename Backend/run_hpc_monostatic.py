@@ -459,24 +459,79 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
     # type: (List[Dict[str, Any]], int, float, int) -> Dict[str, Any]
     """Cost every unit, size its memory, and deal the units out to slots.
 
-    Resource records are cached per (geometry, frequency, polarization).
-    Polarization shares the mesh topology but can select a different dense
-    formulation and therefore a different memory footprint.
+    Geometry validation/material loading is batched once per geometry, and
+    polarization-independent frequency meshes are shared only when their
+    complete interface signatures match. Every unit still receives an exact
+    formulation-specific memory record.
     """
 
     resource_cache = {}  # type: Dict[Tuple[str, float, str], Dict[str, Any]]
+    grouped = {}  # type: Dict[str, Dict[str, List[Any]]]
+    for unit in units:
+        geometry = str(unit["geometry"])
+        group = grouped.setdefault(geometry, {"frequencies": [], "polarizations": []})
+        frequency = float(unit["frequency_ghz"])
+        polarization = str(unit["polarization"])
+        if frequency not in group["frequencies"]:
+            group["frequencies"].append(frequency)
+        if polarization not in group["polarizations"]:
+            group["polarizations"].append(polarization)
+
+    total = sum(
+        len(group["frequencies"]) * len(group["polarizations"])
+        for group in grouped.values()
+    )
+    started = time.monotonic()
+    completed = 0
+    report_step = max(1, total // 20)
+    next_report = report_step
+    last_report = started
+    print(
+        f"  Planning exact resources for {total} unit(s) across "
+        f"{len(grouped)} geometry file(s)...",
+        flush=True,
+    )
+
+    def planning_progress(_frequency, _polarization):
+        # type: (float, str) -> None
+        nonlocal completed, next_report, last_report
+        completed += 1
+        now = time.monotonic()
+        if completed < total and completed < next_report and now - last_report < 10.0:
+            return
+        elapsed = max(now - started, 1.0e-9)
+        rate = completed / elapsed
+        eta = (total - completed) / rate if rate > 0.0 else 0.0
+        print(
+            f"    planned {completed}/{total} ({100.0 * completed / total:.0f}%) "
+            f"in {elapsed:.1f}s, ETA {eta:.1f}s",
+            flush=True,
+        )
+        while next_report <= completed:
+            next_report += report_step
+        last_report = now
+
+    for geometry, group in grouped.items():
+        batch = hpc_scheduler.predict_2d_resources_many(
+            geometry,
+            group["frequencies"],
+            group["polarizations"],
+            GEOMETRY_UNITS,
+            MAX_PANELS,
+            fine_factor=fine_factor,
+            n_angles=n_angles,
+            safety=float(MEMORY_SAFETY),
+            progress=planning_progress,
+        )
+        for (frequency, polarization), planned in batch.items():
+            resource_cache[(geometry, frequency, polarization)] = planned
+
     records = []     # type: List[Dict[str, Any]]
     for unit in units:
         key = (
             str(unit["geometry"]), float(unit["frequency_ghz"]),
             str(unit["polarization"]),
         )
-        if key not in resource_cache:
-            resource_cache[key] = hpc_scheduler.predict_2d_resources(
-                key[0], key[1], key[2], GEOMETRY_UNITS, MAX_PANELS,
-                fine_factor=fine_factor, n_angles=n_angles,
-                safety=float(MEMORY_SAFETY),
-            )
         planned = resource_cache[key]
         nodes = int(planned["nodes"])
         records.append({
@@ -502,10 +557,21 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
     assignment = hpc_scheduler.balance_units(records, n_slots)
     for record, slot in zip(records, assignment):
         record["slot"] = int(slot)
+    elapsed = time.monotonic() - started
+    print(f"  Resource plan ready in {elapsed:.1f}s.", flush=True)
     return {
         "schema": SCHEDULE_SCHEMA,
         "n_slots": int(n_slots),
         "fine_factor": float(fine_factor),
+        "planning": {
+            "method": "batched_exact",
+            "elapsed_seconds": float(elapsed),
+            "geometry_preflights": int(len(grouped)),
+            "frequency_mesh_groups": int(
+                sum(len(group["frequencies"]) for group in grouped.values())
+            ),
+            "unit_records": int(len(records)),
+        },
         "units": records,
         "summary": hpc_scheduler.slot_plan_summary(records, assignment, n_slots),
     }

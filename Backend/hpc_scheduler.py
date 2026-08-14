@@ -268,28 +268,135 @@ def install_fingerprint_cache(full_recheck_seconds: 'float' = 300.0) -> 'None':
 # Cost and memory model
 # -----------------------------------------------------------------------------
 
-def predict_2d_resources(
-    geometry_path: 'str',
+def _same_interface_topology(
+    rcs_solver: 'Any',
+    panels: 'Sequence[Any]',
+    left: 'Sequence[Any]',
+    right: 'Sequence[Any]',
+) -> 'bool':
+    """Whether two polarization previews produce the same nodal topology.
+
+    Today the signature depends only on geometry/interface flags, not material
+    values or polarization. Keeping the comparison explicit makes the reuse
+    fail-safe if a future formulation introduces a polarization-dependent
+    interface: that channel simply receives its own mesh.
+    """
+
+    if len(left) != len(right) or len(left) != len(panels):
+        return False
+    return all(
+        rcs_solver._linear_panel_signature_from_info(panel, l_info)
+        == rcs_solver._linear_panel_signature_from_info(panel, r_info)
+        for panel, l_info, r_info in zip(panels, left, right)
+    )
+
+
+def _resource_records_for_frequency(
+    rcs_solver: 'Any',
+    snapshot: 'Dict[str, Any]',
+    materials: 'Any',
     frequency_ghz: 'float',
-    polarization: 'str',
+    polarizations: 'Sequence[Tuple[str, str]]',
+    unit_scale: 'float',
+    max_panels: 'int',
+) -> 'Dict[str, Dict[str, Any]]':
+    """Build one exact mesh per distinct interface topology at a frequency."""
+
+    freq_ghz = float(frequency_ghz)
+    k0 = 2.0 * math.pi * freq_ghz * 1.0e9 / rcs_solver.C0
+    lambda_min, _, _ = rcs_solver._mesh_wavelength_for_snapshot(
+        snapshot, materials, freq_ghz
+    )
+    panels = rcs_solver._build_panels(
+        snapshot, unit_scale, lambda_min, max_panels=int(max_panels)
+    )
+
+    # Each group holds a representative panel-info list and the exact mesh
+    # built from it. VV/HH currently share one group; the fallback remains
+    # exact if that ever stops being true.
+    topology_groups = []  # type: List[Tuple[List[Any], Any]]
+    records = {}  # type: Dict[str, Dict[str, Any]]
+    for requested_pol, canonical_pol in polarizations:
+        preview = rcs_solver._build_coupled_panel_info(
+            panels, materials, freq_ghz, canonical_pol, k0
+        )
+        mesh = None
+        for representative, candidate_mesh in topology_groups:
+            if _same_interface_topology(
+                rcs_solver, panels, representative, preview
+            ):
+                mesh = candidate_mesh
+                break
+        if mesh is None:
+            mesh, _stats = rcs_solver._build_linear_mesh_interface_aware(
+                panels, preview
+            )
+            topology_groups.append((preview, mesh))
+
+        # ``preview`` already came from the production coefficient builder.
+        # Interface-aware meshing preserves the panels one-for-one and in the
+        # same order, changing only their endpoint node IDs.  Rebuilding the
+        # material records from those copied elements would therefore produce
+        # identical records while repeating every material-table lookup and
+        # passivity check on large meshes.
+        infos = preview
+        rcs_solver._assert_no_type1_sheet_for_mixed(infos)
+        rcs_solver._assert_air_exterior(infos)
+        rcs_solver._assert_supported_te_type2_contours(
+            mesh, infos, canonical_pol
+        )
+        resources = rcs_solver._dense_formulation_resources(
+            mesh, infos, canonical_pol
+        )
+        records[requested_pol] = {
+            "panels": int(len(panels)),
+            **resources,
+        }
+    return records
+
+
+def predict_2d_resources_many(
+    geometry_path: 'str',
+    frequencies_ghz: 'Sequence[float]',
+    polarizations: 'Sequence[str]',
     geometry_units: 'str',
     max_panels: 'int',
     fine_factor: 'float' = 1.0,
     n_angles: 'int' = 1,
     safety: 'float' = 1.35,
     floor_gb: 'float' = 0.6,
-) -> 'Dict[str, Any]':
-    """Plan one 2-D unit from its actual formulation and interface mesh.
+    progress: 'Optional[Callable[[float, str], None]]' = None,
+) -> 'Dict[Tuple[float, str], Dict[str, Any]]':
+    """Plan a geometry sweep using the exact solver mesh and formulation.
 
-    Builds the same interface-aware base/fine meshes used by the solver,
-    classifies the active formulation, and sizes the actual system DOFs.
-    Errors propagate so an unsupported unit cannot enter a sweep with a
-    zero-GB reservation.
+    Geometry validation, material-table loading, and certification refinement
+    are performed once per geometry. Panels are built once per frequency and
+    the interface-aware mesh is shared across polarizations only after their
+    complete topology signatures compare equal. Material coefficients,
+    formulation checks, DOF counts, and memory estimates remain specific to
+    every frequency/polarization unit. Errors still propagate so an
+    unsupported unit cannot enter a sweep with a zero-GB reservation.
     """
 
     import rcs_solver
     from geometry_io import parse_geometry, build_geometry_snapshot
     from solver_quality import scale_snapshot_panel_density
+
+    frequencies = [float(value) for value in frequencies_ghz]
+    if not frequencies:
+        raise ValueError("2-D resource planning requires at least one frequency.")
+    if (
+        any(not math.isfinite(value) or value <= 0.0 for value in frequencies)
+        or len(set(frequencies)) != len(frequencies)
+    ):
+        raise ValueError("Planning frequencies must be finite, positive, and unique.")
+    requested_pols = distinct_polarization_channels(
+        [str(value) for value in polarizations]
+    )
+    normalized_pols = [
+        (label, rcs_solver._normalize_polarization(label))
+        for label in requested_pols
+    ]
 
     path = Path(geometry_path)
     title, segments, ibcs, dielectrics = parse_geometry(path.read_text())
@@ -297,46 +404,19 @@ def predict_2d_resources(
         title, segments, ibcs, dielectrics
     )
     base_dir = str(path.parent)
-    pol = rcs_solver._normalize_polarization(polarization)
     unit_scale = rcs_solver._unit_scale_to_meters(geometry_units)
-    freq_ghz = float(frequency_ghz)
-    k0 = 2.0 * math.pi * freq_ghz * 1.0e9 / rcs_solver.C0
+    materials = rcs_solver.MaterialLibrary.from_entries(
+        base_snapshot.get("ibcs", []) or [],
+        base_snapshot.get("dielectrics", []) or [],
+        base_dir=base_dir,
+    )
+    rcs_solver.validate_geometry_snapshot_for_solver(
+        base_snapshot,
+        base_dir=base_dir,
+        meters_scale=unit_scale,
+        material_library=materials,
+    )
 
-    def _mesh_record(snapshot):
-        rcs_solver.validate_geometry_snapshot_for_solver(
-            snapshot, base_dir=base_dir, meters_scale=unit_scale
-        )
-        materials = rcs_solver.MaterialLibrary.from_entries(
-            snapshot.get("ibcs", []) or [],
-            snapshot.get("dielectrics", []) or [],
-            base_dir=base_dir,
-        )
-        lambda_min, _, _ = rcs_solver._mesh_wavelength_for_snapshot(
-            snapshot, materials, freq_ghz
-        )
-        panels = rcs_solver._build_panels(
-            snapshot, unit_scale, lambda_min, max_panels=int(max_panels)
-        )
-        preview = rcs_solver._build_coupled_panel_info(
-            panels, materials, freq_ghz, pol, k0
-        )
-        mesh, _stats = rcs_solver._build_linear_mesh_interface_aware(
-            panels, preview
-        )
-        infos = rcs_solver._build_linear_coupled_infos(
-            mesh, materials, freq_ghz, pol, k0
-        )
-        rcs_solver._assert_no_type1_sheet_for_mixed(infos)
-        rcs_solver._assert_air_exterior(infos)
-        rcs_solver._assert_supported_te_type2_contours(mesh, infos, pol)
-
-        resources = rcs_solver._dense_formulation_resources(mesh, infos, pol)
-        return {
-            "panels": int(len(panels)),
-            **resources,
-        }
-
-    base = _mesh_record(base_snapshot)
     if float(fine_factor) <= 1.0:
         fine_snapshot = base_snapshot
     else:
@@ -351,35 +431,98 @@ def predict_2d_resources(
             fine_factor
         )
         fine_snapshot["_2d_certification_base_segment_n"] = base_segment_n
-    fine = base if fine_snapshot is base_snapshot else _mesh_record(fine_snapshot)
-    if fine["formulation"] != base["formulation"]:
-        raise RuntimeError(
-            "base/fine resource planning selected different formulations"
+        rcs_solver.validate_geometry_snapshot_for_solver(
+            fine_snapshot,
+            base_dir=base_dir,
+            meters_scale=unit_scale,
+            material_library=materials,
         )
-    dense_gb = rcs_solver._estimate_memory_gb(
-        fine["nodes"],
-        use_cfie=False,
-        n_regions=max(1, fine["n_regions"]),
-        system_dofs=fine["system_dofs"],
-        operator_matrices=fine["operator_matrices"],
-        n_rhs=max(1, int(n_angles)),
-    )
-    return {
-        "nodes": int(base["nodes"]),
-        "panels": int(base["panels"]),
-        "base_system_dofs": int(base["system_dofs"]),
-        "base_operator_matrices": int(base["operator_matrices"]),
-        "fine_nodes": int(fine["nodes"]),
-        "fine_panels": int(fine["panels"]),
-        "fine_system_dofs": int(fine["system_dofs"]),
-        "fine_operator_matrices": int(fine["operator_matrices"]),
-        "n_regions": int(fine["n_regions"]),
-        "formulation": str(fine["formulation"]),
-        # Compatibility aliases: peak planning is governed by the fine mesh.
-        "system_dofs": int(fine["system_dofs"]),
-        "operator_matrices": int(fine["operator_matrices"]),
-        "peak_gb": float(floor_gb) + float(safety) * float(dense_gb),
-    }
+
+    planned = {}  # type: Dict[Tuple[float, str], Dict[str, Any]]
+    for freq_ghz in frequencies:
+        base_records = _resource_records_for_frequency(
+            rcs_solver,
+            base_snapshot,
+            materials,
+            freq_ghz,
+            normalized_pols,
+            unit_scale,
+            max_panels,
+        )
+        fine_records = (
+            base_records
+            if fine_snapshot is base_snapshot
+            else _resource_records_for_frequency(
+                rcs_solver,
+                fine_snapshot,
+                materials,
+                freq_ghz,
+                normalized_pols,
+                unit_scale,
+                max_panels,
+            )
+        )
+        for requested_pol in requested_pols:
+            base = base_records[requested_pol]
+            fine = fine_records[requested_pol]
+            if fine["formulation"] != base["formulation"]:
+                raise RuntimeError(
+                    "base/fine resource planning selected different formulations"
+                )
+            dense_gb = rcs_solver._estimate_memory_gb(
+                fine["nodes"],
+                use_cfie=False,
+                n_regions=max(1, fine["n_regions"]),
+                system_dofs=fine["system_dofs"],
+                operator_matrices=fine["operator_matrices"],
+                n_rhs=max(1, int(n_angles)),
+            )
+            planned[(freq_ghz, requested_pol)] = {
+                "nodes": int(base["nodes"]),
+                "panels": int(base["panels"]),
+                "base_system_dofs": int(base["system_dofs"]),
+                "base_operator_matrices": int(base["operator_matrices"]),
+                "fine_nodes": int(fine["nodes"]),
+                "fine_panels": int(fine["panels"]),
+                "fine_system_dofs": int(fine["system_dofs"]),
+                "fine_operator_matrices": int(fine["operator_matrices"]),
+                "n_regions": int(fine["n_regions"]),
+                "formulation": str(fine["formulation"]),
+                # Compatibility aliases: peak planning is governed by the fine mesh.
+                "system_dofs": int(fine["system_dofs"]),
+                "operator_matrices": int(fine["operator_matrices"]),
+                "peak_gb": float(floor_gb) + float(safety) * float(dense_gb),
+            }
+            if progress is not None:
+                progress(freq_ghz, requested_pol)
+    return planned
+
+
+def predict_2d_resources(
+    geometry_path: 'str',
+    frequency_ghz: 'float',
+    polarization: 'str',
+    geometry_units: 'str',
+    max_panels: 'int',
+    fine_factor: 'float' = 1.0,
+    n_angles: 'int' = 1,
+    safety: 'float' = 1.35,
+    floor_gb: 'float' = 0.6,
+) -> 'Dict[str, Any]':
+    """Backward-compatible one-unit exact resource prediction."""
+
+    key = (float(frequency_ghz), str(polarization))
+    return predict_2d_resources_many(
+        geometry_path,
+        [key[0]],
+        [key[1]],
+        geometry_units,
+        max_panels,
+        fine_factor=fine_factor,
+        n_angles=n_angles,
+        safety=safety,
+        floor_gb=floor_gb,
+    )[key]
 
 
 def unit_cost(

@@ -481,7 +481,11 @@ class MaterialLibrary:
 
     def is_tapered_impedance(self, flag: 'int') -> 'bool':
         """True if the IBC flag is spatially tapered along the segment."""
-        return isinstance(self.impedance_models.get(flag), ImpedanceTaper)
+        model = self.impedance_models.get(flag)
+        return (
+            isinstance(model, ImpedanceTaper)
+            and model.kind != "constant"
+        )
 
     def get_medium(self, flag: 'int', freq_ghz: 'float') -> 'Tuple[complex, complex]':
         if flag <= 0:
@@ -1356,6 +1360,7 @@ def validate_geometry_snapshot_for_solver(
     geometry_snapshot: 'Dict[str, Any]',
     base_dir: 'str',
     meters_scale: 'float' = 1.0,
+    material_library: 'Optional[MaterialLibrary]' = None,
 ) -> 'Dict[str, Any]':
     """
     Strict solver-side preflight for geometry/material consistency.
@@ -1391,7 +1396,12 @@ def validate_geometry_snapshot_for_solver(
     # Parse and validate every material definition before geometry assembly.
     # Both 2D and BoR call this preflight, so missing/malformed explicit CSV
     # sidecars fail identically in both solver paths.
-    MaterialLibrary.from_entries(ibc_rows, diel_rows, base_dir)
+    # Batched HPC planning already holds the immutable material library for
+    # this geometry. Reusing it avoids reopening and reparsing the same CSV
+    # sidecars hundreds of times. Ordinary solver callers omit the argument
+    # and retain the original fail-closed construction path.
+    if material_library is None:
+        MaterialLibrary.from_entries(ibc_rows, diel_rows, base_dir)
 
     warnings: 'List[str]' = []
     primitives: 'List[Tuple[int, int, str, Tuple[float, float], Tuple[float, float]]]' = []
@@ -4806,6 +4816,54 @@ def _build_coupled_panel_info(
     sheet_region_by_name: 'Dict[str, int]' = {}
     next_sheet_region = VIRTUAL_SHEET_REGION_START
 
+    # Medium properties are constant for a (region, frequency) pair. Large
+    # meshes used to resample and revalidate the same epsilon/mu twice per
+    # panel, which made even submit-time resource previews scale expensively
+    # with panel count. Cache only within this call/frequency; dispersive
+    # tables are still sampled independently at every requested frequency.
+    medium_state = {}  # type: Dict[int, Tuple[complex, complex, complex]]
+
+    def region_state(region):
+        # type: (int) -> Tuple[complex, complex, complex]
+        key = int(region)
+        cached = medium_state.get(key)
+        if cached is not None:
+            return cached
+        eps_value, mu_value = _region_medium(materials, key, freq_ghz)
+        k_value = _medium_wavenumber(k0, eps_value, mu_value)
+        if (
+            abs(k_value.imag) > 1e-10
+            and _complex_hankel_backend_name() == "unavailable"
+        ):
+            raise RuntimeError(
+                "Lossy dielectric media require SciPy or mpmath for trustworthy "
+                "complex-Hankel evaluation. Install one of those backends before "
+                "running production dielectric solves."
+            )
+        cached = (eps_value, mu_value, k_value)
+        medium_state[key] = cached
+        return cached
+
+    # Non-tapered impedance models are also constant over every panel carrying
+    # the same flag at this frequency. Spatial tapers deliberately bypass this
+    # cache because arc_s is part of their physical definition.
+    impedance_cache = {}  # type: Dict[int, complex]
+
+    def panel_impedance(panel):
+        # type: (Panel) -> complex
+        flag = int(panel.ibc_flag)
+        if flag <= 0:
+            return 0.0 + 0.0j
+        if materials.is_tapered_impedance(flag):
+            return materials.get_impedance(
+                flag, freq_ghz, arc_s=float(panel.arc_s_center)
+            )
+        if flag not in impedance_cache:
+            impedance_cache[flag] = materials.get_impedance(
+                flag, freq_ghz, arc_s=float(panel.arc_s_center)
+            )
+        return impedance_cache[flag]
+
     for panel in panels:
         seg_type = panel.seg_type
         if seg_type == 3:
@@ -4861,23 +4919,9 @@ def _build_coupled_panel_info(
             minus_has_incident = True
             plus_has_incident = False
 
-        eps_minus, mu_minus = _region_medium(materials, minus_region, freq_ghz)
-        eps_plus, mu_plus = _region_medium(materials, plus_region, freq_ghz)
-        k_minus = _medium_wavenumber(k0, eps_minus, mu_minus)
-        k_plus = _medium_wavenumber(k0, eps_plus, mu_plus)
-        if (
-            abs(k_minus.imag) > 1e-10 or abs(k_plus.imag) > 1e-10
-        ) and _complex_hankel_backend_name() == "unavailable":
-            raise RuntimeError(
-                "Lossy dielectric media require SciPy or mpmath for trustworthy complex-Hankel evaluation. "
-                "Install one of those backends before running production dielectric solves."
-            )
-
-        z_card = (
-            materials.get_impedance(panel.ibc_flag, freq_ghz, arc_s=float(panel.arc_s_center))
-            if panel.ibc_flag > 0
-            else 0.0 + 0.0j
-        )
+        eps_minus, mu_minus, k_minus = region_state(minus_region)
+        eps_plus, mu_plus, k_plus = region_state(plus_region)
+        z_card = panel_impedance(panel)
         if bc_kind == "transmission":
             if seg_type == 1:
                 if abs(z_card) <= EPS:

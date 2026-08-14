@@ -493,6 +493,14 @@ class TaperedImpedanceTests(unittest.TestCase):
                     err_msg=f"{pol} {kind}",
                 )
 
+    def test_constant_impedance_is_not_classified_as_spatial_taper(self):
+        materials = rcs.MaterialLibrary.from_entries(
+            [["1", "constant", "60", "10", "60", "10"]],
+            [],
+            base_dir=".",
+        )
+        self.assertFalse(materials.is_tapered_impedance(1))
+
 
 class SheetLimitAndMixedTests(unittest.TestCase):
     _ANGLES = [-35.0, 0.0, 40.0]
