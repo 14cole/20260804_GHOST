@@ -342,8 +342,14 @@ def solve_job(
 
 
 def solve_job_catching(args: 'tuple[Any, ...]') -> 'tuple[str, str, str, dict[str, Any]]':
-    job, kwargs = args
+    if len(args) == 2:
+        job, kwargs = args
+        assembly_threads = 1
+    else:
+        job, kwargs, assembly_threads = args
     try:
+        import rcs_solver
+        rcs_solver.set_assembly_threads(assembly_threads)
         status, path = solve_job(job, **kwargs)
         return "ok", status, path, job
     except Exception:

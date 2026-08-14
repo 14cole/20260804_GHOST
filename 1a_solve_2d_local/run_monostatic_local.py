@@ -42,7 +42,7 @@ POLARIZATIONS = ["TM", "TE"]   # or the radar aliases ["VV", "HH"]
                                # way, so the spelling you use here never
                                # forks the results into two sets.
 GEOMETRY_UNITS = "meters"
-SOLVER_METHOD = "auto"
+SOLVER_METHOD = "auto"       # "auto" | "direct" (certified production)
 MAX_PANELS = 50_000
 FORCE = False
 
@@ -73,6 +73,11 @@ TASKS_PER_CHILD = 4           # pool worker lifetime, in units
 
 
 def _validate_settings() -> 'None':
+    if str(SOLVER_METHOD).strip().lower() not in {"auto", "direct"}:
+        raise SystemExit(
+            "SOLVER_METHOD must be 'auto' or 'direct'; certified 2-D "
+            "production solves require a condition-reporting dense method."
+        )
     if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
         raise SystemExit("MEMORY_HEADROOM must be in (0, 1].")
     if float(MEMORY_SAFETY) < 1.0:
@@ -88,8 +93,8 @@ def _validate_settings() -> 'None':
 def _plan(jobs, n_angles):
     """Cost and size every job from the mesh the solver will actually build.
 
-    The mesh depends on the geometry and frequency but not the polarization,
-    so a coupon library with both polarizations meshes each pair once.
+    Formulation and interface splitting can depend on polarization, so the
+    resource plan is cached per complete solve unit.
     """
 
     from solver_quality import validate_mesh_convergence_policy
@@ -99,43 +104,50 @@ def _plan(jobs, n_angles):
         float(validate_mesh_convergence_policy()["fine_factor"])
         if MESH_CERTIFICATION else 1.0
     )
-    nodes_cache = {}
+    resource_cache = {}
     costs = {}
     peaks = {}
     for job in jobs:
-        key = (str(job["geometry"]), float(job["frequency_ghz"]))
-        if key not in nodes_cache:
-            nodes_cache[key] = hpc_scheduler.predict_2d_nodes(
-                key[0], key[1], str(job["polarization"]),
-                GEOMETRY_UNITS, MAX_PANELS,
+        key = (
+            str(job["geometry"]), float(job["frequency_ghz"]),
+            str(job["polarization"]),
+        )
+        if key not in resource_cache:
+            resource_cache[key] = hpc_scheduler.predict_2d_resources(
+                key[0], key[1], key[2], GEOMETRY_UNITS, MAX_PANELS,
+                fine_factor=fine_factor, n_angles=n_angles,
+                safety=float(MEMORY_SAFETY),
             )
-        nodes = int(nodes_cache[key])
+        planned = resource_cache[key]
+        nodes = int(planned["nodes"])
         name = str(job["output"])
-        costs[name] = (
-            hpc_scheduler.unit_cost(nodes, n_angles, fine_factor)
-            if nodes > 0 else 1.0
+        costs[name] = hpc_scheduler.unit_cost(
+            nodes, n_angles, fine_factor,
+            fine_nodes=int(planned["fine_nodes"]),
+            system_dofs=int(planned["base_system_dofs"]),
+            fine_system_dofs=int(planned["fine_system_dofs"]),
+            operator_matrices=int(planned["base_operator_matrices"]),
+            fine_operator_matrices=int(planned["fine_operator_matrices"]),
         )
-        peaks[name] = (
-            hpc_scheduler.unit_peak_gb(
-                nodes, fine_factor, safety=float(MEMORY_SAFETY)
-            ) if nodes > 0 else 0.0
-        )
+        peaks[name] = float(planned["peak_gb"])
     return costs, peaks
 
 
-def _resolve_assembly_threads(cores: 'int', concurrency: 'int') -> 'int':
-    """Threads per solve, sized so threads x processes never exceeds the cores."""
+def _unit_assembly_threads(
+    cores: 'int', pool_size: 'int', budget_gb: 'float', peak_gb: 'float'
+) -> 'int':
+    """Thread count/CPU reservation derived from this unit's own footprint."""
 
-    if ASSEMBLY_THREADS != "auto":
-        return max(1, int(ASSEMBLY_THREADS))
-    return max(1, int(cores) // max(1, int(concurrency)))
+    return hpc_scheduler.assembly_threads_for_unit(
+        cores, pool_size, budget_gb, peak_gb, configured=ASSEMBLY_THREADS
+    )
 
 
-def _pool_initializer(blas_threads: 'int', assembly_threads: 'int') -> 'None':
+def _pool_initializer(blas_threads: 'int') -> 'None':
     _pin_blas(blas_threads)
     import rcs_solver
 
-    rcs_solver.set_assembly_threads(assembly_threads)
+    rcs_solver.set_assembly_threads(1)
 
 
 def main() -> 'None':
@@ -176,18 +188,25 @@ def main() -> 'None':
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = max(1, cores - 1) if WORKERS is None else int(WORKERS)
     pool_size = max(1, min(cores, worker_cap, len(ordered)))
-    # Threads are sized from the concurrency memory will actually permit, not
-    # from the pool width: a memory-heavy geometry narrows admission, and
-    # sizing threads for a width that will never be reached would leave most of
-    # the cores idle for the whole run.
     heaviest = max(
         (peaks.get(str(j["output"]), 0.0) for j in ordered), default=0.0
     )
-    memory_concurrency = (
+    heaviest_concurrency = (
         pool_size if heaviest <= 0.0
         else max(1, min(pool_size, int(budget_gb // heaviest)))
     )
-    assembly_threads = _resolve_assembly_threads(cores, memory_concurrency)
+    unit_thread_counts = [
+        _unit_assembly_threads(
+            cores, pool_size, budget_gb, peaks.get(str(job["output"]), 0.0)
+        )
+        for job in ordered
+    ] or [1]
+    min_threads = min(unit_thread_counts)
+    max_threads = max(unit_thread_counts)
+    thread_label = (
+        str(min_threads) if min_threads == max_threads
+        else f"{min_threads}-{max_threads} dynamic"
+    )
 
     kwargs = {
         "angles_deg": angles,
@@ -197,15 +216,15 @@ def main() -> 'None':
         "force": FORCE,
     }
     print(
-        f"Step 1 local: {len(ordered)} solve unit(s), {pool_size} worker(s) x "
-        f"{assembly_threads} assembly thread(s) of {cores} cpu(s), "
+        f"Step 1 local: {len(ordered)} solve unit(s), {pool_size} worker(s), "
+        f"{thread_label} assembly thread(s)/solve of {cores} cpu(s), "
         f"{budget_gb:.1f}/{memory_gb:.1f} GB schedulable; "
         "outputs -> results/{FRD,OPN}"
     )
-    if memory_concurrency < pool_size:
+    if heaviest_concurrency < pool_size:
         print(
-            f"  memory-limited: at most {memory_concurrency} concurrent "
-            f"solve(s); heaviest unit {heaviest:.1f} GB"
+            f"  heaviest units: {heaviest_concurrency} concurrent at "
+            f"{heaviest:.1f} GB each; smaller units expand dynamically"
         )
     if not MESH_CERTIFICATION:
         print(
@@ -225,9 +244,13 @@ def main() -> 'None':
     total = len(ordered)
 
     def _prepare(job):
+        peak_gb = peaks.get(str(job["output"]), 0.0)
+        assembly_threads = _unit_assembly_threads(
+            cores, pool_size, budget_gb, peak_gb
+        )
         return (
-            str(job["output"]), peaks.get(str(job["output"]), 0.0),
-            (solve_job_catching, ((job, kwargs),)),
+            str(job["output"]), peak_gb,
+            (solve_job_catching, ((job, kwargs, assembly_threads),)),
         )
 
     def _done():
@@ -253,13 +276,26 @@ def main() -> 'None':
     with Pool(
         processes=pool_size,
         initializer=_pool_initializer,
-        initargs=(int(BLAS_THREADS_PER_WORKER), int(assembly_threads)),
+        initargs=(int(BLAS_THREADS_PER_WORKER),),
         maxtasksperchild=int(TASKS_PER_CHILD),
     ) as pool:
         dispatcher = hpc_scheduler.MemoryAwareDispatcher(
-            pool, budget_gb=budget_gb, max_concurrent=pool_size
+            pool, budget_gb=budget_gb, max_concurrent=pool_size,
+            cpu_budget=cores,
         )
-        dispatcher.run(ordered, _prepare, _on_result, _on_error)
+
+        def _resources(job):
+            peak_gb = peaks.get(str(job["output"]), 0.0)
+            return (
+                peak_gb,
+                _unit_assembly_threads(
+                    cores, pool_size, budget_gb, peak_gb
+                ),
+            )
+
+        dispatcher.run(
+            ordered, _prepare, _on_result, _on_error, _resources
+        )
 
     print(f"Done: wrote={counters['written']}, skipped={counters['skipped']}, "
           f"failed={counters['failed']}. {time.time() - started:.1f} s elapsed.")

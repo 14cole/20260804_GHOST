@@ -328,6 +328,19 @@ def test_polarization_aliases():
         else:
             check(False, f"{bad} was accepted but is one channel twice")
 
+    import run_local_monostatic as local_driver
+    previous_method = local_driver.SOLVER_METHOD
+    try:
+        local_driver.SOLVER_METHOD = "fmm"
+        try:
+            local_driver._validate_config()
+        except SystemExit:
+            check(True, "certified local driver rejects matrix-free FMM at startup")
+        else:
+            check(False, "certified local driver accepted matrix-free FMM")
+    finally:
+        local_driver.SOLVER_METHOD = previous_method
+
 
 def test_bor_driver_loads():
     """No BoR geometry ships with the repo, so this is a config/import check."""

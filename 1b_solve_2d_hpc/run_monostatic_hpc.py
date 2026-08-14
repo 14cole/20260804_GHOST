@@ -57,7 +57,7 @@ POLARIZATIONS = ["TM", "TE"]   # or the radar aliases ["VV", "HH"]
                                # way, so the spelling you use here never
                                # forks the results into two sets.
 GEOMETRY_UNITS = "meters"
-SOLVER_METHOD = "auto"
+SOLVER_METHOD = "auto"       # "auto" | "direct" (certified production)
 MAX_PANELS = 50_000
 FORCE = False
 
@@ -124,6 +124,11 @@ def _validate_config() -> 'None':
         validate_config(FREQUENCIES_GHZ, ANGLES_DEG, POLARIZATIONS)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+    if str(SOLVER_METHOD).strip().lower() not in {"auto", "direct"}:
+        raise SystemExit(
+            "SOLVER_METHOD must be 'auto' or 'direct'; certified 2-D "
+            "production solves require a condition-reporting dense method."
+        )
     if int(ARRAY_TASKS) < 1:
         raise SystemExit("ARRAY_TASKS must be at least 1.")
     if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
@@ -139,8 +144,8 @@ def _validate_config() -> 'None':
 def _plan(jobs, n_angles, n_slots):
     """Cost and size every job, then deal them out longest-first.
 
-    The mesh depends on the geometry and frequency but not the polarization,
-    so a coupon library with both polarizations meshes each pair once.
+    Formulation and interface splitting can depend on polarization, so the
+    resource plan is cached per complete solve unit.
     """
 
     from solver_quality import validate_mesh_convergence_policy
@@ -150,28 +155,38 @@ def _plan(jobs, n_angles, n_slots):
         float(validate_mesh_convergence_policy()["fine_factor"])
         if MESH_CERTIFICATION else 1.0
     )
-    nodes_cache = {}
+    resource_cache = {}
     records = []
     for job in jobs:
-        key = (str(job["geometry"]), float(job["frequency_ghz"]))
-        if key not in nodes_cache:
-            nodes_cache[key] = hpc_scheduler.predict_2d_nodes(
-                key[0], key[1], str(job["polarization"]),
-                GEOMETRY_UNITS, MAX_PANELS,
+        key = (
+            str(job["geometry"]), float(job["frequency_ghz"]),
+            str(job["polarization"]),
+        )
+        if key not in resource_cache:
+            resource_cache[key] = hpc_scheduler.predict_2d_resources(
+                key[0], key[1], key[2], GEOMETRY_UNITS, MAX_PANELS,
+                fine_factor=fine_factor, n_angles=n_angles,
+                safety=float(MEMORY_SAFETY),
             )
-        nodes = int(nodes_cache[key])
+        planned = resource_cache[key]
+        nodes = int(planned["nodes"])
         records.append({
             "unit": str(job["output"]),
             "nodes": nodes,
-            "cost": (
-                hpc_scheduler.unit_cost(nodes, n_angles, fine_factor)
-                if nodes > 0 else 1.0
+            "fine_nodes": int(planned["fine_nodes"]),
+            "base_system_dofs": int(planned["base_system_dofs"]),
+            "system_dofs": int(planned["system_dofs"]),
+            "n_regions": int(planned["n_regions"]),
+            "formulation": str(planned["formulation"]),
+            "cost": hpc_scheduler.unit_cost(
+                nodes, n_angles, fine_factor,
+                fine_nodes=int(planned["fine_nodes"]),
+                system_dofs=int(planned["base_system_dofs"]),
+                fine_system_dofs=int(planned["fine_system_dofs"]),
+                operator_matrices=int(planned["base_operator_matrices"]),
+                fine_operator_matrices=int(planned["fine_operator_matrices"]),
             ),
-            "peak_gb": (
-                hpc_scheduler.unit_peak_gb(
-                    nodes, fine_factor, safety=float(MEMORY_SAFETY)
-                ) if nodes > 0 else 0.0
-            ),
+            "peak_gb": float(planned["peak_gb"]),
         })
     assignment = hpc_scheduler.balance_units(records, n_slots)
     for record, slot in zip(records, assignment):
@@ -189,24 +204,21 @@ def _claim_key(job) -> 'str':
     return f"{job['role']}__{Path(job['output']).name}"
 
 
-def _resolve_assembly_threads(cores: 'int', pool_size: 'int') -> 'int':
-    """Threads per solve, sized so threads x processes never exceeds the cores.
+def _unit_assembly_threads(
+    cores: 'int', pool_size: 'int', budget_gb: 'float', peak_gb: 'float'
+) -> 'int':
+    """Thread count/CPU reservation derived from this unit's own footprint."""
 
-    The pool is itself sized from this task's planned share, and the steal
-    phase reuses that same width, so threads x processes equals the core count
-    in both phases and neither can oversubscribe the node.
-    """
-
-    if ASSEMBLY_THREADS != "auto":
-        return max(1, int(ASSEMBLY_THREADS))
-    return max(1, int(cores) // max(1, int(pool_size)))
+    return hpc_scheduler.assembly_threads_for_unit(
+        cores, pool_size, budget_gb, peak_gb, configured=ASSEMBLY_THREADS
+    )
 
 
-def _pool_initializer(blas_threads: 'int', assembly_threads: 'int') -> 'None':
+def _pool_initializer(blas_threads: 'int') -> 'None':
     _pin_blas(blas_threads)
     import rcs_solver
 
-    rcs_solver.set_assembly_threads(assembly_threads)
+    rcs_solver.set_assembly_threads(1)
 
 
 def worker(task_index: 'int') -> 'None':
@@ -245,7 +257,18 @@ def worker(task_index: 'int') -> 'None':
     # Sized from this task's OWN share, so it cannot out-claim its peers and
     # each solve gets a real slice of the node when the run is small.
     pool_size = max(1, min(cores, worker_limit, max(1, len(mine))))
-    assembly_threads = _resolve_assembly_threads(cores, pool_size)
+    mine_thread_counts = [
+        _unit_assembly_threads(
+            cores, pool_size, budget_gb, peaks.get(str(job["output"]), 0.0)
+        )
+        for job in mine
+    ] or [1]
+    min_threads = min(mine_thread_counts)
+    max_threads = max(mine_thread_counts)
+    thread_label = (
+        str(min_threads) if min_threads == max_threads
+        else f"{min_threads}-{max_threads} dynamic"
+    )
 
     kwargs = {
         "angles_deg": angles,
@@ -256,8 +279,8 @@ def worker(task_index: 'int') -> 'None':
     }
     print(
         f"Task {task_index}/{task_count - 1}: {len(jobs)} unit(s) in the sweep, "
-        f"{len(mine)} planned here, {pool_size} worker(s) x "
-        f"{assembly_threads} assembly thread(s), "
+        f"{len(mine)} planned here, {pool_size} worker(s), "
+        f"{thread_label} assembly thread(s)/solve, "
         f"{budget_gb:.1f}/{memory_gb:.1f} GB schedulable. "
         "Direct output to results/{FRD,OPN}.",
         flush=True,
@@ -282,9 +305,13 @@ def worker(task_index: 'int') -> 'None':
 
     def _prepare(job):
         key = _claim_key(job)
+        peak_gb = peaks.get(str(job["output"]), 0.0)
+        assembly_threads = _unit_assembly_threads(
+            cores, pool_size, budget_gb, peak_gb
+        )
         dispatch = (
-            key, peaks.get(str(job["output"]), 0.0),
-            (solve_job_catching, ((job, kwargs),)),
+            key, peak_gb,
+            (solve_job_catching, ((job, kwargs, assembly_threads),)),
         )
         if not FORCE and Path(job["output"]).exists():
             # Dispatched, not skipped outright: solve_job re-verifies the
@@ -326,17 +353,31 @@ def worker(task_index: 'int') -> 'None':
     with Pool(
         processes=pool_size,
         initializer=_pool_initializer,
-        initargs=(int(BLAS_THREADS_PER_WORKER), int(assembly_threads)),
+        initargs=(int(BLAS_THREADS_PER_WORKER),),
         maxtasksperchild=int(TASKS_PER_CHILD),
     ) as pool:
         dispatcher = hpc_scheduler.MemoryAwareDispatcher(
-            pool, budget_gb=budget_gb, max_concurrent=pool_size
+            pool, budget_gb=budget_gb, max_concurrent=pool_size,
+            cpu_budget=cores,
         )
+
+        def _resources(job):
+            peak_gb = peaks.get(str(job["output"]), 0.0)
+            return (
+                peak_gb,
+                _unit_assembly_threads(
+                    cores, pool_size, budget_gb, peak_gb
+                ),
+            )
         try:
             # Own share first; steal only once it is finished.
-            dispatcher.run(mine, _prepare, _on_result, _on_error)
+            dispatcher.run(
+                mine, _prepare, _on_result, _on_error, _resources
+            )
             if others:
-                dispatcher.run(others, _prepare, _on_result, _on_error)
+                dispatcher.run(
+                    others, _prepare, _on_result, _on_error, _resources
+                )
         finally:
             broker.stop_heartbeat()
 
@@ -402,10 +443,6 @@ def submit() -> 'None':
     if peaks:
         print(f"  Unit peak RAM: {min(peaks):.2f}-{max(peaks):.2f} GB estimated "
               f"(incl. {MEMORY_SAFETY:g}x safety)")
-    unknown = sum(1 for r in records if int(r["nodes"]) <= 0)
-    if unknown:
-        print(f"  [warn] {unknown} unit(s) could not be pre-meshed; they carry "
-              "unit cost and no memory reservation.")
     if not MESH_CERTIFICATION:
         print("  Certification: OFF (survey mode) -- base mesh only, ~3x faster.\n"
               "                 Results carry NO mesh-convergence certificate and are\n"

@@ -331,22 +331,6 @@ class MediumTable:
         mu_i = np.interp(freq_ghz, self.freqs_ghz, self.mu_values.imag)
         return complex(eps_r, eps_i), complex(mu_r, mu_i)
 
-@dataclass
-class PreparedLinearSolver:
-    """Reusable linear-solve handle for repeated Ax=b with fixed A."""
-
-    a_mat: 'np.ndarray'
-    method: 'str'
-    lu: 'Optional[np.ndarray]' = None
-    piv: 'Optional[np.ndarray]' = None
-    null_basis: 'Optional[np.ndarray]' = None
-    reduced_mat: 'Optional[np.ndarray]' = None
-    constraint_mat: 'Optional[np.ndarray]' = None
-    preconditioner: 'Optional[Any]' = None
-    gmres_restart: 'int' = GMRES_RESTART
-    gmres_maxiter: 'int' = GMRES_MAXITER
-    gmres_tol: 'float' = GMRES_TOL
-
 class MaterialLibrary:
     """Material lookup facade for inline values and frequency tables."""
 
@@ -715,7 +699,7 @@ def _complex_hankel_backend_name() -> 'str':
         return "scipy-special"
     if _MPMATH is not None:
         return "mpmath"
-    return "native-series-asymptotic"
+    return "unavailable"
 
 def _raise_if_untrusted_math_backends() -> 'None':
     """Abort production solves when only approximation fallback math backends are available."""
@@ -725,78 +709,6 @@ def _raise_if_untrusted_math_backends() -> 'None':
             "Aborting solve: real-argument Bessel evaluation is using the native series/asymptotic "
             "fallback backend. Install SciPy or provide libm j0/y0/j1/y1 before running production solves."
         )
-
-def _j0_complex_series(z: 'complex') -> 'complex':
-    zz = 0.25 * z * z
-    term = 1.0 + 0.0j
-    acc = term
-    for m in range(1, 160):
-        term *= -zz / (m * m)
-        acc += term
-        if abs(term) <= 1e-16 * max(1.0, abs(acc)):
-            break
-    return acc
-
-def _j1_complex_series(z: 'complex') -> 'complex':
-    z_half = 0.5 * z
-    term = z_half
-    acc = term
-    for m in range(1, 160):
-        term *= -(z_half * z_half) / (m * (m + 1.0))
-        acc += term
-        if abs(term) <= 1e-16 * max(1.0, abs(acc)):
-            break
-    return acc
-
-def _y0_complex_series(z: 'complex') -> 'complex':
-    z_safe = z if abs(z) > 1e-14 else (1e-14 + 0.0j)
-    j0 = _j0_complex_series(z_safe)
-    zz = 0.25 * z_safe * z_safe
-    term = 1.0 + 0.0j
-    harmonic = 0.0
-    acc = 0.0 + 0.0j
-    for m in range(1, 160):
-        harmonic += 1.0 / m
-        term *= -zz / (m * m)
-        acc -= harmonic * term
-        if abs(harmonic * term) <= 1e-16 * max(1.0, abs(acc), abs(j0)):
-            break
-    return (2.0 / math.pi) * ((cmath.log(z_safe / 2.0) + EULER_GAMMA) * j0 + acc)
-
-def _y1_complex_series(z: 'complex') -> 'complex':
-    z_safe = z if abs(z) > 1e-14 else (1e-14 + 0.0j)
-    j1 = _j1_complex_series(z_safe)
-    z_half = 0.5 * z_safe
-    term = z_half
-    harmonic_k = 0.0
-    harmonic_k1 = 1.0
-    acc = (harmonic_k + harmonic_k1) * term
-    for k in range(1, 160):
-        term *= -(z_half * z_half) / (k * (k + 1.0))
-        harmonic_k += 1.0 / k
-        harmonic_k1 = harmonic_k + 1.0 / (k + 1.0)
-        contrib = (harmonic_k + harmonic_k1) * term
-        acc += contrib
-        if abs(contrib) <= 1e-16 * max(1.0, abs(acc), abs(j1)):
-            break
-    return (
-        (2.0 / math.pi) * (cmath.log(z_safe / 2.0) + EULER_GAMMA) * j1
-        - (1.0 / math.pi) * acc
-        - (2.0 / (math.pi * z_safe))
-    )
-
-def _hankel2_asymptotic(order: 'int', z: 'complex') -> 'complex':
-    z_safe = z if abs(z) > 1e-14 else (1e-14 + 0.0j)
-    phase = z_safe - ((0.5 * order) + 0.25) * math.pi
-    amp = cmath.sqrt(2.0 / (math.pi * z_safe))
-    return amp * cmath.exp(-1j * phase)
-
-def _hankel2_complex_fallback(order: 'int', z: 'complex') -> 'complex':
-    if abs(z) < 16.0:
-        if order == 0:
-            return _j0_complex_series(z) - 1j * _y0_complex_series(z)
-        return _j1_complex_series(z) - 1j * _y1_complex_series(z)
-    return _hankel2_asymptotic(order, z)
 
 def _hankel2_0(x: 'Union[complex, float]') -> 'complex':
     """Hankel H_0^(2), with real fast path and no approximation fallback in production."""
@@ -980,18 +892,6 @@ def _validate_passive_medium(
         )
     return eps_eval, mu_eval
 
-def _normalize_material_value(value: 'complex', fallback: 'complex') -> 'complex':
-    """
-    Preserve every finite constitutive value exactly.
-
-    ``fallback`` remains in the signature for internal compatibility, but is
-    intentionally not used for explicit values. Inline rows must supply every
-    constitutive field; invalid and singular values are rejected by
-    ``_validate_passive_medium`` instead of being converted to free space.
-    """
-
-    del fallback
-    return _ensure_finite_complex(value, "Material value")
 
 def _resolve_mat_file(base_dir: 'str', flag: 'int') -> 'str':
     """Resolve a legacy mat.<flag> relative to the geometry directory."""
@@ -1291,37 +1191,6 @@ def _panel_count_from_n(n_prop: 'int', primitive_len: 'float', min_wavelength: '
         return max(1, int(math.ceil(primitive_len / target)))
     return max(1, int(math.ceil(primitive_len / (primitive_len / 10.0 + EPS))))
 
-def _segment_closed_area2(point_pairs: 'List[Dict[str, Any]]', meters_scale: 'float') -> 'Tuple[bool, float]':
-    """Return (is_closed, signed_area2) for a multi-primitive segment chain."""
-
-    if not point_pairs:
-        return False, 0.0
-
-    pts: 'List[Tuple[float, float]]' = []
-    for idx, pair in enumerate(point_pairs):
-        x1 = _parse_float(pair.get("x1", 0.0), 0.0) * meters_scale
-        y1 = _parse_float(pair.get("y1", 0.0), 0.0) * meters_scale
-        x2 = _parse_float(pair.get("x2", 0.0), 0.0) * meters_scale
-        y2 = _parse_float(pair.get("y2", 0.0), 0.0) * meters_scale
-        if idx == 0:
-            pts.append((x1, y1))
-        pts.append((x2, y2))
-
-    if len(pts) < 3:
-        return False, 0.0
-
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    diag = max(float(math.hypot(max(xs) - min(xs), max(ys) - min(ys))), 1.0)
-    tol = max(1e-12, 1e-9 * diag)
-    closed = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= tol
-    if not closed:
-        return False, 0.0
-
-    area2 = 0.0
-    for (x0, y0), (x1, y1) in zip(pts[:-1], pts[1:]):
-        area2 += x0 * y1 - x1 * y0
-    return True, float(area2)
 
 def _reverse_point_pairs(point_pairs: 'List[Dict[str, Any]]') -> 'List[Dict[str, Any]]':
     """Reverse a primitive chain: last primitive first, endpoints swapped."""
@@ -2816,72 +2685,7 @@ def _dgreen_dn_src_array(k0: 'Union[complex, float]', r_vec: 'np.ndarray', n_src
     out[mask] = (0.25j * complex(k0)) * h1 * projection
     return out
 
-def _linear_pair_far_mask(
-    elements: 'List[LinearElement]',
-    obs_index: 'int',
-    centers: 'np.ndarray',
-    lengths: 'np.ndarray',
-    node_ids: 'np.ndarray',
-    far_ratio: 'float',
-) -> 'np.ndarray':
-    obs_ids = node_ids[obs_index]
-    shared = np.any(node_ids == obs_ids[0], axis=1) | np.any(node_ids == obs_ids[1], axis=1)
-    dist = np.linalg.norm(centers - centers[obs_index], axis=1)
-    scale = np.maximum(np.maximum(lengths, lengths[obs_index]), EPS)
-    far = (dist / scale) >= float(far_ratio)
-    far[obs_index] = False
-    far &= ~shared
-    return far
 
-def _assemble_linear_far_blocks_for_obs(
-    obs_elem: 'LinearElement',
-    src_elems: 'List[LinearElement]',
-    k0: 'Union[complex, float]',
-    obs_normal_deriv: 'bool',
-    obs_order: 'int',
-    src_order: 'int',
-) -> 'Tuple[np.ndarray, np.ndarray]':
-    """Vectorised far-pair 2x2 block assembly for one observation element."""
-    m = len(src_elems)
-    if m == 0:
-        return (
-            np.zeros((0, 2, 2), dtype=np.complex128),
-            np.zeros((0, 2, 2), dtype=np.complex128),
-        )
-
-    qt_obs, qw_obs = _get_quadrature(max(2, int(obs_order)))
-    qt_src, qw_src = _get_quadrature(max(2, int(src_order)))
-    obs_seg = obs_elem.p1 - obs_elem.p0
-    src_p0 = np.stack([e.p0 for e in src_elems], axis=0)
-    src_seg = np.stack([e.p1 - e.p0 for e in src_elems], axis=0)
-    src_normals = np.stack([e.normal for e in src_elems], axis=0)
-    src_lengths = np.asarray([e.length for e in src_elems], dtype=float)
-    s_blocks = np.zeros((m, 2, 2), dtype=np.complex128)
-    k_blocks = np.zeros((m, 2, 2), dtype=np.complex128)
-
-    for tobs, wobs in zip(qt_obs, qw_obs):
-        tobs_f = float(tobs)
-        phi_obs = _linear_shape_values(tobs_f)
-        robs = obs_elem.p0 + tobs_f * obs_seg
-        for tsrc, wsrc in zip(qt_src, qw_src):
-            tsrc_f = float(tsrc)
-            phi_src = _linear_shape_values(tsrc_f)
-            rsrc = src_p0 + tsrc_f * src_seg
-            diff = robs[None, :] - rsrc
-            kval_s = _green_2d_array(k0, np.linalg.norm(diff, axis=1))
-            if obs_normal_deriv:
-                kval_k = _dgreen_dn_obs_array(k0, diff, obs_elem.normal)
-            else:
-                kval_k = _dgreen_dn_src_array(k0, diff, src_normals)
-            outer = np.outer(phi_obs, phi_src)[None, :, :]
-            w = float(wobs) * float(wsrc)
-            s_blocks += w * kval_s[:, None, None] * outer
-            k_blocks += w * kval_k[:, None, None] * outer
-
-    scale = float(obs_elem.length) * src_lengths[:, None, None]
-    s_blocks *= scale
-    k_blocks *= scale
-    return s_blocks, k_blocks
 
 def _single_layer_block_linear(
     obs_elem: 'LinearElement',
@@ -2902,29 +2706,6 @@ def _single_layer_block_linear(
         src_order=src_order,
     )
 
-def _double_layer_block_linear(
-    obs_elem: 'LinearElement',
-    src_elem: 'LinearElement',
-    k0: 'Union[complex, float]',
-    obs_normal_deriv: 'bool',
-    obs_order: 'int' = 8,
-    src_order: 'int' = 8,
-) -> 'np.ndarray':
-    if obs_normal_deriv:
-        return _integrate_linear_pair_generic(
-            obs_elem,
-            src_elem,
-            lambda robs, rsrc: _dgreen_dn_obs(k0, robs - rsrc, obs_elem.normal),
-            obs_order=obs_order,
-            src_order=src_order,
-        )
-    return _integrate_linear_pair_generic(
-        obs_elem,
-        src_elem,
-        lambda robs, rsrc: _dgreen_dn_src(k0, robs - rsrc, src_elem.normal),
-        obs_order=obs_order,
-        src_order=src_order,
-    )
 
 def _sk_blocks_near_linear(
     obs_elem: 'LinearElement',
@@ -4327,7 +4108,7 @@ def _linear_element_incident_dn_load_many(
 
     du_inc/dn = j*k*(d_inc . n) * exp(j*k*d_inc . r)
 
-    Used by the Burton-Miller CFIE RHS correction.
+    Used by TE sheet and impedance/flux right-hand sides.
     """
 
     qt, qw = _get_quadrature(max(2, int(order)))
@@ -4345,108 +4126,7 @@ def _linear_element_incident_dn_load_many(
         out += float(w) * shape * (1j * k_air * d_dot_n * phase)[None, :]
     return out * float(elem.length)
 
-def _build_coupled_rhs_many_linear(
-    mesh: 'LinearMesh',
-    infos: 'List[PanelCoupledInfo]',
-    k_air: 'float',
-    elevations_deg: 'np.ndarray',
-    cfie_alpha: 'float' = 0.0,
-) -> 'np.ndarray':
-    """
-    Build tested incident-field load vectors on linear nodal DOFs.
 
-    Returns an array of shape (2 * nnodes, E) corresponding to the future nodal
-    unknown ordering [U_trace_nodes, Q_minus_nodes].
-
-    When ``cfie_alpha > 0`` the Burton-Miller RHS correction is added:
-        rhs += (j * cfie_alpha / k_air) * <phi, du_inc/dn>
-    to the representation-formula rows.
-    """
-
-    nnodes = len(mesh.nodes)
-    elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
-    rhs = np.zeros((2 * nnodes, elev.size), dtype=np.complex128)
-    use_cfie = float(cfie_alpha) > 0.0 and float(k_air) > EPS
-    bm_eta = (1j * float(cfie_alpha) / float(k_air)) if use_cfie else 0.0
-
-    for elem, info in zip(mesh.elements, infos):
-        local = _linear_element_incident_load_many(elem, k_air=k_air, elevations_deg=elev)
-        if use_cfie:
-            local_dn = _linear_element_incident_dn_load_many(elem, k_air=k_air, elevations_deg=elev)
-        ids = elem.node_ids
-        active_is_minus = info.minus_region >= 0
-        if info.minus_has_incident if active_is_minus else info.plus_has_incident:
-            rhs[np.asarray(ids, dtype=int), :] += local
-            if use_cfie:
-                rhs[np.asarray(ids, dtype=int), :] += bm_eta * local_dn
-        if info.bc_kind == "transmission":
-            passive_has_inc = info.plus_has_incident if active_is_minus else info.minus_has_incident
-            if passive_has_inc:
-                rhs[nnodes + np.asarray(ids, dtype=int), :] += local
-                if use_cfie:
-                    rhs[nnodes + np.asarray(ids, dtype=int), :] += bm_eta * local_dn
-    return rhs
-
-def _backscatter_rcs_coupled_many_linear(
-    mesh: 'LinearMesh',
-    infos: 'List[PanelCoupledInfo]',
-    u_trace_nodes_mat: 'np.ndarray',
-    q_minus_nodes_mat: 'np.ndarray',
-    k_air: 'float',
-    elevations_deg: 'np.ndarray',
-    order: 'int' = 8,
-) -> 'Tuple[np.ndarray, np.ndarray]':
-    """
-    Linear-element far-field projector for the future coupled Galerkin solve.
-
-    This helper already evaluates the backscatter integral from nodal traces/fluxes;
-    it is intended to be used once the linear coupled system assembly is wired in.
-    """
-
-    elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
-    u_eval = np.asarray(u_trace_nodes_mat, dtype=np.complex128)
-    q_eval = np.asarray(q_minus_nodes_mat, dtype=np.complex128)
-    if u_eval.ndim == 1:
-        u_eval = u_eval.reshape(-1, 1)
-    if q_eval.ndim == 1:
-        q_eval = q_eval.reshape(-1, 1)
-    nnodes = len(mesh.nodes)
-    if u_eval.shape != q_eval.shape or u_eval.shape[0] != nnodes:
-        raise ValueError("Linear nodal trace/flux arrays must have shape (nnodes, nelevations).")
-    if u_eval.shape[1] != elev.size:
-        raise ValueError("Linear nodal solution columns must match elevation count.")
-
-    phi = np.deg2rad(elev)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, int(order)))
-    amp = np.zeros(elev.size, dtype=np.complex128)
-
-    for elem, info in zip(mesh.elements, infos):
-        ids = np.asarray(elem.node_ids, dtype=int)
-        beta = complex(info.q_plus_beta)
-        gamma = complex(info.q_plus_gamma)
-        u_local = u_eval[ids, :]
-        q_minus_local = q_eval[ids, :]
-        q_plus_local = beta * q_minus_local + gamma * u_local
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))[:, None]
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp((1j * k_air) * (dirs @ rp))
-            dot_scatter = dirs @ elem.normal
-            u_t = np.sum(shape * u_local, axis=0)
-            q_minus_t = np.sum(shape * q_minus_local, axis=0)
-            q_plus_t = np.sum(shape * q_plus_local, axis=0)
-            if info.minus_has_incident:
-                amp += float(w) * float(elem.length) * phase * (
-                    -q_minus_t + 1j * k_air * dot_scatter * u_t
-                )
-            if info.plus_has_incident:
-                amp += float(w) * float(elem.length) * phase * (
-                    q_plus_t - 1j * k_air * dot_scatter * u_t
-                )
-
-    sigma_lin = _rcs_sigma_from_amp(amp, k_air)
-    return np.asarray(sigma_lin, dtype=float), np.asarray(amp, dtype=np.complex128)
 
 
 def _farfield_linear_density_many(
@@ -4791,348 +4471,6 @@ def _robin_alpha_elements(
         )
     return alpha, pec
 
-@dataclass
-class LinearCoupledNodeInfo:
-    """Per-node coupled metadata for the global linear/Galerkin assembly."""
-
-    active_region: 'int'
-    passive_region: 'int'
-    bc_kind: 'str'
-    robin_impedance: 'complex'
-    coeff_u_active: 'complex'
-    coeff_q_active: 'complex'
-    eps_phys: 'complex'
-    mu_phys: 'complex'
-    k_phys: 'complex'
-    q_plus_beta: 'complex'
-    q_plus_gamma: 'complex'
-    plus_region: 'int'
-
-def _build_linear_coupled_node_infos(
-    mesh: 'LinearMesh',
-    infos: 'List[PanelCoupledInfo]',
-) -> 'List[LinearCoupledNodeInfo]':
-    """
-    Derive one consistent coupled-interface record per nodal test/unknown DOF.
-
-    The interface-aware linear mesh is expected to share a node only across elements with
-    the same physical interface signature. We still verify that the incident elements agree
-    on the metadata needed by the global nodal assembly.
-    """
-
-    incident: 'Dict[int, List[int]]' = {}
-    for eidx, elem in enumerate(mesh.elements):
-        for nid in elem.node_ids:
-            incident.setdefault(int(nid), []).append(int(eidx))
-
-    def _complex_close(a: 'complex', b: 'complex', tol: 'float' = 1.0e-10) -> 'bool':
-        return abs(complex(a) - complex(b)) <= tol * max(1.0, abs(complex(a)), abs(complex(b)))
-
-    # Fields that MUST agree across every element incident on a node.  These
-    # describe the interface topology and the physical medium on each side,
-    # which cannot change within a single physical interface.
-    STRICT_KEYS = (
-        'coeff_u_active', 'coeff_q_active',
-        'eps_phys', 'mu_phys', 'k_phys',
-        'q_plus_beta',
-    )
-    # Fields that are allowed to vary across incident elements (e.g., a
-    # spatially tapered IBC or a tapered sheet admittance). This legacy
-    # coupled-trace node record retains a nodal average; the production Robin
-    # and sheet formulations instead keep these coefficients element-local in
-    # their Galerkin integrals.
-    AVERAGED_KEYS = ('robin_impedance', 'q_plus_gamma')
-
-    node_infos: 'List[Optional[LinearCoupledNodeInfo]]' = [None] * len(mesh.nodes)
-    for nid in range(len(mesh.nodes)):
-        elem_ids = incident.get(int(nid), [])
-        if not elem_ids:
-            raise ValueError(f"Linear coupled node {nid} is not attached to any element.")
-        ref = infos[int(elem_ids[0])]
-        active_region = int(ref.minus_region if ref.minus_region >= 0 else ref.plus_region)
-        passive_region = int(ref.plus_region if active_region == ref.minus_region else ref.minus_region)
-        coeff_u_active, coeff_q_active = _region_side_trace_coefficients(ref, active_region)
-        eps_phys = ref.eps_minus if active_region == ref.minus_region else ref.eps_plus
-        mu_phys = ref.mu_minus if active_region == ref.minus_region else ref.mu_plus
-        k_phys = ref.k_minus if active_region == ref.minus_region else ref.k_plus
-        expected = {
-            'active_region': active_region,
-            'passive_region': passive_region,
-            'bc_kind': str(ref.bc_kind),
-            'robin_impedance': complex(ref.robin_impedance),
-            'coeff_u_active': complex(coeff_u_active),
-            'coeff_q_active': complex(coeff_q_active),
-            'eps_phys': complex(eps_phys),
-            'mu_phys': complex(mu_phys),
-            'k_phys': complex(k_phys),
-            'q_plus_beta': complex(ref.q_plus_beta),
-            'q_plus_gamma': complex(ref.q_plus_gamma),
-            'plus_region': int(ref.plus_region),
-        }
-        # Running sums for averaged fields (seeded with the reference element).
-        averaged_sums = {k: complex(expected[k]) for k in AVERAGED_KEYS}
-        averaged_count = 1
-        for eidx in elem_ids[1:]:
-            info = infos[int(eidx)]
-            active_chk = int(info.minus_region if info.minus_region >= 0 else info.plus_region)
-            passive_chk = int(info.plus_region if active_chk == info.minus_region else info.minus_region)
-            coeff_u_chk, coeff_q_chk = _region_side_trace_coefficients(info, active_chk)
-            eps_chk = info.eps_minus if active_chk == info.minus_region else info.eps_plus
-            mu_chk = info.mu_minus if active_chk == info.minus_region else info.mu_plus
-            k_chk = info.k_minus if active_chk == info.minus_region else info.k_plus
-            actual = {
-                'active_region': active_chk,
-                'passive_region': passive_chk,
-                'bc_kind': str(info.bc_kind),
-                'robin_impedance': complex(info.robin_impedance),
-                'coeff_u_active': complex(coeff_u_chk),
-                'coeff_q_active': complex(coeff_q_chk),
-                'eps_phys': complex(eps_chk),
-                'mu_phys': complex(mu_chk),
-                'k_phys': complex(k_chk),
-                'q_plus_beta': complex(info.q_plus_beta),
-                'q_plus_gamma': complex(info.q_plus_gamma),
-                'plus_region': int(info.plus_region),
-            }
-            if (actual['active_region'] != expected['active_region']
-                or actual['passive_region'] != expected['passive_region']
-                or actual['bc_kind'] != expected['bc_kind']
-                or actual['plus_region'] != expected['plus_region']):
-                raise ValueError(
-                    "Linear/Galerkin nodal assembly encountered incompatible interface "
-                    f"topology at node {nid}."
-                )
-            for key in STRICT_KEYS:
-                if not _complex_close(expected[key], actual[key]):
-                    raise ValueError(
-                        "Linear/Galerkin nodal assembly encountered inconsistent material "
-                        f"coefficient '{key}' at node {nid}."
-                    )
-            for key in AVERAGED_KEYS:
-                averaged_sums[key] += actual[key]
-            averaged_count += 1
-
-        # Overwrite averaged fields with the mean across incident elements.
-        for key in AVERAGED_KEYS:
-            expected[key] = averaged_sums[key] / averaged_count
-
-        node_infos[nid] = LinearCoupledNodeInfo(**expected)
-
-    return [ni for ni in node_infos if ni is not None]
-
-def _build_linear_coupled_region_operators(
-    mesh: 'LinearMesh',
-    infos: 'List[PanelCoupledInfo]',
-    obs_order: 'int' = 5,
-    src_order: 'int' = 5,
-    far_ratio: 'float' = 3.0,
-    compute_cfie: 'bool' = False,
-) -> 'Dict[int, Dict[str, Any]]':
-    """
-    Assemble reusable nodal S/K operators for each region and interface side.
-
-    Returns `region_ops[region]['minus'|'plus'] = (S, K)` where the matrices already
-    include only source elements whose minus/plus side belongs to the requested region.
-
-    When `compute_cfie` is True, also assembles K' (adjoint double layer) and D
-    (hypersingular via Maue identity) for Burton-Miller CFIE.
-    """
-
-    region_to_k: 'Dict[int, complex]' = {}
-    for info in infos:
-        if info.minus_region >= 0:
-            region_to_k[int(info.minus_region)] = complex(info.k_minus)
-        if info.plus_region >= 0:
-            region_to_k[int(info.plus_region)] = complex(info.k_plus)
-
-    nelems = len(mesh.elements)
-    region_ops: 'Dict[int, Dict[str, Any]]' = {}
-    for region, k_region in region_to_k.items():
-        k_eval = k_region if abs(k_region) > EPS else (EPS + 0.0j)
-        minus_mask = np.fromiter((info.minus_region == region for info in infos), dtype=bool, count=nelems)
-        plus_mask = np.fromiter((info.plus_region == region for info in infos), dtype=bool, count=nelems)
-        # Both interface sides of a region share its wavenumber and differ
-        # only in which elements are active, so one traversal produces both.
-        # Assembling them separately repeated every Hankel evaluation, which
-        # is ~90% of a solve on a geometry with materials.
-        minus_ops, plus_ops = _assemble_linear_operator_matrices_multi(
-            mesh=mesh,
-            k0=k_eval,
-            obs_normal_deriv=False,
-            source_element_masks=[minus_mask, plus_mask],
-            obs_order=obs_order,
-            src_order=src_order,
-            far_ratio=far_ratio,
-        )
-        entry: 'Dict[str, Any]' = {'minus': minus_ops, 'plus': plus_ops}
-        if compute_cfie:
-            # K' (adjoint double layer): obs_normal_deriv=True
-            kp_minus, kp_plus = _assemble_linear_operator_matrices_multi(
-                mesh=mesh,
-                k0=k_eval,
-                obs_normal_deriv=True,
-                source_element_masks=[minus_mask, plus_mask],
-                obs_order=obs_order,
-                src_order=src_order,
-                far_ratio=far_ratio,
-                compute_single_layer=False,
-            )
-            entry['kp_minus'] = kp_minus
-            entry['kp_plus'] = kp_plus
-            # D (hypersingular via Maue identity)
-            entry['d_minus'] = _assemble_linear_hypersingular_matrix(
-                mesh=mesh,
-                k0=k_eval,
-                obs_order=obs_order,
-                src_order=src_order,
-                far_ratio=far_ratio,
-                source_element_mask=minus_mask,
-            )
-            entry['d_plus'] = _assemble_linear_hypersingular_matrix(
-                mesh=mesh,
-                k0=k_eval,
-                obs_order=obs_order,
-                src_order=src_order,
-                far_ratio=far_ratio,
-                source_element_mask=plus_mask,
-            )
-        region_ops[int(region)] = entry
-    return region_ops
-
-def _build_coupled_matrix_linear(
-    mesh: 'LinearMesh',
-    infos: 'List[PanelCoupledInfo]',
-    pol: 'str',
-    obs_order: 'int' = 5,
-    src_order: 'int' = 5,
-    cfie_alpha: 'float' = 0.0,
-    k_air: 'float' = 0.0,
-) -> 'np.ndarray':
-    """
-    Assemble the nodal linear/Galerkin coupled matrix with optional Burton-Miller CFIE.
-
-    Unknown ordering is [U_trace_nodes, Q_minus_nodes].  When ``cfie_alpha > 0``,
-    the Burton-Miller regularisation is applied to the representation-formula rows,
-    suppressing interior-resonance artefacts.  The coupling parameter is
-
-        eta_bm = j * cfie_alpha / k_air
-
-    which follows the Kress (1985) convention for 2-D Helmholtz.
-    """
-
-    nnodes = len(mesh.nodes)
-    a_mat = np.zeros((2 * nnodes, 2 * nnodes), dtype=np.complex128)
-    if nnodes == 0:
-        return a_mat
-
-    use_cfie = float(cfie_alpha) > 0.0 and float(k_air) > EPS
-    bm_eta = (1j * float(cfie_alpha) / float(k_air)) if use_cfie else 0.0
-
-    node_infos = _build_linear_coupled_node_infos(mesh, infos)
-    mass_mat = _assemble_linear_mass_matrix(mesh)
-    region_ops = _build_linear_coupled_region_operators(
-        mesh=mesh,
-        infos=infos,
-        obs_order=obs_order,
-        src_order=src_order,
-        compute_cfie=use_cfie,
-    )
-
-    node_ids = np.arange(nnodes, dtype=int)
-    q_plus_beta = np.asarray([ni.q_plus_beta for ni in node_infos], dtype=np.complex128)
-    q_plus_gamma = np.asarray([ni.q_plus_gamma for ni in node_infos], dtype=np.complex128)
-    active_regions = np.asarray([ni.active_region for ni in node_infos], dtype=int)
-    passive_regions = np.asarray([ni.passive_region for ni in node_infos], dtype=int)
-    bc_kinds = np.asarray([ni.bc_kind for ni in node_infos], dtype=object)
-    robin_impedance = np.asarray([ni.robin_impedance for ni in node_infos], dtype=np.complex128)
-    coeff_u_active = np.asarray([ni.coeff_u_active for ni in node_infos], dtype=np.complex128)
-    coeff_q_active = np.asarray([ni.coeff_q_active for ni in node_infos], dtype=np.complex128)
-    eps_phys = np.asarray([ni.eps_phys for ni in node_infos], dtype=np.complex128)
-    mu_phys = np.asarray([ni.mu_phys for ni in node_infos], dtype=np.complex128)
-    k_phys = np.asarray([ni.k_phys for ni in node_infos], dtype=np.complex128)
-
-    def _apply_region_rows(rows: 'np.ndarray', region: 'int', row_offset: 'int') -> 'None':
-        if rows.size == 0:
-            return
-        ops = region_ops.get(int(region))
-        if ops is None:
-            raise ValueError(f"Missing linear/Galerkin region operators for region {region}.")
-        s_minus, k_minus = ops['minus']
-        s_plus, k_plus = ops['plus']
-        # --- Standard EFIE rows ---
-        a_mat[np.ix_(row_offset + rows, node_ids)] += (
-            0.5 * mass_mat[np.ix_(rows, node_ids)]
-            + k_minus[np.ix_(rows, node_ids)]
-            - k_plus[np.ix_(rows, node_ids)]
-            + s_plus[np.ix_(rows, node_ids)] * q_plus_gamma[None, :]
-        )
-        a_mat[np.ix_(row_offset + rows, nnodes + node_ids)] += (
-            -s_minus[np.ix_(rows, node_ids)]
-            + s_plus[np.ix_(rows, node_ids)] * q_plus_beta[None, :]
-        )
-
-        # --- Burton-Miller CFIE correction ---
-        if use_cfie and 'd_minus' in ops:
-            d_minus = ops['d_minus']
-            d_plus = ops['d_plus']
-            _s_kp_minus, kp_minus = ops['kp_minus']
-            _s_kp_plus, kp_plus = ops['kp_plus']
-
-            # u-block BM: eta*(D_minus - D_plus + K'_plus*gamma - 0.5*M*gamma)
-            a_mat[np.ix_(row_offset + rows, node_ids)] += bm_eta * (
-                d_minus[np.ix_(rows, node_ids)]
-                - d_plus[np.ix_(rows, node_ids)]
-                + kp_plus[np.ix_(rows, node_ids)] * q_plus_gamma[None, :]
-                - 0.5 * mass_mat[np.ix_(rows, node_ids)] * q_plus_gamma[rows][:, None]
-            )
-            # q-block BM: eta*(M*(1-0.5*beta) - K'_minus + K'_plus*beta)
-            a_mat[np.ix_(row_offset + rows, nnodes + node_ids)] += bm_eta * (
-                mass_mat[np.ix_(rows, node_ids)] * (1.0 - 0.5 * q_plus_beta[rows])[:, None]
-                - kp_minus[np.ix_(rows, node_ids)]
-                + kp_plus[np.ix_(rows, node_ids)] * q_plus_beta[None, :]
-            )
-
-    for region in sorted(set(int(v) for v in active_regions)):
-        rows = node_ids[active_regions == int(region)]
-        _apply_region_rows(rows, int(region), row_offset=0)
-
-    transmission_nodes = node_ids[bc_kinds == 'transmission']
-    if transmission_nodes.size > 0:
-        transmission_passive = passive_regions[transmission_nodes]
-        for region in sorted(set(int(v) for v in transmission_passive if int(v) >= 0)):
-            rows = transmission_nodes[transmission_passive == int(region)]
-            _apply_region_rows(rows, int(region), row_offset=nnodes)
-
-    bc_nodes = node_ids[bc_kinds != 'transmission']
-    if bc_nodes.size > 0:
-        zero_z = np.abs(robin_impedance[bc_nodes]) <= EPS
-        pec_nodes = bc_nodes[zero_z]
-        if pec_nodes.size > 0:
-            if pol == 'TE':
-                a_mat[np.ix_(nnodes + pec_nodes, node_ids)] += mass_mat[np.ix_(pec_nodes, node_ids)]
-            else:
-                a_mat[np.ix_(nnodes + pec_nodes, node_ids)] += (
-                    mass_mat[np.ix_(pec_nodes, node_ids)] * coeff_u_active[pec_nodes][:, None]
-                )
-                a_mat[np.ix_(nnodes + pec_nodes, nnodes + node_ids)] += (
-                    mass_mat[np.ix_(pec_nodes, node_ids)] * coeff_q_active[pec_nodes][:, None]
-                )
-
-        robin_nodes = bc_nodes[~zero_z]
-        if robin_nodes.size > 0:
-            alpha = np.asarray([
-                _surface_robin_alpha(pol, eps_phys[i], mu_phys[i], k_phys[i], robin_impedance[i])
-                for i in robin_nodes
-            ], dtype=np.complex128)
-            a_mat[np.ix_(nnodes + robin_nodes, node_ids)] += (
-                mass_mat[np.ix_(robin_nodes, node_ids)] * (coeff_u_active[robin_nodes] + alpha)[:, None]
-            )
-            a_mat[np.ix_(nnodes + robin_nodes, nnodes + node_ids)] += (
-                mass_mat[np.ix_(robin_nodes, node_ids)] * coeff_q_active[robin_nodes][:, None]
-            )
-
-    return a_mat
-
 def prepare_linear_galerkin_system(
     geometry_snapshot: 'Dict[str, Any]',
     frequency_ghz: 'float',
@@ -5255,28 +4593,8 @@ def _safe_complex_div(num: 'complex', den: 'complex', fallback: 'complex') -> 'c
         return fallback
     return num / den
 
-def _snell_cos_t(eps1: 'complex', mu1: 'complex', eps2: 'complex', mu2: 'complex', cos_i: 'float') -> 'complex':
-    c_i = max(0.0, min(1.0, float(abs(cos_i))))
-    s_i2 = max(0.0, 1.0 - c_i * c_i)
-    n1 = _medium_n(eps1, mu1)
-    n2 = _medium_n(eps2, mu2)
-    if abs(n2) <= EPS:
-        n2 = 1.0 + 0.0j
-    s_t2 = (n1 / n2) ** 2 * s_i2
-    return cmath.sqrt(1.0 - s_t2)
 
-def _projected_impedance(eps: 'complex', mu: 'complex', cos_theta: 'complex', pol: 'str') -> 'complex':
-    eta = _medium_eta(eps, mu)
-    if pol == "TM":
-        return _safe_complex_div(eta, cos_theta, eta)
-    return eta * cos_theta
 
-def _parallel_impedance(z1: 'complex', z2: 'complex') -> 'complex':
-    if abs(z1) <= EPS:
-        return z2
-    if abs(z2) <= EPS:
-        return z1
-    return _safe_complex_div(z1 * z2, z1 + z2, z1)
 
 def _region_medium(materials: 'MaterialLibrary', region_flag: 'int', freq_ghz: 'float') -> 'Tuple[complex, complex]':
     # TYPE 1 sheets use distinct virtual region IDs solely to keep their two
@@ -5436,20 +4754,6 @@ def _surface_robin_alpha(
         return 1j * complex(k_medium) * _safe_complex_div(eta_medium, z_surface, 0.0 + 0.0j)
     return 1j * complex(k_medium) * _safe_complex_div(z_surface, eta_medium, 0.0 + 0.0j)
 
-def _region_side_trace_coefficients(info: 'PanelCoupledInfo', region_flag: 'int') -> 'Tuple[complex, complex]':
-    """
-    Map a region-side normal derivative to [u_trace, q_minus] coefficients.
-
-    Returns (coeff_u, coeff_q) such that:
-        q_region = coeff_u * u_trace + coeff_q * q_minus
-    """
-
-    if info.minus_region == region_flag:
-        return 0.0 + 0.0j, 1.0 + 0.0j
-    if info.plus_region == region_flag:
-        return complex(info.q_plus_gamma), complex(info.q_plus_beta)
-    raise ValueError("Requested region does not participate in this panel.")
-
 def _q_plus_beta(
     pol: 'str',
     eps_minus: 'complex',
@@ -5477,59 +4781,6 @@ def _q_plus_beta(
         return _safe_complex_div(eps_plus, eps_minus, 1.0 + 0.0j)
     return _safe_complex_div(mu_plus, mu_minus, 1.0 + 0.0j)
 
-def _panel_effective_impedance(
-    panel: 'Panel',
-    materials: 'MaterialLibrary',
-    freq_ghz: 'float',
-    pol: 'str',
-    cos_inc: 'float',
-) -> 'complex':
-    """
-    Return the effective local impedance associated with one boundary primitive.
-
-    Used for local surface-impedance calculations in the formulation and
-    related post-processing utilities.
-    """
-
-    if panel.seg_type == 1:
-        z_card = materials.get_impedance(panel.ibc_flag, freq_ghz, arc_s=float(panel.arc_s_center))
-        return z_card
-
-    if panel.seg_type == 2:
-        if panel.ibc_flag > 0:
-            return materials.get_impedance(panel.ibc_flag, freq_ghz, arc_s=float(panel.arc_s_center))
-        return 0.0 + 0.0j
-
-    if panel.seg_type == 3:
-        eps2, mu2 = materials.get_medium(panel.pos_mat, freq_ghz)
-        cos_t = _snell_cos_t(1.0 + 0.0j, 1.0 + 0.0j, eps2, mu2, cos_inc)
-        z_int = _projected_impedance(eps2, mu2, cos_t, pol)
-        if panel.ibc_flag > 0:
-            z_card = materials.get_impedance(panel.ibc_flag, freq_ghz, arc_s=float(panel.arc_s_center))
-            return z_int + z_card
-        return z_int
-
-    if panel.seg_type == 4:
-        if panel.ibc_flag > 0:
-            return materials.get_impedance(panel.ibc_flag, freq_ghz, arc_s=float(panel.arc_s_center))
-        return 0.0 + 0.0j
-
-    if panel.seg_type == 5:
-        eps1, mu1 = materials.get_medium(panel.pos_mat, freq_ghz)
-        eps2, mu2 = materials.get_medium(panel.neg_mat, freq_ghz)
-        cos_i = complex(max(1e-6, min(1.0, abs(cos_inc))), 0.0)
-        cos_t = _snell_cos_t(eps1, mu1, eps2, mu2, float(abs(cos_inc)))
-        z1 = _projected_impedance(eps1, mu1, cos_i, pol)
-        z2 = _projected_impedance(eps2, mu2, cos_t, pol)
-        z_if = _parallel_impedance(z1, z2)
-        if panel.ibc_flag > 0:
-            z_card = materials.get_impedance(panel.ibc_flag, freq_ghz, arc_s=float(panel.arc_s_center))
-            return z_if + z_card
-        return z_if
-
-    if panel.ibc_flag > 0:
-        return materials.get_impedance(panel.ibc_flag, freq_ghz, arc_s=float(panel.arc_s_center))
-    return 0.0 + 0.0j
 
 def _build_coupled_panel_info(
     panels: 'List[Panel]',
@@ -5616,7 +4867,7 @@ def _build_coupled_panel_info(
         k_plus = _medium_wavenumber(k0, eps_plus, mu_plus)
         if (
             abs(k_minus.imag) > 1e-10 or abs(k_plus.imag) > 1e-10
-        ) and _complex_hankel_backend_name() == "native-series-asymptotic":
+        ) and _complex_hankel_backend_name() == "unavailable":
             raise RuntimeError(
                 "Lossy dielectric media require SciPy or mpmath for trustworthy complex-Hankel evaluation. "
                 "Install one of those backends before running production dielectric solves."
@@ -5679,31 +4930,7 @@ def _green_2d(k0: 'Union[complex, float]', r: 'float') -> 'complex':
         x = 1e-12 + 0.0j
     return 0.25j * _hankel2_0(x)
 
-def _dgreen_dn_obs(k0: 'Union[complex, float]', r_vec: 'np.ndarray', n_obs: 'np.ndarray') -> 'complex':
-    """Normal derivative of Green's function w.r.t. observation point normal."""
 
-    r = float(np.linalg.norm(r_vec))
-    if r <= EPS:
-        return 0.0 + 0.0j
-    x = complex(k0) * r
-    if abs(x) <= 1e-12:
-        x = 1e-12 + 0.0j
-    h1 = _hankel2_1(x)
-    projection = float(np.dot(n_obs, r_vec) / r)
-    return (-0.25j * complex(k0)) * h1 * projection
-
-def _dgreen_dn_src(k0: 'Union[complex, float]', r_vec: 'np.ndarray', n_src: 'np.ndarray') -> 'complex':
-    """Normal derivative of Green's function w.r.t. source panel normal."""
-
-    r = float(np.linalg.norm(r_vec))
-    if r <= EPS:
-        return 0.0 + 0.0j
-    x = complex(k0) * r
-    if abs(x) <= 1e-12:
-        x = 1e-12 + 0.0j
-    h1 = _hankel2_1(x)
-    projection = float(np.dot(n_src, r_vec) / r)
-    return (0.25j * complex(k0)) * h1 * projection
 
 def _quadrature_nodes(order: 'int' = 10) -> 'Tuple[np.ndarray, np.ndarray]':
     qx, qw = np.polynomial.legendre.leggauss(order)
@@ -5743,280 +4970,7 @@ def _near_singular_scheme(distance: 'float', panel_length: 'float') -> 'Tuple[in
         return 28, 3
     return 16, 1
 
-def _integrate_panel_generic(
-    obs: 'np.ndarray',
-    src: 'Panel',
-    kernel_eval: 'Callable[[np.ndarray, np.ndarray], complex]',
-) -> 'complex':
-    seg = src.p1 - src.p0
-    distance = float(np.linalg.norm(obs - src.center))
-    order, splits = _near_singular_scheme(distance, src.length)
-    qt, qw = _get_quadrature(order)
 
-    acc = 0.0 + 0.0j
-    inv_splits = 1.0 / float(splits)
-    for sidx in range(splits):
-        t0 = float(sidx) * inv_splits
-        dt = inv_splits
-        for t, w in zip(qt, qw):
-            u = t0 + dt * float(t)
-            rp = src.p0 + u * seg
-            acc += (dt * float(w)) * kernel_eval(obs, rp)
-    return acc * src.length
-
-def _single_layer_self_term(k0: 'Union[complex, float]', panel_length: 'float') -> 'complex':
-    """
-    Self-term using singularity subtraction + correction.
-
-    Base asymptotic piece is analytic; remainder is integrated numerically so this
-    remains accurate beyond the small-argument regime.
-    """
-
-    l = max(float(panel_length), EPS)
-    kz = complex(k0)
-    x = kz * l / 4.0
-    if abs(x) <= 1e-12:
-        x = 1e-12 + 0.0j
-    asym = (l / (2.0 * math.pi)) * (cmath.log(x) + EULER_GAMMA - 1.0) + 0.25j * l
-
-    # Correction integral for finite kL effects:
-    # 2 * Int_0^{L/2} [G(r) - G_asym(r)] dr
-    a = 0.5 * l
-    kl = abs(kz) * l
-    if kl < 0.5:
-        order, splits = 24, 6
-    elif kl < 3.0:
-        order, splits = 36, 8
-    elif kl < 10.0:
-        order, splits = 48, 12
-    else:
-        order, splits = 64, 16
-
-    qt, qw = _get_quadrature(order)
-    corr_pos = 0.0 + 0.0j
-    inv_splits = 1.0 / float(splits)
-    for sidx in range(splits):
-        r0 = a * float(sidx) * inv_splits
-        dr = a * inv_splits
-        for t, w in zip(qt, qw):
-            r = r0 + dr * float(t)
-            g = _green_2d(k0, r)
-            z = kz * max(r, EPS) / 2.0
-            if abs(z) <= 1e-12:
-                z = 1e-12 + 0.0j
-            g_asym = (1.0 / (2.0 * math.pi)) * (cmath.log(z) + EULER_GAMMA) + 0.25j
-            corr_pos += dr * float(w) * (g - g_asym)
-
-    return asym + 2.0 * corr_pos
-
-def _build_bem_matrices(
-    panels: 'List[Panel]',
-    k0: 'Union[complex, float]',
-    obs_normal_deriv: 'bool' = False,
-) -> 'Tuple[np.ndarray, np.ndarray]':
-    """
-    Assemble dense S and K/K' operators on the linear boundary mesh built from primitives.
-
-    Thin wrapper over the linear/Galerkin assembly path; several internal and external
-    call sites dispatch through this entry point.
-    """
-
-    mesh = _build_linear_mesh(list(panels))
-    return _assemble_linear_operator_matrices(
-        mesh=mesh,
-        k0=complex(k0),
-        obs_normal_deriv=bool(obs_normal_deriv),
-    )
-
-
-def _constraint_null_space(c_mat: 'np.ndarray') -> 'np.ndarray':
-    """Compute a complex null-space basis Z such that C @ Z ~= 0."""
-
-    c_eval = np.asarray(c_mat, dtype=np.complex128)
-    if c_eval.ndim != 2:
-        raise ValueError("Constraint matrix must be two-dimensional.")
-    ncols = int(c_eval.shape[1])
-    if ncols <= 0:
-        raise ValueError("Constraint matrix must have at least one primal column.")
-    if c_eval.shape[0] == 0 or c_eval.size == 0:
-        return np.eye(ncols, dtype=np.complex128)
-
-    if _SCIPY_LINALG is not None:
-        try:
-            _, svals, vh = _SCIPY_LINALG.svd(c_eval, full_matrices=True, check_finite=True)
-        except Exception:
-            _, svals, vh = np.linalg.svd(c_eval, full_matrices=True)
-    else:
-        _, svals, vh = np.linalg.svd(c_eval, full_matrices=True)
-
-    svals = np.asarray(svals, dtype=float)
-    sigma_max = float(np.max(svals)) if svals.size else 0.0
-    tol = max(c_eval.shape) * max(sigma_max, 1.0) * np.finfo(float).eps * 16.0
-    rank = int(np.sum(svals > tol))
-    z_basis = np.asarray(vh[rank:, :].conj().T, dtype=np.complex128)
-    if z_basis.ndim != 2 or z_basis.shape[0] != ncols:
-        raise RuntimeError("Internal error: invalid null-space basis shape for exact constrained solve.")
-    if z_basis.shape[1] == 0:
-        raise RuntimeError(
-            "Aborting solve: exact junction constraints eliminate all primal degrees of freedom."
-        )
-    return z_basis
-
-def _prepare_linear_solver(
-    a_mat: 'np.ndarray',
-    constraint_mat: 'Optional[np.ndarray]' = None,
-    solver_method: 'str' = "auto",
-) -> 'PreparedLinearSolver':
-    """
-    Prepare reusable factorization for repeated solves with identical matrix.
-
-    ``solver_method`` controls the linear algebra strategy:
-    - ``'auto'``: dense LU (public RCS paths expose matrix-free FMM separately)
-    - ``'direct'``: always dense LU
-    - ``'gmres'``: always GMRES with block-diagonal preconditioner
-
-    Unconstrained systems remain on the direct square-solve path. When
-    `constraint_mat` is provided, the solver computes an exact null-space basis
-    and solves the reduced least-squares problem over the constrained subspace,
-    so junction constraints are enforced exactly rather than by weighted rows.
-    """
-
-    a_eval = np.asarray(a_mat, dtype=np.complex128)
-    c_eval = None if constraint_mat is None else np.asarray(constraint_mat, dtype=np.complex128)
-    if c_eval is not None and c_eval.size > 0:
-        if c_eval.ndim != 2:
-            raise ValueError("Constraint matrix must be two-dimensional.")
-        if c_eval.shape[1] != a_eval.shape[1]:
-            raise ValueError("Constraint matrix width does not match the primal system size.")
-        z_basis = _constraint_null_space(c_eval)
-        reduced_mat = np.asarray(a_eval @ z_basis, dtype=np.complex128)
-        return PreparedLinearSolver(
-            a_mat=a_eval,
-            method="constrained_null_lstsq",
-            null_basis=z_basis,
-            reduced_mat=reduced_mat,
-            constraint_mat=c_eval,
-        )
-
-    is_square = a_eval.shape[0] == a_eval.shape[1]
-    if not is_square:
-        raise RuntimeError(
-            "Aborting solve: reusable prepared solver requires a square primal system. "
-            "Use exact constraints through constraint_mat instead of a rectangular augmented matrix."
-        )
-
-    n = a_eval.shape[0]
-    method = solver_method.strip().lower()
-    use_gmres = method == "gmres"
-    if use_gmres and _SCIPY_SPARSE_LINALG is None:
-        raise ImportError(
-            "solver_method='gmres' requires scipy.sparse.linalg; no dense "
-            "fallback was performed."
-        )
-
-    if use_gmres and _SCIPY_SPARSE_LINALG is not None:
-        # Block-diagonal preconditioner: LU-factor the 2x2 block-diagonal
-        # consisting of the (u,u) and (q,q) sub-blocks.
-        half = n // 2
-        precond = None
-        if half > 0 and _SCIPY_LINALG is not None:
-            try:
-                uu_block = a_eval[:half, :half]
-                qq_block = a_eval[half:, half:]
-                lu_uu, piv_uu = _SCIPY_LINALG.lu_factor(uu_block)
-                lu_qq, piv_qq = _SCIPY_LINALG.lu_factor(qq_block)
-
-                def precond_matvec(x):
-                    x = np.asarray(x, dtype=np.complex128)
-                    out = np.empty_like(x)
-                    out[:half] = _SCIPY_LINALG.lu_solve((lu_uu, piv_uu), x[:half])
-                    out[half:] = _SCIPY_LINALG.lu_solve((lu_qq, piv_qq), x[half:])
-                    return out
-
-                precond = _SCIPY_SPARSE_LINALG.LinearOperator(
-                    shape=(n, n), matvec=precond_matvec, dtype=np.complex128,
-                )
-            except Exception:
-                precond = None
-
-        return PreparedLinearSolver(
-            a_mat=a_eval, method="gmres", preconditioner=precond,
-        )
-
-    if _SCIPY_LINALG is not None:
-        try:
-            lu, piv = _SCIPY_LINALG.lu_factor(a_eval)
-            return PreparedLinearSolver(a_mat=a_eval, method="scipy_lu", lu=lu, piv=piv)
-        except Exception:
-            pass
-
-    return PreparedLinearSolver(a_mat=a_eval, method="numpy_solve")
-
-def _solve_with_prepared_solver(prepared: 'PreparedLinearSolver', rhs: 'np.ndarray') -> 'np.ndarray':
-    """Solve with a prepared linear-solver handle."""
-
-    rhs_eval = np.asarray(rhs, dtype=np.complex128)
-    if prepared.method == "scipy_lu" and _SCIPY_LINALG is not None and prepared.lu is not None and prepared.piv is not None:
-        return _SCIPY_LINALG.lu_solve((prepared.lu, prepared.piv), rhs_eval)
-    if prepared.method == "numpy_solve":
-        return np.linalg.solve(prepared.a_mat, rhs_eval)
-    if prepared.method == "gmres" and _SCIPY_SPARSE_LINALG is not None:
-        a = prepared.a_mat
-        if rhs_eval.ndim == 1:
-            # rtol must be passed explicitly: scipy stops at
-            # max(rtol*||b||, atol) with rtol defaulting to 1e-5, which would
-            # silently override the much tighter atol requested here.
-            sol, info = _gmres_compat(
-                a, rhs_eval, M=prepared.preconditioner,
-                restart=prepared.gmres_restart,
-                maxiter=prepared.gmres_maxiter,
-                rtol=prepared.gmres_tol,
-                atol=prepared.gmres_tol,
-            )
-            if info != 0:
-                raise RuntimeError(
-                    "Aborting GMRES solve: iterative linear solve did not "
-                    f"converge (status {int(info)}); no direct fallback or "
-                    "unconverged field was returned."
-                )
-            return sol
-        # Multi-RHS: solve each column.
-        sols = []
-        for i in range(rhs_eval.shape[1]):
-            sol_i, info = _gmres_compat(
-                a, rhs_eval[:, i], M=prepared.preconditioner,
-                restart=prepared.gmres_restart,
-                maxiter=prepared.gmres_maxiter,
-                rtol=prepared.gmres_tol,
-                atol=prepared.gmres_tol,
-            )
-            if info != 0:
-                raise RuntimeError(
-                    "Aborting GMRES solve: iterative linear solve did not "
-                    f"converge for RHS column {i} (status {int(info)}); no "
-                    "direct fallback or unconverged field was returned."
-                )
-            sols.append(sol_i)
-        return np.column_stack(sols)
-    if prepared.method == "constrained_null_lstsq":
-        if prepared.null_basis is None or prepared.reduced_mat is None:
-            raise RuntimeError("Aborting solve: constrained solver is missing its reduced-space data.")
-        reduced_sol, *_ = np.linalg.lstsq(prepared.reduced_mat, rhs_eval, rcond=None)
-        return np.asarray(prepared.null_basis @ reduced_sol, dtype=np.complex128)
-    raise RuntimeError(
-        f"Aborting solve: unsupported prepared solver method '{prepared.method}'."
-    )
-
-def _solve_many_with_prepared_solver(prepared: 'PreparedLinearSolver', rhs_list: 'List[np.ndarray]') -> 'List[np.ndarray]':
-    """Solve A x_k = b_k for many right-hand-sides using one prepared handle."""
-
-    if not rhs_list:
-        return []
-    rhs_mat = np.column_stack(rhs_list)
-    sol_mat = _solve_with_prepared_solver(prepared, rhs_mat)
-    if sol_mat.ndim == 1:
-        sol_mat = sol_mat.reshape(-1, 1)
-    return [np.asarray(sol_mat[:, i], dtype=np.complex128) for i in range(sol_mat.shape[1])]
 
 def _residual_norm(a_mat: 'np.ndarray', x: 'np.ndarray', b: 'np.ndarray') -> 'float':
     denom = float(np.linalg.norm(b))
@@ -6038,24 +4992,6 @@ def _residual_norm_many(a_mat: 'np.ndarray', x_mat: 'np.ndarray', b_mat: 'np.nda
     den = np.where(den <= EPS, 1.0, den)
     return np.asarray(num / den, dtype=float)
 
-def _constraint_residual_norm_many(c_mat: 'Optional[np.ndarray]', x_mat: 'np.ndarray') -> 'np.ndarray':
-    """Absolute residual norms for exact linear constraints C x = 0."""
-
-    if c_mat is None:
-        x_eval = np.asarray(x_mat)
-        cols = 1 if x_eval.ndim == 1 else int(x_eval.shape[1])
-        return np.zeros(cols, dtype=float)
-    c_eval = np.asarray(c_mat, dtype=np.complex128)
-    if c_eval.size == 0:
-        x_eval = np.asarray(x_mat)
-        cols = 1 if x_eval.ndim == 1 else int(x_eval.shape[1])
-        return np.zeros(cols, dtype=float)
-
-    x_eval = np.asarray(x_mat, dtype=np.complex128)
-    if x_eval.ndim == 1:
-        return np.asarray([float(np.linalg.norm(c_eval @ x_eval))], dtype=float)
-    return np.asarray(np.linalg.norm(c_eval @ x_eval, axis=0), dtype=float)
-
 def _summarize_residuals(values: 'List[float]') -> 'Tuple[float, float, int]':
     """Return finite max/mean and the number of non-finite residuals."""
 
@@ -6069,28 +5005,98 @@ def _summarize_residuals(values: 'List[float]') -> 'Tuple[float, float, int]':
         mean_value = float(np.mean(finite))
     return max_value, mean_value, int(residuals.size - finite.size)
 
-def _cond_estimate(a_mat: 'np.ndarray') -> 'float':
-    try:
-        return float(np.linalg.cond(a_mat))
-    except np.linalg.LinAlgError:
-        return float("inf")
-
-def _record_condition_estimate(
-    diagnostics: 'Optional[Dict[str, Any]]',
+def _equilibrated_condition_from_lu(
     a_mat: 'np.ndarray',
-    label: 'str',
-) -> 'None':
-    """Record an explicitly requested dense condition estimate.
+    lu: 'np.ndarray',
+    piv: 'np.ndarray',
+) -> 'float':
+    """Estimate cond_1 of a row/column-equilibrated matrix from one LU.
 
-    Callers pass ``None`` when no estimate was requested.  Keeping this
-    opt-in avoids silently doubling the cost of every dense solve, while
-    ensuring ``compute_condition_number=True`` cannot remain a no-op.
+    The raw block systems mix trace and flux equations with different scales,
+    so their unscaled condition numbers are not comparable.  The inverse
+    1-norm estimator needs only a handful of LU solves and avoids the second
+    cubic SVD that certification previously performed.
     """
 
-    if diagnostics is None:
-        return
-    diagnostics["condition_est"] = _cond_estimate(a_mat)
-    diagnostics["condition_label"] = str(label)
+    if _SCIPY_LINALG is None or _SCIPY_SPARSE_LINALG is None:
+        raise RuntimeError("equilibrated condition estimation requires SciPy")
+    a_eval = np.asarray(a_mat, dtype=np.complex128)
+    magnitude = np.abs(a_eval)
+    row_scale = np.max(magnitude, axis=1)
+    row_scale = np.where(row_scale > 0.0, row_scale, 1.0)
+    row_equilibrated = magnitude / row_scale[:, None]
+    col_scale = np.max(row_equilibrated, axis=0)
+    col_scale = np.where(col_scale > 0.0, col_scale, 1.0)
+    norm_a = float(np.max(np.sum(
+        row_equilibrated / col_scale[None, :], axis=0
+    )))
+    n = int(a_eval.shape[0])
+
+    def _inverse_matvec(vector):
+        rhs = row_scale * np.asarray(
+            vector, dtype=np.complex128
+        ).reshape(-1)
+        solved = _SCIPY_LINALG.lu_solve((lu, piv), rhs)
+        return col_scale * solved
+
+    def _inverse_rmatvec(vector):
+        rhs = col_scale * np.asarray(
+            vector, dtype=np.complex128
+        ).reshape(-1)
+        solved = _SCIPY_LINALG.lu_solve((lu, piv), rhs, trans=2)
+        return row_scale * solved
+
+    inverse = _SCIPY_SPARSE_LINALG.LinearOperator(
+        (n, n), matvec=_inverse_matvec, rmatvec=_inverse_rmatvec,
+        dtype=np.complex128,
+    )
+    inverse_norm = float(_SCIPY_SPARSE_LINALG.onenormest(inverse))
+    estimate = norm_a * inverse_norm
+    return estimate if math.isfinite(estimate) else float("inf")
+
+
+def _solve_dense_system(
+    a_mat: 'np.ndarray',
+    rhs: 'np.ndarray',
+    condition_diagnostics: 'Optional[Dict[str, Any]]' = None,
+    label: 'str' = "dense system",
+) -> 'np.ndarray':
+    """Factor once, solve all RHS columns, and optionally estimate condition."""
+
+    a_eval = np.asarray(a_mat, dtype=np.complex128)
+    rhs_eval = np.asarray(rhs, dtype=np.complex128)
+    if _SCIPY_LINALG is None:
+        solution = np.linalg.solve(a_eval, rhs_eval)
+        if condition_diagnostics is not None:
+            # Production environments require SciPy, but keep a fail-closed
+            # diagnostic fallback for minimal installations.
+            row = np.max(np.abs(a_eval), axis=1)
+            row = np.where(row > 0.0, row, 1.0)
+            row_eq = a_eval / row[:, None]
+            col = np.max(np.abs(row_eq), axis=0)
+            col = np.where(col > 0.0, col, 1.0)
+            try:
+                estimate = float(np.linalg.cond(row_eq / col[None, :], p=1))
+            except np.linalg.LinAlgError:
+                estimate = float("inf")
+            condition_diagnostics["condition_est"] = estimate
+            condition_diagnostics["condition_method"] = (
+                "equilibrated_1norm_numpy_fallback"
+            )
+    else:
+        lu, piv = _SCIPY_LINALG.lu_factor(a_eval)
+        solution = _SCIPY_LINALG.lu_solve((lu, piv), rhs_eval)
+        if condition_diagnostics is not None:
+            condition_diagnostics["condition_est"] = (
+                _equilibrated_condition_from_lu(a_eval, lu, piv)
+            )
+            condition_diagnostics["condition_method"] = (
+                "equilibrated_1norm_lu_onenormest"
+            )
+    if condition_diagnostics is not None:
+        condition_diagnostics["condition_label"] = str(label)
+    return np.asarray(solution, dtype=np.complex128)
+
 
 def _consume_condition_estimate(
     values: 'List[float]',
@@ -6173,20 +5179,6 @@ def _rcs_db_from_sigma(
         raise ValueError("RCS dB display floor must be positive and finite.")
     return np.asarray(10.0 * np.log10(np.maximum(sigma, floor_eval)), dtype=float)
 
-def _resolve_worker_count(enabled: 'bool', requested: 'int', jobs: 'int') -> 'int':
-    """
-    Resolve thread-pool worker count for per-elevation parallel execution.
-
-    Returns 1 when parallel execution is disabled or not useful.
-    """
-
-    count = int(max(0, jobs))
-    if not enabled or count <= 1:
-        return 1
-    if int(requested) > 0:
-        return max(1, min(int(requested), count))
-    cpu = int(os.cpu_count() or 1)
-    return max(1, min(cpu, count))
 
 def evaluate_quality_gate(
     metadata: 'Dict[str, Any]',
@@ -6338,12 +5330,6 @@ def evaluate_quality_gate(
         ),
     }
 
-def _is_all_pec(infos: 'List[PanelCoupledInfo]') -> 'bool':
-    """Return True if every element is a PEC surface (robin BC with zero impedance)."""
-    return all(
-        info.bc_kind == 'robin' and abs(info.robin_impedance) <= EPS
-        for info in infos
-    )
 
 def _is_all_robin(infos: 'List[PanelCoupledInfo]') -> 'bool':
     """Return True if every element uses a Robin BC (PEC or IBC, no dielectric)."""
@@ -6450,6 +5436,9 @@ def _estimate_memory_gb(
     nnodes: 'int',
     use_cfie: 'bool',
     n_regions: 'int' = 1,
+    system_dofs: 'Optional[int]' = None,
+    operator_matrices: 'Optional[int]' = None,
+    n_rhs: 'int' = 1000,
 ) -> 'float':
     """
     Estimate peak memory for the dense BIE/MoM solve in GB.
@@ -6458,14 +5447,25 @@ def _estimate_memory_gb(
     """
 
     bytes_per_complex = 16  # complex128
-    # 2Nx2N system matrix + factorization copy
-    sys_size = 2 * nnodes
+    # System matrix + factorization copy.  The historical default is a 2N
+    # coupled system; formulation-aware planning supplies the active system
+    # dimension (N for sheet/Robin, 2N for a single dielectric, and the exact
+    # interface-side DOF count for multi-region geometries).
+    sys_size = (
+        2 * nnodes if system_dofs is None else max(1, int(system_dofs))
+    )
     sys_bytes = 2 * sys_size * sys_size * bytes_per_complex
-    # Region operators: 2 matrices (S, K) per side per region, plus CFIE extras
-    ops_per_region = 4 if not use_cfie else 8
-    region_bytes = n_regions * ops_per_region * nnodes * nnodes * bytes_per_complex
+    # Dense global operators retained while the system is formed.  Callers
+    # that know the formulation provide the actual conservative count.
+    if operator_matrices is None:
+        ops_per_region = 4 if not use_cfie else 8
+        operator_matrices = max(1, int(n_regions)) * ops_per_region
+    region_bytes = (
+        max(0, int(operator_matrices))
+        * nnodes * nnodes * bytes_per_complex
+    )
     # RHS + solution
-    misc_bytes = 4 * sys_size * bytes_per_complex * 1000  # generous estimate
+    misc_bytes = 4 * sys_size * bytes_per_complex * max(1, int(n_rhs))
     total = sys_bytes + region_bytes + misc_bytes
     return total / (1024 ** 3)
 
@@ -6615,10 +5615,10 @@ def _solve_te_robin_mfie(
         if has_ibc:
             a_mfie += s_alpha_mat
         _ensure_finite_linear_system(a_mfie, rhs_mfie, label="TE Robin MFIE system")
-        _record_condition_estimate(
-            condition_diagnostics, a_mfie, "TE Robin MFIE system"
+        sigma_mat = _solve_dense_system(
+            a_mfie, rhs_mfie, condition_diagnostics,
+            "TE Robin MFIE system",
         )
-        sigma_mat = np.linalg.solve(a_mfie, rhs_mfie)
         residual = np.linalg.norm(a_mfie @ sigma_mat - rhs_mfie, axis=0)
     else:
         # FMM path.
@@ -6873,10 +5873,10 @@ def _solve_dielectric_indirect(
         rhs_sys[nnodes + ids, :] -= load_dn
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="dielectric indirect system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "dielectric indirect system"
+    sol = _solve_dense_system(
+        a_sys, rhs_sys, condition_diagnostics,
+        "dielectric indirect system",
     )
-    sol = np.linalg.solve(a_sys, rhs_sys)
     if sol.ndim == 1:
         sol = sol.reshape(-1, 1)
 
@@ -7000,10 +6000,9 @@ def _solve_tm_sheet(
         rhs_sys[ids, :] -= load_u
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="TM sheet system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "TM sheet system"
+    sigma_mat = _solve_dense_system(
+        a_sys, rhs_sys, condition_diagnostics, "TM sheet system"
     )
-    sigma_mat = np.linalg.solve(a_sys, rhs_sys)
     if sigma_mat.ndim == 1:
         sigma_mat = sigma_mat.reshape(-1, 1)
 
@@ -7104,10 +6103,9 @@ def _solve_te_sheet(
         rhs_sys[endpoint_nodes, :] = 0.0
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="TE sheet system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "TE sheet system"
+    mu_mat = _solve_dense_system(
+        a_sys, rhs_sys, condition_diagnostics, "TE sheet system"
     )
-    mu_mat = np.linalg.solve(a_sys, rhs_sys)
     if mu_mat.ndim == 1:
         mu_mat = mu_mat.reshape(-1, 1)
 
@@ -7217,8 +6215,8 @@ def _solve_mixed_sheet_pec(
             )
             rhs_sys[ids, :] -= load_u
 
-        _ensure_finite_linear_system(a_sys, rhs_sys, label="mixed sheet+PEC TM system")
-        sol_mat = np.linalg.solve(a_sys, rhs_sys)
+        solve_label = "mixed sheet+PEC TM system"
+        _ensure_finite_linear_system(a_sys, rhs_sys, label=solve_label)
 
     else:   # TE
         N_mat = _assemble_linear_hypersingular_matrix(
@@ -7250,16 +6248,12 @@ def _solve_mixed_sheet_pec(
             a_sys[endpoint_nodes, endpoint_nodes] = 1.0
             rhs_sys[endpoint_nodes, :] = 0.0
 
-        _ensure_finite_linear_system(a_sys, rhs_sys, label="mixed sheet+PEC TE system")
-        _record_condition_estimate(
-            condition_diagnostics, a_sys, "mixed sheet+PEC TE system"
-        )
-        sol_mat = np.linalg.solve(a_sys, rhs_sys)
+        solve_label = "mixed sheet+PEC TE system"
+        _ensure_finite_linear_system(a_sys, rhs_sys, label=solve_label)
 
-    if pol == "TM":
-        _record_condition_estimate(
-            condition_diagnostics, a_sys, "mixed sheet+PEC TM system"
-        )
+    sol_mat = _solve_dense_system(
+        a_sys, rhs_sys, condition_diagnostics, solve_label
+    )
 
     if sol_mat.ndim == 1:
         sol_mat = sol_mat.reshape(-1, 1)
@@ -7278,12 +6272,6 @@ def _solve_mixed_sheet_pec(
     return rcs_lin, amp, float(np.max(residual_vec))
 
 
-def _is_all_ibc(infos: 'List[PanelCoupledInfo]') -> 'bool':
-    """Return True if every element is a Robin BC surface with nonzero impedance."""
-    return all(
-        info.bc_kind == 'robin' and abs(info.robin_impedance) > EPS
-        for info in infos
-    )
 
 def _assemble_robin_bie_system(
     mesh: 'LinearMesh',
@@ -7319,7 +6307,8 @@ def _assemble_robin_bie_system(
     Brakhage-Werner combined-SOURCE ansatz (double-layer + hypersingular
     operators) -- only worth building if iterative (GMRES/FMM) solves near
     dense resonance spectra ever stall; direct solves do not need it.
-    solve_monostatic_rcs_2d warns when cfie_alpha is requested on this path.
+    The public 2-D entry points reject nonzero ``cfie_alpha`` so this setting
+    cannot silently leave the physical operator unchanged.
     """
 
     nnodes = len(mesh.nodes)
@@ -7470,10 +6459,9 @@ def _solve_robin_bie(
     )
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="Robin-BIE IBC system")
-    _record_condition_estimate(
-        condition_diagnostics, a_sys, "Robin-BIE IBC system"
+    sigma_mat = _solve_dense_system(
+        a_sys, rhs_sys, condition_diagnostics, "Robin-BIE IBC system"
     )
-    sigma_mat = np.linalg.solve(a_sys, rhs_sys)
     if sigma_mat.ndim == 1:
         sigma_mat = sigma_mat.reshape(-1, 1)
 
@@ -7523,6 +6511,75 @@ def _is_multi_region(infos):
     has_transmission = any(info.bc_kind == 'transmission' for info in infos)
     has_robin = any(info.bc_kind == 'robin' for info in infos)
     return has_transmission and has_robin
+
+
+def _dense_formulation_resources(
+    mesh: 'LinearMesh',
+    infos: 'List[PanelCoupledInfo]',
+    pol: 'str',
+) -> 'Dict[str, Any]':
+    """Return the dense system size and retained-operator budget.
+
+    This is the single formulation classifier used by both the solver's
+    pre-allocation memory gate and the sweep scheduler.  Keeping it beside the
+    active dispatch predicates prevents a scheduler estimate from silently
+    drifting back to the old generic 2N coupled-system assumption.
+    """
+
+    nnodes = int(len(mesh.nodes))
+    regions = {
+        int(region)
+        for info in infos
+        for region in (info.minus_region, info.plus_region)
+        if int(region) >= 0
+    }
+
+    if _is_all_sheet(infos):
+        formulation = "sheet"
+        system_dofs = nnodes
+        operator_matrices = 3
+    elif _is_sheet_plus_pec(infos):
+        formulation = "mixed_sheet_pec"
+        system_dofs = nnodes
+        operator_matrices = 3
+    elif pol == "TE" and _is_all_robin(infos):
+        formulation = "te_robin"
+        system_dofs = nnodes
+        operator_matrices = 3
+    elif _is_multi_region(infos):
+        interface_nodes = {}  # type: Dict[Tuple[int, int], Set[int]]
+        for elem, info in zip(mesh.elements, infos):
+            key = (int(info.minus_region), int(info.plus_region))
+            interface_nodes.setdefault(key, set()).update(
+                int(node) for node in elem.node_ids
+            )
+        formulation = "multi_region"
+        system_dofs = sum(
+            len(nodes) * int(r_minus >= 0)
+            + len(nodes) * int(r_plus >= 0)
+            for (r_minus, r_plus), nodes in interface_nodes.items()
+        )
+        operator_matrices = 4 * max(1, len(regions))
+    elif _is_single_dielectric_body(infos):
+        formulation = "single_dielectric"
+        system_dofs = 2 * nnodes
+        operator_matrices = 5
+    elif _is_all_robin(infos):
+        formulation = "robin"
+        system_dofs = nnodes
+        operator_matrices = 3
+    else:
+        raise ValueError(
+            "Geometry does not match a supported dense 2-D formulation."
+        )
+
+    return {
+        "nodes": nnodes,
+        "n_regions": int(len(regions)),
+        "formulation": formulation,
+        "system_dofs": int(system_dofs),
+        "operator_matrices": int(operator_matrices),
+    }
 
 def _solve_multi_region_indirect(
     mesh,
@@ -7913,10 +6970,10 @@ def _solve_multi_region_indirect(
 
         # 6. Solve (dense).
         _ensure_finite_linear_system(Asys, Brhs, label="multi-region indirect system")
-        _record_condition_estimate(
-            condition_diagnostics, Asys, "multi-region indirect system"
+        sol = _solve_dense_system(
+            Asys, Brhs, condition_diagnostics,
+            "multi-region indirect system",
         )
-        sol = np.linalg.solve(Asys, Brhs)
         if sol.ndim == 1: sol = sol.reshape(-1, 1)
         residual = np.linalg.norm(Asys @ sol - Brhs, axis=0)
         rhs_norm = np.linalg.norm(Brhs, axis=0)
@@ -8285,18 +7342,12 @@ def solve_monostatic_rcs_2d(
     check_abort()
     emit_progress("Initializing solver")
 
-    if float(cfie_alpha) > 0.0:
-        materials.warn_once(
-            f"cfie_alpha={float(cfie_alpha):g} has NO EFFECT on monostatic "
-            "solves: every supported geometry routes to an indirect "
-            "single-layer formulation (Robin BIE / TE MFIE / sheet / "
-            "dielectric / multi-region) whose exterior far field is immune "
-            "to interior cavity resonances -- a resonant null density "
-            "radiates nothing outside, so direct solves stay accurate even "
-            "where conditioning spikes (monitor linear_residual in the "
-            "samples). The Burton-Miller CFIE term exists only in the "
-            "bistatic coupled-trace branch. See _assemble_robin_bie_system "
-            "for why a Robin-style CFIE is invalid for the SLP ansatz.")
+    if abs(float(cfie_alpha)) > EPS:
+        raise ValueError(
+            "cfie_alpha is not implemented by any active 2-D formulation; "
+            "use cfie_alpha=0. No unchanged field was returned under a "
+            "different solver setting."
+        )
 
     # --- Mesh caching: when mesh_reference_ghz is set, the mesh topology is
     # frequency-independent and can be built once before the frequency loop. ---
@@ -8400,6 +7451,45 @@ def solve_monostatic_rcs_2d(
                 "or 'direct'; no dense fallback was performed."
             )
 
+        # Refuse before any formulation allocates its dense operators.  The
+        # classifier is shared with the scheduler, including N-DOF sheet and
+        # Robin systems and exact interface-side DOFs for multi-region solves.
+        resources = _dense_formulation_resources(mesh, coupled_infos, pol)
+        est_gb = _estimate_memory_gb(
+            resources["nodes"],
+            use_cfie=False,
+            n_regions=max(1, resources["n_regions"]),
+            system_dofs=resources["system_dofs"],
+            operator_matrices=resources["operator_matrices"],
+            n_rhs=max(1, len(elevations)),
+        )
+        fmm_requested = solver_method == "fmm"
+        fmm_capable = (
+            (pol == 'TE' and _is_all_robin(coupled_infos))
+            or _is_multi_region(coupled_infos)
+        )
+        dense_gate_active = not (fmm_requested and fmm_capable)
+        memory_limit_gb = _solve_memory_limit_gb()
+        if est_gb > memory_limit_gb and dense_gate_active:
+            raise MemoryError(
+                f"Estimated peak memory {est_gb:.1f} GB exceeds the "
+                f"{memory_limit_gb:.1f} GB limit for this process "
+                f"({resources['system_dofs']} system DOFs, "
+                f"{resources['n_regions']} region(s), "
+                f"{resources['formulation']}; "
+                f"{_detect_available_gb():.1f} GB detected). "
+                f"Reduce panel count, frequency, use mesh_reference_ghz, "
+                f"raise GHOST_MAX_SOLVE_GB if the memory really is there, or "
+                f"solver_method='fmm' for TE all-Robin / multi-region problems."
+            )
+        if est_gb > 8.0 and dense_gate_active:
+            materials.warn_once(
+                f"Estimated peak memory {est_gb:.1f} GB for "
+                f"{resources['system_dofs']} {resources['formulation']} "
+                "system DOFs. Large problems may cause slowdowns or "
+                "out-of-memory errors."
+            )
+
         # --- TYPE 1 sheet dispatch ---
         # Pure-sheet geometries use a dedicated sheet BIE derived directly
         # from Maxwell's equations (see _solve_tm_sheet / _solve_te_sheet).
@@ -8493,37 +7583,6 @@ def solve_monostatic_rcs_2d(
             linear_mesh_stats_local.update(_linear_coupled_node_report(mesh, coupled_infos))
         done_steps += 1
         emit_progress(f"Assembled linear/Galerkin coupled operators at {freq_ghz:g} GHz")
-
-        nnodes = len(mesh.nodes)
-
-        # Memory estimation -- refuse before allocating multi-GB matrices.
-        # The estimate models DENSE operator storage; when the run is routed
-        # to an FMM-capable formulation (TE all-Robin MFIE or the multi-region
-        # solver) with solver_method="fmm", memory scales O(N) (sparse
-        # near-field + per-interface preconditioner blocks), so the dense
-        # gate must not veto exactly the large runs FMM exists for.
-        n_regions = len({info.minus_region for info in coupled_infos if info.minus_region >= 0}
-                        | {info.plus_region for info in coupled_infos if info.plus_region >= 0})
-        est_gb = _estimate_memory_gb(nnodes, use_cfie=float(cfie_alpha) > 0, n_regions=max(1, n_regions))
-        fmm_requested = isinstance(solver_method, str) and solver_method.strip().lower() == "fmm"
-        fmm_capable = (pol == 'TE' and _is_all_robin(coupled_infos)) or _is_multi_region(coupled_infos)
-        dense_gate_active = not (fmm_requested and fmm_capable)
-        memory_limit_gb = _solve_memory_limit_gb()
-        if est_gb > memory_limit_gb and dense_gate_active:
-            raise MemoryError(
-                f"Estimated peak memory {est_gb:.1f} GB exceeds the "
-                f"{memory_limit_gb:.1f} GB limit for this process "
-                f"({nnodes} nodes, {n_regions} region(s); "
-                f"{_detect_available_gb():.1f} GB detected). "
-                f"Reduce panel count, frequency, use mesh_reference_ghz, "
-                f"raise GHOST_MAX_SOLVE_GB if the memory really is there, or "
-                f"solver_method='fmm' for TE all-Robin / multi-region problems."
-            )
-        if est_gb > 8.0 and dense_gate_active:
-            materials.warn_once(
-                f"Estimated peak memory {est_gb:.1f} GB for {nnodes} nodes. "
-                "Large problems may cause slowdowns or out-of-memory errors."
-            )
 
         if cached_junction_constraints is not None and cached_junction_stats is not None:
             linear_junction_constraints = cached_junction_constraints
@@ -8803,6 +7862,10 @@ def solve_monostatic_rcs_2d(
         "condition_est_max": float(np.max(cond_values)) if cond_values else float("nan"),
         "condition_est_mean": float(np.mean(cond_values)) if cond_values else float("nan"),
         "condition_est_computed": bool(condition_est_computed),
+        "condition_estimator": (
+            "equilibrated_1norm_lu_onenormest"
+            if condition_est_computed else "not_requested"
+        ),
         "warnings": list(materials.warnings),
         "warning_count": int(len(materials.warnings)),
         "math_backend_real_bessel": _BESSEL.backend_name,
@@ -8842,56 +7905,6 @@ def solve_monostatic_rcs_2d(
         "samples": samples,
         "metadata": metadata,
     }
-
-
-def _farfield_at_angles_coupled(
-    mesh: 'LinearMesh',
-    infos: 'List[PanelCoupledInfo]',
-    u_trace: 'np.ndarray',
-    q_minus: 'np.ndarray',
-    k_air: 'float',
-    obs_angles_deg: 'np.ndarray',
-    order: 'int' = 8,
-) -> 'Tuple[np.ndarray, np.ndarray]':
-    """
-    Evaluate coupled-formulation far-field at arbitrary observation angles.
-
-    Unlike the monostatic projector, this takes a single solution vector
-    (one incidence angle) and projects it at multiple observation angles.
-    """
-
-    obs = np.asarray(obs_angles_deg, dtype=float).reshape(-1)
-    phi = np.deg2rad(obs)
-    dirs = np.stack([np.cos(phi), np.sin(phi)], axis=1)
-    qt, qw = _get_quadrature(max(2, int(order)))
-    amp = np.zeros(obs.size, dtype=np.complex128)
-
-    for elem, info in zip(mesh.elements, infos):
-        ids = np.asarray(elem.node_ids, dtype=int)
-        beta = complex(info.q_plus_beta)
-        gamma = complex(info.q_plus_gamma)
-        u_local = u_trace[ids]
-        q_local = q_minus[ids]
-        q_plus_local = beta * q_local + gamma * u_local
-        for t, w in zip(qt, qw):
-            shape = _linear_shape_values(float(t))
-            rp = elem.p0 + float(t) * (elem.p1 - elem.p0)
-            phase = np.exp(1j * k_air * (dirs @ rp))
-            dot_n = dirs @ elem.normal
-            u_t = shape[0] * u_local[0] + shape[1] * u_local[1]
-            q_t = shape[0] * q_local[0] + shape[1] * q_local[1]
-            qp_t = shape[0] * q_plus_local[0] + shape[1] * q_plus_local[1]
-            if info.minus_has_incident:
-                amp += float(w) * float(elem.length) * phase * (
-                    -q_t + 1j * k_air * dot_n * u_t
-                )
-            if info.plus_has_incident:
-                amp += float(w) * float(elem.length) * phase * (
-                    qp_t - 1j * k_air * dot_n * u_t
-                )
-
-    rcs_lin = _rcs_sigma_from_amp(amp, k_air)
-    return rcs_lin, amp
 
 
 def _farfield_at_angles_slp(
@@ -9005,14 +8018,11 @@ def solve_bistatic_rcs_2d(
         materials.warn_once(str(_msg))
     _warn_far_quadrature_override(materials)
 
-    if float(cfie_alpha) > 0.0:
-        materials.warn_once(
-            f"cfie_alpha={float(cfie_alpha):g}: every supported geometry "
-            "routes to an indirect single-layer formulation where this knob "
-            "has NO EFFECT (its far field is immune to interior cavity "
-            "resonances; see solve_monostatic_rcs_2d). It is consumed only "
-            "by the deprecated coupled-trace branch, which no supported "
-            "geometry reaches.")
+    if abs(float(cfie_alpha)) > EPS:
+        raise ValueError(
+            "cfie_alpha is not implemented by any active 2-D formulation; "
+            "use cfie_alpha=0."
+        )
 
     samples: 'List[Dict[str, Any]]' = []
     residual_values: 'List[float]' = []
@@ -9085,6 +8095,33 @@ def solve_bistatic_rcs_2d(
         use_tm_robin_bie = (pol == 'TM' and _is_all_robin(coupled_infos))
         use_diel_indirect = _is_single_dielectric_body(coupled_infos) and not _is_multi_region(coupled_infos)
         use_multi_region = _is_multi_region(coupled_infos)
+
+        resources = _dense_formulation_resources(mesh, coupled_infos, pol)
+        est_gb = _estimate_memory_gb(
+            resources["nodes"],
+            use_cfie=False,
+            n_regions=max(1, resources["n_regions"]),
+            system_dofs=resources["system_dofs"],
+            operator_matrices=resources["operator_matrices"],
+            n_rhs=1,
+        )
+        memory_limit_gb = _solve_memory_limit_gb()
+        if est_gb > memory_limit_gb:
+            raise MemoryError(
+                f"Estimated peak memory {est_gb:.1f} GB exceeds the "
+                f"{memory_limit_gb:.1f} GB limit for this bistatic process "
+                f"({resources['system_dofs']} system DOFs, "
+                f"{resources['n_regions']} region(s), "
+                f"{resources['formulation']}; "
+                f"{_detect_available_gb():.1f} GB detected)."
+            )
+        if est_gb > 8.0:
+            materials.warn_once(
+                f"Estimated peak memory {est_gb:.1f} GB for "
+                f"{resources['system_dofs']} {resources['formulation']} "
+                "system DOFs. Large problems may cause slowdowns or "
+                "out-of-memory errors."
+            )
 
         # Pre-assemble system matrices (reused across incidence angles).
 
@@ -9181,10 +8218,14 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 sheet_a_sys, rhs_all, label="bistatic sheet system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(sheet_a_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_system(
+                sheet_a_sys, rhs_all, condition_diagnostics,
+                "bistatic sheet system",
+            )
+            if condition_diagnostics is not None:
+                cond_values.append(float(condition_diagnostics["condition_est"]))
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(sheet_a_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 sheet_a_sys, batch_solution, rhs_all
             )
@@ -9234,10 +8275,14 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 mfie_sys, rhs_all, label="bistatic TE Robin MFIE system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(mfie_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_system(
+                mfie_sys, rhs_all, condition_diagnostics,
+                "bistatic TE Robin MFIE system",
+            )
+            if condition_diagnostics is not None:
+                cond_values.append(float(condition_diagnostics["condition_est"]))
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(mfie_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 mfie_sys, batch_solution, rhs_all
             )
@@ -9254,10 +8299,14 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 robin_sys, rhs_all, label="bistatic TM Robin BIE system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(robin_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_system(
+                robin_sys, rhs_all, condition_diagnostics,
+                "bistatic Robin system",
+            )
+            if condition_diagnostics is not None:
+                cond_values.append(float(condition_diagnostics["condition_est"]))
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(robin_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 robin_sys, batch_solution, rhs_all
             )
@@ -9314,10 +8363,14 @@ def solve_bistatic_rcs_2d(
             _ensure_finite_linear_system(
                 diel_sys, rhs_all, label="bistatic dielectric indirect system"
             )
-            if compute_condition_number:
-                cond_values.append(_cond_estimate(diel_sys))
+            condition_diagnostics = {} if compute_condition_number else None
+            batch_solution = _solve_dense_system(
+                diel_sys, rhs_all, condition_diagnostics,
+                "bistatic dielectric indirect system",
+            )
+            if condition_diagnostics is not None:
+                cond_values.append(float(condition_diagnostics["condition_est"]))
                 frequency_condition_recorded = True
-            batch_solution = np.linalg.solve(diel_sys, rhs_all)
             batch_residuals = _residual_norm_many(
                 diel_sys, batch_solution, rhs_all
             )
@@ -9417,6 +8470,10 @@ def solve_bistatic_rcs_2d(
         "condition_est_max": float(np.max(cond_values)) if cond_values else float("nan"),
         "condition_est_mean": float(np.mean(cond_values)) if cond_values else float("nan"),
         "condition_est_computed": bool(compute_condition_number),
+        "condition_estimator": (
+            "equilibrated_1norm_lu_onenormest"
+            if compute_condition_number else "not_requested"
+        ),
         "warnings": list(materials.warnings),
         "warning_count": int(len(materials.warnings)),
         "preflight": dict(preflight_report),
@@ -9765,6 +8822,11 @@ def compute_boundary_densities(
     and the formulation used for a single-frequency, single-angle debug solve.
     """
 
+    if abs(float(cfie_alpha)) > EPS:
+        raise ValueError(
+            "cfie_alpha is not implemented by boundary-density diagnostics; "
+            "use cfie_alpha=0."
+        )
     pol = _normalize_polarization(polarization)
     unit_scale = _unit_scale_to_meters(geometry_units)
     base_dir = _material_base_dir_for_snapshot(
@@ -9809,6 +8871,24 @@ def compute_boundary_densities(
     # the whole body (ignoring tapers, using raw k0) and dropped mixed
     # PEC+IBC TM bodies into a pure-PEC EFIE that ignored the impedance.
     use_robin = _is_all_robin(coupled_infos)
+
+    resources = _dense_formulation_resources(mesh, coupled_infos, pol)
+    est_gb = _estimate_memory_gb(
+        resources["nodes"],
+        use_cfie=False,
+        n_regions=max(1, resources["n_regions"]),
+        system_dofs=resources["system_dofs"],
+        operator_matrices=resources["operator_matrices"],
+        n_rhs=1,
+    )
+    memory_limit_gb = _solve_memory_limit_gb()
+    if est_gb > memory_limit_gb:
+        raise MemoryError(
+            f"Estimated peak memory {est_gb:.1f} GB exceeds the "
+            f"{memory_limit_gb:.1f} GB limit for boundary-density diagnostics "
+            f"({resources['system_dofs']} system DOFs, "
+            f"{resources['formulation']})."
+        )
 
     if use_multi:
         # Multi-region: extract exterior SLP density.

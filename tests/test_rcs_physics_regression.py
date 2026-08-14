@@ -209,6 +209,79 @@ class WeightedGalerkinTests(unittest.TestCase):
         np.testing.assert_allclose(k_weighted, k_plain, rtol=0.0, atol=0.0)
 
 
+class NumericalCertificationTests(unittest.TestCase):
+    def test_condition_estimate_reuses_lu_without_svd(self):
+        rng = np.random.default_rng(17)
+        matrix = (
+            rng.normal(size=(18, 18))
+            + 1j * rng.normal(size=(18, 18))
+            + 12.0 * np.eye(18)
+        )
+        rhs = rng.normal(size=(18, 3)) + 1j * rng.normal(size=(18, 3))
+        diagnostics = {}
+        with mock.patch("numpy.linalg.cond", side_effect=AssertionError("SVD used")):
+            solution = rcs._solve_dense_system(
+                matrix, rhs, diagnostics, "test matrix"
+            )
+        np.testing.assert_allclose(
+            matrix @ solution, rhs, rtol=2e-14, atol=2e-14
+        )
+        self.assertTrue(math.isfinite(diagnostics["condition_est"]))
+        self.assertEqual(
+            diagnostics["condition_method"],
+            "equilibrated_1norm_lu_onenormest",
+        )
+
+    def test_nonzero_cfie_is_rejected_instead_of_ignored(self):
+        snapshot = {
+            "segments": [_circle_segment(0.05, 24, 2)],
+            "ibcs": [],
+            "dielectrics": [],
+        }
+        with self.assertRaisesRegex(ValueError, "cfie_alpha is not implemented"):
+            rcs.solve_monostatic_rcs_2d(
+                snapshot,
+                frequencies_ghz=[1.0],
+                elevations_deg=[0.0],
+                polarization="TM",
+                geometry_units="meters",
+                cfie_alpha=0.5,
+                strict_quality_gate=False,
+                max_panels=1000,
+            )
+
+    def test_sheet_memory_gate_runs_before_dense_assembly(self):
+        snapshot = {
+            "segments": [{
+                "name": "sheet",
+                "seg_type": 1,
+                "properties": ["1", "20", "1", "0", "0"],
+                "point_pairs": [{
+                    "x1": -0.1, "y1": 0.0, "x2": 0.1, "y2": 0.0,
+                }],
+            }],
+            "ibcs": [["1", "constant", "75", "0", "0", "0"]],
+            "dielectrics": [],
+        }
+        with (
+            mock.patch.object(rcs, "_solve_memory_limit_gb", return_value=0.0),
+            mock.patch.object(
+                rcs, "_solve_tm_sheet",
+                side_effect=AssertionError("dense assembly started"),
+            ),
+        ):
+            with self.assertRaisesRegex(MemoryError, "sheet"):
+                rcs.solve_monostatic_rcs_2d(
+                    snapshot,
+                    frequencies_ghz=[1.0],
+                    elevations_deg=[0.0],
+                    polarization="TM",
+                    geometry_units="meters",
+                    strict_quality_gate=False,
+                    max_panels=1000,
+                )
+
+
 class FarFieldProjectionTests(unittest.TestCase):
     def _mesh(self):
         radius = 0.37
@@ -419,6 +492,96 @@ class TaperedImpedanceTests(unittest.TestCase):
                     actual, reference, rtol=2e-12, atol=2e-12,
                     err_msg=f"{pol} {kind}",
                 )
+
+
+class SheetLimitAndMixedTests(unittest.TestCase):
+    _ANGLES = [-35.0, 0.0, 40.0]
+
+    @staticmethod
+    def _line(seg_type, ibc=0, y=0.0):
+        return {
+            "name": f"line_{seg_type}_{y:g}",
+            "seg_type": seg_type,
+            "properties": [str(seg_type), "36", str(ibc), "0", "0"],
+            "point_pairs": [{
+                "x1": -0.1, "y1": y, "x2": 0.1, "y2": y,
+            }],
+        }
+
+    def _amplitudes(self, snapshot, pol):
+        result = rcs.solve_monostatic_rcs_2d(
+            snapshot,
+            frequencies_ghz=[0.75],
+            elevations_deg=self._ANGLES,
+            polarization=pol,
+            geometry_units="meters",
+            strict_quality_gate=False,
+            max_panels=1000,
+        )
+        return np.asarray([
+            complex(sample["rcs_amp_real"], sample["rcs_amp_imag"])
+            for sample in result["samples"]
+        ])
+
+    def test_zero_impedance_sheet_matches_tm_open_pec(self):
+        sheet = {
+            "segments": [self._line(1, ibc=1)],
+            "ibcs": [["1", "constant", "1e-8", "0", "0", "0"]],
+            "dielectrics": [],
+        }
+        pec = {
+            "segments": [self._line(2)],
+            "ibcs": [],
+            "dielectrics": [],
+        }
+        np.testing.assert_allclose(
+            self._amplitudes(sheet, "TM"),
+            self._amplitudes(pec, "TM"),
+            rtol=2e-8, atol=2e-8,
+        )
+
+    def test_large_impedance_sheet_approaches_transparency(self):
+        ordinary = {
+            "segments": [self._line(1, ibc=1)],
+            "ibcs": [["1", "constant", "75", "0", "0", "0"]],
+            "dielectrics": [],
+        }
+        transparent = {
+            "segments": [self._line(1, ibc=1)],
+            "ibcs": [["1", "constant", "1e9", "0", "0", "0"]],
+            "dielectrics": [],
+        }
+        for pol in ("TM", "TE"):
+            reference = self._amplitudes(ordinary, pol)
+            limit = self._amplitudes(transparent, pol)
+            self.assertLess(
+                float(np.max(np.abs(limit))),
+                1.0e-5 * float(np.max(np.abs(reference))),
+                msg=pol,
+            )
+
+    def test_mixed_pec_limit_matches_all_sheet_dispatch(self):
+        circle_pec = _circle_segment(0.04, 32, 2)
+        circle_sheet = _circle_segment(0.04, 32, 1, ibc=1)
+        line = self._line(1, ibc=1, y=0.09)
+        ibc = [["1", "constant", "1e-8", "0", "0", "0"]]
+        mixed = {
+            "segments": [circle_pec, line],
+            "ibcs": ibc,
+            "dielectrics": [],
+        }
+        all_sheet = {
+            "segments": [circle_sheet, line],
+            "ibcs": ibc,
+            "dielectrics": [],
+        }
+        for pol in ("TM", "TE"):
+            np.testing.assert_allclose(
+                self._amplitudes(mixed, pol),
+                self._amplitudes(all_sheet, pol),
+                rtol=3e-8, atol=3e-8,
+                err_msg=pol,
+            )
 
 
 class BistaticReciprocityTests(unittest.TestCase):

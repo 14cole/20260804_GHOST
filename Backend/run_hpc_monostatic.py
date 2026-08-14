@@ -371,13 +371,13 @@ def _load_snapshot(geometry_path):
     return entry
 
 
-def _pool_initializer(blas_threads, assembly_threads):
-    # type: (int, int) -> None
+def _pool_initializer(blas_threads):
+    # type: (int) -> None
     hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
     import rcs_solver
 
-    rcs_solver.set_assembly_threads(assembly_threads)
+    rcs_solver.set_assembly_threads(1)
 
 
 def _solve_and_export(unit, context, run_dir_str):
@@ -443,8 +443,10 @@ def _solve_and_export_star(args):
     shows where the failure happened, not just the message.
     """
 
-    unit, context, run_dir_str = args
+    unit, context, run_dir_str, assembly_threads = args
     try:
+        import rcs_solver
+        rcs_solver.set_assembly_threads(assembly_threads)
         status, path = _solve_and_export(unit, context, run_dir_str)
         return ("ok", status, path)
     except Exception:
@@ -454,36 +456,48 @@ def _solve_and_export_star(args):
 # --- submit mode (user-invoked) --------------------------------------------
 
 def _plan_schedule(units, n_slots, fine_factor, n_angles):
-    # type: (List[Dict[str, Any]], int, float) -> Dict[str, Any]
+    # type: (List[Dict[str, Any]], int, float, int) -> Dict[str, Any]
     """Cost every unit, size its memory, and deal the units out to slots.
 
-    The mesh is built once per (geometry, frequency) -- polarization does not
-    change the discretization -- so this stays cheap for a large sweep.
+    Resource records are cached per (geometry, frequency, polarization).
+    Polarization shares the mesh topology but can select a different dense
+    formulation and therefore a different memory footprint.
     """
 
-    node_cache = {}  # type: Dict[Tuple[str, float], int]
+    resource_cache = {}  # type: Dict[Tuple[str, float, str], Dict[str, Any]]
     records = []     # type: List[Dict[str, Any]]
     for unit in units:
-        key = (str(unit["geometry"]), float(unit["frequency_ghz"]))
-        if key not in node_cache:
-            node_cache[key] = hpc_scheduler.predict_2d_nodes(
-                key[0], key[1], str(unit["polarization"]),
-                GEOMETRY_UNITS, MAX_PANELS,
+        key = (
+            str(unit["geometry"]), float(unit["frequency_ghz"]),
+            str(unit["polarization"]),
+        )
+        if key not in resource_cache:
+            resource_cache[key] = hpc_scheduler.predict_2d_resources(
+                key[0], key[1], key[2], GEOMETRY_UNITS, MAX_PANELS,
+                fine_factor=fine_factor, n_angles=n_angles,
+                safety=float(MEMORY_SAFETY),
             )
-        nodes = int(node_cache[key])
+        planned = resource_cache[key]
+        nodes = int(planned["nodes"])
         records.append({
             "unit": _unit_name(unit),
             "nodes": nodes,
+            "fine_nodes": int(planned["fine_nodes"]),
+            "base_system_dofs": int(planned["base_system_dofs"]),
+            "system_dofs": int(planned["system_dofs"]),
+            "n_regions": int(planned["n_regions"]),
+            "formulation": str(planned["formulation"]),
             "cost": (
                 hpc_scheduler.unit_cost(
-                    nodes, n_angles, fine_factor
-                ) if nodes > 0 else 1.0
+                    nodes, n_angles, fine_factor,
+                    fine_nodes=int(planned["fine_nodes"]),
+                    system_dofs=int(planned["base_system_dofs"]),
+                    fine_system_dofs=int(planned["fine_system_dofs"]),
+                    operator_matrices=int(planned["base_operator_matrices"]),
+                    fine_operator_matrices=int(planned["fine_operator_matrices"]),
+                )
             ),
-            "peak_gb": (
-                hpc_scheduler.unit_peak_gb(
-                    nodes, fine_factor, safety=float(MEMORY_SAFETY)
-                ) if nodes > 0 else 0.0
-            ),
+            "peak_gb": float(planned["peak_gb"]),
         })
     assignment = hpc_scheduler.balance_units(records, n_slots)
     for record, slot in zip(records, assignment):
@@ -529,8 +543,8 @@ def _validate_config():
         sys.exit("ERROR: AZIMUTHS_DEG must be finite and unique.")
     if str(SOLVER_METHOD).strip().lower() not in {"auto", "direct"}:
         sys.exit(
-            "ERROR: SOLVER_METHOD must be 'auto' or 'direct'; the legacy "
-            "FMM/GMRES route is not a supported production solver."
+            "ERROR: SOLVER_METHOD must be 'auto' or 'direct'; certified "
+            "2-D production solves require a condition-reporting dense method."
         )
     if not math.isfinite(float(CFIE_ALPHA)) or float(CFIE_ALPHA) != 0.0:
         sys.exit(
@@ -727,11 +741,6 @@ def submit():
                   "fine -- but if the node cannot report its own memory the "
                   "ceiling falls back to 32 GB. Set MAX_SOLVE_GB, or give "
                   "MEM_PER_NODE an explicit size, to be sure.")
-    unknown = sum(1 for r in schedule["units"] if int(r["nodes"]) <= 0)
-    if unknown:
-        print(f"  [warn] {unknown} unit(s) could not be pre-meshed; they carry "
-              "unit cost and no memory reservation, so they may schedule "
-              "poorly. Check those geometries parse.")
     idle = int(summary.get("idle_slots", 0))
     print(f"  Plan balance  : {summary['imbalance']:.2f}x the best any schedule "
           f"could do (1.00 = optimal; stealing absorbs the rest)")
@@ -777,18 +786,30 @@ def submit():
 
 def _read_schedule(run_dir):
     # type: (Path) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, int]]
-    """(cost, peak_gb, slot) keyed by unit name, or empty dicts if unplanned."""
+    """Return (cost, peak_gb, slot), failing closed without a valid plan."""
 
     path = run_dir / "schedule.json"
     if not path.is_file():
-        return {}, {}, {}
+        raise RuntimeError(
+            f"Missing {path}; refusing to run without per-unit memory "
+            "reservations. Regenerate the submission."
+        )
     try:
         schedule = json.loads(path.read_text())
         records = schedule["units"]
-    except (ValueError, KeyError, TypeError):
-        print("  [warn] schedule.json is unreadable; falling back to a "
-              "striped order with no memory estimates.", file=sys.stderr)
-        return {}, {}, {}
+        if not isinstance(records, list) or not records:
+            raise ValueError("unit list is empty")
+        for record in records:
+            if float(record["peak_gb"]) <= 0.0:
+                raise ValueError(
+                    f"unit {record.get('unit', '<unknown>')} has no positive "
+                    "memory reservation"
+                )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"Unreadable or incomplete {path}; refusing to run without "
+            f"per-unit memory reservations: {exc}"
+        ) from exc
     costs = {str(r["unit"]): float(r.get("cost", 1.0)) for r in records}
     peaks = {str(r["unit"]): float(r.get("peak_gb", 0.0)) for r in records}
     slots = {str(r["unit"]): int(r.get("slot", 0)) for r in records}
@@ -799,17 +820,11 @@ def _planned_names(units, slots, slot, n_slots):
     # type: (List[Dict[str, Any]], Dict[str, int], int, int) -> set
     """Names of the units this slot owns in the submit-time plan.
 
-    Falls back to a deterministic stripe when there is no schedule on disk
-    (a legacy run directory), which at least starts tasks on different units.
+    The worker refuses a missing or incomplete schedule before reaching here.
     """
 
-    if slots:
-        return {
-            _unit_name(u) for u in units if slots.get(_unit_name(u), -1) == slot
-        }
     return {
-        _unit_name(u) for i, u in enumerate(units)
-        if i % max(1, n_slots) == slot
+        _unit_name(u) for u in units if slots.get(_unit_name(u), -1) == slot
     }
 
 
@@ -838,21 +853,13 @@ def _ordered_candidates(units, costs, slots, slot, n_slots):
     return sorted(mine, key=_key), sorted(others, key=_key)
 
 
-def _resolve_assembly_threads(cores, pool_size):
-    # type: (int, int) -> int
-    """Threads per solve, sized so threads x processes never exceeds the cores.
+def _unit_assembly_threads(cores, pool_size, budget_gb, peak_gb):
+    # type: (int, int, float, float) -> int
+    """Thread count/CPU reservation derived from this unit's own footprint."""
 
-    The pool is itself sized from this slot's planned share, and the steal
-    phase reuses that same width, so threads x processes equals the core count
-    in both phases and neither can oversubscribe the node. It opens up
-    precisely when a slot holds fewer units than the node has cores, which is
-    the case this exists for -- a 40-unit sweep across 10 nodes gives each
-    solve a real slice of its node instead of one core out of 96.
-    """
-
-    if ASSEMBLY_THREADS != "auto":
-        return max(1, int(ASSEMBLY_THREADS))
-    return max(1, int(cores) // max(1, int(pool_size)))
+    return hpc_scheduler.assembly_threads_for_unit(
+        cores, pool_size, budget_gb, peak_gb, configured=ASSEMBLY_THREADS
+    )
 
 
 def worker(run_dir_str, submission_index, task_index):
@@ -911,19 +918,25 @@ def worker(run_dir_str, submission_index, task_index):
     # others had started; it also left each solve with a sliver of the node
     # when the run was smaller than the cluster.
     pool_size = max(1, min(cores, worker_cap, max(1, planned)))
-    # Threads are sized from the concurrency memory will actually permit, not
-    # from the pool width. A memory-heavy geometry narrows admission -- eight
-    # planned units that peak at 45 GB each run two at a time on a 100 GB
-    # node -- and sizing threads for eight would leave three quarters of the
-    # cores idle for the whole run.
     heaviest = max(
         (peaks.get(_unit_name(u), 0.0) for u in planned_units), default=0.0
     )
-    memory_concurrency = (
+    heaviest_concurrency = (
         pool_size if heaviest <= 0.0
         else max(1, min(pool_size, int(budget_gb // heaviest)))
     )
-    assembly_threads = _resolve_assembly_threads(cores, memory_concurrency)
+    planned_thread_counts = [
+        _unit_assembly_threads(
+            cores, pool_size, budget_gb, peaks.get(_unit_name(unit), 0.0)
+        )
+        for unit in planned_units
+    ] or [1]
+    min_threads = min(planned_thread_counts)
+    max_threads = max(planned_thread_counts)
+    thread_label = (
+        str(min_threads) if min_threads == max_threads
+        else f"{min_threads}-{max_threads} dynamic"
+    )
 
     print("=" * 70)
     print(f"  Slot {slot}/{n_slots - 1}  "
@@ -932,10 +945,10 @@ def worker(run_dir_str, submission_index, task_index):
           f"   (then {len(steal_units)} stealable)")
     print(f"  Cores detected : {cores}   pool size: {pool_size}   "
           f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
-          f"assembly threads/solve: {assembly_threads})")
-    if memory_concurrency < pool_size:
-        print(f"  Memory-limited : at most {memory_concurrency} concurrent "
-              f"solve(s); heaviest planned unit {heaviest:.1f} GB")
+          f"assembly threads/solve: {thread_label})")
+    if heaviest_concurrency < pool_size:
+        print(f"  Heaviest units : {heaviest_concurrency} concurrent at "
+              f"{heaviest:.1f} GB each; smaller units expand dynamically")
     print(f"  Memory         : {memory_gb:.1f} GB allocated, "
           f"{budget_gb:.1f} GB schedulable")
     print("=" * 70, flush=True)
@@ -970,9 +983,14 @@ def worker(run_dir_str, submission_index, task_index):
 
     def _prepare(unit):
         name = _unit_name(unit)
+        peak_gb = peaks.get(name, 0.0)
+        assembly_threads = _unit_assembly_threads(
+            cores, pool_size, budget_gb, peak_gb
+        )
         dispatch = (
-            name, peaks.get(name, 0.0),
-            (_solve_and_export_star, ((unit, context, str(run_dir)),)),
+            name, peak_gb,
+            (_solve_and_export_star,
+             ((unit, context, str(run_dir), assembly_threads),)),
         )
         if name in done:
             # An already-written result is dispatched, not skipped outright, so
@@ -1020,18 +1038,32 @@ def worker(run_dir_str, submission_index, task_index):
     with Pool(
         processes=pool_size,
         initializer=_pool_initializer,
-        initargs=(int(BLAS_THREADS_PER_WORKER), int(assembly_threads)),
+        initargs=(int(BLAS_THREADS_PER_WORKER),),
         maxtasksperchild=int(TASKS_PER_CHILD),
     ) as pool:
         dispatcher = hpc_scheduler.MemoryAwareDispatcher(
-            pool, budget_gb=budget_gb, max_concurrent=pool_size
+            pool, budget_gb=budget_gb, max_concurrent=pool_size,
+            cpu_budget=cores,
         )
+
+        def _resources(unit):
+            peak_gb = peaks.get(_unit_name(unit), 0.0)
+            return (
+                peak_gb,
+                _unit_assembly_threads(
+                    cores, pool_size, budget_gb, peak_gb
+                ),
+            )
         try:
             # Own share first. Only when it is finished does this task reach
             # for anyone else's, so a fast starter cannot swallow the run.
-            dispatcher.run(planned_units, _prepare, _on_result, _on_error)
+            dispatcher.run(
+                planned_units, _prepare, _on_result, _on_error, _resources
+            )
             if steal_units:
-                dispatcher.run(steal_units, _prepare, _on_result, _on_error)
+                dispatcher.run(
+                    steal_units, _prepare, _on_result, _on_error, _resources
+                )
         finally:
             broker.stop_heartbeat()
 

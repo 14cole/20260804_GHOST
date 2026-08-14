@@ -121,7 +121,16 @@ node is a fraction of what is there and will OOM-kill workers.
 ### Memory-heavy geometries
 
 Concurrency follows each unit's predicted peak, so a heavy geometry
-automatically runs fewer at a time. Measured against a 100 GB budget:
+automatically runs fewer at a time. Planning builds the same interface-aware
+base and certification meshes as the solver, selects the formulation for each
+polarization, and reserves from its actual dense system DOFs. A PEC/IBC or
+sheet solve is therefore budgeted as an N-unknown system, a single dielectric
+as 2N, and a coated/multi-region body by its exact interface-side unknowns.
+The longest-processing-time assignment uses those same formulation DOFs and
+operator counts, so coated bodies are also charged for their larger LU and
+additional assemblies instead of being balanced as ordinary N-unknown PEC
+jobs.
+Measured against a 100 GB budget:
 
 | Per-unit peak | Concurrent solves | Reserved |
 |---:|---:|---:|
@@ -191,24 +200,23 @@ srun --mem=0 --exclusive python -c \
    print(r._detect_available_gb(), '->', r._solve_memory_limit_gb())"
 ```
 
-Worth sizing the ambition too. The dense footprint is ~128 bytes per boundary
-node squared, so on one node:
-
-| Footprint | Boundary nodes | Assembly | LU |
-|---:|---:|---:|---:|
-| 100 GB | ~29 000 | ~6 h | ~0.3 h |
-| 300 GB | ~50 000 | ~19 h | ~1.5 h |
-| 675 GB | ~75 000 | ~43 h | ~5 h |
-
-A 300 GB solve also sits right at the default `MAX_PANELS = 50_000`, so raise
-that too. Assembly dominates and is only partly threaded, so these are long
-single-unit runs -- worth a walltime that can hold them.
+Worth sizing the ambition too. There is no longer one defensible bytes-per-node
+constant: retained dense storage is roughly 80 N-squared bytes for the current
+N-unknown sheet/Robin paths and roughly 208 N-squared bytes for the 2N-unknown
+single-dielectric path, before angle RHS storage, allocator safety, and the
+scheduler's fixed process allowance. Multi-region storage depends on the exact
+interface-side DOF count. Use the submission plan's per-unit `peak_gb` rather
+than converting panel count with a universal constant. Assembly still scales
+quadratically and is only partly threaded, so the largest units need generous
+walltime even when they fit in RAM.
 
 **Do not set `MAX_WORKERS_PER_NODE` to throttle memory.** The scheduler already
 sizes concurrency from each unit's predicted peak: it runs many cheap units at
-once and narrows to a few when the expensive ones come up. A fixed cap is the
-wrong control because unit footprints in a frequency sweep differ by two orders
-of magnitude.
+once and narrows to a few when the expensive ones come up. If the next large
+unit does not fit, a smaller unit may backfill the remaining memory; the large
+unit keeps its position and is reconsidered as soon as running work completes.
+A fixed cap is the wrong control because unit footprints in a frequency sweep
+differ by two orders of magnitude.
 
 ### Threads
 
@@ -217,16 +225,18 @@ BLAS_THREADS_PER_WORKER = 1
 ASSEMBLY_THREADS        = "auto"
 ```
 
-With at least one unit per core — the normal case for a many-geometry sweep —
-leave both alone. One process per unit with single-threaded BLAS is the right
-shape, and `"auto"` resolves to 1.
+Leave both alone for normal sweeps. One process per admitted unit with
+single-threaded BLAS is the right shape. `"auto"` chooses assembly threads for
+each unit from that unit's predicted memory concurrency. On a 96-core node, a
+70 GB unit that fits four at a time gets 24 assembly threads, while a 10 GB unit
+that fits 31 at a time gets 3. The dispatcher reserves those CPU counts along
+with memory, including for mixed heavy/light backfill, so dynamic admission
+cannot oversubscribe the node.
 
-`"auto"` gives each pool worker `cores // pool_size` assembly threads, and the
-pool is sized from the task's planned share, so threads x processes equals the
-core count. It resolves to 1 whenever a task holds at least one unit per core,
-and opens up when it holds fewer — a 40-unit sweep across 10 nodes gives each
-of a task's 4 solves roughly `96/4 = 24` threads instead of one core out of 96.
-The steal phase reuses the same width, so neither phase oversubscribes.
+This is deliberately per unit rather than a pool-wide startup setting. A
+frequency sweep can move from four large solves to dozens of small solves; a
+fixed 24-thread setting would otherwise multiply into hundreds of runnable
+threads when the small solves began.
 
 Scaling is real but sub-linear — only the tiled far-field pass is threaded, and
 the scatter into the global matrices is serialized behind a lock. Measured on a
@@ -380,8 +390,10 @@ because per-unit overhead — import, preflight, provenance — stops being
 negligible. Big units get close to the 3×.
 
 Memory follows the same shape: the reservation is built on the **fine** mesh,
-so survey mode roughly halves it and about twice as many units fit per node.
-At N = 5000 that is 15.4 GB reserved versus 7.4 GB.
+so survey mode usually cuts it substantially and more units fit per node. The
+exact ratio is formulation-dependent because the planner now counts the true
+system DOFs and retained operators rather than applying one 2N model to every
+geometry.
 
 **Survey output is not production data.** The algebraic quality gate still runs
 — a badly conditioned or non-converged solve still fails closed — but nothing
@@ -627,6 +639,11 @@ mesh-convergence comparison together come to under 1.5%). Order 4 is 16
 evaluations per pair — a quarter of the dominant cost. Near-field and singular quadrature are untouched. A solve
 that used the override records it in its warnings, so the fact travels with the
 published `.grim`.
+
+The condition diagnostic no longer performs a second dense SVD after solving.
+It equilibrates the assembled system and estimates its 1-norm inverse through
+the LU factors already needed for the field solve, preserving the fail-closed
+quality gate without another cubic factorization.
 
 ### Other environment knobs
 

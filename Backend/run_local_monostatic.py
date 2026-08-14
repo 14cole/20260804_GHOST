@@ -19,6 +19,7 @@ Edit the CONFIG block and run:
 """
 
 import json
+import math
 import os
 import sys
 import time
@@ -68,7 +69,7 @@ WORKERS = None
 
 # Solver knobs (mirror run_monostatic.py).
 GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
-SOLVER_METHOD           = "auto"         # "auto" | "direct" | supported "fmm"
+SOLVER_METHOD           = "auto"         # "auto" | "direct" (certified production)
 CFIE_ALPHA              = 0.0
 MAX_PANELS              = 50_000
 BLAS_THREADS_PER_WORKER = 1
@@ -271,12 +272,12 @@ def _load_snapshot(geometry_path: 'str') -> 'Tuple[Dict[str, Any], str]':
     return entry
 
 
-def _pool_initializer(blas_threads: 'int', assembly_threads: 'int') -> 'None':
+def _pool_initializer(blas_threads: 'int') -> 'None':
     hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
     import rcs_solver
 
-    rcs_solver.set_assembly_threads(assembly_threads)
+    rcs_solver.set_assembly_threads(1)
 
 
 def _solve_and_export(
@@ -344,8 +345,10 @@ def _solve_and_export_star(args: 'tuple') -> 'tuple':
     names the line it happened on rather than only its message.
     """
 
-    unit, context, results_dir_str = args
+    unit, context, results_dir_str, assembly_threads = args
     try:
+        import rcs_solver
+        rcs_solver.set_assembly_threads(assembly_threads)
         status, path = _solve_and_export(unit, context, results_dir_str)
         return ("ok", status, path)
     except Exception:
@@ -359,40 +362,47 @@ def _plan(
 ) -> 'Tuple[Dict[str, float], Dict[str, float]]':
     """Cost and size every unit from the mesh the solver will actually build.
 
-    The mesh depends on geometry and frequency but not polarization, so a
-    two-polarization sweep meshes each pair once.
+    Formulation and interface splitting can depend on polarization, so the
+    resource plan is cached per complete solve unit.
     """
 
-    nodes_cache: 'Dict[Tuple[str, float], int]' = {}
+    resource_cache: 'Dict[Tuple[str, float, str], Dict[str, Any]]' = {}
     costs: 'Dict[str, float]' = {}
     peaks: 'Dict[str, float]' = {}
     for unit in units:
-        key = (str(unit["geometry"]), float(unit["frequency_ghz"]))
-        if key not in nodes_cache:
-            nodes_cache[key] = hpc_scheduler.predict_2d_nodes(
-                key[0], key[1], str(unit["polarization"]),
-                GEOMETRY_UNITS, MAX_PANELS,
+        key = (
+            str(unit["geometry"]), float(unit["frequency_ghz"]),
+            str(unit["polarization"]),
+        )
+        if key not in resource_cache:
+            resource_cache[key] = hpc_scheduler.predict_2d_resources(
+                key[0], key[1], key[2], GEOMETRY_UNITS, MAX_PANELS,
+                fine_factor=fine_factor, n_angles=n_angles,
+                safety=float(MEMORY_SAFETY),
             )
-        nodes = int(nodes_cache[key])
+        planned = resource_cache[key]
+        nodes = int(planned["nodes"])
         name = _unit_name(unit)
-        costs[name] = (
-            hpc_scheduler.unit_cost(nodes, n_angles, fine_factor)
-            if nodes > 0 else 1.0
+        costs[name] = hpc_scheduler.unit_cost(
+            nodes, n_angles, fine_factor,
+            fine_nodes=int(planned["fine_nodes"]),
+            system_dofs=int(planned["base_system_dofs"]),
+            fine_system_dofs=int(planned["fine_system_dofs"]),
+            operator_matrices=int(planned["base_operator_matrices"]),
+            fine_operator_matrices=int(planned["fine_operator_matrices"]),
         )
-        peaks[name] = (
-            hpc_scheduler.unit_peak_gb(
-                nodes, fine_factor, safety=float(MEMORY_SAFETY)
-            ) if nodes > 0 else 0.0
-        )
+        peaks[name] = float(planned["peak_gb"])
     return costs, peaks
 
 
-def _resolve_assembly_threads(cores: 'int', concurrency: 'int') -> 'int':
-    """Threads per solve, sized so threads x processes never exceeds the cores."""
+def _unit_assembly_threads(
+    cores: 'int', pool_size: 'int', budget_gb: 'float', peak_gb: 'float'
+) -> 'int':
+    """Thread count/CPU reservation derived from this unit's own footprint."""
 
-    if ASSEMBLY_THREADS != "auto":
-        return max(1, int(ASSEMBLY_THREADS))
-    return max(1, int(cores) // max(1, int(concurrency)))
+    return hpc_scheduler.assembly_threads_for_unit(
+        cores, pool_size, budget_gb, peak_gb, configured=ASSEMBLY_THREADS
+    )
 
 
 def _validate_config() -> 'List[str]':
@@ -408,6 +418,16 @@ def _validate_config() -> 'List[str]':
         pols = hpc_scheduler.distinct_polarization_channels(pols)
     except ValueError as exc:
         sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
+    if str(SOLVER_METHOD).strip().lower() not in {"auto", "direct"}:
+        sys.exit(
+            "ERROR: SOLVER_METHOD must be 'auto' or 'direct'; certified "
+            "2-D production solves require a condition-reporting dense method."
+        )
+    if not math.isfinite(float(CFIE_ALPHA)) or float(CFIE_ALPHA) != 0.0:
+        sys.exit(
+            "ERROR: CFIE_ALPHA must be 0 for the current 2-D formulations; "
+            "a nonzero value would not select a different operator."
+        )
     if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
         sys.exit("ERROR: MEMORY_HEADROOM must be in (0, 1].")
     if float(MEMORY_SAFETY) < 1.0:
@@ -542,16 +562,23 @@ def main() -> 'None':
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = max(1, cores - 1) if WORKERS is None else int(WORKERS)
     pool_size = max(1, min(cores, worker_cap, len(ordered)))
-    # Threads are sized from the concurrency memory will actually permit, not
-    # from the pool width. A memory-heavy geometry narrows admission, and
-    # sizing threads for a width that will never be reached leaves most of the
-    # cores idle for the whole run.
     heaviest = max((peaks.get(_unit_name(u), 0.0) for u in ordered), default=0.0)
-    memory_concurrency = (
+    heaviest_concurrency = (
         pool_size if heaviest <= 0.0
         else max(1, min(pool_size, int(budget_gb // heaviest)))
     )
-    assembly_threads = _resolve_assembly_threads(cores, memory_concurrency)
+    unit_thread_counts = [
+        _unit_assembly_threads(
+            cores, pool_size, budget_gb, peaks.get(_unit_name(unit), 0.0)
+        )
+        for unit in ordered
+    ] or [1]
+    min_threads = min(unit_thread_counts)
+    max_threads = max(unit_thread_counts)
+    thread_label = (
+        str(min_threads) if min_threads == max_threads
+        else f"{min_threads}-{max_threads} dynamic"
+    )
 
     print("=" * 70)
     print("Local monostatic RCS sweep")
@@ -566,10 +593,10 @@ def main() -> 'None':
     print(f"  Certification : {'on' if MESH_CERTIFICATION else 'OFF (survey)'}")
     print(f"  Workers       : {pool_size} of {cores} cpus  "
           f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
-          f"assembly threads/solve: {assembly_threads})")
-    if memory_concurrency < pool_size:
-        print(f"  Memory-limited: at most {memory_concurrency} concurrent "
-              f"solve(s); heaviest unit {heaviest:.1f} GB")
+          f"assembly threads/solve: {thread_label})")
+    if heaviest_concurrency < pool_size:
+        print(f"  Heaviest units: {heaviest_concurrency} concurrent at "
+              f"{heaviest:.1f} GB each; smaller units expand dynamically")
     print(f"  Memory        : {memory_gb:.1f} GB detected, "
           f"{budget_gb:.1f} GB schedulable")
     if not MESH_CERTIFICATION:
@@ -593,9 +620,14 @@ def main() -> 'None':
 
     def _prepare(unit):
         name = _unit_name(unit)
+        peak_gb = peaks.get(name, 0.0)
+        assembly_threads = _unit_assembly_threads(
+            cores, pool_size, budget_gb, peak_gb
+        )
         return (
-            name, peaks.get(name, 0.0),
-            (_solve_and_export_star, ((unit, context, str(results_dir)),)),
+            name, peak_gb,
+            (_solve_and_export_star,
+             ((unit, context, str(results_dir), assembly_threads),)),
         )
 
     def _finished():
@@ -620,13 +652,26 @@ def main() -> 'None':
     with Pool(
         processes=pool_size,
         initializer=_pool_initializer,
-        initargs=(int(BLAS_THREADS_PER_WORKER), int(assembly_threads)),
+        initargs=(int(BLAS_THREADS_PER_WORKER),),
         maxtasksperchild=int(TASKS_PER_CHILD),
     ) as pool:
         dispatcher = hpc_scheduler.MemoryAwareDispatcher(
-            pool, budget_gb=budget_gb, max_concurrent=pool_size
+            pool, budget_gb=budget_gb, max_concurrent=pool_size,
+            cpu_budget=cores,
         )
-        dispatcher.run(ordered, _prepare, _on_result, _on_error)
+
+        def _resources(unit):
+            peak_gb = peaks.get(_unit_name(unit), 0.0)
+            return (
+                peak_gb,
+                _unit_assembly_threads(
+                    cores, pool_size, budget_gb, peak_gb
+                ),
+            )
+
+        dispatcher.run(
+            ordered, _prepare, _on_result, _on_error, _resources
+        )
 
     elapsed = time.time() - started
     print(f"\n  Done. wrote={counters['written']}, "

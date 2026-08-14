@@ -39,8 +39,9 @@ import os
 import socket
 import threading
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 # -----------------------------------------------------------------------------
 # Polarization labels
@@ -267,70 +268,171 @@ def install_fingerprint_cache(full_recheck_seconds: 'float' = 300.0) -> 'None':
 # Cost and memory model
 # -----------------------------------------------------------------------------
 
-def predict_2d_nodes(
+def predict_2d_resources(
     geometry_path: 'str',
     frequency_ghz: 'float',
     polarization: 'str',
     geometry_units: 'str',
     max_panels: 'int',
-) -> 'int':
-    """Boundary-node count the 2-D solver will actually discretize to.
+    fine_factor: 'float' = 1.0,
+    n_angles: 'int' = 1,
+    safety: 'float' = 1.35,
+    floor_gb: 'float' = 0.6,
+) -> 'Dict[str, Any]':
+    """Plan one 2-D unit from its actual formulation and interface mesh.
 
-    Uses the solver's own meshing rule rather than a proxy, so the cost and
-    memory numbers below track what the solve really does (including
-    material-dependent wavelength shortening inside dielectrics).  Returns 0
-    when the geometry cannot be meshed, which the caller treats as "unknown".
+    Builds the same interface-aware base/fine meshes used by the solver,
+    classifies the active formulation, and sizes the actual system DOFs.
+    Errors propagate so an unsupported unit cannot enter a sweep with a
+    zero-GB reservation.
     """
 
-    try:
-        import rcs_solver
-        from geometry_io import parse_geometry, build_geometry_snapshot
+    import rcs_solver
+    from geometry_io import parse_geometry, build_geometry_snapshot
+    from solver_quality import scale_snapshot_panel_density
 
-        title, segments, ibcs, dielectrics = parse_geometry(
-            Path(geometry_path).read_text()
+    path = Path(geometry_path)
+    title, segments, ibcs, dielectrics = parse_geometry(path.read_text())
+    base_snapshot = build_geometry_snapshot(
+        title, segments, ibcs, dielectrics
+    )
+    base_dir = str(path.parent)
+    pol = rcs_solver._normalize_polarization(polarization)
+    unit_scale = rcs_solver._unit_scale_to_meters(geometry_units)
+    freq_ghz = float(frequency_ghz)
+    k0 = 2.0 * math.pi * freq_ghz * 1.0e9 / rcs_solver.C0
+
+    def _mesh_record(snapshot):
+        rcs_solver.validate_geometry_snapshot_for_solver(
+            snapshot, base_dir=base_dir, meters_scale=unit_scale
         )
-        snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
         materials = rcs_solver.MaterialLibrary.from_entries(
             snapshot.get("ibcs", []) or [],
             snapshot.get("dielectrics", []) or [],
-            base_dir=str(Path(geometry_path).parent),
+            base_dir=base_dir,
         )
         lambda_min, _, _ = rcs_solver._mesh_wavelength_for_snapshot(
-            snapshot, materials, float(frequency_ghz)
+            snapshot, materials, freq_ghz
         )
         panels = rcs_solver._build_panels(
-            snapshot,
-            rcs_solver._unit_scale_to_meters(geometry_units),
-            lambda_min,
-            max_panels=int(max_panels),
+            snapshot, unit_scale, lambda_min, max_panels=int(max_panels)
         )
-        return int(len(panels))
-    except Exception:
-        return 0
+        preview = rcs_solver._build_coupled_panel_info(
+            panels, materials, freq_ghz, pol, k0
+        )
+        mesh, _stats = rcs_solver._build_linear_mesh_interface_aware(
+            panels, preview
+        )
+        infos = rcs_solver._build_linear_coupled_infos(
+            mesh, materials, freq_ghz, pol, k0
+        )
+        rcs_solver._assert_no_type1_sheet_for_mixed(infos)
+        rcs_solver._assert_air_exterior(infos)
+        rcs_solver._assert_supported_te_type2_contours(mesh, infos, pol)
+
+        resources = rcs_solver._dense_formulation_resources(mesh, infos, pol)
+        return {
+            "panels": int(len(panels)),
+            **resources,
+        }
+
+    base = _mesh_record(base_snapshot)
+    if float(fine_factor) <= 1.0:
+        fine_snapshot = base_snapshot
+    else:
+        fine_snapshot = scale_snapshot_panel_density(
+            base_snapshot, float(fine_factor)
+        )
+        base_segment_n = []
+        for segment in list(base_snapshot.get("segments", []) or []):
+            props = list(segment.get("properties", []) or [])
+            base_segment_n.append(props[1] if len(props) > 1 else 0)
+        fine_snapshot["_2d_certification_refinement_factor"] = float(
+            fine_factor
+        )
+        fine_snapshot["_2d_certification_base_segment_n"] = base_segment_n
+    fine = base if fine_snapshot is base_snapshot else _mesh_record(fine_snapshot)
+    if fine["formulation"] != base["formulation"]:
+        raise RuntimeError(
+            "base/fine resource planning selected different formulations"
+        )
+    dense_gb = rcs_solver._estimate_memory_gb(
+        fine["nodes"],
+        use_cfie=False,
+        n_regions=max(1, fine["n_regions"]),
+        system_dofs=fine["system_dofs"],
+        operator_matrices=fine["operator_matrices"],
+        n_rhs=max(1, int(n_angles)),
+    )
+    return {
+        "nodes": int(base["nodes"]),
+        "panels": int(base["panels"]),
+        "base_system_dofs": int(base["system_dofs"]),
+        "base_operator_matrices": int(base["operator_matrices"]),
+        "fine_nodes": int(fine["nodes"]),
+        "fine_panels": int(fine["panels"]),
+        "fine_system_dofs": int(fine["system_dofs"]),
+        "fine_operator_matrices": int(fine["operator_matrices"]),
+        "n_regions": int(fine["n_regions"]),
+        "formulation": str(fine["formulation"]),
+        # Compatibility aliases: peak planning is governed by the fine mesh.
+        "system_dofs": int(fine["system_dofs"]),
+        "operator_matrices": int(fine["operator_matrices"]),
+        "peak_gb": float(floor_gb) + float(safety) * float(dense_gb),
+    }
 
 
-def unit_cost(nodes: 'int', n_angles: 'int', fine_factor: 'float' = 2.0) -> 'float':
+def unit_cost(
+    nodes: 'int',
+    n_angles: 'int',
+    fine_factor: 'float' = 2.0,
+    fine_nodes: 'Optional[int]' = None,
+    system_dofs: 'Optional[int]' = None,
+    fine_system_dofs: 'Optional[int]' = None,
+    operator_matrices: 'int' = 3,
+    fine_operator_matrices: 'Optional[int]' = None,
+) -> 'float':
     """Relative wall-clock cost of one certified unit.
 
     Only ratios matter -- this feeds bin packing, not a walltime request.  The
-    terms are the three that actually scale: operator assembly (N^2 element
-    pairs), the LU factorization (N^3, but with threaded BLAS behind it, so it
-    only overtakes assembly for very large N), and the multi-RHS solve plus
-    residual check across the angle sweep (N^2 per angle).  A certified solve
-    runs the base mesh and a refined one, so both are counted.
+    Terms are the three that actually scale: retained operator assembly
+    (operator count times N^2 element pairs), LU factorization (system DOFs
+    cubed), and multi-RHS solve/residual work (system DOFs squared per angle).
+    This distinction matters for coated bodies whose interface-side system can
+    be much larger than the boundary-node count. A certified solve runs the
+    base mesh and a refined one, so both are counted.
     """
 
     angles = max(1.0, float(n_angles))
 
-    def _one(n_nodes: 'float') -> 'float':
+    def _one(n_nodes: 'float', n_dofs: 'float', n_operators: 'int') -> 'float':
         n = max(1.0, float(n_nodes))
-        return n * n * (1.0 + angles / 1500.0) + (n ** 3) / 13000.0
+        d = max(1.0, float(n_dofs))
+        # Three retained matrices is the calibrated N-unknown Robin/sheet
+        # baseline, preserving the historical cost for that common case.
+        assembly = n * n * max(1.0, float(n_operators) / 3.0)
+        rhs_solve = d * d * angles / 1500.0
+        factorization = (d ** 3) / 13000.0
+        return assembly + rhs_solve + factorization
 
-    base = _one(nodes)
+    base_dofs = nodes if system_dofs is None else int(system_dofs)
+    base = _one(nodes, base_dofs, operator_matrices)
     if float(fine_factor) <= 1.0:
         # Survey mode: one mesh, no convergence pair.
         return base
-    return base + _one(max(1.0, float(nodes) * float(fine_factor)))
+    refined_nodes = (
+        max(1.0, float(nodes) * float(fine_factor))
+        if fine_nodes is None else max(1.0, float(fine_nodes))
+    )
+    refined_dofs = (
+        max(1.0, float(base_dofs) * float(fine_factor))
+        if fine_system_dofs is None else max(1.0, float(fine_system_dofs))
+    )
+    refined_operators = (
+        int(operator_matrices)
+        if fine_operator_matrices is None else int(fine_operator_matrices)
+    )
+    return base + _one(refined_nodes, refined_dofs, refined_operators)
 
 
 def unit_peak_gb(
@@ -361,6 +463,37 @@ def unit_peak_gb(
     except Exception:
         dense_gb = (128.0 * fine_nodes * fine_nodes) / (1024.0 ** 3)
     return float(floor_gb) + float(safety) * dense_gb
+
+
+def assembly_threads_for_unit(
+    cores: 'int',
+    max_concurrent: 'int',
+    budget_gb: 'float',
+    peak_gb: 'float',
+    configured: 'Any' = "auto",
+) -> 'int':
+    """Choose a CPU reservation/thread count for one memory-sized solve.
+
+    Homogeneous units fill the node without oversubscription: if only four
+    copies of a 70 GB unit fit, each gets one quarter of the cores; if many
+    cheap units fit, each gets correspondingly fewer.  The dispatcher reserves
+    these CPU counts as well as memory, so mixed heavy/light backfill cannot
+    multiply the heavy-unit thread count by every cheap process admitted.
+    """
+
+    cores = max(1, int(cores))
+    max_concurrent = max(1, int(max_concurrent))
+    if str(configured).strip().lower() != "auto":
+        return max(1, min(cores, int(configured)))
+    peak_gb = max(0.0, float(peak_gb))
+    if peak_gb <= 0.0:
+        concurrency = max_concurrent
+    else:
+        concurrency = max(
+            1,
+            min(max_concurrent, int(max(0.0, float(budget_gb)) // peak_gb)),
+        )
+    return max(1, cores // concurrency)
 
 
 def predict_bor_extent(
@@ -631,9 +764,10 @@ class MemoryAwareDispatcher:
     A fixed pool size is the wrong control for a sweep whose units differ by
     two orders of magnitude in footprint: sized for the big units it wastes the
     node on the small ones, and sized for the small ones it OOM-kills on the
-    big ones.  This admits work while ``sum(estimated peak) <= budget``, so a
-    node runs many cheap units concurrently and automatically narrows to a few
-    when the expensive ones come up.
+    big ones.  This admits work while ``sum(estimated peak) <= budget`` and,
+    when CPU requests are supplied, ``sum(assembly threads) <= cores``.  A
+    node therefore runs many cheap units concurrently, narrows for expensive
+    ones, and can backfill spare resources without oversubscribing either.
 
     One unit is always admitted when nothing is running, so a unit larger than
     the whole budget still runs (and fails loudly with a MemoryError from the
@@ -645,11 +779,15 @@ class MemoryAwareDispatcher:
         pool: 'Any',
         budget_gb: 'float',
         max_concurrent: 'int',
+        cpu_budget: 'Optional[int]' = None,
         poll_seconds: 'float' = 0.05,
     ) -> 'None':
         self.pool = pool
         self.budget_gb = float(budget_gb)
         self.max_concurrent = max(1, int(max_concurrent))
+        self.cpu_budget = (
+            None if cpu_budget is None else max(1, int(cpu_budget))
+        )
         self.poll_seconds = float(poll_seconds)
 
     def run(
@@ -658,6 +796,7 @@ class MemoryAwareDispatcher:
         prepare: 'Callable[[Dict[str, Any]], Optional[Tuple[str, float, Any]]]',
         on_result: 'Callable[[str, Any], None]',
         on_error: 'Callable[[str, BaseException], None]',
+        resource_request: 'Optional[Callable[[Dict[str, Any]], Tuple[float, int]]]' = None,
     ) -> 'None':
         """Work through ``candidates`` in order and drain the pool.
 
@@ -667,11 +806,19 @@ class MemoryAwareDispatcher:
         room to start something, so claims are taken at the moment work
         actually begins.
 
-        A prepared unit that does not fit the remaining budget is *held*, not
-        skipped: skipping it would let a queue of cheap units run ahead of the
-        expensive one that the longest-processing-time ordering deliberately
-        put first, which is exactly the tail imbalance this is here to avoid.
+        When ``resource_request`` is supplied, it returns ``(GB, CPUs)`` before
+        a unit is claimed.  The dispatcher scans past a temporarily blocked
+        large unit and backfills the first smaller unit that fits both budgets.
+        Deferred units keep their original order and are reconsidered whenever
+        work completes.  Without the callback the legacy memory-only,
+        no-backfill behaviour is retained for callers with fixed-size work.
         """
+
+        if resource_request is not None:
+            self._run_with_backfill(
+                candidates, prepare, on_result, on_error, resource_request
+            )
+            return
 
         inflight: 'List[Tuple[str, float, Any]]' = []
         reserved = 0.0
@@ -715,6 +862,99 @@ class MemoryAwareDispatcher:
                     on_result(key, handle.get())
                 except BaseException as exc:  # noqa: BLE001 - reported, not raised
                     on_error(key, exc)
+            if not progressed:
+                time.sleep(self.poll_seconds)
+
+    def _run_with_backfill(
+        self,
+        candidates: 'Sequence[Dict[str, Any]]',
+        prepare: 'Callable[[Dict[str, Any]], Optional[Tuple[str, float, Any]]]',
+        on_result: 'Callable[[str, Any], None]',
+        on_error: 'Callable[[str, BaseException], None]',
+        resource_request: 'Callable[[Dict[str, Any]], Tuple[float, int]]',
+    ) -> 'None':
+        """Resource-aware admission with claim-safe, order-preserving backfill."""
+
+        pending: 'Deque[Dict[str, Any]]' = deque(candidates)
+        deferred: 'List[Dict[str, Any]]' = []
+        inflight: 'List[Tuple[str, float, int, Any]]' = []
+        reserved_gb = 0.0
+        reserved_cpus = 0
+
+        while True:
+            while len(inflight) < self.max_concurrent:
+                selected = None
+                selected_gb = 0.0
+                selected_cpus = 1
+                while pending:
+                    unit = pending.popleft()
+                    requested_gb, requested_cpus = resource_request(unit)
+                    requested_gb = max(0.0, float(requested_gb))
+                    requested_cpus = max(1, int(requested_cpus))
+                    memory_fits = reserved_gb + requested_gb <= self.budget_gb
+                    cpu_fits = (
+                        self.cpu_budget is None
+                        or reserved_cpus + requested_cpus <= self.cpu_budget
+                    )
+                    # An over-budget unit runs alone and reaches the solver's
+                    # own memory/error gate instead of deadlocking this loop.
+                    if not inflight or (memory_fits and cpu_fits):
+                        selected = unit
+                        selected_gb = requested_gb
+                        selected_cpus = requested_cpus
+                        break
+                    deferred.append(unit)
+                if selected is None:
+                    break
+
+                prepared = prepare(selected)
+                if prepared is None:
+                    continue
+                key, prepared_gb, args = prepared
+                if not math.isclose(
+                    max(0.0, float(prepared_gb)), selected_gb,
+                    rel_tol=1.0e-12, abs_tol=1.0e-12,
+                ):
+                    on_error(
+                        key,
+                        ValueError(
+                            "resource_request and prepare returned different "
+                            f"memory estimates ({selected_gb:g} vs "
+                            f"{float(prepared_gb):g} GB)"
+                        ),
+                    )
+                    continue
+                handle = self.pool.apply_async(*args)
+                inflight.append(
+                    (key, selected_gb, selected_cpus, handle)
+                )
+                reserved_gb += selected_gb
+                reserved_cpus += selected_cpus
+
+            if not inflight:
+                if deferred:
+                    pending.extendleft(reversed(deferred))
+                    deferred = []
+                    continue
+                if not pending:
+                    return
+
+            progressed = False
+            for index in range(len(inflight) - 1, -1, -1):
+                key, gb, cpus, handle = inflight[index]
+                if not handle.ready():
+                    continue
+                inflight.pop(index)
+                reserved_gb -= gb
+                reserved_cpus -= cpus
+                progressed = True
+                try:
+                    on_result(key, handle.get())
+                except BaseException as exc:  # noqa: BLE001 - reported, not raised
+                    on_error(key, exc)
+            if progressed and deferred:
+                pending.extendleft(reversed(deferred))
+                deferred = []
             if not progressed:
                 time.sleep(self.poll_seconds)
 

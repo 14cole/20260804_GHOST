@@ -468,9 +468,10 @@ class SolverTab(QWidget):
         advanced_form.setContentsMargins(0, 0, 0, 0)
 
         self.edit_cfie_alpha = QLineEdit("0.0")
+        self.edit_cfie_alpha.setEnabled(False)
         self.edit_cfie_alpha.setToolTip(
-            "Burton-Miller CFIE coupling (0 = disabled, default). "
-            "Prevents interior-resonance artefacts on closed bodies."
+            "BoR closed-PEC CFIE coupling. The 2-D solver requires 0 because "
+            "its active formulations do not implement a CFIE operator."
         )
         self.cmb_solver_method = QComboBox()
         self.cmb_solver_method.addItem("Auto (dense direct)", userData="auto")
@@ -772,7 +773,7 @@ class SolverTab(QWidget):
         enable_2d_quality_thresholds = not solving and not is_bor
         self.btn_run.setEnabled(not solving)
         self.btn_export.setEnabled(not solving)
-        self.btn_currents.setEnabled(not solving)
+        self.btn_currents.setEnabled(not solving and not is_bor)
         self.btn_browse_geo.setEnabled(not solving)
         self.btn_use_tab.setEnabled(not solving)
         self.btn_browse_output.setEnabled(not solving)
@@ -783,6 +784,7 @@ class SolverTab(QWidget):
         self.cmb_pol.setEnabled(not solving)
         self.cmb_scatter_mode.setEnabled(not solving and not is_bor)
         self.cmb_solver_method.setEnabled(not solving and not is_bor)
+        self.edit_cfie_alpha.setEnabled(not solving and is_bor)
         self.cmb_freq_mode.setEnabled(not solving)
         self.cmb_elev_mode.setEnabled(not solving)
         self.edit_freq_list.setEnabled(not solving and self.cmb_freq_mode.currentIndex() == 0)
@@ -816,6 +818,8 @@ class SolverTab(QWidget):
             self.chk_strict_quality.setChecked(True)
         self.cmb_scatter_mode.setEnabled(not is_bor)
         self.cmb_solver_method.setEnabled(not is_bor)
+        self.edit_cfie_alpha.setEnabled(is_bor)
+        self.btn_currents.setEnabled(not is_bor and not self._is_solving)
         self.chk_strict_quality.setEnabled(False)
         self.edit_quality_residual_max.setEnabled(not is_bor)
         self.edit_quality_condition_max.setEnabled(not is_bor)
@@ -986,10 +990,16 @@ class SolverTab(QWidget):
             }
 
             # Advanced settings
+            solver_kind = str(self.cmb_solver_kind.currentData() or "2d")
             cfie_text = self.edit_cfie_alpha.text().strip()
             cfie_alpha = float(cfie_text) if cfie_text else 0.0
             if not math.isfinite(cfie_alpha) or cfie_alpha < 0.0:
                 raise ValueError("CFIE alpha must be a non-negative finite number.")
+            if solver_kind == "2d" and cfie_alpha != 0.0:
+                raise ValueError(
+                    "CFIE alpha must be 0 for the 2-D solver; no active 2-D "
+                    "formulation implements a CFIE operator."
+                )
 
             # Scattering mode and observation angles.
             scatter_mode = str(self.cmb_scatter_mode.currentData() or "monostatic")
@@ -1026,7 +1036,7 @@ class SolverTab(QWidget):
             solver_method=str(self.cmb_solver_method.currentData() or "auto"),
             scattering_mode=scatter_mode,
             observation_angles=obs_angles_list,
-            solver_kind=str(self.cmb_solver_kind.currentData() or "2d"),
+            solver_kind=solver_kind,
         )
         worker.moveToThread(thread)
 

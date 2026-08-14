@@ -180,6 +180,150 @@ def test_memory_admission():
     check(len(seen) == len(units) - 2, "declined units are skipped cleanly")
 
 
+def test_memory_cpu_backfill():
+    print("\nmemory/CPU-aware backfill")
+
+    class _Handle:
+        def __init__(self, owner, payload):
+            self.owner = owner
+            self.payload = payload
+            self.polls = 0
+            self.finished = False
+
+        def ready(self):
+            self.polls += 1
+            if self.polls <= 2:
+                return False
+            if not self.finished:
+                self.finished = True
+                _name, gb, cpus = self.payload
+                self.owner.live_gb -= gb
+                self.owner.live_cpus -= cpus
+            return True
+
+        def get(self):
+            return self.payload[0]
+
+    class _TrackingPool:
+        def __init__(self):
+            self.order = []
+            self.live_gb = 0.0
+            self.live_cpus = 0
+            self.peak_gb = 0.0
+            self.peak_cpus = 0
+
+        def apply_async(self, fn, args):
+            payload = args[0]
+            self.order.append(payload[0])
+            self.live_gb += payload[1]
+            self.live_cpus += payload[2]
+            self.peak_gb = max(self.peak_gb, self.live_gb)
+            self.peak_cpus = max(self.peak_cpus, self.live_cpus)
+            return _Handle(self, payload)
+
+    units = [
+        {"name": "heavy0", "gb": 6.0, "cpus": 4},
+        {"name": "heavy1", "gb": 6.0, "cpus": 4},
+        {"name": "small0", "gb": 4.0, "cpus": 2},
+        {"name": "small1", "gb": 4.0, "cpus": 2},
+    ]
+    pool = _TrackingPool()
+    dispatcher = hpc_scheduler.MemoryAwareDispatcher(
+        pool, budget_gb=10.0, max_concurrent=8, cpu_budget=6,
+        poll_seconds=0.0,
+    )
+    prepared = []
+    seen = []
+
+    def prepare(unit):
+        prepared.append(unit["name"])
+        payload = (unit["name"], unit["gb"], unit["cpus"])
+        return (unit["name"], unit["gb"], (lambda value: value, (payload,)))
+
+    dispatcher.run(
+        units, prepare, lambda key, value: seen.append(value),
+        lambda key, exc: seen.append(("error", key, exc)),
+        resource_request=lambda unit: (unit["gb"], unit["cpus"]),
+    )
+    check(pool.order[:2] == ["heavy0", "small0"],
+          "a fitting small unit backfills behind a blocked heavy unit")
+    check(prepared[:2] == ["heavy0", "small0"],
+          "a blocked unit is not claimed before it can be dispatched")
+    check(pool.peak_gb <= 10.0 and pool.peak_cpus <= 6,
+          "backfill respects both memory and CPU reservations")
+    check(sorted(seen) == sorted(unit["name"] for unit in units),
+          "backfill runs every unit exactly once")
+
+    heavy_threads = hpc_scheduler.assembly_threads_for_unit(
+        96, 96, 318.75, 70.0
+    )
+    cheap_threads = hpc_scheduler.assembly_threads_for_unit(
+        96, 96, 318.75, 10.0
+    )
+    check(heavy_threads == 24 and cheap_threads == 3,
+          "per-unit threads shrink as memory permits more concurrent solves")
+
+
+def test_formulation_resource_plan():
+    print("\nformulation-aware resource planning")
+    pec = hpc_scheduler.predict_2d_resources(
+        str(REPO / "geometries" / "body.geo"), 3.0, "TM", "meters",
+        50000, fine_factor=1.5, n_angles=19,
+    )
+    check(pec["formulation"] == "robin",
+          "PEC is planned as the active Robin formulation")
+    check(pec["system_dofs"] == pec["fine_nodes"],
+          "PEC reserves an N-by-N system rather than a generic 2N system")
+    check(pec["fine_nodes"] > pec["nodes"],
+          "the planner builds the genuinely refined certification mesh")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        coating = Path(tmp) / "coating.geo"
+        coating.write_text(
+            """Title: resource-plan coating
+Segment: outer 3
+properties: 3 12 0 1 0
+-1 -1  -1 1
+-1 1  1 1
+1 1  1 -1
+1 -1  -1 -1
+Segment: inner 4
+properties: 4 12 0 1 0
+-0.8 -0.8  -0.8 0.8
+-0.8 0.8  0.8 0.8
+0.8 0.8  0.8 -0.8
+0.8 -0.8  -0.8 -0.8
+IBCS_Resistances:
+Dielectrics:
+1 2.8 -0.06 1 0
+"""
+        )
+        layered = hpc_scheduler.predict_2d_resources(
+            str(coating), 0.1, "TM", "meters", 50000,
+            fine_factor=1.5, n_angles=19,
+        )
+    check(layered["formulation"] == "multi_region",
+          "a coated PEC is planned as multi-region")
+    check(layered["n_regions"] == 2,
+          "the planner counts exterior and dielectric regions")
+    check(layered["system_dofs"] > layered["fine_nodes"],
+          "multi-region planning uses interface-side DOFs, not panel count")
+    node_only_cost = hpc_scheduler.unit_cost(
+        layered["nodes"], 19, 1.5,
+        fine_nodes=layered["fine_nodes"],
+    )
+    formulation_cost = hpc_scheduler.unit_cost(
+        layered["nodes"], 19, 1.5,
+        fine_nodes=layered["fine_nodes"],
+        system_dofs=layered["base_system_dofs"],
+        fine_system_dofs=layered["fine_system_dofs"],
+        operator_matrices=layered["base_operator_matrices"],
+        fine_operator_matrices=layered["fine_operator_matrices"],
+    )
+    check(formulation_cost > node_only_cost,
+          "multi-region load balancing charges its larger system and operators")
+
+
 def test_survey_mode_cost():
     print("\nsurvey mode (MESH_CERTIFICATION = False)")
     # fine_factor <= 1 means "one mesh", not "a second mesh the same size".
@@ -438,6 +582,32 @@ def test_end_to_end():
         check("OMP_NUM_THREADS=1" in slurm_text,
               "BLAS threads are pinned before the interpreter starts")
 
+        # A worker must never recreate the old zero-reservation fallback when
+        # its submit-time plan is missing or corrupt.
+        schedule_path = run_dir / "schedule.json"
+        schedule_text = schedule_path.read_text()
+        schedule_path.unlink()
+        missing_plan = _run(
+            driver, ["--worker", str(run_dir), "0", "0"]
+        )
+        check(
+            missing_plan.returncode != 0
+            and "refusing to run without per-unit memory reservations"
+            in missing_plan.stdout,
+            "a missing schedule fails closed before any unit starts",
+        )
+        schedule_path.write_text("{not-json")
+        corrupt_plan = _run(
+            driver, ["--worker", str(run_dir), "0", "0"]
+        )
+        check(
+            corrupt_plan.returncode != 0
+            and "refusing to run without per-unit memory reservations"
+            in corrupt_plan.stdout,
+            "a corrupt schedule fails closed before any unit starts",
+        )
+        schedule_path.write_text(schedule_text)
+
         # Two array tasks working the same run at the same time.
         started = time.time()
         procs = [
@@ -512,6 +682,8 @@ def main():
     test_balance()
     test_claims()
     test_memory_admission()
+    test_memory_cpu_backfill()
+    test_formulation_resource_plan()
     test_survey_mode_cost()
     test_memory_heavy_geometry()
     test_resource_detection()
