@@ -14,6 +14,7 @@ which only your real file (or MATLAB ssread) can confirm.
 import os
 import struct
 import tempfile
+import unittest
 import numpy as np
 import read_ss as R
 
@@ -127,6 +128,32 @@ def check(name, nsig, nfreq, ifreq, f1, f2, flags, mode):
         for e in errs:
             print("        -", e)
         return not errs
+
+
+class TestSsParsing(unittest.TestCase):
+    def test_monostatic_uniform_header_b_256(self):
+        self.assertTrue(check(
+            "monostatic/uniform/hdrb=256", 5, 8, 1, 8.0, 12.0,
+            dict(edge_diff=False, iqmatrix=True, ibspsave=1), "incident",
+        ))
+
+    def test_monostatic_uniform_header_b_0(self):
+        self.assertTrue(check(
+            "monostatic/uniform/hdrb=0", 7, 16, 1, 2.0, 18.0,
+            dict(edge_diff=False, iqmatrix=False, ibspsave=1), "incident",
+        ))
+
+    def test_bistatic_discrete_header_b_768(self):
+        self.assertTrue(check(
+            "bistatic/discrete/hdrb=768", 9, 8, 2, 8.0, 12.0,
+            dict(edge_diff=True, iqmatrix=True, ibspsave=3), "observation",
+        ))
+
+    def test_bistatic_uniform_header_b_512(self):
+        self.assertTrue(check(
+            "bistatic/uniform/hdrb=512", 13, 4, 1, 9.0, 10.0,
+            dict(edge_diff=True, iqmatrix=False, ibspsave=2), "observation",
+        ))
 
 
 if __name__ == "__main__":

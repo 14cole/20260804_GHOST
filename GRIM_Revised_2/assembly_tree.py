@@ -132,20 +132,24 @@ def _grid_to_b64(grid) -> str:
     """Serialise an RcsGrid to a base-64 string."""
     buf = io.BytesIO()
     units_payload = json.dumps(grid.units) if grid.units else ""
-    np.savez(
-        buf,
+    payload = dict(grid._extra_to_write())
+    payload.update(
         azimuths=grid.azimuths,
         elevations=grid.elevations,
         frequencies=grid.frequencies,
         polarizations=grid.polarizations,
-        rcs_power=np.asarray(grid.rcs_power, dtype=np.float32),
-        rcs_phase=np.asarray(grid.rcs_phase, dtype=np.float32),
+        rcs_power=grid.rcs_power,
+        rcs_phase=grid.rcs_phase,
         rcs_domain="power_phase",
         power_domain="linear_rcs",
         source_path=grid.source_path if grid.source_path is not None else "",
         history=grid.history if grid.history is not None else "",
         units=units_payload,
     )
+    for tag in ("rcs_domain", "power_domain"):
+        if tag in grid.extra:
+            payload[tag] = grid.extra[tag]
+    np.savez(buf, **payload)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -172,6 +176,11 @@ def _b64_to_grid(b64: str):
     source_path     = source_path_raw if source_path_raw else None
     history_raw     = data["history"].item() if "history" in data else None
     history         = history_raw if history_raw else None
+    extra = {
+        key: data[key]
+        for key in getattr(data, "files", [])
+        if key not in RcsGrid._RESERVED_KEYS
+    }
 
     return RcsGrid(
         data["azimuths"],
@@ -184,6 +193,7 @@ def _b64_to_grid(b64: str):
         source_path=source_path,
         history=history,
         units=units,
+        extra=extra,
     )
 
 
@@ -850,7 +860,7 @@ def _interp_target_axes(grids) -> tuple:
     return az, el, f, pol
 
 
-def _axes_only_grid(az, el, f, pol):
+def _axes_only_grid(az, el, f, pol, reference=None):
     """Construct a stub RcsGrid carrying only axis arrays — used as the target
     passed to RcsGrid.align_to() so we can align every part to the same set
     of axes without inventing a synthetic data array each time."""
@@ -862,6 +872,12 @@ def _axes_only_grid(az, el, f, pol):
         np.asarray(az), np.asarray(el), np.asarray(f), np.asarray(pol),
         rcs=None, rcs_power=zero, rcs_phase=zero,
         rcs_domain="power_phase",
+        units=dict(reference.units or {}) if reference is not None else None,
+        extra=(
+            {"phase_reference": reference.extra["phase_reference"]}
+            if reference is not None and "phase_reference" in reference.extra
+            else None
+        ),
     )
 
 
@@ -890,7 +906,7 @@ def _align_grids_for_assembly(grids, axis_mode: str) -> list:
             raise ValueError(
                 "intersect: parts have no common azimuth/elevation/frequency/polarization values"
             )
-        target = _axes_only_grid(az, el, f, pol)
+        target = _axes_only_grid(az, el, f, pol, ref)
         return [g.align_to(target, mode="intersect") for g in grids]
 
     if axis_mode == "interp":
@@ -899,7 +915,7 @@ def _align_grids_for_assembly(grids, axis_mode: str) -> list:
             raise ValueError(
                 "interp: parts have no overlapping axis range across all parts"
             )
-        target = _axes_only_grid(az, el, f, pol)
+        target = _axes_only_grid(az, el, f, pol, ref)
         return [g.align_to(target, mode="interp") for g in grids]
 
     raise ValueError(f"unknown axis_mode {axis_mode!r}")
@@ -917,6 +933,13 @@ def _combine_children(coh_grids, incoh_grids, ref):
 
     C_coh = None
     if coh_grids:
+        for g in coh_grids:
+            missing = np.isfinite(g.rcs_power) & ~np.isfinite(g.rcs_phase)
+            if np.any(missing):
+                raise ValueError(
+                    "a branch containing incoherent or phase-unknown data cannot "
+                    "be used as a coherent assembly child"
+                )
         C_coh = np.array(coh_grids[0].rcs, copy=True)
         for g in coh_grids[1:]:
             C_coh = C_coh + g.rcs
@@ -928,14 +951,17 @@ def _combine_children(coh_grids, incoh_grids, ref):
             P_incoh = P_incoh + g.rcs_power
 
     if C_coh is not None and P_incoh is not None:
-        total_power = (np.abs(C_coh) ** 2 + P_incoh).astype(np.float32)
-        total_phase = np.angle(C_coh).astype(np.float32)
+        total_power = np.abs(C_coh) ** 2 + P_incoh
+        # No single field phase exists for a coherent-field plus statistically
+        # independent power sum. Mark it unknown so an ancestor cannot silently
+        # reinterpret the incoherent contribution as a coherent field.
+        total_phase = np.full(total_power.shape, np.nan, dtype=total_power.dtype)
     elif C_coh is not None:
-        total_power = (np.abs(C_coh) ** 2).astype(np.float32)
-        total_phase = np.angle(C_coh).astype(np.float32)
+        total_power = np.abs(C_coh) ** 2
+        total_phase = np.angle(C_coh)
     else:
-        total_power = P_incoh.astype(np.float32)
-        total_phase = np.full(total_power.shape, np.nan, dtype=np.float32)
+        total_power = np.array(P_incoh, copy=True)
+        total_phase = np.full(total_power.shape, np.nan, dtype=total_power.dtype)
 
     return RcsGrid(
         ref.azimuths, ref.elevations, ref.frequencies, ref.polarizations,
@@ -944,6 +970,11 @@ def _combine_children(coh_grids, incoh_grids, ref):
         rcs_phase=total_phase,
         rcs_domain="power_phase",
         units=dict(ref.units or {}),
+        extra={
+            "phase_reference": ref.extra["phase_reference"]
+            for _ in (0,)
+            if "phase_reference" in ref.extra
+        },
     )
 
 
@@ -982,17 +1013,29 @@ def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
     all_pairs = coh + incoh
     grids_in_order = [g for _, g in all_pairs]
 
-    # Refuse to mix dBsm and dBke flavours — the linear values represent
-    # physically different quantities (m² vs m) and adding them would be
-    # silent nonsense.
-    unit_set = {
-        str((g.units or {}).get("rcs_log_unit", "dBsm")).strip().lower()
-        for g in grids_in_order
-    }
-    if len(unit_set) > 1:
-        raise ValueError(
-            f"refusing to combine parts with mixed rcs_log_unit values {unit_set}"
-        )
+    # Axis values alone do not establish physical compatibility. Refuse unit,
+    # quantity, and phase-reference mismatches before intersecting/interpolating.
+    ref_units = grids_in_order[0]
+    for grid in grids_in_order[1:]:
+        for key, default in (("azimuth", "deg"), ("elevation", "deg"), ("frequency", "GHz")):
+            left = str((ref_units.units or {}).get(key, default)).strip().lower()
+            right = str((grid.units or {}).get(key, default)).strip().lower()
+            if left != right:
+                raise ValueError(f"refusing to combine parts with {key} units {left!r} and {right!r}")
+        if ref_units.linear_quantity() != grid.linear_quantity():
+            raise ValueError(
+                "refusing to combine parts with physical quantities "
+                f"{ref_units.linear_quantity()!r} and {grid.linear_quantity()!r}"
+            )
+        if ref_units.default_log_unit().lower() != grid.default_log_unit().lower():
+            raise ValueError(
+                "refusing to combine parts with log units "
+                f"{ref_units.default_log_unit()!r} and {grid.default_log_unit()!r}"
+            )
+        left_ref = ref_units._phase_reference()
+        right_ref = grid._phase_reference()
+        if left_ref != right_ref and (left_ref or right_ref):
+            raise ValueError("refusing to combine parts with different phase references")
 
     aligned = _align_grids_for_assembly(grids_in_order, axis_mode=axis_mode)
     n_coh = len(coh)

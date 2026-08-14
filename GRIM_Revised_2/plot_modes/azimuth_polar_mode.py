@@ -20,17 +20,18 @@ def _collect_series(self, dataset, name, az_values_sel, elev_values_sel, freq_va
         return None
 
     pol_value = dataset.polarizations[pol_indices[0]]
+    frequency_unit = str((dataset.units or {}).get("frequency", "GHz"))
     series = []
     for f_idx in freq_indices:
         freq_value = float(dataset.frequencies[f_idx])
         for e_idx in elev_indices:
             elev_value = dataset.elevations[e_idx]
             if self._button_checked(self.btn_phase):
-                raw_values = dataset.rcs[az_indices, e_idx, f_idx, pol_indices[0]]
+                raw_values = dataset.rcs_slice((az_indices, e_idx, f_idx, pol_indices[0]))
             else:
                 raw_values = dataset.rcs_power[az_indices, e_idx, f_idx, pol_indices[0]]
             rcs_display = self._display_from_values(dataset, raw_values, frequency_value=freq_value)
-            label = f"{name} | Pol {pol_value}, Freq {freq_value:g} GHz, El {elev_value:g} deg"
+            label = f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, El {elev_value:g} deg"
             series.append((rcs_display, label))
     return az_values, series
 
@@ -90,7 +91,7 @@ def render(self) -> None:
                 freq_value = float(dataset.frequencies[f_idx])
                 for e_idx in elev_indices:
                     if self._button_checked(self.btn_phase):
-                        raw_values = dataset.rcs[az_indices, e_idx, f_idx, pol_indices[0]]
+                        raw_values = dataset.rcs_slice((az_indices, e_idx, f_idx, pol_indices[0]))
                     else:
                         raw_values = dataset.rcs_power[az_indices, e_idx, f_idx, pol_indices[0]]
                     rcs_display = self._display_from_values(dataset, raw_values, frequency_value=freq_value)
@@ -101,10 +102,12 @@ def render(self) -> None:
             y_min = np.nanmin(stacked, axis=0)
             y_max = np.nanmax(stacked, axis=0)
             density = np.sum(np.isfinite(stacked), axis=0)
+            frequency_units = {str((dataset.units or {}).get("frequency", "GHz")) for _, dataset in datasets}
+            frequency_unit = next(iter(frequency_units)) if len(frequency_units) == 1 else "mixed units"
             freq_label = (
-                f"{freq_values[0]}-{freq_values[-1]} GHz"
+                f"{freq_values[0]}-{freq_values[-1]} {frequency_unit}"
                 if len(freq_values) > 1
-                else f"{freq_values[0]} GHz"
+                else f"{freq_values[0]} {frequency_unit}"
             )
             elev_label = (
                 f"{elev_values[0]}-{elev_values[-1]} deg"

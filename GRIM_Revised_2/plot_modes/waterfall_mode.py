@@ -56,7 +56,7 @@ def render(self) -> None:
         for elev_idx in elev_indices:
             elev_value = dataset.elevations[elev_idx]
             if self._button_checked(self.btn_phase):
-                raw_values = dataset.rcs[np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]])]
+                raw_values = dataset.rcs_slice(np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]]))
             else:
                 raw_values = dataset.rcs_power[np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]])]
             raw_values = raw_values[:, 0, :, 0]
@@ -131,7 +131,8 @@ def render(self) -> None:
         meshes.append(mesh)
         ax.set_title(f"{dataset_name} | Elevation {elev_value} deg", color=self._current_plot_text())
         ax.set_xlabel("Azimuth (deg)")
-        ax.set_ylabel("Frequency (GHz)")
+        frequency_unit = str((panel["dataset"].units or {}).get("frequency", "GHz"))
+        ax.set_ylabel(f"Frequency ({frequency_unit})")
 
         xmins.append(float(np.min(az_values)))
         xmaxs.append(float(np.max(az_values)))

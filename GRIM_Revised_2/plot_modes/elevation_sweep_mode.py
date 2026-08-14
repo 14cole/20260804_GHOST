@@ -60,10 +60,11 @@ def render(self) -> None:
             continue
 
         pol_value = dataset.polarizations[pol_indices[0]]
+        frequency_unit = str((dataset.units or {}).get("frequency", "GHz"))
         for f_idx in freq_indices:
             freq_value = float(dataset.frequencies[f_idx])
             if self._button_checked(self.btn_phase):
-                rcs_slice = dataset.rcs[np.ix_(az_indices, elev_indices, [f_idx], [pol_indices[0]])]
+                rcs_slice = dataset.rcs_slice(np.ix_(az_indices, elev_indices, [f_idx], [pol_indices[0]]))
                 rcs_slice = rcs_slice[:, :, 0, 0]  # (az, elev)
                 phase_deg = np.degrees(np.angle(rcs_slice))
                 phase_deg = np.where(np.isfinite(phase_deg), phase_deg, np.nan)
@@ -77,12 +78,12 @@ def render(self) -> None:
             y_values = np.asarray(y_values)[order]
             if p50_mode:
                 label = (
-                    f"{name} | Pol {pol_value}, Freq {freq_value:g} GHz, "
+                    f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, "
                     f"P50 over az ({az_min:g},{az_max:g})"
                 )
             else:
                 label = (
-                    f"{name} | Pol {pol_value}, Freq {freq_value:g} GHz, "
+                    f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, "
                     f"Az {az_min:g} deg"
                 )
             self.plot_ax.plot(elev_values, y_values, label=label)

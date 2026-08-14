@@ -44,9 +44,11 @@ def _collect_series(self, dataset, name, sweep_axis,
         return None
 
     pol_value = dataset.polarizations[pol_indices[0]]
+    frequency_unit = str((dataset.units or {}).get("frequency", "GHz"))
     pol_idx = pol_indices[0]
     use_complex = self._button_checked(self.btn_phase)
-    src = dataset.rcs if use_complex else dataset.rcs_power
+    def _values(selection):
+        return dataset.rcs_slice(selection) if use_complex else dataset.rcs_power[selection]
 
     series: list[tuple[np.ndarray, str]] = []
     if sweep_axis == "azimuth":
@@ -55,9 +57,9 @@ def _collect_series(self, dataset, name, sweep_axis,
             freq_value = float(dataset.frequencies[f_idx])
             for e_idx in elev_indices:
                 elev_value = dataset.elevations[e_idx]
-                raw = src[az_indices, e_idx, f_idx, pol_idx]
+                raw = _values((az_indices, e_idx, f_idx, pol_idx))
                 rcs_display = self._display_from_values(dataset, raw, frequency_value=freq_value)
-                label = f"{name} | Pol {pol_value}, Freq {freq_value:g} GHz, El {elev_value:g} deg"
+                label = f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, El {elev_value:g} deg"
                 series.append((rcs_display, label))
     elif sweep_axis == "elevation":
         sweep_values = elev_values
@@ -65,9 +67,9 @@ def _collect_series(self, dataset, name, sweep_axis,
             freq_value = float(dataset.frequencies[f_idx])
             for a_idx in az_indices:
                 az_value = dataset.azimuths[a_idx]
-                raw = src[a_idx, elev_indices, f_idx, pol_idx]
+                raw = _values((a_idx, elev_indices, f_idx, pol_idx))
                 rcs_display = self._display_from_values(dataset, raw, frequency_value=freq_value)
-                label = f"{name} | Pol {pol_value}, Freq {freq_value:g} GHz, Az {az_value:g} deg"
+                label = f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, Az {az_value:g} deg"
                 series.append((rcs_display, label))
     else:  # frequency
         sweep_values = freq_values
@@ -80,7 +82,7 @@ def _collect_series(self, dataset, name, sweep_axis,
             elev_value = dataset.elevations[e_idx]
             for a_idx in az_indices:
                 az_value = dataset.azimuths[a_idx]
-                raw = src[a_idx, e_idx, freq_indices, pol_idx]
+                raw = _values((a_idx, e_idx, freq_indices, pol_idx))
                 rcs_display = self._display_from_values(
                     dataset, raw, frequency_value=freq_axis_values
                 )
@@ -208,6 +210,11 @@ def render(self) -> None:
             )
             top_ax.set_title(stats_text, fontsize=8, color=text_color, pad=4)
 
-    res_ax.set_xlabel(_AXIS_LABEL[sweep_axis])
+    if sweep_axis == "frequency":
+        frequency_units = {str((dataset.units or {}).get("frequency", "GHz")) for _, dataset in datasets}
+        frequency_unit = next(iter(frequency_units)) if len(frequency_units) == 1 else "mixed units"
+        res_ax.set_xlabel(f"Frequency ({frequency_unit})")
+    else:
+        res_ax.set_xlabel(_AXIS_LABEL[sweep_axis])
     self._apply_plot_limits()
     self.status.showMessage(f"Compare plot updated ({sweep_axis} sweep).")

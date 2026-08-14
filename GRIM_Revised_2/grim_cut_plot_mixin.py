@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from matplotlib.backend_bases import MouseButton
@@ -948,11 +950,24 @@ class PlotOpsMixin:
     # ------------------------------------------------------------------
 
     def _isar_submit(self, params: dict) -> None:
+        cancel_event = threading.Event()
+        params["cancel_check"] = cancel_event.is_set
         if getattr(self, "_isar_busy", False):
             # Latest request wins; it launches as soon as the current one lands.
+            current_cancel = getattr(self, "_isar_cancel_event", None)
+            if current_cancel is not None:
+                current_cancel.set()
+            old_pending = getattr(self, "_isar_pending", None)
+            if old_pending is not None:
+                old_check = old_pending.get("_cancel_event")
+                if old_check is not None:
+                    old_check.set()
+            params["_cancel_event"] = cancel_event
             self._isar_pending = params
             return
         self._isar_busy = True
+        self._isar_cancel_event = cancel_event
+        params["_cancel_event"] = cancel_event
         signals = getattr(self, "_isar_signals", None)
         if signals is None:
             signals = self._isar_signals = _IsarComputeSignals()
@@ -970,10 +985,15 @@ class PlotOpsMixin:
 
     def _on_isar_compute_done(self, params: dict, result) -> None:
         self._isar_busy = False
+        self._isar_cancel_event = None
         pending = getattr(self, "_isar_pending", None)
         self._isar_pending = None
         ok = not isinstance(result, str)
-        if not ok:
+        superseded = pending is not None and params.get("_cancel_event") is not None \
+            and params["_cancel_event"].is_set()
+        if superseded:
+            ok = False
+        elif not ok:
             self.status.showMessage(result)
         elif (
             params.get("dataset") is not self.active_dataset
@@ -1260,7 +1280,7 @@ class PlotOpsMixin:
             for elev_idx in elev_indices:
                 elev_value = dataset.elevations[elev_idx]
                 if self._button_checked(self.btn_phase):
-                    rcs_values = dataset.rcs[az_indices, elev_idx, freq_idx, pol_indices[0]]
+                    rcs_values = dataset.rcs_slice((az_indices, elev_idx, freq_idx, pol_indices[0]))
                 else:
                     rcs_values = dataset.rcs_power[az_indices, elev_idx, freq_idx, pol_indices[0]]
                 rcs_display = self._rcs_display_values(dataset, rcs_values)
@@ -1273,7 +1293,11 @@ class PlotOpsMixin:
         return az_values, series
 
     def _legend_kwargs(self) -> dict[str, object]:
-        kwargs: dict[str, object] = {"loc": "upper right"}
+        kwargs: dict[str, object] = {
+            "loc": "upper right",
+            "frameon": True,
+            "framealpha": 0.92,
+        }
         if self.last_plot_mode == "compare":
             kwargs["fontsize"] = 8
         return kwargs
@@ -1283,11 +1307,38 @@ class PlotOpsMixin:
             return
         if ax is None:
             ax = self.plot_ax
+        # Reset a previously dragged/off-canvas legend. Legend.set_loc was
+        # added after older Matplotlib releases still found on clusters, and
+        # set_bbox_to_anchor's transform keyword also differs by release, so
+        # keep the two operations independent and provide the stable numeric
+        # upper-right fallback (loc code 1).
         try:
             legend.set_loc("upper right")
-            legend.set_bbox_to_anchor((0.98, 0.98), transform=ax.transAxes)
         except Exception:
+            try:
+                legend._loc = 1
+            except Exception:
+                pass
+        try:
+            legend.set_bbox_to_anchor(None)
+        except Exception:
+            try:
+                legend._bbox_to_anchor = None
+            except Exception:
+                pass
+        legend.set_visible(True)
+        legend.set_zorder(1000)
+        try:
+            legend.set_in_layout(True)
+        except AttributeError:
             pass
+        for text in legend.get_texts():
+            text.set_color(self._current_plot_text())
+        frame = legend.get_frame()
+        frame.set_visible(True)
+        frame.set_alpha(0.92)
+        frame.set_facecolor(self._current_plot_bg())
+        frame.set_edgecolor(self._current_plot_grid())
         try:
             legend.set_draggable(True, use_blit=True, update="loc")
         except TypeError:
@@ -1489,23 +1540,34 @@ class PlotOpsMixin:
             f"   z: {self._format_hover_number(z_val)}"
         )
 
-    def _update_legend_visibility(self) -> None:
-        legend = self.plot_ax.get_legend()
-        if self.chk_plot_legend.isChecked():
-            handles, labels = self.plot_ax.get_legend_handles_labels()
-            if not handles:
-                return
+    def _update_legend_visibility(self, checked: bool | None = None) -> None:
+        """Create/show/hide legends on every current line-plot axis.
+
+        ``checked`` is accepted directly from the toolbar signal. This avoids
+        reading the other tab's toggle during a tab-context transition; plot
+        renderers call the method without it and use the active toggle.
+        """
+        show = bool(self.chk_plot_legend.isChecked()) if checked is None else bool(checked)
+        axes = self.plot_axes or [self.plot_ax]
+        for ax in axes:
+            legend = ax.get_legend()
+            handles, labels = ax.get_legend_handles_labels()
+            if not show or not handles:
+                if legend is not None:
+                    legend.set_visible(False)
+                continue
             existing_labels = (
-                [t.get_text() for t in legend.get_texts()] if legend is not None else None
+                [text.get_text() for text in legend.get_texts()]
+                if legend is not None else None
             )
             if legend is None or existing_labels != labels:
-                legend = self.plot_ax.legend(**self._legend_kwargs())
-            legend.set_visible(True)
-            self._configure_legend(legend, self.plot_ax)
-        else:
-            if legend is not None:
-                legend.set_visible(False)
-        self.plot_canvas.draw_idle()
+                if legend is not None:
+                    legend.remove()
+                legend = ax.legend(handles, labels, **self._legend_kwargs())
+            self._configure_legend(legend, ax)
+        # A synchronous draw makes toolbar clicks deterministic even when the
+        # Qt event queue is busy loading or replotting a large dataset.
+        self.plot_canvas.draw()
 
     def _plot_azimuth_rect(self) -> None:
         azimuth_rect_mode.render(self)

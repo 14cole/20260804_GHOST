@@ -7,6 +7,33 @@ import numpy as np
 
 C0 = 299_792_458.0
 
+_FREQUENCY_UNITS = {
+    "hz": "Hz",
+    "khz": "kHz",
+    "mhz": "MHz",
+    "ghz": "GHz",
+}
+_ANGLE_UNITS = {
+    "deg": "deg",
+    "degree": "deg",
+    "degrees": "deg",
+    "rad": "rad",
+    "radian": "rad",
+    "radians": "rad",
+}
+
+
+def _real_storage_dtype(*values):
+    """Return float32 unless any supplied numeric array carries >32-bit precision."""
+    dtypes = [np.asarray(value).dtype for value in values if value is not None]
+    if any(
+        (dtype.kind == "f" and dtype.itemsize > 4)
+        or (dtype.kind == "c" and dtype.itemsize > 8)
+        for dtype in dtypes
+    ):
+        return np.float64
+    return np.float32
+
 
 class RcsGrid:
     """Container for gridded RCS data with axis metadata and helpers."""
@@ -70,21 +97,25 @@ class RcsGrid:
         expected = (len(self.azimuths), len(self.elevations), len(self.frequencies), len(self.polarizations))
 
         complex_arr = None
+        real_dtype = _real_storage_dtype(rcs, rcs_power, rcs_phase)
+        complex_dtype = np.complex128 if real_dtype == np.float64 else np.complex64
         if rcs is not None:
             rcs_arr = np.asarray(rcs)
             if rcs_arr.shape == expected + (2,):
-                complex_arr = np.asarray(rcs_arr[..., 0] + 1j * rcs_arr[..., 1], dtype=np.complex64)
+                complex_arr = np.asarray(
+                    rcs_arr[..., 0] + 1j * rcs_arr[..., 1], dtype=complex_dtype
+                )
             elif rcs_arr.shape == expected:
                 if np.iscomplexobj(rcs_arr):
-                    complex_arr = np.asarray(rcs_arr, dtype=np.complex64)
+                    complex_arr = np.asarray(rcs_arr, dtype=complex_dtype)
                 elif rcs_power is None:
                     # Real-valued rcs input is treated as linear power when explicit power is not provided.
-                    rcs_power = np.asarray(rcs_arr, dtype=np.float32)
+                    rcs_power = np.asarray(rcs_arr, dtype=real_dtype)
             else:
                 raise ValueError(f"rcs shape {rcs_arr.shape} != {expected}")
 
         if rcs_power is not None:
-            power_arr = np.asarray(rcs_power, dtype=np.float32)
+            power_arr = np.asarray(rcs_power, dtype=real_dtype)
             if power_arr.shape != expected:
                 raise ValueError(f"rcs_power shape {power_arr.shape} != {expected}")
         elif complex_arr is not None:
@@ -93,13 +124,13 @@ class RcsGrid:
             raise ValueError("provide complex rcs samples and/or rcs_power")
 
         if rcs_phase is not None:
-            phase_arr = np.asarray(rcs_phase, dtype=np.float32)
+            phase_arr = np.asarray(rcs_phase, dtype=real_dtype)
             if phase_arr.shape != expected:
                 raise ValueError(f"rcs_phase shape {phase_arr.shape} != {expected}")
         elif complex_arr is not None:
-            phase_arr = np.angle(complex_arr).astype(np.float32)
+            phase_arr = np.angle(complex_arr).astype(real_dtype)
         else:
-            phase_arr = np.full(expected, np.nan, dtype=np.float32)
+            phase_arr = np.full(expected, np.nan, dtype=real_dtype)
 
         power_clean = self._clean_power(power_arr)
         phase_clean = self._clean_phase(phase_arr)
@@ -119,34 +150,85 @@ class RcsGrid:
 
     @staticmethod
     def _clean_power(power_value):
-        power = np.asarray(power_value, dtype=np.float32)
+        dtype = _real_storage_dtype(power_value)
+        power = np.asarray(power_value, dtype=dtype)
         finite = np.isfinite(power)
-        out = np.full(power.shape, np.nan, dtype=np.float32)
+        out = np.full(power.shape, np.nan, dtype=dtype)
         out[finite] = np.maximum(power[finite], 0.0)
         return out
 
     @staticmethod
     def _clean_phase(phase_value):
-        phase = np.array(phase_value, dtype=np.float32, copy=True)
+        dtype = _real_storage_dtype(phase_value)
+        phase = np.array(phase_value, dtype=dtype, copy=True)
         phase[~np.isfinite(phase)] = np.nan
         return phase
 
     @staticmethod
     def _complex_from_power_phase(power_value, phase_value):
-        power = np.asarray(power_value, dtype=np.float32)
-        phase = np.asarray(phase_value, dtype=np.float32)
+        real_dtype = _real_storage_dtype(power_value, phase_value)
+        complex_dtype = np.complex128 if real_dtype == np.float64 else np.complex64
+        power = np.asarray(power_value, dtype=real_dtype)
+        phase = np.asarray(phase_value, dtype=real_dtype)
         if power.shape != phase.shape:
             raise ValueError(f"power/phase shapes {power.shape}/{phase.shape} do not match")
-        out = np.full(power.shape, np.nan + 1j * np.nan, dtype=np.complex64)
+        out = np.full(power.shape, np.nan + 1j * np.nan, dtype=complex_dtype)
         valid = np.isfinite(power) & np.isfinite(phase)
         if np.any(valid):
-            out[valid] = (np.sqrt(power[valid]) * np.exp(1j * phase[valid])).astype(np.complex64)
+            out[valid] = (
+                np.sqrt(power[valid]) * np.exp(1j * phase[valid])
+            ).astype(complex_dtype)
         return out
+
+    def _authoritative_raw_amplitude(self, selection=None):
+        """Return a solver-provided raw field when its normalization is known."""
+        real = self.extra.get("rcs_amp_real")
+        imag = self.extra.get("rcs_amp_imag")
+        if real is None or imag is None:
+            return None
+        real = np.asarray(real)
+        imag = np.asarray(imag)
+        if real.shape != self.rcs_power.shape or imag.shape != self.rcs_power.shape:
+            return None
+        quantity = self.linear_quantity()
+        if selection is None:
+            real_values = real.astype(np.float64, copy=False)
+            imag_values = imag.astype(np.float64, copy=False)
+        else:
+            real_values = real[selection].astype(np.float64, copy=False)
+            imag_values = imag[selection].astype(np.float64, copy=False)
+        raw = real_values + 1j * imag_values
+        if quantity == "sigma_2d":
+            freq_hz = self._frequency_value_to_hz(self.frequencies)
+            k0 = (2.0 * np.pi * np.asarray(freq_hz, dtype=float)) / C0
+            if np.any(~np.isfinite(k0)) or np.any(k0 <= 0.0):
+                return None
+            scale = 1.0 / (2.0 * np.sqrt(k0))
+            if selection is None:
+                scale = scale[None, None, :, None]
+            else:
+                scale = scale[selection[2]]
+            return raw * scale
+        if quantity == "sigma_3d":
+            return raw * np.sqrt(4.0 * np.pi)
+        return None
 
     @property
     def rcs(self):
         """Complex RCS values derived from stored linear power and phase."""
+        authoritative = self._authoritative_raw_amplitude()
+        if authoritative is not None:
+            return authoritative
         return self._complex_from_power_phase(self.rcs_power, self.rcs_phase)
+
+    def rcs_slice(self, selection):
+        """Reconstruct only a requested complex slice, avoiding a whole-grid allocation."""
+        authoritative = self._authoritative_raw_amplitude(selection)
+        if authoritative is not None:
+            return authoritative
+        return self._complex_from_power_phase(
+            self.rcs_power[selection], self.rcs_phase[selection]
+        )
 
     def __len__(self):
         """Return total number of complex samples in the grid."""
@@ -169,7 +251,7 @@ class RcsGrid:
             "elevation": self.elevations[el_idx],
             "frequency": self.frequencies[f_idx],
             "polarization": self.polarizations[p_idx],
-            "rcs": self.rcs[az_idx, el_idx, f_idx, p_idx],
+            "rcs": self.rcs_slice((az_idx, el_idx, f_idx, p_idx)),
         }
 
     def get_axis(self, name):
@@ -202,7 +284,48 @@ class RcsGrid:
             "polarizations": self.polarizations,
         }
 
-    def _assert_compatible(self, other):
+    @staticmethod
+    def _canonical_unit(value, aliases, default):
+        text = str(value or default).strip().lower()
+        return aliases.get(text, text)
+
+    def linear_quantity(self):
+        """Physical meaning of ``rcs_power`` (sigma_2d, sigma_3d, or ratio)."""
+        raw = str((self.units or {}).get("rcs_linear_quantity", "")).strip().lower()
+        if raw:
+            return raw
+        return "sigma_2d" if self.default_log_unit().lower() == "dbke" else "sigma_3d"
+
+    def _phase_reference(self):
+        raw = self.extra.get("phase_reference", "")
+        if isinstance(raw, np.ndarray) and raw.size == 1:
+            raw = raw.reshape(-1)[0]
+        return str(raw or "").strip()
+
+    def _assert_physical_metadata_compatible(self, other):
+        if not isinstance(other, RcsGrid):
+            raise TypeError("other must be an RcsGrid")
+        for key, aliases, default in (
+            ("azimuth", _ANGLE_UNITS, "deg"),
+            ("elevation", _ANGLE_UNITS, "deg"),
+            ("frequency", _FREQUENCY_UNITS, "GHz"),
+        ):
+            left = self._canonical_unit((self.units or {}).get(key), aliases, default)
+            right = self._canonical_unit((other.units or {}).get(key), aliases, default)
+            if left != right:
+                raise ValueError(f"{key} unit mismatch: {left} != {right}")
+        if self.linear_quantity() != other.linear_quantity():
+            raise ValueError(
+                "RCS linear quantity mismatch: "
+                f"{self.linear_quantity()} != {other.linear_quantity()}"
+            )
+        if self.default_log_unit().lower() != other.default_log_unit().lower():
+            raise ValueError(
+                f"RCS log unit mismatch: {self.default_log_unit()} != "
+                f"{other.default_log_unit()}"
+            )
+
+    def _assert_compatible(self, other, *, coherent=False):
         """Validate another grid for element-wise operations.
 
         Use before coherent/incoherent add/subtract operations.
@@ -226,6 +349,24 @@ class RcsGrid:
             raise ValueError("frequency axis mismatch")
         if not np.array_equal(self.polarizations, other.polarizations):
             raise ValueError("polarization axis mismatch")
+        self._assert_physical_metadata_compatible(other)
+        if coherent:
+            for label, grid in (("left", self), ("right", other)):
+                missing = np.isfinite(grid.rcs_power) & ~np.isfinite(grid.rcs_phase)
+                if np.any(missing):
+                    raise ValueError(
+                        f"coherent operation requires phase; {label} grid has "
+                        f"{int(np.count_nonzero(missing))} finite-power sample(s) "
+                        "with unknown phase"
+                    )
+            left_ref = self._phase_reference()
+            right_ref = other._phase_reference()
+            if left_ref != right_ref and (left_ref or right_ref):
+                raise ValueError(
+                    "coherent operation requires matching phase references; "
+                    f"got {left_ref or '<unspecified>'!r} and "
+                    f"{right_ref or '<unspecified>'!r}"
+                )
 
     def coherent_add(self, other):
         """Coherently add two grids (complex sum).
@@ -238,7 +379,7 @@ class RcsGrid:
         Returns:
             New RcsGrid with rcs = self.rcs + other.rcs.
         """
-        self._assert_compatible(other)
+        self._assert_compatible(other, coherent=True)
         rcs_out = self.rcs + other.rcs
         return self._new_grid(
             self.azimuths,
@@ -264,7 +405,7 @@ class RcsGrid:
             return self
         total = np.array(self.rcs, copy=True)
         for grid in grids:
-            self._assert_compatible(grid)
+            self._assert_compatible(grid, coherent=True)
             total = total + grid.rcs
         return self._new_grid(
             self.azimuths,
@@ -286,7 +427,7 @@ class RcsGrid:
         Returns:
             New RcsGrid with rcs = self.rcs - other.rcs.
         """
-        self._assert_compatible(other)
+        self._assert_compatible(other, coherent=True)
         rcs_out = self.rcs - other.rcs
         return self._new_grid(
             self.azimuths,
@@ -316,7 +457,7 @@ class RcsGrid:
             self.frequencies,
             self.polarizations,
             rcs_power=power_sum,
-            rcs_phase=np.full(power_sum.shape, np.nan, dtype=np.float32),
+            rcs_phase=np.full(power_sum.shape, np.nan, dtype=power_sum.dtype),
             rcs_domain="power_phase",
         )
 
@@ -343,7 +484,7 @@ class RcsGrid:
             self.frequencies,
             self.polarizations,
             rcs_power=total,
-            rcs_phase=np.full(total.shape, np.nan, dtype=np.float32),
+            rcs_phase=np.full(total.shape, np.nan, dtype=total.dtype),
             rcs_domain="power_phase",
         )
 
@@ -367,16 +508,16 @@ class RcsGrid:
             self.frequencies,
             self.polarizations,
             rcs_power=power_diff,
-            rcs_phase=np.full(power_diff.shape, np.nan, dtype=np.float32),
+            rcs_phase=np.full(power_diff.shape, np.nan, dtype=power_diff.dtype),
             rcs_domain="power_phase",
         )
 
     def arithmetic_db_subtract(self, other):
-        """Subtract in the dataset's dB display unit (dBsm or dBke).
+        """Return the dimensionless power ratio represented by a dB difference.
 
         Returns a grid whose dB display equals ``self_dB - other_dB``. For two
-        constant lines at 30 and 25 dBsm, the result displays as 5 dBsm. Phase
-        is meaningless for this magnitude-domain operation and is set to NaN.
+        constant lines at 30 and 25 dBsm, the result displays as 5 dB. Phase is
+        meaningless for this magnitude-domain operation and is set to NaN.
 
         Both grids must share the same ``default_log_unit`` (dBsm or dBke).
         """
@@ -397,7 +538,10 @@ class RcsGrid:
         db_a = self.linear_to_default_db(self.rcs_power, frequency_value=freq_bcast)
         db_b = other.linear_to_default_db(other.rcs_power, frequency_value=freq_bcast)
         diff_db = db_a - db_b
-        output_power = self.default_db_to_linear(diff_db, frequency_value=freq_bcast)
+        output_power = np.power(10.0, np.asarray(diff_db, dtype=float) / 10.0)
+        ratio_units = dict(self.units)
+        ratio_units["rcs_log_unit"] = "dB"
+        ratio_units["rcs_linear_quantity"] = "power_ratio"
 
         return self._new_grid(
             self.azimuths,
@@ -405,8 +549,9 @@ class RcsGrid:
             self.frequencies,
             self.polarizations,
             rcs_power=output_power,
-            rcs_phase=np.full(output_power.shape, np.nan, dtype=np.float32),
+            rcs_phase=np.full(output_power.shape, np.nan, dtype=output_power.dtype),
             rcs_domain="power_phase",
+            units=ratio_units,
         )
 
     def align_to(self, other, mode="exact"):
@@ -426,6 +571,7 @@ class RcsGrid:
         """
         if not isinstance(other, RcsGrid):
             raise TypeError("other must be an RcsGrid")
+        self._assert_physical_metadata_compatible(other)
 
         if mode == "exact":
             self._assert_compatible(other)
@@ -497,31 +643,23 @@ class RcsGrid:
         self._check_axis_sorted(other.elevations, "elevation")
         self._check_axis_sorted(other.frequencies, "frequency")
 
-        phase_missing = np.isfinite(self.rcs_power) & ~np.isfinite(self.rcs_phase)
-        if np.any(phase_missing):
-            power_interp = self._interp_real_axis(self.rcs_power, self.azimuths, other.azimuths, axis=0)
-            power_interp = self._interp_real_axis(power_interp, self.elevations, other.elevations, axis=1)
-            power_interp = self._interp_real_axis(power_interp, self.frequencies, other.frequencies, axis=2)
-            phase_interp = np.full(power_interp.shape, np.nan, dtype=np.float32)
-            return self._new_grid(
-                other.azimuths,
-                other.elevations,
-                other.frequencies,
-                other.polarizations,
-                rcs_power=power_interp,
-                rcs_phase=phase_interp,
-                rcs_domain="power_phase",
+        power_interp = self.rcs_power
+        phase_interp = self.rcs_phase
+        for axis, old, new in (
+            (0, self.azimuths, other.azimuths),
+            (1, self.elevations, other.elevations),
+            (2, self.frequencies, other.frequencies),
+        ):
+            power_interp, phase_interp = self._interp_power_phase_axis(
+                power_interp, phase_interp, old, new, axis
             )
-
-        rcs_interp = self._interp_complex_axis(self.rcs, self.azimuths, other.azimuths, axis=0)
-        rcs_interp = self._interp_complex_axis(rcs_interp, self.elevations, other.elevations, axis=1)
-        rcs_interp = self._interp_complex_axis(rcs_interp, self.frequencies, other.frequencies, axis=2)
         return self._new_grid(
             other.azimuths,
             other.elevations,
             other.frequencies,
             other.polarizations,
-            rcs_interp,
+            rcs_power=power_interp,
+            rcs_phase=phase_interp,
             rcs_domain="power_phase",
         )
 
@@ -539,16 +677,7 @@ class RcsGrid:
         x_new = np.asarray(x_new, dtype=float)
         if x_new.min() < x_old.min() or x_new.max() > x_old.max():
             raise ValueError("interp would require extrapolation")
-        moved = np.moveaxis(data, axis, 0)
-        flat = moved.reshape(moved.shape[0], -1)
-        real = np.empty((x_new.size, flat.shape[1]), dtype=float)
-        imag = np.empty((x_new.size, flat.shape[1]), dtype=float)
-        for i in range(flat.shape[1]):
-            real[:, i] = np.interp(x_new, x_old, flat[:, i].real)
-            imag[:, i] = np.interp(x_new, x_old, flat[:, i].imag)
-        combined = real + 1j * imag
-        out = combined.reshape((x_new.size,) + moved.shape[1:])
-        return np.moveaxis(out, 0, axis)
+        return RcsGrid._interp_linear_axis(data, x_old, x_new, axis)
 
     @staticmethod
     def _interp_real_axis(data, x_old, x_new, axis):
@@ -556,13 +685,44 @@ class RcsGrid:
         x_new = np.asarray(x_new, dtype=float)
         if x_new.min() < x_old.min() or x_new.max() > x_old.max():
             raise ValueError("interp would require extrapolation")
-        moved = np.moveaxis(data, axis, 0)
-        flat = moved.reshape(moved.shape[0], -1)
-        out_flat = np.empty((x_new.size, flat.shape[1]), dtype=np.float32)
-        for i in range(flat.shape[1]):
-            out_flat[:, i] = np.interp(x_new, x_old, flat[:, i]).astype(np.float32)
-        out = out_flat.reshape((x_new.size,) + moved.shape[1:])
-        return np.moveaxis(out, 0, axis)
+        return RcsGrid._interp_linear_axis(data, x_old, x_new, axis)
+
+    @staticmethod
+    def _interp_linear_axis(data, x_old, x_new, axis):
+        """Vectorized adjacent-bin interpolation; NaNs remain local."""
+        x_old = np.asarray(x_old, dtype=float)
+        x_new = np.asarray(x_new, dtype=float)
+        if x_new.min() < x_old.min() or x_new.max() > x_old.max():
+            raise ValueError("interp would require extrapolation")
+        moved = np.moveaxis(np.asarray(data), axis, 0)
+        right = np.searchsorted(x_old, x_new, side="left")
+        right = np.clip(right, 0, len(x_old) - 1)
+        exact = x_old[right] == x_new
+        left = np.where(exact, right, np.maximum(right - 1, 0))
+        denom = x_old[right] - x_old[left]
+        weight = np.divide(
+            x_new - x_old[left],
+            denom,
+            out=np.zeros_like(x_new, dtype=float),
+            where=denom != 0.0,
+        )
+        reshape = (len(x_new),) + (1,) * (moved.ndim - 1)
+        w = weight.reshape(reshape)
+        out = moved[left] * (1.0 - w) + moved[right] * w
+        return np.moveaxis(out.astype(moved.dtype, copy=False), 0, axis)
+
+    @staticmethod
+    def _interp_power_phase_axis(power, phase, x_old, x_new, axis):
+        power_out = RcsGrid._interp_real_axis(power, x_old, x_new, axis)
+        complex_in = RcsGrid._complex_from_power_phase(power, phase)
+        complex_out = RcsGrid._interp_complex_axis(complex_in, x_old, x_new, axis)
+        complex_valid = np.isfinite(complex_out.real) & np.isfinite(complex_out.imag)
+        phase_out = np.full(power_out.shape, np.nan, dtype=power_out.dtype)
+        if np.any(complex_valid):
+            power_out = np.array(power_out, copy=True)
+            power_out[complex_valid] = np.abs(complex_out[complex_valid]) ** 2
+            phase_out[complex_valid] = np.angle(complex_out[complex_valid])
+        return power_out, phase_out
 
     def interpolate_axis(self, axis_name, new_values):
         """Linearly interpolate the grid onto new values along one numeric axis.
@@ -587,31 +747,20 @@ class RcsGrid:
         new_axes = list(old_axes)
         new_axes[axis_idx] = new_arr
 
-        phase_missing = np.isfinite(self.rcs_power) & ~np.isfinite(self.rcs_phase)
-        if np.any(phase_missing):
-            power_interp = self._interp_real_axis(
-                self.rcs_power, old_axes[axis_idx], new_arr, axis=axis_idx
-            )
-            phase_interp = np.full(power_interp.shape, np.nan, dtype=np.float32)
-            return self._new_grid(
-                new_axes[0],
-                new_axes[1],
-                new_axes[2],
-                self.polarizations,
-                rcs_power=power_interp,
-                rcs_phase=phase_interp,
-                rcs_domain="power_phase",
-            )
-
-        rcs_interp = self._interp_complex_axis(
-            self.rcs, old_axes[axis_idx], new_arr, axis=axis_idx
+        power_interp, phase_interp = self._interp_power_phase_axis(
+            self.rcs_power,
+            self.rcs_phase,
+            old_axes[axis_idx],
+            new_arr,
+            axis_idx,
         )
         return self._new_grid(
             new_axes[0],
             new_axes[1],
             new_axes[2],
             self.polarizations,
-            rcs_interp,
+            rcs_power=power_interp,
+            rcs_phase=phase_interp,
             rcs_domain="power_phase",
         )
 
@@ -797,7 +946,15 @@ class RcsGrid:
         rcs_phase=None,
         rcs_domain=None,
         history=None,
+        units=None,
+        extra=None,
     ):
+        if extra is None:
+            # Preserve scalar phase-reference metadata across derived grids, but
+            # never carry shape-dependent raw amplitudes through a transform.
+            extra = {}
+            if "phase_reference" in self.extra:
+                extra["phase_reference"] = self.extra["phase_reference"]
         return RcsGrid(
             azimuths,
             elevations,
@@ -809,7 +966,8 @@ class RcsGrid:
             rcs_domain=(self.rcs_domain if rcs_domain is None else rcs_domain),
             source_path=self.source_path,
             history=history if history is not None else self.history,
-            units=dict(self.units),
+            units=dict(self.units if units is None else units),
+            extra=extra,
         )
 
     def _power_from_values(self, rcs_value):
@@ -828,7 +986,7 @@ class RcsGrid:
 
     def _amplitude_from_power(self, power_value):
         power = self._clean_power(power_value)
-        zero_phase = np.zeros(power.shape, dtype=np.float32)
+        zero_phase = np.zeros(power.shape, dtype=power.dtype)
         return self._complex_from_power_phase(power, zero_phase)
 
     def rcs_to_linear(self, rcs_value):
@@ -871,7 +1029,11 @@ class RcsGrid:
 
     def default_log_unit(self):
         raw = str((self.units or {}).get("rcs_log_unit", "dBsm")).strip().lower()
-        return "dBke" if raw == "dbke" else "dBsm"
+        if raw == "dbke":
+            return "dBke"
+        if raw == "db":
+            return "dB"
+        return "dBsm"
 
     def linear_to_default_db(self, linear_value, frequency_value=None, eps=1e-12):
         if self.default_log_unit().lower() == "dbke":
@@ -1186,8 +1348,8 @@ class RcsGrid:
             raise ValueError("combined azimuth axis is empty")
 
         out_shape = (len(az_merged), 1, len(self.frequencies), len(self.polarizations))
-        out_power = np.full(out_shape, np.nan, dtype=np.float32)
-        out_phase = np.full(out_shape, np.nan, dtype=np.float32)
+        out_power = np.full(out_shape, np.nan, dtype=self.rcs_power.dtype)
+        out_phase = np.full(out_shape, np.nan, dtype=self.rcs_phase.dtype)
 
         lo_target_idx = self._indices_for_axis_values(az_merged, az_lo, tol=tol)
         hi_target_idx = self._indices_for_axis_values(az_merged, az_hi, tol=tol)
@@ -1228,9 +1390,38 @@ class RcsGrid:
         )
 
     @classmethod
-    def join_many(cls, *grids, tol=1e-6):
-        """Join datasets on union axes; later grids overwrite overlaps."""
+    def join_many(cls, *grids, tol=1e-6, overlap="error", max_output_bytes=None):
+        """Join datasets on union axes without silently replacing finite data.
+
+        ``overlap`` may be ``"error"`` (default), ``"first"``, or ``"last"``.
+        Equal finite samples are accepted in all modes. ``max_output_bytes`` can
+        cap the dense union allocation for memory-aware folder workflows.
+        """
         grids = cls._ensure_grids(grids)
+        if overlap not in {"error", "first", "last"}:
+            raise ValueError("overlap must be 'error', 'first', or 'last'")
+        ref = grids[0]
+        for grid in grids[1:]:
+            for key, aliases, default in (
+                ("azimuth", _ANGLE_UNITS, "deg"),
+                ("elevation", _ANGLE_UNITS, "deg"),
+                ("frequency", _FREQUENCY_UNITS, "GHz"),
+            ):
+                left = cls._canonical_unit((ref.units or {}).get(key), aliases, default)
+                right = cls._canonical_unit((grid.units or {}).get(key), aliases, default)
+                if left != right:
+                    raise ValueError(f"cannot join grids with {key} units {left} and {right}")
+            if ref.linear_quantity() != grid.linear_quantity():
+                raise ValueError(
+                    "cannot join grids with physical quantities "
+                    f"{ref.linear_quantity()} and {grid.linear_quantity()}"
+                )
+            if ref.default_log_unit().lower() != grid.default_log_unit().lower():
+                raise ValueError("cannot join grids with different logarithmic units")
+            left_ref = ref._phase_reference()
+            right_ref = grid._phase_reference()
+            if left_ref != right_ref and (left_ref or right_ref):
+                raise ValueError("cannot join grids with different phase references")
         if len(grids) == 1:
             grid = grids[0]
             return grid._new_grid(
@@ -1249,8 +1440,15 @@ class RcsGrid:
         p_union = cls._axis_union([grid.polarizations for grid in grids], tol=0.0)
 
         shape = (len(az_union), len(el_union), len(f_union), len(p_union))
-        joined_power = np.full(shape, np.nan, dtype=np.float32)
-        joined_phase = np.full(shape, np.nan, dtype=np.float32)
+        out_dtype = np.result_type(*[g.rcs_power.dtype for g in grids])
+        estimated_bytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(out_dtype).itemsize * 2
+        if max_output_bytes is not None and estimated_bytes > int(max_output_bytes):
+            raise MemoryError(
+                f"dense joined grid needs about {estimated_bytes / (1024**3):.2f} GiB, "
+                f"above the configured limit of {int(max_output_bytes) / (1024**3):.2f} GiB"
+            )
+        joined_power = np.full(shape, np.nan, dtype=out_dtype)
+        joined_phase = np.full(shape, np.nan, dtype=out_dtype)
 
         for grid in grids:
             az_idx = cls._indices_for_axis_values(az_union, grid.azimuths, tol=tol)
@@ -1259,10 +1457,29 @@ class RcsGrid:
             p_idx = cls._indices_for_axis_values(p_union, grid.polarizations, tol=0.0)
             if az_idx is None or el_idx is None or f_idx is None or p_idx is None:
                 raise ValueError("failed to align a dataset during join")
-            joined_power[np.ix_(az_idx, el_idx, f_idx, p_idx)] = grid.rcs_power
-            joined_phase[np.ix_(az_idx, el_idx, f_idx, p_idx)] = grid.rcs_phase
+            target = np.ix_(az_idx, el_idx, f_idx, p_idx)
+            existing_power = joined_power[target]
+            existing_phase = joined_phase[target]
+            incoming_power = np.asarray(grid.rcs_power, dtype=out_dtype)
+            incoming_phase = np.asarray(grid.rcs_phase, dtype=out_dtype)
+            both = np.isfinite(existing_power) & np.isfinite(incoming_power)
+            power_conflict = both & ~np.isclose(
+                existing_power, incoming_power, rtol=1e-6, atol=1e-12
+            )
+            both_phase = both & np.isfinite(existing_phase) & np.isfinite(incoming_phase)
+            phase_delta = np.abs(np.angle(np.exp(1j * (existing_phase - incoming_phase))))
+            phase_conflict = both_phase & (phase_delta > 1e-5)
+            if overlap == "error" and (np.any(power_conflict) or np.any(phase_conflict)):
+                raise ValueError("conflicting finite samples overlap during join")
+            if overlap == "last":
+                take = np.isfinite(incoming_power)
+            else:
+                take = ~np.isfinite(existing_power) & np.isfinite(incoming_power)
+            existing_power[take] = incoming_power[take]
+            existing_phase[take] = incoming_phase[take]
+            joined_power[target] = existing_power
+            joined_phase[target] = existing_phase
 
-        last = grids[-1]
         return cls(
             az_union,
             el_union,
@@ -1271,9 +1488,14 @@ class RcsGrid:
             rcs_power=joined_power,
             rcs_phase=joined_phase,
             rcs_domain="power_phase",
-            source_path=last.source_path,
-            history=last.history,
-            units=dict(last.units),
+            source_path=ref.source_path,
+            history=ref.history,
+            units=dict(ref.units),
+            extra={
+                "phase_reference": ref.extra["phase_reference"]
+                for _ in (0,)
+                if "phase_reference" in ref.extra
+            },
         )
 
     @classmethod
@@ -1289,6 +1511,8 @@ class RcsGrid:
         grids = cls._ensure_grids(grids)
         if len(grids) == 1:
             return [grids[0]]
+        for grid in grids[1:]:
+            grids[0]._assert_physical_metadata_compatible(grid)
 
         az_common = cls._axis_intersection([grid.azimuths for grid in grids], tol=tol)
         el_common = cls._axis_intersection([grid.elevations for grid in grids], tol=tol)
@@ -1354,6 +1578,11 @@ class RcsGrid:
                     source_path=grid.source_path,
                     history=grid.history,
                     units=dict(grid.units),
+                    extra={
+                        "phase_reference": grid.extra["phase_reference"]
+                        for _ in (0,)
+                        if "phase_reference" in grid.extra
+                    },
                 )
             )
 
@@ -1469,23 +1698,29 @@ class RcsGrid:
                 axis_values[1],
                 axis_values[2],
                 axis_values[3],
-                rcs_power=np.asarray(reduced, dtype=np.float32),
-                rcs_phase=np.full(reduced.shape, np.nan, dtype=np.float32),
+                rcs_power=np.asarray(reduced, dtype=self.rcs_power.dtype),
+                rcs_phase=np.full(reduced.shape, np.nan, dtype=self.rcs_phase.dtype),
                 rcs_domain="power_phase",
             )
         # db domain: compute in a log domain, then store as linear so future conversion reproduces the reduced values.
         if domain == "dbke":
             freq_grid = self._frequency_value_to_hz(axis_values[2]).reshape(1, 1, -1, 1)
-            reduced_linear = np.asarray(self.dbke_to_linear(np.asarray(reduced, dtype=float), freq_grid), dtype=np.float32)
+            reduced_linear = np.asarray(
+                self.dbke_to_linear(np.asarray(reduced, dtype=float), freq_grid),
+                dtype=self.rcs_power.dtype,
+            )
         else:
-            reduced_linear = np.asarray(10.0 ** (np.asarray(reduced, dtype=float) / 10.0), dtype=np.float32)
+            reduced_linear = np.asarray(
+                10.0 ** (np.asarray(reduced, dtype=float) / 10.0),
+                dtype=self.rcs_power.dtype,
+            )
         return self._new_grid(
             axis_values[0],
             axis_values[1],
             axis_values[2],
             axis_values[3],
             rcs_power=reduced_linear,
-            rcs_phase=np.full(reduced_linear.shape, np.nan, dtype=np.float32),
+            rcs_phase=np.full(reduced_linear.shape, np.nan, dtype=self.rcs_phase.dtype),
             rcs_domain="power_phase",
         )
 
@@ -1531,7 +1766,7 @@ class RcsGrid:
         el_idx = self._index_for_value(self.elevations, elevation, tol=tol)
         f_idx = self._index_for_value(self.frequencies, frequency, tol=tol)
         p_idx = self._index_for_value(self.polarizations, polarization, tol=tol)
-        return self.rcs[az_idx, el_idx, f_idx, p_idx]
+        return self.rcs_slice((az_idx, el_idx, f_idx, p_idx))
 
     def rcs_to_dbsm(self, rcs_value, eps=1e-12):
         """Convert linear RCS to dBsm.
@@ -1632,8 +1867,8 @@ class RcsGrid:
                 elevations=self.elevations,
                 frequencies=self.frequencies,
                 polarizations=self.polarizations,
-                rcs_power=self.rcs_power.astype(np.float32),
-                rcs_phase=self.rcs_phase.astype(np.float32),
+                rcs_power=self.rcs_power,
+                rcs_phase=self.rcs_phase,
                 rcs_domain="power_phase",
                 power_domain=self.power_domain,
                 source_path=self.source_path if self.source_path is not None else "",
@@ -1650,20 +1885,35 @@ class RcsGrid:
         return path
 
     @classmethod
-    def load(cls, path, mmap_mode: str | None = None):
+    def load(
+        cls,
+        path,
+        mmap_mode: str | None = None,
+        *,
+        allow_legacy_pickle: bool = False,
+    ):
         """Load a grid from a .grim (npz) file.
 
         Args:
             path: Input path, with or without .grim.
-            mmap_mode: Optional numpy mmap mode (e.g., "r") for lazy loading.
+            mmap_mode: Retained for API compatibility. ``.npz`` members cannot
+                be memory-mapped; a warning is emitted when this is supplied.
+            allow_legacy_pickle: Explicitly opt in to legacy object-array files.
+                Never enable this for an untrusted file.
 
         Returns:
             RcsGrid instance loaded from disk.
         """
         if not path.endswith(".grim"):
             path = f"{path}.grim"
+        if mmap_mode is not None:
+            warnings.warn(
+                "mmap_mode has no effect for .grim/.npz archives; arrays are loaded eagerly",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         with open(path, "rb") as f:
-            data = np.load(f, mmap_mode=mmap_mode, allow_pickle=True)
+            data = np.load(f, allow_pickle=bool(allow_legacy_pickle))
 
             units = {}
             if "units" in data:
@@ -1879,6 +2129,15 @@ class RcsGrid:
         if not np.isfinite(grid).any():
             raise ValueError("SS parsed, but no finite scattering samples were found")
 
+        extra = {}
+        if int(data.get("imono", 1)) == 2:
+            if data.get("angle_source") == "observation":
+                extra["fixed_incident_azimuth_deg"] = float(np.asarray(data["az_inc"])[0])
+                extra["fixed_incident_elevation_deg"] = float(np.asarray(data["el_inc"])[0])
+            else:
+                extra["fixed_observation_azimuth_deg"] = float(np.asarray(data["az_obs"])[0])
+                extra["fixed_observation_elevation_deg"] = float(np.asarray(data["el_obs"])[0])
+
         return cls(
             az_axis,
             el_axis,
@@ -1890,7 +2149,11 @@ class RcsGrid:
             history=(f"Loaded Xpatch .ss ({n_sig} signals, {n_freq} freqs, "
                      f"{data.get('angle_source', 'incident')} angles, "
                      f"imono={data.get('imono', '?')}): {path}"),
-            units={"azimuth": "deg", "elevation": "deg", "frequency": "GHz"},
+            units={
+                "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
+                "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
+            },
+            extra=extra,
         )
 
     @classmethod
@@ -2260,7 +2523,10 @@ class RcsGrid:
             rcs_domain="power_phase",
             source_path=path,
             history=f"Loaded theta/phi CSV: {path}",
-            units={"azimuth": "deg", "elevation": "deg", "frequency": "GHz"},
+            units={
+                "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
+                "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
+            },
         )
 
     @classmethod
@@ -2491,7 +2757,10 @@ class RcsGrid:
             rcs_domain="power_phase",
             source_path=path,
             history=f"Loaded theta/phi TXT: {path}",
-            units={"azimuth": "deg", "elevation": "deg", "frequency": freq_unit},
+            units={
+                "azimuth": "deg", "elevation": "deg", "frequency": freq_unit,
+                "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
+            },
         )
 
     @classmethod
@@ -2521,6 +2790,9 @@ class RcsGrid:
         with open(path, "rb") as f:
             raw_first = f.readline()
             first_line = raw_first.decode("ascii", errors="replace").strip()
+            if "=" in first_line:
+                first_key, _, first_value = first_line.partition("=")
+                header[first_key.strip().lower()] = first_value.strip()
 
             # Read header until a line with key 'offset' (case-insensitive).
             while True:
@@ -2559,11 +2831,18 @@ class RcsGrid:
 
             precision = (header.get("precision") or "").strip().lower()
             data_type = (header.get("type") or "complex").strip().lower()
+            order_text = (header.get("order") or "little endian").strip().lower()
+            if "big" in order_text:
+                byte_order = ">"
+            elif "little" in order_text or not order_text:
+                byte_order = "<"
+            else:
+                raise ValueError(f"Unsupported PIO byte order: {order_text!r}")
 
             if precision == "single":
-                dtype = np.float32
+                dtype = np.dtype(f"{byte_order}f4")
             elif precision == "double":
-                dtype = np.float64
+                dtype = np.dtype(f"{byte_order}f8")
             else:
                 raise ValueError(f"Unsupported PIO precision: {precision!r}")
 
@@ -2639,9 +2918,12 @@ class RcsGrid:
             complex_arr = rawdata.astype(np.complex128)
 
         # MATLAB reshape(data, xsize, ysize) is column-major.
-        data_2d = np.asarray(complex_arr, dtype=np.complex64).reshape((int(xsize), int(ysize)), order="F")
+        complex_dtype = np.complex128 if precision == "double" else np.complex64
+        data_2d = np.asarray(complex_arr, dtype=complex_dtype).reshape(
+            (int(xsize), int(ysize)), order="F"
+        )
 
-        if not (xname in ("azimuth", "position") or yname == "frequency"):
+        if not (xname in ("azimuth", "position") and yname == "frequency"):
             raise ValueError(
                 f"Unsupported PIO axes (xname={xname!r}, yname={yname!r}); "
                 "expected azimuth/position vs frequency"
@@ -2672,7 +2954,7 @@ class RcsGrid:
         elevations = np.asarray([0.0], dtype=float)
         polarizations = np.asarray([pol], dtype=object)
 
-        rcs_arr = data_2d[:, np.newaxis, :, np.newaxis].astype(np.complex64)
+        rcs_arr = data_2d[:, np.newaxis, :, np.newaxis]
 
         prior_log = header.get("log") or footer.get("log") or ""
         history_parts = [f"Loaded Pioneer file: {path}"]
@@ -2689,15 +2971,18 @@ class RcsGrid:
             rcs_domain="complex_amplitude",
             source_path=str(path),
             history=history,
-            units={"azimuth": "deg", "elevation": "deg", "frequency": "GHz"},
+            units={
+                "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
+                "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
+            },
         )
 
     def save_pio(self, path, *, el_idx=None, pol_idx=None, precision="single"):
         """Save a single (elevation, polarization) slice as a Pioneer .pio file.
 
         Round-trips with `load_pio`: a grid loaded from a .pio file and saved
-        back via this method produces the same complex samples (within float32
-        precision) on reload.
+        back via this method produces the same complex samples within the
+        selected on-disk precision.
 
         Args:
             path: Output path. `.pio` is appended if missing.
@@ -2732,10 +3017,10 @@ class RcsGrid:
 
         precision_l = (precision or "single").strip().lower()
         if precision_l == "single":
-            dtype = np.float32
+            dtype = np.dtype("<f4")
             precision_label = "Single"
         elif precision_l == "double":
-            dtype = np.float64
+            dtype = np.dtype("<f8")
             precision_label = "Double"
         else:
             raise ValueError(f"save_pio: unsupported precision {precision!r}")
@@ -2746,7 +3031,18 @@ class RcsGrid:
         ysize = int(frequencies.size)
 
         # complex_slice[i, j] = complex sample at azimuths[i], frequencies[j]
-        complex_slice = np.asarray(self.rcs[:, el_idx, :, pol_idx], dtype=np.complex128)
+        power_slice = self.rcs_power[:, el_idx, :, pol_idx]
+        phase_slice = self.rcs_phase[:, el_idx, :, pol_idx]
+        phase_missing = np.isfinite(power_slice) & ~np.isfinite(phase_slice)
+        if np.any(phase_missing):
+            raise ValueError(
+                "save_pio: complex PIO export requires phase for every finite-power "
+                f"sample; {int(np.count_nonzero(phase_missing))} sample(s) lack phase"
+            )
+        complex_slice = np.asarray(
+            self.rcs_slice((slice(None), el_idx, slice(None), pol_idx)),
+            dtype=np.complex128,
+        )
         if complex_slice.shape != (xsize, ysize):
             raise ValueError(
                 f"save_pio: slice shape {complex_slice.shape} != ({xsize}, {ysize})"

@@ -1068,10 +1068,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
         settings_layout.addWidget(QLabel("Recon"), row, 0)
         combo_isar_recon = QComboBox()
-        combo_isar_recon.addItems(["FFT (fast)", "Sparse L1 (clean)"])
+        combo_isar_recon.addItems([
+            "Fast PFA (FFT)",
+            "Accurate PFA (Cartesian)",
+            "Sparse L1 (clean)",
+        ])
         combo_isar_recon.setToolTip(
-            "FFT: matched-filter imaging — instant, but point-spread sidelobes "
-            "smear scatterers into crosses and haze.\n"
+            "Fast PFA: keystone-corrected matched-filter imaging — quickest, "
+            "but residual range curvature can defocus off-centre scatterers.\n"
+            "Accurate PFA: regrids both Cartesian wavenumber axes before the FFT; "
+            "better focus for wider apertures and targets away from the phase centre.\n"
             "Sparse L1: basis-pursuit-denoise reconstruction (van den Berg & "
             "Friedlander 2008) — solves for the fewest scatterers that explain "
             "the data, so sidelobes vanish and the object outline stands out. "

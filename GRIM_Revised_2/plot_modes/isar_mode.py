@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+import os
 import time
 
 import numpy as np
@@ -10,21 +12,24 @@ except ImportError:  # pragma: no cover - scipy is normally present
     _sp_fft = None
 
 
+_FFT_WORKERS = int(os.environ.get("GRIM_FFT_WORKERS", "-1"))
+
+
 def _ifft(a: np.ndarray, n: int, axis: int) -> np.ndarray:
     if _sp_fft is not None:
-        return _sp_fft.ifft(a, n=n, axis=axis, workers=-1)
+        return _sp_fft.ifft(a, n=n, axis=axis, workers=_FFT_WORKERS)
     return np.fft.ifft(a, n=n, axis=axis)
 
 
 def _fft2(a: np.ndarray) -> np.ndarray:
     if _sp_fft is not None:
-        return _sp_fft.fft2(a, workers=-1)
+        return _sp_fft.fft2(a, workers=_FFT_WORKERS)
     return np.fft.fft2(a)
 
 
 def _ifft2(a: np.ndarray) -> np.ndarray:
     if _sp_fft is not None:
-        return _sp_fft.ifft2(a, workers=-1)
+        return _sp_fft.ifft2(a, workers=_FFT_WORKERS)
     return np.fft.ifft2(a)
 
 
@@ -199,6 +204,12 @@ def _split_into_bands(indices: list[int]) -> list[list[int]]:
     return bands
 
 
+def _unwrap_degrees(values: np.ndarray, center_deg: float) -> np.ndarray:
+    """Return angles on the continuous branch centred on ``center_deg``."""
+    values = np.asarray(values, dtype=float)
+    return center_deg + np.mod(values - center_deg + 180.0, 360.0) - 180.0
+
+
 
 
 def _window_array(name: str, n: int) -> np.ndarray:
@@ -254,6 +265,9 @@ def _compute_band_polar_format(
     freq_hz: np.ndarray,
     df: float,
     unit_scale: float,
+    *,
+    sample_weights: np.ndarray | None = None,
+    elevation_deg: float = 0.0,
 ):
     """Range-Doppler / Polar Format ISAR image (decoupled 2-D IFFT) — the
     industry-standard formation used by FFT-based ISAR tools.
@@ -284,6 +298,15 @@ def _compute_band_polar_format(
     win_freq = _window_array(window_name, n_freq).astype(np.float32)
     rcs_windowed = np.asarray(rcs_polar, dtype=np.complex64) * win_az[:, None]
     rcs_windowed *= win_freq[None, :]
+    if sample_weights is None:
+        coherent_gain = float(win_az.sum()) * float(win_freq.sum())
+    else:
+        weights = np.asarray(sample_weights, dtype=np.float32)
+        if weights.shape != rcs_windowed.shape:
+            raise ValueError("ISAR sample weights must match the phase-history shape")
+        coherent_gain = float(np.sum(weights * win_az[:, None] * win_freq[None, :]))
+    if coherent_gain <= 0.0:
+        return "ISAR selected data has zero weighted aperture coverage."
 
     # Pad to fast FFT lengths: primes (e.g. 1601 frequencies) fall back to
     # Bluestein and are several times slower; the display floor keeps small
@@ -298,9 +321,15 @@ def _compute_band_polar_format(
     isar_complex = np.fft.fftshift(isar_complex, axes=(0, 1))
     # Undo the padded 1/(n_az_fft·n_freq_fft) so amplitudes match the
     # canonical unpadded ifft2 normalisation.
-    isar_complex *= (n_az_fft * n_freq_fft) / float(n_az * n_freq)
+    # Normalize by the actual coherent aperture gain, not merely the number
+    # of samples. This keeps a unit point target at 0 dB for every taper and
+    # when gridding/missing-data masks reduce the usable k-space support.
+    isar_complex *= (n_az_fft * n_freq_fft) / coherent_gain
 
-    x_range, y_range = _scene_axes(n_az_fft, n_freq_fft, theta, freq_hz, df, unit_scale)
+    x_range, y_range = _scene_axes(
+        n_az_fft, n_freq_fft, theta, freq_hz, df, unit_scale,
+        elevation_deg=elevation_deg,
+    )
     return isar_complex, x_range, y_range
 
 
@@ -311,20 +340,38 @@ def _scene_axes(
     freq_hz: np.ndarray,
     df: float,
     unit_scale: float,
+    *,
+    elevation_deg: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Cross-range / range axes of the (padded, fftshifted) image grid —
     shared by the FFT and sparse reconstructions, which image onto the same
     k-space geometry."""
     c0 = 299_792_458.0
+    projection = abs(float(np.cos(np.deg2rad(elevation_deg))))
+    if projection < 1.0e-6:
+        raise ValueError(
+            "Azimuth ISAR is degenerate at elevation ±90° for a horizontal 2-D image plane."
+        )
     dtheta = float(np.mean(np.diff(theta)))
     f_c = float(np.mean(freq_hz))
-    y_range = np.fft.fftshift(np.fft.fftfreq(n_freq_fft, d=df)) * (c0 / 2.0) * unit_scale
+    y_range = (
+        np.fft.fftshift(np.fft.fftfreq(n_freq_fft, d=df))
+        * (c0 / (2.0 * projection)) * unit_scale
+    )
     cross_freq_grid_d = (np.arange(n_az_fft) - n_az_fft // 2) / (n_az_fft * dtheta)
-    x_range = cross_freq_grid_d * (c0 / (2.0 * max(f_c, 1.0))) * unit_scale
+    x_range = (
+        cross_freq_grid_d
+        * (c0 / (2.0 * max(f_c, 1.0) * projection)) * unit_scale
+    )
     return x_range, y_range
 
 
-def _pfa_regrid_azimuth(S: np.ndarray, theta: np.ndarray, freq_hz: np.ndarray) -> np.ndarray:
+def _pfa_regrid_azimuth(
+    S: np.ndarray,
+    theta: np.ndarray,
+    freq_hz: np.ndarray,
+    target_q: np.ndarray | None = None,
+) -> np.ndarray:
     """Keystone / polar-format regrid: per frequency row, resample the azimuth
     axis so the cross-range wavenumber k_x = 2·k_n·sin(ψ) (ψ measured from the
     aperture center) lands on the SAME uniform grid at every frequency.
@@ -341,17 +388,115 @@ def _pfa_regrid_azimuth(S: np.ndarray, theta: np.ndarray, freq_hz: np.ndarray) -
     """
     theta = np.asarray(theta, dtype=float)
     psi = theta - float(np.mean(theta))
+    if target_q is None:
+        target_q = psi
+    else:
+        target_q = np.asarray(target_q, dtype=float)
     k_ratio = np.asarray(freq_hz, dtype=float) / max(float(np.mean(freq_hz)), 1.0)
     sin_psi = np.sin(psi)
     out = np.empty_like(S)
     for n in range(S.shape[1]):
         src = k_ratio[n] * sin_psi
         row = S[:, n]
-        out[:, n] = (
-            np.interp(psi, src, row.real, left=0.0, right=0.0)
-            + 1j * np.interp(psi, src, row.imag, left=0.0, right=0.0)
-        )
+        if np.iscomplexobj(row):
+            out[:, n] = (
+                np.interp(target_q, src, row.real, left=0.0, right=0.0)
+                + 1j * np.interp(target_q, src, row.imag, left=0.0, right=0.0)
+            )
+        else:
+            out[:, n] = np.interp(target_q, src, row, left=0.0, right=0.0)
     return out
+
+
+def _interp_uniform_axis0(data: np.ndarray, coordinates: np.ndarray) -> np.ndarray:
+    """Four-point interpolation along axis 0 at per-column sample coordinates.
+
+    Cubic Lagrange interpolation is used in the interior and linear at the
+    two boundary intervals. Unlike phase/angle interpolation, operating on
+    the complex field is continuous through phase wraps.
+    """
+    data = np.asarray(data)
+    coordinates = np.asarray(coordinates, dtype=float)
+    if data.ndim != 2 or coordinates.ndim != 2 or data.shape[1] != coordinates.shape[1]:
+        raise ValueError("Uniform interpolation expects (samples, columns) arrays")
+    n = data.shape[0]
+    valid = (coordinates >= 0.0) & (coordinates <= n - 1)
+    base = np.clip(np.floor(coordinates).astype(np.int64), 0, n - 2)
+    t = coordinates - base
+    if data.dtype in (np.complex64, np.float32):
+        t = t.astype(np.float32)
+    y0 = np.take_along_axis(data, base, axis=0)
+    y1 = np.take_along_axis(data, base + 1, axis=0)
+    out = y0 + (y1 - y0) * t
+    interior = (base >= 1) & (base <= n - 3)
+    if np.any(interior):
+        ym1 = np.take_along_axis(data, np.clip(base - 1, 0, n - 1), axis=0)
+        y2 = np.take_along_axis(data, np.clip(base + 2, 0, n - 1), axis=0)
+        wm1 = -t * (t - 1.0) * (t - 2.0) / 6.0
+        w0 = (t + 1.0) * (t - 1.0) * (t - 2.0) / 2.0
+        w1 = -(t + 1.0) * t * (t - 2.0) / 2.0
+        w2 = (t + 1.0) * t * (t - 1.0) / 6.0
+        cubic = ym1 * wm1 + y0 * w0 + y1 * w1 + y2 * w2
+        out[interior] = cubic[interior]
+    out[~valid] = 0
+    return out
+
+
+def _pfa_regrid_cartesian(
+    S: np.ndarray,
+    theta: np.ndarray,
+    freq_hz: np.ndarray,
+    *,
+    row_block: int = 128,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Regrid polar samples onto an inscribed uniform Cartesian k-space grid.
+
+    The fast keystone path makes ``U = f_c q`` uniform but leaves
+    ``V = sqrt(f**2-U**2)`` coupled to cross-range. This second interpolation
+    makes V uniform as well, removing the O(psi**2) range-curvature defocus.
+    The grid is inscribed in the measured polar support so no artificial
+    zero-filled wedge changes its coherent gain.
+    """
+    theta = np.asarray(theta, dtype=float)
+    freq_hz = np.asarray(freq_hz, dtype=float)
+    if theta.size < 2 or freq_hz.size < 2:
+        raise ValueError("Accurate PFA requires at least two azimuth and frequency samples")
+    psi = theta - float(np.mean(theta))
+    if float(psi[-1] - psi[0]) >= np.pi / 2.0:
+        raise ValueError("Accurate Cartesian PFA requires an aperture narrower than 90°")
+    fc = float(np.mean(freq_hz))
+    ratio_min = float(freq_hz[0] / fc)
+    q = np.linspace(ratio_min * np.sin(psi[0]), ratio_min * np.sin(psi[-1]), theta.size)
+    az_grid = np.empty_like(S)
+    dpsi = float(np.mean(np.diff(psi)))
+    ratios = freq_hz / fc
+    # Invert q=(f/fc)sin(psi) analytically, then interpolate the complex
+    # field with a four-point stencil. This avoids the amplitude droop of
+    # piecewise-linear gridding when phase advances appreciably per sample.
+    for start in range(0, freq_hz.size, max(int(row_block), 1)):
+        stop = min(start + max(int(row_block), 1), freq_hz.size)
+        arg = q[:, None] / ratios[None, start:stop]
+        required_psi = np.arcsin(np.clip(arg, -1.0, 1.0))
+        coordinates = (required_psi - psi[0]) / dpsi
+        block = _interp_uniform_axis0(np.asarray(S)[:, start:stop], coordinates)
+        block[np.abs(arg) > 1.0] = 0
+        az_grid[:, start:stop] = block
+
+    u = fc * q
+    max_abs_u = float(np.max(np.abs(u)))
+    v_max_sq = float(freq_hz[-1] ** 2 - max_abs_u**2)
+    if v_max_sq <= float(freq_hz[0] ** 2):
+        raise ValueError("Selected aperture/band has no common Cartesian PFA support")
+    v = np.linspace(float(freq_hz[0]), np.sqrt(v_max_sq), freq_hz.size)
+    out = np.empty_like(az_grid)
+    for start in range(0, q.size, max(int(row_block), 1)):
+        stop = min(start + max(int(row_block), 1), q.size)
+        required_f = np.sqrt(v[None, :] ** 2 + u[start:stop, None] ** 2)
+        coordinates = (required_f - freq_hz[0]) / float(np.mean(np.diff(freq_hz)))
+        out[start:stop] = _interp_uniform_axis0(
+            az_grid[start:stop].T, coordinates.T
+        ).T
+    return out, q, v
 
 
 def _soft_threshold_complex(x: np.ndarray, t: float) -> np.ndarray:
@@ -366,6 +511,43 @@ def _soft_threshold_complex(x: np.ndarray, t: float) -> np.ndarray:
 # seconds per solve; steer the user to a sub-aperture / sub-band instead.
 _SPARSE_MAX_PIXELS = 16_000_000
 
+# Keep only reusable, post-gridding phase histories. The byte bound prevents
+# cine mode from retaining several platform-sized arrays. Set to zero to
+# disable, or tune for a workstation with GRIM_ISAR_CACHE_MB.
+_PREPROCESS_CACHE: OrderedDict[tuple, dict] = OrderedDict()
+_PREPROCESS_CACHE_LIMIT = max(int(os.environ.get("GRIM_ISAR_CACHE_MB", "512")), 0) * 1024**2
+_PREPROCESS_CACHE_BYTES = 0
+
+
+def _array_token(values) -> tuple:
+    arr = np.ascontiguousarray(values)
+    return (arr.size, hash(arr.view(np.uint8).tobytes()))
+
+
+def _preprocess_cache_get(key: tuple):
+    value = _PREPROCESS_CACHE.get(key)
+    if value is not None:
+        _PREPROCESS_CACHE.move_to_end(key)
+    return value
+
+
+def _preprocess_cache_put(key: tuple, value: dict) -> None:
+    global _PREPROCESS_CACHE_BYTES
+    if _PREPROCESS_CACHE_LIMIT <= 0:
+        return
+    nbytes = sum(v.nbytes for v in value.values() if isinstance(v, np.ndarray))
+    if nbytes > _PREPROCESS_CACHE_LIMIT // 2:
+        return
+    previous = _PREPROCESS_CACHE.pop(key, None)
+    if previous is not None:
+        _PREPROCESS_CACHE_BYTES -= int(previous.get("_cache_nbytes", 0))
+    value["_cache_nbytes"] = nbytes
+    _PREPROCESS_CACHE[key] = value
+    _PREPROCESS_CACHE_BYTES += nbytes
+    while _PREPROCESS_CACHE_BYTES > _PREPROCESS_CACHE_LIMIT and _PREPROCESS_CACHE:
+        _, evicted = _PREPROCESS_CACHE.popitem(last=False)
+        _PREPROCESS_CACHE_BYTES -= int(evicted.get("_cache_nbytes", 0))
+
 
 def _compute_band_sparse_l1(
     rcs_polar: np.ndarray,
@@ -375,6 +557,11 @@ def _compute_band_sparse_l1(
     unit_scale: float,
     strength: float,
     n_iters: int,
+    *,
+    sample_weights: np.ndarray | None = None,
+    elevation_deg: float = 0.0,
+    cancel_check=None,
+    convergence_tol: float = 1.0e-4,
 ):
     """Sparse (ℓ1-regularised) ISAR image — the compressed-sensing / basis
     pursuit denoise formulation (van den Berg & Friedlander 2008, "Probing the
@@ -414,6 +601,13 @@ def _compute_band_sparse_l1(
         )
 
     S = np.ascontiguousarray(rcs_polar, dtype=np.complex64)
+    if sample_weights is None:
+        weights = np.ones(S.shape, dtype=np.float32)
+    else:
+        weights = np.clip(np.asarray(sample_weights, dtype=np.float32), 0.0, 1.0)
+        if weights.shape != S.shape:
+            raise ValueError("Sparse ISAR sample weights must match the phase-history shape")
+    weights_sq = weights * weights
 
     def forward(X: np.ndarray) -> np.ndarray:
         # image -> predicted phase history at the measured (θ, f) samples
@@ -424,9 +618,10 @@ def _compute_band_sparse_l1(
         Z[:n_az, :n_freq] = y
         return np.fft.fftshift(_ifft2(Z)).astype(np.complex64) * np.float32(n_pad)
 
-    # Lipschitz constant of ∇½‖AX−S‖²: A·Aᴴ = n_pad·I on the observed set.
+    # The sampling mask is part of the measurement operator. Missing samples
+    # must not be interpreted as measured zero fields.
     lip = float(n_pad)
-    matched = adjoint(S)
+    matched = adjoint(weights_sq * S)
     lam = float(strength) * float(np.abs(matched).max())
     if lam <= 0.0:
         return "Sparse L1: selected data is identically zero."
@@ -434,11 +629,20 @@ def _compute_band_sparse_l1(
     X = np.zeros((n_az_fft, n_freq_fft), dtype=np.complex64)
     Y = X
     t_momentum = 1.0
-    for _ in range(int(n_iters)):
-        grad = adjoint(forward(Y) - S)
+    iterations_used = 0
+    for iteration in range(int(n_iters)):
+        if cancel_check is not None and cancel_check():
+            return "ISAR computation superseded."
+        grad = adjoint(weights_sq * (forward(Y) - S))
         X_new = _soft_threshold_complex(Y - grad / np.float32(lip), lam / lip)
         t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_momentum**2))
         Y = X_new + np.float32((t_momentum - 1.0) / t_new) * (X_new - X)
+        iterations_used = iteration + 1
+        if iterations_used >= 10 and iterations_used % 5 == 0:
+            rel_change = float(np.linalg.norm(X_new - X)) / max(float(np.linalg.norm(X_new)), 1e-30)
+            if rel_change <= float(convergence_tol):
+                X = X_new
+                break
         X, t_momentum = X_new, t_new
 
     # Debias (standard companion step to BPDN, cf. §1 of the referenced
@@ -451,11 +655,11 @@ def _compute_band_sparse_l1(
     support = np.abs(X) > 0
     if support.any():
         def normal_op(v: np.ndarray) -> np.ndarray:
-            out = adjoint(forward(v))
+            out = adjoint(weights_sq * forward(v))
             out[~support] = 0
             return out
 
-        b = adjoint(S)
+        b = adjoint(weights_sq * S)
         b[~support] = 0
         X[~support] = 0
         r = b - normal_op(X)
@@ -463,6 +667,8 @@ def _compute_band_sparse_l1(
         rs_old = float(np.vdot(r, r).real)
         b_norm = float(np.vdot(b, b).real)
         for _ in range(30):
+            if cancel_check is not None and cancel_check():
+                return "ISAR computation superseded."
             if rs_old <= 1e-12 * max(b_norm, 1e-30):
                 break
             Ap = normal_op(p)
@@ -477,8 +683,11 @@ def _compute_band_sparse_l1(
     # No rescale needed: a unit-amplitude scatterer produces |S| = 1 under the
     # forward model, so the recovered X IS the physical reflectivity (≈ 1 →
     # 0 dB), matching the FFT path's normalisation convention.
-    x_range, y_range = _scene_axes(n_az_fft, n_freq_fft, theta, freq_hz, df, unit_scale)
-    return X, x_range, y_range
+    x_range, y_range = _scene_axes(
+        n_az_fft, n_freq_fft, theta, freq_hz, df, unit_scale,
+        elevation_deg=elevation_deg,
+    )
+    return X, x_range, y_range, iterations_used
 
 
 def _compute_band(
@@ -493,72 +702,126 @@ def _compute_band(
     unit_scale: float,
     *,
     az_target_deg: np.ndarray | None = None,
+    az_center_deg: float | None = None,
     recon: str = "fft",
     l1_strength: float = 0.05,
     l1_iters: int = 100,
+    elevation_deg: float = 0.0,
+    cancel_check=None,
 ):
-    band_az_values = dataset.azimuths[band_az_indices]
+    band_az_values = np.asarray(dataset.azimuths[band_az_indices], dtype=float)
+    if az_center_deg is not None:
+        band_az_values = _unwrap_degrees(band_az_values, az_center_deg)
     order = np.argsort(band_az_values)
     sorted_band_indices = [band_az_indices[i] for i in order]
     az_values = band_az_values[order].astype(float)
-
-    # Slice power/phase FIRST, then build complex only for the slice. The
-    # dataset's `rcs` property reconstructs the ENTIRE complex grid (sqrt+exp
-    # over every sample) on each access — ~2 GB and seconds of work for a
-    # 0.01°-step platform file, almost all of it thrown away after slicing.
-    sel = np.ix_(sorted_band_indices, [elev_idx], freq_indices_sorted, [pol_idx])
-    power_slice = dataset.rcs_power[sel][:, 0, :, 0]
-    phase_slice = dataset.rcs_phase[sel][:, 0, :, 0]
-    if not np.any(np.isfinite(phase_slice)):
-        return "ISAR imaging requires phase-aware samples; selected data has no finite rcs_phase."
-    rcs_slice = dataset._complex_from_power_phase(power_slice, phase_slice)
-    del power_slice, phase_slice
-    rcs_slice = np.nan_to_num(rcs_slice, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-
-    if az_target_deg is not None:
-        # User explicitly asked for a uniform azimuth grid. Use periodic
-        # interpolation (or linear w/ zero-fill for partial apertures).
-        az_uniform, rcs_slice = _resample_azimuth_to_target(
-            az_values, rcs_slice, np.asarray(az_target_deg, dtype=float), axis=0
-        )
-        if az_uniform.size < 2:
-            return "ISAR azimuth target grid must have ≥2 samples."
-        az_nonuniformity = 0.0
-    else:
-        theta_native = np.deg2rad(az_values)
-        if not np.all(np.isfinite(theta_native)) or np.any(np.diff(theta_native) <= 0):
-            return "Azimuth samples must be strictly increasing within a band."
-        # Auto-regularise non-uniform input — the FFT requires uniform
-        # sampling, and it keeps the scene-extent formulas well-defined.
-        az_uniform, rcs_slice, az_nonuniformity = _resample_complex_uniform(
-            az_values, rcs_slice, axis=0
-        )
-
-    freq_uniform, rcs_slice, fr_nonuniformity = _resample_complex_uniform(
-        freq_hz, rcs_slice, axis=1
+    target_token = None if az_target_deg is None else _array_token(np.asarray(az_target_deg))
+    preprocess_mode = "accurate" if recon == "accurate" else "fast"
+    cache_key = (
+        id(dataset), _array_token(np.asarray(sorted_band_indices, dtype=np.int64)),
+        _array_token(np.asarray(freq_indices_sorted, dtype=np.int64)), elev_idx, pol_idx,
+        target_token, az_center_deg, preprocess_mode,
     )
-    theta = np.deg2rad(az_uniform)
-    if freq_uniform.size >= 2:
-        df_eff = float(np.mean(np.diff(freq_uniform)))
-    else:
-        df_eff = df
-    az_values = az_uniform
+    prep = _preprocess_cache_get(cache_key)
+    cache_hit = prep is not None
+    if prep is None:
+        if cancel_check is not None and cancel_check():
+            return "ISAR computation superseded."
+        # Slice first; constructing the whole complex grid can require GBs.
+        sel = np.ix_(sorted_band_indices, [elev_idx], freq_indices_sorted, [pol_idx])
+        rcs_slice = dataset.rcs_slice(sel)[:, 0, :, 0]
+        valid = np.isfinite(rcs_slice)
+        if not np.any(valid):
+            return "ISAR imaging requires phase-aware samples; selected data has no finite complex phase history."
+        weights = valid.astype(np.float32)
+        rcs_slice = np.nan_to_num(
+            rcs_slice, copy=False, nan=0.0, posinf=0.0, neginf=0.0
+        ).astype(np.complex64, copy=False)
 
-    # True polar-format (keystone) correction for BOTH recon modes: at wide
-    # fractional bandwidth (1–18 GHz is >160%) the uncorrected decoupled model
-    # scales a scatterer's cross-range position with frequency (±90%!), which
-    # smears everything into radial streaks. Requires sin(ψ) monotonic — the
-    # composite path keeps sub-apertures well below 90°.
-    if float(theta.max() - theta.min()) < np.pi / 2.0:
-        rcs_slice = _pfa_regrid_azimuth(rcs_slice, theta, freq_uniform)
+        if az_target_deg is not None:
+            target = np.asarray(az_target_deg, dtype=float)
+            az_uniform, rcs_slice = _resample_azimuth_to_target(
+                az_values, rcs_slice, target, axis=0
+            )
+            _, weights = _resample_azimuth_to_target(az_values, weights, target, axis=0)
+            if az_uniform.size < 2:
+                return "ISAR azimuth target grid must have ≥2 samples."
+            az_nonuniformity = 0.0
+        else:
+            theta_native = np.deg2rad(az_values)
+            if not np.all(np.isfinite(theta_native)) or np.any(np.diff(theta_native) <= 0):
+                return "Azimuth samples must be strictly increasing within a band."
+            az_uniform, rcs_slice, az_nonuniformity = _resample_complex_uniform(
+                az_values, rcs_slice, axis=0
+            )
+            _, weights, _ = _resample_complex_uniform(az_values, weights, axis=0)
+
+        freq_uniform, rcs_slice, fr_nonuniformity = _resample_complex_uniform(
+            freq_hz, rcs_slice, axis=1
+        )
+        _, weights, _ = _resample_complex_uniform(freq_hz, weights, axis=1)
+        theta = np.deg2rad(az_uniform)
+
+        if float(theta.max() - theta.min()) < np.pi / 2.0:
+            if preprocess_mode == "accurate":
+                theta_input = theta.copy()
+                freq_input = np.asarray(freq_uniform, dtype=float).copy()
+                rcs_slice, theta, freq_uniform = _pfa_regrid_cartesian(
+                    rcs_slice, theta_input, freq_input
+                )
+                weights, _, _ = _pfa_regrid_cartesian(weights, theta_input, freq_input)
+            else:
+                rcs_slice = _pfa_regrid_azimuth(rcs_slice, theta, freq_uniform)
+                weights = _pfa_regrid_azimuth(weights, theta, freq_uniform)
+        elif preprocess_mode == "accurate":
+            return "Accurate Cartesian PFA requires an aperture narrower than 90°."
+
+        weights = np.clip(np.asarray(weights, dtype=np.float32), 0.0, 1.0)
+        observed = np.zeros_like(rcs_slice, dtype=np.complex64)
+        np.divide(rcs_slice, weights, out=observed, where=weights > 1.0e-6)
+        df_eff = float(np.mean(np.diff(freq_uniform)))
+        prep = {
+            "observed": observed,
+            "weights": weights,
+            "theta": np.asarray(theta, dtype=float),
+            "freq": np.asarray(freq_uniform, dtype=float),
+            "df": df_eff,
+            "az_values": np.asarray(az_uniform, dtype=float),
+            "az_nonuniformity": float(az_nonuniformity),
+            "freq_nonuniformity": float(fr_nonuniformity),
+            "coverage": float(np.mean(weights)),
+        }
+        _preprocess_cache_put(cache_key, prep)
+
+    observed = prep["observed"]
+    weights = prep["weights"]
+    theta = prep["theta"]
+    freq_uniform = prep["freq"]
+    df_eff = float(prep["df"])
+    az_values = prep["az_values"]
+    az_nonuniformity = float(prep["az_nonuniformity"])
+    fr_nonuniformity = float(prep["freq_nonuniformity"])
+    projection = abs(float(np.cos(np.deg2rad(elevation_deg))))
+    theta_span = float(theta[-1] - theta[0])
+    dtheta_eff = float(np.mean(np.diff(theta)))
+    bandwidth = float(freq_uniform[-1] - freq_uniform[0])
+    fc_eff = float(np.mean(freq_uniform))
+    sampling = {
+        "range_resolution": 299_792_458.0 / (2.0 * projection * bandwidth) * unit_scale,
+        "cross_resolution": 299_792_458.0 / (2.0 * projection * fc_eff * theta_span) * unit_scale,
+        "range_half_extent": 299_792_458.0 / (4.0 * projection * df_eff) * unit_scale,
+        "cross_half_extent": 299_792_458.0 / (4.0 * projection * fc_eff * dtheta_eff) * unit_scale,
+    }
 
     if recon == "sparse":
         out = _compute_band_sparse_l1(
-            rcs_slice, theta, freq_uniform, df_eff, unit_scale, l1_strength, l1_iters
+            observed, theta, freq_uniform, df_eff, unit_scale, l1_strength, l1_iters,
+            sample_weights=weights, elevation_deg=elevation_deg,
+            cancel_check=cancel_check,
         )
         if isinstance(out, str):
             return out
-        complex_image, x_range, y_range = out
+        complex_image, x_range, y_range, iterations_used = out
         magnitude = np.abs(complex_image)
         peak = float(magnitude.max())
         if peak > 0.0:
@@ -566,9 +829,13 @@ def _compute_band(
             # peak−120 dB so the dB conversion stays finite for display.
             np.maximum(magnitude, peak * 1e-6, out=magnitude)
     else:
-        complex_image, x_range, y_range = _compute_band_polar_format(
-            window_name, rcs_slice, theta, freq_uniform, df_eff, unit_scale
+        out = _compute_band_polar_format(
+            window_name, observed * weights, theta, freq_uniform, df_eff, unit_scale,
+            sample_weights=weights, elevation_deg=elevation_deg,
         )
+        if isinstance(out, str):
+            return out
+        complex_image, x_range, y_range = out
         magnitude = np.abs(complex_image)
 
     # Sanity-check the computed scene extent.
@@ -599,6 +866,11 @@ def _compute_band(
         "y_range": y_range,
         "az_nonuniformity": az_nonuniformity,
         "freq_nonuniformity": fr_nonuniformity,
+        "phase_coverage": float(prep["coverage"]),
+        "preprocess_cache_hit": cache_hit,
+        "sparse_iterations": iterations_used if recon == "sparse" else None,
+        "accurate_pfa": recon == "accurate",
+        "sampling": sampling,
     }
 
 
@@ -623,6 +895,9 @@ def _compute_band_composite(
     recon: str,
     l1_strength: float,
     l1_iters: int,
+    elevation_deg: float,
+    az_center_deg: float | None = None,
+    cancel_check=None,
 ):
     """Wide-aperture image as an incoherent composite of narrow looks — the
     processing that paints the full object OUTLINE from a 360° turntable
@@ -634,6 +909,8 @@ def _compute_band_composite(
     pixel keeps its brightest look."""
     az_all = np.asarray(dataset.azimuths, dtype=float)
     az_vals = az_all[band_az_indices]
+    if az_center_deg is not None:
+        az_vals = _unwrap_degrees(az_vals, az_center_deg)
     order = np.argsort(az_vals)
     idx_sorted = [band_az_indices[i] for i in order]
     az_sorted = az_vals[order]
@@ -645,6 +922,8 @@ def _compute_band_composite(
     az_nonuni = 0.0
     fr_nonuni = 0.0
     for chunk in chunks:
+        if cancel_check is not None and cancel_check():
+            return "ISAR computation superseded."
         chunk = [int(c) for c in chunk]
         if len(chunk) < 2:
             continue
@@ -653,10 +932,15 @@ def _compute_band_composite(
             freq_hz, df, unit_scale,
             az_target_deg=None, recon=recon,
             l1_strength=l1_strength, l1_iters=l1_iters,
+            az_center_deg=az_center_deg, elevation_deg=elevation_deg,
+            cancel_check=cancel_check,
         )
         if isinstance(r, str):
             return r
-        theta_c = np.deg2rad(float(np.mean(az_all[chunk])))
+        chunk_az = az_all[chunk]
+        if az_center_deg is not None:
+            chunk_az = _unwrap_degrees(chunk_az, az_center_deg)
+        theta_c = np.deg2rad(float(np.mean(chunk_az)))
         subs.append((r, theta_c))
         az_nonuni = max(az_nonuni, r.get("az_nonuniformity", 0.0))
         fr_nonuni = max(fr_nonuni, r.get("freq_nonuniformity", 0.0))
@@ -721,8 +1005,13 @@ def compute_bands(params: dict):
     Returns (band_results, elapsed_seconds), or an error-message string."""
     t_start = time.perf_counter()
     band_results = []
+    cancel_check = params.get("cancel_check")
     for band_az_indices in params["bands"]:
+        if cancel_check is not None and cancel_check():
+            return "ISAR computation superseded."
         az_band = np.asarray(params["dataset"].azimuths, dtype=float)[band_az_indices]
+        if params.get("az_center_deg") is not None:
+            az_band = _unwrap_degrees(az_band, params["az_center_deg"])
         span = float(az_band.max() - az_band.min())
         if span > _COMPOSITE_SPAN_DEG:
             # A single coherent look is invalid this wide — build the
@@ -741,6 +1030,9 @@ def compute_bands(params: dict):
                 recon=params.get("recon", "fft"),
                 l1_strength=params.get("l1_strength", 0.05),
                 l1_iters=params.get("l1_iters", 100),
+                elevation_deg=params.get("elevation_deg", 0.0),
+                az_center_deg=params.get("az_center_deg"),
+                cancel_check=cancel_check,
             )
         else:
             result = _compute_band(
@@ -754,9 +1046,12 @@ def compute_bands(params: dict):
                 params["df"],
                 params["unit_scale"],
                 az_target_deg=params["az_target_deg"],
+                az_center_deg=params.get("az_center_deg"),
                 recon=params.get("recon", "fft"),
                 l1_strength=params.get("l1_strength", 0.05),
                 l1_iters=params.get("l1_iters", 100),
+                elevation_deg=params.get("elevation_deg", 0.0),
+                cancel_check=cancel_check,
             )
         if isinstance(result, str):
             return result
@@ -771,10 +1066,98 @@ def compute_bands(params: dict):
         if params.get("flip_y"):
             result["magnitude"] = result["magnitude"][:, ::-1]
             result["y_range"] = -np.asarray(result["y_range"])[::-1]
-        # Decimation is part of the heavy work — do it off the GUI thread.
-        result["magnitude"] = _decimate_display_max(result["magnitude"])
+        # GUI rendering can reduce oversized images after formation; headless
+        # callers keep the full numerical grid by disabling this parameter.
+        if params.get("decimate_display", True):
+            result["magnitude"] = _decimate_display_max(result["magnitude"])
         band_results.append(result)
     return band_results, time.perf_counter() - t_start
+
+
+def form_isar(
+    dataset,
+    *,
+    azimuth_indices=None,
+    frequency_indices=None,
+    elevation_index: int = 0,
+    polarization_index: int = 0,
+    window: str = "Hanning",
+    reconstruction: str = "fast",
+    length_unit: str = "m",
+    aperture_center_degrees: float | None = None,
+    azimuth_target_degrees: np.ndarray | None = None,
+    l1_strength: float = 0.05,
+    l1_iterations: int = 100,
+    flip_x: bool = False,
+    flip_y: bool = False,
+):
+    """Form full-resolution ISAR images without Qt or display decimation.
+
+    Returns ``(band_results, elapsed_seconds)`` using the same physical path as
+    the GUI. ``reconstruction`` accepts ``fast``, ``accurate``, or ``sparse``.
+    """
+    az_indices = list(range(len(dataset.azimuths))) if azimuth_indices is None else sorted(
+        int(i) for i in azimuth_indices
+    )
+    freq_indices = list(range(len(dataset.frequencies))) if frequency_indices is None else sorted(
+        int(i) for i in frequency_indices
+    )
+    if len(az_indices) < 2 or len(freq_indices) < 2:
+        raise ValueError("ISAR requires at least two azimuth and two frequency samples")
+    if not (0 <= elevation_index < len(dataset.elevations)):
+        raise IndexError("elevation_index is out of range")
+    if not (0 <= polarization_index < len(dataset.polarizations)):
+        raise IndexError("polarization_index is out of range")
+
+    frequency_values = np.asarray(dataset.frequencies, dtype=float)[freq_indices]
+    order = np.argsort(frequency_values)
+    freq_indices = [freq_indices[int(i)] for i in order]
+    frequency_values = frequency_values[order]
+    if not np.all(np.isfinite(frequency_values)) or np.any(np.diff(frequency_values) <= 0.0):
+        raise ValueError("ISAR frequency samples must be finite and strictly increasing")
+    frequency_hz = frequency_values * _unit_to_hz_scale(
+        str(dataset.units.get("frequency", "ghz"))
+    )
+    _, unit_scale = _length_unit(length_unit)
+    recon_key = str(reconstruction).strip().lower()
+    if recon_key in {"accurate", "cartesian", "pfa-accurate"}:
+        recon_key = "accurate"
+    elif recon_key in {"sparse", "l1", "sparse-l1"}:
+        recon_key = "sparse"
+    elif recon_key in {"fast", "fft", "pfa", "fast-pfa"}:
+        recon_key = "fft"
+    else:
+        raise ValueError("reconstruction must be 'fast', 'accurate', or 'sparse'")
+
+    if aperture_center_degrees is not None or azimuth_target_degrees is not None:
+        bands = [az_indices]
+    else:
+        bands = [b for b in _split_into_bands(az_indices) if len(b) >= 2]
+    result = compute_bands({
+        "dataset": dataset,
+        "bands": bands,
+        "freq_indices_sorted": freq_indices,
+        "elev_idx": int(elevation_index),
+        "elevation_deg": float(dataset.elevations[elevation_index]),
+        "pol_idx": int(polarization_index),
+        "freq_hz": frequency_hz,
+        "df": float(np.mean(np.diff(frequency_hz))),
+        "unit_scale": unit_scale,
+        "az_target_deg": None if azimuth_target_degrees is None else np.asarray(
+            azimuth_target_degrees, dtype=float
+        ),
+        "az_center_deg": aperture_center_degrees,
+        "window_name": window,
+        "recon": recon_key,
+        "l1_strength": float(l1_strength),
+        "l1_iters": int(l1_iterations),
+        "flip_x": bool(flip_x),
+        "flip_y": bool(flip_y),
+        "decimate_display": False,
+    })
+    if isinstance(result, str):
+        raise ValueError(result)
+    return result
 
 
 def render(self) -> None:
@@ -794,6 +1177,7 @@ def render(self) -> None:
     # Optional aperture window (the scrub workflow): keep only selected
     # azimuths within ±width/2 of the center look angle, with 0/360 wrap.
     ap_widget = getattr(self, "chk_isar_aperture", None)
+    az_center_deg: float | None = None
     if ap_widget is not None and ap_widget.isChecked():
         ap_center = float(self.spin_isar_ap_center.value())
         ap_width = float(self.spin_isar_ap_width.value())
@@ -804,6 +1188,7 @@ def render(self) -> None:
         dist = np.abs(np.mod(az_arr - ap_center + 180.0, 360.0) - 180.0)
         keep = dist <= ap_width / 2.0 + 1e-9
         az_indices = [i for i, k in zip(az_indices, keep) if k]
+        az_center_deg = ap_center
         if len(az_indices) < 2:
             self.status.showMessage(
                 f"ISAR aperture {ap_center:g}° ± {ap_width / 2.0:g}° contains fewer "
@@ -844,6 +1229,12 @@ def render(self) -> None:
     elev_idx = self._single_selection_index(self.list_elev, "elevation")
     if elev_idx is None:
         return
+    elevation_deg = float(self.active_dataset.elevations[elev_idx])
+    if abs(float(np.cos(np.deg2rad(elevation_deg)))) < 1.0e-6:
+        self.status.showMessage(
+            "Azimuth ISAR is degenerate at elevation ±90° for the horizontal image plane."
+        )
+        return
 
     az_interp_widget = getattr(self, "chk_isar_az_interp", None)
     az_interp_on = bool(az_interp_widget.isChecked()) if az_interp_widget is not None else False
@@ -868,10 +1259,9 @@ def render(self) -> None:
             self.status.showMessage("ISAR azimuth interp grid needs ≥2 samples.")
             return
 
-    if az_interp_on:
+    if az_interp_on or az_center_deg is not None:
         # Explicit resample collapses the multi-band view into a single image —
-        # the periodic interpolator stitches selected sub-apertures together
-        # exactly the way the reference program does for full-sweep mode.
+        # and circular aperture mode must keep a 0°/360° crossing coherent.
         bands: list[list[int]] = [az_indices] if len(az_indices) >= 2 else []
     else:
         bands = _split_into_bands(az_indices)
@@ -904,7 +1294,13 @@ def render(self) -> None:
 
     recon_combo = getattr(self, "combo_isar_recon", None)
     recon_text = recon_combo.currentText() if recon_combo is not None else "FFT"
-    recon = "sparse" if recon_text.lower().startswith("sparse") else "fft"
+    recon_lower = recon_text.lower()
+    if recon_lower.startswith("sparse"):
+        recon = "sparse"
+    elif "accurate" in recon_lower or "cartesian" in recon_lower:
+        recon = "accurate"
+    else:
+        recon = "fft"
     l1_strength_spin = getattr(self, "spin_isar_l1_strength", None)
     l1_iters_spin = getattr(self, "spin_isar_l1_iters", None)
     l1_strength = float(l1_strength_spin.value()) if l1_strength_spin is not None else 0.05
@@ -923,12 +1319,14 @@ def render(self) -> None:
         "bands": bands,
         "freq_indices_sorted": freq_indices_sorted,
         "elev_idx": elev_idx,
+        "elevation_deg": elevation_deg,
         "pol_idx": pol_idx,
         "freq_hz": freq_hz,
         "df": df,
         "unit_scale": unit_scale,
         "unit_name": unit_name,
         "az_target_deg": az_target_deg,
+        "az_center_deg": az_center_deg,
         "window_name": str(self.combo_isar_window.currentText()),
         "recon": recon,
         "l1_strength": l1_strength,
@@ -1026,7 +1424,12 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
 
     elev_value = dataset.elevations[params["elev_idx"]]
     pol_value = dataset.polarizations[params["pol_idx"]]
-    recon_label = " | Sparse L1" if params.get("recon") == "sparse" else ""
+    if params.get("recon") == "sparse":
+        recon_label = " | Sparse L1"
+    elif params.get("recon") == "accurate":
+        recon_label = " | Cartesian PFA"
+    else:
+        recon_label = " | Fast PFA"
     composite_subs = max((br.get("composite", 0) for br in band_results), default=0)
     if composite_subs:
         recon_label += f" | Wide-Aperture Composite ({composite_subs} looks)"
@@ -1038,9 +1441,13 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
 
     # Composite images live in the body frame (θ=0 radar frame), not a single
     # look's cross-range/range frame — label accordingly.
+    horizontal_projection = abs(float(params.get("elevation_deg", 0.0))) > 1.0e-9
     if composite_subs:
         x_label = f"Cross-Range at 0° ({unit_name})"
         y_label = f"Down-Range at 0° ({unit_name})"
+    elif horizontal_projection:
+        x_label = f"Horizontal Cross-Range ({unit_name})"
+        y_label = f"Horizontal Range ({unit_name})"
     else:
         x_label = f"Cross-Range ({unit_name})"
         y_label = f"Range ({unit_name})"
@@ -1109,7 +1516,12 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     # spacings ((max-min)/median); anything > ~0.001 was actually resampled.
     az_max = max(br.get("az_nonuniformity", 0.0) for br in band_results)
     fr_max = max(br.get("freq_nonuniformity", 0.0) for br in band_results)
-    mode_label = "Sparse L1" if params.get("recon") == "sparse" else "FFT"
+    if params.get("recon") == "sparse":
+        mode_label = "Sparse L1"
+    elif params.get("recon") == "accurate":
+        mode_label = "Cartesian PFA"
+    else:
+        mode_label = "Fast PFA"
     parts = [f"ISAR image updated in {elapsed:.2f}s ({mode_label})"]
     if n_bands > 1:
         parts.append(f" ({n_bands} bands)")
@@ -1130,6 +1542,24 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
         notes.append(f"resampled azimuth (Δ-spread {az_max*100:.1f}%)")
     if fr_max >= 1e-3:
         notes.append(f"resampled frequency (Δ-spread {fr_max*100:.1f}%)")
+    coverage = min(br.get("phase_coverage", 1.0) for br in band_results)
+    if coverage < 0.9995:
+        notes.append(f"weighted phase coverage {coverage*100:.1f}%")
+    if any(br.get("preprocess_cache_hit", False) for br in band_results):
+        notes.append("reused gridded phase history")
+    sparse_used = [br.get("sparse_iterations") for br in band_results
+                   if br.get("sparse_iterations") is not None]
+    if sparse_used:
+        notes.append(f"sparse convergence {max(sparse_used)} iterations")
+    if band_results:
+        sampling = band_results[0].get("sampling", {})
+        if sampling:
+            notes.append(
+                f"nominal resolution Δx≈{sampling['cross_resolution']:.3g} {unit_name}, "
+                f"Δr≈{sampling['range_resolution']:.3g} {unit_name}; "
+                f"unambiguous |x|≤{sampling['cross_half_extent']:.3g}, "
+                f"|r|≤{sampling['range_half_extent']:.3g} {unit_name}"
+            )
     if notes:
         parts.append(" — " + ", ".join(notes))
     self.status.showMessage("".join(parts))

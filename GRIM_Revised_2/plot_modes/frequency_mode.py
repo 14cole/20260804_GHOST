@@ -64,7 +64,7 @@ def render(self) -> None:
             freq_axis_values = np.asarray([float(dataset.frequencies[idx]) for idx in freq_indices], dtype=float)
             for elev_idx, elev_value in zip(elev_indices, elev_values):
                 if self._button_checked(self.btn_phase):
-                    rcs_slice = dataset.rcs[np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]])]
+                    rcs_slice = dataset.rcs_slice(np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]]))
                     rcs_slice = rcs_slice[:, 0, :, 0]
                     phase_deg = np.degrees(np.angle(rcs_slice))
                     phase_deg = np.where(np.isfinite(phase_deg), phase_deg, np.nan)
@@ -120,7 +120,7 @@ def render(self) -> None:
             for elev_idx in elev_indices:
                 elev_value = dataset.elevations[elev_idx]
                 if self._button_checked(self.btn_phase):
-                    rcs_slice = dataset.rcs[np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]])]
+                    rcs_slice = dataset.rcs_slice(np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]]))
                     rcs_slice = rcs_slice[:, 0, :, 0]
                     phase_deg = np.degrees(np.angle(rcs_slice))
                     phase_deg = np.where(np.isfinite(phase_deg), phase_deg, np.nan)
@@ -142,7 +142,11 @@ def render(self) -> None:
                     f"P50 over az ({az_min},{az_max})"
                 )
                 self.plot_ax.plot(freq_values, rcs_p50_values, label=label)
-    self.plot_ax.set_xlabel("Frequency (GHz)")
+    frequency_units = {
+        str((dataset.units or {}).get("frequency", "GHz")) for _, dataset in datasets
+    }
+    frequency_unit = next(iter(frequency_units)) if len(frequency_units) == 1 else "mixed units"
+    self.plot_ax.set_xlabel(f"Frequency ({frequency_unit})")
     self.plot_ax.set_ylabel(self._display_axis_label(datasets, tag=" P50"))
     self._update_legend_visibility()
     self.spin_plot_xmin.blockSignals(True)

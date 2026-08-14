@@ -58,9 +58,9 @@ def render(self) -> None:
         self.status.showMessage("Frequency samples must be strictly increasing.")
         return
 
-    rcs_slice = self.active_dataset.rcs[
+    rcs_slice = self.active_dataset.rcs_slice(
         np.ix_(sorted_az_indices, [elev_idx], sorted_freq_indices, [pol_idx])
-    ][:, 0, :, 0]
+    )[:, 0, :, 0]
     rcs_slice = np.where(np.isfinite(rcs_slice), rcs_slice, 0.0)
 
     # IFFT along freq requires uniform freq spacing — match what ISAR does.

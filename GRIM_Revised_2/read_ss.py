@@ -324,11 +324,20 @@ def read_ss(path, verbose=True):
     # sweep is usually in observation while incident stays fixed (0/360). Pick
     # whichever pair actually varies, so both run types load with a real axis.
     def _nuniq(vals):
-        return int(np.unique(np.round(np.asarray(vals, float), 4)).size)
+        # Xpatch commonly emits both 0 and 360 for the same fixed direction.
+        wrapped = np.mod(np.asarray(vals, float), 360.0)
+        wrapped[np.isclose(wrapped, 360.0, atol=5e-5)] = 0.0
+        return int(np.unique(np.round(wrapped, 4)).size)
     az_inc, el_inc = np.asarray(ang["azinc"]), np.asarray(ang["elinc"])
     az_obs, el_obs = np.asarray(ang["azobs"]), np.asarray(ang["elobs"])
     n_inc = max(_nuniq(az_inc), _nuniq(el_inc))
     n_obs = max(_nuniq(az_obs), _nuniq(el_obs))
+    if imono == 2 and n_inc > 1 and n_obs > 1:
+        raise ValueError(
+            "bistatic .ss varies both incident and observation angles; the GRIM "
+            "azimuth/elevation grid can represent only one angular pair, so loading "
+            "this file would discard physical coordinates"
+        )
     if n_obs > n_inc:
         az, el, angle_source = az_obs, el_obs, "observation"
     else:

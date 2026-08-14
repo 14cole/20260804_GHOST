@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ghost-grim"
+version = "0.2.0"
+description = "RCS visualization and headless dataset processing"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "matplotlib>=3.8",
+  "PySide6>=6.6",
+  "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+memory = ["psutil>=5.9"]
+
+[project.scripts]
+grim = "grim_cut_gui:main"
+grim-headless = "grim_headless:main"
+
+[tool.setuptools]
+package-dir = {"" = "GRIM_Revised_2"}
+py-modules = [
+  "assembly_tree",
+  "grim_cut_dataset_mixin",
+  "grim_cut_gui",
+  "grim_cut_plot_mixin",
+  "grim_dataset",
+  "grim_headless",
+  "plot_models",
+  "read_ss",
+]
+
+[tool.setuptools.packages.find]
+where = ["GRIM_Revised_2"]
+include = ["plot_modes*"]

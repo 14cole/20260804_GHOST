@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from grim_dataset import C0, RcsGrid
+from grim_headless import load_dataset as load_dataset_headless
 
 # Characters forbidden in filenames on Windows (and `/` on POSIX). Replaced
 # with `_` so dataset names with op symbols like `|`, `÷`, etc. still save.
@@ -548,6 +549,7 @@ class ExportCsvDialog(QDialog):
         grid.addWidget(QLabel("Magnitude:"), 0, 0)
         self._combo_scale = QComboBox()
         self._combo_scale.addItem("Linear", "linear")
+        self._combo_scale.addItem("dB (dimensionless ratio)", "db")
         self._combo_scale.addItem("dBsm", "dbsm")
         self._combo_scale.addItem("dBke", "dbke")
         self._combo_scale.addItem("Both (Linear + dBsm + dBke)", "both")
@@ -663,6 +665,11 @@ def _dataset_with_rcs(
         rcs_power=rcs_power,
         rcs_domain=(dataset.rcs_domain if rcs_domain is None else rcs_domain),
         units=dataset.units,
+        extra={
+            "phase_reference": dataset.extra["phase_reference"]
+            for _ in (0,)
+            if "phase_reference" in dataset.extra
+        },
     )
 
 
@@ -704,8 +711,10 @@ def _canonical_rcs_log_unit(value: object, *, default: str = "dBsm") -> str:
         return "dBsm"
     if text == "dbke":
         return "dBke"
+    if text == "db":
+        return "dB"
     raise ValueError(
-        f"unsupported RCS log unit {value!r}; use dBsm or dBke"
+        f"unsupported RCS log unit {value!r}; use dBsm, dBke, or dB"
     )
 
 
@@ -747,10 +756,15 @@ def _write_dataset_csv(
     """
 
     scale = str(scale).strip().lower()
-    if scale not in {"linear", "dbsm", "dbke", "both"}:
+    if scale not in {"linear", "db", "dbsm", "dbke", "both"}:
         raise ValueError(
-            "CSV magnitude scale must be linear, dbsm, dbke, or both"
+            "CSV magnitude scale must be linear, db, dbsm, dbke, or both"
         )
+    is_ratio = dataset.linear_quantity() == "power_ratio"
+    if is_ratio and scale not in {"linear", "db"}:
+        raise ValueError("dimensionless power ratios can be exported only as Linear or dB")
+    if not is_ratio and scale == "db":
+        raise ValueError("dimensionless dB export is only valid for power-ratio datasets")
     az = dataset.azimuths
     el = dataset.elevations
     fr = dataset.frequencies
@@ -773,6 +787,8 @@ def _write_dataset_csv(
     ]
     if scale in ("linear", "both"):
         header.append("magnitude_linear")
+    if scale == "db":
+        header.append("magnitude_db")
     if scale in ("dbsm", "both"):
         header.append("magnitude_dbsm")
     if scale in ("dbke", "both"):
@@ -799,6 +815,8 @@ def _write_dataset_csv(
                         ]
                         if scale in ("linear", "both"):
                             row.append(_csv_number(mag, ".10g"))
+                        if scale == "db":
+                            row.append(_csv_number(dataset.linear_to_dbsm(mag), ".6f"))
                         if scale in ("dbsm", "both"):
                             row.append(_csv_number(
                                 dataset.linear_to_dbsm(mag), ".6f"
@@ -841,10 +859,11 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
             raise ValueError(f"missing required column(s): {', '.join(missing)}")
 
         has_linear = "magnitude_linear" in field_map
+        has_db = "magnitude_db" in field_map
         has_dbsm = "magnitude_dbsm" in field_map
         has_dbke = "magnitude_dbke" in field_map
-        if not has_linear and not has_dbsm and not has_dbke:
-            raise ValueError("missing magnitude column (need magnitude_linear and/or magnitude_dbsm and/or magnitude_dbke)")
+        if not has_linear and not has_db and not has_dbsm and not has_dbke:
+            raise ValueError("missing magnitude column (need magnitude_linear, magnitude_db, magnitude_dbsm, or magnitude_dbke)")
         has_phase = "phase_deg" in field_map
         has_frequency_unit = "frequency_unit" in field_map
         has_rcs_log_unit = "rcs_log_unit" in field_map
@@ -922,6 +941,15 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
                         raise ValueError(f"line {line_no}: invalid magnitude_dbsm ({exc})") from exc
                     if np.isfinite(db_value):
                         lin_value = float(10.0 ** (db_value / 10.0))
+            if lin_value is None and has_db:
+                db_text = _cell(row, "magnitude_db")
+                if db_text:
+                    try:
+                        db_value = float(db_text)
+                    except ValueError as exc:
+                        raise ValueError(f"line {line_no}: invalid magnitude_db ({exc})") from exc
+                    if np.isfinite(db_value):
+                        lin_value = float(10.0 ** (db_value / 10.0))
             if lin_value is None and has_dbke:
                 db_text = _cell(row, "magnitude_dbke")
                 if db_text:
@@ -967,6 +995,7 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
     rcs_log_unit = (
         next(iter(rcs_log_units_seen))
         if rcs_log_units_seen
+        else "dB" if has_db and not has_dbsm and not has_dbke
         else "dBke" if has_dbke and not has_dbsm else "dBsm"
     )
 
@@ -1022,6 +1051,11 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
             "elevation": "deg",
             "frequency": frequency_unit,
             "rcs_log_unit": rcs_log_unit,
+            "rcs_linear_quantity": (
+                "power_ratio" if rcs_log_unit == "dB"
+                else "sigma_2d" if rcs_log_unit == "dBke"
+                else "sigma_3d"
+            ),
         },
     )
 
@@ -1081,13 +1115,42 @@ def _is_supported_dataset_path(path: str) -> bool:
     )
 
 
-def _recommended_loader_workers(task_count: int) -> int:
+def _available_memory_bytes() -> int | None:
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except (ImportError, AttributeError, OSError):
+        return None
+
+
+def _recommended_loader_workers(tasks) -> int:
+    if isinstance(tasks, int):
+        task_count = int(tasks)
+        paths = []
+    else:
+        paths = [str(task[1]) for task in tasks]
+        task_count = len(paths)
     cpu_total = os.cpu_count() or 1
     if cpu_total <= 2:
         target = cpu_total
     else:
         target = cpu_total - 1
-    return max(1, min(int(task_count), int(target)))
+    target = max(1, min(int(task_count), int(target)))
+    if not paths:
+        return target
+    # npz parsing and RcsGrid construction can transiently need several times
+    # the archive size. Bound concurrent loads by half of currently available
+    # RAM, and keep very large archives serial even without psutil.
+    largest = max((os.path.getsize(path) for path in paths if os.path.isfile(path)), default=0)
+    per_worker = max(64 * 1024**2, largest * 4)
+    available = _available_memory_bytes()
+    if available is not None:
+        target = min(target, max(1, int((available * 0.5) // per_worker)))
+    elif largest >= 512 * 1024**2:
+        target = 1
+    elif largest >= 128 * 1024**2:
+        target = min(target, 2)
+    return max(1, target)
 
 
 def _load_dataset_path_task(task: tuple[int, str]) -> dict[str, object]:
@@ -1096,19 +1159,7 @@ def _load_dataset_path_task(task: tuple[int, str]) -> dict[str, object]:
     dataset_name = os.path.splitext(file_name)[0]
     lower = path.lower()
     try:
-        if lower.endswith(".grim"):
-            dataset = RcsGrid.load(path)
-            history = path
-        elif (
-            lower.endswith(".csv")
-            or lower.endswith(".txt")
-            or lower.endswith(".out")
-            or lower.endswith(".pio")
-            or lower.endswith(".cmplx_di")
-            or lower.endswith(".ss")
-        ):
-            dataset, history = _load_dataset_from_dropped_text(path)
-        else:
+        if not _is_supported_dataset_path(path):
             return {
                 "status": "ignored",
                 "index": index,
@@ -1116,6 +1167,8 @@ def _load_dataset_path_task(task: tuple[int, str]) -> dict[str, object]:
                 "file_name": file_name,
                 "error": "Unsupported file extension",
             }
+        dataset = load_dataset_headless(path)
+        history = str(getattr(dataset, "history", "") or path)
     except Exception as exc:
         return {
             "status": "error",
@@ -1144,54 +1197,17 @@ def _join_many_with_progress(
 ) -> RcsGrid:
     checked = RcsGrid._ensure_grids(grids)
     total = len(checked)
-    if total == 1:
-        grid = checked[0]
-        if progress_cb is not None:
-            progress_cb(1, 1)
-        return grid._new_grid(
-            np.array(grid.azimuths, copy=True),
-            np.array(grid.elevations, copy=True),
-            np.array(grid.frequencies, copy=True),
-            np.array(grid.polarizations, copy=True),
-            rcs_power=np.array(grid.rcs_power, copy=True),
-            rcs_phase=np.array(grid.rcs_phase, copy=True),
-            rcs_domain="power_phase",
-        )
-
-    az_union = RcsGrid._axis_union([grid.azimuths for grid in checked], tol=tol)
-    el_union = RcsGrid._axis_union([grid.elevations for grid in checked], tol=tol)
-    f_union = RcsGrid._axis_union([grid.frequencies for grid in checked], tol=tol)
-    p_union = RcsGrid._axis_union([grid.polarizations for grid in checked], tol=0.0)
-
-    shape = (len(az_union), len(el_union), len(f_union), len(p_union))
-    joined_power = np.full(shape, np.nan, dtype=np.float32)
-    joined_phase = np.full(shape, np.nan, dtype=np.float32)
-
-    for idx, grid in enumerate(checked, start=1):
-        az_idx = RcsGrid._indices_for_axis_values(az_union, grid.azimuths, tol=tol)
-        el_idx = RcsGrid._indices_for_axis_values(el_union, grid.elevations, tol=tol)
-        f_idx = RcsGrid._indices_for_axis_values(f_union, grid.frequencies, tol=tol)
-        p_idx = RcsGrid._indices_for_axis_values(p_union, grid.polarizations, tol=0.0)
-        if az_idx is None or el_idx is None or f_idx is None or p_idx is None:
-            raise ValueError("failed to align a dataset during join")
-        joined_power[np.ix_(az_idx, el_idx, f_idx, p_idx)] = grid.rcs_power
-        joined_phase[np.ix_(az_idx, el_idx, f_idx, p_idx)] = grid.rcs_phase
-        if progress_cb is not None:
-            progress_cb(idx, total)
-
-    last = checked[-1]
-    return RcsGrid(
-        az_union,
-        el_union,
-        f_union,
-        p_union,
-        rcs_power=joined_power,
-        rcs_phase=joined_phase,
-        rcs_domain="power_phase",
-        source_path=last.source_path,
-        history=last.history,
-        units=dict(last.units),
+    available = _available_memory_bytes()
+    limit = int(available * 0.5) if available is not None else None
+    result = RcsGrid.join_many(
+        *checked,
+        tol=tol,
+        overlap="error",
+        max_output_bytes=limit,
     )
+    if progress_cb is not None:
+        progress_cb(total, total)
+    return result
 
 
 class _DatasetLoadWorker(QObject):
@@ -1235,7 +1251,7 @@ class _DatasetLoadWorker(QObject):
         if total == 1:
             _consume(_load_dataset_path_task(self._tasks[0]), 1)
         else:
-            worker_count = _recommended_loader_workers(total)
+            worker_count = _recommended_loader_workers(self._tasks)
             with ThreadPoolExecutor(max_workers=worker_count) as pool:
                 futures = {
                     pool.submit(_load_dataset_path_task, task): task
@@ -2598,8 +2614,9 @@ class DatasetOpsMixin:
                 new_power = dataset.rcs_power * scale_4d
                 new_units = dict(dataset.units or {})
                 new_units["rcs_log_unit"] = "dBke"
+                new_units["rcs_linear_quantity"] = "sigma_2d"
                 if dataset.rcs_domain == "complex_amplitude":
-                    amp_scale_4d = np.sqrt(np.maximum(scale_4d, 0.0)).astype(np.complex64)
+                    amp_scale_4d = np.sqrt(np.maximum(scale_4d, 0.0))
                     new_rcs = dataset.rcs * amp_scale_4d
                     result = RcsGrid(
                         dataset.azimuths,
@@ -2696,8 +2713,9 @@ class DatasetOpsMixin:
                 new_power = dataset.rcs_power * scale_4d
                 new_units = dict(dataset.units or {})
                 new_units["rcs_log_unit"] = "dBsm"
+                new_units["rcs_linear_quantity"] = "sigma_3d"
                 if dataset.rcs_domain == "complex_amplitude":
-                    amp_scale_4d = np.sqrt(np.maximum(scale_4d, 0.0)).astype(np.complex64)
+                    amp_scale_4d = np.sqrt(np.maximum(scale_4d, 0.0))
                     new_rcs = dataset.rcs * amp_scale_4d
                     result = RcsGrid(
                         dataset.azimuths,
@@ -2924,30 +2942,36 @@ class DatasetOpsMixin:
 
         query = np.column_stack([phi_q, theta_q])
 
-        power_out = interpn(
-            (az_in, el_in),
-            dataset.rcs_power,
-            query,
-            method="linear",
-            bounds_error=False,
-            fill_value=np.nan,
+        phase_complete = not np.any(
+            np.isfinite(dataset.rcs_power) & ~np.isfinite(dataset.rcs_phase)
         )
-        phase_out = interpn(
-            (az_in, el_in),
-            dataset.rcs_phase,
-            query,
-            method="nearest",
-            bounds_error=False,
-            fill_value=np.nan,
-        )
+        if phase_complete:
+            complex_in = dataset.rcs
+            real_out = interpn(
+                (az_in, el_in), complex_in.real, query, method="linear",
+                bounds_error=False, fill_value=np.nan,
+            )
+            imag_out = interpn(
+                (az_in, el_in), complex_in.imag, query, method="linear",
+                bounds_error=False, fill_value=np.nan,
+            )
+            complex_out = real_out + 1j * imag_out
+            power_out = np.abs(complex_out) ** 2
+            phase_out = np.angle(complex_out)
+        else:
+            power_out = interpn(
+                (az_in, el_in), dataset.rcs_power, query, method="linear",
+                bounds_error=False, fill_value=np.nan,
+            )
+            phase_out = np.full(power_out.shape, np.nan, dtype=power_out.dtype)
         new_shape = (
             pri_grid.size,
             sec_grid.size,
             dataset.frequencies.size,
             dataset.polarizations.size,
         )
-        power_out = power_out.reshape(new_shape).astype(np.float32)
-        phase_out = phase_out.reshape(new_shape).astype(np.float32)
+        power_out = power_out.reshape(new_shape).astype(dataset.rcs_power.dtype)
+        phase_out = phase_out.reshape(new_shape).astype(dataset.rcs_phase.dtype)
 
         result = RcsGrid(
             pri_grid,
@@ -3079,7 +3103,7 @@ class DatasetOpsMixin:
         Output bounds: hull of the forward-mapped longitude/latitude (no user
         inputs). Output sample count: input N_φ × N_τ.
         """
-        from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+        from scipy.interpolate import LinearNDInterpolator
 
         az_in = np.asarray(dataset.azimuths, dtype=float)
         el_in = np.asarray(dataset.elevations, dtype=float)
@@ -3103,22 +3127,30 @@ class DatasetOpsMixin:
 
         n_f = dataset.frequencies.size
         n_pol = dataset.polarizations.size
-        flat_power = dataset.rcs_power.reshape(n_az * n_el, n_f * n_pol)
-        flat_phase = dataset.rcs_phase.reshape(n_az * n_el, n_f * n_pol)
-
-        power_interp = LinearNDInterpolator(points, flat_power, fill_value=np.nan)
-        phase_interp = NearestNDInterpolator(points, flat_phase)
-        power_out = power_interp(query)
-        phase_out = phase_interp(query)
-        # NearestNDInterpolator has no fill_value option — mask cells outside
-        # the convex hull (where the linear interp returned NaN) so phase and
-        # power agree about which cells are valid.
-        outside = ~np.isfinite(power_out)
-        phase_out = np.where(outside, np.nan, phase_out)
+        phase_complete = not np.any(
+            np.isfinite(dataset.rcs_power) & ~np.isfinite(dataset.rcs_phase)
+        )
+        if phase_complete:
+            flat_complex = dataset.rcs.reshape(n_az * n_el, n_f * n_pol)
+            real_out = LinearNDInterpolator(
+                points, flat_complex.real, fill_value=np.nan
+            )(query)
+            imag_out = LinearNDInterpolator(
+                points, flat_complex.imag, fill_value=np.nan
+            )(query)
+            complex_out = real_out + 1j * imag_out
+            power_out = np.abs(complex_out) ** 2
+            phase_out = np.angle(complex_out)
+        else:
+            flat_power = dataset.rcs_power.reshape(n_az * n_el, n_f * n_pol)
+            power_out = LinearNDInterpolator(
+                points, flat_power, fill_value=np.nan
+            )(query)
+            phase_out = np.full(power_out.shape, np.nan, dtype=power_out.dtype)
 
         new_shape = (n_lon, n_lat, n_f, n_pol)
-        power_out = power_out.reshape(new_shape).astype(np.float32)
-        phase_out = phase_out.reshape(new_shape).astype(np.float32)
+        power_out = power_out.reshape(new_shape).astype(dataset.rcs_power.dtype)
+        phase_out = phase_out.reshape(new_shape).astype(dataset.rcs_phase.dtype)
 
         result = RcsGrid(
             lon_grid,
@@ -3189,18 +3221,16 @@ class DatasetOpsMixin:
                     centres = first_centre + np.arange(n_steps, dtype=float) * slide_deg
 
                 # Compute the median of the linear power in each window and
-                # keep the phase of the input sample nearest the centre — a
-                # circular-statistic median isn't well-defined, and "nearest
-                # to centre" gives a phase that is at least locally
-                # consistent. Power-domain median doesn't change under the
-                # log → result is identical to a median in dB.
+                # A power median has no physically defined coherent phase. Mark
+                # it unknown so this statistical result cannot later be added
+                # as if it were a measured complex field.
                 n_el = dataset.elevations.size
                 n_f = dataset.frequencies.size
                 n_pol = dataset.polarizations.size
                 new_power = np.empty(
-                    (centres.size, n_el, n_f, n_pol), dtype=np.float32
+                    (centres.size, n_el, n_f, n_pol), dtype=dataset.rcs_power.dtype
                 )
-                new_phase = np.empty_like(new_power)
+                new_phase = np.full_like(new_power, np.nan)
                 for i, c in enumerate(centres):
                     in_window = np.where(np.abs(az - c) <= half_w)[0]
                     if in_window.size == 0:
@@ -3208,8 +3238,6 @@ class DatasetOpsMixin:
                         in_window = np.array([int(np.argmin(np.abs(az - c)))])
                     window_power = dataset.rcs_power[in_window, :, :, :]
                     new_power[i] = np.nanmedian(window_power, axis=0)
-                    centre_idx = int(in_window[np.argmin(np.abs(az[in_window] - c))])
-                    new_phase[i] = dataset.rcs_phase[centre_idx, :, :, :]
 
                 result = RcsGrid(
                     centres,
@@ -3411,20 +3439,28 @@ class DatasetOpsMixin:
         name_b, ds_b = datasets[1]
 
         try:
-            ds_a._assert_compatible(ds_b)
+            ds_a._assert_compatible(ds_b, coherent=True)
         except (ValueError, TypeError) as exc:
             self.status.showMessage(f"Coherent ÷: {exc}")
             return
 
         denom = ds_b.rcs.copy()
-        denom[denom == 0] = 1e-30 + 0j
-        result_rcs = ds_a.rcs / denom
+        numerator = ds_a.rcs
+        result_rcs = np.full(
+            numerator.shape, np.nan + 1j * np.nan,
+            dtype=np.result_type(numerator.dtype, denom.dtype),
+        )
+        valid = np.isfinite(numerator) & np.isfinite(denom) & (denom != 0)
+        np.divide(numerator, denom, out=result_rcs, where=valid)
+        ratio_units = dict(ds_a.units or {})
+        ratio_units["rcs_log_unit"] = "dB"
+        ratio_units["rcs_linear_quantity"] = "power_ratio"
         result = RcsGrid(
             ds_a.azimuths, ds_a.elevations, ds_a.frequencies,
             ds_a.polarizations, result_rcs,
             rcs_power=np.abs(result_rcs) ** 2,
             rcs_domain="complex_amplitude",
-            units=ds_a.units,
+            units=ratio_units,
         )
         out_name = f"{name_a} ÷ {name_b}"
         self._add_dataset_row(result, out_name, f"Coherent ÷: {name_a} / {name_b}", file_name="")
