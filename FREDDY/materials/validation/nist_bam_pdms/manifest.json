@@ -1,0 +1,61 @@
+{
+  "conversion": {
+    "bam_particle_epsilon": [
+      16.65,
+      0.0
+    ],
+    "bam_particle_mu": "inverted from the published 30 wt% MG fit",
+    "freddy_loss_conversion": "eps_imag=-source_eps_loss; mu_imag=-source_mu_loss",
+    "freddy_time_convention": "exp(+j*omega*t)",
+    "frequency_unit": "Hz (unchanged)",
+    "measured_nonpassive_policy": "omit and count; never clamp or change sign",
+    "minimum_frequency_hz": 100000000.0,
+    "source_loss_columns": "positive loss magnitudes",
+    "volume_fraction_30wt": 0.0726,
+    "volume_fraction_60wt": 0.215
+  },
+  "dataset": "Broadband Electromagnetic Properties of Engineered Flexible Absorber Materials",
+  "doi": "https://doi.org/10.18434/mds2-2911",
+  "license": "https://www.nist.gov/open/license",
+  "outputs": {
+    "bam_particle_fit.csv": {
+      "dropped_nonpassive_rows": 0,
+      "rows": 512
+    },
+    "bam_pdms_30wt_fit.csv": {
+      "dropped_nonpassive_rows": 0,
+      "rows": 512
+    },
+    "bam_pdms_30wt_sample_1_passive.csv": {
+      "dropped_nonpassive_rows": 99,
+      "rows": 413
+    },
+    "bam_pdms_30wt_sample_2_passive.csv": {
+      "dropped_nonpassive_rows": 32,
+      "rows": 480
+    },
+    "bam_pdms_30wt_sample_3_passive.csv": {
+      "dropped_nonpassive_rows": 38,
+      "rows": 474
+    },
+    "bam_pdms_60wt_fit.csv": {
+      "dropped_nonpassive_rows": 0,
+      "rows": 512
+    },
+    "bam_pdms_60wt_measured_passive.csv": {
+      "dropped_nonpassive_rows": 12,
+      "rows": 500
+    },
+    "pdms_fit.csv": {
+      "dropped_nonpassive_rows": 0,
+      "rows": 512
+    }
+  },
+  "source_sha256": {
+    "Figure 7a.csv": "b1a98f1fcb2ddb0b91798dfc303c3cb3812d6c28a64ca02254e0ba8c5c56aa8d",
+    "Figure 7b.csv": "a164abf2ce5fa89d5549d365585fd498175f3a6784566e6e196b6029b68c55fd",
+    "Figure 8a.csv": "4287e2a46b510b8778009c6cc1f76700424f9bb0c9adeaaffbd85316ce1bcfb5",
+    "Figure 8b.csv": "9058163e9f9aa5e5a87948e127944f96a0fa348d1b9e1752d061970f1b93ca63",
+    "README.txt": "19467fd7cb303ecf1f5cb702be162705c391418305fba18286b27ff8fac1a319"
+  }
+}

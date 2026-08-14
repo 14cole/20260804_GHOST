@@ -170,6 +170,8 @@ class MixCandidate:
     thickness_in: float
     component_files: list[str]
     rule: str
+    objective_kind: str = "property"
+    score_unit: str = "%"
     # Weight fractions and blended density, available only when every
     # component has a known density (> 0 g/cc).
     weight_fractions: list[float] | None = None
@@ -182,6 +184,39 @@ def _finite_complex(value: complex) -> bool:
 
 def _complex_tolerance(value: complex) -> float:
     return 64.0 * math.ulp(1.0) * max(1.0, abs(value))
+
+
+def causal_medium_index(eps_r: complex, mu_r: complex) -> complex:
+    """Return the passive refractive-index branch for ``e^(+j omega t)``.
+
+    Passive attenuation requires ``Im(n) <= 0``.  On an exactly lossless
+    branch, choose the sign that gives a non-negative-real wave impedance
+    ``mu/n``.  The latter is important for double-negative media, where the
+    principal complex square root selects the wrong physical index sign.
+    """
+    n = cmath.sqrt(eps_r * mu_r)
+    if abs(n) <= 1e-15:
+        raise ValueError("Material refractive index is singular/near-zero.")
+    tol = _complex_tolerance(n)
+    if n.imag > tol:
+        n = -n
+    elif abs(n.imag) <= tol and (mu_r / n).real < 0.0:
+        n = -n
+    return n
+
+
+def _causal_medium_index_many(
+    eps_r: "np.ndarray", mu_r: "np.ndarray"
+) -> "np.ndarray":
+    n = np.sqrt(eps_r * mu_r)
+    if np.any(np.abs(n) <= 1e-15):
+        raise ValueError("Material refractive index is singular/near-zero.")
+    tol = 64.0 * np.finfo(float).eps * np.maximum(1.0, np.abs(n))
+    flip = n.imag > tol
+    lossless = np.abs(n.imag) <= tol
+    eta_ratio = mu_r / n
+    flip |= lossless & (eta_ratio.real < 0.0)
+    return np.where(flip, -n, n)
 
 
 def _validate_effective_value(value: complex, label: str) -> None:
@@ -885,6 +920,74 @@ def layer_properties_many(layer: LoadedLayer, f_ghz: list[float]) -> tuple[list[
     return mix_anisotropic_many(eps_0, mu_0, eps_90, mu_90, layer.polarization_deg)
 
 
+def prepare_layer_properties_many(
+    f_ghz: list[float], layers: list[LoadedLayer]
+) -> list[tuple[list[complex], list[complex]] | None]:
+    """Interpolate fixed material tables once for repeated stack evaluations.
+
+    Thickness and sheet resistance are deliberately absent from this cache, so
+    inverse and thickness searches can vary those quantities without stale
+    physics.
+    """
+    _validate_frequency_vector(f_ghz)
+    prepared: list[tuple[list[complex], list[complex]] | None] = []
+    for layer in layers:
+        prepared.append(None if layer.is_sheet else layer_properties_many(layer, f_ghz))
+    return prepared
+
+
+def prepare_layer_wave_terms_many(
+    f_ghz: list[float],
+    theta_deg: float,
+    layers: list[LoadedLayer],
+    wave_pol: str,
+    eps_scale: float = 1.0,
+    mu_scale: float = 1.0,
+    prepared_properties: list[tuple[list[complex], list[complex]] | None] | None = None,
+) -> list[tuple["np.ndarray", "np.ndarray"] | None]:
+    """Precompute frequency-dependent ``(Zc, kz)`` arrays for a fixed corner."""
+    if not NUMPY_AVAILABLE:
+        raise RuntimeError("Prepared wave arrays require NumPy.")
+    _validate_frequency_vector(f_ghz)
+    theta_deg = validate_incidence_angle(theta_deg)
+    if wave_pol not in {"te", "tm"}:
+        raise ValueError(f"Unsupported wave polarization: {wave_pol}")
+    if prepared_properties is not None and len(prepared_properties) != len(layers):
+        raise ValueError("Prepared material properties do not match the layer stack.")
+
+    f_arr_ghz = np.asarray(f_ghz, dtype=float)
+    f_hz = f_arr_ghz * GHZ_TO_HZ
+    omega = 2.0 * math.pi * f_hz
+    k0 = omega / C0
+    kx = k0 * math.sin(math.radians(theta_deg))
+    out: list[tuple[np.ndarray, np.ndarray] | None] = []
+    for index, layer in enumerate(layers):
+        if layer.is_sheet:
+            out.append(None)
+            continue
+        cached = prepared_properties[index] if prepared_properties is not None else None
+        if cached is None:
+            eps_r, mu_r = layer_properties_many(layer, f_ghz)
+        else:
+            eps_r, mu_r = cached
+        eps_arr = np.asarray(eps_r, dtype=complex) * eps_scale
+        mu_arr = np.asarray(mu_r, dtype=complex) * mu_scale
+        k_layer = k0 * np.sqrt(eps_arr * mu_arr)
+        kz = _causal_kz_many(
+            np.sqrt(k_layer * k_layer - kx * kx),
+            eps_arr,
+            mu_arr,
+            wave_pol,
+            omega,
+        )
+        if wave_pol == "te":
+            zc = omega * MU0 * mu_arr / kz
+        else:
+            zc = kz / (omega * EPS0 * eps_arr)
+        out.append((zc, kz))
+    return out
+
+
 def compute_stack_impedance(
     f_ghz: float,
     layers: list[LoadedLayer],
@@ -915,8 +1018,9 @@ def compute_stack_impedance(
         eps_r, mu_r = layer_properties(layer, f_ghz)
         eps_r *= eps_scale
         mu_r *= mu_scale
-        zc = ETA0 * cmath.sqrt(mu_r / eps_r)
-        gamma = 1j * k0 * cmath.sqrt(mu_r * eps_r)
+        n = causal_medium_index(eps_r, mu_r)
+        zc = ETA0 * mu_r / n
+        gamma = 1j * k0 * n
         t = cmath.tanh(gamma * layer.thickness_m * thickness_scale)
         z_next = zc * (z_next + zc * t) / (zc + z_next * t)
 
@@ -956,8 +1060,9 @@ def compute_stack_impedance_many(
             eps_r, mu_r = layer_properties_many(layer, f_ghz)
             eps_arr = np.asarray(eps_r, dtype=complex) * eps_scale
             mu_arr = np.asarray(mu_r, dtype=complex) * mu_scale
-            zc = ETA0 * np.sqrt(mu_arr / eps_arr)
-            gamma = 1j * k0 * np.sqrt(mu_arr * eps_arr)
+            n_arr = _causal_medium_index_many(eps_arr, mu_arr)
+            zc = ETA0 * mu_arr / n_arr
+            gamma = 1j * k0 * n_arr
             t = np.tanh(gamma * layer.thickness_m * thickness_scale)
             z_next = zc * (z_next + zc * t) / (zc + z_next * t)
         return z_next.tolist()
@@ -990,13 +1095,32 @@ def normalize_wave_polarization(pol: str) -> str:
     raise ValueError(f"Unsupported wave polarization: {pol}")
 
 
-def _stable_kz(z: complex) -> complex:
-    # Choose branch with non-negative attenuation.
-    if z.imag < 0:
-        return -z
-    if abs(z.imag) < 1e-12 and z.real < 0:
-        return -z
-    return z
+def _causal_kz(
+    kz: complex,
+    eps_r: complex,
+    mu_r: complex,
+    wave_pol: str,
+    omega: float,
+) -> complex:
+    """Choose the passive longitudinal-wavenumber branch.
+
+    With ``e^(+j omega t)`` and forward fields proportional to ``exp(-j kz z)``,
+    attenuation requires ``Im(kz) <= 0``.  At a lossless branch point, use the
+    sign that gives non-negative-real TE/TM wave impedance.
+    """
+    tol = _complex_tolerance(kz)
+    if kz.imag > tol:
+        return -kz
+    if abs(kz.imag) <= tol:
+        if wave_pol == "te":
+            z_try = omega * MU0 * mu_r / kz
+        elif wave_pol == "tm":
+            z_try = kz / (omega * EPS0 * eps_r)
+        else:
+            raise ValueError(f"Unsupported wave polarization: {wave_pol}")
+        if z_try.real < 0.0:
+            return -kz
+    return kz
 
 
 def layer_wave_params(
@@ -1014,8 +1138,14 @@ def layer_wave_params(
     k0 = 2.0 * math.pi * f_hz / C0
     kx = k0 * math.sin(theta)
     k_layer = k0 * cmath.sqrt(eps_r * mu_r)
-    kz = _stable_kz(cmath.sqrt(k_layer * k_layer - kx * kx))
     omega = 2.0 * math.pi * f_hz
+    kz = _causal_kz(
+        cmath.sqrt(k_layer * k_layer - kx * kx),
+        eps_r,
+        mu_r,
+        wave_pol,
+        omega,
+    )
     if wave_pol == "te":
         zc = omega * MU0 * mu_r / kz
     elif wave_pol == "tm":
@@ -1101,11 +1231,151 @@ def cascade_abcd(
     return a, b, c, d
 
 
+def _scaled_layer_trig(p: complex) -> tuple[complex, complex, float]:
+    """Return ``cos(p)`` and ``j*sin(p)`` after removing a real scale.
+
+    For a passive layer ``Im(p) <= 0`` and both raw functions grow like
+    ``exp(-Im(p))``.  Factoring that growth prevents overflow without changing
+    the chain matrix or its phase.
+    """
+    attenuation = max(0.0, -p.imag)
+    forward_phase = cmath.exp(1j * p.real)
+    reverse_phase = forward_phase.conjugate()
+    small = math.exp(-2.0 * attenuation) if attenuation < 400.0 else 0.0
+    cos_scaled = 0.5 * (forward_phase + small * reverse_phase)
+    jsin_scaled = 0.5 * (forward_phase - small * reverse_phase)
+    return cos_scaled, jsin_scaled, attenuation
+
+
+def _transmission_from_scaled_chain(
+    f_ghz: float,
+    theta_deg: float,
+    layers: list[LoadedLayer],
+    wave_pol: str,
+    z0: complex,
+    thickness_scale: float,
+    eps_scale: float,
+    mu_scale: float,
+) -> tuple[float, float, float]:
+    """Return transmitted power, amplitude dB, and phase using a scaled chain."""
+    f_hz = f_ghz * GHZ_TO_HZ
+    a = 1.0 + 0.0j
+    b = 0.0 + 0.0j  # B / z0
+    c = 0.0 + 0.0j  # C * z0
+    d = 1.0 + 0.0j
+    log_scale = 0.0
+
+    for layer in layers:
+        layer_log_scale = 0.0
+        if layer.is_sheet:
+            ai = di = 1.0 + 0.0j
+            bi = 0.0 + 0.0j
+            ci = z0 / layer.sheet_resistance
+        else:
+            eps_r, mu_r = layer_properties(layer, f_ghz)
+            eps_r *= eps_scale
+            mu_r *= mu_scale
+            zc, kz = layer_wave_params(f_hz, theta_deg, eps_r, mu_r, wave_pol)
+            p = kz * layer.thickness_m * thickness_scale
+            ai, jsin, layer_log_scale = _scaled_layer_trig(p)
+            di = ai
+            bi = (zc / z0) * jsin
+            ci = (z0 / zc) * jsin
+
+        a, b, c, d = (
+            a * ai + b * ci,
+            a * bi + b * di,
+            c * ai + d * ci,
+            c * bi + d * di,
+        )
+        norm = max(abs(a), abs(b), abs(c), abs(d))
+        if not math.isfinite(norm) or norm <= 0.0:
+            raise ValueError("Transmission chain became singular/non-finite.")
+        a, b, c, d = a / norm, b / norm, c / norm, d / norm
+        log_scale += layer_log_scale + math.log(norm)
+
+    den = a + b + c + d
+    den_mag = abs(den)
+    if not math.isfinite(den_mag) or den_mag <= 0.0:
+        raise ValueError("Transmission denominator is singular/non-finite.")
+    log_mag = math.log(2.0) - log_scale - math.log(den_mag)
+    floor_log = math.log(1e-15)
+    loss_db = 20.0 * max(log_mag, floor_log) / math.log(10.0)
+    power = math.exp(2.0 * log_mag) if log_mag > -400.0 else 0.0
+    phase_deg = -math.degrees(cmath.phase(den))
+    return power, loss_db, phase_deg
+
+
+def _transmission_from_scaled_chain_many(
+    z0: complex,
+    layer_terms: list[tuple["np.ndarray", "np.ndarray", "np.ndarray"] | None],
+    layer_sheet_rs: list[float],
+    sample: "np.ndarray",
+) -> tuple["np.ndarray", "np.ndarray", "np.ndarray"]:
+    """Vectorized scaled-chain counterpart of `_transmission_from_scaled_chain`."""
+    a = np.ones_like(sample, dtype=complex)
+    b = np.zeros_like(sample, dtype=complex)
+    c = np.zeros_like(sample, dtype=complex)
+    d = np.ones_like(sample, dtype=complex)
+    log_scale = np.zeros_like(sample.real, dtype=float)
+
+    for idx, term in enumerate(layer_terms):
+        if term is None:
+            ai = di = np.ones_like(sample, dtype=complex)
+            bi = np.zeros_like(sample, dtype=complex)
+            ci = np.full_like(sample, z0 / layer_sheet_rs[idx], dtype=complex)
+            layer_log_scale = np.zeros_like(sample.real, dtype=float)
+        else:
+            zc, _tan_p, p = term
+            attenuation = np.maximum(0.0, -p.imag)
+            forward_phase = np.exp(1j * p.real)
+            small = np.exp(np.maximum(-800.0, -2.0 * attenuation))
+            reverse_phase = np.conjugate(forward_phase)
+            ai = 0.5 * (forward_phase + small * reverse_phase)
+            jsin = 0.5 * (forward_phase - small * reverse_phase)
+            di = ai
+            bi = (zc / z0) * jsin
+            ci = (z0 / zc) * jsin
+            layer_log_scale = attenuation
+
+        a, b, c, d = (
+            a * ai + b * ci,
+            a * bi + b * di,
+            c * ai + d * ci,
+            c * bi + d * di,
+        )
+        norm = np.maximum.reduce((np.abs(a), np.abs(b), np.abs(c), np.abs(d)))
+        if np.any(~np.isfinite(norm)) or np.any(norm <= 0.0):
+            raise ValueError("Transmission chain became singular/non-finite.")
+        a, b, c, d = a / norm, b / norm, c / norm, d / norm
+        log_scale += layer_log_scale + np.log(norm)
+
+    den = a + b + c + d
+    den_mag = np.abs(den)
+    if np.any(~np.isfinite(den_mag)) or np.any(den_mag <= 0.0):
+        raise ValueError("Transmission denominator is singular/non-finite.")
+    log_mag = math.log(2.0) - log_scale - np.log(den_mag)
+    loss_db = 20.0 * np.maximum(log_mag, math.log(1e-15)) / math.log(10.0)
+    power = np.exp(np.maximum(-800.0, 2.0 * log_mag))
+    phase_deg = -np.degrees(np.angle(den))
+    return power, loss_db, phase_deg
+
+
 def _db_from_mag(x: complex) -> float:
     if not (math.isfinite(x.real) and math.isfinite(x.imag)):
         raise ValueError("Scattering coefficient is non-finite.")
     mag = max(abs(x), 1e-15)
     return 20.0 * math.log10(mag)
+
+
+def align_phase_degrees(value_deg: float, reference_deg: float) -> float:
+    """Map a wrapped phase to the nearest equivalent phase about a reference."""
+    value = float(value_deg)
+    reference = float(reference_deg)
+    if not math.isfinite(value) or not math.isfinite(reference):
+        raise ValueError("Phase values must be finite.")
+    delta = (value - reference + 180.0) % 360.0 - 180.0
+    return reference + delta
 
 
 def _db_from_power(x: float) -> float:
@@ -1136,10 +1406,25 @@ def _db_from_power_many(x: "np.ndarray") -> "np.ndarray":
     return 10.0 * np.log10(np.maximum(values, 1e-15))
 
 
-def _stable_kz_many(z: "np.ndarray") -> "np.ndarray":
-    out = np.asarray(z, dtype=complex)
-    mask = (out.imag < 0.0) | ((np.abs(out.imag) < 1e-12) & (out.real < 0.0))
-    return np.where(mask, -out, out)
+def _causal_kz_many(
+    kz: "np.ndarray",
+    eps_r: "np.ndarray",
+    mu_r: "np.ndarray",
+    wave_pol: str,
+    omega: "np.ndarray",
+) -> "np.ndarray":
+    out = np.asarray(kz, dtype=complex)
+    tol = 64.0 * np.finfo(float).eps * np.maximum(1.0, np.abs(out))
+    flip = out.imag > tol
+    lossless = np.abs(out.imag) <= tol
+    if wave_pol == "te":
+        z_try = omega * MU0 * mu_r / out
+    elif wave_pol == "tm":
+        z_try = out / (omega * EPS0 * eps_r)
+    else:
+        raise ValueError(f"Unsupported wave polarization: {wave_pol}")
+    flip |= lossless & (z_try.real < 0.0)
+    return np.where(flip, -out, out)
 
 
 def _db_from_mag_many(x: "np.ndarray") -> "np.ndarray":
@@ -1157,6 +1442,9 @@ def compute_angle_metrics_many(
     thickness_scale: float = 1.0,
     eps_scale: float = 1.0,
     mu_scale: float = 1.0,
+    *,
+    prepared_properties: list[tuple[list[complex], list[complex]] | None] | None = None,
+    prepared_wave_terms: list[tuple["np.ndarray", "np.ndarray"] | None] | None = None,
 ) -> dict[str, list[float]]:
     if not f_ghz:
         return {
@@ -1196,39 +1484,44 @@ def compute_angle_metrics_many(
             "air_absorption_db": [r["air_absorption_db"] for r in rows],
         }
 
-    theta = math.radians(theta_deg)
-    sin_t = math.sin(theta)
     z0 = ambient_wave_impedance(theta_deg, wave_pol)
     f_arr_ghz = np.asarray(f_ghz, dtype=float)
     f_hz = f_arr_ghz * GHZ_TO_HZ
-    omega = 2.0 * math.pi * f_hz
-    k0 = omega / C0
-    kx = k0 * sin_t
 
     if wave_pol not in {"te", "tm"}:
         raise ValueError(f"Unsupported wave polarization: {wave_pol}")
+    if prepared_wave_terms is None:
+        wave_terms = prepare_layer_wave_terms_many(
+            f_ghz,
+            theta_deg,
+            layers,
+            wave_pol,
+            eps_scale=eps_scale,
+            mu_scale=mu_scale,
+            prepared_properties=prepared_properties,
+        )
+    else:
+        if len(prepared_wave_terms) != len(layers):
+            raise ValueError("Prepared wave terms do not match the layer stack.")
+        wave_terms = prepared_wave_terms
 
-    # Cache layer wave terms once; they are reused by both reflection cascades and ABCD propagation.
-    # For sheet layers, terms entry is None and sheet_rs stores the resistance.
-    layer_terms: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None] = []
+    # Cache layer wave terms once; they are reused by both reflection cascades
+    # and the scaled transmission chain. For sheet layers, the entry is None.
+    layer_terms: list[tuple[np.ndarray, np.ndarray, np.ndarray] | None] = []
     layer_sheet_rs: list[float] = []
-    for layer in layers:
+    for layer, wave_term in zip(layers, wave_terms):
         if layer.is_sheet:
+            if wave_term is not None:
+                raise ValueError("Prepared wave terms mark a sheet as a bulk layer.")
             layer_terms.append(None)
             layer_sheet_rs.append(layer.sheet_resistance)
             continue
+        if wave_term is None:
+            raise ValueError("Prepared wave terms are missing a bulk layer.")
         layer_sheet_rs.append(0.0)
-        eps_r, mu_r = layer_properties_many(layer, f_ghz)
-        eps_arr = np.asarray(eps_r, dtype=complex) * eps_scale
-        mu_arr = np.asarray(mu_r, dtype=complex) * mu_scale
-        k_layer = k0 * np.sqrt(eps_arr * mu_arr)
-        kz = _stable_kz_many(np.sqrt(k_layer * k_layer - kx * kx))
-        if wave_pol == "te":
-            zc = omega * MU0 * mu_arr / kz
-        else:
-            zc = kz / (omega * EPS0 * eps_arr)
+        zc, kz = wave_term
         p = kz * layer.thickness_m * thickness_scale
-        layer_terms.append((zc, np.tan(p), np.sin(p), np.cos(p)))
+        layer_terms.append((zc, np.tan(p), p))
 
     def _cascade(z_load: complex) -> np.ndarray:
         z_next = np.full_like(f_hz, z_load, dtype=complex)
@@ -1237,7 +1530,7 @@ def compute_angle_metrics_many(
                 rs = complex(layer_sheet_rs[idx], 0.0)
                 z_next = (z_next * rs) / (z_next + rs)
             else:
-                zc, t, _si, _co = layer_terms[idx]
+                zc, t, _p = layer_terms[idx]
                 z_next = zc * (z_next + 1j * zc * t) / (zc + 1j * z_next * t)
         return z_next
 
@@ -1247,40 +1540,22 @@ def compute_angle_metrics_many(
     zin_air = _cascade(z0)
     gamma_air = (zin_air - z0) / (zin_air + z0)
 
-    a = np.ones_like(f_hz, dtype=complex)
-    b = np.zeros_like(f_hz, dtype=complex)
-    c = np.zeros_like(f_hz, dtype=complex)
-    d = np.ones_like(f_hz, dtype=complex)
-
-    for idx in range(len(layer_terms)):
-        if layer_terms[idx] is None:
-            y_s = 1.0 / layer_sheet_rs[idx]
-            a, b, c, d = (a + b * y_s, b, c + d * y_s, d)
-        else:
-            zc, _t, si, ai = layer_terms[idx]
-            bi = 1j * zc * si
-            ci = 1j * si / zc
-            di = ai
-            a, b, c, d = (
-                a * ai + b * ci,
-                a * bi + b * di,
-                c * ai + d * ci,
-                c * bi + d * di,
-            )
-
-    den = a + b / z0 + c * z0 + d
-    s21 = 2.0 / den
+    transmission_power, insertion_loss_db, insertion_phase_deg = (
+        _transmission_from_scaled_chain_many(
+            z0, layer_terms, layer_sheet_rs, f_hz
+        )
+    )
 
     metal_abs_frac = 1.0 - np.abs(gamma_metal) ** 2
-    air_abs_frac = 1.0 - np.abs(gamma_air) ** 2 - np.abs(s21) ** 2
+    air_abs_frac = 1.0 - np.abs(gamma_air) ** 2 - transmission_power
 
     return {
         "metal_loss_db": _db_from_mag_many(gamma_metal).tolist(),
         "metal_phase_deg": np.degrees(np.angle(gamma_metal)).tolist(),
         "air_loss_db": _db_from_mag_many(gamma_air).tolist(),
         "air_phase_deg": np.degrees(np.angle(gamma_air)).tolist(),
-        "insertion_loss_db": _db_from_mag_many(s21).tolist(),
-        "insertion_phase_deg": np.degrees(np.angle(s21)).tolist(),
+        "insertion_loss_db": insertion_loss_db.tolist(),
+        "insertion_phase_deg": insertion_phase_deg.tolist(),
         "metal_absorption_db": _db_from_power_many(metal_abs_frac).tolist(),
         "air_absorption_db": _db_from_power_many(air_abs_frac).tolist(),
     }
@@ -1325,28 +1600,30 @@ def compute_angle_metrics(
     )
     gamma_air = (zin_air - z0) / (zin_air + z0)
 
-    # Through transmission in air (insertion).
-    a, b, c, d = cascade_abcd(
-        f_ghz,
-        theta_deg,
-        layers,
-        wave_pol,
-        thickness_scale=thickness_scale,
-        eps_scale=eps_scale,
-        mu_scale=mu_scale,
+    # Through transmission in air (insertion). A scaled dimensionless chain
+    # stays finite for electrically thick or highly attenuating stacks.
+    transmission_power, insertion_loss_db, insertion_phase_deg = (
+        _transmission_from_scaled_chain(
+            f_ghz,
+            theta_deg,
+            layers,
+            wave_pol,
+            z0,
+            thickness_scale=thickness_scale,
+            eps_scale=eps_scale,
+            mu_scale=mu_scale,
+        )
     )
-    den = a + b / z0 + c * z0 + d
-    s21 = 2.0 / den
 
     return {
         "metal_loss_db": _db_from_mag(gamma_metal),
         "metal_phase_deg": math.degrees(cmath.phase(gamma_metal)),
         "air_loss_db": _db_from_mag(gamma_air),
         "air_phase_deg": math.degrees(cmath.phase(gamma_air)),
-        "insertion_loss_db": _db_from_mag(s21),
-        "insertion_phase_deg": math.degrees(cmath.phase(s21)),
+        "insertion_loss_db": insertion_loss_db,
+        "insertion_phase_deg": insertion_phase_deg,
         "metal_absorption_db": _db_from_power(1.0 - abs(gamma_metal) ** 2),
         "air_absorption_db": _db_from_power(
-            1.0 - abs(gamma_air) ** 2 - abs(s21) ** 2
+            1.0 - abs(gamma_air) ** 2 - transmission_power
         ),
     }

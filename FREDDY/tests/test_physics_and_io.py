@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ibc.compute import (
     C0,
+    ETA0,
     MIX_RULE_BRUGGEMAN,
     MIX_RULE_HARMONIC,
     MIX_RULE_LINEAR,
@@ -15,14 +16,22 @@ from ibc.compute import (
     MIX_RULE_MG,
     LoadedLayer,
     MaterialTable,
+    MixComponent,
+    align_phase_degrees,
     ambient_wave_impedance,
+    cascade_input_impedance,
     combine_mix,
     compute_angle_metrics,
+    compute_angle_metrics_many,
     compute_stack_impedance,
+    compute_stack_impedance_many,
     make_frequency_sweep,
     mix_anisotropic,
+    mix_material_tables,
     normalize_wave_polarization,
     project_bounded_fractions,
+    prepare_layer_properties_many,
+    prepare_layer_wave_terms_many,
     validate_fraction_bounds,
 )
 from ibc.io import (
@@ -197,6 +206,103 @@ class PhysicsTests(unittest.TestCase):
         self.assertEqual(normalize_wave_polarization("HH"), "te")
         self.assertEqual(normalize_wave_polarization("VV"), "tm")
 
+    def test_air_backed_quarter_wave_slab_matches_closed_form(self) -> None:
+        f_hz = 10e9
+        eps = 4.0 + 0.0j
+        thickness = (C0 / f_hz) / (4.0 * math.sqrt(eps.real))
+        expected_reflection = 0.6
+        expected_transmission = 0.8
+        for pol in ("te", "tm"):
+            result = compute_angle_metrics(
+                f_hz / 1e9, 0.0, [_bulk(thickness, eps)], pol
+            )
+            self.assertAlmostEqual(
+                result["air_loss_db"],
+                20.0 * math.log10(expected_reflection),
+                places=10,
+            )
+            self.assertAlmostEqual(
+                result["insertion_loss_db"],
+                20.0 * math.log10(expected_transmission),
+                places=10,
+            )
+
+    def test_lossless_oblique_stacks_conserve_power_for_te_and_tm(self) -> None:
+        layers = [_bulk(0.003, 2.5 + 0j), _bulk(0.0015, 4.2 + 0j, 1.3 + 0j)]
+        for pol in ("te", "tm"):
+            for angle in (0.0, 30.0, 60.0, 80.0):
+                result = compute_angle_metrics(12.0, angle, layers, pol)
+                reflected = 10.0 ** (result["air_loss_db"] / 10.0)
+                transmitted = 10.0 ** (result["insertion_loss_db"] / 10.0)
+                self.assertAlmostEqual(reflected + transmitted, 1.0, places=11)
+
+    def test_normal_impedance_uses_same_causal_branch_as_angle_solver(self) -> None:
+        media = (
+            (2.5 - 0.2j, 1.0 - 0.01j),
+            (-2.0 - 0.1j, -1.0 - 0.05j),
+            (2.0 - 0.1j, -1.0 - 0.05j),
+        )
+        for eps, mu in media:
+            layer = _bulk(0.01, eps, mu)
+            for backing, load in (("pec", 0.0j), ("air", ETA0 + 0.0j)):
+                normal = compute_stack_impedance(10.0, [layer], backing)
+                normal_many = compute_stack_impedance_many(
+                    [10.0, 10.1], [layer], backing
+                )[0]
+                angle = cascade_input_impedance(
+                    10.0, 0.0, [layer], "te", load
+                )
+                self.assertAlmostEqual(normal, angle, places=10)
+                self.assertAlmostEqual(normal_many, angle, places=10)
+                self.assertGreaterEqual(normal.real, -1e-10)
+
+    def test_scalar_vector_and_prepared_wave_paths_are_equivalent(self) -> None:
+        freqs = [8.0, 10.0, 12.0]
+        layers = [
+            _sheet(245.0),
+            _bulk(0.004, 3.2 - 0.25j, 1.1 - 0.02j),
+            _bulk(0.001, 1.8 - 0.05j),
+        ]
+        properties = prepare_layer_properties_many(freqs, layers)
+        wave_terms = prepare_layer_wave_terms_many(
+            freqs, 37.0, layers, "tm", prepared_properties=properties
+        )
+        direct = compute_angle_metrics_many(freqs, 37.0, layers, "tm")
+        prepared = compute_angle_metrics_many(
+            freqs,
+            37.0,
+            layers,
+            "tm",
+            prepared_wave_terms=wave_terms,
+        )
+        for key in direct:
+            for index, frequency in enumerate(freqs):
+                scalar = compute_angle_metrics(frequency, 37.0, layers, "tm")[key]
+                self.assertAlmostEqual(direct[key][index], scalar, places=10)
+                self.assertAlmostEqual(prepared[key][index], scalar, places=10)
+
+    def test_thick_lossy_stack_has_finite_scaled_transmission(self) -> None:
+        layers = [_bulk(2.0, 10.0 - 10.0j)]
+        scalar = compute_angle_metrics(18.0, 0.0, layers, "te")
+        vector = compute_angle_metrics_many([18.0, 18.1], 0.0, layers, "te")
+        self.assertTrue(all(math.isfinite(value) for value in scalar.values()))
+        self.assertAlmostEqual(scalar["insertion_loss_db"], -300.0, places=10)
+        self.assertAlmostEqual(
+            vector["insertion_loss_db"][0], scalar["insertion_loss_db"], places=10
+        )
+
+    def test_layer_order_changes_input_impedance(self) -> None:
+        first = _bulk(0.003, 2.0 - 0.1j)
+        second = _bulk(0.005, 6.0 - 0.4j)
+        forward = compute_stack_impedance(10.0, [first, second], "pec")
+        reverse = compute_stack_impedance(10.0, [second, first], "pec")
+        self.assertGreater(abs(forward - reverse), 1.0)
+
+    def test_phase_alignment_uses_short_circular_distance(self) -> None:
+        self.assertAlmostEqual(align_phase_degrees(-179.0, 179.0), 181.0)
+        self.assertAlmostEqual(align_phase_degrees(179.0, -179.0), -181.0)
+        self.assertAlmostEqual(align_phase_degrees(45.0, 40.0), 45.0)
+
 
 class EffectiveMediumTests(unittest.TestCase):
     def _mix(self, values: list[complex], fractions: list[float], rule: str) -> complex:
@@ -285,6 +391,25 @@ class EffectiveMediumTests(unittest.TestCase):
             self.assertLessEqual(value, hi + 1e-12)
         with self.assertRaisesRegex(ValueError, "infeasible"):
             validate_fraction_bounds([0.6, 0.6], [0.8, 0.8])
+
+    def test_explicit_mix_frequency_grid_is_preserved(self) -> None:
+        first = MaterialTable(
+            [1.0, 2.0, 3.0],
+            [2.0 - 0.1j, 2.2 - 0.11j, 2.4 - 0.12j],
+            [1.0 + 0j] * 3,
+        )
+        second = MaterialTable(
+            [1.0, 2.0, 3.0],
+            [6.0 - 0.3j, 6.2 - 0.31j, 6.4 - 0.32j],
+            [1.2 - 0.01j] * 3,
+        )
+        grid = [1.5, 2.5]
+        mixed = mix_material_tables(
+            [MixComponent(first, 1.0), MixComponent(second, 1.0)],
+            MIX_RULE_LINEAR,
+            grid,
+        )
+        self.assertEqual(mixed.freq_ghz, grid)
 
 
 if __name__ == "__main__":

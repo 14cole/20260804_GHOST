@@ -18,7 +18,13 @@ except Exception:
     np = None  # type: ignore[assignment]
     NUMPY_AVAILABLE = False
 
-import scipy.optimize as _scipy_optimize
+try:
+    import scipy.optimize as _scipy_optimize
+
+    SCIPY_AVAILABLE = True
+except Exception:
+    _scipy_optimize = None  # type: ignore[assignment]
+    SCIPY_AVAILABLE = False
 
 try:
     from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
@@ -279,6 +285,7 @@ from .compute import (
     MixCandidate,
     MixComponent,
     UncertaintyConfig,
+    align_phase_degrees,
     blend_density_gcc,
     build_uncertainty_scales,
     combine_mix,
@@ -296,6 +303,8 @@ from .compute import (
     normalize_mix_rule,
     normalize_wave_polarization,
     parts_to_fractions,
+    prepare_layer_properties_many,
+    prepare_layer_wave_terms_many,
     property_match_error,
     property_match_error_curve,
     project_bounded_fractions,
@@ -325,6 +334,9 @@ APP_TITLE = f"{APP_ACRONYM} - {APP_NAME}"
 ABOUT_TEXT = (
     f"{APP_TITLE}\n\n"
     f"Acronym: {APP_NAME}\n\n"
+    "Physical scope:\n"
+    "Infinite planar material-stack reflection, transmission, absorption, and input impedance.\n"
+    "FREDDY does not calculate finite-object RCS or dBsm.\n\n"
     "Angle convention:\n"
     "0 deg = normal incidence (broadside)\n"
     "angles must be < 90 deg; exact grazing has singular field normalization\n\n"
@@ -453,6 +465,11 @@ HEATMAP_METRIC_OPTIONS = [
     ("Insertion phase (deg)", "insertion_phase_deg"),
 ]
 HEATMAP_METRIC_KEYS = [key for _label, key in HEATMAP_METRIC_OPTIONS]
+PHASE_METRIC_KEYS = {
+    "metal_phase_deg",
+    "air_phase_deg",
+    "insertion_phase_deg",
+}
 
 
 @dataclass
@@ -491,14 +508,36 @@ INVERSE_SCORE_MODE_OPTIONS = (
     "Average mean metal loss (robust)",
 )
 MIX_RULE_LABEL_OPTIONS = tuple(MIX_RULE_LABELS[key] for key in MIX_RULES)
-# Material Mix deliberately exposes two materials-engineering workflows.
-# Coating/RCS performance optimization remains in the dedicated inverse-design
-# workflow; it should not be conflated with effective-medium recipe design.
+# Material Mix predicts a single homogeneous effective layer. Its performance
+# target is therefore deliberately narrower than the separate multilayer-stack
+# inverse-design workflow, and neither workflow calculates finite-object RCS.
 MIX_OBJECTIVE_FORWARD = "Predict properties from a known recipe"
 MIX_OBJECTIVE_PROPERTY = "Find a recipe for target properties"
-MIX_OBJECTIVE_OPTIONS = (MIX_OBJECTIVE_FORWARD, MIX_OBJECTIVE_PROPERTY)
+MIX_OBJECTIVE_PERFORMANCE = "Find a recipe for target stack performance"
+MIX_OBJECTIVE_OPTIONS = (
+    MIX_OBJECTIVE_FORWARD,
+    MIX_OBJECTIVE_PROPERTY,
+    MIX_OBJECTIVE_PERFORMANCE,
+)
 MIX_PROP_SOURCE_OPTIONS = ("Constant values", "Material file")
-# Corner-aggregation labels for target-property mismatch.
+MIX_PERFORMANCE_METRIC_OPTIONS = (
+    ("PEC-backed reflection |Γ| (dB)", "metal_loss_db", "at_most", "dB", -10.0),
+    ("PEC-backed absorption (%)", "metal_absorption_db", "at_least", "%", 90.0),
+    ("Air-backed reflection |Γ| (dB)", "air_loss_db", "at_most", "dB", -10.0),
+    ("Air-backed absorption (%)", "air_absorption_db", "at_least", "%", 50.0),
+    ("Air-backed transmission |S21| (dB)", "insertion_loss_db", "at_most", "dB", -10.0),
+)
+MIX_PERFORMANCE_SPEC_BY_LABEL = {
+    label: {
+        "label": label,
+        "metric_key": metric_key,
+        "direction": direction,
+        "unit": unit,
+        "default_target": default_target,
+    }
+    for label, metric_key, direction, unit, default_target in MIX_PERFORMANCE_METRIC_OPTIONS
+}
+# Corner-aggregation labels for property mismatch or performance gap.
 MIX_SCORE_MODE_OPTIONS = (
     "Worst-case across uncertainty corners (robust)",
     "Average across uncertainty corners",
@@ -1161,7 +1200,7 @@ class ImpedanceGui(QMainWindow):
         self.inv_refine_var = BooleanVar(True)
         self.inv_seed_var = StringVar("")
         # Material Mix tab: predict effective properties from a volume recipe or
-        # find bounded volume-fraction recipes for a target epsilon/permeability.
+        # find bounded volume-fraction recipes for properties/planar performance.
         self.mix_components: list[dict] = []
         self.mix_rule_var = StringVar(MIX_RULE_LABEL_OPTIONS[0])
         self.mix_objective_var = StringVar(MIX_OBJECTIVE_OPTIONS[0])
@@ -1181,6 +1220,12 @@ class ImpedanceGui(QMainWindow):
         self.mix_prop_file_var = StringVar("")
         self.mix_prop_weps_var = StringVar("1.0")
         self.mix_prop_wmu_var = StringVar("1.0")
+        self.mix_perf_metric_var = StringVar(MIX_PERFORMANCE_METRIC_OPTIONS[0][0])
+        self.mix_perf_target_var = StringVar("-10.0")
+        self.mix_perf_angle_start_var = StringVar("0.0")
+        self.mix_perf_angle_stop_var = StringVar("60.0")
+        self.mix_perf_angle_step_var = StringVar("5.0")
+        self.mix_perf_wave_pol_var = StringVar("TE")
         self.mix_max_evals_var = StringVar("400")
         self.mix_top_n_var = StringVar("10")
         self.mix_seed_var = StringVar("")
@@ -1282,6 +1327,8 @@ class ImpedanceGui(QMainWindow):
         self.mix_unc_eps_entry = None
         self.mix_unc_mu_entry = None
         self.mix_prop_frame = None
+        self.mix_perf_frame = None
+        self.mix_perf_requirement_label: QLabel | None = None
         self.mix_prop_const_entries: list = []
         self.mix_prop_file_entry = None
         self.mix_prop_browse_btn = None
@@ -1698,7 +1745,8 @@ class ImpedanceGui(QMainWindow):
         intro = QLabel(
             "Build a volume-based recipe from measured material CSV files. "
             "Predict effective ε/μ for a known recipe or search for recipes "
-            "matching a target. Results remain model-dependent estimates."
+            "matching target properties or planar-stack performance. Results "
+            "remain morphology-model-dependent estimates."
         )
         intro.setWordWrap(True)
         mix_layout.addWidget(intro)
@@ -1839,6 +1887,51 @@ class ImpedanceGui(QMainWindow):
         mix_prop_body.addWidget(_entry(self.mix_prop_wmu_var, 6), 3, 3, Qt.AlignLeft)
         mix_prop_body.setColumnStretch(7, 1)
 
+        self.mix_perf_frame = CollapsibleFrame(
+            "4. Set target planar-stack performance", expanded=True
+        )
+        mix_layout.addWidget(self.mix_perf_frame)
+        mix_perf_body = QGridLayout(self.mix_perf_frame.body)
+        mix_perf_body.addWidget(QLabel("Performance metric"), 0, 0, Qt.AlignLeft)
+        mix_perf_body.addWidget(
+            make_combo(
+                tuple(item[0] for item in MIX_PERFORMANCE_METRIC_OPTIONS),
+                self.mix_perf_metric_var,
+                width=300,
+                on_change=self._on_mix_performance_metric_changed,
+            ),
+            0,
+            1,
+            1,
+            3,
+            Qt.AlignLeft,
+        )
+        mix_perf_body.addWidget(QLabel("Required threshold"), 1, 0, Qt.AlignLeft)
+        mix_perf_body.addWidget(_entry(self.mix_perf_target_var, 9), 1, 1, Qt.AlignLeft)
+        self.mix_perf_requirement_label = QLabel()
+        mix_perf_body.addWidget(self.mix_perf_requirement_label, 1, 2, 1, 4, Qt.AlignLeft)
+        mix_perf_body.addWidget(QLabel("Angle start (deg)"), 2, 0, Qt.AlignLeft)
+        mix_perf_body.addWidget(_entry(self.mix_perf_angle_start_var, 8), 2, 1, Qt.AlignLeft)
+        mix_perf_body.addWidget(QLabel("Stop"), 2, 2, Qt.AlignLeft)
+        mix_perf_body.addWidget(_entry(self.mix_perf_angle_stop_var, 8), 2, 3, Qt.AlignLeft)
+        mix_perf_body.addWidget(QLabel("Step"), 2, 4, Qt.AlignLeft)
+        mix_perf_body.addWidget(_entry(self.mix_perf_angle_step_var, 8), 2, 5, Qt.AlignLeft)
+        mix_perf_body.addWidget(QLabel("Wave polarization"), 3, 0, Qt.AlignLeft)
+        mix_perf_body.addWidget(
+            make_combo(("TE", "TM"), self.mix_perf_wave_pol_var, width=80),
+            3,
+            1,
+            Qt.AlignLeft,
+        )
+        perf_help = QLabel(
+            "The requirement is enforced at the worst frequency/angle point, "
+            "not only on an average. PEC-backed metrics model the mixed layer "
+            "on a conductor; air-backed metrics model a free-standing slab."
+        )
+        perf_help.setWordWrap(True)
+        mix_perf_body.addWidget(perf_help, 4, 0, 1, 6)
+        mix_perf_body.setColumnStretch(5, 1)
+
         self.mix_search_frame = CollapsibleFrame(
             "Inverse recipe search settings", expanded=False
         )
@@ -1861,18 +1954,20 @@ class ImpedanceGui(QMainWindow):
         bind_check_box(self.mix_uncertainty_var, mix_unc_check)
         mix_unc_check.clicked.connect(self._sync_mix_uncertainty_state)
         mix_search_body.addWidget(mix_unc_check, 2, 0, 1, 6, Qt.AlignLeft)
-        self.mix_unc_t_pct_var.set("0")
-        self.mix_unc_t_entry = None
-        mix_search_body.addWidget(QLabel("ε constituents ±%"), 3, 0, Qt.AlignLeft)
+        mix_search_body.addWidget(QLabel("Layer thickness ±%"), 3, 0, Qt.AlignLeft)
+        self.mix_unc_t_entry = _entry(self.mix_unc_t_pct_var, 7)
+        mix_search_body.addWidget(self.mix_unc_t_entry, 3, 1, Qt.AlignLeft)
+        mix_search_body.addWidget(QLabel("ε constituents ±%"), 3, 2, Qt.AlignLeft)
         self.mix_unc_eps_entry = _entry(self.mix_unc_eps_pct_var, 7)
-        mix_search_body.addWidget(self.mix_unc_eps_entry, 3, 1, Qt.AlignLeft)
-        mix_search_body.addWidget(QLabel("μ constituents ±%"), 3, 2, Qt.AlignLeft)
+        mix_search_body.addWidget(self.mix_unc_eps_entry, 3, 3, Qt.AlignLeft)
+        mix_search_body.addWidget(QLabel("μ constituents ±%"), 3, 4, Qt.AlignLeft)
         self.mix_unc_mu_entry = _entry(self.mix_unc_mu_pct_var, 7)
-        mix_search_body.addWidget(self.mix_unc_mu_entry, 3, 3, Qt.AlignLeft)
+        mix_search_body.addWidget(self.mix_unc_mu_entry, 3, 5, Qt.AlignLeft)
         tolerance_help = QLabel(
-            "Tolerance scales all constituent ε values together and all μ "
-            "values together; it represents correlated measurement/calibration "
-            "bias, not independent material-to-material scatter."
+            "Property tolerance scales all constituent ε values together and "
+            "all μ values together (correlated calibration bias). Thickness "
+            "tolerance affects performance searches and is ignored for a pure "
+            "effective-property target."
         )
         tolerance_help.setWordWrap(True)
         mix_search_body.addWidget(tolerance_help, 4, 0, 1, 6)
@@ -1923,6 +2018,7 @@ class ImpedanceGui(QMainWindow):
         self.mix_export_btn.clicked.connect(self._export_mix_material)
         mix_actions_layout.addWidget(self.mix_export_btn)
         mix_layout.addWidget(mix_actions)
+        self._bind_mix_input_invalidation()
         mix_layout.addStretch(1)
 
         layers_group = QGroupBox("Layers (top to bottom)")
@@ -2346,6 +2442,12 @@ class ImpedanceGui(QMainWindow):
             "mix_prop_file": self.mix_prop_file_var.get(),
             "mix_prop_weps": self.mix_prop_weps_var.get(),
             "mix_prop_wmu": self.mix_prop_wmu_var.get(),
+            "mix_perf_metric": self.mix_perf_metric_var.get(),
+            "mix_perf_target": self.mix_perf_target_var.get(),
+            "mix_perf_angle_start": self.mix_perf_angle_start_var.get(),
+            "mix_perf_angle_stop": self.mix_perf_angle_stop_var.get(),
+            "mix_perf_angle_step": self.mix_perf_angle_step_var.get(),
+            "mix_perf_wave_pol": self.mix_perf_wave_pol_var.get(),
             "mix_thickness": self.mix_thickness_var.get(),
             "mix_freq_mode": self.mix_freq_mode_var.get(),
             "mix_freq_list": self.mix_freq_list_var.get(),
@@ -2450,6 +2552,12 @@ class ImpedanceGui(QMainWindow):
             "mix_prop_file": self.mix_prop_file_var,
             "mix_prop_weps": self.mix_prop_weps_var,
             "mix_prop_wmu": self.mix_prop_wmu_var,
+            "mix_perf_metric": self.mix_perf_metric_var,
+            "mix_perf_target": self.mix_perf_target_var,
+            "mix_perf_angle_start": self.mix_perf_angle_start_var,
+            "mix_perf_angle_stop": self.mix_perf_angle_stop_var,
+            "mix_perf_angle_step": self.mix_perf_angle_step_var,
+            "mix_perf_wave_pol": self.mix_perf_wave_pol_var,
             "mix_thickness": self.mix_thickness_var,
             "mix_freq_mode": self.mix_freq_mode_var,
             "mix_freq_list": self.mix_freq_list_var,
@@ -2483,6 +2591,7 @@ class ImpedanceGui(QMainWindow):
                     "wave_pol",
                     "thk_wave_pol",
                     "inv_wave_pol",
+                    "mix_perf_wave_pol",
                 }:
                     # Migrate legacy HH/VV project values to unambiguous
                     # plane-wave TE/TM labels.
@@ -2491,12 +2600,11 @@ class ImpedanceGui(QMainWindow):
                     value = normalize_backing(value)
                 elif key == "mix_objective":
                     lowered = value.strip().lower()
-                    if lowered.startswith("match") or lowered.startswith("find"):
+                    if "performance" in lowered:
+                        value = MIX_OBJECTIVE_PERFORMANCE
+                    elif lowered.startswith("match") or lowered.startswith("find"):
                         value = MIX_OBJECTIVE_PROPERTY
-                    elif "performance" in lowered or lowered.startswith("predict"):
-                        # Legacy coating-performance searches cannot be mapped
-                        # to a materials-property inverse problem. Preserve the
-                        # entered recipe in the forward prediction workflow.
+                    elif lowered.startswith("predict"):
                         value = MIX_OBJECTIVE_FORWARD
                 var.set(value)
         for key, var in bool_vars.items():
@@ -3917,6 +4025,7 @@ class ImpedanceGui(QMainWindow):
                 validate_sweep_coverage(freqs, layer.table_90deg, f"layer {i} 90 deg")
 
         if NUMPY_AVAILABLE:
+            prepared_properties = prepare_layer_properties_many(freqs, loaded_layers)
             grids = {k: np.zeros((len(freqs), len(angles)), dtype=float) for k in HEATMAP_METRIC_KEYS}
             for j, a in enumerate(angles):
                 col = compute_angle_metrics_many(
@@ -3927,6 +4036,7 @@ class ImpedanceGui(QMainWindow):
                     thickness_scale=thickness_scale,
                     eps_scale=eps_scale,
                     mu_scale=mu_scale,
+                    prepared_properties=prepared_properties,
                 )
                 for key in HEATMAP_METRIC_KEYS:
                     grids[key][:, j] = np.asarray(col[key], dtype=float)
@@ -4005,6 +4115,16 @@ class ImpedanceGui(QMainWindow):
             return trial
 
         if NUMPY_AVAILABLE:
+            prepared_properties = prepare_layer_properties_many(freqs, loaded_layers)
+            prepared_wave_terms = prepare_layer_wave_terms_many(
+                freqs,
+                angle_deg,
+                loaded_layers,
+                wave_pol,
+                eps_scale=eps_scale,
+                mu_scale=mu_scale,
+                prepared_properties=prepared_properties,
+            )
             grids = {
                 k: np.zeros((len(freqs), len(thicknesses_in)), dtype=float)
                 for k in HEATMAP_METRIC_KEYS
@@ -4018,6 +4138,7 @@ class ImpedanceGui(QMainWindow):
                     thickness_scale=thickness_scale,
                     eps_scale=eps_scale,
                     mu_scale=mu_scale,
+                    prepared_wave_terms=prepared_wave_terms,
                 )
                 for key in HEATMAP_METRIC_KEYS:
                     grids[key][:, j] = np.asarray(col[key], dtype=float)
@@ -4176,6 +4297,9 @@ class ImpedanceGui(QMainWindow):
                     )
                     for key in HEATMAP_METRIC_KEYS:
                         arr = np.asarray(s_out[key], dtype=float)
+                        if key in PHASE_METRIC_KEYS:
+                            nominal = np.asarray(out[key], dtype=float)
+                            arr = nominal + (arr - nominal + 180.0) % 360.0 - 180.0
                         envelope_min[key] = np.minimum(envelope_min[key], arr)
                         envelope_max[key] = np.maximum(envelope_max[key], arr)
                 envelope_min = {key: envelope_min[key].tolist() for key in HEATMAP_METRIC_KEYS}
@@ -4205,6 +4329,10 @@ class ImpedanceGui(QMainWindow):
                         for i in range(len(out["freq_ghz"])):
                             for j in range(len(out["angle_deg"])):
                                 val = s_out[key][i][j]
+                                if key in PHASE_METRIC_KEYS:
+                                    val = align_phase_degrees(
+                                        val, out[key][i][j]
+                                    )
                                 envelope_min[key][i][j] = min(envelope_min[key][i][j], val)
                                 envelope_max[key][i][j] = max(envelope_max[key][i][j], val)
 
@@ -4326,6 +4454,10 @@ class ImpedanceGui(QMainWindow):
                     for i in range(len(freqs)):
                         for j in range(len(thicknesses_in)):
                             val = grid[i][j]
+                            if key in PHASE_METRIC_KEYS:
+                                val = align_phase_degrees(
+                                    val, out[key][i][j]
+                                )
                             if val < envelope_min[key][i][j]:
                                 envelope_min[key][i][j] = val
                             if val > envelope_max[key][i][j]:
@@ -4403,12 +4535,21 @@ class ImpedanceGui(QMainWindow):
         wave_pol: str,
         scales: list[tuple[float, float, float]],
         score_mode: str,
+        prepared_wave_terms: dict[
+            tuple[float, float, float],
+            list[tuple["np.ndarray", "np.ndarray"] | None],
+        ] | None = None,
     ) -> tuple[float, float, float, float, float]:
         corner_means: list[float] = []
         nominal_mean: float | None = None
         for t_scale, e_scale, m_scale in scales:
             values: list[float] = []
             for angle_deg in target_angles:
+                prepared = (
+                    prepared_wave_terms.get((angle_deg, e_scale, m_scale))
+                    if prepared_wave_terms is not None
+                    else None
+                )
                 metrics = compute_angle_metrics_many(
                     target_freqs,
                     angle_deg,
@@ -4417,6 +4558,7 @@ class ImpedanceGui(QMainWindow):
                     thickness_scale=t_scale,
                     eps_scale=e_scale,
                     mu_scale=m_scale,
+                    prepared_wave_terms=prepared,
                 )
                 values.extend(metrics["metal_loss_db"])
             mean_db, _mn, _mx = self._stats(values)
@@ -4536,6 +4678,10 @@ class ImpedanceGui(QMainWindow):
             score_mode = self.inv_score_mode_var.get().strip()
             uncertainty_cfg = self._read_inverse_uncertainty_config()
             refine_top_candidates = bool(self.inv_refine_var.get())
+            if refine_top_candidates and (not NUMPY_AVAILABLE or not SCIPY_AVAILABLE):
+                raise ValueError(
+                    "Local inverse-design refinement requires NumPy and SciPy."
+                )
             seed_text = self.inv_seed_var.get().strip()
             search_seed: int | None = int(seed_text) if seed_text else None
         except Exception as exc:
@@ -4626,11 +4772,16 @@ class ImpedanceGui(QMainWindow):
                     wave_pol,
                     scales,
                     score_mode,
+                    prepared_inverse_wave_terms,
                 )
 
             top_candidates: list[InverseCandidate] = []
             eval_count = 0
             refine_evals = 0
+            prepared_inverse_wave_terms: dict[
+                tuple[float, float, float],
+                list[tuple[np.ndarray, np.ndarray] | None],
+            ] = {}
 
             # Monte Carlo: one fixed material per layer; validate coverage once.
             chosen_files = [
@@ -4703,6 +4854,27 @@ class ImpedanceGui(QMainWindow):
                             layer.inv_t_accuracy_in,
                         )
                     )
+
+            if NUMPY_AVAILABLE:
+                reference_layers = build_loaded_layers(base_thick, base_rs)
+                prepared_properties = prepare_layer_properties_many(
+                    target_freqs, reference_layers
+                )
+                for _t_scale, e_scale, m_scale in scales:
+                    for angle_deg in target_angles:
+                        key = (angle_deg, e_scale, m_scale)
+                        if key not in prepared_inverse_wave_terms:
+                            prepared_inverse_wave_terms[key] = (
+                                prepare_layer_wave_terms_many(
+                                    target_freqs,
+                                    angle_deg,
+                                    reference_layers,
+                                    wave_pol,
+                                    eps_scale=e_scale,
+                                    mu_scale=m_scale,
+                                    prepared_properties=prepared_properties,
+                                )
+                            )
 
             mc_rng = random.Random(search_seed)
             n_samples = max_evals if search_dims else 1
@@ -4838,6 +5010,9 @@ class ImpedanceGui(QMainWindow):
                             thickness_scale=t_scale,
                             eps_scale=e_scale,
                             mu_scale=m_scale,
+                            prepared_wave_terms=prepared_inverse_wave_terms.get(
+                                (angle_deg, e_scale, m_scale)
+                            ),
                         )
                         for fi, val in enumerate(metrics["metal_loss_db"]):
                             freq_samples[fi].append(val)
@@ -4888,6 +5063,45 @@ class ImpedanceGui(QMainWindow):
         self._run_background_task("Inverse Design", worker, on_success, "Inverse Design Error")
 
     # --- Material Mix tab ---------------------------------------------------
+    def _bind_mix_input_invalidation(self) -> None:
+        """Prevent results from silently surviving a changed design problem."""
+        string_inputs = (
+            self.mix_rule_var,
+            self.mix_objective_var,
+            self.mix_thickness_var,
+            self.mix_freq_mode_var,
+            self.mix_freq_list_var,
+            self.mix_target_start_var,
+            self.mix_target_stop_var,
+            self.mix_target_step_var,
+            self.mix_prop_source_var,
+            self.mix_prop_eps_re_var,
+            self.mix_prop_eps_im_var,
+            self.mix_prop_mu_re_var,
+            self.mix_prop_mu_im_var,
+            self.mix_prop_file_var,
+            self.mix_prop_weps_var,
+            self.mix_prop_wmu_var,
+            self.mix_perf_metric_var,
+            self.mix_perf_target_var,
+            self.mix_perf_angle_start_var,
+            self.mix_perf_angle_stop_var,
+            self.mix_perf_angle_step_var,
+            self.mix_perf_wave_pol_var,
+            self.mix_max_evals_var,
+            self.mix_top_n_var,
+            self.mix_seed_var,
+            self.mix_score_mode_var,
+            self.mix_unc_t_pct_var,
+            self.mix_unc_eps_pct_var,
+            self.mix_unc_mu_pct_var,
+        )
+        boolean_inputs = (self.mix_refine_var, self.mix_uncertainty_var)
+        for var in string_inputs:
+            var.valueChanged.connect(lambda _value: self._invalidate_mix_results())
+        for var in boolean_inputs:
+            var.valueChanged.connect(lambda _value: self._invalidate_mix_results())
+
     def _sync_mix_freq_mode_state(self) -> None:
         mode = self.mix_freq_mode_var.get().strip().lower()
         band_enabled = mode.startswith("band")
@@ -4909,12 +5123,22 @@ class ImpedanceGui(QMainWindow):
 
     def _mix_objective_is_property(self) -> bool:
         text = self.mix_objective_var.get().strip().lower()
-        return text.startswith("find") or text.startswith("match")
+        return "target properties" in text or text.startswith("match properties")
+
+    def _mix_objective_is_performance(self) -> bool:
+        return "performance" in self.mix_objective_var.get().strip().lower()
+
+    def _mix_objective_is_inverse(self) -> bool:
+        return self._mix_objective_is_property() or self._mix_objective_is_performance()
 
     def _sync_mix_objective_state(self) -> None:
-        inverse = self._mix_objective_is_property()
+        property_mode = self._mix_objective_is_property()
+        performance_mode = self._mix_objective_is_performance()
+        inverse = property_mode or performance_mode
         if self.mix_prop_frame is not None:
-            self.mix_prop_frame.setVisible(inverse)
+            self.mix_prop_frame.setVisible(property_mode)
+        if self.mix_perf_frame is not None:
+            self.mix_perf_frame.setVisible(performance_mode)
         if self.mix_search_frame is not None:
             self.mix_search_frame.setVisible(inverse)
         if self.mix_run_btn is not None:
@@ -4924,20 +5148,27 @@ class ImpedanceGui(QMainWindow):
                 "Preview current recipe" if inverse else "Calculate recipe"
             )
         if self.mix_workflow_help_label is not None:
-            self.mix_workflow_help_label.setText(
-                (
+            if property_mode:
+                help_text = (
                     "Inverse workflow: set a target ε/μ and allowable volume-% "
                     "range for each material. FREDDY searches the bounded "
                     "volume-fraction simplex and reports the best recipes."
                 )
-                if inverse
-                else (
+            elif performance_mode:
+                help_text = (
+                    "Performance workflow: choose a reflection, absorption, or "
+                    "transmission requirement over frequency and incidence angle. "
+                    "FREDDY searches recipes whose worst grid point meets it."
+                )
+            else:
+                help_text = (
                     "Forward workflow: enter relative volume amounts for the "
                     "known recipe. FREDDY normalizes them to volume percent and "
                     "predicts the effective ε/μ over the selected band."
                 )
-            )
+            self.mix_workflow_help_label.setText(help_text)
         self._sync_mix_prop_source_state()
+        self._on_mix_performance_metric_changed()
         self._on_mix_model_changed()
 
     def _sync_mix_prop_source_state(self) -> None:
@@ -4949,6 +5180,25 @@ class ImpedanceGui(QMainWindow):
             self.mix_prop_file_entry.setEnabled(prop and use_file)
         if self.mix_prop_browse_btn is not None:
             self.mix_prop_browse_btn.setEnabled(prop and use_file)
+
+    def _on_mix_performance_metric_changed(self) -> None:
+        metric_label = self.mix_perf_metric_var.get()
+        spec = MIX_PERFORMANCE_SPEC_BY_LABEL.get(metric_label)
+        previous = getattr(self, "_mix_last_perf_metric", None)
+        if spec is not None and previous is not None and previous != metric_label:
+            # A percent target is not a sensible carry-over from a dB target (or
+            # vice versa). Start a newly selected metric from its documented
+            # default; the user can then edit it explicitly.
+            self.mix_perf_target_var.set(str(spec["default_target"]))
+        self._mix_last_perf_metric = metric_label
+        if spec is None:
+            text = "Select a supported performance metric."
+        elif spec["direction"] == "at_most":
+            text = f"Requirement: every point must be ≤ target {spec['unit']}"
+        else:
+            text = f"Requirement: every point must be ≥ target {spec['unit']}"
+        if self.mix_perf_requirement_label is not None:
+            self.mix_perf_requirement_label.setText(text)
 
     def _on_mix_model_changed(self) -> None:
         try:
@@ -5025,7 +5275,7 @@ class ImpedanceGui(QMainWindow):
         self._refresh_mix_results_list()
         if self.mix_summary_label is not None:
             self.mix_summary_label.setText(
-                "Recipe or model changed. Recalculate to update the material prediction."
+                "A material-mix input changed. Recalculate before using these results."
             )
 
     def _add_mix_component(self) -> None:
@@ -5126,6 +5376,99 @@ class ImpedanceGui(QMainWindow):
             )
         return target_eps, target_mu, w_eps, w_mu, desc
 
+    def _parse_mix_performance_target(self) -> dict:
+        spec = MIX_PERFORMANCE_SPEC_BY_LABEL.get(self.mix_perf_metric_var.get())
+        if spec is None:
+            raise ValueError("Select a supported stack-performance metric.")
+        target = float(self.mix_perf_target_var.get().strip())
+        if not math.isfinite(target):
+            raise ValueError("Performance threshold must be finite.")
+        if spec["unit"] == "%" and not 0.0 <= target <= 100.0:
+            raise ValueError("An absorption target must be between 0 and 100%.")
+        if spec["unit"] == "dB" and target > 0.0:
+            raise ValueError("Passive reflection/transmission thresholds must be <= 0 dB.")
+
+        angle_start = validate_incidence_angle(
+            float(self.mix_perf_angle_start_var.get().strip())
+        )
+        angle_stop = validate_incidence_angle(
+            float(self.mix_perf_angle_stop_var.get().strip())
+        )
+        if angle_stop < angle_start:
+            raise ValueError("Performance angle stop must be >= start.")
+        if abs(angle_stop - angle_start) <= 1e-12:
+            angles = [angle_start]
+        else:
+            angle_step = float(self.mix_perf_angle_step_var.get().strip())
+            angles = make_sweep(angle_start, angle_stop, angle_step)
+        wave_pol = normalize_wave_polarization(self.mix_perf_wave_pol_var.get())
+        return {
+            **spec,
+            "target": target,
+            "angles": angles,
+            "wave_pol": wave_pol,
+        }
+
+    @staticmethod
+    def _mix_performance_values(metrics: dict[str, list[float]], config: dict) -> list[float]:
+        values = [float(value) for value in metrics[config["metric_key"]]]
+        if config["unit"] == "%":
+            return [100.0 * 10.0 ** (value / 10.0) for value in values]
+        return values
+
+    @staticmethod
+    def _mix_performance_gap(values: list[float], config: dict) -> float:
+        if not values:
+            raise ValueError("A performance target requires at least one grid point.")
+        if config["direction"] == "at_most":
+            return max(values) - config["target"]
+        return config["target"] - min(values)
+
+    def _evaluate_mix_performance(
+        self,
+        table: MaterialTable,
+        thickness_in: float,
+        config: dict,
+        *,
+        thickness_scale: float = 1.0,
+        eps_scale: float = 1.0,
+        mu_scale: float = 1.0,
+    ) -> dict:
+        layer = LoadedLayer(
+            thickness_m=thickness_in * INCH_TO_M,
+            anisotropic=False,
+            polarization_deg=0.0,
+            table_0deg=table,
+            table_90deg=None,
+        )
+        freqs = list(table.freq_ghz)
+        prepared_properties = (
+            prepare_layer_properties_many(freqs, [layer]) if NUMPY_AVAILABLE else None
+        )
+        grid = [[0.0 for _angle in config["angles"]] for _freq in freqs]
+        all_values: list[float] = []
+        for angle_index, angle_deg in enumerate(config["angles"]):
+            metrics = compute_angle_metrics_many(
+                freqs,
+                angle_deg,
+                [layer],
+                config["wave_pol"],
+                thickness_scale=thickness_scale,
+                eps_scale=eps_scale,
+                mu_scale=mu_scale,
+                prepared_properties=prepared_properties,
+            )
+            values = self._mix_performance_values(metrics, config)
+            all_values.extend(values)
+            for freq_index, value in enumerate(values):
+                grid[freq_index][angle_index] = value
+        return {
+            **config,
+            "freqs": freqs,
+            "grid": grid,
+            "gap": self._mix_performance_gap(all_values, config),
+        }
+
     def _load_mix_components(self) -> list[dict]:
         if len(self.mix_components) < 2:
             raise ValueError("Add at least two measured materials to make a blend.")
@@ -5148,15 +5491,18 @@ class ImpedanceGui(QMainWindow):
         components: list[MixComponent],
         rule: str,
         thickness_in: float,
+        grid_ghz: list[float],
         target: dict | None = None,
+        performance: dict | None = None,
         densities: list[float] | None = None,
         component_names: list[str] | None = None,
     ) -> dict:
-        # Synthesized material on its full overlapping band. When a property
-        # target is given, also carry target curves and per-frequency mismatch.
+        # Synthesize on the frequency grid selected in the Material Mix tab.
+        # When a property target is given, also carry target curves and
+        # per-frequency mismatch.
         # A model comparison at the band midpoint makes morphology sensitivity
         # visible rather than implying that one mixing law is ground truth.
-        disp_table = mix_material_tables(components, rule)
+        disp_table = mix_material_tables(components, rule, grid_ghz)
         lo, hi = disp_table.freq_ghz[0], disp_table.freq_ghz[-1]
         fractions = parts_to_fractions([component.parts for component in components])
         eps_tan = [
@@ -5239,6 +5585,10 @@ class ImpedanceGui(QMainWindow):
                 out["err_pct"] = property_match_error_curve(
                     blend_eps, blend_mu, tg_eps, tg_mu, target["w_eps"], target["w_mu"]
                 )
+        if performance is not None:
+            out["performance"] = self._evaluate_mix_performance(
+                disp_table, thickness_in, performance
+            )
         return out
 
     def _preview_mix(self) -> None:
@@ -5263,6 +5613,11 @@ class ImpedanceGui(QMainWindow):
                 }
             else:
                 target = None
+            performance = (
+                self._parse_mix_performance_target()
+                if self._mix_objective_is_performance()
+                else None
+            )
             components = [
                 MixComponent(table=c["table"], parts=float(c["parts"])) for c in loaded
             ]
@@ -5272,7 +5627,9 @@ class ImpedanceGui(QMainWindow):
                 components,
                 rule,
                 thickness_in,
+                target_freqs,
                 target=target,
+                performance=performance,
                 densities=[float(c.get("density", 0.0)) for c in loaded],
                 component_names=[Path(c["file"]).name for c in loaded],
             )
@@ -5308,14 +5665,27 @@ class ImpedanceGui(QMainWindow):
         density_text = f" | blend density ≈ {density:.4g} g/cc" if density else ""
         model = MIX_RULE_LABELS.get(display.get("model"), str(display.get("model", "")))
         notes = " ".join(display.get("advisories", []))
-        return (
+        summary = (
             f"Selected model: {model}\nVolume recipe: {recipe}{weight_text}{density_text}\n"
             f"Applicability: {notes}"
         )
+        performance = display.get("performance")
+        if performance is not None:
+            relation = "≤" if performance["direction"] == "at_most" else "≥"
+            status = "PASS" if performance["gap"] <= 0.0 else "MISS"
+            summary += (
+                f"\nPerformance: {performance['label']} {relation} "
+                f"{performance['target']:g} {performance['unit']} | "
+                f"worst requirement gap {performance['gap']:+.3f} "
+                f"{performance['unit']} ({status})"
+            )
+        return summary
 
     def _run_mix_design(self) -> None:
-        """Find volume-fraction recipes that best match a target ε/μ table."""
-        if not self._mix_objective_is_property():
+        """Find bounded recipes for a property or stack-performance target."""
+        property_mode = self._mix_objective_is_property()
+        performance_mode = self._mix_objective_is_performance()
+        if not (property_mode or performance_mode):
             self._preview_mix()
             return
         try:
@@ -5327,9 +5697,22 @@ class ImpedanceGui(QMainWindow):
                 raise ValueError("Add at least two measured materials.")
             rule_norm = normalize_mix_rule(self.mix_rule_var.get())
             target_freqs, target_desc = self._parse_mix_freqs()
-            target_eps, target_mu, w_eps, w_mu, prop_desc = (
-                self._parse_mix_property_target(target_freqs)
-            )
+            target: dict | None = None
+            performance_config: dict | None = None
+            if property_mode:
+                target_eps, target_mu, w_eps, w_mu, prop_desc = (
+                    self._parse_mix_property_target(target_freqs)
+                )
+                target = {
+                    "freqs": target_freqs,
+                    "eps": target_eps,
+                    "mu": target_mu,
+                    "w_eps": w_eps,
+                    "w_mu": w_mu,
+                }
+            else:
+                performance_config = self._parse_mix_performance_target()
+                prop_desc = ""
             thickness_in = float(self.mix_thickness_var.get().strip())
             if not math.isfinite(thickness_in) or thickness_in <= 0:
                 raise ValueError("Stack-layer thickness must be finite and > 0.")
@@ -5345,19 +5728,24 @@ class ImpedanceGui(QMainWindow):
                 self.mix_unc_eps_pct_var,
                 self.mix_unc_mu_pct_var,
             )
-            # Effective properties do not depend on a later layer thickness.
-            uncertainty_cfg = UncertaintyConfig(
-                uncertainty_cfg.enabled,
-                0.0,
-                uncertainty_cfg.eps_pct,
-                uncertainty_cfg.mu_pct,
-            )
+            if property_mode:
+                # Effective properties do not depend on a later layer thickness.
+                uncertainty_cfg = UncertaintyConfig(
+                    uncertainty_cfg.enabled,
+                    0.0,
+                    uncertainty_cfg.eps_pct,
+                    uncertainty_cfg.mu_pct,
+                )
             lower = [component["min"] / 100.0 for component in comp_snapshot]
             upper = [component["max"] / 100.0 for component in comp_snapshot]
             validate_fraction_bounds(lower, upper)
             seed_text = self.mix_seed_var.get().strip()
             search_seed: int | None = int(seed_text) if seed_text else None
             refine = bool(self.mix_refine_var.get())
+            if refine and (not NUMPY_AVAILABLE or not SCIPY_AVAILABLE):
+                raise ValueError(
+                    "Local material-recipe refinement requires NumPy and SciPy."
+                )
         except Exception as exc:
             messagebox.showerror("Material Mix Error", str(exc))
             return
@@ -5392,16 +5780,26 @@ class ImpedanceGui(QMainWindow):
                 corner_values: list[float] = []
                 nominal: float | None = None
                 for t_scale, eps_scale, mu_scale in scales:
-                    error = property_match_error(
-                        table.eps_r,
-                        table.mu_r,
-                        target_eps,
-                        target_mu,
-                        w_eps,
-                        w_mu,
-                        eps_scale,
-                        mu_scale,
-                    )
+                    if property_mode:
+                        error = property_match_error(
+                            table.eps_r,
+                            table.mu_r,
+                            target["eps"],
+                            target["mu"],
+                            target["w_eps"],
+                            target["w_mu"],
+                            eps_scale,
+                            mu_scale,
+                        )
+                    else:
+                        error = self._evaluate_mix_performance(
+                            table,
+                            thickness_in,
+                            performance_config,
+                            thickness_scale=t_scale,
+                            eps_scale=eps_scale,
+                            mu_scale=mu_scale,
+                        )["gap"]
                     corner_values.append(error)
                     if is_nominal_scale(t_scale, eps_scale, mu_scale):
                         nominal = error
@@ -5514,13 +5912,6 @@ class ImpedanceGui(QMainWindow):
                 refined.sort(key=lambda candidate: candidate["score"])
                 candidates_raw = refined[:top_n]
 
-            target = {
-                "freqs": target_freqs,
-                "eps": target_eps,
-                "mu": target_mu,
-                "w_eps": w_eps,
-                "w_mu": w_mu,
-            }
             candidates: list[MixCandidate] = []
             plot_data: list[dict] = []
             for candidate in candidates_raw:
@@ -5536,6 +5927,8 @@ class ImpedanceGui(QMainWindow):
                         thickness_in=thickness_in,
                         component_files=list(component_files),
                         rule=rule_norm,
+                        objective_kind="property" if property_mode else "performance",
+                        score_unit="%" if property_mode else performance_config["unit"],
                         weight_fractions=weight_fractions_from_volume(
                             fractions, densities
                         ),
@@ -5551,7 +5944,9 @@ class ImpedanceGui(QMainWindow):
                         display_components,
                         rule_norm,
                         thickness_in,
-                        target=target,
+                        target_freqs,
+                        target=target if property_mode else None,
+                        performance=performance_config if performance_mode else None,
                         densities=densities,
                         component_names=[Path(path).name for path in component_files],
                     )
@@ -5567,14 +5962,36 @@ class ImpedanceGui(QMainWindow):
             advisories = " ".join(
                 mix_model_advisories(rule_norm, best_candidate.fractions)
             )
+            if property_mode:
+                target_text = f"Target: {prop_desc}; {target_desc}"
+                result_text = (
+                    f"Match error: {best_candidate.score_db:.3f}% "
+                    f"(nominal {best_candidate.nominal_mean_db:.3f}%, "
+                    f"worst {best_candidate.worst_mean_db:.3f}%)"
+                )
+            else:
+                relation = "<=" if performance_config["direction"] == "at_most" else ">="
+                angles = performance_config["angles"]
+                status = "PASS" if best_candidate.worst_mean_db <= 0.0 else "MISS"
+                target_text = (
+                    f"Target: {performance_config['label']} {relation} "
+                    f"{performance_config['target']:g} {performance_config['unit']}; "
+                    f"{target_desc}; angles {angles[0]:g}-{angles[-1]:g} deg; "
+                    f"pol={performance_config['wave_pol'].upper()}"
+                )
+                result_text = (
+                    f"Search score: {best_candidate.score_db:+.3f} "
+                    f"{best_candidate.score_unit}; certified worst-corner gap "
+                    f"{best_candidate.worst_mean_db:+.3f} {best_candidate.score_unit} "
+                    f"({status}; gap <= 0 passes); nominal gap "
+                    f"{best_candidate.nominal_mean_db:+.3f}"
+                )
             message = (
                 "Inverse material recipe search complete.\n"
-                f"Target: {prop_desc}; {target_desc}\n"
+                f"{target_text}\n"
                 f"Model: {MIX_RULE_LABELS[rule_norm]}\n"
                 f"Best volume recipe: {recipe}\n"
-                f"Match error: {best_candidate.score_db:.3f}% "
-                f"(nominal {best_candidate.nominal_mean_db:.3f}%, "
-                f"worst {best_candidate.worst_mean_db:.3f}%)\n"
+                f"{result_text}\n"
                 f"Evaluated {len(proposals)} bounded recipe(s); "
                 f"{invalid_count} invalid under model; refinement evaluations "
                 f"{refine_evals}.\nApplicability: {advisories}"
@@ -5590,9 +6007,18 @@ class ImpedanceGui(QMainWindow):
             if self.mix_results_frame is not None:
                 self.mix_results_frame.expand()
             if self.mix_summary_label is not None and self.mix_plot_data:
+                candidate = self.mix_candidates[0]
+                if candidate.objective_kind == "performance":
+                    status = "PASS" if candidate.worst_mean_db <= 0.0 else "MISS"
+                    score_text = (
+                        f"\nWorst uncertainty-corner gap: "
+                        f"{candidate.worst_mean_db:+.3f} {candidate.score_unit} "
+                        f"({status}; gap <= 0 passes)"
+                    )
+                else:
+                    score_text = f"\nBest target mismatch: {candidate.score_db:.3f}%"
                 self.mix_summary_label.setText(
-                    self._mix_display_summary(self.mix_plot_data[0])
-                    + f"\nBest target mismatch: {self.mix_candidates[0].score_db:.3f}%"
+                    self._mix_display_summary(self.mix_plot_data[0]) + score_text
                 )
             self._update_plot()
             messagebox.showinfo("Material Mix", message)
@@ -5620,9 +6046,20 @@ class ImpedanceGui(QMainWindow):
                 if c.weight_fractions
                 else ""
             )
+            if c.objective_kind == "performance":
+                status = "PASS" if c.worst_mean_db <= 0.0 else "MISS"
+                score_text = (
+                    f"score={c.score_db:+.2f} {c.score_unit} | "
+                    f"nom gap={c.nominal_mean_db:+.2f} | "
+                    f"worst gap={c.worst_mean_db:+.2f} {status}"
+                )
+            else:
+                score_text = (
+                    f"err={c.score_db:.2f}% | nom={c.nominal_mean_db:.2f}% | "
+                    f"worst={c.worst_mean_db:.2f}%"
+                )
             self.mix_results_list.addItem(
-                f"{i:02d}: err={c.score_db:.2f}% | nom={c.nominal_mean_db:.2f}% | "
-                f"worst={c.worst_mean_db:.2f}% | vol=[{frac_text}]{wt_text}"
+                f"{i:02d}: {score_text} | vol=[{frac_text}]{wt_text}"
             )
 
     def _current_mix_material(self) -> tuple[MaterialTable, float, str]:
@@ -5641,14 +6078,20 @@ class ImpedanceGui(QMainWindow):
                 MixComponent(table=loaded[i]["table"], parts=cand.fractions[i])
                 for i in range(len(loaded))
             ]
-            table = mix_material_tables(components, cand.rule)
+            if idx >= len(self.mix_plot_data):
+                raise ValueError("Candidate frequency grid is unavailable; re-run the search.")
+            grid = [float(value) for value in self.mix_plot_data[idx]["freqs"]]
+            table = mix_material_tables(components, cand.rule, grid)
             return table, cand.thickness_in, f"blend candidate #{idx + 1}"
         if self.mix_preview is not None:
             loaded = self._load_mix_components()
             components = [
                 MixComponent(table=c["table"], parts=float(c["parts"])) for c in loaded
             ]
-            table = mix_material_tables(components, self.mix_rule_var.get())
+            grid = [float(value) for value in self.mix_preview["freqs"]]
+            table = mix_material_tables(
+                components, self.mix_rule_var.get(), grid
+            )
             thickness_in = float(self.mix_thickness_var.get().strip())
             return table, thickness_in, "previewed blend"
         raise ValueError("Preview a blend or run a search first.")
@@ -5739,6 +6182,126 @@ class ImpedanceGui(QMainWindow):
                 ax.grid(False)
         self.canvas.draw_idle()
 
+    @staticmethod
+    def _mix_plot_edges(values: list[float]) -> list[float]:
+        """Convert monotonic sample centers to plotting-cell edges."""
+        if len(values) == 1:
+            span = max(0.5, abs(values[0]) * 0.02)
+            return [values[0] - span, values[0] + span]
+        mids = [0.5 * (a + b) for a, b in zip(values[:-1], values[1:])]
+        return [values[0] - (mids[0] - values[0]), *mids, values[-1] + (values[-1] - mids[-1])]
+
+    def _draw_mix_performance_plot(
+        self, data: dict, performance: dict, subtitle: str, selected_idx: int
+    ) -> None:
+        """Draw the selected blend's full frequency/angle requirement grid."""
+        colors = self._colors
+        freqs = [float(value) for value in performance["freqs"]]
+        angles = [float(value) for value in performance["angles"]]
+        grid = performance["grid"]
+        direction = performance["direction"]
+        target = float(performance["target"])
+        unit = performance["unit"]
+        relation = "≤" if direction == "at_most" else "≥"
+
+        self.ax_heatmap.clear()
+        image = self.ax_heatmap.pcolormesh(
+            self._mix_plot_edges(angles),
+            self._mix_plot_edges(freqs),
+            grid,
+            shading="flat",
+            cmap="viridis",
+        )
+        flat_grid = [value for row in grid for value in row]
+        if (
+            len(freqs) >= 2
+            and len(angles) >= 2
+            and min(flat_grid) <= target <= max(flat_grid)
+        ):
+            contour = self.ax_heatmap.contour(
+                angles,
+                freqs,
+                grid,
+                levels=[target],
+                colors=[colors["plot_worst"]],
+                linewidths=1.4,
+            )
+            if contour.allsegs and any(len(segment) > 0 for segment in contour.allsegs[0]):
+                self.ax_heatmap.clabel(contour, fmt={target: f"target {target:g}"}, fontsize=7)
+        self.ax_heatmap.set_title(f"{performance['label']} ({subtitle})")
+        self.ax_heatmap.set_xlabel("Incidence angle (deg)")
+        self.ax_heatmap.set_ylabel("Frequency (GHz)")
+        self._style_plot_axis(self.ax_heatmap)
+        self.ax_heatmap.grid(False)
+        self.heatmap_cbar = self.fig.colorbar(image, ax=self.ax_heatmap)
+        self.heatmap_cbar.set_label(f"{performance['label']} [{unit}]")
+        style_colorbar(self.heatmap_cbar, colors)
+
+        reducer = max if direction == "at_most" else min
+        worst_by_freq = [reducer(row) for row in grid]
+        worst_by_angle = [
+            reducer(grid[freq_index][angle_index] for freq_index in range(len(freqs)))
+            for angle_index in range(len(angles))
+        ]
+
+        self.ax_freq_slice.clear()
+        self.ax_freq_slice.plot(
+            freqs,
+            worst_by_freq,
+            color=colors["plot_line_freq"],
+            linewidth=1.8,
+            label="worst angle",
+        )
+        self.ax_freq_slice.axhline(
+            target,
+            color=colors["plot_worst"],
+            linewidth=1.2,
+            linestyle="--",
+            label=f"target {relation} {target:g}",
+        )
+        self.ax_freq_slice.set_title("Worst angle at each frequency", fontsize=9, pad=2)
+        self.ax_freq_slice.set_xlabel("Frequency (GHz)", fontsize=8)
+        self.ax_freq_slice.set_ylabel(unit, fontsize=8)
+        self._style_plot_axis(self.ax_freq_slice)
+        self.ax_freq_slice.grid(True, color=colors["plot_grid"], alpha=0.3)
+        self.ax_freq_slice.legend(loc="best", fontsize=7)
+
+        self.ax_angle_slice.clear()
+        self.ax_angle_slice.plot(
+            angles,
+            worst_by_angle,
+            color=colors["plot_line_angle"],
+            linewidth=1.8,
+            label="worst frequency",
+        )
+        self.ax_angle_slice.axhline(
+            target,
+            color=colors["plot_worst"],
+            linewidth=1.2,
+            linestyle="--",
+            label=f"target {relation} {target:g}",
+        )
+        self.ax_angle_slice.set_title("Worst frequency at each angle", fontsize=9, pad=2)
+        self.ax_angle_slice.set_xlabel("Incidence angle (deg)", fontsize=8)
+        self.ax_angle_slice.set_ylabel(unit, fontsize=8)
+        self._style_plot_axis(self.ax_angle_slice)
+        self.ax_angle_slice.grid(True, color=colors["plot_grid"], alpha=0.3)
+        self.ax_angle_slice.legend(loc="best", fontsize=7)
+
+        if self.mix_summary_label is not None:
+            summary = self._mix_display_summary(data)
+            if self.mix_candidates and 0 <= selected_idx < len(self.mix_candidates):
+                candidate = self.mix_candidates[selected_idx]
+                status = "PASS" if candidate.worst_mean_db <= 0.0 else "MISS"
+                summary += (
+                    f"\nSearch score: {candidate.score_db:+.3f} "
+                    f"{candidate.score_unit}; worst gap "
+                    f"{candidate.worst_mean_db:+.3f} {candidate.score_unit} "
+                    f"({status}; gap ≤ 0 passes)"
+                )
+            self.mix_summary_label.setText(summary)
+        self.canvas.draw_idle()
+
     def _update_mix_plot(self) -> None:
         if (
             not MPL_AVAILABLE
@@ -5773,6 +6336,13 @@ class ImpedanceGui(QMainWindow):
 
         colors = self._colors
         freqs = data["freqs"]
+
+        performance = data.get("performance")
+        if performance is not None:
+            self._draw_mix_performance_plot(
+                data, performance, subtitle, selected_idx
+            )
+            return
 
         has_target = "target_freqs" in data
 
