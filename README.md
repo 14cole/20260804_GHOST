@@ -33,6 +33,36 @@ Folder processing is deterministic by pathname. It defaults to one loader
 worker because large `.grim` archives are memory intensive; parallel loading
 must be requested explicitly.
 
+## PowerPoint Image Imprinter
+
+The Windows-only helper copies picture location, size, and crop formatting
+from pictures on one slide to pictures selected on another slide. Install the
+PowerPoint automation dependency and launch it alongside desktop PowerPoint:
+
+```powershell
+py -m pip install -e ".[powerpoint]"
+ppt-image-imprinter
+```
+
+After installation, you can also double-click
+`Launch_PowerPoint_Image_Imprinter.bat` in the repository's top-level folder.
+The launcher reports a clear installation command if Python, PySide6, or
+pywin32 is unavailable.
+
+Use **Capture selected** after selecting the source picture or pictures in
+PowerPoint. Move to the destination slide, select its pictures, choose whether
+to apply Location, Size, and/or Crop, and click **Apply to selected**. One
+captured profile is broadcast to every destination. Multiple profiles require
+the same number of destinations and pair in PowerPoint's selected-shape order.
+Grouped pictures are supported; other selected shape types are skipped and
+reported. If PowerPoint rejects any update, the helper attempts to restore the
+entire destination selection to its pre-apply formatting.
+
+Crop margins are copied using PowerPoint's native point values, which are
+relative to each picture's original dimensions. Applying a crop to a different
+underlying image can therefore produce a different visible composition even
+though the PowerPoint crop values match.
+
 ## ISAR imaging
 
 GRIM offers three phase-aware reconstruction paths:

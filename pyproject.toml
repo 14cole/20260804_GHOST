@@ -17,10 +17,12 @@ dependencies = [
 
 [project.optional-dependencies]
 memory = ["psutil>=5.9"]
+powerpoint = ["pywin32>=306; sys_platform == 'win32'"]
 
 [project.scripts]
 grim = "grim_cut_gui:main"
 grim-headless = "grim_headless:main"
+ppt-image-imprinter = "ppt_image_imprinter:main"
 
 [tool.setuptools]
 package-dir = {"" = "GRIM_Revised_2"}
@@ -31,6 +33,7 @@ py-modules = [
   "grim_cut_plot_mixin",
   "grim_dataset",
   "grim_headless",
+  "ppt_image_imprinter",
   "plot_models",
   "read_ss",
 ]
