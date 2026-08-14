@@ -1,0 +1,187 @@
+"""Regression coverage for spreadsheet-compatible RCS CSV export."""
+
+import csv
+import os
+import tempfile
+import unittest
+
+import numpy as np
+
+from grim_cut_dataset_mixin import _load_dataset_csv, _write_dataset_csv
+from grim_dataset import RcsGrid
+
+
+class TestCsvExport(unittest.TestCase):
+    def setUp(self):
+        descriptor, self.path = tempfile.mkstemp(suffix=".csv")
+        os.close(descriptor)
+
+    def tearDown(self):
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+
+    def _rows(self):
+        with open(self.path, newline="", encoding="utf-8") as stream:
+            return list(csv.DictReader(stream))
+
+    def test_power_only_magnitude_is_not_lost_when_phase_is_unknown(self):
+        power = np.asarray([1.0, 4.0], dtype=np.float32).reshape(2, 1, 1, 1)
+        dataset = RcsGrid(
+            [0.0, 90.0],
+            [0.0],
+            [3.0],
+            ["VV"],
+            rcs_power=power,
+            units={"frequency": "GHz"},
+        )
+
+        _write_dataset_csv(
+            dataset, self.path, scale="both", include_phase=True
+        )
+        rows = self._rows()
+
+        self.assertEqual(
+            [float(row["magnitude_linear"]) for row in rows], [1.0, 4.0]
+        )
+        self.assertAlmostEqual(float(rows[0]["magnitude_dbsm"]), 0.0, places=6)
+        self.assertAlmostEqual(
+            float(rows[1]["magnitude_dbsm"]), 6.020600, places=6
+        )
+        self.assertEqual([row["phase_deg"] for row in rows], ["", ""])
+        self.assertEqual(
+            {row["frequency_unit"] for row in rows}, {"GHz"}
+        )
+        self.assertEqual(
+            {row["rcs_log_unit"] for row in rows}, {"dBsm"}
+        )
+
+        loaded = _load_dataset_csv(self.path)
+        np.testing.assert_allclose(loaded.rcs_power, power)
+        self.assertTrue(np.isnan(loaded.rcs_phase).all())
+        self.assertEqual(loaded.units["frequency"], "GHz")
+
+    def test_statistics_output_exports_finite_magnitude(self):
+        field = np.asarray(
+            [1.0 + 0.0j, 2.0 + 0.0j], dtype=np.complex64
+        ).reshape(2, 1, 1, 1)
+        source = RcsGrid(
+            [0.0, 90.0],
+            [0.0],
+            [3.0],
+            ["VV"],
+            rcs=field,
+            units={"frequency": "GHz"},
+        )
+        statistic = source.statistics_dataset(
+            statistic="mean",
+            axes=["azimuth"],
+            domain="magnitude",
+            broadcast_reduced=True,
+        )
+        self.assertTrue(np.isnan(statistic.rcs_phase).all())
+
+        _write_dataset_csv(statistic, self.path, scale="linear")
+        values = [
+            float(row["magnitude_linear"]) for row in self._rows()
+        ]
+        self.assertEqual(values, [2.5, 2.5])
+
+    def test_known_phase_round_trip_is_preserved(self):
+        field = np.asarray(
+            [1.0 + 0.0j, 0.0 + 2.0j], dtype=np.complex64
+        ).reshape(2, 1, 1, 1)
+        dataset = RcsGrid(
+            [0.0, 90.0],
+            [0.0],
+            [3.0],
+            ["HH"],
+            rcs=field,
+            units={"frequency": "GHz"},
+        )
+
+        _write_dataset_csv(
+            dataset, self.path, scale="both", include_phase=True
+        )
+        loaded = _load_dataset_csv(self.path)
+
+        np.testing.assert_allclose(
+            loaded.rcs_power.ravel(), [1.0, 4.0], rtol=1.0e-6
+        )
+        np.testing.assert_allclose(
+            np.degrees(loaded.rcs_phase.ravel()),
+            [0.0, 90.0],
+            atol=1.0e-5,
+        )
+
+    def test_missing_magnitude_stays_localized(self):
+        power = np.asarray([1.0, np.nan], dtype=np.float32).reshape(
+            2, 1, 1, 1
+        )
+        dataset = RcsGrid(
+            [0.0, 90.0],
+            [0.0],
+            [3.0],
+            ["VV"],
+            rcs_power=power,
+            units={"frequency": "GHz"},
+        )
+
+        _write_dataset_csv(dataset, self.path, scale="linear")
+        rows = self._rows()
+        self.assertEqual(rows[0]["magnitude_linear"], "1")
+        self.assertEqual(rows[1]["magnitude_linear"], "")
+
+        loaded = _load_dataset_csv(self.path)
+        self.assertEqual(float(loaded.rcs_power.ravel()[0]), 1.0)
+        self.assertTrue(np.isnan(loaded.rcs_power.ravel()[1]))
+
+    def test_frequency_units_survive_dbke_round_trip(self):
+        cases = {
+            "GHz": 3.0,
+            "MHz": 3.0e3,
+            "kHz": 3.0e6,
+            "Hz": 3.0e9,
+        }
+        for unit, frequency in cases.items():
+            with self.subTest(unit=unit):
+                dataset = RcsGrid(
+                    [0.0],
+                    [0.0],
+                    [frequency],
+                    ["VV"],
+                    rcs_power=np.ones((1, 1, 1, 1), dtype=np.float32),
+                    units={
+                        "frequency": unit,
+                        "rcs_log_unit": "dBke",
+                    },
+                )
+                _write_dataset_csv(dataset, self.path, scale="dbke")
+                loaded = _load_dataset_csv(self.path)
+                self.assertEqual(loaded.units["frequency"], unit)
+                self.assertEqual(loaded.units["rcs_log_unit"], "dBke")
+                self.assertAlmostEqual(
+                    float(loaded.frequencies[0]), frequency
+                )
+                self.assertAlmostEqual(
+                    float(loaded.rcs_power.ravel()[0]), 1.0, places=5
+                )
+
+    def test_legacy_csv_without_unit_column_is_still_supported(self):
+        with open(self.path, "w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow([
+                "azimuth",
+                "elevation",
+                "frequency",
+                "polarization",
+                "magnitude_linear",
+            ])
+            writer.writerow([0.0, 0.0, 3.0e9, "VV", 2.0])
+
+        loaded = _load_dataset_csv(self.path)
+        self.assertEqual(loaded.units["frequency"], "Hz")
+        self.assertEqual(float(loaded.rcs_power.ravel()[0]), 2.0)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
