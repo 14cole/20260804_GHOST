@@ -11,6 +11,26 @@ For `.geo` boundary types, material flags, inline/CSV dielectric and IBC
 definitions, impedance tapers, winding, and phasor signs, see
 **[GEOMETRY_INPUT_CHEATSHEET.md](GEOMETRY_INPUT_CHEATSHEET.md)**.
 
+## Open the desktop GUI
+
+Install the GUI dependencies once:
+
+```bash
+python -m pip install numpy scipy matplotlib PySide6
+```
+
+Then start the combined Geometry and Solver interface from the repository root:
+
+```bash
+python Backend/ghost_gui.py
+```
+
+You can instead double-click `Launch_GHOST_GUI.bat` on Windows or
+`Launch_GHOST_GUI.command` on macOS. The launchers check Python and the required
+imports before opening the GUI and print the installation command if anything
+is missing. In the GUI, load or construct a boundary on the **Geometry** tab,
+validate it, then switch to **Solver** and click **Use Geometry Tab**.
+
 ## Layout
 
 ```
