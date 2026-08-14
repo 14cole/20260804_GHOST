@@ -20,13 +20,13 @@ pause
 exit /b 1
 
 :use_py_launcher
-py -3 "Backend\ghost_gui.py" --check >nul 2>&1
+py -3 "Backend\ghost_gui.py" --check >"%TEMP%\ghost-gui-launch.log" 2>&1
 if errorlevel 1 goto missing_dependencies
 start "" pyw -3 "%~dp0Backend\ghost_gui.py"
 exit /b 0
 
 :use_python
-python "Backend\ghost_gui.py" --check >nul 2>&1
+python "Backend\ghost_gui.py" --check >"%TEMP%\ghost-gui-launch.log" 2>&1
 if errorlevel 1 goto missing_dependencies
 where pythonw.exe >nul 2>&1
 if errorlevel 1 (
@@ -37,10 +37,12 @@ if errorlevel 1 (
 exit /b 0
 
 :missing_dependencies
-echo ERROR: One or more GHOST GUI dependencies could not be imported.
+echo ERROR: The selected Python interpreter could not import the GHOST GUI.
 echo.
-echo Install them with:
-echo     py -3 -m pip install numpy scipy matplotlib PySide6
+if exist "%TEMP%\ghost-gui-launch.log" type "%TEMP%\ghost-gui-launch.log"
+echo.
+echo Install into the Python you want to use with:
+echo     path\to\python.exe -m pip install numpy scipy matplotlib PySide6
 echo.
 echo Then run this launcher again.
 pause
