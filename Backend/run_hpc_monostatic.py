@@ -16,7 +16,9 @@ Workflow:
   same worker: each takes its planned share, then steals whatever is still
   unclaimed, so the tail of a run rebalances itself.
 - As each unit finishes, its result is exported immediately to
-  "<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim" in <run_dir>/results/.
+  "<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim" in
+  <run_dir>/results/{FRD,OPN}/.  The role-preserving layout can be passed
+  directly to the downstream concatenate/subtract tools.
 
 Scheduling notes -- what makes a big sweep finish sooner:
 
@@ -174,14 +176,10 @@ MAX_PANELS              = 50_000
 # the node count: turning it off is about 3x faster per unit and roughly halves
 # the memory, so more units fit per node as well.
 #
-# SURVEY OUTPUT IS NOT PRODUCTION DATA. The algebraic quality gate still runs
-# (a badly conditioned or non-converged solve still fails closed), but nothing
-# establishes that the discretization is fine enough -- the error that biases
-# an RCS number quietly instead of announcing itself. Survey grims carry no
-# mesh-convergence block, which is what feature_sum requires before a field may
-# enter a body or a delta, so the downstream pipeline rejects them on its own.
-# Use this for trade studies and screening, then re-run what matters with
-# MESH_CERTIFICATION = True.
+# With this off the algebraic quality gate still runs, but no base/fine mesh
+# comparison is performed.  The choice is recorded for provenance and does not
+# prevent the result from being viewed, combined, subtracted, or used by the
+# downstream feature workflow.
 MESH_CERTIFICATION      = True
 BLAS_THREADS_PER_WORKER = 1              # keeps N workers x BLAS threads sane
 
@@ -337,6 +335,20 @@ def _discover_geometries():
     return found
 
 
+def _geometry_role(path):
+    # type: (Path) -> str
+    """Return the configured FRD/OPN role for a discovered geometry."""
+
+    resolved = Path(path).resolve()
+    for role, directory in (("FRD", FRD_DIR), ("OPN", OPN_DIR)):
+        try:
+            resolved.relative_to(Path(directory).resolve())
+            return role
+        except ValueError:
+            continue
+    raise ValueError(f"Geometry is outside configured input folders: {path}")
+
+
 def _unit_name(unit):
     # type: (Dict[str, Any]) -> str
     return (f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
@@ -345,7 +357,9 @@ def _unit_name(unit):
 
 def _unit_output_path(run_dir, unit):
     # type: (Path, Dict[str, Any]) -> Path
-    return run_dir / "results" / _unit_name(unit)
+    role = str(unit.get("role", "")).strip().upper()
+    folder = run_dir / "results" / role if role else run_dir / "results"
+    return folder / _unit_name(unit)
 
 
 def _load_snapshot(geometry_path):
@@ -386,6 +400,7 @@ def _solve_and_export(unit, context, run_dir_str):
 
     run_dir = Path(run_dir_str)
     out_path = _unit_output_path(run_dir, unit)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
     attestation = _unit_attestation_fields(context, unit)
@@ -656,6 +671,8 @@ def submit():
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "logs").mkdir()
     (run_dir / "results").mkdir()
+    (run_dir / "results" / "FRD").mkdir()
+    (run_dir / "results" / "OPN").mkdir()
     (run_dir / "claims").mkdir()
 
     # Freeze every geometry and its referenced material sidecars before
@@ -687,6 +704,7 @@ def submit():
                     "geometry_stem": geom.stem,
                     "geometry_original": str(original.resolve()),
                     "geometry_input_sha256": input_fingerprint,
+                    "role":          _geometry_role(original),
                     "polarization":  pol,
                     "frequency_ghz": float(f),
                 })
@@ -814,10 +832,9 @@ def submit():
         print(f"                  {idle} of {n_slots} slot(s) have no planned "
               "work -- fewer units than nodes, so those tasks exit at once")
     if not MESH_CERTIFICATION:
-        print("  Certification : OFF (survey mode) -- base mesh only, ~3x faster")
-        print("                  Results carry NO mesh-convergence certificate and")
-        print("                  are rejected by the body/delta pipeline. Screening")
-        print("                  only; re-run with MESH_CERTIFICATION = True to publish.")
+        print("  Certification : OFF -- base mesh only, typically ~3x faster")
+        print("                  Downstream use remains enabled; the user owns the")
+        print("                  mesh-resolution decision.")
     print(f"  Slurm scripts : {len(slurm_paths)} files in {run_dir}")
 
     if not SUBMIT:
@@ -1037,7 +1054,7 @@ def worker(run_dir_str, submission_index, task_index):
     import rcs_solver  # noqa: F401
     import grim_io     # noqa: F401
 
-    done = {p.name for p in (run_dir / "results").glob("*.grim")}
+    done = {p.name for p in (run_dir / "results").rglob("*.grim")}
     broker = hpc_scheduler.ClaimBroker(
         run_dir / "claims", stale_seconds=float(CLAIM_STALE_SECONDS)
     )

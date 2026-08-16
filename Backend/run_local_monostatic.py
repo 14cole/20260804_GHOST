@@ -2,8 +2,9 @@
 """Local monostatic RCS sweep -- run_hpc_monostatic.py without SLURM.
 
 One .grim per (geometry, frequency, polarization) unit is written to
-<OUTPUT_DIR>/run_YYYYMMDD_HHMMSS/results/ as soon as that unit finishes, named
-"<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim". Nothing else lands in results/:
+<OUTPUT_DIR>/run_YYYYMMDD_HHMMSS/results/{FRD,OPN}/ as soon as that unit
+finishes, named "<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim". The role folders
+can be passed directly to the downstream concatenate/subtract tools.
 each file carries its own source/runtime/input attestation inside the artifact,
 so a resumed run verifies what it reuses without a sidecar per output.
 
@@ -69,7 +70,7 @@ WORKERS = None
 
 # Solver knobs (mirror run_monostatic.py).
 GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
-SOLVER_METHOD           = "auto"         # "auto" | "direct" (certified production)
+SOLVER_METHOD           = "auto"         # "auto" | "direct"
 CFIE_ALPHA              = 0.0
 MAX_PANELS              = 50_000
 BLAS_THREADS_PER_WORKER = 1
@@ -81,14 +82,9 @@ BLAS_THREADS_PER_WORKER = 1
 # the node count: turning it off is about 3x faster per unit and roughly halves
 # the memory, so more units fit in RAM at once as well.
 #
-# SURVEY OUTPUT IS NOT PRODUCTION DATA. The algebraic quality gate still runs
-# (a badly conditioned or non-converged solve still fails closed), but nothing
-# establishes that the discretization is fine enough -- the error that biases
-# an RCS number quietly instead of announcing itself. Survey grims carry no
-# mesh-convergence block, which is what feature_sum requires before a field may
-# enter a body or a delta, so the downstream pipeline rejects them on its own.
-# Use this for trade studies and screening, then re-run what matters with
-# MESH_CERTIFICATION = True.
+# With this off the algebraic quality gate still runs, but no base/fine mesh
+# comparison is performed.  The choice is recorded for provenance and does not
+# prevent downstream viewing, combination, or subtraction.
 MESH_CERTIFICATION      = True
 
 # --- Memory admission ------------------------------------------------------
@@ -241,13 +237,26 @@ def _discover_geometries() -> 'List[Path]':
     return found
 
 
+def _geometry_role(path: 'Path') -> 'str':
+    resolved = Path(path).resolve()
+    for role, directory in (("FRD", FRD_DIR), ("OPN", OPN_DIR)):
+        try:
+            resolved.relative_to(Path(directory).resolve())
+            return role
+        except ValueError:
+            continue
+    raise ValueError(f"Geometry is outside configured input folders: {path}")
+
+
 def _unit_name(unit: 'Dict[str, Any]') -> 'str':
     return (f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
             f"{unit['geometry_stem']}.grim")
 
 
 def _unit_output_path(results_dir: 'Path', unit: 'Dict[str, Any]') -> 'Path':
-    return results_dir / _unit_name(unit)
+    role = str(unit.get("role", "")).strip().upper()
+    folder = results_dir / role if role else results_dir
+    return folder / _unit_name(unit)
 
 
 def _load_snapshot(geometry_path: 'str') -> 'Tuple[Dict[str, Any], str]':
@@ -289,6 +298,7 @@ def _solve_and_export(
 
     results_dir = Path(results_dir_str)
     out_path = _unit_output_path(results_dir, unit)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
     attestation = _unit_attestation_fields(context, unit)
@@ -479,6 +489,7 @@ def main() -> 'None':
                     "geometry":      str(geom.resolve()),
                     "geometry_stem": geom.stem,
                     "geometry_input_sha256": input_fingerprint,
+                    "role":          _geometry_role(geom),
                     "polarization":  pol,
                     "frequency_ghz": float(f),
                 })
@@ -489,6 +500,8 @@ def main() -> 'None':
     results_dir = run_dir / "results"
     run_dir.mkdir(parents=True, exist_ok=False)
     results_dir.mkdir()
+    (results_dir / "FRD").mkdir()
+    (results_dir / "OPN").mkdir()
     solver_config = {
         "geometry_units": GEOMETRY_UNITS,
         "solver_method": SOLVER_METHOD,
@@ -590,7 +603,7 @@ def main() -> 'None':
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Azimuths      : {len(AZIMUTHS_DEG)}")
     print(f"  Units total   : {len(ordered)}  (geom x freq x pol)")
-    print(f"  Certification : {'on' if MESH_CERTIFICATION else 'OFF (survey)'}")
+    print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
     print(f"  Workers       : {pool_size} of {cores} cpus  "
           f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "
           f"assembly threads/solve: {thread_label})")
@@ -600,9 +613,8 @@ def main() -> 'None':
     print(f"  Memory        : {memory_gb:.1f} GB detected, "
           f"{budget_gb:.1f} GB schedulable")
     if not MESH_CERTIFICATION:
-        print("  [warn] MESH_CERTIFICATION is off: results are survey-grade "
-              "and the")
-        print("         body/delta pipeline will reject them. Screening only.")
+        print("  Mesh comparison is off: downstream use remains enabled; the")
+        print("  user owns the mesh-resolution decision.")
     print("=" * 70, flush=True)
 
     # Parse each distinct geometry once, before the pool forks, so workers

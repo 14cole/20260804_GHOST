@@ -13,11 +13,10 @@ cancelled, or is preempted cannot strand work.
 
 ## 1. Which driver to run
 
-| Path | SLURM entry point | Same sweep, one machine | Output |
+| Solver | SLURM entry point | Same sweep, one machine | Output |
 |---|---|---|---|
-| Coupon library, numbered pipeline | `1b_solve_2d_hpc/run_monostatic_hpc.py` | `1a_solve_2d_local/run_monostatic_local.py` | straight into `results/{FRD,OPN}/` |
-| Manifest-tracked 2-D sweep | `Backend/run_hpc_monostatic.py` | `Backend/run_local_monostatic.py` | `<OUTPUT_DIR>/run_*/results/` |
-| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | `<OUTPUT_DIR>/run_*/results/` |
+| 2-D arbitrary geometry | `Backend/run_hpc_monostatic.py` | `Backend/run_local_monostatic.py` | `<OUTPUT_DIR>/run_*/results/{FRD,OPN}/` |
+| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | unit files in `results/`, collected inputs in `bodies/` |
 
 Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
 knobs below mean the same thing in each.
@@ -70,9 +69,6 @@ changing what you type in CONFIG never forks a sweep into two sets of files:
 
 - `run_hpc_monostatic.py` / `run_local_monostatic.py` name files with the label
   you wrote, and default to `["VV", "HH"]`.
-- The step-1 runners (`1a_solve_2d_local`, `1b_solve_2d_hpc`) always name files
-  `TM_`/`TE_`, so a sweep configured as `["VV", "HH"]` reuses results a
-  `["TM", "TE"]` sweep already produced instead of re-solving them.
 - The BoR drivers always name files `VV_`/`HH_` -- a BoR unit's channels really
   are theta-pol and phi-pol, and the az/el pairing looks for those names. When
   both are requested, the scheduler performs one physical BoR solve and writes
@@ -326,6 +322,21 @@ To force a completely fresh sweep, delete `claims/`.
 
 One `.grim` per unit. Nothing else.
 
+For 2-D runs, those unit files are placed under `results/FRD/` and
+`results/OPN/`, preserving the geometry role expected by the concatenate and
+subtract tools. `1c_build_deltas/concat_pols.py` automatically selects the
+newest complete `rcs_runs/run_*/results/` folder when no input path is given.
+
+For BoR runs, `BODY_GRIM_ENABLE = True` additionally collects the verified
+unit files into `bodies/<geometry>.grim`, with both polarizations, all
+frequencies, and the outer profile needed by `feature_sum`. Collection runs
+automatically when the sweep completes and performs no additional field solve.
+It can be rerun explicitly with:
+
+```bash
+python Backend/run_hpc_bor_monostatic.py --collect-bodies /path/to/run_dir
+```
+
 Each result is bound to its run -- source build, runtime, geometry inputs,
 solve spec, angular grid -- by fields carried **inside** the artifact, not by a
 `<name>.provenance.json` beside it. A sweep of thousands of units would
@@ -372,11 +383,11 @@ different inputs or a different solver build.
 agree. Cost scales with the square of the node count, so that second solve is
 most of the wall clock and all of the peak memory.
 
-Set `MESH_CERTIFICATION = False` in either 2-D driver to solve the base mesh
+Set `MESH_CERTIFICATION = False` in any driver to solve the base mesh
 only:
 
 ```python
-MESH_CERTIFICATION = False   # survey mode: screening, not production
+MESH_CERTIFICATION = False   # base mesh only
 ```
 
 Measured on `body.geo`, solve time only:
@@ -397,26 +408,19 @@ exact ratio is formulation-dependent because the planner now counts the true
 system DOFs and retained operators rather than applying one 2N model to every
 geometry.
 
-**Survey output is not production data.** The algebraic quality gate still runs
+The algebraic quality gate still runs
 — a badly conditioned or non-converged solve still fails closed — but nothing
 establishes that the discretization is fine enough, which is the error that
 biases an RCS number quietly rather than announcing itself. On the shipped
 geometry the base mesh happened to land within 0.04 dB of the certified one;
 that is a property of that geometry at that frequency, not a guarantee.
 
-Three things keep survey results out of the production path:
-
-- the grim carries **no `mesh_convergence` block**, and `feature_sum` requires
-  `mesh_convergence.passed is True` with `published_mesh == "fine"` before a
-  field may enter a body or a delta — so the pipeline rejects it on structure,
-  not on a label it has to trust;
-- metadata says so explicitly (`survey_mode: true`,
-  `mesh_convergence_certified: false`, `published_mesh: "base"`) and the
-  solve's warnings carry the reason, so an artifact found later identifies
-  itself;
-- in the coupon pipeline the flag is part of each unit's fingerprint, so
-  switching back to `MESH_CERTIFICATION = True` will **not** accept the survey
-  files as completed units — they get re-solved properly.
+Certification is a user-selected accuracy check, not a downstream permission
+system. Both base-mesh and certified GRIMs may be viewed, joined, subtracted,
+collected into a body, and used in feature summation. Raw solver metadata still
+records which choice produced the field so the two are not ambiguous later.
+The choice is also part of the unit fingerprint, so changing it starts the
+appropriate solve rather than silently reusing a result from the other mode.
 
 There is no way to weaken certification without switching it off: the policy
 enforces `fine_factor > 1.0`, so you cannot quietly shrink the refinement and
@@ -425,10 +429,9 @@ is `rcs_solver.solve_monostatic_rcs_2d_survey` (or the raw
 `solve_monostatic_rcs_2d`).
 
 The GUI and both BoR sweep drivers use the same default-on switch. Set
-`MESH_CERTIFICATION = False` in `run_local_bor.py`,
-`run_hpc_bor_monostatic.py`, or the simplified root BoR launcher to request an
-explicit base-mesh survey. BoR survey outputs carry the same unambiguous
-uncertified metadata as 2-D outputs.
+`MESH_CERTIFICATION = False` in `run_local_bor.py` or
+`run_hpc_bor_monostatic.py` to request a base-mesh solve. BoR outputs carry
+the same factual provenance as 2-D outputs and remain usable downstream.
 
 BoR memory admission is also per solve, not the old fixed
 `STREAM_BUDGET_GB` reservation. Before dispatch, the driver previews the

@@ -18,6 +18,11 @@ power of frequency (elements^3 x modes), so a frequency sweep is badly
 lopsided; units are costed and run dearest-first, and concurrent solves are
 admitted against a memory budget instead of filling every core.
 
+When BODY_GRIM_ENABLE is true, the unit files are also collected into one
+self-contained <run_dir>/bodies/<geometry>.grim per geometry for direct use by
+feature_sum.  Certification remains a user-selected solve option and does not
+gate collection or downstream use.
+
 Edit the CONFIG block and run:
 
     python run_local_bor.py
@@ -79,7 +84,8 @@ STREAM_BUDGET_GB = 8.0            # maximum held streaming-block budget; the
 EXPAND_TO_360    = False          # mirror samples about the axis to fill the
                                   # full polar cut (exact for a BoR)
 MESH_CERTIFICATION = True         # recommended: compare base/fine meshes;
-                                  # False is explicit single-mesh survey mode
+                                  # False solves the base mesh only
+BODY_GRIM_ENABLE = True            # collect both pols/all freqs for downstream
 WORKERS_PER_UNIT = 4              # threads inside one BoR solve
 BLAS_THREADS_PER_WORKER = 1
 
@@ -443,6 +449,11 @@ def _validate_config() -> 'List[str]':
         )
     except ValueError as exc:
         sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
+    if BODY_GRIM_ENABLE and not {"VV", "HH"}.issubset(set(pols)):
+        sys.exit(
+            "ERROR: BODY_GRIM_ENABLE=True requires both VV and HH in "
+            "POLARIZATIONS. Disable body collection for a single-channel run."
+        )
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
     if (
         not all(math.isfinite(value) and value > 0.0 for value in frequencies)
@@ -520,6 +531,8 @@ def main() -> 'None':
     results_dir = run_dir / "results"
     run_dir.mkdir(parents=True, exist_ok=False)
     results_dir.mkdir()
+    if BODY_GRIM_ENABLE:
+        (run_dir / "bodies").mkdir()
     solver_config = {
         "geometry_units": GEOMETRY_UNITS,
         "cfie_alpha": float(CFIE_ALPHA),
@@ -550,6 +563,7 @@ def main() -> 'None':
         "solver_source_inventory": _solver_source_inventory(),
         "runtime_environment_sha256": runtime_environment_fingerprint(),
         "solver_config": solver_config,
+        "body_grim_config": {"enabled": bool(BODY_GRIM_ENABLE)},
         "units": units,
     }
     manifest_path = run_dir / "manifest.json"
@@ -611,7 +625,8 @@ def main() -> 'None':
           f"({min(ASPECTS_DEG):g}-{max(ASPECTS_DEG):g} deg from +z axis)")
     print(f"  Output files  : {len(units)}  (geom x freq x pol)")
     print(f"  Physical solves: {len(ordered)}  (VV/HH co-solved)")
-    print(f"  Mesh check    : {'base + fine (certified)' if MESH_CERTIFICATION else 'base only (SURVEY, uncertified)'}")
+    print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
+    print(f"  Body GRIMs    : {'enabled' if BODY_GRIM_ENABLE else 'disabled'}")
     print(f"  Workers       : {pool_size} procs x {WORKERS_PER_UNIT} threads "
           f"of {cores} cpus  (BLAS threads/worker: {BLAS_THREADS_PER_WORKER})")
     reservations = [
@@ -681,6 +696,33 @@ def main() -> 'None':
     _write_json_atomic(manifest_path, manifest)
     if counters["failed"]:
         raise SystemExit(1)
+    if BODY_GRIM_ENABLE:
+        from hpc_common import bodies_from_units, read_unit_grims
+        from feature_sum import outer_generatrix, save_body_grim
+
+        records = read_unit_grims(results_dir)
+        for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
+            matching = [unit for unit in units if unit["geometry_stem"] == stem]
+            snapshot, _material_base = _load_snapshot(
+                str(matching[0]["geometry"])
+            )
+            profile = outer_generatrix(snapshot, GEOMETRY_UNITS)
+            save_body_grim(
+                bodies_from_units(records, stem=stem),
+                str(run_dir / "bodies" / f"{stem}.grim"),
+                history="run_local_bor.py collected body",
+                source_path=str(matching[0]["geometry"]),
+                geometry_input_sha256=str(
+                    matching[0].get("geometry_input_sha256", "")
+                ),
+                solver_source_sha256=str(manifest["solver_source_sha256"]),
+                runtime_environment_sha256=str(
+                    manifest["runtime_environment_sha256"]
+                ),
+                run_solve_spec_sha256=manifest_solve_spec_fingerprint(manifest),
+                body_profile=profile,
+            )
+        print(f"  Body inputs: {run_dir / 'bodies'}/")
 
 
 if __name__ == "__main__":

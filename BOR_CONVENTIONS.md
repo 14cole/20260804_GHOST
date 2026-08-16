@@ -52,9 +52,10 @@ complex VV and HH fields on the requested mesh and an internally refined mesh,
 then publishes the refined result only if both pass the fixed convergence
 policy.
 
-Certification can be disabled for exploratory sweeps. Such output is marked
+Certification can be disabled whenever the user chooses. Such output is marked
 with `survey_mode=true`, `mesh_convergence_certified=false`, and
-`published_mesh=base`; it must not be represented as mesh-converged data.
+`published_mesh=base`. It remains valid input for GRIM and downstream tools,
+but must not be described as having passed a base/fine mesh comparison.
 
 Every solve still enforces finite fields, non-negative RCS, modal convergence,
 linear residual, conditioning, and amplitude/power consistency gates.

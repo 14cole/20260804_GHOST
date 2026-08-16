@@ -2,11 +2,12 @@
 """
 Shared plumbing for the HPC steps -- three small jobs, all of them explicit.
 
-1. CONFIGURE A DRIVER.  The root drivers (run_hpc_bor_monostatic.py, and
-   run_hpc_monostatic.py for 2-D) keep their settings in a CONFIG block of
-   module-level constants, and the SLURM script they write execs THE SAME FILE
-   with --worker.  So the compute nodes read the constants out of whichever copy
-   submitted the job.  ``configure_driver`` therefore writes a COPY of the driver
+1. CONFIGURE A DRIVER.  The canonical Backend drivers
+   (run_hpc_bor_monostatic.py and run_hpc_monostatic.py) keep their settings
+   in a CONFIG block of module-level constants, and the SLURM script they write
+   execs THE SAME FILE with --worker.  So the compute nodes read the constants
+   out of whichever copy submitted the job.  ``configure_driver`` therefore
+   writes a COPY of the driver
    with those constants replaced -- and submitting that copy is what makes the
    settings reach the nodes.  Overriding them in your own process would not.
 
@@ -108,7 +109,7 @@ def run_status(run_dir: 'os.PathLike') -> 'Dict[str, Any]':
     import json
     run_dir = Path(run_dir)
     man = json.loads((run_dir / "manifest.json").read_text())
-    done = sorted((run_dir / "results").glob("*.grim"))
+    done = sorted((run_dir / "results").rglob("*.grim"))
     return {"run_dir": run_dir, "n_units": int(man["n_units"]),
             "n_done": len(done), "manifest": man, "done": done,
             "pending": int(man["n_units"]) - len(done)}
@@ -376,9 +377,9 @@ def require_hpc_output_attestations(
             or any(char not in "0123456789abcdef" for char in geometry_hash)
         ):
             raise ValueError(f"HPC unit for {name} has no input fingerprint.")
-        verify_embedded_attestation(
-            str(results_dir / name),
-            {
+        role = str(unit.get("role", "")).strip().upper()
+        output_path = results_dir / role / name if role else results_dir / name
+        expected_attestation = {
                 "run_id": str(manifest["run_id"]),
                 "solver_source_sha256":
                     str(manifest["solver_source_sha256"]),
@@ -389,18 +390,35 @@ def require_hpc_output_attestations(
                 "unit_solve_spec_sha256": unit_solve_spec_fingerprint(unit),
                 "solver_config_sha256": config_sha,
                 "angular_grid_kind": expected_angle_key,
-                "angular_grid_sha256": angular_grid_sha256,
                 "polarization": polarization,
                 "frequency_ghz": float(frequency),
-            },
-        )
+        }
+        if schema == "ghost.hpc.bor-run.v1":
+            expected_attestation["angular_grid_deg"] = [
+                float(value) for value in raw_angles
+            ]
+        else:
+            expected_attestation["angular_grid_sha256"] = angular_grid_sha256
+        verify_embedded_attestation(str(output_path), expected_attestation)
 
-    actual_names = {path.name for path in results_dir.glob("*.grim")}
-    if actual_names != expected_names:
+    actual_names = {
+        str(path.relative_to(results_dir))
+        for path in results_dir.rglob("*.grim")
+    }
+    expected_paths = {
+        str(Path(str(unit.get("role", "")).strip().upper()) /
+            f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
+            f"{unit['geometry_stem']}.grim")
+        if str(unit.get("role", "")).strip() else
+        f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
+        f"{unit['geometry_stem']}.grim"
+        for unit in units
+    }
+    if actual_names != expected_paths:
         raise ValueError(
             "HPC results do not contain the exact manifest output set "
-            f"(missing={sorted(expected_names - actual_names)[:8]}, "
-            f"unexpected={sorted(actual_names - expected_names)[:8]})."
+            f"(missing={sorted(expected_paths - actual_names)[:8]}, "
+            f"unexpected={sorted(actual_names - expected_paths)[:8]})."
         )
 
 
@@ -414,7 +432,7 @@ def read_unit_grims(results_dir: 'os.PathLike') -> 'List[Dict[str, Any]]':
     for the 2-D driver it is the cut angle (90 = normal to the outer face).
     """
     out: 'List[Dict[str, Any]]' = []
-    for p in sorted(Path(results_dir).glob("*.grim")):
+    for p in sorted(Path(results_dir).rglob("*.grim")):
         m = _UNIT_RE.match(p.name)
         if not m:
             continue

@@ -707,7 +707,8 @@ def test_end_to_end():
         check(True, f"both array tasks completed ({elapsed:.1f}s)")
 
         written = sum(out.count("written") for out in outputs)
-        results = sorted(p.name for p in (run_dir / "results").glob("*.grim"))
+        result_paths = sorted((run_dir / "results").rglob("*.grim"))
+        results = [p.name for p in result_paths]
         check(len(results) == expected_units,
               f"results/ holds exactly {expected_units} grims (got {len(results)})")
         check(written == expected_units,
@@ -720,18 +721,20 @@ def test_end_to_end():
         hpc_common.require_hpc_output_attestations(run_dir, manifest)
         check(True, "manifest provenance and every output attestation verify")
 
-        sidecars = list((run_dir / "results").glob("*.provenance.json"))
+        sidecars = list((run_dir / "results").rglob("*.provenance.json"))
         check(not sidecars,
               f"results/ holds no sidecar files (found {len(sidecars)})")
-        check(len(list((run_dir / "results").iterdir())) == expected_units,
+        check(len(result_paths) == expected_units,
               "results/ holds exactly one file per unit")
+        check(all(path.parent.name in {"FRD", "OPN"} for path in result_paths),
+              "results preserve their FRD/OPN role for downstream tools")
         first_unit = manifest["units"][0]
         check("azimuths_deg" not in first_unit,
               "units do not repeat the shared angular grid")
         check(isinstance(manifest.get("azimuths_deg"), list),
               "the angular grid is recorded once at manifest level")
         from workflow_provenance import read_embedded_attestation
-        sample = sorted((run_dir / "results").glob("*.grim"))[0]
+        sample = result_paths[0]
         embedded = read_embedded_attestation(str(sample))
         check(embedded.get("run_id") == manifest["run_id"],
               "each result carries its run binding inside the artifact")

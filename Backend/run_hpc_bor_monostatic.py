@@ -35,6 +35,12 @@ polarization finishes, that worker writes the pair's az/el grids to
 <run_dir>/azel/ (AZEL_ENABLE / AZEL_* in the config).  A manual backfill
 CLI exists for re-runs:  python run_hpc_bor_monostatic.py --azel <run_dir>
 
+The same unit files are also collected into one self-contained
+<run_dir>/bodies/<geometry>.grim per geometry when BODY_GRIM_ENABLE is true.
+Those files contain both polarizations, every frequency, and the body profile,
+so they can be passed directly to feature_sum.  Mesh certification is optional
+and never changes whether a result may be collected or used downstream.
+
 Internal worker invocation (called by SLURM, not by the user):
     python run_hpc_bor_monostatic.py --worker <run_dir> <job_index> <node_index>
 """
@@ -119,7 +125,7 @@ ASSEMBLY                = "auto"         # "auto" | "tables" | "streaming"
 TABLE_PRECISION         = "auto"         # "auto" | "single" | "double"
 STREAM_BUDGET_GB        = 8.0            # held streaming-block budget per unit
 MESH_CERTIFICATION      = True           # recommended base/fine comparison;
-                                         # False = explicit survey mode
+                                         # False = base mesh only
 WORKERS_PER_UNIT        = 4              # threads inside one BoR solve (modes
                                          # + streaming tiles); pool size =
                                          # cores // WORKERS_PER_UNIT
@@ -140,6 +146,11 @@ AZEL_AXIS_AZ_DEG    = 0.0     # target axis orientation in the earth frame
 AZEL_AXIS_EL_DEG    = 0.0     # horizontal, nose toward azimuth 0.  NOTE the
                               # polarization label mapping for horizontal
                               # axes (bor_az_el_grid docstring).
+
+# Collect all per-frequency VV/HH files into one self-contained body GRIM per
+# geometry for feature_sum and other downstream workflows.  This does not run
+# another solve and accepts either certified or base-mesh results.
+BODY_GRIM_ENABLE    = True
 
 # --- Scheduling ------------------------------------------------------------
 # Units are costed at submit time and dealt out longest-processing-time-first,
@@ -287,6 +298,102 @@ def _unit_output_path(run_dir, unit):
     freq = float(unit["frequency_ghz"])
     stem = unit["geometry_stem"]
     return run_dir / "results" / f"{pol}_{freq:.3f}GHz_{stem}.grim"
+
+
+def collect_bodies(run_dir_str, require_complete=True):
+    # type: (str, bool) -> Tuple[int, int]
+    """Collect a completed unit sweep into one downstream body GRIM per body.
+
+    Returns ``(written, skipped)``.  With ``require_complete=False`` an
+    incomplete sweep simply returns ``(0, 0)``; workers use that form so the
+    array task that observes the final unit can publish the body artifacts.
+    """
+
+    run_dir = Path(run_dir_str).resolve()
+    manifest = _manifest_for(run_dir)
+    units = list(manifest.get("units", []) or [])
+    missing = [
+        _unit_output_path(run_dir, unit)
+        for unit in units
+        if not _unit_output_path(run_dir, unit).is_file()
+    ]
+    if missing:
+        if require_complete:
+            raise ValueError(
+                f"Cannot collect body GRIMs: {len(missing)} solver output(s) "
+                f"are still missing; first missing: {missing[0]}."
+            )
+        return 0, 0
+
+    requested = {
+        str(pol).upper() for pol in manifest.get("polarizations", [])
+    }
+    if not {"VV", "HH"}.issubset(requested):
+        if require_complete:
+            raise ValueError(
+                "Body GRIM collection needs both VV and HH in POLARIZATIONS."
+            )
+        return 0, 0
+
+    # Verify every raw unit against the immutable run before deriving a body.
+    from hpc_common import (
+        bodies_from_units,
+        read_unit_grims,
+        require_hpc_output_attestations,
+        require_hpc_run_provenance,
+    )
+    require_hpc_run_provenance(manifest, "ghost.hpc.bor-run.v1")
+    require_hpc_output_attestations(run_dir, manifest)
+    records = read_unit_grims(run_dir / "results")
+
+    from feature_sum import outer_generatrix, save_body_grim
+    from geometry_io import build_geometry_snapshot, parse_geometry
+
+    out_dir = run_dir / "bodies"
+    out_dir.mkdir(exist_ok=True)
+    written = skipped = 0
+    for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
+        matching = [unit for unit in units if unit["geometry_stem"] == stem]
+        geometry = Path(str(matching[0]["geometry"]))
+        snapshot = build_geometry_snapshot(
+            *parse_geometry(geometry.read_text(encoding="utf-8"))
+        )
+        profile = outer_generatrix(
+            snapshot, str(manifest["solver_config"]["geometry_units"])
+        )
+        bodies = bodies_from_units(records, stem=stem)
+        destination = out_dir / f"{stem}.grim"
+        if destination.is_file():
+            from feature_sum import verify_body_artifact_bundle
+            try:
+                verify_body_artifact_bundle(str(destination))
+                skipped += 1
+                continue
+            except (OSError, TypeError, ValueError):
+                # Rebuild a damaged derived artifact atomically from the
+                # verified raw units; the original remains until replacement.
+                pass
+        temporary = out_dir / f".{stem}.{os.getpid()}.tmp.grim"
+        save_body_grim(
+            bodies,
+            str(temporary),
+            history="run_hpc_bor_monostatic.py collected body",
+            source_path=str(matching[0].get("geometry_original", geometry)),
+            geometry_input_sha256=str(
+                matching[0].get("geometry_input_sha256", "")
+            ),
+            solver_source_sha256=str(
+                manifest.get("solver_source_sha256", "")
+            ),
+            runtime_environment_sha256=str(
+                manifest.get("runtime_environment_sha256", "")
+            ),
+            run_solve_spec_sha256=manifest_solve_spec_fingerprint(manifest),
+            body_profile=profile,
+        )
+        os.replace(str(temporary), str(destination))
+        written += 1
+    return written, skipped
 
 
 def _paired_solve_units(output_units):
@@ -630,6 +737,11 @@ def submit():
         )
     except ValueError as exc:
         sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
+    if BODY_GRIM_ENABLE and not {"VV", "HH"}.issubset(set(pols)):
+        sys.exit(
+            "ERROR: BODY_GRIM_ENABLE=True requires both VV and HH in "
+            "POLARIZATIONS. Disable body collection for a single-channel run."
+        )
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
     if (
         not all(math.isfinite(value) and value > 0.0
@@ -698,6 +810,8 @@ def submit():
     (run_dir / "logs").mkdir()
     (run_dir / "results").mkdir()
     (run_dir / "claims").mkdir()
+    if BODY_GRIM_ENABLE:
+        (run_dir / "bodies").mkdir()
 
     # Freeze the exact solver inputs inside the run.  Referencing the discovery
     # folder directly makes an active/archived run mutable: a later staging
@@ -805,6 +919,9 @@ def submit():
             "axis_az_deg":    AZEL_AXIS_AZ_DEG,
             "axis_el_deg":    AZEL_AXIS_EL_DEG,
         },
+        "body_grim_config": {
+            "enabled": bool(BODY_GRIM_ENABLE),
+        },
         "units": units,
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -830,7 +947,8 @@ def submit():
           f"{', mirrored to 360 on export' if EXPAND_TO_360 else ''})")
     print(f"  Output files  : {len(units)}  (geom x freq x pol)")
     print(f"  Physical solves: {len(_paired_solve_units(units))}  (VV/HH co-solved)")
-    print(f"  Mesh check    : {'base + fine (certified)' if MESH_CERTIFICATION else 'base only (SURVEY, uncertified)'}")
+    print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
+    print(f"  Body GRIMs    : {'enabled' if BODY_GRIM_ENABLE else 'disabled'}")
     print(f"  Slots         : {N_JOBS} job(s) x {N_NODES} node(s)")
     print(f"  Per unit      : {WORKERS_PER_UNIT} threads (modes + streaming "
           f"tiles), assembly={ASSEMBLY}, precision={TABLE_PRECISION}")
@@ -864,6 +982,8 @@ def submit():
     print(f"\nMonitor with:  squeue -u $USER")
     print(f"Outputs in:    {run_dir}/results/"
           + (f"  (+ az/el grids in {run_dir}/azel/)" if AZEL_ENABLE else ""))
+    if BODY_GRIM_ENABLE:
+        print(f"Body inputs:   {run_dir}/bodies/")
 
 
 # --- worker mode (invoked by SLURM) ----------------------------------------
@@ -1124,6 +1244,21 @@ def worker(run_dir_str, job_index, node_index):
           f"left to other tasks={counters['passed']}.  {elapsed:.1f} s elapsed.")
     if counters["failed"]:
         raise SystemExit(1)
+    if bool((manifest.get("body_grim_config") or {}).get("enabled", False)):
+        try:
+            n_written, n_skipped = collect_bodies(
+                str(run_dir), require_complete=False
+            )
+            if n_written or n_skipped:
+                print(
+                    f"  Body GRIMs: {n_written} written, {n_skipped} already "
+                    f"present in {run_dir / 'bodies'}/",
+                    flush=True,
+                )
+        except Exception:
+            print("      [warn] body GRIM collection failed:", flush=True)
+            for line in traceback.format_exc().rstrip().splitlines():
+                print(f"        {line}", flush=True)
 
 
 def _pool_initializer(blas_threads):
@@ -1208,11 +1343,21 @@ def main():
         help="Post-process a completed run into radar-frame (az, el) "
              "polarimetric grids (needs both VV and HH units).",
     )
+    ap.add_argument(
+        "--collect-bodies", metavar="RUN_DIR",
+        help="Collect a completed run into one downstream-ready body GRIM "
+             "per geometry (needs both VV and HH units).",
+    )
     args = ap.parse_args()
     if args.worker:
         worker(args.worker[0], int(args.worker[1]), int(args.worker[2]))
     elif args.azel:
         azel(args.azel)
+    elif args.collect_bodies:
+        written, skipped = collect_bodies(args.collect_bodies)
+        print(
+            f"Body GRIMs: {written} written, {skipped} already present."
+        )
     else:
         submit()
 

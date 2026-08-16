@@ -18,7 +18,6 @@ Usage:
 """
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -100,12 +99,15 @@ def test_run_local_monostatic(workspace):
     run_dir = runs[0]
     results = run_dir / "results"
 
-    entries = sorted(p.name for p in results.iterdir())
-    check(len(entries) == 2, f"results/ holds exactly 2 files (got {entries})")
-    check(all(name.endswith(".grim") for name in entries),
+    entries = sorted(results.rglob("*.grim"))
+    check(len(entries) == 2, f"results/ holds exactly 2 files "
+                             f"(got {[p.name for p in entries]})")
+    check(all(path.suffix == ".grim" for path in entries),
           "every file in results/ is a .grim")
-    check(not list(results.glob("*.provenance.json")),
+    check(not list(results.rglob("*.provenance.json")),
           "results/ holds no .provenance.json sidecars")
+    check(all(path.parent.name == "FRD" for path in entries),
+          "2-D results preserve their FRD/OPN role for downstream tools")
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
     check(manifest["status"] == "complete", "manifest reports the run complete")
@@ -122,7 +124,7 @@ def test_run_local_monostatic(workspace):
         read_embedded_attestation,
     )
 
-    embedded = read_embedded_attestation(str(results / entries[0]))
+    embedded = read_embedded_attestation(str(entries[0]))
     check(embedded.get("run_id") == manifest["run_id"],
           "each result carries its run binding inside the artifact")
     check(embedded.get("angular_grid_kind") == "azimuths_deg",
@@ -189,99 +191,10 @@ def test_resume_same_run_dir(workspace):
           f"every finished unit verifies and skips (got {set(statuses)})")
 
 
-def test_step1_local(workspace):
-    print("\n1a_solve_2d_local/run_monostatic_local.py")
-    source = REPO / "1a_solve_2d_local"
-    # A shipped coupon, not geometries/body.geo: this driver requires both
-    # physical channels, and body.geo is an open TYPE 2 contour that the TE
-    # Robin MFIE (a closed-obstacle formulation) legitimately refuses.
-    candidates = sorted((source / "geometries" / "FRD").glob("*.geo"))
-    if not source.is_dir() or not candidates:
-        print("  [skip] no coupon in 1a_solve_2d_local/geometries/FRD")
-        return
-    geo_src = candidates[0]
-
-    # The driver resolves Backend/ as a sibling of its own folder, so the copy
-    # needs that same shape.
-    sandbox = workspace / "step1"
-    (sandbox / "1a_solve_2d_local" / "geometries" / "FRD").mkdir(parents=True)
-    (sandbox / "1a_solve_2d_local" / "geometries" / "OPN").mkdir(parents=True)
-    os.symlink(str(BACKEND), str(sandbox / "Backend"))
-    shutil.copy2(
-        str(source / "run_monostatic_local.py"),
-        str(sandbox / "1a_solve_2d_local" / "run_monostatic_local.py"),
-    )
-    shutil.copy2(
-        str(geo_src),
-        str(sandbox / "1a_solve_2d_local" / "geometries" / "FRD" / "coupon_a.geo"),
-    )
-
-    here = sandbox / "1a_solve_2d_local"
-    script = DRIVER_HARNESS.format(
-        backend=str(BACKEND),
-        module="run_monostatic_local",
-        overrides=_overrides(
-            FREQUENCIES_GHZ=[2.0],
-            # validate_config requires both physical channels: a feature delta
-            # is not complete without them.
-            POLARIZATIONS=["TM", "TE"],
-            GEOMETRY_UNITS="meters",
-            WORKERS=2,
-        ) + "\nimport numpy; driver.ANGLES_DEG = numpy.array([0.0, 45.0, 90.0])",
-    )
-    # sys.path[0] must reach the copied driver, not the repo original.
-    script = script.replace(
-        f"sys.path.insert(0, {str(BACKEND)!r})",
-        f"sys.path.insert(0, {str(BACKEND)!r})\nsys.path.insert(0, {str(here)!r})",
-    )
-    first = _run(script, here)
-    if first.returncode != 0:
-        check(False, f"driver exited {first.returncode}:\n{first.stdout}\n{first.stderr}")
-        return
-    check(True, "sweep completed")
-
-    files = [p for p in (here / "results").rglob("*") if p.is_file()]
-    check(len(files) == 2, f"results/ holds exactly one file per unit "
-                           f"(got {[p.name for p in files]})")
-    check(all(p.suffix == ".grim" for p in files),
-          "every published file is a .grim")
-    check(not list((here / "results").rglob("*.provenance.json")),
-          "results/ holds no .provenance.json sidecars")
-
-    second = _run(script, here)
-    check(second.returncode == 0, "a second run completes")
-    check("skipped=2" in second.stdout,
-          f"finished units are skipped, not redone:\n{second.stdout.strip()}")
-
-    # The radar spellings name the same two physical channels, so a sweep
-    # written as VV/HH must land on the results the TM/TE sweep already
-    # produced rather than forking a second set of files under other names.
-    alias_script = script.replace(
-        f"driver.POLARIZATIONS = {['TM', 'TE']!r}",
-        f"driver.POLARIZATIONS = {['VV', 'HH']!r}",
-    )
-    if alias_script == script:
-        check(False, "could not reconfigure the run to VV/HH")
-        return
-    aliased = _run(alias_script, here)
-    check(aliased.returncode == 0,
-          f"a VV/HH run is accepted:\n{aliased.stdout}\n{aliased.stderr}")
-    check("skipped=2" in aliased.stdout,
-          f"VV/HH reuses the TM/TE results instead of re-solving:\n"
-          f"{aliased.stdout.strip()}")
-    after = [p for p in (here / "results").rglob("*") if p.is_file()]
-    check(len(after) == 2,
-          f"VV/HH added no second set of files (got {[p.name for p in after]})")
-    check(all(p.name.startswith(("TM_", "TE_")) for p in after),
-          f"outputs stay canonically named (got {[p.name for p in after]})")
-
-
 def test_polarization_aliases():
     print("\npolarization aliases")
     sys.path.insert(0, str(BACKEND))
     import hpc_scheduler
-    from step1_monostatic import validate_config
-
     canonical = hpc_scheduler.canonical_polarization
     check(canonical("VV") == "TE" and canonical("HH") == "TM",
           "VV maps to TE and HH maps to TM")
@@ -299,24 +212,6 @@ def test_polarization_aliases():
     check(hpc_scheduler.distinct_polarization_channels(["TM", "TE"], bor)
           == ["HH", "VV"],
           "and canonicalized when the driver's file names use a fixed spelling")
-
-    _f, _a, pols = validate_config([3.0], [0.0], ["VV", "HH"])
-    check(sorted(pols) == ["TE", "TM"],
-          f"a VV/HH step-1 config canonicalizes to TM/TE (got {pols})")
-
-    for bad, why in (
-        (["VV", "V"], "two spellings of the same channel"),
-        (["TM", "HH"], "two spellings of the same channel"),
-        (["TM"], "only one channel"),
-        (["TM", "TE", "VV"], "a repeated channel"),
-        (["RHCP", "LHCP"], "an unsupported label"),
-    ):
-        try:
-            validate_config([3.0], [0.0], bad)
-        except ValueError:
-            check(True, f"step-1 rejects {bad} ({why})")
-        else:
-            check(False, f"step-1 accepted {bad} but it is {why}")
 
     # The same-channel-twice case is the one a plain uniqueness check misses,
     # so assert it directly on the shared helper the 2-D drivers call.
@@ -389,14 +284,60 @@ def test_bor_driver_loads():
           f"knobs{'' if result.returncode == 0 else ': ' + result.stderr.strip()}")
 
 
+def test_local_bor_downstream_collection(workspace):
+    """A base-mesh BoR run must still produce a usable downstream body."""
+
+    print("\nrun_local_bor.py downstream collection")
+    script = DRIVER_HARNESS.format(
+        backend=str(BACKEND),
+        module="run_local_bor",
+        overrides=_overrides(
+            GEOMETRY_DIRS=[str(REPO / "geometries")],
+            FREQUENCIES_GHZ=[1.0],
+            ASPECTS_DEG=[0.0, 90.0, 180.0],
+            POLARIZATIONS=["VV", "HH"],
+            OUTPUT_DIR=str(workspace / "bor_runs"),
+            GEOMETRY_UNITS="meters",
+            MESH_CERTIFICATION=False,
+            BODY_GRIM_ENABLE=True,
+            WORKERS=1,
+            WORKERS_PER_UNIT=1,
+        ),
+    )
+    result = _run(script, workspace)
+    if result.returncode != 0:
+        check(False, f"driver exited {result.returncode}:\n"
+                     f"{result.stdout}\n{result.stderr}")
+        return
+    runs = sorted((workspace / "bor_runs").glob("run_*"))
+    body_paths = sorted(runs[-1].glob("bodies/*.grim")) if runs else []
+    check(len(body_paths) == 1,
+          f"one collected body GRIM was written (got {len(body_paths)})")
+    if not body_paths:
+        return
+    sys.path.insert(0, str(BACKEND))
+    from feature_sum import (  # noqa: E402
+        load_body_grim,
+        verify_body_artifact_bundle,
+    )
+    body = load_body_grim(str(body_paths[0]))
+    check(set(body) == {1.0} and set(body[1.0]) == {
+        "theta_deg", "amp_vv", "amp_hh"
+    }, "collected body contains both channels and the requested frequency")
+    bundle = verify_body_artifact_bundle(str(body_paths[0]))
+    check(bundle["profile_points"] > 1,
+          "base-mesh body passes downstream structural checks without a "
+          "certification gate")
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="ghost_local_") as tmp:
         workspace = Path(tmp)
         test_run_local_monostatic(workspace)
         test_resume_same_run_dir(workspace)
-        test_step1_local(workspace)
         test_polarization_aliases()
         test_bor_driver_loads()
+        test_local_bor_downstream_collection(workspace)
 
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
     for label in FAIL:

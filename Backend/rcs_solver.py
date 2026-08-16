@@ -7298,7 +7298,8 @@ def solve_monostatic_rcs_2d(
 
     The returned quality gate certifies the assembled discrete linear system,
     not mesh convergence.  Production callers must perform the base/fine
-    complex-field mesh comparison implemented by ``step1_monostatic``.
+    complex-field mesh comparison implemented by the certified solve entry
+    points and selected by the general-purpose local/HPC drivers.
 
     Angle convention (coming-from):
     - 0 deg: from right to left
@@ -8750,20 +8751,17 @@ def solve_monostatic_rcs_2d_survey(
     where most of the wall clock and all of the peak memory go, because cost
     scales with the square of the node count.
 
-    This entry runs the base mesh alone, for screening: trade studies, sanity
-    checks, picking which configurations are worth a real run.  The discrete
+    This entry runs the base mesh alone. The discrete
     linear system is still certified (the algebraic quality gate is untouched,
     so a badly conditioned or non-converged solve still fails closed); what is
     missing is any evidence that the *discretization* is fine enough, which is
     the error that silently biases an RCS number rather than announcing
     itself.
 
-    The result is deliberately made unusable as production input.  It carries
-    no ``metadata["mesh_convergence"]`` block, which is exactly what
-    `feature_sum` requires before a field may enter a body or a delta, so the
-    downstream pipeline rejects it on its own rather than trusting a label.
-    Metadata and warnings say so explicitly as well, so an artifact found
-    later identifies itself without needing this docstring.
+    The result remains usable by viewers and downstream combination tools.
+    Metadata and warnings record that no mesh comparison was performed, so an
+    artifact found later identifies itself without imposing that accuracy
+    policy on the user.
     """
 
     result = solve_monostatic_rcs_2d(

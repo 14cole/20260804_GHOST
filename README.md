@@ -42,11 +42,8 @@ Backend/
   run_local_monostatic.py     the same 2-D sweep on one machine, no SLURM
   run_local_bor.py            the same BoR sweep on one machine, no SLURM
   build_bor_stream_kernel.py  build the optional native BoR streaming sampler
-  step1_monostatic.py         shared implementation for the numbered 2-D runners
   ...                         geometry/material I/O, quality gates, provenance, grim export
 0_calibrate_shadowing/        shadowing bias calibration
-1a_solve_2d_local/            single-machine coupon solve
-1b_solve_2d_hpc/              coupon library on SLURM
 1c_build_deltas/              delta assembly from solved coupons
 tests/                        equivalence, scheduling, and benchmark scripts
 ```
@@ -54,23 +51,25 @@ tests/                        equivalence, scheduling, and benchmark scripts
 ## Quick start
 
 ```bash
-# One machine
-python 1a_solve_2d_local/run_monostatic_local.py
+# One machine: edit the CONFIG block, then
+python Backend/run_local_monostatic.py
+python Backend/run_local_bor.py
 
-# SLURM: edit the CONFIG block at the top, then
-python 1b_solve_2d_hpc/run_monostatic_hpc.py
+# SLURM: edit the CONFIG block, then
+python Backend/run_hpc_monostatic.py
+python Backend/run_hpc_bor_monostatic.py
 
 # Check the scheduler and a real two-task sweep end to end
 python tests/test_hpc_scheduling.py
 python tests/test_local_drivers.py
 ```
 
-Every driver has a local twin that runs the identical sweep without SLURM
-(`Backend/run_local_monostatic.py`, `Backend/run_local_bor.py`,
-`1a_solve_2d_local/run_monostatic_local.py`). They share the scheduler with the
-cluster path, so units are cost-ordered and admitted against a memory budget
-rather than filling every core, and `results/` holds one `.grim` per unit and
-nothing else. See [HPC.md](HPC.md#running-without-slurm).
+There is one general-purpose driver family per solver: the `run_hpc_*` driver
+for SLURM and its `run_local_*` twin for one machine. The same result files work
+in GRIM and downstream feature/delta tools whether or not mesh certification
+was selected. They share the scheduler, so units are cost-ordered and admitted
+against a memory budget rather than filling every core. See
+[HPC.md](HPC.md#running-without-slurm).
 
 ## Numerical validation
 

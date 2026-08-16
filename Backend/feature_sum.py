@@ -932,22 +932,30 @@ _BODY_AZ_MEANING = ("BoR aspect from the +z rotation axis (0 = nose-on, "
 
 
 def verify_body_artifact_bundle(body_grim: 'str') -> 'Dict[str, Any]':
-    """Validate one self-contained body GRIM and its embedded profile."""
+    """Validate one self-contained body GRIM and its embedded profile.
+
+    Mesh certification is a solve-time accuracy choice, not an authorization
+    token.  A base-mesh and a certified body therefore pass the same structural
+    checks here and may both be used by downstream feature workflows.
+    """
 
     path = os.path.abspath(str(body_grim))
-    certification = require_body_mesh_certification(path)
     load_body_grim(path)
     profile = load_body_profile_grim(path)
     return {
         "schema": "ghost.workflow.self-contained-body-grim.v1",
         "body_grim": path,
         "profile_points": int(len(profile)),
-        "mesh_certification": certification,
     }
 
 
 def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
-    """Reject a body artifact not produced by the strict refined-mesh path."""
+    """Explicitly audit that a body used the refined-mesh path.
+
+    This opt-in audit helper is retained for users who want to enforce that
+    policy themselves.  Normal loading and downstream feature operations do
+    not call it.
+    """
 
     label = str(path)
     try:
@@ -1031,7 +1039,11 @@ def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
 
 
 def require_delta_mesh_certification(path: 'str') -> 'Dict[str, Any]':
-    """Require an unbroken strict-mesh source chain on a production delta."""
+    """Explicitly audit a delta's refined-mesh source chain.
+
+    This is an optional user policy check, not a prerequisite for loading or
+    combining the delta.
+    """
 
     label = str(path)
     try:

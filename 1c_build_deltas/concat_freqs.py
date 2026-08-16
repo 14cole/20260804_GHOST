@@ -26,17 +26,8 @@ def _imports():
                 os.environ.setdefault("CEM_SOLVER_BACKEND_PATH", str(backend))
             break
     from cem_tools.errors import CemToolError
-    from cem_tools.grim_native import (
-        load_grim,
-        require_production_mesh_certification,
-    )
     from cem_tools.operations import concatenate_frequencies
-    return (
-        CemToolError,
-        concatenate_frequencies,
-        load_grim,
-        require_production_mesh_certification,
-    )
+    return CemToolError, concatenate_frequencies
 
 
 def _role_folders(path: 'Path'):
@@ -51,15 +42,13 @@ def main() -> 'None':
     parser.add_argument("--overwrite", action="store_true", default=OVERWRITE)
     args = parser.parse_args()
     source, destination = Path(args.input_dir).resolve(), Path(args.output_dir).resolve()
-    CemToolError, operation, load_grim, require_certification = _imports()
+    CemToolError, operation = _imports()
     wrote = 0
     try:
         for role, folder in _role_folders(source):
             if not folder.is_dir() or not any(folder.glob("*.grim")):
                 print(f"skip empty {role or folder.name}")
                 continue
-            for path in sorted(folder.glob("*.grim")):
-                require_certification(load_grim(path), str(path))
             result = operation(
                 folder,
                 destination / role if role else destination,

@@ -29,17 +29,8 @@ def _imports():
                 os.environ.setdefault("CEM_SOLVER_BACKEND_PATH", str(backend))
             break
     from cem_tools.errors import CemToolError
-    from cem_tools.grim_native import (
-        load_grim,
-        require_production_mesh_certification,
-    )
     from cem_tools.operations import subtract_datasets
-    return (
-        CemToolError,
-        subtract_datasets,
-        load_grim,
-        require_production_mesh_certification,
-    )
+    return CemToolError, subtract_datasets
 
 
 def main() -> 'None':
@@ -49,14 +40,12 @@ def main() -> 'None':
     parser.add_argument("output_dir", nargs="?", default=str(OUTPUT_DIR))
     parser.add_argument("--overwrite", action="store_true", default=OVERWRITE)
     args = parser.parse_args()
-    CemToolError, operation, load_grim, require_certification = _imports()
+    CemToolError, operation = _imports()
     try:
         for folder in (Path(args.opn_dir), Path(args.frd_dir)):
             paths = sorted(folder.resolve().glob("*.grim"))
             if not paths:
                 raise CemToolError(f"no .grim files found in {folder}")
-            for path in paths:
-                require_certification(load_grim(path), str(path))
         result = operation(
             args.opn_dir,
             args.frd_dir,
