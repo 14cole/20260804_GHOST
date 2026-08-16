@@ -8847,6 +8847,61 @@ def solve_bistatic_rcs_2d_certified(
     )
 
 
+def solve_bistatic_rcs_2d_survey(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    incidence_angles_deg: 'List[float]',
+    observation_angles_deg: 'List[float]',
+    polarization: 'str',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
+    max_panels: 'int' = MAX_PANELS_DEFAULT,
+    mesh_reference_ghz: 'Optional[float]' = None,
+    cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
+    abort_event: 'Optional[threading.Event]' = None,
+    solver_method: 'str' = "auto",
+) -> 'Dict[str, Any]':
+    """Single-mesh bistatic solve with explicit survey provenance."""
+
+    result = solve_bistatic_rcs_2d(
+        geometry_snapshot=geometry_snapshot,
+        frequencies_ghz=frequencies_ghz,
+        incidence_angles_deg=incidence_angles_deg,
+        observation_angles_deg=observation_angles_deg,
+        polarization=polarization,
+        geometry_units=geometry_units,
+        material_base_dir=material_base_dir,
+        progress_callback=progress_callback,
+        quality_thresholds=quality_thresholds,
+        strict_quality_gate=True,
+        compute_condition_number=True,
+        max_panels=max_panels,
+        mesh_reference_ghz=mesh_reference_ghz,
+        cfie_alpha=cfie_alpha,
+        abort_event=abort_event,
+        solver_method=solver_method,
+    )
+    metadata = result.setdefault("metadata", {})
+    metadata["mesh_convergence_certified"] = False
+    metadata["certified_entry_point"] = False
+    metadata["published_mesh"] = "base"
+    metadata["survey_mode"] = True
+    warning = (
+        "SURVEY MODE: solved on the base mesh only. No mesh-convergence "
+        "certificate exists for this bistatic field."
+    )
+    warnings = metadata.setdefault("warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
+    quality_gate = metadata.get("quality_gate")
+    if isinstance(quality_gate, dict):
+        quality_gate["mesh_convergence_certified"] = False
+        quality_gate["certification_scope"] = "discrete_linear_system_only"
+    return result
+
+
 def compute_boundary_densities(
     geometry_snapshot: 'Dict[str, Any]',
     frequency_ghz: 'float',

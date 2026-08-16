@@ -17,7 +17,7 @@ import sys
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+ROOT = HERE
 sys.path[:0] = [str(ROOT / "Backend"), str(ROOT)]
 
 from feature_sum import radar_grid_aspects  # noqa: E402
@@ -40,6 +40,7 @@ GEOMETRY_UNITS = "meters"
 WORKERS_PER_BODY = 4
 MAX_CONCURRENT_BODIES_PER_TASK = 1
 FORCE = False
+MESH_CERTIFICATION = True   # recommended; False writes base-mesh survey data
 
 ARRAY_TASKS = 1
 SLURM_PARTITION = "compute"
@@ -82,6 +83,7 @@ def _configuration():
             "axis_az_deg": float(AXIS_AZ_DEG),
             "axis_el_deg": float(AXIS_EL_DEG),
         },
+        certify=bool(MESH_CERTIFICATION),
     )
 
 
@@ -151,6 +153,11 @@ def submit():
     print(
         f"Step 2 HPC: {len(jobs)} body/bodies; direct results -> results/, "
         "scheduler output -> logs/."
+    )
+    print(
+        "Mesh certification: "
+        + ("ON (base + fine)" if MESH_CERTIFICATION
+           else "OFF (SURVEY: base mesh only, uncertified)")
     )
     if not SUBMIT:
         print(" ".join(shlex.quote(x) for x in args))

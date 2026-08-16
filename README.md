@@ -41,6 +41,7 @@ Backend/
   run_hpc_bor_monostatic.py   body-of-revolution SLURM sweep
   run_local_monostatic.py     the same 2-D sweep on one machine, no SLURM
   run_local_bor.py            the same BoR sweep on one machine, no SLURM
+  build_bor_stream_kernel.py  build the optional native BoR streaming sampler
   step1_monostatic.py         shared implementation for the numbered 2-D runners
   ...                         geometry/material I/O, quality gates, provenance, grim export
 0_calibrate_shadowing/        shadowing bias calibration
@@ -90,6 +91,23 @@ polarizations, tapered-impedance invariance, and bistatic reciprocity:
 
 ```bash
 python tests/test_rcs_physics_regression.py
+python tests/test_bor_physics_regression.py
+```
+
+The BoR suite checks PEC, passive IBC, lossy dielectric, and lossy coated-PEC
+spheres against independent Mie-series references. It also checks table versus
+streaming assembly, per-frequency mesh/resource planning, survey provenance,
+and VV/HH co-solve scheduling. See [BOR_CONVENTIONS.md](BOR_CONVENTIONS.md) for
+the geometry, polarization, RCS, phasor, material-loss, and certification
+conventions.
+
+Large conductor BoR jobs use an optional native sampling kernel. The NumPy
+fallback is physically equivalent but normally 2–8 times slower during
+streaming assembly. Build the kernel on each target platform before submitting
+a run (the native artifact is part of solver provenance) with:
+
+```bash
+python Backend/build_bor_stream_kernel.py
 ```
 
 Away from the corrected close-gap and varying-impedance cases, agreement with

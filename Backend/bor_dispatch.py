@@ -353,6 +353,159 @@ def _classify(chains: 'List[_SegChain]') -> 'str':
                      "the TYPE 2+3+4 partial-coating layout.")
 
 
+def estimate_bor_resources(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequency_ghz: 'float',
+    aspects_deg: 'List[float]',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    n_modes: 'Optional[int]' = None,
+    max_elements: 'int' = MAX_ELEMENTS_DEFAULT,
+    workers: 'int' = 1,
+    table_precision: 'str' = "auto",
+    assembly: 'str' = "auto",
+    stream_budget_gb: 'float' = BOR_STREAM_BUDGET_GB_DEFAULT,
+    mesh_certification: 'bool' = True,
+    fine_factor: 'float' = 1.5,
+) -> 'Dict[str, Any]':
+    """Preview the peak allocation used for memory-aware scheduling.
+
+    Material interpolation and panel-count arithmetic match the solve path,
+    but this function performs no quadrature or matrix assembly. The peak is
+    intentionally conservative and is a reservation, not an RSS promise.
+    """
+
+    frequency = float(frequency_ghz)
+    if not math.isfinite(frequency) or frequency <= 0.0:
+        raise ValueError("frequency_ghz must be positive and finite.")
+    aspects = np.asarray(aspects_deg, dtype=float)
+    if (
+        aspects.ndim != 1 or aspects.size == 0
+        or not np.all(np.isfinite(aspects))
+        or np.any((aspects < 0.0) | (aspects > 180.0))
+    ):
+        raise ValueError("aspects_deg must be a nonempty finite [0, 180] axis.")
+    worker_count = max(1, int(workers))
+    precision = str(table_precision).strip().lower()
+    assembly_key = str(assembly).strip().lower()
+    if precision not in {"auto", "single", "double"}:
+        raise ValueError("table_precision must be auto, single, or double.")
+    if assembly_key not in {"auto", "tables", "streaming"}:
+        raise ValueError("assembly must be auto, tables, or streaming.")
+
+    preview_snapshot = (
+        scale_snapshot_panel_density(geometry_snapshot, float(fine_factor))
+        if mesh_certification else geometry_snapshot
+    )
+    scale = _unit_scale_to_meters(geometry_units)
+    base_dir = _material_base_dir_for_snapshot(
+        preview_snapshot, material_base_dir
+    )
+    materials = MaterialLibrary.from_entries(
+        preview_snapshot.get("ibcs", []) or [],
+        preview_snapshot.get("dielectrics", []) or [],
+        base_dir=base_dir,
+    )
+    wavelength, _max_index, _flags = (
+        _conservative_mesh_wavelength_for_frequencies(
+            preview_snapshot, materials, [frequency]
+        )
+    )
+    chains = _chains_from_snapshot(preview_snapshot, scale)
+    kind = _classify(chains)
+    element_count = sum(
+        _element_count(chain.n_prop, float(length), wavelength)
+        for chain in chains
+        for length in chain.prim_lengths
+    )
+    if kind == "conductor" and element_count > int(max_elements):
+        raise ValueError(
+            f"BoR mesh would need approximately {element_count} elements "
+            f"(> max {int(max_elements)})."
+        )
+    radius = max(float(np.max(chain.pts[:, 0])) for chain in chains)
+    k0 = 2.0 * math.pi * frequency * 1.0e9 / C0
+    sin_max = float(np.max(np.abs(np.sin(np.radians(aspects)))))
+    mode_cap = (
+        max(0, int(n_modes))
+        if n_modes is not None
+        else int(math.ceil(k0 * radius * max(sin_max, 0.05))) + 12
+    )
+    active_modes = min(worker_count, mode_cap + 1)
+
+    surface_count = max(1, len(chains))
+    unknowns = (
+        2 * (element_count + 1)
+        if kind == "conductor"
+        else 4 * (element_count + surface_count)
+    )
+    # Per active mode: assembled/masked matrix, LU copy, residual products,
+    # LAPACK/RHS workspace. The safety factor covers allocator fragmentation.
+    matrix_work_gb = (
+        4.5 * 16.0 * float(unknowns) * float(unknowns) / 1.0e9
+    )
+    rhs_work_gb = (
+        6.0 * 16.0 * float(unknowns) * 2.0 * float(aspects.size) / 1.0e9
+    )
+
+    persistent_gb = 0.0
+    held_assembly_gb = 0.0
+    estimated_assembly = "dense-direct"
+    estimated_precision = "double"
+    if kind == "conductor":
+        from bor_solver import estimate_bor_table_gb
+        from bor_streaming import estimate_streaming_gb
+
+        has_ibc = any(chain.ibc_flag > 0 for chain in chains)
+        formulation = "efie" if has_ibc else "cfie"
+        table_double = estimate_bor_table_gb(
+            element_count, mode_cap, formulation, has_ibc, 4, False
+        )
+        use_streaming = (
+            assembly_key == "streaming"
+            or (assembly_key == "auto" and table_double > 2.0)
+        )
+        full_double = (
+            estimate_streaming_gb(
+                element_count, mode_cap, formulation, has_ibc, False
+            )
+            if use_streaming else table_double
+        )
+        use_single = (
+            precision == "single"
+            or (precision == "auto" and full_double > 4.0)
+        )
+        persistent_gb = full_double / (2.0 if use_single else 1.0)
+        held_assembly_gb = persistent_gb
+        if use_streaming and persistent_gb > float(stream_budget_gb):
+            per_mode = persistent_gb / max(mode_cap + 1, 1)
+            block = max(1, int(float(stream_budget_gb) / per_mode))
+            held_assembly_gb = persistent_gb * block / max(mode_cap + 1, 1)
+        elif not use_streaming:
+            held_assembly_gb = 3.5 * persistent_gb
+        estimated_assembly = "streaming" if use_streaming else "tables"
+        estimated_precision = "single" if use_single else "double"
+
+    raw_peak = held_assembly_gb + active_modes * (
+        matrix_work_gb + rhs_work_gb
+    )
+    peak_gb = max(0.5, 0.5 + 1.20 * raw_peak)
+    return {
+        "frequency_ghz": frequency,
+        "geometry_kind": kind,
+        "mesh_elements": int(element_count),
+        "n_unknowns_estimate": int(unknowns),
+        "mode_cap_estimate": int(mode_cap),
+        "active_mode_workers": int(active_modes),
+        "assembly_estimate": estimated_assembly,
+        "table_precision_estimate": estimated_precision,
+        "persistent_assembly_gb": float(persistent_gb),
+        "held_assembly_gb": float(held_assembly_gb),
+        "estimated_peak_gb": float(peak_gb),
+        "mesh_certification": bool(mesh_certification),
+    }
+
+
 def _stitch_pieces(chains: 'List[_SegChain]', what: 'str',
                    tol: 'float') -> 'List[List[_SegChain]]':
     """Order chains head-to-tail into MULTIPLE maximal open runs (used for
@@ -476,18 +629,34 @@ def solve_monostatic_rcs_bor(
         geometry_snapshot.get("dielectrics", []) or [],
         base_dir=base_dir,
     )
+    # Mesh each solve frequency from its own material wavelength. A previous
+    # sweep-wide minimum made a 1 GHz solve use the 18 GHz mesh whenever both
+    # appeared in one GUI call. ``mesh_reference_ghz`` remains an explicit
+    # user request to impose an additional common reference frequency.
     mesh_control_frequencies = set(frequencies)
     if mesh_ref_ghz is not None:
         mesh_control_frequencies.add(mesh_ref_ghz)
-    (
-        mesh_wavelength_m,
-        mesh_max_refractive_index,
-        mesh_material_flags,
-    ) = _conservative_mesh_wavelength_for_frequencies(
-        geometry_snapshot,
-        materials,
-        mesh_control_frequencies,
+    mesh_controls = {}
+    for solve_frequency in frequencies:
+        control_frequencies = {float(solve_frequency)}
+        if mesh_ref_ghz is not None:
+            control_frequencies.add(mesh_ref_ghz)
+        mesh_controls[float(solve_frequency)] = (
+            _conservative_mesh_wavelength_for_frequencies(
+                geometry_snapshot,
+                materials,
+                control_frequencies,
+            )
+        )
+    mesh_wavelength_m = min(value[0] for value in mesh_controls.values())
+    mesh_max_refractive_index = max(
+        value[1] for value in mesh_controls.values()
     )
+    mesh_material_flags = sorted({
+        flag
+        for value in mesh_controls.values()
+        for flag in value[2]
+    })
 
     chains = _chains_from_snapshot(geometry_snapshot, scale)
     kind = _classify(chains)
@@ -665,11 +834,8 @@ def solve_monostatic_rcs_bor(
     for fi, freq_ghz in enumerate(frequencies):
         check_abort()
         freq_hz = freq_ghz * 1e9
-        # Reuse one topology only at the shortest wavelength over every solve
-        # frequency and the optional reference frequency, including all
-        # referenced penetrable media.  A low mesh reference can therefore
-        # never under-resolve a higher-frequency or higher-index solve.
-        lam0 = float(mesh_wavelength_m)
+        current_mesh = mesh_controls[float(freq_ghz)]
+        lam0 = float(current_mesh[0])
 
         def report(modes_done, m_cap):
             if progress_callback is not None:
@@ -982,6 +1148,9 @@ def solve_monostatic_rcs_bor(
             ),
             "stream_mode_block": out.get("stream_mode_block"),
             "stream_sweeps": out.get("stream_sweeps"),
+            "mesh_wavelength_m": float(current_mesh[0]),
+            "mesh_max_refractive_index": float(current_mesh[1]),
+            "mesh_material_flags": list(current_mesh[2]),
         })
         if progress_callback is not None:
             try:
@@ -1350,6 +1519,43 @@ def solve_monostatic_rcs_bor_certified(
     metadata["quality_gate"] = quality_gate
     fine_result["metadata"] = metadata
     return fine_result
+
+
+def solve_monostatic_rcs_bor_survey(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    elevations_deg: 'List[float]',
+    polarization: 'str',
+    **kwargs: 'Any',
+) -> 'Dict[str, Any]':
+    """Single-mesh BoR solve with explicit uncertified-result metadata."""
+
+    result = solve_monostatic_rcs_bor(
+        geometry_snapshot=geometry_snapshot,
+        frequencies_ghz=frequencies_ghz,
+        elevations_deg=elevations_deg,
+        polarization=polarization,
+        **kwargs,
+    )
+    metadata = result.setdefault("metadata", {})
+    metadata["mesh_convergence_certified"] = False
+    metadata["certified_entry_point"] = False
+    metadata["published_mesh"] = "base"
+    metadata["survey_mode"] = True
+    warning = (
+        "SURVEY MODE: solved on the base BoR mesh only. No mesh-convergence "
+        "certificate exists for this field."
+    )
+    warnings = metadata.setdefault("warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
+    quality_gate = metadata.get("quality_gate")
+    if isinstance(quality_gate, dict):
+        quality_gate["mesh_convergence_certified"] = False
+        quality_gate["certification_scope"] = (
+            "discrete_linear_system_and_modal_truncation_only"
+        )
+    return result
 
 
 def bor_az_el_grid(res_vv: 'Dict[str, Any]', res_hh: 'Dict[str, Any]',

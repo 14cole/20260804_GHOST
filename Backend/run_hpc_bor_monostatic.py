@@ -10,9 +10,10 @@ Edit the CONFIG block below and run:
 Workflow (mirrors the 2D driver):
 - Discover geometry files under FRD_DIR + OPN_DIR (BoR .geo files: x = rho,
   y = z, generatrices traversed +z -> -z; see bor_dispatch).
-- Expand into a (geometry x frequency x polarization) unit list. All ASPECT
-  angles for a unit are solved in one call (each azimuthal mode is factored
-  once; extra aspects are RHS columns).
+- Keep a compatible (geometry x frequency x polarization) output manifest,
+  but dispatch one physical solve per geometry/frequency. VV and HH share each
+  azimuthal-mode factorization and are exported separately. All ASPECT angles
+  are stacked as RHS columns.
 - Distribute units round-robin across N_NODES x N_JOBS slots, write sbatch
   job-array scripts, submit. Restartable: units whose .grim exists are
   skipped.
@@ -117,6 +118,8 @@ MAX_ELEMENTS            = 50_000
 ASSEMBLY                = "auto"         # "auto" | "tables" | "streaming"
 TABLE_PRECISION         = "auto"         # "auto" | "single" | "double"
 STREAM_BUDGET_GB        = 8.0            # held streaming-block budget per unit
+MESH_CERTIFICATION      = True           # recommended base/fine comparison;
+                                         # False = explicit survey mode
 WORKERS_PER_UNIT        = 4              # threads inside one BoR solve (modes
                                          # + streaming tiles); pool size =
                                          # cores // WORKERS_PER_UNIT
@@ -286,6 +289,48 @@ def _unit_output_path(run_dir, unit):
     return run_dir / "results" / f"{pol}_{freq:.3f}GHz_{stem}.grim"
 
 
+def _paired_solve_units(output_units):
+    # type: (List[Dict[str, Any]]) -> List[Dict[str, Any]]
+    """Keep manifest outputs separate while co-solving compatible channels."""
+    pairs = {}  # type: Dict[Tuple[str, float], Dict[str, Any]]
+    for unit in output_units:
+        key = (str(unit["geometry"]), float(unit["frequency_ghz"]))
+        pair = pairs.setdefault(key, {
+            "geometry": unit["geometry"],
+            "geometry_stem": unit["geometry_stem"],
+            "geometry_input_sha256": unit["geometry_input_sha256"],
+            "frequency_ghz": float(unit["frequency_ghz"]),
+            "channel_units": [],
+        })
+        pair["channel_units"].append(unit)
+        if "estimated_peak_gb" in unit:
+            estimate = float(unit["estimated_peak_gb"])
+            previous = pair.get("estimated_peak_gb")
+            if previous is not None and float(previous) != estimate:
+                raise ValueError(
+                    "Paired BoR output units carry different memory estimates."
+                )
+            pair["estimated_peak_gb"] = estimate
+    return list(pairs.values())
+
+
+def _channel_result(result, polarization):
+    # type: (Dict[str, Any], str) -> Dict[str, Any]
+    samples = list(
+        (result.get("co_solved_samples", {}) or {}).get(polarization, []) or []
+    )
+    if not samples:
+        raise RuntimeError(
+            f"BoR solve did not return its co-solved {polarization} channel."
+        )
+    channel = dict(result)
+    channel["samples"] = samples
+    channel["polarization"] = polarization
+    channel["polarization_export"] = polarization
+    channel["metadata"] = dict(result.get("metadata", {}) or {})
+    return channel
+
+
 def _azel_out_paths(run_dir, stem, freq):
     # type: (Path, str, float) -> List[Path]
     return [run_dir / "azel" / f"azel_{freq:.3f}GHz_{stem}_{ch}.grim"
@@ -407,74 +452,104 @@ def _manifest_for(run_dir):
     return manifest
 
 
-def _solve_and_export(unit, snapshot, material_base, run_dir_str):
+def _solve_and_export(pair, snapshot, material_base, run_dir_str):
     # type: (Dict[str, Any], Dict[str, Any], str, str) -> Tuple[str, str]
-    """Pool-worker entry point: solve one BoR unit, export .grim, and (when
-    its partner polarization is already done) write the pair's az/el
-    product. Idempotent."""
+    """Solve one geometry/frequency pair and export requested channels."""
     run_dir = Path(run_dir_str)
-    out_path = _unit_output_path(run_dir, unit)
+    channel_units = list(pair["channel_units"])
     manifest = _manifest_for(run_dir)
     _verify_run_provenance(manifest)
-    _verify_unit_input(unit, manifest)
-    attestation = _unit_attestation_fields(manifest, unit)
-    if out_path.exists():
-        verify_embedded_attestation(str(out_path), attestation)
-        return ("skipped", str(out_path))
+    for unit in channel_units:
+        _verify_unit_input(unit, manifest)
+    missing = []
+    paths = []
+    for unit in channel_units:
+        out_path = _unit_output_path(run_dir, unit)
+        paths.append(out_path)
+        if out_path.exists():
+            verify_embedded_attestation(
+                str(out_path), _unit_attestation_fields(manifest, unit)
+            )
+        else:
+            missing.append(unit)
+    if not missing:
+        return ("skipped", ", ".join(str(path) for path in paths))
 
-    from bor_dispatch import solve_monostatic_rcs_bor
-    result = solve_monostatic_rcs_bor(
+    from bor_dispatch import (
+        solve_monostatic_rcs_bor_certified,
+        solve_monostatic_rcs_bor_survey,
+    )
+    certified = bool(
+        manifest.get("solver_config", {}).get("mesh_certification", True)
+    )
+    solver_config = dict(manifest.get("solver_config", {}) or {})
+    solve = (solve_monostatic_rcs_bor_certified if certified
+             else solve_monostatic_rcs_bor_survey)
+    result = solve(
         geometry_snapshot=snapshot,
-        frequencies_ghz=[float(unit["frequency_ghz"])],
+        frequencies_ghz=[float(pair["frequency_ghz"])],
         elevations_deg=[float(a) for a in manifest["aspects_deg"]],
-        polarization=unit["polarization"],
-        geometry_units=GEOMETRY_UNITS,
+        polarization=missing[0]["polarization"],
+        geometry_units=str(solver_config.get(
+            "geometry_units", GEOMETRY_UNITS
+        )),
         material_base_dir=material_base,
-        cfie_alpha=CFIE_ALPHA,
-        n_modes=N_MODES,
-        mode_tol=MODE_TOL,
-        max_elements=MAX_ELEMENTS,
-        workers=WORKERS_PER_UNIT,
-        table_precision=TABLE_PRECISION,
-        assembly=ASSEMBLY,
-        stream_budget_gb=STREAM_BUDGET_GB,
-        expand_to_360=EXPAND_TO_360,
+        cfie_alpha=float(solver_config.get("cfie_alpha", CFIE_ALPHA)),
+        n_modes=solver_config.get("n_modes", N_MODES),
+        mode_tol=float(solver_config.get("mode_tol", MODE_TOL)),
+        max_elements=int(solver_config.get("max_elements", MAX_ELEMENTS)),
+        workers=int(solver_config.get(
+            "workers_per_unit", WORKERS_PER_UNIT
+        )),
+        table_precision=str(solver_config.get(
+            "table_precision", TABLE_PRECISION
+        )),
+        assembly=str(solver_config.get("assembly", ASSEMBLY)),
+        stream_budget_gb=float(solver_config.get(
+            "stream_budget_gb", STREAM_BUDGET_GB
+        )),
+        expand_to_360=bool(manifest.get("expand_to_360", EXPAND_TO_360)),
     )
     for w in result["metadata"].get("warnings", []) or []:
-        print(f"      [warn] {unit['geometry_stem']}: {w}", flush=True)
+        print(f"      [warn] {pair['geometry_stem']}: {w}", flush=True)
     _verify_run_provenance(manifest)
-    _verify_unit_input(unit, manifest)
-
-    # Bind the result to its run state inside the artifact, before export, so
-    # results/ holds one file per unit instead of a .grim and a sidecar.
-    embed_output_attestation(result, attestation)
+    for unit in channel_units:
+        _verify_unit_input(unit, manifest)
 
     from grim_io import export_result_to_grim
-    written = export_result_to_grim(
-        result, str(out_path),
-        source_path=str(snapshot.get("source_path", "") or ""),
-        history=(f"run_hpc_bor_monostatic.py pol={unit['polarization']} "
-                 f"freq={unit['frequency_ghz']}GHz"),
-    )
-    actual_path = str(written[0]) if written else str(out_path)
+    actual_paths = []
+    for unit in missing:
+        out_path = _unit_output_path(run_dir, unit)
+        channel_result = _channel_result(result, str(unit["polarization"]))
+        embed_output_attestation(
+            channel_result, _unit_attestation_fields(manifest, unit)
+        )
+        written = export_result_to_grim(
+            channel_result, str(out_path),
+            source_path=str(snapshot.get("source_path", "") or ""),
+            history=(f"run_hpc_bor_monostatic.py pol={unit['polarization']} "
+                     f"freq={unit['frequency_ghz']}GHz"),
+        )
+        actual_paths.append(str(written[0]) if written else str(out_path))
     _verify_run_provenance(manifest)
-    _verify_unit_input(unit, manifest)
+    for unit in channel_units:
+        _verify_unit_input(unit, manifest)
 
     # az/el product: whichever polarization of the pair finishes second
     # builds it (config from the manifest, so all nodes agree).
-    if AZEL_ENABLE:
+    if bool((manifest.get("azel_config") or {}).get("enabled", False)):
         try:
             cfg = manifest.get("azel_config") or {}
-            if cfg and _build_azel_pair(run_dir, unit["geometry_stem"],
-                                        float(unit["frequency_ghz"]), cfg):
-                print(f"      azel grids written for {unit['geometry_stem']} "
-                      f"{unit['frequency_ghz']:.3f}GHz", flush=True)
+            if cfg and _build_azel_pair(run_dir, pair["geometry_stem"],
+                                        float(pair["frequency_ghz"]), cfg):
+                print(f"      azel grids written for {pair['geometry_stem']} "
+                      f"{pair['frequency_ghz']:.3f}GHz", flush=True)
         except Exception:
             print("      [warn] azel product failed:", flush=True)
             for line in traceback.format_exc().rstrip().splitlines():
                 print(f"        {line}", flush=True)
 
-    return ("written", actual_path)
+    return ("written", ", ".join(actual_paths))
 
 
 def _solve_and_export_star(args):
@@ -590,6 +665,13 @@ def submit():
         or float(STREAM_BUDGET_GB) <= 0.0
         or int(WORKERS_PER_UNIT) < 1
         or int(BLAS_THREADS_PER_WORKER) < 1
+        or not math.isfinite(float(MEMORY_HEADROOM))
+        or not 0.0 < float(MEMORY_HEADROOM) <= 1.0
+        or int(TASKS_PER_CHILD) < 1
+        or (
+            MAX_WORKERS_PER_NODE is not None
+            and int(MAX_WORKERS_PER_NODE) < 1
+        )
     ):
         sys.exit("ERROR: BoR numerical resource/tolerance controls are invalid.")
     if str(ASSEMBLY).strip().lower() not in {
@@ -633,6 +715,33 @@ def submit():
             shutil.copy2(str(table), str(inp / table.name))
         frozen_geometries.append((geom, frozen))
 
+    from bor_dispatch import estimate_bor_resources
+    from geometry_io import build_geometry_snapshot, parse_geometry
+
+    resource_estimates = {}  # type: Dict[Tuple[str, float], Dict[str, Any]]
+    for _original, geom in frozen_geometries:
+        snapshot = build_geometry_snapshot(
+            *parse_geometry(geom.read_text(encoding="utf-8"))
+        )
+        snapshot["source_path"] = str(geom.resolve())
+        for frequency in frequencies:
+            resource_estimates[(str(geom.resolve()), float(frequency))] = (
+                estimate_bor_resources(
+                    snapshot,
+                    frequency,
+                    aspects,
+                    geometry_units=GEOMETRY_UNITS,
+                    material_base_dir=str(geom.parent),
+                    n_modes=N_MODES,
+                    max_elements=MAX_ELEMENTS,
+                    workers=WORKERS_PER_UNIT,
+                    table_precision=TABLE_PRECISION,
+                    assembly=ASSEMBLY,
+                    stream_budget_gb=STREAM_BUDGET_GB,
+                    mesh_certification=bool(MESH_CERTIFICATION),
+                )
+            )
+
     units = []  # type: List[Dict[str, Any]]
     from feature_sum import geometry_input_fingerprint
     for original, geom in frozen_geometries:
@@ -648,6 +757,9 @@ def submit():
                     "geometry_input_sha256": input_fingerprint,
                     "polarization":  pol,
                     "frequency_ghz": float(f),
+                    "estimated_peak_gb": float(resource_estimates[
+                        (str(geom.resolve()), float(f))
+                    ]["estimated_peak_gb"]),
                 })
 
     source_driver = Path(__file__).resolve()
@@ -667,6 +779,7 @@ def submit():
         "n_jobs":          int(N_JOBS),
         "n_slots":         int(N_NODES) * int(N_JOBS),
         "n_units":         len(units),
+        "resource_planning_method": "bor-frequency-specific-v1",
         "solver_source_sha256": _solver_source_fingerprint(),
         "solver_source_inventory": _solver_source_inventory(),
         "runtime_environment_sha256":
@@ -680,6 +793,7 @@ def submit():
             "assembly":                ASSEMBLY,
             "table_precision":         TABLE_PRECISION,
             "stream_budget_gb":        STREAM_BUDGET_GB,
+            "mesh_certification":      bool(MESH_CERTIFICATION),
             "workers_per_unit":        WORKERS_PER_UNIT,
             "blas_threads_per_worker": BLAS_THREADS_PER_WORKER,
             "cores_per_node":          CORES_PER_NODE,
@@ -714,10 +828,18 @@ def submit():
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Aspects       : {len(ASPECTS_DEG)}  (0-180 from the axis"
           f"{', mirrored to 360 on export' if EXPAND_TO_360 else ''})")
-    print(f"  Units total   : {len(units)}  (geom x freq x pol)")
+    print(f"  Output files  : {len(units)}  (geom x freq x pol)")
+    print(f"  Physical solves: {len(_paired_solve_units(units))}  (VV/HH co-solved)")
+    print(f"  Mesh check    : {'base + fine (certified)' if MESH_CERTIFICATION else 'base only (SURVEY, uncertified)'}")
     print(f"  Slots         : {N_JOBS} job(s) x {N_NODES} node(s)")
     print(f"  Per unit      : {WORKERS_PER_UNIT} threads (modes + streaming "
           f"tiles), assembly={ASSEMBLY}, precision={TABLE_PRECISION}")
+    reservations = [
+        float(record["estimated_peak_gb"])
+        for record in resource_estimates.values()
+    ]
+    print(f"  Memory reserve: {min(reservations):.2f}-"
+          f"{max(reservations):.2f} GB per physical solve")
     print(f"  Slurm scripts : {len(slurm_paths)} files in {run_dir}")
 
     if not SUBMIT or shutil.which("sbatch") is None:
@@ -748,12 +870,15 @@ def submit():
 
 def _unit_claim_key(unit):
     # type: (Dict[str, Any]) -> str
-    return (f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
+    channels = "+".join(
+        str(channel["polarization"]) for channel in unit["channel_units"]
+    )
+    return (f"{channels}_{float(unit['frequency_ghz']):.3f}GHz_"
             f"{unit['geometry_stem']}")
 
 
-def _plan_units(units, n_slots, manifest_aspects):
-    # type: (List[Dict[str, Any]], int, List[float]) -> Tuple[Dict[str, float], Dict[str, int]]
+def _plan_units(units, n_slots, manifest_aspects, geometry_units):
+    # type: (List[Dict[str, Any]], int, List[float], str) -> Tuple[Dict[str, float], Dict[str, int]]
     """Cost every unit and deal them out longest-processing-time-first.
 
     Extents are read straight off the .geo, so the whole plan costs one parse
@@ -765,7 +890,9 @@ def _plan_units(units, n_slots, manifest_aspects):
     for unit in units:
         path = str(unit["geometry"])
         if path not in extents:
-            extents[path] = hpc_scheduler.predict_bor_extent(path, GEOMETRY_UNITS)
+            extents[path] = hpc_scheduler.predict_bor_extent(
+                path, geometry_units
+            )
         arc, radius = extents[path]
         records.append({
             "unit": _unit_claim_key(unit),
@@ -782,20 +909,33 @@ def _plan_units(units, n_slots, manifest_aspects):
 
 def worker(run_dir_str, job_index, node_index):
     # type: (str, int, int) -> None
-    _pin_blas_threads(BLAS_THREADS_PER_WORKER)
     hpc_scheduler.install_fingerprint_cache()
     from geometry_io import parse_geometry, build_geometry_snapshot
 
     run_dir  = Path(run_dir_str).resolve()
     manifest = json.loads((run_dir / "manifest.json").read_text())
     _verify_run_provenance(manifest)
-    units    = manifest["units"]
+    solver_config = dict(manifest.get("solver_config", {}) or {})
+    blas_threads = int(solver_config.get(
+        "blas_threads_per_worker", BLAS_THREADS_PER_WORKER
+    ))
+    workers_per_unit = int(solver_config.get(
+        "workers_per_unit", WORKERS_PER_UNIT
+    ))
+    geometry_units = str(solver_config.get(
+        "geometry_units", GEOMETRY_UNITS
+    ))
+    _pin_blas_threads(blas_threads)
+    output_units = manifest["units"]
+    units = _paired_solve_units(output_units)
     n_nodes  = int(manifest.get("n_nodes", 1))
     n_jobs   = int(manifest.get("n_jobs", 1))
     n_slots  = max(1, n_nodes * n_jobs)
     slot_id  = job_index * n_nodes + node_index
 
-    costs, slots = _plan_units(units, n_slots, manifest["aspects_deg"])
+    costs, slots = _plan_units(
+        units, n_slots, manifest["aspects_deg"], geometry_units
+    )
     mine_keys = {k for k, v in slots.items() if v == slot_id}
 
     def _order_key(unit):
@@ -814,7 +954,7 @@ def worker(run_dir_str, job_index, node_index):
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     # BoR units are internally threaded: divide the node into pool workers of
     # WORKERS_PER_UNIT threads each.
-    by_threads = max(1, cores // max(1, WORKERS_PER_UNIT))
+    by_threads = max(1, cores // max(1, workers_per_unit))
     worker_cap = by_threads if MAX_WORKERS_PER_NODE is None else \
         max(1, min(by_threads, int(MAX_WORKERS_PER_NODE)))
     pool_size = max(1, min(worker_cap, len(candidates))) if candidates else 1
@@ -822,11 +962,12 @@ def worker(run_dir_str, job_index, node_index):
     print("=" * 70)
     print(f"  Slot {slot_id}/{n_slots - 1}  "
           f"(job={job_index}, node={node_index})")
-    print(f"  Units in run: {len(units)}   planned here: {len(mine)}")
-    print(f"  Cores: {cores}   pool: {pool_size} x {WORKERS_PER_UNIT} threads "
-          f"(BLAS/worker: {BLAS_THREADS_PER_WORKER})")
+    print(f"  Physical solves: {len(units)}   planned here: {len(mine)}")
+    print(f"  Output files: {len(output_units)}")
+    print(f"  Cores: {cores}   pool: {pool_size} x {workers_per_unit} threads "
+          f"(BLAS/worker: {blas_threads})")
     print(f"  Memory: {memory_gb:.1f} GB allocated, {budget_gb:.1f} GB "
-          f"schedulable at {STREAM_BUDGET_GB:g} GB reserved per unit")
+          "schedulable with per-solve admission")
     print("=" * 70, flush=True)
 
     if not candidates:
@@ -856,6 +997,52 @@ def worker(run_dir_str, job_index, node_index):
         snap["source_path"] = str(p)
         snapshots[gpath] = (snap, str(p.parent))
 
+    unplanned = [
+        unit for unit in candidates if "estimated_peak_gb" not in unit
+    ]
+    if unplanned:
+        from bor_dispatch import estimate_bor_resources
+    for unit in unplanned:
+        snapshot, material_base = snapshots[unit["geometry"]]
+        resource_estimate = estimate_bor_resources(
+            snapshot,
+            float(unit["frequency_ghz"]),
+            [float(value) for value in manifest["aspects_deg"]],
+            geometry_units=str(solver_config.get(
+                "geometry_units", GEOMETRY_UNITS
+            )),
+            material_base_dir=material_base,
+            n_modes=solver_config.get("n_modes", N_MODES),
+            max_elements=int(solver_config.get(
+                "max_elements", MAX_ELEMENTS
+            )),
+            workers=int(solver_config.get(
+                "workers_per_unit", WORKERS_PER_UNIT
+            )),
+            table_precision=str(solver_config.get(
+                "table_precision", TABLE_PRECISION
+            )),
+            assembly=str(solver_config.get("assembly", ASSEMBLY)),
+            stream_budget_gb=float(solver_config.get(
+                "stream_budget_gb", STREAM_BUDGET_GB
+            )),
+            mesh_certification=bool(solver_config.get(
+                "mesh_certification", True
+            )),
+        )
+        unit["estimated_peak_gb"] = float(
+            resource_estimate["estimated_peak_gb"]
+        )
+    reservations = [
+        float(unit["estimated_peak_gb"])
+        for unit in candidates
+    ]
+    print(
+        f"  Per-solve memory reservations: {min(reservations):.2f}-"
+        f"{max(reservations):.2f} GB",
+        flush=True,
+    )
+
     broker = hpc_scheduler.ClaimBroker(
         run_dir / "claims", stale_seconds=float(CLAIM_STALE_SECONDS)
     )
@@ -868,12 +1055,17 @@ def worker(run_dir_str, job_index, node_index):
     def _prepare(unit):
         key = _unit_claim_key(unit)
         dispatch = (
-            key, float(STREAM_BUDGET_GB),
+            key,
+            float(unit["estimated_peak_gb"]),
             (_solve_and_export_star,
              ((unit, snapshots[unit["geometry"]][0],
                snapshots[unit["geometry"]][1], str(run_dir)),)),
         )
-        if _unit_output_path(run_dir, unit).exists():
+        all_outputs_exist = all(
+            _unit_output_path(run_dir, channel).exists()
+            for channel in unit["channel_units"]
+        )
+        if all_outputs_exist:
             # Verify the existing output's attestation rather than trusting the
             # filename, but only on the slot that owns the unit, so each result
             # is re-checked once per run instead of once per node.
@@ -891,13 +1083,16 @@ def worker(run_dir_str, job_index, node_index):
 
     def _on_result(key, payload):
         kind, a, b, u = payload
-        tag = (f"{u['polarization']} {u['frequency_ghz']:7.3f}GHz "
+        channels = "+".join(
+            str(channel["polarization"]) for channel in u["channel_units"]
+        )
+        tag = (f"{channels} {u['frequency_ghz']:7.3f}GHz "
                f"{u['geometry_stem']}")
         if kind == "ok":
             counters["skipped" if a == "skipped" else "written"] += 1
             broker.release(key)
             print(f"  [{_done():3d}/{total}] {a:7s}  {tag}  -> "
-                  f"{Path(b).name}", flush=True)
+                  f"{b}", flush=True)
         else:
             counters["failed"] += 1
             broker.abandon(key)
@@ -913,7 +1108,7 @@ def worker(run_dir_str, job_index, node_index):
 
     with Pool(processes=pool_size,
               initializer=_pool_initializer,
-              initargs=(BLAS_THREADS_PER_WORKER,),
+              initargs=(blas_threads,),
               maxtasksperchild=int(TASKS_PER_CHILD)) as pool:
         dispatcher = hpc_scheduler.MemoryAwareDispatcher(
             pool, budget_gb=budget_gb, max_concurrent=pool_size

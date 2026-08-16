@@ -7,10 +7,9 @@ Quality gate inputs:
 - `warns <=`: max allowed warning count emitted by the solver.
 - `Require quality gate pass`: fail the solve if any quality threshold is exceeded.
 
-Mesh convergence is an internal, mandatory production policy.  Both 2-D and
-BoR solve a base/fine pair, fail closed on a convergence failure, and publish
-only the fine result.  The geometry's points-per-wavelength value is the only
-user-facing mesh-density control.
+Mesh convergence is enabled by default for both solvers and may be disabled
+explicitly for survey work. Survey results retain the algebraic quality gate
+but are marked as uncertified base-mesh fields in their metadata.
 """
 
 import math
@@ -48,10 +47,15 @@ from geometry_io import build_geometry_snapshot, parse_geometry
 from grim_io import compute_dbke_from_linear, export_result_to_grim
 from rcs_solver import (
     solve_monostatic_rcs_2d_certified,
+    solve_monostatic_rcs_2d_survey,
     solve_bistatic_rcs_2d_certified,
+    solve_bistatic_rcs_2d_survey,
     compute_boundary_densities,
 )
-from bor_dispatch import solve_monostatic_rcs_bor_certified
+from bor_dispatch import (
+    solve_monostatic_rcs_bor_certified,
+    solve_monostatic_rcs_bor_survey,
+)
 from solver_quality import validate_mesh_convergence_policy
 
 
@@ -254,6 +258,7 @@ class _SolveWorker(QObject):
         units: 'str',
         quality_thresholds: 'Dict[str, float | int]',
         strict_quality_gate: 'bool',
+        mesh_certification: 'bool' = True,
         cfie_alpha: 'float' = 0.0,
         abort_event: 'Optional[Any]' = None,
         solver_method: 'str' = "auto",
@@ -272,6 +277,7 @@ class _SolveWorker(QObject):
         self.units = units
         self.quality_thresholds = dict(quality_thresholds)
         self.strict_quality_gate = strict_quality_gate
+        self.mesh_certification = bool(mesh_certification)
         self.cfie_alpha = float(cfie_alpha)
         self.abort_event = abort_event
         self.solver_method = str(solver_method)
@@ -305,14 +311,19 @@ class _SolveWorker(QObject):
             cfie_alpha=bor_alpha,
             abort_event=self.abort_event,
         )
-        return solve_monostatic_rcs_bor_certified(
+        if self.mesh_certification:
+            return solve_monostatic_rcs_bor_certified(
+                progress_callback=self._on_progress,
+                mesh_convergence_policy=validate_mesh_convergence_policy(),
+                **kwargs
+            )
+        return solve_monostatic_rcs_bor_survey(
             progress_callback=self._on_progress,
-            mesh_convergence_policy=validate_mesh_convergence_policy(),
             **kwargs
         )
 
     def _run_2d(self, snapshot, progress_callback):
-        """Run the selected 2-D mode through the mandatory certified API."""
+        """Run the selected 2-D mode with optional mesh certification."""
 
         mesh_policy = validate_mesh_convergence_policy()
         if self.scattering_mode == "bistatic":
@@ -320,7 +331,12 @@ class _SolveWorker(QObject):
                 raise ValueError(
                     "Bistatic mode requires at least one observation angle."
                 )
-            return solve_bistatic_rcs_2d_certified(
+            solve_bistatic = (
+                solve_bistatic_rcs_2d_certified
+                if self.mesh_certification
+                else solve_bistatic_rcs_2d_survey
+            )
+            bistatic_kwargs = dict(
                 geometry_snapshot=snapshot,
                 frequencies_ghz=self.frequencies,
                 incidence_angles_deg=self.elevations,
@@ -330,16 +346,23 @@ class _SolveWorker(QObject):
                 material_base_dir=self.base_dir,
                 progress_callback=progress_callback,
                 quality_thresholds=self.quality_thresholds,
-                mesh_convergence_policy=mesh_policy,
                 cfie_alpha=self.cfie_alpha,
                 abort_event=self.abort_event,
                 solver_method=self.solver_method,
             )
+            if self.mesh_certification:
+                bistatic_kwargs["mesh_convergence_policy"] = mesh_policy
+            return solve_bistatic(**bistatic_kwargs)
         if self.scattering_mode != "monostatic":
             raise ValueError(
                 f"Unsupported 2-D scattering mode {self.scattering_mode!r}."
             )
-        return solve_monostatic_rcs_2d_certified(
+        solve_monostatic = (
+            solve_monostatic_rcs_2d_certified
+            if self.mesh_certification
+            else solve_monostatic_rcs_2d_survey
+        )
+        monostatic_kwargs = dict(
             geometry_snapshot=snapshot,
             frequencies_ghz=self.frequencies,
             elevations_deg=self.elevations,
@@ -348,11 +371,13 @@ class _SolveWorker(QObject):
             material_base_dir=self.base_dir,
             progress_callback=progress_callback,
             quality_thresholds=self.quality_thresholds,
-            mesh_convergence_policy=mesh_policy,
             cfie_alpha=self.cfie_alpha,
             abort_event=self.abort_event,
             solver_method=self.solver_method,
         )
+        if self.mesh_certification:
+            monostatic_kwargs["mesh_convergence_policy"] = mesh_policy
+        return solve_monostatic(**monostatic_kwargs)
 
     @Slot()
     def run(self):
@@ -439,10 +464,19 @@ class SolverTab(QWidget):
             "Require quality gate pass (mandatory for 2-D)"
         )
         self.chk_strict_quality.setToolTip(
-            "Certified 2-D solves always require this gate. The checkbox is "
-            "shown as an audit reminder and cannot disable certification."
+            "Every 2-D solve requires the algebraic residual, conditioning, "
+            "and field-consistency gate. Mesh convergence is controlled "
+            "separately below."
         )
         self.chk_strict_quality.setChecked(True)
+        self.chk_mesh_certification = QCheckBox(
+            "Compare base/fine meshes (recommended)"
+        )
+        self.chk_mesh_certification.setToolTip(
+            "When disabled, run one base mesh and mark the result as survey "
+            "data with mesh_convergence_certified=false."
+        )
+        self.chk_mesh_certification.setChecked(True)
         self.edit_quality_residual_max = QLineEdit("1e-6")
         self.edit_quality_condition_max = QLineEdit("1e6")
         self.edit_quality_warnings_max = QLineEdit("10")
@@ -486,6 +520,7 @@ class SolverTab(QWidget):
         advanced_form.addRow("CFIE alpha", self.edit_cfie_alpha)
         advanced_form.addRow("Solver method", self.cmb_solver_method)
         advanced_form.addRow("Quality Gate", self.chk_strict_quality)
+        advanced_form.addRow("Mesh Certification", self.chk_mesh_certification)
         advanced_form.addRow("Quality Thresholds", quality_threshold_row)
         self.advanced_settings_widget.setVisible(False)
 
@@ -797,6 +832,7 @@ class SolverTab(QWidget):
         self.edit_elev_step.setEnabled(not solving and self.cmb_elev_mode.currentIndex() != 0)
         self.chk_export_after_solve.setEnabled(not solving)
         self.chk_strict_quality.setEnabled(False)
+        self.chk_mesh_certification.setEnabled(not solving)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_warnings_max.setEnabled(enable_2d_quality_thresholds)
@@ -911,16 +947,21 @@ class SolverTab(QWidget):
         quality_suffix = _quality_gate_suffix(metadata)
         mesh_suffix = ""
         mesh = metadata.get("mesh_convergence", {}) or {}
-        if isinstance(mesh, dict) and bool(mesh.get("enabled", False)):
+        if bool(metadata.get("mesh_convergence_certified", False)):
             if bool(mesh.get("passed", False)):
-                mesh_suffix = (
-                    " Mesh convergence: PASS "
-                    f"(rms={float(mesh.get('rms_db', 0.0)):.3g} dB, "
-                    f"max={float(mesh.get('max_abs_db', 0.0)):.3g} dB)."
-                )
+                if "rms_db" in mesh and "max_abs_db" in mesh:
+                    mesh_suffix = (
+                        " Mesh convergence: PASS "
+                        f"(rms={float(mesh['rms_db']):.3g} dB, "
+                        f"max={float(mesh['max_abs_db']):.3g} dB)."
+                    )
+                else:
+                    mesh_suffix = " Mesh convergence: PASS."
             else:
                 reason = str(mesh.get("reason", "") or "criteria not met")
                 mesh_suffix = f" Mesh convergence: FAIL ({reason})."
+        elif bool(metadata.get("survey_mode", False)):
+            mesh_suffix = " Survey mode: base mesh only (not mesh-certified)."
 
         self.progress.setValue(100)
         self.lbl_status.setText(write_summary + quality_suffix + mesh_suffix)
@@ -974,6 +1015,7 @@ class SolverTab(QWidget):
             pol = str(self.cmb_pol.currentData())
             units = self.cmb_units.currentText()
             strict_quality = bool(self.chk_strict_quality.isChecked())
+            mesh_certification = bool(self.chk_mesh_certification.isChecked())
             quality_residual_max = float(self.edit_quality_residual_max.text().strip())
             quality_condition_max = float(self.edit_quality_condition_max.text().strip())
             quality_warnings_max = int(float(self.edit_quality_warnings_max.text().strip()))
@@ -1031,6 +1073,7 @@ class SolverTab(QWidget):
             units=units,
             quality_thresholds=quality_thresholds,
             strict_quality_gate=strict_quality,
+            mesh_certification=mesh_certification,
             cfie_alpha=cfie_alpha,
             abort_event=abort_event,
             solver_method=str(self.cmb_solver_method.currentData() or "auto"),

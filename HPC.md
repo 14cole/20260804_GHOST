@@ -74,7 +74,9 @@ changing what you type in CONFIG never forks a sweep into two sets of files:
   `TM_`/`TE_`, so a sweep configured as `["VV", "HH"]` reuses results a
   `["TM", "TE"]` sweep already produced instead of re-solving them.
 - The BoR drivers always name files `VV_`/`HH_` -- a BoR unit's channels really
-  are theta-pol and phi-pol, and the az/el pairing looks for those names.
+  are theta-pol and phi-pol, and the az/el pairing looks for those names. When
+  both are requested, the scheduler performs one physical BoR solve and writes
+  both compatible output files from the co-solved fields.
 
 Listing one channel under two names (`["VV", "TE"]`) is rejected rather than
 silently solving the same physics twice and publishing it under two names,
@@ -422,8 +424,18 @@ keep the certificate. If you want the low-level uncertified entry directly, it
 is `rcs_solver.solve_monostatic_rcs_2d_survey` (or the raw
 `solve_monostatic_rcs_2d`).
 
-The BoR driver has its own certification inside `bor_dispatch` and no
-equivalent switch.
+The GUI and both BoR sweep drivers use the same default-on switch. Set
+`MESH_CERTIFICATION = False` in `run_local_bor.py`,
+`run_hpc_bor_monostatic.py`, or the simplified root BoR launcher to request an
+explicit base-mesh survey. BoR survey outputs carry the same unambiguous
+uncertified metadata as 2-D outputs.
+
+BoR memory admission is also per solve, not the old fixed
+`STREAM_BUDGET_GB` reservation. Before dispatch, the driver previews the
+frequency-specific material wavelength, certified or survey mesh, modal cap,
+table/streaming choice, precision, dense system workspace, and internal mode
+workers. Small frequencies can therefore backfill around a large solve while
+the large solve retains its full reservation.
 
 ---
 
@@ -689,6 +701,8 @@ encoding and are yours, not ours.
 ```bash
 python tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
 python tests/test_local_drivers.py                        # the run_local drivers, end to end
+python tests/test_rcs_physics_regression.py               # 2-D analytic/reciprocity gates
+python tests/test_bor_physics_regression.py               # BoR Mie/streaming/workflow gates
 python tests/test_solver_equivalence.py  <pristine rcs_solver.py>
 python tests/test_assembly_equivalence.py <pristine rcs_solver.py>
 python tests/benchmark_assembly.py      [pristine rcs_solver.py]

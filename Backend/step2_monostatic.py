@@ -149,6 +149,7 @@ def prepare_jobs(
     runner_path: 'str',
     mesh_convergence_policy: 'dict[str, Any]' = None,
     requested_radar_grid: 'dict[str, Any]' = None,
+    certify: 'bool' = True,
 ) -> 'list[dict[str, Any]]':
     backend = Path(__file__).resolve().parent
     source_sha = backend_source_fingerprint(
@@ -179,7 +180,8 @@ def prepare_jobs(
             "frequencies_ghz": frequencies,
             "aspects_deg": aspects,
             "mesh_convergence_policy": mesh_policy,
-            "published_mesh": "fine",
+            "mesh_certified": bool(certify),
+            "published_mesh": "fine" if certify else "base",
         }
         if normalized_radar_grid is not None:
             spec["requested_radar_grid"] = dict(normalized_radar_grid)
@@ -349,51 +351,73 @@ def solve_job(
         material_base_dir=str(geometry.parent),
         return_diagnostics=True,
     )
-    fine_snapshot = scale_snapshot_panel_density(
-        snapshot, mesh_policy["fine_factor"]
-    )
-    bodies, _fine_profile, solver_diagnostics = solve_vehicle_body(
-        fine_snapshot,
-        frequencies,
-        aspects,
-        geometry_units=geometry_units,
-        cfie_alpha=0.5,
-        workers=int(workers_per_body),
-        material_base_dir=str(geometry.parent),
-        return_diagnostics=True,
-    )
-    mesh_gate = certify_body_mesh_convergence(
-        base_bodies, bodies, mesh_policy
-    )
-    if not bool(mesh_gate.get("passed", False)):
-        raise RuntimeError(
-            "Production BoR mesh convergence gate failed: "
-            + str(mesh_gate.get("reason", "unknown convergence failure"))
+    if bool(job["specification"].get("mesh_certified", True)):
+        fine_snapshot = scale_snapshot_panel_density(
+            snapshot, mesh_policy["fine_factor"]
         )
-    for frequency in sorted(solver_diagnostics):
-        fine_metadata = solver_diagnostics[frequency].setdefault(
-            "metadata", {}
+        bodies, _fine_profile, solver_diagnostics = solve_vehicle_body(
+            fine_snapshot,
+            frequencies,
+            aspects,
+            geometry_units=geometry_units,
+            cfie_alpha=0.5,
+            workers=int(workers_per_body),
+            material_base_dir=str(geometry.parent),
+            return_diagnostics=True,
         )
-        fine_metadata["mesh_convergence"] = (
-            mesh_gate["per_frequency"][str(float(frequency))]
+        mesh_gate = certify_body_mesh_convergence(
+            base_bodies, bodies, mesh_policy
         )
-        fine_metadata["mesh_convergence"]["fine_factor"] = (
-            mesh_policy["fine_factor"]
-        )
-        fine_metadata["mesh_convergence"]["published_mesh"] = "fine"
-        fine_metadata["mesh_convergence"]["base_quality_gate"] = dict(
-            base_diagnostics.get(frequency, {}).get(
+        if not bool(mesh_gate.get("passed", False)):
+            raise RuntimeError(
+                "Production BoR mesh convergence gate failed: "
+                + str(mesh_gate.get("reason", "unknown convergence failure"))
+            )
+        for frequency in sorted(solver_diagnostics):
+            fine_metadata = solver_diagnostics[frequency].setdefault(
                 "metadata", {}
-            ).get("quality_gate", {}) or {}
+            )
+            fine_metadata["mesh_convergence"] = (
+                mesh_gate["per_frequency"][str(float(frequency))]
+            )
+            fine_metadata["mesh_convergence"]["fine_factor"] = (
+                mesh_policy["fine_factor"]
+            )
+            fine_metadata["mesh_convergence"]["published_mesh"] = "fine"
+            fine_metadata["mesh_convergence_certified"] = True
+            fine_metadata["certified_entry_point"] = True
+            fine_metadata["published_mesh"] = "fine"
+            fine_metadata["mesh_convergence"]["base_quality_gate"] = dict(
+                base_diagnostics.get(frequency, {}).get(
+                    "metadata", {}
+                ).get("quality_gate", {}) or {}
+            )
+            fine_metadata["mesh_convergence"]["fine_quality_gate"] = dict(
+                fine_metadata.get("quality_gate", {}) or {}
+            )
+    else:
+        bodies = base_bodies
+        solver_diagnostics = base_diagnostics
+        survey_warning = (
+            "SURVEY MODE: solved on the base BoR mesh only. No "
+            "mesh-convergence certificate exists for this field."
         )
-        fine_metadata["mesh_convergence"]["fine_quality_gate"] = dict(
-            fine_metadata.get("quality_gate", {}) or {}
-        )
+        for frequency in sorted(solver_diagnostics):
+            metadata = solver_diagnostics[frequency].setdefault("metadata", {})
+            metadata["mesh_convergence_certified"] = False
+            metadata["certified_entry_point"] = False
+            metadata["published_mesh"] = "base"
+            metadata["survey_mode"] = True
+            warnings = metadata.setdefault("warnings", [])
+            if survey_warning not in warnings:
+                warnings.append(survey_warning)
     for frequency in sorted(solver_diagnostics):
-        for label, diagnostics in (
-            ("base", base_diagnostics),
-            ("fine", solver_diagnostics),
-        ):
+        diagnostic_sets = (
+            (("base", base_diagnostics), ("fine", solver_diagnostics))
+            if bool(job["specification"].get("mesh_certified", True))
+            else (("survey", solver_diagnostics),)
+        )
+        for label, diagnostics in diagnostic_sets:
             metadata = diagnostics[frequency].get("metadata", {}) or {}
             for warning in metadata.get("warnings", []) or []:
                 print(
