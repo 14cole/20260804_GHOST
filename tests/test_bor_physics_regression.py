@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """BoR physics, workflow, and optimized-assembly release regressions."""
 
+import json
 import math
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,9 +16,14 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
 import bor_dispatch  # noqa: E402
+import grim_io  # noqa: E402
+import run_hpc_bor_monostatic  # noqa: E402
 import run_local_bor  # noqa: E402
 from bor_kernels import C0  # noqa: E402
 from bor_solver import (  # noqa: E402
+    BOR_LINEAR_BACKWARD_ERROR_MAX,
+    BOR_LINEAR_RESIDUAL_MAX,
+    _mode_sweep,
     solve_bor,
     solve_bor_coated_pec,
     solve_bor_dielectric,
@@ -162,6 +169,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 "mode_last_relative_increment": 0.0,
                 "n_unknowns": 2 * len(points),
                 "linear_residual": 1.0e-12,
+                "linear_backward_error": 1.0e-16,
                 "max_cond": 10.0,
                 "condition_est_computed": True,
                 "condition_est_method": "test",
@@ -253,6 +261,84 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(len(units), 4)
         self.assertEqual(len(pairs), 2)
         self.assertTrue(all(len(pair["channel_units"]) == 2 for pair in pairs))
+
+    def test_scaled_stable_lu_is_not_rejected_by_rhs_residual_alone(self):
+        rng = np.random.default_rng(1)
+        size = 8
+        left, _ = np.linalg.qr(rng.normal(size=(size, size)))
+        right, _ = np.linalg.qr(rng.normal(size=(size, size)))
+        singular_values = np.geomspace(1.0, 1.0e-9, size)
+        matrix = ((left * singular_values) @ right.T).astype(np.complex128)
+        excitations = rng.normal(size=(size, 4)).astype(np.complex128)
+
+        column = iter(range(excitations.shape[1]))
+
+        def rhs(_mode, _theta, _polarization):
+            return excitations[:, next(column)]
+
+        field, _modes, stats = _mode_sweep(
+            size,
+            [0.0, 90.0],
+            ("VV", "HH"),
+            0,
+            1.0,
+            lambda _mode: (matrix, None),
+            rhs,
+            lambda _mode, solution, _theta, _polarization: solution[0],
+            monitor_cond=True,
+        )
+        self.assertTrue(np.all(np.isfinite(field)))
+        self.assertLessEqual(
+            stats["linear_backward_error"],
+            BOR_LINEAR_BACKWARD_ERROR_MAX,
+        )
+        # This matrix is deliberately scaled so the old diagnostic can cross
+        # its cutoff while the standard backward error remains near epsilon.
+        direct = np.linalg.solve(matrix, excitations)
+        relative = np.max(
+            np.linalg.norm(matrix @ direct - excitations, axis=0)
+            / np.linalg.norm(excitations, axis=0)
+        )
+        self.assertGreater(relative, BOR_LINEAR_RESIDUAL_MAX)
+
+    def test_azel_writer_accepts_per_channel_metadata(self):
+        grid = {
+            "azimuths_deg": np.asarray([0.0]),
+            "elevations_deg": np.asarray([0.0]),
+            "frequencies_ghz": np.asarray([1.0]),
+            "axis_az_deg": 0.0,
+            "axis_el_deg": 0.0,
+            "amp": {
+                channel: np.ones((1, 1, 1), dtype=np.complex128)
+                for channel in ("VV", "HH", "VH")
+            },
+        }
+        metadata = {
+            channel: {"output_attestation": {"channel": channel}}
+            for channel in ("VV", "HH", "VH")
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            written = grim_io.save_bor_az_el_grim(
+                grid,
+                str(Path(directory) / "azel.grim"),
+                channel_metadata=metadata,
+            )
+            self.assertEqual(len(written), 3)
+            with np.load(written[0], allow_pickle=False) as payload:
+                stored = json.loads(str(payload["solver_metadata_json"]))
+            self.assertIn("output_attestation", stored["metadata"])
+
+    def test_bor_slurm_pins_the_submitting_backend_first(self):
+        text = run_hpc_bor_monostatic._build_slurm(
+            Path("/tmp/run/driver_configured.py"),
+            Path("/tmp/run"),
+            0,
+        )
+        backend = str(Path(run_hpc_bor_monostatic.__file__).resolve().parent)
+        self.assertIn(
+            f"export PYTHONPATH={backend}:${{PYTHONPATH:-}}",
+            text,
+        )
 
 
 if __name__ == "__main__":

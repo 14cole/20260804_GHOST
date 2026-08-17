@@ -41,7 +41,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from bor_kernels import C0
-from bor_solver import (BOR_CONDITION_EST_MAX, BOR_LINEAR_RESIDUAL_MAX,
+from bor_solver import (BOR_CONDITION_EST_MAX,
+                        BOR_LINEAR_BACKWARD_ERROR_MAX,
+                        BOR_LINEAR_RESIDUAL_MAX,
                         solve_bor,
                         solve_bor_dielectric, solve_bor_coated_pec,
                         solve_bor_partial_coating, solve_bor_coated2_pec,
@@ -1079,6 +1081,9 @@ def solve_monostatic_rcs_bor(
         # Missing residual telemetry is not evidence of a good solve.  Preserve
         # it as non-finite so the release gate below rejects the result.
         residual = float(out.get("linear_residual", math.nan))
+        backward_error = float(
+            out.get("linear_backward_error", math.nan)
+        )
         for channel, sigma_key, amp_key in (
             ("VV", "sigma_vv", "amp_vv"),
             ("HH", "sigma_hh", "amp_hh"),
@@ -1120,6 +1125,7 @@ def solve_monostatic_rcs_bor(
                     "rcs_amp_imag": float(a_val.imag),
                     "rcs_amp_phase_deg": float(math.degrees(cmath.phase(a_val))),
                     "linear_residual": residual,
+                    "linear_backward_error": backward_error,
                 })
         per_freq_meta.append({
             "frequency_ghz": float(freq_ghz),
@@ -1132,6 +1138,10 @@ def solve_monostatic_rcs_bor(
             ),
             "n_unknowns": int(out["n_unknowns"]),
             "linear_residual": residual,
+            "linear_backward_error": backward_error,
+            "linear_refinement_steps": int(
+                out.get("linear_refinement_steps", 0)
+            ),
             "max_cond": float(out["max_cond"]) if "max_cond" in out else None,
             "condition_est_computed": bool(
                 out.get("condition_est_computed", "max_cond" in out)
@@ -1195,6 +1205,24 @@ def solve_monostatic_rcs_bor(
         if finite_residuals.size
         else math.nan
     )
+    backward_error_values = np.asarray(
+        [
+            row.get("linear_backward_error", math.nan)
+            for row in per_freq_meta
+        ],
+        dtype=float,
+    )
+    finite_backward_errors = backward_error_values[
+        np.isfinite(backward_error_values)
+    ]
+    backward_error_nonfinite_count = int(
+        backward_error_values.size - finite_backward_errors.size
+    )
+    backward_error_max = (
+        float(np.max(finite_backward_errors))
+        if finite_backward_errors.size
+        else math.nan
+    )
     condition_values = np.asarray(
         [
             row.get("max_cond", math.nan)
@@ -1230,10 +1258,18 @@ def solve_monostatic_rcs_bor(
         quality_violations.append(
             f"residual_nonfinite_count={residual_nonfinite_count} must be zero"
         )
-    if not math.isfinite(residual_max) or residual_max > BOR_LINEAR_RESIDUAL_MAX:
+    if backward_error_nonfinite_count:
         quality_violations.append(
-            f"residual_norm_max={residual_max:.6g} exceeds limit "
-            f"{BOR_LINEAR_RESIDUAL_MAX:.6g}"
+            "backward_error_nonfinite_count="
+            f"{backward_error_nonfinite_count} must be zero"
+        )
+    if (
+        not math.isfinite(backward_error_max)
+        or backward_error_max > BOR_LINEAR_BACKWARD_ERROR_MAX
+    ):
+        quality_violations.append(
+            f"backward_error_max={backward_error_max:.6g} exceeds limit "
+            f"{BOR_LINEAR_BACKWARD_ERROR_MAX:.6g}"
         )
     if condition_missing_count:
         quality_violations.append(
@@ -1273,7 +1309,8 @@ def solve_monostatic_rcs_bor(
     quality_gate = {
         "passed": not quality_violations,
         "thresholds": {
-            "residual_norm_max": BOR_LINEAR_RESIDUAL_MAX,
+            "residual_norm_refinement_advisory": BOR_LINEAR_RESIDUAL_MAX,
+            "backward_error_max": BOR_LINEAR_BACKWARD_ERROR_MAX,
             "condition_est_max": BOR_CONDITION_EST_MAX,
             "mode_unconverged_count": 0,
             "nonfinite_sample_count": 0,
@@ -1286,6 +1323,10 @@ def solve_monostatic_rcs_bor(
         "values": {
             "residual_norm_max": residual_max,
             "residual_nonfinite_count": residual_nonfinite_count,
+            "backward_error_max": backward_error_max,
+            "backward_error_nonfinite_count": (
+                backward_error_nonfinite_count
+            ),
             "condition_est_max": condition_max,
             "condition_missing_or_nonfinite_count":
                 condition_missing_count,
@@ -1303,8 +1344,8 @@ def solve_monostatic_rcs_bor(
         "reason": (
             "; ".join(quality_violations)
             if quality_violations
-            else "BoR linear, conditioning, modal, and field-consistency "
-                 "thresholds satisfied"
+            else "BoR linear backward-error, conditioning, modal, and "
+                 "field-consistency thresholds satisfied"
         ),
     }
     if quality_violations:
@@ -1338,6 +1379,13 @@ def solve_monostatic_rcs_bor(
             "per_frequency": per_freq_meta,
             "residual_norm_max": residual_max,
             "residual_nonfinite_count": residual_nonfinite_count,
+            "residual_norm_refinement_advisory": (
+                BOR_LINEAR_RESIDUAL_MAX
+            ),
+            "backward_error_max": backward_error_max,
+            "backward_error_nonfinite_count": (
+                backward_error_nonfinite_count
+            ),
             "condition_est_max": condition_max,
             "condition_missing_or_nonfinite_count":
                 condition_missing_count,

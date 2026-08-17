@@ -709,6 +709,14 @@ def _build_slurm(script_path, run_dir, job_index):
         "set -euo pipefail",
         f"cd {shlex.quote(str(script_path.parent))}",
         *JOB_PROLOGUE,
+        # The configured driver lives in the run directory, not beside its
+        # solver modules.  Put the exact Backend tree used to create the
+        # manifest first, even when the login environment inherited an older
+        # GHOST checkout on PYTHONPATH.  Without this, a new driver can import
+        # an old grim_io on compute nodes and fail only during derived export.
+        ("export PYTHONPATH="
+         f"{shlex.quote(str(Path(_workflow_provenance.__file__).resolve().parent))}"
+         ":${PYTHONPATH:-}"),
         (f"exec {shlex.quote(PYTHON_EXE)} {shlex.quote(str(script_path))} "
          f"--worker {shlex.quote(str(run_dir))} {job_index} "
          f"${{SLURM_ARRAY_TASK_ID}}"),

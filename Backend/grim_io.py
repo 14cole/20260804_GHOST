@@ -62,6 +62,7 @@ def _solver_metadata_json(result: 'Dict[str, Any]') -> 'str':
     diagnostics = []
     diagnostic_keys = (
         'linear_residual',
+        'linear_backward_error',
         'constraint_residual',
         'constraint_residual_norm',
         'condition_est',
@@ -737,10 +738,19 @@ def save_bor_az_el_grim(grid: 'Dict[str, Any]', output_path: 'str',
             'complex_field_domain': 'solver_raw_far_field_amplitude',
         }
         if ch in channel_metadata:
-            payload['solver_metadata_json'] = json.dumps(
-                {'metadata': channel_metadata[ch]},
-                sort_keys=True, allow_nan=False,
-            )
+            payload['solver_metadata_json'] = _solver_metadata_json({
+                'solver': 'bor_mom_rcs',
+                'scattering_mode': 'monostatic',
+                'polarization': ch,
+                'polarization_export': ch,
+                'rcs_log_unit': 'dBsm',
+                'rcs_linear_quantity': 'sigma_3d',
+                'amplitude_convention': (
+                    'F physical far-field amplitude; sigma_3d=4*pi*|F|^2'
+                ),
+                'metadata': channel_metadata[ch],
+                'samples': [],
+            })
         written.append(os.path.abspath(_save_grim_npz(payload, f'{root}_{ch}')))
     return written
 

@@ -47,7 +47,14 @@ from bor_kernels import (
     ibc_kernels_fft, ibc_kernels_near, n_xi_for_pairs,
 )
 
+# ``||A x - b||_2 / ||b||_2`` remains useful telemetry, but it is not a
+# scale-invariant acceptance test: cancellation in ``A x`` can make it much
+# larger than the actual backward error of an otherwise stable LU solve.  Keep
+# the historical value as the point at which iterative refinement is tried and
+# as an advisory diagnostic.  Release is governed by the normwise backward
+# error below.
 BOR_LINEAR_RESIDUAL_MAX = 1.0e-8
+BOR_LINEAR_BACKWARD_ERROR_MAX = 1.0e-12
 BOR_CONDITION_EST_MAX = 1.0e12
 
 
@@ -974,12 +981,72 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
         prepare(m_max)
     workers = max(1, int(workers))
 
+    def linear_error_metrics(A, X, B):
+        """Return residual matrix, RHS-relative residual, and backward error.
+
+        The last quantity is the standard normwise infinity-norm backward
+        error, evaluated independently for every RHS column:
+
+            ||r||_inf / (||A||_inf ||x||_inf + ||b||_inf).
+
+        Unlike ``||r|| / ||b||``, it remains meaningful when a scaled or
+        ill-conditioned system produces a large solution whose matrix-vector
+        product contains substantial cancellation.
+        """
+
+        residual_matrix = A @ X - B
+        residual_norms = np.asarray(
+            np.linalg.norm(residual_matrix, axis=0), dtype=float
+        )
+        rhs_norms = np.asarray(np.linalg.norm(B, axis=0), dtype=float)
+        rhs_denominators = np.where(rhs_norms > 0.0, rhs_norms, 1.0)
+        relative_residual = float(
+            np.max(residual_norms / rhs_denominators)
+        )
+
+        matrix_inf_norm = float(np.linalg.norm(A, ord=np.inf))
+        solution_inf_norms = np.asarray(
+            np.linalg.norm(X, ord=np.inf, axis=0), dtype=float
+        )
+        rhs_inf_norms = np.asarray(
+            np.linalg.norm(B, ord=np.inf, axis=0), dtype=float
+        )
+        residual_inf_norms = np.asarray(
+            np.linalg.norm(residual_matrix, ord=np.inf, axis=0), dtype=float
+        )
+        backward_denominators = (
+            matrix_inf_norm * solution_inf_norms + rhs_inf_norms
+        )
+        backward_by_column = np.full(
+            backward_denominators.shape, math.inf, dtype=float
+        )
+        np.divide(
+            residual_inf_norms,
+            backward_denominators,
+            out=backward_by_column,
+            where=backward_denominators > 0.0,
+        )
+        backward_by_column[
+            (backward_denominators <= 0.0) & (residual_inf_norms == 0.0)
+        ] = 0.0
+        backward_error = float(np.max(backward_by_column))
+        return (
+            residual_matrix,
+            relative_residual,
+            backward_error,
+            residual_norms,
+            rhs_norms,
+        )
+
     def solve_am(am: 'int'):
         dF = np.zeros_like(F)
         res = 0.0
+        backward = 0.0
+        refinement_count = 0
         cond = 0.0
         for m in ([0] if am == 0 else [am, -am]):
             A, mask = assemble(m)
+            mode_condition = math.nan
             if not np.all(np.isfinite(A)):
                 raise RuntimeError(
                     f"BoR mode m={m} produced a non-finite system matrix; "
@@ -1054,28 +1121,73 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                     f"BoR mode m={m} produced a non-finite linear-system "
                     "solution; no field is returned."
                 )
-            residual_matrix = A @ X - B
-            rhs_norms = np.asarray(np.linalg.norm(B, axis=0), dtype=float)
-            residual_norms = np.asarray(
-                np.linalg.norm(residual_matrix, axis=0), dtype=float
-            )
+            (
+                residual_matrix,
+                residual,
+                backward_error,
+                residual_norms,
+                rhs_norms,
+            ) = linear_error_metrics(A, X, B)
+
+            # A cheap correction solve reuses the existing LU.  It is only
+            # attempted when the historical RHS-relative diagnostic is high
+            # (or the true backward-error gate is high), so ordinary modes pay
+            # no extra triangular solve.  Same-precision refinement is bounded
+            # and accepted only when at least one error metric improves.
+            for _attempt in range(2):
+                if (
+                    residual <= BOR_LINEAR_RESIDUAL_MAX
+                    and backward_error <= BOR_LINEAR_BACKWARD_ERROR_MAX
+                ):
+                    break
+                if monitor_cond:
+                    correction, correction_info = getrs(
+                        lu, piv, -residual_matrix
+                    )
+                    if correction_info != 0:
+                        break
+                else:
+                    correction = np.linalg.solve(A, -residual_matrix)
+                if not np.all(np.isfinite(correction)):
+                    break
+                candidate = X + correction
+                candidate_metrics = linear_error_metrics(A, candidate, B)
+                candidate_residual = candidate_metrics[1]
+                candidate_backward = candidate_metrics[2]
+                if (
+                    candidate_residual >= residual
+                    and candidate_backward >= backward_error
+                ):
+                    break
+                X = candidate
+                (
+                    residual_matrix,
+                    residual,
+                    backward_error,
+                    residual_norms,
+                    rhs_norms,
+                ) = candidate_metrics
+                refinement_count += 1
+
             if (
                 not np.all(np.isfinite(rhs_norms))
                 or not np.all(np.isfinite(residual_norms))
+                or not math.isfinite(backward_error)
             ):
                 raise RuntimeError(
                     f"BoR mode m={m} produced a non-finite linear-system "
                     "residual; no field is returned."
                 )
-            denominators = np.where(rhs_norms > 0.0, rhs_norms, 1.0)
-            residual = float(np.max(residual_norms / denominators))
-            if residual > BOR_LINEAR_RESIDUAL_MAX:
+            if backward_error > BOR_LINEAR_BACKWARD_ERROR_MAX:
                 raise RuntimeError(
-                    f"BoR mode m={m} worst-column normalized linear residual "
-                    f"{residual:.6g} exceeds the release limit "
-                    f"{BOR_LINEAR_RESIDUAL_MAX:.6g}; no field is returned."
+                    f"BoR mode m={m} normwise linear backward error "
+                    f"{backward_error:.6g} exceeds the release limit "
+                    f"{BOR_LINEAR_BACKWARD_ERROR_MAX:.6g} "
+                    f"(RHS-relative residual {residual:.6g}, estimated "
+                    f"condition {mode_condition:.6g}); no field is returned."
                 )
             res = max(res, residual)
+            backward = max(backward, backward_error)
             ci = 0
             for it, th in enumerate(thetas):
                 for ip, pol in enumerate(pols):
@@ -1096,12 +1208,14 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                             f"polarization {pol}; no field is returned."
                         )
                     dF[ip, it] += contribution
-        return dF, res, cond
+        return dF, res, backward, refinement_count, cond
 
     modes_used = 0
     quiet = 0
     am = 0
     max_res = 0.0
+    max_backward_error = 0.0
+    refinement_steps = 0
     last_relative_increment = math.inf
     conds: 'List[float]' = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -1109,7 +1223,9 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
             if check_abort is not None:
                 check_abort()
             wave = list(range(am, min(am + workers, m_max + 1)))
-            for w_am, (dF, res, cond) in zip(wave, ex.map(solve_am, wave)):
+            for w_am, (dF, res, backward, refined, cond) in zip(
+                wave, ex.map(solve_am, wave)
+            ):
                 F += dF
                 if not np.all(np.isfinite(F)):
                     raise RuntimeError(
@@ -1117,6 +1233,8 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                         f"|m|={w_am}; no field is returned."
                     )
                 max_res = max(max_res, res)
+                max_backward_error = max(max_backward_error, backward)
+                refinement_steps += int(refined)
                 if monitor_cond:
                     conds.append(cond)
                 modes_used = w_am
@@ -1133,11 +1251,17 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 progress(modes_used, m_max)
     stats = {
         "linear_residual": max_res,
+        "linear_backward_error": max_backward_error,
+        "linear_refinement_steps": int(refinement_steps),
         "mode_converged": bool(quiet >= 2),
         "mode_cap": int(m_max),
         "mode_quiet_count": int(quiet),
         "mode_last_relative_increment": float(last_relative_increment),
         "linear_residual_limit": float(BOR_LINEAR_RESIDUAL_MAX),
+        "linear_residual_limit_kind": "iterative_refinement_advisory",
+        "linear_backward_error_limit": float(
+            BOR_LINEAR_BACKWARD_ERROR_MAX
+        ),
         "condition_est_computed": bool(monitor_cond),
         "condition_est_method": (
             "lapack_gecon_1norm" if monitor_cond else None
