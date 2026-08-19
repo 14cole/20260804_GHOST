@@ -16,9 +16,11 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
 import bor_dispatch  # noqa: E402
+import feature_sum  # noqa: E402
 import grim_io  # noqa: E402
 import run_hpc_bor_monostatic  # noqa: E402
 import run_local_bor  # noqa: E402
+import validate_feature_reconstruction  # noqa: E402
 from bor_kernels import C0  # noqa: E402
 from bor_solver import (  # noqa: E402
     BOR_LINEAR_BACKWARD_ERROR_MAX,
@@ -34,6 +36,7 @@ from mie_sphere import (  # noqa: E402
     sigma_impedance_sphere,
     sigma_pec_sphere,
 )
+from line_expand import SeamCoefficients, expand_perimeter  # noqa: E402
 
 
 FREQUENCY_HZ = 1.0e9
@@ -72,6 +75,22 @@ def _pec_sphere_snapshot(radius_m=0.04, explicit_elements=20):
         }],
         "ibcs": [],
         "dielectrics": [],
+    }
+
+
+def _constant_compact_pattern(frequency_ghz=1.0):
+    metadata = feature_sum.point_pattern_convention_metadata()
+    amplitude = np.empty((2, 3, 1, 3), dtype=np.complex128)
+    amplitude[..., 0] = 1.0 + 0.2j
+    amplitude[..., 1] = 0.7 - 0.1j
+    amplitude[..., 2] = 0.15 + 0.05j
+    return {
+        "azimuths": np.asarray([0.0, 360.0]),
+        "elevations": np.asarray([-90.0, 0.0, 90.0]),
+        "frequencies": np.asarray([float(frequency_ghz)]),
+        "polarizations": np.asarray(["VV", "HH", "VH"]),
+        "amp": amplitude,
+        **metadata,
     }
 
 
@@ -149,6 +168,184 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
 
 
 class BoRWorkflowRegressionTests(unittest.TestCase):
+    def test_feature_reconstruction_comparison_does_not_fit_away_phase_error(self):
+        amplitude = 1.0 / math.sqrt(4.0 * math.pi)
+        bodies = {1.0: {
+            "theta_deg": np.asarray([0.0, 90.0]),
+            "amp_vv": np.asarray([amplitude, 2.0 * amplitude], complex),
+            "amp_hh": np.asarray([1.5 * amplitude, 0.8 * amplitude], complex),
+        }}
+        profile = np.asarray([[0.0, 1.0], [0.2, 0.0], [0.0, -1.0]])
+        with tempfile.TemporaryDirectory() as directory:
+            truth = Path(directory) / "truth.grim"
+            shifted = Path(directory) / "shifted.grim"
+            feature_sum.save_monostatic_grim(
+                bodies, profile, str(truth),
+                azimuths_deg=[0.0, 90.0], elevations_deg=[0.0],
+            )
+            exact = validate_feature_reconstruction.compare_grims(truth, truth)
+            self.assertTrue(exact["passed"])
+            self.assertEqual(exact["normalized_complex_rms"], 0.0)
+            with np.load(truth, allow_pickle=False) as source:
+                payload = {
+                    key: np.array(source[key], copy=True) for key in source.files
+                }
+            phase = np.exp(1j * math.radians(40.0))
+            field = (
+                payload["rcs_amp_real"] + 1j * payload["rcs_amp_imag"]
+            ) * phase
+            payload["rcs_amp_real"] = field.real
+            payload["rcs_amp_imag"] = field.imag
+            payload["rcs_phase"] = np.angle(field).astype(np.float32)
+            payload["rcs_power"] = (
+                4.0 * math.pi * np.abs(field) ** 2
+            ).astype(np.float32)
+            grim_io._save_grim_npz(payload, str(shifted))
+            result = validate_feature_reconstruction.compare_grims(
+                truth, shifted
+            )
+            self.assertFalse(result["passed"])
+            self.assertAlmostEqual(
+                result["best_fit_global_phase_diagnostic_deg"], 40.0, places=10
+            )
+            self.assertGreater(result["phase_error_rms_deg"], 39.9)
+
+    def test_compact_feature_translation_is_exact_two_way_phase(self):
+        frequency = 1.0
+        direction = np.asarray([[0.6, 0.0, 0.8]], dtype=float)
+        direction /= np.linalg.norm(direction, axis=1)[:, None]
+        location = np.asarray([0.037, -0.011, 0.023])
+        common = dict(
+            pattern=_constant_compact_pattern(frequency),
+            aperture_normal=[0.0, 0.0, 1.0],
+            directions=direction,
+            frequency_ghz=frequency,
+            roll_ref=[1.0, 0.0, 0.0],
+        )
+        origin = feature_sum.point_scatterer_amplitude(
+            location=[0.0, 0.0, 0.0], **common
+        )
+        translated = feature_sum.point_scatterer_amplitude(
+            location=location, **common
+        )
+        wave_number = 2.0 * math.pi * frequency * 1.0e9 / C0
+        expected = np.exp(2j * wave_number * float(direction[0] @ location))
+        for channel in ("F_vv", "F_hh", "F_vh"):
+            self.assertGreater(abs(origin[channel][0]), 1.0e-12)
+            np.testing.assert_allclose(
+                translated[channel], origin[channel] * expected,
+                rtol=2.0e-14, atol=2.0e-14,
+            )
+
+    def test_line_expansion_is_invariant_to_segment_splitting(self):
+        coefficients = SeamCoefficients(
+            1.0,
+            np.asarray([0.0, 90.0, 180.0]),
+            np.asarray([1.0 + 0.2j] * 3),
+            np.asarray([0.7 - 0.1j] * 3),
+        )
+        whole = np.asarray([[[0.0, 0.0, 0.0], [0.0, 0.02, 0.0]]])
+        split = np.asarray([
+            [[0.0, 0.0, 0.0], [0.0, 0.01, 0.0]],
+            [[0.0, 0.01, 0.0], [0.0, 0.02, 0.0]],
+        ])
+        normal = lambda points: np.tile(  # noqa: E731
+            np.asarray([1.0, 0.0, 0.0]), (len(points), 1)
+        )
+        common = dict(
+            coefficients=coefficients,
+            normal_fn=normal,
+            directions=np.asarray([[1.0, 0.0, 0.0]]),
+            frequency_ghz=1.0,
+            max_piece_wavelengths=0.05,
+        )
+        first = expand_perimeter(whole, **common)
+        second = expand_perimeter(split, **common)
+        for channel in ("F_vv", "F_hh", "F_vh"):
+            np.testing.assert_allclose(
+                first[channel], second[channel], rtol=2.0e-14, atol=2.0e-14
+            )
+
+    def test_one_monostatic_artifact_is_reusable_for_feature_addition(self):
+        amplitude = 1.0 / math.sqrt(4.0 * math.pi)
+        bodies = {
+            1.0: {
+                "theta_deg": np.asarray([0.0, 90.0]),
+                "amp_vv": np.asarray([amplitude, 2.0 * amplitude], complex),
+                "amp_hh": np.asarray([3.0 * amplitude, 4.0 * amplitude], complex),
+            }
+        }
+        profile = np.asarray([[0.0, 1.0], [0.2, 0.0], [0.0, -1.0]])
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "body.grim"
+            combined = Path(directory) / "body_features.grim"
+            feature_sum.save_monostatic_grim(
+                bodies, profile, str(base),
+                azimuths_deg=[0.0, 90.0], elevations_deg=[0.0],
+                roll_deg=12.0,
+            )
+            loaded = feature_sum.load_body_grim(str(base))
+            np.testing.assert_array_equal(
+                loaded[1.0]["theta_deg"], bodies[1.0]["theta_deg"]
+            )
+            grid = feature_sum.load_body_requested_radar_grid(str(base))
+            self.assertEqual(grid["roll_deg"], 12.0)
+            feature_sum.add_features_to_monostatic_grim(
+                str(base), str(combined), feature_provenance={"test": True}
+            )
+            with np.load(base, allow_pickle=False) as original, np.load(
+                combined, allow_pickle=False
+            ) as updated:
+                np.testing.assert_array_equal(
+                    updated["rcs_amp_real"], original["rcs_amp_real"]
+                )
+                np.testing.assert_array_equal(
+                    updated["rcs_amp_imag"], original["rcs_amp_imag"]
+                )
+                provenance = json.loads(str(updated["feature_provenance_json"]))
+            self.assertEqual(provenance[-1]["line_feature_count"], 0)
+            self.assertEqual(provenance[-1]["compact_feature_count"], 0)
+
+            pattern = feature_sum.prepare_point_pattern(
+                _constant_compact_pattern()
+            )
+            point_a = {
+                "pattern": pattern,
+                "location": [0.01, 0.0, 0.02],
+                "aperture_normal": [0.0, 0.0, 1.0],
+                "roll_ref": [1.0, 0.0, 0.0],
+            }
+            point_b = {
+                "pattern": pattern,
+                "location": [0.0, 0.015, 0.01],
+                "aperture_normal": [0.0, 0.0, 1.0],
+                "roll_ref": [1.0, 0.0, 0.0],
+            }
+            direct = Path(directory) / "direct.grim"
+            step_one = Path(directory) / "step_one.grim"
+            sequential = Path(directory) / "sequential.grim"
+            feature_sum.add_features_to_monostatic_grim(
+                str(base), str(direct), points=[point_a, point_b]
+            )
+            feature_sum.add_features_to_monostatic_grim(
+                str(base), str(step_one), points=[point_a]
+            )
+            feature_sum.add_features_to_monostatic_grim(
+                str(step_one), str(sequential), points=[point_b]
+            )
+            with np.load(direct, allow_pickle=False) as one_pass, np.load(
+                sequential, allow_pickle=False
+            ) as two_pass:
+                direct_field = (
+                    one_pass["rcs_amp_real"] + 1j * one_pass["rcs_amp_imag"]
+                )
+                sequential_field = (
+                    two_pass["rcs_amp_real"] + 1j * two_pass["rcs_amp_imag"]
+                )
+            np.testing.assert_allclose(
+                direct_field, sequential_field, rtol=2.0e-14, atol=2.0e-14
+            )
+
     def test_dispatch_builds_each_frequency_on_its_own_mesh(self):
         snapshot = _pec_sphere_snapshot(explicit_elements=-20)
         point_counts = []

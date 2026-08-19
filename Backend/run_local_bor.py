@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Local BoR monostatic RCS aspect sweep -- run_hpc_bor_monostatic.py without SLURM.
+"""Local BoR monostatic RCS sweep -- run_hpc_bor_monostatic.py without SLURM.
 
 Each physical solve is a true 3-D (dBsm) body-of-revolution solve over the ASPECT angles
 (degrees from the +z rotation axis: 0 = nose-on, 90 = broadside, 180 = tail-on).
 Geometries are .geo half-profiles: x = rho (>= 0), y = z (rotation axis), drawn
 from the +z axis end to the -z axis end (see bor_dispatch.py).
 
-One .grim per (geometry, frequency, polarization) unit is written to
-<OUTPUT_DIR>/run_YYYYMMDD_HHMMSS/results/ as soon as that unit finishes, named
-"<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim". Nothing else lands in results/:
-each file carries its own source/runtime/input attestation inside the artifact,
-so a resumed run verifies what it reuses without a sidecar per output.
+The user specifies frequencies, radar azimuths, and radar elevations.  The
+driver derives the exact body-aspect RHS columns needed by those looks, solves
+VV and HH together, and publishes one self-contained monostatic GRIM per
+geometry in results/.  That same file opens in GRIM and contains the compact
+body model/profile needed for later coherent door or cavity placement.
 
 Scheduling matches the HPC path. VV and HH are co-solved and still exported as
 separate compatible files. A BoR solve's cost grows roughly as the fourth
@@ -18,10 +18,9 @@ power of frequency (elements^3 x modes), so a frequency sweep is badly
 lopsided; units are costed and run dearest-first, and concurrent solves are
 admitted against a memory budget instead of filling every core.
 
-When BODY_GRIM_ENABLE is true, the unit files are also collected into one
-self-contained <run_dir>/bodies/<geometry>.grim per geometry for direct use by
-feature_sum.  Certification remains a user-selected solve option and does not
-gate collection or downstream use.
+Per-frequency solver-unit files are restart/provenance state under the hidden
+.solver_units/ directory, not alternative datasets. Certification remains a
+user-selected solve option and does not gate publication or downstream use.
 
 Edit the CONFIG block and run:
 
@@ -60,9 +59,14 @@ from workflow_provenance import (
 GEOMETRY_DIRS = ["geometries/BOR"]      # every *.geo under these, recursively
 
 FREQUENCIES_GHZ = [1.0, 2.0, 4.0]
-ASPECTS_DEG     = [float(a) for a in range(0, 181, 5)]
-POLARIZATIONS   = ["VV", "HH"]         # or TM/TE (TM = HH, TE = VV); either
-                                       # spelling is written out as VV/HH
+AZIMUTHS_DEG    = [float(a) for a in range(0, 360, 5)]
+ELEVATIONS_DEG  = [float(e) for e in range(-60, 61, 5)]
+
+# Body-axis attitude in the radar/earth frame.  The default is horizontal,
+# nose toward azimuth 0.  Roll changes feature orientation about the BoR axis.
+BODY_AXIS_AZ_DEG = 0.0
+BODY_AXIS_EL_DEG = 0.0
+BODY_ROLL_DEG    = 0.0
 
 OUTPUT_DIR = "rcs_runs_bor"
 
@@ -81,11 +85,8 @@ ASSEMBLY         = "auto"         # "auto" | "tables" | "streaming"
 TABLE_PRECISION  = "auto"         # "auto" | "single" | "double"
 STREAM_BUDGET_GB = 8.0            # maximum held streaming-block budget; the
                                   # scheduler predicts total peak separately
-EXPAND_TO_360    = False          # mirror samples about the axis to fill the
-                                  # full polar cut (exact for a BoR)
 MESH_CERTIFICATION = True         # recommended: compare base/fine meshes;
                                   # False solves the base mesh only
-BODY_GRIM_ENABLE = True            # collect both pols/all freqs for downstream
 WORKERS_PER_UNIT = 4              # threads inside one BoR solve
 BLAS_THREADS_PER_WORKER = 1
 
@@ -394,7 +395,10 @@ def _solve_and_export_star(args: 'tuple') -> 'tuple':
         return ("err", traceback.format_exc(), "")
 
 
-def _plan(units: 'List[Dict[str, Any]]') -> 'Dict[str, float]':
+def _plan(
+    units: 'List[Dict[str, Any]]',
+    aspects_deg: 'List[float]',
+) -> 'Dict[str, float]':
     """Relative cost of every unit, read off the .geo profile.
 
     Deliberately coarser than the 2-D model: there is no equally cheap way to
@@ -413,13 +417,13 @@ def _plan(units: 'List[Dict[str, Any]]') -> 'Dict[str, float]':
             )
         arc, radius = extents[path]
         costs[_pair_name(unit)] = hpc_scheduler.bor_unit_cost(
-            arc, radius, float(unit["frequency_ghz"]), len(ASPECTS_DEG)
+            arc, radius, float(unit["frequency_ghz"]), len(aspects_deg)
         )
         snapshot, material_base = _load_snapshot(path)
         unit["resource_estimate"] = estimate_bor_resources(
             snapshot,
             float(unit["frequency_ghz"]),
-            [float(value) for value in ASPECTS_DEG],
+            aspects_deg,
             geometry_units=GEOMETRY_UNITS,
             material_base_dir=material_base,
             n_modes=N_MODES,
@@ -433,27 +437,19 @@ def _plan(units: 'List[Dict[str, Any]]') -> 'Dict[str, float]':
     return costs
 
 
-def _validate_config() -> 'List[str]':
-    pols = [p.strip().upper() for p in POLARIZATIONS if p and p.strip()]
-    if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
+def _validate_config() -> 'List[float]':
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
-    if not ASPECTS_DEG:     sys.exit("ERROR: ASPECTS_DEG is empty.")
     try:
-        # A BoR unit's channels are theta-pol and phi-pol, so VV/HH is the
-        # canonical spelling here and TM/TE are the aliases -- the reverse of
-        # the 2-D elevation-cut convention. Either is accepted and both land on
-        # VV/HH names. Two spellings of one channel are rejected: ["VV", "TE"]
-        # looks like two polarizations and is one.
-        pols = hpc_scheduler.distinct_polarization_channels(
-            pols, hpc_scheduler.canonical_bor_polarization
+        from feature_sum import radar_grid_aspects, validate_radar_grid
+        validate_radar_grid(AZIMUTHS_DEG, ELEVATIONS_DEG)
+        aspects = radar_grid_aspects(
+            AZIMUTHS_DEG,
+            ELEVATIONS_DEG,
+            BODY_AXIS_AZ_DEG,
+            BODY_AXIS_EL_DEG,
         )
     except ValueError as exc:
-        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
-    if BODY_GRIM_ENABLE and not {"VV", "HH"}.issubset(set(pols)):
-        sys.exit(
-            "ERROR: BODY_GRIM_ENABLE=True requires both VV and HH in "
-            "POLARIZATIONS. Disable body collection for a single-channel run."
-        )
+        sys.exit(f"ERROR: radar grid is invalid -- {exc}")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
     if (
         not all(math.isfinite(value) and value > 0.0 for value in frequencies)
@@ -464,15 +460,10 @@ def _validate_config() -> 'List[str]':
             "ERROR: frequencies must be finite, positive, unique, and "
             "distinct at the 0.001 GHz output-name precision."
         )
-    aspects = [float(value) for value in ASPECTS_DEG]
-    if (
-        not all(math.isfinite(value) for value in aspects)
-        or len(set(aspects)) != len(aspects)
-        or any(value < 0.0 or value > 180.0 for value in aspects)
-    ):
-        sys.exit(
-            "ERROR: ASPECTS_DEG must be finite, unique, and in [0, 180]."
-        )
+    if not all(math.isfinite(float(value)) for value in (
+        BODY_AXIS_AZ_DEG, BODY_AXIS_EL_DEG, BODY_ROLL_DEG
+    )):
+        sys.exit("ERROR: body-axis attitude angles must be finite.")
     if str(ASSEMBLY).strip().lower() not in {"auto", "tables", "streaming"}:
         sys.exit("ERROR: ASSEMBLY must be auto, tables, or streaming.")
     if str(TABLE_PRECISION).strip().lower() not in {"auto", "single", "double"}:
@@ -487,11 +478,12 @@ def _validate_config() -> 'List[str]':
         sys.exit("ERROR: TASKS_PER_CHILD must be >= 1.")
     if WORKERS is not None and int(WORKERS) < 1:
         sys.exit("ERROR: WORKERS must be a positive integer or None.")
-    return pols
+    return [float(value) for value in aspects]
 
 
 def main() -> 'None':
-    pols = _validate_config()
+    aspects = _validate_config()
+    pols = ["VV", "HH"]
     hpc_scheduler.pin_blas_threads(int(BLAS_THREADS_PER_WORKER))
     hpc_scheduler.install_fingerprint_cache()
 
@@ -529,10 +521,10 @@ def main() -> 'None':
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
     run_dir = Path(OUTPUT_DIR).resolve() / run_id
     results_dir = run_dir / "results"
+    unit_dir = run_dir / ".solver_units"
     run_dir.mkdir(parents=True, exist_ok=False)
     results_dir.mkdir()
-    if BODY_GRIM_ENABLE:
-        (run_dir / "bodies").mkdir()
+    unit_dir.mkdir()
     solver_config = {
         "geometry_units": GEOMETRY_UNITS,
         "cfie_alpha": float(CFIE_ALPHA),
@@ -542,7 +534,7 @@ def main() -> 'None':
         "assembly": ASSEMBLY,
         "table_precision": TABLE_PRECISION,
         "stream_budget_gb": float(STREAM_BUDGET_GB),
-        "expand_to_360": bool(EXPAND_TO_360),
+        "expand_to_360": False,
         "mesh_certification": bool(MESH_CERTIFICATION),
         "workers_per_unit": int(WORKERS_PER_UNIT),
         "blas_threads_per_worker": int(BLAS_THREADS_PER_WORKER),
@@ -554,8 +546,16 @@ def main() -> 'None':
         "created": datetime.now().isoformat(),
         "solver": "bor_mom_rcs",
         "frequencies_ghz": [float(f) for f in FREQUENCIES_GHZ],
-        "aspects_deg": [float(a) for a in ASPECTS_DEG],
+        "aspects_deg": aspects,
         "polarizations": pols,
+        "unit_output_dir": ".solver_units",
+        "radar_grid": {
+            "azimuths_deg": [float(value) for value in AZIMUTHS_DEG],
+            "elevations_deg": [float(value) for value in ELEVATIONS_DEG],
+            "axis_az_deg": float(BODY_AXIS_AZ_DEG),
+            "axis_el_deg": float(BODY_AXIS_EL_DEG),
+            "roll_deg": float(BODY_ROLL_DEG),
+        },
         "n_units": len(units),
         "solver_source_sha256": _solver_source_fingerprint(),
         # Per-file hashes behind that fingerprint, so a later mismatch can say
@@ -563,7 +563,6 @@ def main() -> 'None':
         "solver_source_inventory": _solver_source_inventory(),
         "runtime_environment_sha256": runtime_environment_fingerprint(),
         "solver_config": solver_config,
-        "body_grim_config": {"enabled": bool(BODY_GRIM_ENABLE)},
         "units": units,
     }
     manifest_path = run_dir / "manifest.json"
@@ -586,12 +585,12 @@ def main() -> 'None':
         "assembly": ASSEMBLY,
         "table_precision": TABLE_PRECISION,
         "stream_budget_gb": float(STREAM_BUDGET_GB),
-        "expand_to_360": bool(EXPAND_TO_360),
+        "expand_to_360": False,
         "mesh_certification": bool(MESH_CERTIFICATION),
         "workers_per_unit": int(WORKERS_PER_UNIT),
-        "aspects_deg": [float(a) for a in ASPECTS_DEG],
+        "aspects_deg": aspects,
         "angular_grid_sha256": stable_json_fingerprint(
-            [float(a) for a in ASPECTS_DEG]
+            aspects
         ),
     }
 
@@ -600,7 +599,7 @@ def main() -> 'None':
     # fingerprint was taken would make the manifest on disk hash differently
     # from what every attestation recorded.
     solve_units = _paired_solve_units(units)
-    costs = _plan(solve_units)
+    costs = _plan(solve_units, aspects)
     ordered = sorted(
         solve_units,
         key=lambda u: (-costs.get(_pair_name(u), 1.0), _pair_name(u)),
@@ -614,19 +613,19 @@ def main() -> 'None':
     pool_size = max(1, min(by_threads, worker_cap, len(ordered)))
 
     print("=" * 70)
-    print("Local BoR monostatic RCS aspect sweep")
+    print("Local BoR monostatic RCS sweep")
     print("=" * 70)
     print(f"  Run dir       : {run_dir}")
     print(f"  Geometries    : {len(geometries)}")
     print(f"  Polarizations : {', '.join(pols)}")
     print(f"  Frequencies   : {len(FREQUENCIES_GHZ)}  "
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
-    print(f"  Aspects       : {len(ASPECTS_DEG)}  "
-          f"({min(ASPECTS_DEG):g}-{max(ASPECTS_DEG):g} deg from +z axis)")
-    print(f"  Output files  : {len(units)}  (geom x freq x pol)")
+    print(f"  Radar grid    : {len(AZIMUTHS_DEG)} az x "
+          f"{len(ELEVATIONS_DEG)} el")
+    print(f"  Solver aspects: {len(aspects)} exact body-aspect RHS columns")
+    print(f"  Deliverables  : {len(geometries)} monostatic GRIM(s)")
     print(f"  Physical solves: {len(ordered)}  (VV/HH co-solved)")
     print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
-    print(f"  Body GRIMs    : {'enabled' if BODY_GRIM_ENABLE else 'disabled'}")
     print(f"  Workers       : {pool_size} procs x {WORKERS_PER_UNIT} threads "
           f"of {cores} cpus  (BLAS threads/worker: {BLAS_THREADS_PER_WORKER})")
     reservations = [
@@ -654,7 +653,7 @@ def main() -> 'None':
         return (
             name,
             float(unit["resource_estimate"]["estimated_peak_gb"]),
-            (_solve_and_export_star, ((unit, context, str(results_dir)),)),
+            (_solve_and_export_star, ((unit, context, str(unit_dir)),)),
         )
 
     def _finished():
@@ -691,38 +690,41 @@ def main() -> 'None':
     print(f"\n  Done. wrote={counters['written']}, "
           f"skipped={counters['skipped']}, failed={counters['failed']}.  "
           f"{elapsed:.1f} s elapsed.")
-    print(f"  Outputs: {results_dir}/")
     manifest["status"] = "failed" if counters["failed"] else "complete"
     _write_json_atomic(manifest_path, manifest)
     if counters["failed"]:
         raise SystemExit(1)
-    if BODY_GRIM_ENABLE:
-        from hpc_common import bodies_from_units, read_unit_grims
-        from feature_sum import outer_generatrix, save_body_grim
+    from hpc_common import bodies_from_units, read_unit_grims
+    from feature_sum import outer_generatrix, save_monostatic_grim
 
-        records = read_unit_grims(results_dir)
-        for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
-            matching = [unit for unit in units if unit["geometry_stem"] == stem]
-            snapshot, _material_base = _load_snapshot(
-                str(matching[0]["geometry"])
-            )
-            profile = outer_generatrix(snapshot, GEOMETRY_UNITS)
-            save_body_grim(
-                bodies_from_units(records, stem=stem),
-                str(run_dir / "bodies" / f"{stem}.grim"),
-                history="run_local_bor.py collected body",
-                source_path=str(matching[0]["geometry"]),
-                geometry_input_sha256=str(
+    records = read_unit_grims(unit_dir)
+    for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
+        matching = [unit for unit in units if unit["geometry_stem"] == stem]
+        snapshot, _material_base = _load_snapshot(str(matching[0]["geometry"]))
+        profile = outer_generatrix(snapshot, GEOMETRY_UNITS)
+        save_monostatic_grim(
+            bodies_from_units(records, stem=stem),
+            profile,
+            str(results_dir / f"{stem}.grim"),
+            azimuths_deg=AZIMUTHS_DEG,
+            elevations_deg=ELEVATIONS_DEG,
+            axis_az_deg=BODY_AXIS_AZ_DEG,
+            axis_el_deg=BODY_AXIS_EL_DEG,
+            roll_deg=BODY_ROLL_DEG,
+            history="run_local_bor.py monostatic response",
+            source_path=str(matching[0]["geometry"]),
+            artifact_metadata={
+                "geometry_input_sha256": str(
                     matching[0].get("geometry_input_sha256", "")
                 ),
-                solver_source_sha256=str(manifest["solver_source_sha256"]),
-                runtime_environment_sha256=str(
+                "solver_source_sha256": str(manifest["solver_source_sha256"]),
+                "runtime_environment_sha256": str(
                     manifest["runtime_environment_sha256"]
                 ),
-                run_solve_spec_sha256=manifest_solve_spec_fingerprint(manifest),
-                body_profile=profile,
-            )
-        print(f"  Body inputs: {run_dir / 'bodies'}/")
+                "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
+            },
+        )
+    print(f"  Monostatic outputs: {results_dir}/")
 
 
 if __name__ == "__main__":

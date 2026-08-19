@@ -246,20 +246,19 @@ def test_bor_driver_loads():
         import sys
         sys.path.insert(0, {str(BACKEND)!r})
         import run_local_bor as driver
-        assert driver._validate_config() == ["VV", "HH"]
-        # TM/TE is accepted and lands on the VV/HH names the az/el pairing
-        # and the grim channel labels expect.
-        driver.POLARIZATIONS = ["TM", "TE"]
-        assert driver._validate_config() == ["HH", "VV"], driver._validate_config()
-        driver.POLARIZATIONS = ["VV", "TE"]
+        aspects = driver._validate_config()
+        assert aspects and min(aspects) >= 0.0 and max(aspects) <= 180.0
+        driver.AZIMUTHS_DEG = [0.0, 360.0]
         try:
             driver._validate_config()
         except SystemExit:
             pass
         else:
-            raise AssertionError("one channel written twice was accepted")
-        driver.POLARIZATIONS = ["VV", "HH"]
-        assert driver._plan([]) == {{}}
+            raise AssertionError("duplicate physical azimuth was accepted")
+        driver.AZIMUTHS_DEG = [0.0, 90.0]
+        driver.ELEVATIONS_DEG = [0.0]
+        aspects = driver._validate_config()
+        assert driver._plan([], aspects) == {{}}
         # The knobs the worker forwards must all exist on the solver entry point.
         import inspect
         from bor_dispatch import solve_monostatic_rcs_bor
@@ -294,12 +293,11 @@ def test_local_bor_downstream_collection(workspace):
         overrides=_overrides(
             GEOMETRY_DIRS=[str(REPO / "geometries")],
             FREQUENCIES_GHZ=[1.0],
-            ASPECTS_DEG=[0.0, 90.0, 180.0],
-            POLARIZATIONS=["VV", "HH"],
+            AZIMUTHS_DEG=[0.0, 90.0, 180.0],
+            ELEVATIONS_DEG=[0.0],
             OUTPUT_DIR=str(workspace / "bor_runs"),
             GEOMETRY_UNITS="meters",
             MESH_CERTIFICATION=False,
-            BODY_GRIM_ENABLE=True,
             WORKERS=1,
             WORKERS_PER_UNIT=1,
         ),
@@ -310,14 +308,15 @@ def test_local_bor_downstream_collection(workspace):
                      f"{result.stdout}\n{result.stderr}")
         return
     runs = sorted((workspace / "bor_runs").glob("run_*"))
-    body_paths = sorted(runs[-1].glob("bodies/*.grim")) if runs else []
+    body_paths = sorted(runs[-1].glob("results/*.grim")) if runs else []
     check(len(body_paths) == 1,
-          f"one collected body GRIM was written (got {len(body_paths)})")
+          f"one monostatic body GRIM was written (got {len(body_paths)})")
     if not body_paths:
         return
     sys.path.insert(0, str(BACKEND))
     from feature_sum import (  # noqa: E402
         load_body_grim,
+        load_body_requested_radar_grid,
         verify_body_artifact_bundle,
     )
     body = load_body_grim(str(body_paths[0]))
@@ -328,6 +327,10 @@ def test_local_bor_downstream_collection(workspace):
     check(bundle["profile_points"] > 1,
           "base-mesh body passes downstream structural checks without a "
           "certification gate")
+    grid = load_body_requested_radar_grid(str(body_paths[0]))
+    check(grid["azimuths_deg"] == [0.0, 90.0, 180.0]
+          and grid["elevations_deg"] == [0.0],
+          "the same file carries the requested monostatic radar grid")
 
 
 def main():

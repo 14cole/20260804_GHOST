@@ -59,3 +59,46 @@ but must not be described as having passed a base/fine mesh comparison.
 
 Every solve still enforces finite fields, non-negative RCS, modal convergence,
 linear residual, conditioning, and amplitude/power consistency gates.
+
+## Monostatic output and placed features
+
+The local and SLURM launchers expose three sweep inputs: `FREQUENCIES_GHZ`,
+`AZIMUTHS_DEG`, and `ELEVATIONS_DEG`. They derive and solve every exact BoR
+aspect required by that radar grid; the complex body field is not interpolated
+between coarse aspect samples. Do not include both 0 and 360 degrees because
+they are the same physical azimuth.
+
+Each geometry publishes one `results/<geometry>.grim`. Its primary arrays are
+the requested radar-frame monostatic VV, HH, and VH response. The same file
+also embeds the body-aspect field and `(rho,z)` profile required for downstream
+placement. Files in `.solver_units/` are hidden checkpoint/provenance state and
+are not separate physical answers.
+
+Edit and run `Backend/add_bor_features.py` to coherently add:
+
+- a door, seam, or other perimeter from a 2-D `featured - clean` complex delta;
+- a compact cavity or similar installed feature from a calibrated 3-D
+  installed-feature-minus-clean-skin pattern.
+
+Coordinates use the CAD frame `+y = nose`, `+x = right`, `+z = up`. Every line
+element and compact feature receives the monostatic two-way translation phase
+`exp(+2 j k d dot r)` for this repository's `exp(+j omega t)` convention.
+Compact-pattern polarization is rotated from its local aperture frame into the
+body/radar frame before addition. Coordinates are checked against the body skin
+using both distance and worst-case two-way phase tolerances.
+
+A standalone cavity field is not a valid compact delta: adding it to the body
+would retain the unbroken skin response and omit installation coupling. Solve
+the installed feature and clean reference with the same surrounding skin, then
+coherently subtract them. Mesh certification is optional for all of these
+datasets; format, normalization, phase-reference, and grid checks are always
+enforced.
+
+The experimental wing/fin line-expansion code remains separate for now. Its
+2-D-to-span expansion is usable in isolation, but a phase-unknown wing-root
+corner estimate is not included in the primary coherent monostatic result.
+
+The internal translation, segment-splitting, and accumulation regressions do
+not replace a direct full-wave featured-body comparison. Follow
+[FEATURE_VALIDATION_GUIDE.md](FEATURE_VALIDATION_GUIDE.md) to construct,
+import, and quantitatively compare an independent 3-D reference.

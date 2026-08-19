@@ -605,7 +605,14 @@ def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
                     'collection_source_sha256',
                     'requested_radar_grid_json',
                     'body_profile_rho_m',
-                    'body_profile_z_m'):
+                    'body_profile_z_m',
+                    'body_model_metadata_json',
+                    'body_model_aspects_deg',
+                    'body_model_amp_vv_real',
+                    'body_model_amp_vv_imag',
+                    'body_model_amp_hh_real',
+                    'body_model_amp_hh_imag',
+                    'feature_provenance_json'):
             if key in payload:
                 save_payload[key] = payload[key]
         np.savez_compressed(f, **save_payload)

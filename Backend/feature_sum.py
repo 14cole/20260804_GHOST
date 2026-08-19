@@ -929,6 +929,7 @@ def solve_vehicle_body(geometry, frequencies_ghz, aspects_deg,
 
 _BODY_AZ_MEANING = ("BoR aspect from the +z rotation axis (0 = nose-on, "
                     "90 = broadside, 180 = tail-on) -- NOT radar azimuth")
+_MONOSTATIC_BODY_MODEL_SCHEMA = "ghost.workflow.embedded-bor-body-model.v1"
 
 
 def verify_body_artifact_bundle(body_grim: 'str') -> 'Dict[str, Any]':
@@ -1355,9 +1356,11 @@ def load_body_requested_radar_grid(
         )
     axis_az = float(grid.get("axis_az_deg", math.nan))
     axis_el = float(grid.get("axis_el_deg", math.nan))
+    roll = float(grid.get("roll_deg", 0.0))
     if (
         not math.isfinite(axis_az)
         or not math.isfinite(axis_el)
+        or not math.isfinite(roll)
         or not -90.0 <= axis_el <= 90.0
     ):
         raise ValueError(
@@ -1370,14 +1373,87 @@ def load_body_requested_radar_grid(
         "frequencies_ghz": frequencies,
         "axis_az_deg": axis_az,
         "axis_el_deg": axis_el,
+        "roll_deg": roll,
     }
 
 
 def load_body_grim(path: 'str') -> 'Dict[float, Dict[str, Any]]':
     """Read a body .grim back into the ``{frequency: {theta_deg, amp_vv, amp_hh}}``
-    dict that sum_features and the exporters consume."""
+    dict that sum_features and the exporters consume.
+
+    Current solver deliverables are radar-frame monostatic grids with the
+    compact BoR aspect model embedded inside the same file.  Legacy compact
+    body GRIMs remain readable so existing validated datasets do not need a
+    lossy conversion.
+    """
     g = _load_grim(str(path))
     label = str(path)
+    if "body_model_metadata_json" in g:
+        try:
+            raw = np.asarray(g["body_model_metadata_json"]).reshape(()).item()
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            metadata = json.loads(str(raw))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"{path}: embedded BoR body-model metadata is malformed."
+            ) from exc
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("schema") != _MONOSTATIC_BODY_MODEL_SCHEMA
+            or metadata.get("phase_reference") != BOR_BODY_PHASE_REFERENCE
+            or metadata.get("amplitude_convention")
+            != PHYSICAL_3D_AMPLITUDE_CONVENTION
+        ):
+            raise ValueError(
+                f"{path}: embedded BoR body model has incompatible field "
+                "conventions."
+            )
+        required = (
+            "body_model_aspects_deg",
+            "body_model_amp_vv_real",
+            "body_model_amp_vv_imag",
+            "body_model_amp_hh_real",
+            "body_model_amp_hh_imag",
+        )
+        missing = [key for key in required if key not in g]
+        if missing:
+            raise ValueError(
+                f"{path}: embedded BoR body model is missing {missing}."
+            )
+        aspects = np.asarray(g["body_model_aspects_deg"], dtype=float)
+        frequencies = np.asarray(g["frequencies"], dtype=float)
+        expected = (len(aspects), len(frequencies))
+        arrays = {
+            key: np.asarray(g[key], dtype=float)
+            for key in required[1:]
+        }
+        if (
+            aspects.ndim != 1
+            or not len(aspects)
+            or not np.all(np.isfinite(aspects))
+            or np.any(np.diff(aspects) <= 0.0)
+            or any(value.shape != expected for value in arrays.values())
+            or any(not np.all(np.isfinite(value)) for value in arrays.values())
+        ):
+            raise ValueError(
+                f"{path}: embedded BoR body-model arrays are malformed."
+            )
+        vv = arrays["body_model_amp_vv_real"] + 1j * arrays[
+            "body_model_amp_vv_imag"
+        ]
+        hh = arrays["body_model_amp_hh_real"] + 1j * arrays[
+            "body_model_amp_hh_imag"
+        ]
+        return {
+            float(frequency): {
+                "theta_deg": aspects.copy(),
+                "amp_vv": vv[:, index].copy(),
+                "amp_hh": hh[:, index].copy(),
+            }
+            for index, frequency in enumerate(frequencies)
+        }
+
     if _metadata_text(g, "rcs_domain", label) != "power_phase":
         raise ValueError(
             f"{path}: a BoR body must have rcs_domain='power_phase'.")
@@ -2281,9 +2357,12 @@ def validate_radar_grid(azimuths_deg, elevations_deg):
             for value in azimuths
         )
         or len(set(azimuths)) != len(azimuths)
+        or len({round(value % 360.0, 12) for value in azimuths})
+        != len(azimuths)
     ):
         raise ValueError(
-            "AZIMUTHS_DEG must be unique finite values in [0, 360]."
+            "AZIMUTHS_DEG must be physically unique finite values in [0, "
+            "360]; do not include both 0 and 360."
         )
     if (
         not elevations
@@ -2565,3 +2644,301 @@ def export_radar_grim(out_path: 'str', *,
     from components import tag_component
     tag_component(saved, "coherent")
     return saved
+
+
+def _attach_body_model_payload(
+    payload: 'Dict[str, Any]',
+    bodies: 'Dict[float, Dict[str, Any]]',
+    generatrix: 'np.ndarray',
+    *,
+    azimuths_deg: 'Sequence[float]',
+    elevations_deg: 'Sequence[float]',
+    axis_az_deg: 'float',
+    axis_el_deg: 'float',
+    roll_deg: 'float',
+) -> 'Dict[str, Any]':
+    """Embed the compact reusable BoR model inside a radar-frame product."""
+
+    frequencies = sorted(float(value) for value in bodies)
+    if not frequencies:
+        raise ValueError("Cannot embed an empty BoR body model.")
+    first = bodies[frequencies[0]]
+    aspects = np.asarray(first.get("theta_deg", []), dtype=float)
+    if (
+        aspects.ndim != 1
+        or not len(aspects)
+        or not np.all(np.isfinite(aspects))
+        or np.any(np.diff(aspects) <= 0.0)
+    ):
+        raise ValueError("BoR body aspects must be finite and increasing.")
+    vv = np.empty((len(aspects), len(frequencies)), dtype=np.complex128)
+    hh = np.empty_like(vv)
+    for index, frequency in enumerate(frequencies):
+        body = bodies[frequency]
+        current = np.asarray(body.get("theta_deg", []), dtype=float)
+        av = np.asarray(body.get("amp_vv", []), dtype=np.complex128)
+        ah = np.asarray(body.get("amp_hh", []), dtype=np.complex128)
+        if (
+            not np.array_equal(current, aspects)
+            or av.shape != aspects.shape
+            or ah.shape != aspects.shape
+            or not np.all(np.isfinite(av.real) & np.isfinite(av.imag))
+            or not np.all(np.isfinite(ah.real) & np.isfinite(ah.imag))
+        ):
+            raise ValueError(
+                f"BoR body model at {frequency:g} GHz does not share one "
+                "finite aspect grid."
+            )
+        vv[:, index] = av
+        hh[:, index] = ah
+
+    profile = np.asarray(generatrix, dtype=float)
+    if (
+        profile.ndim != 2
+        or profile.shape[1] != 2
+        or len(profile) < 2
+        or not np.all(np.isfinite(profile))
+    ):
+        raise ValueError(
+            "The embedded BoR profile must contain finite rho,z rows."
+        )
+    requested_azimuths, requested_elevations = validate_radar_grid(
+        azimuths_deg, elevations_deg
+    )
+    primary_frequencies = np.asarray(payload["frequencies"], dtype=float)
+    if not np.array_equal(primary_frequencies, np.asarray(frequencies)):
+        raise ValueError(
+            "Radar-frame and embedded body-model frequencies differ."
+        )
+
+    payload["body_model_metadata_json"] = np.asarray(json.dumps({
+        "schema": _MONOSTATIC_BODY_MODEL_SCHEMA,
+        "phase_reference": BOR_BODY_PHASE_REFERENCE,
+        "amplitude_convention": PHYSICAL_3D_AMPLITUDE_CONVENTION,
+        "complex_field_domain": BOR_BODY_FIELD_DOMAIN,
+        "axis_meaning": _BODY_AZ_MEANING,
+    }, sort_keys=True, separators=(",", ":")))
+    payload["body_model_aspects_deg"] = aspects.astype(np.float64)
+    payload["body_model_amp_vv_real"] = vv.real.astype(np.float64)
+    payload["body_model_amp_vv_imag"] = vv.imag.astype(np.float64)
+    payload["body_model_amp_hh_real"] = hh.real.astype(np.float64)
+    payload["body_model_amp_hh_imag"] = hh.imag.astype(np.float64)
+    payload["body_profile_rho_m"] = profile[:, 0].astype(np.float64)
+    payload["body_profile_z_m"] = profile[:, 1].astype(np.float64)
+    payload["requested_radar_grid_json"] = np.asarray(json.dumps({
+        "schema": "ghost.workflow.requested-radar-grid.v1",
+        "azimuths_deg": requested_azimuths,
+        "elevations_deg": requested_elevations,
+        "frequencies_ghz": frequencies,
+        "axis_az_deg": float(axis_az_deg),
+        "axis_el_deg": float(axis_el_deg),
+        "roll_deg": float(roll_deg),
+    }, sort_keys=True, separators=(",", ":")))
+    return payload
+
+
+def save_monostatic_grim(
+    bodies: 'Dict[float, Dict[str, Any]]',
+    generatrix: 'np.ndarray',
+    out_path: 'str',
+    *,
+    azimuths_deg: 'Sequence[float]',
+    elevations_deg: 'Sequence[float]',
+    axis_az_deg: 'float' = 0.0,
+    axis_el_deg: 'float' = 0.0,
+    roll_deg: 'float' = 0.0,
+    source_path: 'str' = "",
+    history: 'str' = "",
+    artifact_metadata: 'Optional[Dict[str, Any]]' = None,
+) -> 'str':
+    """Publish one complete BoR monostatic deliverable.
+
+    Its primary arrays are the requested radar-frame azimuth/elevation VV, HH,
+    and VH response.  The exact body-frame aspect amplitudes and profile needed
+    for later coherent feature placement travel inside the same GRIM, so users
+    never have to choose between ``bodies`` and ``azel`` products.
+    """
+
+    frequencies = sorted(float(value) for value in bodies)
+    require_body_radar_support(
+        bodies,
+        frequencies,
+        azimuths_deg,
+        elevations_deg,
+        axis_az_deg,
+        axis_el_deg,
+    )
+    destination = os.path.abspath(
+        out_path if str(out_path).lower().endswith(".grim")
+        else str(out_path) + ".grim"
+    )
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    temporary = os.path.join(
+        os.path.dirname(destination),
+        f".{os.path.basename(destination)}.tmp.{os.getpid()}.grim",
+    )
+    try:
+        export_radar_grim(
+            temporary,
+            bor_result=bodies,
+            placements=[],
+            generatrix=generatrix,
+            frequencies_ghz=frequencies,
+            azimuths_deg=azimuths_deg,
+            elevations_deg=elevations_deg,
+            axis_az_deg=axis_az_deg,
+            axis_el_deg=axis_el_deg,
+            roll_deg=roll_deg,
+            source_path=source_path,
+            history=(history or "BoR monostatic response"),
+        )
+        with np.load(temporary, allow_pickle=False) as stored:
+            payload = {
+                key: np.array(stored[key], copy=True) for key in stored.files
+            }
+        _attach_body_model_payload(
+            payload,
+            bodies,
+            generatrix,
+            azimuths_deg=azimuths_deg,
+            elevations_deg=elevations_deg,
+            axis_az_deg=axis_az_deg,
+            axis_el_deg=axis_el_deg,
+            roll_deg=roll_deg,
+        )
+        for key, value in dict(artifact_metadata or {}).items():
+            payload[str(key)] = np.asarray(value)
+        from grim_io import _save_grim_npz
+        _save_grim_npz(payload, temporary)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return destination
+
+
+def add_features_to_monostatic_grim(
+    base_path: 'str',
+    out_path: 'str',
+    *,
+    placements: 'Sequence[Dict[str, Any]]' = (),
+    points: 'Sequence[Dict[str, Any]]' = (),
+    corners: 'Sequence[Dict[str, Any]]' = (),
+    occluder=None,
+    feature_provenance: 'Optional[Dict[str, Any]]' = None,
+    history: 'str' = "",
+) -> 'str':
+    """Coherently add placed features to one monostatic deliverable.
+
+    The existing radar-frame field is retained and the newly evaluated feature
+    field is added sample-by-sample.  Writing is atomic and may target a new
+    path or intentionally replace ``base_path``.
+    """
+
+    base = os.path.abspath(str(base_path))
+    if not os.path.isfile(base):
+        raise FileNotFoundError(f"Base monostatic GRIM does not exist: {base}")
+    grid = load_body_requested_radar_grid(base)
+    if grid is None:
+        raise ValueError(
+            f"{base}: no embedded radar-grid/body-model record; regenerate "
+            "it with the current BoR launcher before adding features."
+        )
+    profile = load_body_profile_grim(base)
+    # Structural validation of the embedded body model; no certification
+    # policy is imposed here.
+    load_body_grim(base)
+    from components import validate_component_schema
+    base_payload = _load_grim(base)
+    validate_component_schema(base_payload, os.path.basename(base))
+
+    destination = os.path.abspath(
+        out_path if str(out_path).lower().endswith(".grim")
+        else str(out_path) + ".grim"
+    )
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    component_tmp = os.path.join(
+        os.path.dirname(destination),
+        f".{os.path.basename(destination)}.features.{os.getpid()}.grim",
+    )
+    output_tmp = os.path.join(
+        os.path.dirname(destination),
+        f".{os.path.basename(destination)}.tmp.{os.getpid()}.grim",
+    )
+    try:
+        export_radar_grim(
+            component_tmp,
+            bor_result=None,
+            placements=placements,
+            points=points,
+            corners=corners,
+            generatrix=profile,
+            occluder=occluder,
+            frequencies_ghz=grid["frequencies_ghz"],
+            azimuths_deg=grid["azimuths_deg"],
+            elevations_deg=grid["elevations_deg"],
+            axis_az_deg=grid["axis_az_deg"],
+            axis_el_deg=grid["axis_el_deg"],
+            roll_deg=grid.get("roll_deg", 0.0),
+            history="placed coherent feature field",
+        )
+        component = _load_grim(component_tmp)
+        for key in ("azimuths", "elevations", "frequencies", "polarizations"):
+            if not np.array_equal(base_payload[key], component[key]):
+                raise ValueError(
+                    f"Feature field {key} does not match the base monostatic "
+                    "grid."
+                )
+        total = np.asarray(base_payload["_amp"], dtype=np.complex128) + np.asarray(
+            component["_amp"], dtype=np.complex128
+        )
+        with np.load(base, allow_pickle=False) as stored:
+            payload = {
+                key: np.array(stored[key], copy=True) for key in stored.files
+            }
+        real = total.real.astype(np.float64)
+        imag = total.imag.astype(np.float64)
+        payload["rcs_amp_real"] = real
+        payload["rcs_amp_imag"] = imag
+        payload["rcs_power"] = (
+            4.0 * math.pi * (real * real + imag * imag)
+        ).astype(np.float32)
+        payload["rcs_phase"] = np.angle(total).astype(np.float32)
+        payload["history"] = (
+            str(np.asarray(payload.get("history", "")).reshape(-1)[0])
+            + " | " + (history or "coherently added placed features")
+        ).strip(" |")
+        for key in (
+            "combination_estimate_power",
+            "combination_estimate_mode",
+            "combination_estimate_semantics",
+        ):
+            payload.pop(key, None)
+
+        from workflow_provenance import sha256_file
+        records = []
+        if "feature_provenance_json" in payload:
+            raw = np.asarray(payload["feature_provenance_json"]).reshape(()).item()
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            decoded = json.loads(str(raw))
+            records = list(decoded) if isinstance(decoded, list) else [decoded]
+        records.append({
+            "schema": "ghost.workflow.coherent-feature-addition.v1",
+            "source_monostatic_sha256": sha256_file(base),
+            "line_feature_count": int(len(placements)),
+            "compact_feature_count": int(len(points)),
+            "corner_estimate_count": int(len(corners)),
+            "details": dict(feature_provenance or {}),
+        })
+        payload["feature_provenance_json"] = np.asarray(json.dumps(
+            records, sort_keys=True, separators=(",", ":")
+        ))
+        from grim_io import _save_grim_npz
+        _save_grim_npz(payload, output_tmp)
+        os.replace(output_tmp, destination)
+    finally:
+        for path in (component_tmp, output_tmp):
+            if os.path.exists(path):
+                os.unlink(path)
+    return destination

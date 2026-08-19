@@ -275,7 +275,18 @@ def require_hpc_output_attestations(
         verify_embedded_attestation,
     )
 
-    results_dir = Path(run_dir) / "results"
+    # Solver-unit GRIMs are restart/provenance state, not user deliverables.
+    # New BoR runs keep them in a hidden directory and publish one monostatic
+    # GRIM in results/.  Older runs and the 2-D driver continue to default to
+    # results/, so archived manifests remain verifiable.
+    unit_output_dir = str(manifest.get("unit_output_dir", "results"))
+    if (
+        not unit_output_dir
+        or Path(unit_output_dir).is_absolute()
+        or any(part in ("", ".", "..") for part in Path(unit_output_dir).parts)
+    ):
+        raise ValueError("HPC manifest unit_output_dir is not a safe relative path.")
+    results_dir = Path(run_dir) / unit_output_dir
     if not isinstance(manifest, dict):
         raise ValueError("HPC manifest must be a JSON object.")
     schema = manifest.get("schema")

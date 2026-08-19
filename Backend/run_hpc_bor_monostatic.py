@@ -10,15 +10,16 @@ Edit the CONFIG block below and run:
 Workflow (mirrors the 2D driver):
 - Discover geometry files under FRD_DIR + OPN_DIR (BoR .geo files: x = rho,
   y = z, generatrices traversed +z -> -z; see bor_dispatch).
-- Keep a compatible (geometry x frequency x polarization) output manifest,
-  but dispatch one physical solve per geometry/frequency. VV and HH share each
-  azimuthal-mode factorization and are exported separately. All ASPECT angles
-  are stacked as RHS columns.
+- The user requests frequencies, radar azimuths, and radar elevations. Exact
+  BoR body-aspect RHS columns are derived automatically. VV and HH share each
+  azimuthal-mode factorization.
 - Distribute units round-robin across N_NODES x N_JOBS slots, write sbatch
   job-array scripts, submit. Restartable: units whose .grim exists are
   skipped.
-- Each unit exports "<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim" (sigma_3d,
-  dBsm) with the complex far-field amplitudes preserved.
+- Per-unit files are hidden restart state in .solver_units/. Once complete,
+  one self-contained <geometry>.grim is published in results/. Its primary
+  arrays are the requested monostatic az/el/frequency VV/HH/VH response and it
+  embeds the exact body model/profile needed for coherent feature placement.
 
 BoR-specific notes:
 - A BoR unit parallelizes INTERNALLY (threads across azimuthal modes and
@@ -27,19 +28,8 @@ BoR-specific notes:
 - The dispatch auto-selects table vs streaming assembly and single/double
   precision by memory estimate; override with ASSEMBLY / TABLE_PRECISION /
   STREAM_BUDGET_GB if needed.
-- EXPAND_TO_360 mirrors each aspect sweep about the axis (exact for a BoR).
-
-Radar-frame (azimuth, elevation) polarimetric grids -- VV/HH/VH -- are built
-AUTOMATICALLY during the sweep: as each (geometry, frequency) pair's second
-polarization finishes, that worker writes the pair's az/el grids to
-<run_dir>/azel/ (AZEL_ENABLE / AZEL_* in the config).  A manual backfill
-CLI exists for re-runs:  python run_hpc_bor_monostatic.py --azel <run_dir>
-
-The same unit files are also collected into one self-contained
-<run_dir>/bodies/<geometry>.grim per geometry when BODY_GRIM_ENABLE is true.
-Those files contain both polarizations, every frequency, and the body profile,
-so they can be passed directly to feature_sum.  Mesh certification is optional
-and never changes whether a result may be collected or used downstream.
+Mesh certification is optional and never changes whether a result may be
+published or used downstream.
 
 Internal worker invocation (called by SLURM, not by the user):
     python run_hpc_bor_monostatic.py --worker <run_dir> <job_index> <node_index>
@@ -69,7 +59,6 @@ from workflow_provenance import (
     describe_source_mismatch,
     manifest_solve_spec_fingerprint,
     runtime_environment_fingerprint,
-    sha256_file,
     stable_json_fingerprint,
     unit_solve_spec_fingerprint,
     embed_output_attestation,
@@ -83,13 +72,16 @@ from workflow_provenance import (
 FRD_DIR = "geometries/FRD"
 OPN_DIR = "geometries/OPN"
 
-# Requested sweep.  ASPECTS are angles from the +z rotation axis (0 =
-# nose-on, 90 = broadside, 180 = tail-on).  [0, 180] fully characterizes the
-# monostatic response; EXPAND_TO_360 fills the mirrored half in the export.
+# Requested monostatic grid.
 FREQUENCIES_GHZ = [1.0, 2.0, 3.0]
-ASPECTS_DEG     = [float(a) for a in range(0, 181, 3)]
-POLARIZATIONS   = ["VV", "HH"]          # keep both if you want --azel grids
-EXPAND_TO_360   = False
+AZIMUTHS_DEG    = [float(a) for a in range(0, 360, 5)]
+ELEVATIONS_DEG  = [float(e) for e in range(-60, 61, 5)]
+
+# Body-axis attitude in the radar/earth frame. Default: horizontal with the
+# nose at azimuth 0. Roll affects later feature orientation, not the bare BoR.
+BODY_AXIS_AZ_DEG = 0.0
+BODY_AXIS_EL_DEG = 0.0
+BODY_ROLL_DEG    = 0.0
 
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "rcs_runs_bor"
@@ -130,27 +122,6 @@ WORKERS_PER_UNIT        = 4              # threads inside one BoR solve (modes
                                          # + streaming tiles); pool size =
                                          # cores // WORKERS_PER_UNIT
 BLAS_THREADS_PER_WORKER = 1
-
-# --- Radar-frame (az, el) product ------------------------------------------
-# Built AUTOMATICALLY inside the workers: whenever a unit finishes and its
-# partner polarization's .grim already exists, that worker writes the
-# VV/HH/VH az/el grids for the (geometry, frequency) pair into
-# <run_dir>/azel/ (atomic renames, so two nodes racing on the same pair are
-# safe; whichever finishes second does the work).  Requires both "VV" and
-# "HH" in POLARIZATIONS.  The `--azel <run_dir>` CLI remains only as a
-# manual backfill / re-run (e.g. after editing the grid below).
-AZEL_ENABLE         = True
-AZEL_AZIMUTHS_DEG   = [float(a) for a in range(0, 360, 5)]
-AZEL_ELEVATIONS_DEG = [float(e) for e in range(-60, 61, 5)]
-AZEL_AXIS_AZ_DEG    = 0.0     # target axis orientation in the earth frame
-AZEL_AXIS_EL_DEG    = 0.0     # horizontal, nose toward azimuth 0.  NOTE the
-                              # polarization label mapping for horizontal
-                              # axes (bor_az_el_grid docstring).
-
-# Collect all per-frequency VV/HH files into one self-contained body GRIM per
-# geometry for feature_sum and other downstream workflows.  This does not run
-# another solve and accepts either certified or base-mesh results.
-BODY_GRIM_ENABLE    = True
 
 # --- Scheduling ------------------------------------------------------------
 # Units are costed at submit time and dealt out longest-processing-time-first,
@@ -297,17 +268,12 @@ def _unit_output_path(run_dir, unit):
     pol  = unit["polarization"]
     freq = float(unit["frequency_ghz"])
     stem = unit["geometry_stem"]
-    return run_dir / "results" / f"{pol}_{freq:.3f}GHz_{stem}.grim"
+    return run_dir / ".solver_units" / f"{pol}_{freq:.3f}GHz_{stem}.grim"
 
 
-def collect_bodies(run_dir_str, require_complete=True):
+def publish_monostatic(run_dir_str, require_complete=True):
     # type: (str, bool) -> Tuple[int, int]
-    """Collect a completed unit sweep into one downstream body GRIM per body.
-
-    Returns ``(written, skipped)``.  With ``require_complete=False`` an
-    incomplete sweep simply returns ``(0, 0)``; workers use that form so the
-    array task that observes the final unit can publish the body artifacts.
-    """
+    """Publish one user-facing monostatic GRIM per completed geometry."""
 
     run_dir = Path(run_dir_str).resolve()
     manifest = _manifest_for(run_dir)
@@ -320,22 +286,11 @@ def collect_bodies(run_dir_str, require_complete=True):
     if missing:
         if require_complete:
             raise ValueError(
-                f"Cannot collect body GRIMs: {len(missing)} solver output(s) "
-                f"are still missing; first missing: {missing[0]}."
+                f"Cannot publish monostatic response: {len(missing)} solver "
+                f"unit(s) remain; first missing: {missing[0]}."
             )
         return 0, 0
 
-    requested = {
-        str(pol).upper() for pol in manifest.get("polarizations", [])
-    }
-    if not {"VV", "HH"}.issubset(requested):
-        if require_complete:
-            raise ValueError(
-                "Body GRIM collection needs both VV and HH in POLARIZATIONS."
-            )
-        return 0, 0
-
-    # Verify every raw unit against the immutable run before deriving a body.
     from hpc_common import (
         bodies_from_units,
         read_unit_grims,
@@ -344,54 +299,73 @@ def collect_bodies(run_dir_str, require_complete=True):
     )
     require_hpc_run_provenance(manifest, "ghost.hpc.bor-run.v1")
     require_hpc_output_attestations(run_dir, manifest)
-    records = read_unit_grims(run_dir / "results")
+    records = read_unit_grims(run_dir / str(manifest["unit_output_dir"]))
 
-    from feature_sum import outer_generatrix, save_body_grim
+    from feature_sum import (
+        load_body_grim,
+        load_body_requested_radar_grid,
+        outer_generatrix,
+        save_monostatic_grim,
+    )
     from geometry_io import build_geometry_snapshot, parse_geometry
 
-    out_dir = run_dir / "bodies"
+    grid = dict(manifest["radar_grid"])
+    out_dir = run_dir / "results"
     out_dir.mkdir(exist_ok=True)
     written = skipped = 0
     for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
         matching = [unit for unit in units if unit["geometry_stem"] == stem]
         geometry = Path(str(matching[0]["geometry"]))
+        destination = out_dir / f"{stem}.grim"
+        if destination.is_file():
+            try:
+                load_body_grim(str(destination))
+                stored_grid = load_body_requested_radar_grid(str(destination))
+                comparable = {
+                    key: stored_grid[key]
+                    for key in (
+                        "azimuths_deg", "elevations_deg", "frequencies_ghz",
+                        "axis_az_deg", "axis_el_deg", "roll_deg",
+                    )
+                }
+                if comparable == {
+                    key: grid[key]
+                    for key in comparable
+                }:
+                    skipped += 1
+                    continue
+            except (OSError, TypeError, ValueError):
+                pass
         snapshot = build_geometry_snapshot(
             *parse_geometry(geometry.read_text(encoding="utf-8"))
         )
         profile = outer_generatrix(
             snapshot, str(manifest["solver_config"]["geometry_units"])
         )
-        bodies = bodies_from_units(records, stem=stem)
-        destination = out_dir / f"{stem}.grim"
-        if destination.is_file():
-            from feature_sum import verify_body_artifact_bundle
-            try:
-                verify_body_artifact_bundle(str(destination))
-                skipped += 1
-                continue
-            except (OSError, TypeError, ValueError):
-                # Rebuild a damaged derived artifact atomically from the
-                # verified raw units; the original remains until replacement.
-                pass
-        temporary = out_dir / f".{stem}.{os.getpid()}.tmp.grim"
-        save_body_grim(
-            bodies,
-            str(temporary),
-            history="run_hpc_bor_monostatic.py collected body",
+        save_monostatic_grim(
+            bodies_from_units(records, stem=stem),
+            profile,
+            str(destination),
+            azimuths_deg=grid["azimuths_deg"],
+            elevations_deg=grid["elevations_deg"],
+            axis_az_deg=float(grid["axis_az_deg"]),
+            axis_el_deg=float(grid["axis_el_deg"]),
+            roll_deg=float(grid.get("roll_deg", 0.0)),
+            history="run_hpc_bor_monostatic.py monostatic response",
             source_path=str(matching[0].get("geometry_original", geometry)),
-            geometry_input_sha256=str(
-                matching[0].get("geometry_input_sha256", "")
-            ),
-            solver_source_sha256=str(
-                manifest.get("solver_source_sha256", "")
-            ),
-            runtime_environment_sha256=str(
-                manifest.get("runtime_environment_sha256", "")
-            ),
-            run_solve_spec_sha256=manifest_solve_spec_fingerprint(manifest),
-            body_profile=profile,
+            artifact_metadata={
+                "geometry_input_sha256": str(
+                    matching[0].get("geometry_input_sha256", "")
+                ),
+                "solver_source_sha256": str(
+                    manifest.get("solver_source_sha256", "")
+                ),
+                "runtime_environment_sha256": str(
+                    manifest.get("runtime_environment_sha256", "")
+                ),
+                "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
+            },
         )
-        os.replace(str(temporary), str(destination))
         written += 1
     return written, skipped
 
@@ -436,107 +410,6 @@ def _channel_result(result, polarization):
     channel["polarization_export"] = polarization
     channel["metadata"] = dict(result.get("metadata", {}) or {})
     return channel
-
-
-def _azel_out_paths(run_dir, stem, freq):
-    # type: (Path, str, float) -> List[Path]
-    return [run_dir / "azel" / f"azel_{freq:.3f}GHz_{stem}_{ch}.grim"
-            for ch in ("VV", "HH", "VH")]
-
-
-def _azel_attestation_fields(
-    manifest, stem, freq, channel, azel_cfg, vv_path, hh_path
-):
-    # type: (Dict[str, Any], str, float, str, Dict[str, Any], Path, Path) -> Dict[str, Any]
-    return {
-        "run_id": str(manifest["run_id"]),
-        "solver_source_sha256": str(manifest["solver_source_sha256"]),
-        "runtime_environment_sha256":
-            str(manifest["runtime_environment_sha256"]),
-        "run_solve_spec_sha256":
-            manifest_solve_spec_fingerprint(manifest),
-        "derived_product": "bor_az_el_grid",
-        "geometry_stem": str(stem),
-        "frequency_ghz": float(freq),
-        "polarization": str(channel),
-        "azel_config_sha256": stable_json_fingerprint(azel_cfg),
-        "source_vv_sha256": sha256_file(str(vv_path)),
-        "source_hh_sha256": sha256_file(str(hh_path)),
-    }
-
-
-def _build_azel_pair(run_dir, stem, freq, azel_cfg):
-    # type: (Path, str, float, Dict[str, Any]) -> bool
-    """Build the radar-frame az/el grids for one (geometry, frequency) pair
-    from its VV + HH .grim exports.  Idempotent; atomic via temp + rename so
-    concurrent attempts from different nodes cannot interleave writes."""
-    outs = _azel_out_paths(run_dir, stem, freq)
-    vv = run_dir / "results" / f"VV_{freq:.3f}GHz_{stem}.grim"
-    hh = run_dir / "results" / f"HH_{freq:.3f}GHz_{stem}.grim"
-    if not (vv.exists() and hh.exists()):
-        return False
-    manifest = _manifest_for(run_dir)
-    for polarization, path in (("VV", vv), ("HH", hh)):
-        matching = [
-            unit for unit in manifest.get("units", [])
-            if unit.get("geometry_stem") == stem
-            and unit.get("polarization") == polarization
-            and float(unit.get("frequency_ghz")) == float(freq)
-        ]
-        if len(matching) != 1:
-            raise ValueError(
-                f"Cannot identify one {polarization} unit attestation for "
-                f"{stem} at {freq:g} GHz."
-            )
-        verify_embedded_attestation(
-            str(path), _unit_attestation_fields(manifest, matching[0])
-        )
-
-    expected_by_path = {
-        path: _azel_attestation_fields(
-            manifest, stem, freq, channel, azel_cfg, vv, hh
-        )
-        for path, channel in zip(outs, ("VV", "HH", "VH"))
-    }
-    if all(path.exists() for path in outs):
-        try:
-            for path in outs:
-                verify_embedded_attestation(
-                    str(path), expected_by_path[path]
-                )
-            return False
-        except ValueError:
-            # Changed grid/config/source or edited bytes: rebuild the complete
-            # three-channel derived product below.
-            pass
-
-    from bor_dispatch import bor_az_el_grid
-    from grim_io import save_bor_az_el_grim
-    rv = _result_from_grim(vv, "VV")
-    rh = _result_from_grim(hh, "HH")
-    grid = bor_az_el_grid(
-        rv, rh, azel_cfg["azimuths_deg"], azel_cfg["elevations_deg"],
-        axis_az_deg=float(azel_cfg["axis_az_deg"]),
-        axis_el_deg=float(azel_cfg["axis_el_deg"]))
-    out_dir = run_dir / "azel"
-    out_dir.mkdir(exist_ok=True)
-    tmp_stem = out_dir / f".tmp_{os.getpid()}_{freq:.3f}GHz_{stem}.grim"
-    # Each channel carries its own attestation inside the file it is written
-    # into, so the derived products need no sidecars either.
-    channel_metadata = {
-        channel: {"output_attestation": dict(
-            expected_by_path[path],
-            schema="ghost.workflow.embedded-attestation.v1",
-        )}
-        for path, channel in zip(outs, ("VV", "HH", "VH"))
-    }
-    written = save_bor_az_el_grim(
-        grid, str(tmp_stem), source_path=stem,
-        history=f"run_hpc_bor_monostatic.py azel {freq}GHz",
-        channel_metadata=channel_metadata)
-    for tmp, final in zip(sorted(written), sorted(str(p) for p in outs)):
-        os.replace(tmp, final)
-    return True
 
 
 # The manifest carries every unit in the run, so re-reading and re-parsing it
@@ -615,7 +488,7 @@ def _solve_and_export(pair, snapshot, material_base, run_dir_str):
         stream_budget_gb=float(solver_config.get(
             "stream_budget_gb", STREAM_BUDGET_GB
         )),
-        expand_to_360=bool(manifest.get("expand_to_360", EXPAND_TO_360)),
+        expand_to_360=False,
     )
     for w in result["metadata"].get("warnings", []) or []:
         print(f"      [warn] {pair['geometry_stem']}: {w}", flush=True)
@@ -641,20 +514,6 @@ def _solve_and_export(pair, snapshot, material_base, run_dir_str):
     _verify_run_provenance(manifest)
     for unit in channel_units:
         _verify_unit_input(unit, manifest)
-
-    # az/el product: whichever polarization of the pair finishes second
-    # builds it (config from the manifest, so all nodes agree).
-    if bool((manifest.get("azel_config") or {}).get("enabled", False)):
-        try:
-            cfg = manifest.get("azel_config") or {}
-            if cfg and _build_azel_pair(run_dir, pair["geometry_stem"],
-                                        float(pair["frequency_ghz"]), cfg):
-                print(f"      azel grids written for {pair['geometry_stem']} "
-                      f"{pair['frequency_ghz']:.3f}GHz", flush=True)
-        except Exception:
-            print("      [warn] azel product failed:", flush=True)
-            for line in traceback.format_exc().rstrip().splitlines():
-                print(f"        {line}", flush=True)
 
     return ("written", ", ".join(actual_paths))
 
@@ -731,25 +590,24 @@ def submit():
     if not geometries:
         sys.exit("ERROR: no geometry files (*.geo) found under FRD_DIR or OPN_DIR.")
 
-    pols = [p.strip().upper() for p in POLARIZATIONS if p and p.strip()]
-    if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
+    pols = ["VV", "HH"]
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
-    if not ASPECTS_DEG:     sys.exit("ERROR: ASPECTS_DEG is empty.")
     try:
-        # A BoR unit's channels are theta-pol and phi-pol, so VV/HH is the
-        # canonical spelling here and TM/TE are the aliases -- the reverse of
-        # the 2-D elevation-cut convention. Either is accepted and both land on
-        # VV/HH names, which is what the az/el pairing below looks for.
-        pols = hpc_scheduler.distinct_polarization_channels(
-            pols, hpc_scheduler.canonical_bor_polarization
-        )
+        from feature_sum import radar_grid_aspects, validate_radar_grid
+        validate_radar_grid(AZIMUTHS_DEG, ELEVATIONS_DEG)
+        aspects = [float(value) for value in radar_grid_aspects(
+            AZIMUTHS_DEG,
+            ELEVATIONS_DEG,
+            BODY_AXIS_AZ_DEG,
+            BODY_AXIS_EL_DEG,
+        )]
+        attitude = [float(value) for value in (
+            BODY_AXIS_AZ_DEG, BODY_AXIS_EL_DEG, BODY_ROLL_DEG
+        )]
+        if not all(math.isfinite(value) for value in attitude):
+            raise ValueError("body-axis attitude angles must be finite")
     except ValueError as exc:
-        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
-    if BODY_GRIM_ENABLE and not {"VV", "HH"}.issubset(set(pols)):
-        sys.exit(
-            "ERROR: BODY_GRIM_ENABLE=True requires both VV and HH in "
-            "POLARIZATIONS. Disable body collection for a single-channel run."
-        )
+        sys.exit(f"ERROR: radar grid is invalid -- {exc}")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
     if (
         not all(math.isfinite(value) and value > 0.0
@@ -762,15 +620,6 @@ def submit():
             "ERROR: frequencies must be finite, positive, unique, and "
             "distinct at the 0.001 GHz output-name precision."
         )
-    aspects = [float(value) for value in ASPECTS_DEG]
-    if (
-        not all(math.isfinite(value) for value in aspects)
-        or len(set(aspects)) != len(aspects)
-    ):
-        sys.exit("ERROR: ASPECTS_DEG must be finite and unique.")
-    if any(a < 0.0 or a > 180.0 for a in aspects):
-        sys.exit("ERROR: BoR aspects must lie in [0, 180] deg from the +z "
-                 "axis (use EXPAND_TO_360 for the mirrored half).")
     if (
         not math.isfinite(float(CFIE_ALPHA))
         or not 0.0 <= float(CFIE_ALPHA) <= 1.0
@@ -817,9 +666,8 @@ def submit():
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "logs").mkdir()
     (run_dir / "results").mkdir()
+    (run_dir / ".solver_units").mkdir()
     (run_dir / "claims").mkdir()
-    if BODY_GRIM_ENABLE:
-        (run_dir / "bodies").mkdir()
 
     # Freeze the exact solver inputs inside the run.  Referencing the discovery
     # folder directly makes an active/archived run mutable: a later staging
@@ -894,9 +742,10 @@ def submit():
         "opn_dir":         str(Path(OPN_DIR).resolve()),
         "output_dir":      str(run_dir),
         "frequencies_ghz": list(FREQUENCIES_GHZ),
-        "aspects_deg":     list(ASPECTS_DEG),
+        "aspects_deg":     aspects,
         "polarizations":   pols,
-        "expand_to_360":   bool(EXPAND_TO_360),
+        "expand_to_360":   False,
+        "unit_output_dir": ".solver_units",
         "n_nodes":         int(N_NODES),
         "n_jobs":          int(N_JOBS),
         "n_slots":         int(N_NODES) * int(N_JOBS),
@@ -920,15 +769,13 @@ def submit():
             "blas_threads_per_worker": BLAS_THREADS_PER_WORKER,
             "cores_per_node":          CORES_PER_NODE,
         },
-        "azel_config": {
-            "enabled":        bool(AZEL_ENABLE),
-            "azimuths_deg":   list(AZEL_AZIMUTHS_DEG),
-            "elevations_deg": list(AZEL_ELEVATIONS_DEG),
-            "axis_az_deg":    AZEL_AXIS_AZ_DEG,
-            "axis_el_deg":    AZEL_AXIS_EL_DEG,
-        },
-        "body_grim_config": {
-            "enabled": bool(BODY_GRIM_ENABLE),
+        "radar_grid": {
+            "azimuths_deg":   [float(value) for value in AZIMUTHS_DEG],
+            "elevations_deg": [float(value) for value in ELEVATIONS_DEG],
+            "frequencies_ghz": frequencies,
+            "axis_az_deg":    float(BODY_AXIS_AZ_DEG),
+            "axis_el_deg":    float(BODY_AXIS_EL_DEG),
+            "roll_deg":       float(BODY_ROLL_DEG),
         },
         "units": units,
     }
@@ -948,15 +795,15 @@ def submit():
     print("=" * 70)
     print(f"  Run dir       : {run_dir}")
     print(f"  Geometries    : {len(geometries)}")
-    print(f"  Polarizations : {', '.join(pols)}")
+    print(f"  Polarizations : VV, HH (co-solved; VH also published)")
     print(f"  Frequencies   : {len(FREQUENCIES_GHZ)}  "
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
-    print(f"  Aspects       : {len(ASPECTS_DEG)}  (0-180 from the axis"
-          f"{', mirrored to 360 on export' if EXPAND_TO_360 else ''})")
-    print(f"  Output files  : {len(units)}  (geom x freq x pol)")
+    print(f"  Radar grid    : {len(AZIMUTHS_DEG)} az x "
+          f"{len(ELEVATIONS_DEG)} el")
+    print(f"  Solver aspects: {len(aspects)} exact body-aspect RHS columns")
+    print(f"  Deliverables  : {len(geometries)} monostatic GRIM(s)")
     print(f"  Physical solves: {len(_paired_solve_units(units))}  (VV/HH co-solved)")
     print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
-    print(f"  Body GRIMs    : {'enabled' if BODY_GRIM_ENABLE else 'disabled'}")
     print(f"  Slots         : {N_JOBS} job(s) x {N_NODES} node(s)")
     print(f"  Per unit      : {WORKERS_PER_UNIT} threads (modes + streaming "
           f"tiles), assembly={ASSEMBLY}, precision={TABLE_PRECISION}")
@@ -988,10 +835,7 @@ def submit():
         print(f"  {res.stdout.strip()}")
 
     print(f"\nMonitor with:  squeue -u $USER")
-    print(f"Outputs in:    {run_dir}/results/"
-          + (f"  (+ az/el grids in {run_dir}/azel/)" if AZEL_ENABLE else ""))
-    if BODY_GRIM_ENABLE:
-        print(f"Body inputs:   {run_dir}/bodies/")
+    print(f"Monostatic outputs in: {run_dir}/results/")
 
 
 # --- worker mode (invoked by SLURM) ----------------------------------------
@@ -1252,89 +1096,26 @@ def worker(run_dir_str, job_index, node_index):
           f"left to other tasks={counters['passed']}.  {elapsed:.1f} s elapsed.")
     if counters["failed"]:
         raise SystemExit(1)
-    if bool((manifest.get("body_grim_config") or {}).get("enabled", False)):
-        try:
-            n_written, n_skipped = collect_bodies(
-                str(run_dir), require_complete=False
+    try:
+        n_written, n_skipped = publish_monostatic(
+            str(run_dir), require_complete=False
+        )
+        if n_written or n_skipped:
+            print(
+                f"  Monostatic GRIMs: {n_written} written, {n_skipped} "
+                f"already present in {run_dir / 'results'}/",
+                flush=True,
             )
-            if n_written or n_skipped:
-                print(
-                    f"  Body GRIMs: {n_written} written, {n_skipped} already "
-                    f"present in {run_dir / 'bodies'}/",
-                    flush=True,
-                )
-        except Exception:
-            print("      [warn] body GRIM collection failed:", flush=True)
-            for line in traceback.format_exc().rstrip().splitlines():
-                print(f"        {line}", flush=True)
+    except Exception:
+        print("      [warn] monostatic publication failed:", flush=True)
+        for line in traceback.format_exc().rstrip().splitlines():
+            print(f"        {line}", flush=True)
 
 
 def _pool_initializer(blas_threads):
     # type: (int) -> None
     hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
-
-
-# --- az/el post-processing mode (login node, after the sweep) --------------
-
-def _result_from_grim(path, pol):
-    # type: (Path, str) -> Dict[str, Any]
-    """Reconstruct the minimal result dict bor_az_el_grid needs from a .grim
-    (the exports preserve the complex far-field amplitudes)."""
-    import numpy as np
-    d = np.load(str(path))
-    # NpzFile.get() only exists on numpy >= 1.25; use .files membership so
-    # this runs on older HPC numpy builds too.
-    if ("raw_complex_amplitude_preserved" not in getattr(d, "files", [])
-            or not bool(d["raw_complex_amplitude_preserved"])):
-        raise ValueError(f"{path.name}: complex amplitudes were not preserved.")
-    samples = []
-    az = d["azimuths"]           # aspect angles for BoR exports
-    freqs = d["frequencies"]
-    ar, ai = d["rcs_amp_real"], d["rcs_amp_imag"]
-    for i, th in enumerate(az):
-        if float(th) > 180.0:
-            continue             # skip the EXPAND_TO_360 mirror half
-        for kf, f in enumerate(freqs):
-            samples.append({
-                "frequency_ghz": float(f),
-                "theta_inc_deg": float(th),
-                "theta_scat_deg": float(th),
-                "rcs_amp_real": float(ar[i, 0, kf, 0]),
-                "rcs_amp_imag": float(ai[i, 0, kf, 0]),
-                "rcs_linear": float(d["rcs_power"][i, 0, kf, 0]),
-                "rcs_db": 10.0 * math.log10(max(float(d["rcs_power"][i, 0, kf, 0]), 1e-30)),
-                "rcs_amp_phase_deg": 0.0,
-            })
-    return {"polarization": pol, "samples": samples}
-
-
-def azel(run_dir_str):
-    # type: (str) -> None
-    """Manual backfill: normally unnecessary -- the workers build each pair's
-    az/el product automatically as the second polarization finishes.  Use
-    this only to (re)build after editing the AZEL_* grid in the manifest, or
-    if AZEL_ENABLE was off during the sweep."""
-
-    run_dir  = Path(run_dir_str).resolve()
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    cfg = dict(manifest.get("azel_config") or {})
-    cfg.setdefault("azimuths_deg", AZEL_AZIMUTHS_DEG)
-    cfg.setdefault("elevations_deg", AZEL_ELEVATIONS_DEG)
-    cfg.setdefault("axis_az_deg", AZEL_AXIS_AZ_DEG)
-    cfg.setdefault("axis_el_deg", AZEL_AXIS_EL_DEG)
-
-    keys = sorted({(u["geometry_stem"], float(u["frequency_ghz"]))
-                   for u in manifest["units"]})
-    n_done = n_skip = 0
-    for stem, freq in keys:
-        if _build_azel_pair(run_dir, stem, freq, cfg):
-            n_done += 1
-            print(f"  {stem} {freq:.3f}GHz -> azel_{freq:.3f}GHz_{stem}_[VV|HH|VH].grim")
-        else:
-            n_skip += 1
-    print(f"\n  az/el grids: {n_done} written, {n_skip} skipped (already "
-          f"built or missing a polarization).  Outputs: {run_dir / 'azel'}/")
 
 
 # --- entry point -----------------------------------------------------------
@@ -1347,24 +1128,17 @@ def main():
         help="Internal: execute one array-task slice. Invoked by SLURM.",
     )
     ap.add_argument(
-        "--azel", metavar="RUN_DIR",
-        help="Post-process a completed run into radar-frame (az, el) "
-             "polarimetric grids (needs both VV and HH units).",
-    )
-    ap.add_argument(
-        "--collect-bodies", metavar="RUN_DIR",
-        help="Collect a completed run into one downstream-ready body GRIM "
-             "per geometry (needs both VV and HH units).",
+        "--publish", metavar="RUN_DIR",
+        help="Publish/rebuild the one monostatic GRIM per geometry after a "
+             "completed solve.",
     )
     args = ap.parse_args()
     if args.worker:
         worker(args.worker[0], int(args.worker[1]), int(args.worker[2]))
-    elif args.azel:
-        azel(args.azel)
-    elif args.collect_bodies:
-        written, skipped = collect_bodies(args.collect_bodies)
+    elif args.publish:
+        written, skipped = publish_monostatic(args.publish)
         print(
-            f"Body GRIMs: {written} written, {skipped} already present."
+            f"Monostatic GRIMs: {written} written, {skipped} already present."
         )
     else:
         submit()

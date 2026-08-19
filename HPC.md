@@ -16,7 +16,7 @@ cancelled, or is preempted cannot strand work.
 | Solver | SLURM entry point | Same sweep, one machine | Output |
 |---|---|---|---|
 | 2-D arbitrary geometry | `Backend/run_hpc_monostatic.py` | `Backend/run_local_monostatic.py` | `<OUTPUT_DIR>/run_*/results/{FRD,OPN}/` |
-| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | unit files in `results/`, collected inputs in `bodies/` |
+| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | one monostatic `results/<geometry>.grim`; hidden restart units in `.solver_units/` |
 
 Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
 knobs below mean the same thing in each.
@@ -39,7 +39,8 @@ sweep finishes and what it leaves behind --
   since there is far less headroom to absorb a wrong guess;
 - assembly threads sized from the concurrency memory will actually permit
   (section 2, *Threads*);
-- one `.grim` per unit in `results/` and nothing beside it (section 3);
+- 2-D unit GRIMs in `results/`; one complete BoR monostatic GRIM per geometry
+  in `results/`, with internal restart units under `.solver_units/` (section 3);
 - the shared angular grid stored once, not once per unit (section 3);
 - resumption by verifying the binding carried inside each existing result.
 
@@ -55,8 +56,7 @@ python Backend/run_local_monostatic.py
 
 ### Naming polarizations
 
-Every driver, local and SLURM alike, takes either spelling of the same two
-physical channels:
+The 2-D drivers take either spelling of the same two physical channels:
 
 | Radar | 2-D | Why |
 |---|---|---|
@@ -69,10 +69,9 @@ changing what you type in CONFIG never forks a sweep into two sets of files:
 
 - `run_hpc_monostatic.py` / `run_local_monostatic.py` name files with the label
   you wrote, and default to `["VV", "HH"]`.
-- The BoR drivers always name files `VV_`/`HH_` -- a BoR unit's channels really
-  are theta-pol and phi-pol, and the az/el pairing looks for those names. When
-  both are requested, the scheduler performs one physical BoR solve and writes
-  both compatible output files from the co-solved fields.
+- The BoR drivers always co-solve VV and HH and publish VV, HH, and the derived
+  radar-frame VH channel in the one monostatic file. Polarization is therefore
+  not a user sweep control for BoR.
 
 Listing one channel under two names (`["VV", "TE"]`) is rejected rather than
 silently solving the same physics twice and publishing it under two names,
@@ -320,21 +319,20 @@ To force a completely fresh sweep, delete `claims/`.
 
 ### What lands in results/
 
-One `.grim` per unit. Nothing else.
-
 For 2-D runs, those unit files are placed under `results/FRD/` and
 `results/OPN/`, preserving the geometry role expected by the concatenate and
 subtract tools. `1c_build_deltas/concat_pols.py` automatically selects the
 newest complete `rcs_runs/run_*/results/` folder when no input path is given.
 
-For BoR runs, `BODY_GRIM_ENABLE = True` additionally collects the verified
-unit files into `bodies/<geometry>.grim`, with both polarizations, all
-frequencies, and the outer profile needed by `feature_sum`. Collection runs
-automatically when the sweep completes and performs no additional field solve.
-It can be rerun explicitly with:
+For BoR runs, `results/<geometry>.grim` is the sole user-facing monostatic
+dataset. It contains the requested azimuth/elevation/frequency VV/HH/VH arrays
+and embeds the exact BoR aspect field plus outer profile needed for coherent
+feature placement. Per-frequency co-solved units live in `.solver_units/` only
+as verified restart state. Publication performs no additional field solve and
+can be rerun explicitly with:
 
 ```bash
-python Backend/run_hpc_bor_monostatic.py --collect-bodies /path/to/run_dir
+python Backend/run_hpc_bor_monostatic.py --publish /path/to/run_dir
 ```
 
 Each result is bound to its run -- source build, runtime, geometry inputs,
