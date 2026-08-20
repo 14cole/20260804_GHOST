@@ -119,7 +119,11 @@ centre, `exp(+j omega t)`, and the documented cavity-frame VV/HH/VH basis. This
 supplies convention tags lost by the GUI; any retained contradictory tag is
 still rejected. The loader reconstructs `F` from stored sigma and phase and
 continues to enforce sigma_3d/dBsm normalization, the full VV/HH/VH matrix, a
-complete azimuth seam, and compatible frequency/elevation coverage.
+complete azimuth period, and compatible frequency/elevation coverage. The
+normal unique-look form (`0..359` by 1 degree, for example) is accepted and
+closed internally by copying the first complex sample to the interpolation
+seam. A dataset that already contains both 0 and 360 is also accepted when
+those complex samples match; incomplete or irregular partial coverage is not.
 
 ## Building a door or seam delta
 

@@ -1867,13 +1867,6 @@ def _load_pattern(pattern, *, declared_coherent_delta=False):
         raise ValueError("point pattern frequencies must be positive.")
     if el[0] < -90.0 - 1e-9 or el[-1] > 90.0 + 1e-9:
         raise ValueError("point pattern elevation must lie in [-90, 90] deg.")
-    az_span = float(az[-1] - az[0]) if len(az) > 1 else 0.0
-    if len(az) < 2 or not math.isclose(
-            az_span, 360.0, rel_tol=0.0, abs_tol=1e-6):
-        raise ValueError(
-            "point pattern must explicitly cover one complete 360-degree "
-            "azimuth period, including matching first/last seam endpoints; "
-            f"got span {az_span:g} deg. Partial data are not silently wrapped.")
     expected = (len(az), len(el), len(fr), len(pols))
     if amp.shape != expected:
         raise ValueError(
@@ -1881,9 +1874,50 @@ def _load_pattern(pattern, *, declared_coherent_delta=False):
             f"{expected}.")
     if not np.all(np.isfinite(amp.real) & np.isfinite(amp.imag)):
         raise ValueError("point pattern contains NaN or infinite amplitudes.")
-    if not np.allclose(amp[0], amp[-1], rtol=2e-5, atol=1e-10):
-        raise ValueError("point pattern includes both azimuth seam endpoints "
-                         "but their complex amplitudes do not agree.")
+    az_span = float(az[-1] - az[0]) if len(az) > 1 else 0.0
+    if math.isclose(az_span, 360.0, rel_tol=0.0, abs_tol=1e-6):
+        if not np.allclose(amp[0], amp[-1], rtol=2e-5, atol=1e-10):
+            raise ValueError(
+                "point pattern includes both azimuth seam endpoints but "
+                "their complex amplitudes do not agree."
+            )
+    else:
+        # Normal monostatic grids contain one unique revolution (for example
+        # 0..359 by 1 deg), not duplicate 0/360 looks. Close that periodic seam
+        # internally only when the axis itself proves full uniform coverage:
+        # every internal step and the wrap gap must be the same. A partial or
+        # irregular cut is still never silently wrapped.
+        steps = np.diff(az)
+        step = float(np.median(steps)) if len(steps) else float("nan")
+        wrap_gap = float(az[0] + 360.0 - az[-1]) if len(az) else float("nan")
+        axis_scale = max(1.0, float(np.max(np.abs(az)))) if len(az) else 1.0
+        # GRIM axes may have been serialized as float32. Allow several ulps at
+        # the largest azimuth while still distinguishing a genuinely missing
+        # angular sample from roundoff.
+        axis_tol = max(
+            1e-9,
+            8.0 * abs(float(np.spacing(np.float32(axis_scale)))),
+        )
+        uniform = (
+            len(az) >= 3
+            and math.isfinite(step)
+            and step > 0.0
+            and np.allclose(steps, step, rtol=1e-8, atol=axis_tol)
+            and math.isclose(
+                wrap_gap, step, rel_tol=1e-8,
+                abs_tol=axis_tol,
+            )
+        )
+        if not uniform:
+            raise ValueError(
+                "point pattern must cover one complete 360-degree azimuth "
+                "period. Accepted forms are matching first/last seam "
+                "endpoints or one complete uniform unique-look grid; got "
+                f"span {az_span:g} deg and wrap gap {wrap_gap:g} deg. "
+                "Partial data are not silently wrapped."
+            )
+        az = np.concatenate([az, [az[0] + 360.0]])
+        amp = np.concatenate([amp, amp[:1]], axis=0)
 
     idx = {}
     for i, p in enumerate(pols):
@@ -1937,7 +1971,8 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
     ``pattern``          .grim path or dict of the delta (see _load_pattern).
                          It must carry the exact metadata returned by
                          point_pattern_convention_metadata(), cover a complete
-                         continuous 360-degree azimuth seam, and support every
+                         360-degree azimuth period (a unique-look grid such as
+                         0..359 is closed internally), and support every
                          requested lit elevation.
     ``location``         r_c (3,), the cavity phase centre on the body (place it
                          where the external solver put ITS phase origin).

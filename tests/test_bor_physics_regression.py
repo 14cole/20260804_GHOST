@@ -172,7 +172,12 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
 class BoRWorkflowRegressionTests(unittest.TestCase):
     def test_declared_gui_compact_subtraction_reconstructs_physical_field(self):
         source = _constant_compact_pattern()
-        amplitude = source["amp"]
+        source["azimuths"] = np.arange(
+            0.0, 360.0, 0.1, dtype=np.float32
+        )
+        amplitude = np.repeat(
+            source["amp"][:1], len(source["azimuths"]), axis=0
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "gui_coherent_subtraction.grim"
             payload = {
@@ -200,8 +205,14 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             prepared = feature_sum.prepare_point_pattern(
                 str(path), declared_coherent_delta=True
             )
+            self.assertEqual(len(prepared.azimuths), 3601)
+            self.assertEqual(prepared.azimuths[-1], 360.0)
             np.testing.assert_allclose(
-                prepared.amplitude, amplitude, rtol=2.0e-6, atol=2.0e-7
+                prepared.amplitude[:-1], amplitude,
+                rtol=2.0e-6, atol=2.0e-7
+            )
+            np.testing.assert_array_equal(
+                prepared.amplitude[-1], prepared.amplitude[0]
             )
 
             # A retained convention is authoritative and cannot contradict
@@ -210,6 +221,17 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             with path.open("wb") as stream:
                 np.savez(stream, **payload)
             with self.assertRaisesRegex(ValueError, "phase_reference"):
+                feature_sum.prepare_point_pattern(
+                    str(path), declared_coherent_delta=True
+                )
+
+            payload.pop("phase_reference")
+            payload["azimuths"] = source["azimuths"][:-1]
+            for key in ("rcs_power", "rcs_phase"):
+                payload[key] = payload[key][:-1]
+            with path.open("wb") as stream:
+                np.savez(stream, **payload)
+            with self.assertRaisesRegex(ValueError, "Partial data"):
                 feature_sum.prepare_point_pattern(
                     str(path), declared_coherent_delta=True
                 )
