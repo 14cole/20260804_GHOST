@@ -113,11 +113,13 @@ measured against a directly featured full-wave platform solve.
 
 A compact result made with GRIM's **Coherent subtraction** may retain the
 generic `power_phase` domain label and omit redundant raw real/imaginary arrays.
-Listing it in `COMPACT_FEATURES` explicitly declares that operation to be
-installed-feature minus clean-skin. The placement loader reconstructs `F` from
-the stored sigma and phase, but continues to require the exact cavity phase
-origin, sigma_3d/dBsm normalization, full VV/HH/VH matrix, complete azimuth
-seam, and compatible frequency/elevation coverage.
+Listing it in `COMPACT_FEATURES` explicitly attests that operation to be
+installed-feature minus clean-skin with the local origin at the aperture phase
+centre, `exp(+j omega t)`, and the documented cavity-frame VV/HH/VH basis. This
+supplies convention tags lost by the GUI; any retained contradictory tag is
+still rejected. The loader reconstructs `F` from stored sigma and phase and
+continues to enforce sigma_3d/dBsm normalization, the full VV/HH/VH matrix, a
+complete azimuth seam, and compatible frequency/elevation coverage.
 
 ## Building a door or seam delta
 

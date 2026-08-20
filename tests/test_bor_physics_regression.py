@@ -173,7 +173,6 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
     def test_declared_gui_compact_subtraction_reconstructs_physical_field(self):
         source = _constant_compact_pattern()
         amplitude = source["amp"]
-        metadata = feature_sum.point_pattern_convention_metadata()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "gui_coherent_subtraction.grim"
             payload = {
@@ -187,7 +186,6 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 "rcs_phase": np.angle(amplitude).astype(np.float32),
                 "rcs_domain": np.asarray("power-phase"),
                 "power_domain": np.asarray("linear_rcs"),
-                "phase_reference": np.asarray(metadata["phase_reference"]),
                 "units": np.asarray(json.dumps({
                     "azimuth": "deg", "elevation": "deg",
                     "frequency": "GHz", "rcs_log_unit": "dBsm",
@@ -206,6 +204,8 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 prepared.amplitude, amplitude, rtol=2.0e-6, atol=2.0e-7
             )
 
+            # A retained convention is authoritative and cannot contradict
+            # the explicit COMPACT_FEATURES declaration.
             payload["phase_reference"] = np.asarray("wrong origin")
             with path.open("wb") as stream:
                 np.savez(stream, **payload)

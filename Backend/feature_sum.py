@@ -1734,16 +1734,19 @@ def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
                 "accept only 'delta' or a GUI coherent-subtraction "
                 "'power_phase' container."
             )
-        # Listing this file in COMPACT_FEATURES declares the operation meaning
-        # (installed feature minus matching clean skin). The GUI's generic
-        # coherent-subtraction grid may drop these semantic tags, but it must
-        # retain the exact phase origin. Any retained tag must still agree.
-        phase = _metadata_text(metadata, "phase_reference", label)
-        if phase != expected["phase_reference"]:
-            raise ValueError(
-                f"{label}: incompatible compact-pattern phase_reference: "
-                f"got {phase!r}; require {expected['phase_reference']!r}."
-            )
+        # Listing this file in COMPACT_FEATURES declares both the operation
+        # meaning (installed feature minus matching clean skin) and the cavity
+        # frame/origin convention documented by place_features.py. GRIM's
+        # generic coherent-subtraction grid may drop these semantic tags. A
+        # missing tag is therefore supplied by that explicit declaration, but
+        # any retained tag must still agree exactly.
+        if "phase_reference" in metadata:
+            phase = _metadata_text(metadata, "phase_reference", label)
+            if phase != expected["phase_reference"]:
+                raise ValueError(
+                    f"{label}: incompatible compact-pattern phase_reference: "
+                    f"got {phase!r}; require {expected['phase_reference']!r}."
+                )
         for key in (
             "amplitude_convention",
             "complex_field_domain",
@@ -1906,9 +1909,10 @@ def prepare_point_pattern(pattern, *, declared_coherent_delta=False
     """Validate and load one compact pattern once for repeated placement.
 
     ``declared_coherent_delta=True`` is for a GUI power/phase result that the
-    caller explicitly declares to be installed-feature minus clean-skin. It
-    relaxes only metadata lost by that GUI operation; physical phase origin,
-    units, grid, polarization, seam, and normalization checks remain strict.
+    caller explicitly attests is installed-feature minus clean-skin in the
+    documented cavity frame and phase origin. It supplies only convention tags
+    lost by that GUI operation; units, grid, polarization, seam, normalization,
+    and any convention metadata that remains in the file stay strict.
     """
     if isinstance(pattern, PreparedPointPattern):
         return pattern

@@ -47,9 +47,12 @@ LINE_FEATURES = [
 
 # Placement CSV rows: x,y,z and optional nx,ny,nz and rx,ry,rz. If the normal
 # is omitted it is derived from the platform skin. r* sets pattern clocking.
-# Listing a dataset here explicitly declares that it is the coherent
-# installed-feature-minus-clean-skin delta. This also accepts a GRIM GUI
-# coherent subtraction whose generic container remains tagged power_phase.
+# Listing a dataset here explicitly attests that it is the coherent
+# installed-feature-minus-clean-skin delta, with its origin at the aperture
+# phase center, exp(+jwt), and the documented cavity-frame VV/HH/VH basis.
+# This accepts a GRIM GUI subtraction that dropped those convention tags and
+# whose generic container remains tagged power_phase. Incorrect placement
+# declarations produce incorrect coherent phase; do not list standalone fields.
 COMPACT_FEATURES = [
     # {"dataset": "cavity_delta.grim", "coordinates": "cavities.csv"},
 ]
