@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+rcs_runs/
+rcs_runs_bor/
+claims/
+hpc_logs/
+results/
+Backend/bor_stream_kernel*.so
