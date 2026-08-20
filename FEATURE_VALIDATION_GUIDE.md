@@ -1,4 +1,4 @@
-# Validating BoR Door and Cavity Reconstruction
+# Validating Platform Door and Cavity Reconstruction
 
 The definitive validation compares the GHOST reduced-order reconstruction with
 an independently solved, directly featured three-dimensional body. Agreement
@@ -94,6 +94,22 @@ Place this delta at the same physical aperture phase centre used as the local
 3-D origin. The direct full-body featured solve then measures the approximation
 left out by placement, principally long-range body/feature mutual coupling and
 multiple scattering.
+
+## Placing on an external platform result
+
+An imported clean-platform monostatic GRIM does not need to originate in the
+BoR solver. In `Backend/place_features.py`, set `BASE_MONOSTATIC_GRIM` to the
+attested external GRIM and `SURFACE_MESH` to the matching indexed ASCII
+`.facet` or STL surface. The surface supplies skin checks and outward normals;
+the GRIM supplies the exact frequency/azimuth/elevation grid on which the
+feature field is evaluated and coherently added.
+
+The platform GRIM, surface mesh, and placement CSV must use the same physical
+origin and orientation. A mismatch creates a deterministic two-way phase error
+even when the feature magnitude looks plausible. Use `SHADOW=True` for binary
+mesh ray blockage and `SHADOW=False` to disable that nonlocal test. Neither
+choice adds body-feature mutual coupling: that limitation must still be
+measured against a directly featured full-wave platform solve.
 
 ## Building a door or seam delta
 

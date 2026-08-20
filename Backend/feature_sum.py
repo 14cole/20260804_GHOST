@@ -2507,7 +2507,8 @@ def _attitude(axis_az_deg: 'float', axis_el_deg: 'float', roll_deg: 'float'):
 def export_radar_grim(out_path: 'str', *,
                       bor_result: 'Optional[Dict[str, Any]]',
                       placements: 'Sequence[Dict[str, Any]]',
-                      generatrix: 'np.ndarray',
+                      generatrix: 'Optional[np.ndarray]' = None,
+                      normal_fn=None,
                       frequencies_ghz: 'Sequence[float]',
                       azimuths_deg: 'Sequence[float]',
                       elevations_deg: 'Sequence[float]',
@@ -2543,7 +2544,10 @@ def export_radar_grim(out_path: 'str', *,
     """
     from grim_io import _save_grim_npz
 
-    normal_fn = surface_of_revolution_normal(np.asarray(generatrix, dtype=float))
+    if normal_fn is None and generatrix is not None:
+        normal_fn = surface_of_revolution_normal(
+            np.asarray(generatrix, dtype=float)
+        )
     freqs = np.asarray([float(f) for f in frequencies_ghz], dtype=float)
     requested_az, requested_el = validate_radar_grid(
         azimuths_deg, elevations_deg
@@ -2825,6 +2829,8 @@ def add_features_to_monostatic_grim(
     points: 'Sequence[Dict[str, Any]]' = (),
     corners: 'Sequence[Dict[str, Any]]' = (),
     occluder=None,
+    radar_grid: 'Optional[Dict[str, Any]]' = None,
+    surface_normal_fn=None,
     feature_provenance: 'Optional[Dict[str, Any]]' = None,
     history: 'str' = "",
 ) -> 'str':
@@ -2838,19 +2844,31 @@ def add_features_to_monostatic_grim(
     base = os.path.abspath(str(base_path))
     if not os.path.isfile(base):
         raise FileNotFoundError(f"Base monostatic GRIM does not exist: {base}")
-    grid = load_body_requested_radar_grid(base)
-    if grid is None:
-        raise ValueError(
-            f"{base}: no embedded radar-grid/body-model record; regenerate "
-            "it with the current BoR launcher before adding features."
-        )
-    profile = load_body_profile_grim(base)
-    # Structural validation of the embedded body model; no certification
-    # policy is imposed here.
-    load_body_grim(base)
     from components import validate_component_schema
     base_payload = _load_grim(base)
     validate_component_schema(base_payload, os.path.basename(base))
+    embedded_grid = load_body_requested_radar_grid(base)
+    grid = dict(radar_grid) if radar_grid is not None else embedded_grid
+    if grid is None:
+        raise ValueError(
+            f"{base}: this is not a self-contained BoR result. Supply "
+            "radar_grid with frequencies_ghz, azimuths_deg, elevations_deg, "
+            "axis_az_deg, axis_el_deg, and roll_deg for an external platform."
+        )
+    required_grid = {
+        "frequencies_ghz", "azimuths_deg", "elevations_deg",
+        "axis_az_deg", "axis_el_deg",
+    }
+    missing_grid = sorted(required_grid - set(grid))
+    if missing_grid:
+        raise ValueError(f"radar_grid is missing {missing_grid}.")
+
+    profile = None
+    if embedded_grid is not None:
+        # Structural validation of the embedded body model; no certification
+        # policy is imposed here.
+        load_body_grim(base)
+        profile = load_body_profile_grim(base)
 
     destination = os.path.abspath(
         out_path if str(out_path).lower().endswith(".grim")
@@ -2873,6 +2891,7 @@ def add_features_to_monostatic_grim(
             points=points,
             corners=corners,
             generatrix=profile,
+            normal_fn=surface_normal_fn,
             occluder=occluder,
             frequencies_ghz=grid["frequencies_ghz"],
             azimuths_deg=grid["azimuths_deg"],

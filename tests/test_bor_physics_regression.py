@@ -18,8 +18,10 @@ sys.path.insert(0, str(REPO / "Backend"))
 import bor_dispatch  # noqa: E402
 import feature_sum  # noqa: E402
 import grim_io  # noqa: E402
+import occluder  # noqa: E402
 import run_hpc_bor_monostatic  # noqa: E402
 import run_local_bor  # noqa: E402
+import surface_mesh  # noqa: E402
 import validate_feature_reconstruction  # noqa: E402
 from bor_kernels import C0  # noqa: E402
 from bor_solver import (  # noqa: E402
@@ -168,6 +170,76 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
 
 
 class BoRWorkflowRegressionTests(unittest.TestCase):
+    def test_indexed_facet_surface_preserves_skin_and_winding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "platform.facet"
+            path.write_text(
+                "4 1\n"
+                "10 0 0 0\n"
+                "20 1 0 0\n"
+                "30 1 1 0\n"
+                "40 0 1 0\n"
+                "7 10 20 30 40\n",
+                encoding="ascii",
+            )
+            triangles = surface_mesh.read_surface_mesh(str(path))
+            self.assertEqual(triangles.shape, (2, 3, 3))
+            surface = surface_mesh.TriangleSurface(triangles)
+            distance, closest, normal, _index = surface.nearest(
+                [[0.25, 0.75, 0.2], [1.2, 0.5, 0.0]]
+            )
+            np.testing.assert_allclose(distance, [0.2, 0.2], atol=2.0e-15)
+            np.testing.assert_allclose(
+                closest, [[0.25, 0.75, 0.0], [1.0, 0.5, 0.0]], atol=2.0e-15
+            )
+            np.testing.assert_allclose(normal, [[0, 0, 1], [0, 0, 1]])
+
+    def test_external_monostatic_grim_accepts_coherent_feature_addition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "external.grim"
+            combined = Path(directory) / "external_with_cavity.grim"
+            shadowed = Path(directory) / "external_shadowed_cavity.grim"
+            grid = {
+                "frequencies_ghz": [1.0],
+                "azimuths_deg": [0.0],
+                "elevations_deg": [0.0],
+                "axis_az_deg": 0.0,
+                "axis_el_deg": 0.0,
+                "roll_deg": 0.0,
+            }
+            feature_sum.export_radar_grim(
+                str(base), bor_result=None, placements=[], **grid
+            )
+            point = {
+                "pattern": feature_sum.prepare_point_pattern(
+                    _constant_compact_pattern()
+                ),
+                "location": [0.0, 0.0, 0.0],
+                "aperture_normal": [0.0, 0.0, 1.0],
+                "roll_ref": [1.0, 0.0, 0.0],
+            }
+            feature_sum.add_features_to_monostatic_grim(
+                str(base), str(combined), points=[point], radar_grid=grid
+            )
+            blocker = occluder.Occluder(np.asarray([[
+                [-1.0, -1.0, 0.5],
+                [1.0, -1.0, 0.5],
+                [0.0, 1.0, 0.5],
+            ]]), bias=1.0e-9)
+            feature_sum.add_features_to_monostatic_grim(
+                str(base), str(shadowed), points=[point], radar_grid=grid,
+                occluder=blocker,
+            )
+            with np.load(base, allow_pickle=False) as original, np.load(
+                combined, allow_pickle=False
+            ) as updated, np.load(shadowed, allow_pickle=False) as blocked:
+                original_field = original["rcs_amp_real"] + 1j * original["rcs_amp_imag"]
+                updated_field = updated["rcs_amp_real"] + 1j * updated["rcs_amp_imag"]
+                blocked_field = blocked["rcs_amp_real"] + 1j * blocked["rcs_amp_imag"]
+            self.assertTrue(np.all(original_field == 0.0))
+            self.assertGreater(float(np.max(np.abs(updated_field))), 0.0)
+            np.testing.assert_array_equal(blocked_field, original_field)
+
     def test_feature_reconstruction_comparison_does_not_fit_away_phase_error(self):
         amplitude = 1.0 / math.sqrt(4.0 * math.pi)
         bodies = {1.0: {

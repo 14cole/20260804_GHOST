@@ -323,6 +323,18 @@ For 2-D runs, those unit files are placed under `results/FRD/` and
 `results/OPN/`, preserving the geometry role expected by the concatenate and
 subtract tools. `1c_build_deltas/concat_pols.py` automatically selects the
 newest complete `rcs_runs/run_*/results/` folder when no input path is given.
+The subtraction tool can join raw frequency/polarization units internally, so
+the normal direct path needs only:
+
+```bash
+python 1c_build_deltas/subtract_datasets.py
+```
+
+With no paths it selects the newest complete 2-D run containing both roles.
+Explicit `OPN`, `FRD`, and output folders may be passed to enter the workflow
+from any compatible dataset library. Geometry/result stems must follow the
+canonical final `_OPN` and `_FRD` role markers so clean/featured cases can be
+paired unambiguously.
 
 For BoR runs, `results/<geometry>.grim` is the sole user-facing monostatic
 dataset. It contains the requested azimuth/elevation/frequency VV/HH/VH arrays

@@ -74,7 +74,7 @@ also embeds the body-aspect field and `(rho,z)` profile required for downstream
 placement. Files in `.solver_units/` are hidden checkpoint/provenance state and
 are not separate physical answers.
 
-Edit and run `Backend/add_bor_features.py` to coherently add:
+Edit and run `Backend/place_features.py` to coherently add:
 
 - a door, seam, or other perimeter from a 2-D `featured - clean` complex delta;
 - a compact cavity or similar installed feature from a calibrated 3-D

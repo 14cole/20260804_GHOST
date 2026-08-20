@@ -44,13 +44,14 @@ Backend/
   run_hpc_bor_monostatic.py   body-of-revolution SLURM sweep
   run_local_monostatic.py     the same 2-D sweep on one machine, no SLURM
   run_local_bor.py            the same BoR sweep on one machine, no SLURM
-  add_bor_features.py         coherent door/seam/cavity placement on BoR output
+  place_features.py           coherent feature placement on BoR or external 3-D output
   import_3d_reference.py      import an attested external complex truth field
   validate_feature_reconstruction.py  compare truth to reconstructed fields
   build_bor_stream_kernel.py  build the optional native BoR streaming sampler
   ...                         geometry/material I/O, quality gates, provenance, grim export
 0_calibrate_shadowing/        shadowing bias calibration
 1c_build_deltas/              delta assembly from solved coupons
+CEM_Tools/                    headless/GUI GRIM join, conversion, and coherent subtraction
 tests/                        equivalence, scheduling, and benchmark scripts
 ```
 
@@ -65,8 +66,14 @@ python Backend/run_local_bor.py
 python Backend/run_hpc_monostatic.py
 python Backend/run_hpc_bor_monostatic.py
 
-# After a BoR run: edit its hard-coded feature lists, then
-python Backend/add_bor_features.py
+# After a BoR or imported 3-D run: edit its hard-coded feature lists, then
+python Backend/place_features.py
+
+# Build placement-ready 2-D deltas from the newest complete FRD/OPN run
+python 1c_build_deltas/subtract_datasets.py
+
+# Optional CEM dataset GUI (join, subtract, rename, convert)
+python3 CEM_Tools/run_gui.py
 
 # Check the scheduler and a real two-task sweep end to end
 python tests/test_hpc_scheduling.py
@@ -85,6 +92,26 @@ elevations directly. Each geometry produces one user-facing
 `results/<geometry>.grim` containing the monostatic VV/HH/VH grid and the exact
 body model needed for later coherent placement. The hidden `.solver_units/`
 directory is restart/provenance state, not another dataset to choose from.
+
+`Backend/place_features.py` also accepts an attested external monostatic GRIM
+plus a platform `.facet` or STL surface. Set `SURFACE_MESH` and its units; the
+mesh and placement coordinates must share the external solve's global origin
+and the GHOST CAD frame (`+y` nose, `+x` right, `+z` up). Set `SHADOW=True` to
+add platform ray blockage, or `False` to retain only each feature's local
+outward-facing test. The supported `.facet` form is indexed ASCII:
+
+```text
+n_vertices n_facets
+vertex_id x y z
+...
+facet_id vertex_id_1 vertex_id_2 vertex_id_3 [vertex_id_4]
+...
+```
+
+Triangles and quads are accepted; winding must point outward, or set
+`FLIP_SURFACE_NORMALS=True`. Shadowing is a geometric-optics visibility mask:
+it does not model diffraction, creeping waves, or new body-feature multiple
+scattering.
 
 ## Numerical validation
 
