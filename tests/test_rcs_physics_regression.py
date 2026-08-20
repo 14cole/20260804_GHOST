@@ -66,6 +66,42 @@ def _circle_segment(radius, count, seg_type, ibc=0, material=0):
 
 
 class NearPairQuadratureTests(unittest.TestCase):
+    def test_batched_fixed_pairs_match_individual_blocks(self):
+        elements = [_linear_element(0.0, 0)] + [
+            _linear_element(gap, index)
+            for index, gap in enumerate((0.8, 1.1, 1.6), start=1)
+        ]
+        obs_indices = np.zeros(3, dtype=np.int64)
+        src_indices = np.arange(1, 4, dtype=np.int64)
+        for obs_normal_deriv in (False, True):
+            actual_s, actual_k = rcs._integrate_linear_pairs_box_sk_batched(
+                elements,
+                obs_indices,
+                src_indices,
+                3.7 - 0.08j,
+                obs_normal_deriv,
+                12,
+            )
+            for position, src_index in enumerate(src_indices):
+                expected_s, expected_k = (
+                    rcs._integrate_linear_pair_box_sk_vectorized(
+                        elements[0],
+                        elements[int(src_index)],
+                        3.7 - 0.08j,
+                        obs_normal_deriv,
+                        (0.0, 1.0),
+                        (0.0, 1.0),
+                        12,
+                        12,
+                    )
+                )
+                np.testing.assert_allclose(
+                    actual_s[position], expected_s, rtol=2e-14, atol=2e-14
+                )
+                np.testing.assert_allclose(
+                    actual_k[position], expected_k, rtol=2e-14, atol=2e-14
+                )
+
     def test_geometrically_touching_split_nodes_use_duffy_rule(self):
         """Interface-split DOFs must not hide a physical endpoint singularity."""
 
@@ -192,6 +228,45 @@ class WeightedGalerkinTests(unittest.TestCase):
             ids = np.asarray(elem.node_ids, dtype=int)
             expected[np.ix_(ids, ids)] += coeff[eidx] * rcs._linear_mass_block(elem)
         np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+    def test_sparse_mass_matches_dense_operator(self):
+        mesh = self._two_element_mesh()
+        dense = rcs._assemble_linear_mass_matrix(mesh)
+        sparse = rcs._assemble_linear_mass_matrix_sparse(mesh)
+        np.testing.assert_allclose(
+            sparse.toarray(), dense.real, rtol=0.0, atol=0.0
+        )
+
+    def test_multi_output_weighted_assembly_matches_individual_calls(self):
+        mesh = self._two_element_mesh()
+        masks = [
+            np.ones(len(mesh.elements), dtype=bool),
+            np.asarray([True, False], dtype=bool),
+        ]
+        coeff = np.asarray([1.2 - 0.1j, 0.4 + 0.3j])
+        outputs = rcs._assemble_linear_operator_matrices_multi(
+            mesh,
+            3.0,
+            True,
+            masks,
+            compute_double_layer_many=[True, False],
+            single_layer_observation_coefficients_many=[None, coeff],
+        )
+        plain = rcs._assemble_linear_operator_matrices(
+            mesh, 3.0, True, source_element_mask=masks[0]
+        )
+        weighted = rcs._assemble_linear_operator_matrices(
+            mesh,
+            3.0,
+            True,
+            source_element_mask=masks[1],
+            compute_double_layer=False,
+            single_layer_observation_coefficients=coeff,
+        )
+        np.testing.assert_allclose(outputs[0][0], plain[0], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(outputs[0][1], plain[1], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(outputs[1][0], weighted[0], rtol=0.0, atol=0.0)
+        self.assertFalse(outputs[1][1].flags.writeable)
 
     def test_weighted_single_layer_constant_limit(self):
         mesh = self._two_element_mesh()
@@ -338,6 +413,39 @@ class FarFieldProjectionTests(unittest.TestCase):
                     mesh, density, 4.2, angles, potential, order=8
                 )
                 np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=2e-14)
+
+    def test_rectangular_far_field_matches_repeated_single_density(self):
+        mesh = self._mesh()
+        rng = np.random.default_rng(1804)
+        angles = np.linspace(-70.0, 85.0, 11)
+        densities = (
+            rng.normal(size=(len(mesh.nodes), 5))
+            + 1j * rng.normal(size=(len(mesh.nodes), 5))
+        )
+        for potential in ("SLP", "DLP"):
+            actual = rcs._farfield_linear_density_many(
+                mesh,
+                densities,
+                4.2,
+                angles,
+                potential,
+                order=8,
+                projection="grid",
+            )
+            expected = np.vstack([
+                rcs._farfield_linear_density_many(
+                    mesh,
+                    densities[:, column],
+                    4.2,
+                    angles,
+                    potential,
+                    order=8,
+                )
+                for column in range(densities.shape[1])
+            ])
+            np.testing.assert_allclose(
+                actual, expected, rtol=2e-14, atol=2e-14
+            )
 
 
 class CylinderPhysicsTests(unittest.TestCase):

@@ -370,15 +370,40 @@ class BorPecSolver:
         g = self.g
         P = len(g.rho)
         self.P = P
-        Nn = self.Nn
-        T = np.zeros((Nn, P)); D = np.zeros((Nn, P))
-        p = np.arange(P)
-        e = g.elem.astype(int, copy=False)
-        T[e, p] = g.T0;     D[e, p] = g.dRT0
-        T[e + 1, p] = g.T1; D[e + 1, p] = g.dRT1
-        self.B_T, self.B_D = T, D
+        # The dense nodal-to-Gauss matrices are useful for the legacy table
+        # contractions, but cost O(Nn*P) storage each.  The streaming path,
+        # near contractions, excitation, and far field all use the exact
+        # two-node element scatter/evaluate operations below and never need
+        # these matrices.  Build them lazily so a large streaming solve does
+        # not retain two unnecessary dense arrays.
+        self._B_T = None
+        self._B_D = None
         # element adjacency classes for pair routing
         self.elem_of_pt = g.elem
+
+    def _ensure_dense_point_matrices(self) -> 'None':
+        if self._B_T is not None:
+            return
+        g = self.g
+        T = np.zeros((self.Nn, self.P))
+        D = np.zeros((self.Nn, self.P))
+        p = np.arange(self.P)
+        e = g.elem.astype(int, copy=False)
+        T[e, p] = g.T0
+        D[e, p] = g.dRT0
+        T[e + 1, p] = g.T1
+        D[e + 1, p] = g.dRT1
+        self._B_T, self._B_D = T, D
+
+    @property
+    def B_T(self) -> 'np.ndarray':
+        self._ensure_dense_point_matrices()
+        return self._B_T
+
+    @property
+    def B_D(self) -> 'np.ndarray':
+        self._ensure_dense_point_matrices()
+        return self._B_D
 
     def _test_accumulate(self, point_values: 'np.ndarray') -> 'np.ndarray':
         """Apply the triangle test basis without the dense ``B_T`` matrix.
@@ -1190,6 +1215,12 @@ class BorPecSolver:
             if 0 <= f < ne
         ]
         streaming = self._stream is not None   # far blocks already built
+        if not streaming and (efie or mfie or ibc):
+            # Table contractions use the dense basis matrices.  Realize them
+            # once on the preparing thread, before parallel mode assembly,
+            # rather than allowing multiple worker threads to race the lazy
+            # initializer.
+            self._ensure_dense_point_matrices()
         if efie:
             if not streaming:
                 self._kernel_tables(m_max)
@@ -2457,14 +2488,13 @@ class BorCrossOperators:
             return self._G, self._B
         gp, gq = self.sp.g, self.sq.g
         Pp, Pq = len(gp.rho), len(gq.rho)
-        one = np.ones((Pp, Pq))
         rho_scale = max(float(np.max(gp.rho)), float(np.max(gq.rho)))
         n_xi_g = n_xi_for_pairs(self.k, rho_scale, m_max, self._far_gap,
                                 bracket=False)
         n_xi_b = n_xi_for_pairs(self.k, rho_scale, m_max, self._far_gap,
                                 bracket=True)
-        G = modal_kernels_fft(gp.rho[:, None] * one, gp.z[:, None] * one,
-                              gq.rho[None, :] * one, gq.z[None, :] * one,
+        G = modal_kernels_fft(gp.rho[:, None], gp.z[:, None],
+                              gq.rho[None, :], gq.z[None, :],
                               self.k, m_max, n_xi=n_xi_g)
         B = ibc_kernels_fft(gp.rho, gp.z, gp.trho, gp.tz,
                             gq.rho, gq.z, gq.trho, gq.tz, self.k, m_max,
@@ -2582,6 +2612,8 @@ class BorCrossOperators:
 
     def prepare(self, m_max: 'int') -> 'None':
         """Warm every table/near cache (see BorPecSolver.prepare_operators)."""
+        self.sp._ensure_dense_point_matrices()
+        self.sq._ensure_dense_point_matrices()
         self._tables(m_max)
         for e, f in self.near_pairs:
             self._near_data(e, f, m_max)

@@ -60,6 +60,32 @@ but must not be described as having passed a base/fine mesh comparison.
 Every solve still enforces finite fields, non-negative RCS, modal convergence,
 linear residual, conditioning, and amplitude/power consistency gates.
 
+## Validated scope and feature boundary
+
+The production solver accepts an arbitrary non-self-intersecting
+axisymmetric generatrix, including smooth, faceted, slender, and re-entrant
+profiles. The release gates cover PEC CFIE, passive Leontovich IBC EFIE,
+homogeneous lossy dielectric PMCHWT, dielectric-coated PEC, multilayer and
+partially coated PEC, and coating-termination junctions. Analytical sphere
+comparisons are evaluated over axial, oblique, and broadside looks; a slender
+missile-class profile is additionally gated by complex-field scale symmetry,
+fore/aft symmetry, and mesh refinement.
+
+This remains a body-of-revolution solver, not a general 3-D solver. An
+axisymmetric annular cavity, circumferential groove/panel gap, or rotationally
+symmetric material treatment may be included in the generatrix when its
+boundary topology is one of the supported formulations. A localized antenna,
+finite cavity, rectangular panel, longitudinal seam, fin, or other
+non-axisymmetric feature must not be inserted into the BoR mesh.
+
+The base result publishes coherent complex `amp_vv` and `amp_hh` together
+with `sigma = 4 pi |amp|^2`, which is the contract used by GRIM feature
+placement. Non-axisymmetric features are added as calibrated complex
+installed-feature-minus-clean-skin deltas. That preserves phase and removes
+the replaced skin response, but it is only as accurate as the differential
+feature reference; a direct full-wave featured-body comparison remains the
+validation standard when body-feature coupling is important.
+
 ## Monostatic output and placed features
 
 The local and SLURM launchers expose three sweep inputs: `FREQUENCIES_GHZ`,
@@ -81,6 +107,22 @@ Edit and run `Backend/place_features.py` to coherently add:
 - a compact cavity or similar installed feature from a calibrated 3-D
   installed-feature-minus-clean-skin pattern.
 
+Point features use one strict placement CSV for all datasets. Its fixed columns
+are `placement_id,dataset_id,x,y,z,nx,ny,nz,roll_x,roll_y,roll_z`;
+`dataset_id` selects a configured GRIM pattern, while the explicit normal and
+roll vectors fully orient it. Point deltas use only the canonical OPN-FRD
+(`featured - clean`) order. Placement does not infer CSV variants, assume a
+missing cross-polarization channel is zero, or silently reverse FRD-OPN data.
+
+Line-expanded features likewise use one strict CSV and a configured dataset
+lookup. Its fixed columns are
+`line_id,dataset_id,segment_index,x1,y1,z1,x2,y2,z2,n1x,n1y,n1z,n2x,n2y,n2z`.
+Rows for each `line_id` are contiguous, one-based, and head-to-tail; separate
+IDs are separate physical instances and may reuse the same dataset. Endpoint
+outward normals are interpolated along each segment. Together with the segment
+tangent they define the complete local 2-D frame, so a line needs no roll
+column. Line deltas also accept only canonical OPN-FRD.
+
 Coordinates use the CAD frame `+y = nose`, `+x = right`, `+z = up`. Every line
 element and compact feature receives the monostatic two-way translation phase
 `exp(+2 j k d dot r)` for this repository's `exp(+j omega t)` convention.
@@ -96,7 +138,7 @@ datasets. Selecting a base or feature in `place_features.py` supplies semantic
 tags a GUI may have dropped; normalization, finite-field, coordinate, angular
 support, and the explicit power-only role check remain enforced.
 
-The experimental wing/fin line-expansion code remains separate for now. Its
+The experimental wing/fin full-object expansion code remains separate. Its
 2-D-to-span expansion is usable in isolation, but a phase-unknown wing-root
 corner estimate is not included in the primary coherent monostatic result.
 

@@ -661,7 +661,7 @@ def load_seam_from_grim(path: 'str', frequency_ghz: 'float',
     dom = str(g.get("rcs_domain", "")).strip()
     normalized_domain = dom.lower().replace("-", "_")
     if declared_coherent_delta:
-        # Listing a file as a LINE_FEATURES dataset is the role declaration.
+        # Listing a file in LINE_FEATURE_DATASETS is the role declaration.
         # GUI derived grids often preserve the numerical complex field as
         # power+phase while dropping or retaining stale source semantics. The
         # declaration supersedes those descriptive strings. Dimensional units
@@ -1778,7 +1778,7 @@ def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
                                      ) -> 'None':
     expected = point_pattern_convention_metadata()
     if declared_coherent_delta:
-        # Listing this file in COMPACT_FEATURES declares both the operation
+        # Listing this file in POINT_FEATURE_DATASETS declares both the operation
         # meaning (installed feature minus matching clean skin) and the cavity
         # frame/origin convention documented by place_features.py. A GUI may
         # drop these strings or carry stale source strings into its derived
@@ -2262,8 +2262,11 @@ def sum_features(bor_result: 'Dict[str, Any]',
                       {"delta": <path to delta/coef .grim OR SeamCoefficients>,
                        "perimeter": <path OR (n,2,3) array>,
                        "scale": <optional per-feature unit scale>,
+                       "segment_normals": <optional (n,2,3) endpoint normals>,
                        "normal": <optional constant (3,) outward normal>,
                        "normal_fn": <optional callable overriding the body one>}
+                    ``segment_normals`` is mutually exclusive with ``normal``
+                    and ``normal_fn`` and is interpolated along each segment.
                     A WING/FIN is a placement whose ``delta`` is a full-object
                     airfoil coefficient (line_expand.coefficients_from_2d), whose
                     ``perimeter`` is the open span line (root -> tip), and which
@@ -2365,11 +2368,21 @@ def sum_features(bor_result: 'Dict[str, Any]',
         per = pl["perimeter"]
         if not isinstance(per, np.ndarray):
             per = read_perimeter_txt(str(per), scale=float(pl.get("scale", perimeter_scale)))
+        segment_normals = pl.get("segment_normals")
+        if segment_normals is not None and (
+            pl.get("normal") is not None or callable(pl.get("normal_fn"))
+        ):
+            raise ValueError(
+                "placement segment_normals cannot be combined with normal or normal_fn."
+            )
         _record_feature(expand_perimeter(
-            per, coef, _placement_normal_fn(pl), dirs,
+            per, coef,
+            None if segment_normals is not None else _placement_normal_fn(pl),
+            dirs,
             frequency_ghz=frequency_ghz,
             psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
             occluder=occluder,
+            segment_normals=segment_normals,
         ))
 
     for cn in corners:
@@ -2412,8 +2425,9 @@ def sum_features(bor_result: 'Dict[str, Any]',
 def _prepared_line_placements_at_frequency(
     placements, frequency_ghz, payload_cache
 ):
-    """Resolve declared line deltas while loading each source GRIM only once."""
+    """Resolve each distinct line delta once per frequency and source GRIM."""
     prepared = []
+    coefficient_cache = {}
     for placement in placements:
         coefficient = placement.get("delta")
         kind = str(placement.get("kind", "") or "").strip().lower()
@@ -2424,16 +2438,21 @@ def _prepared_line_placements_at_frequency(
             source = os.path.abspath(str(coefficient))
             if source not in payload_cache:
                 payload_cache[source] = _load_grim(source)
-            resolved = dict(placement)
-            resolved["delta"] = load_seam_from_grim(
+            cache_key = (
                 source,
-                float(frequency_ghz),
-                declared_coherent_delta=bool(
-                    placement.get("declared_coherent_delta", False)
-                ),
-                delta_sign=float(placement.get("delta_sign", 1.0)),
-                _grim_payload=payload_cache[source],
+                bool(placement.get("declared_coherent_delta", False)),
+                float(placement.get("delta_sign", 1.0)),
             )
+            if cache_key not in coefficient_cache:
+                coefficient_cache[cache_key] = load_seam_from_grim(
+                    source,
+                    float(frequency_ghz),
+                    declared_coherent_delta=cache_key[1],
+                    delta_sign=cache_key[2],
+                    _grim_payload=payload_cache[source],
+                )
+            resolved = dict(placement)
+            resolved["delta"] = coefficient_cache[cache_key]
             prepared.append(resolved)
         else:
             prepared.append(placement)

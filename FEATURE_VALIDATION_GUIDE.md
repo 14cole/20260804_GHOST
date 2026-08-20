@@ -122,11 +122,11 @@ measured against a directly featured full-wave platform solve.
 
 A compact result made with GRIM's **Coherent subtraction** may retain the
 generic `power_phase` domain label and omit redundant raw real/imaginary arrays.
-Listing it in `COMPACT_FEATURES` explicitly attests that operation to be
-installed-feature minus clean-skin with the local origin at the aperture phase
-centre, `exp(+j omega t)`, and the documented cavity-frame VV/HH/VH basis. This
-supplies convention semantics lost or copied stale by the GUI. The loader
-reconstructs `F` from stored sigma and phase and
+Listing it in `POINT_FEATURE_DATASETS` explicitly attests that operation to be
+OPN-FRD: installed feature minus clean skin (`featured - clean`), with the
+local origin at the aperture phase centre, `exp(+j omega t)`, and the documented
+cavity-frame VV/HH/VH basis. This supplies convention semantics lost or copied
+stale by the GUI. The loader reconstructs `F` from stored sigma and phase and
 continues to enforce sigma_3d normalization, the full VV/HH/VH matrix, a
 complete azimuth period, and compatible frequency/elevation coverage. The
 normal unique-look form (`0..359` by 1 degree, for example) is accepted and
@@ -134,21 +134,95 @@ closed internally by copying the first complex sample to the interpolation
 seam. A dataset that already contains both 0 and 360 is also accepted when
 those complex samples match; incomplete or irregular partial coverage is not.
 
-The same declaration model applies to a 2-D GUI subtraction listed in
-`LINE_FEATURES`: missing semantic tags are not a blocker. Its stored linear
-quantity must still be sigma_2d, elevation must be the singleton zero cut, and both
-TE/VV and TM/HH must be present. For a compact locally diagonal or axisymmetric
-feature exported with only VV and HH, the per-feature setting
-`assume_missing_cross_pol_zero=True` is available. That is an explicit physical
-assumption that local VH is zero, not a format conversion, and is unsuitable
-for a general asymmetric feature.
+Every point pattern must contain VV, HH, and reciprocal VH/HV. For a locally
+diagonal or axisymmetric fastener, write the physically zero VH channel into
+the dataset rather than asking placement to infer it. The same declaration
+model applies to a 2-D GUI subtraction listed in `LINE_FEATURE_DATASETS`:
+missing semantic tags are not a blocker. Its stored linear quantity must still
+be sigma_2d, elevation must be the singleton zero cut, and both TE/VV and
+TM/HH must be present.
 
 Subtraction order changes the coherent answer. The canonical delta is
-`featured - clean`, which is OPN-FRD in the supplied GHOST/CEM workflow. Set a
-feature's `subtraction_order` to `"clean-featured"` only when its input was
-actually made as FRD-OPN; the placer then multiplies the complete complex field
-by -1. Reversing order without this correction changes the delta by 180 degrees
-and changes its interference with the platform.
+`featured - clean`, which is OPN-FRD in the supplied GHOST/CEM workflow. Point
+and line placement accept only that standard; neither exposes a
+subtraction-order switch. Convert an FRD-OPN dataset once, before placing it,
+by negating the complete complex field. Reversing order without that correction
+changes the delta by 180 degrees and changes its interference with the platform.
+
+## One point-placement CSV
+
+All fasteners, antennas, compact cavities, and other point features share one
+CSV. Configure a dataset lookup in `Backend/place_features.py`:
+
+```python
+POINT_FEATURE_LOCATIONS_CSV = "point_features.csv"
+POINT_FEATURE_DATASETS = {
+    "fastener": "fastener_opn_minus_frd.grim",
+    "antenna": "antenna_opn_minus_frd.grim",
+}
+```
+
+The CSV header and order are fixed:
+
+```csv
+placement_id,dataset_id,x,y,z,nx,ny,nz,roll_x,roll_y,roll_z
+fastener_001,fastener,1.2,8.4,0.5,0,0,1,1,0,0
+fastener_002,fastener,-1.2,8.4,0.5,0,0,1,1,0,0
+antenna_001,antenna,0,12.7,2.1,0,0,1,1,0,0
+```
+
+Values use `COORDINATE_UNITS` and the CAD frame (`+y` nose, `+x` right,
+`+z` up). `dataset_id` must exactly match the configured lookup.
+`placement_id` must be unique. The normal is the local pattern `+z` direction
+and is checked against the outward body normal. The roll vector defines local
+pattern `+x`/azimuth zero after projection into the tangent plane; it must not
+be parallel to the normal. Even an axisymmetric fastener supplies a roll vector
+so there is one schema and no optional-column interpretation.
+
+Feature size, fastener type, antenna state, material, or other response-changing
+dimensions belong in `dataset_id`: provide a separately solved dataset and map
+another ID. Placement does not multiply a pattern by a guessed geometric scale,
+because electromagnetic scaling generally also changes its frequency response
+and phase.
+
+## One line-placement CSV
+
+All doors, seams, panel gaps, coating edges, and other locally two-dimensional
+features share one CSV. Configure the dataset lookup in
+`Backend/place_features.py`:
+
+```python
+LINE_FEATURE_LOCATIONS_CSV = "line_features.csv"
+LINE_FEATURE_DATASETS = {
+    "door_seam": "door_seam_opn_minus_frd.grim",
+    "panel_gap": "panel_gap_opn_minus_frd.grim",
+}
+```
+
+The CSV header and order are fixed:
+
+```csv
+line_id,dataset_id,segment_index,x1,y1,z1,x2,y2,z2,n1x,n1y,n1z,n2x,n2y,n2z
+door_001,door_seam,1,1.0,8.0,0.0,1.0,9.0,0.0,0,0,1,0,0,1
+door_001,door_seam,2,1.0,9.0,0.0,0.0,9.5,0.2,0,0,1,0,0.1,0.995
+gap_001,panel_gap,1,-2.0,6.0,0.0,-2.0,10.0,0.0,0,0,1,0,0,1
+```
+
+Values use `COORDINATE_UNITS` and the CAD frame (`+y` nose, `+x` right,
+`+z` up). `line_id` identifies one physical chain; repeated instances use
+different IDs even when they share a dataset. Rows for an ID must be contiguous,
+`segment_index` must start at 1 and increase without gaps, and each endpoint
+must meet the next segment head-to-tail. An open chain and a closed loop are
+both valid. Branches use separate line IDs because a single chain has no
+ambiguous junction ordering.
+
+The two endpoint normals are mandatory nonzero direction vectors (they are
+normalized after validation) and must point outward. They are checked against the body
+skin and interpolated along the segment. No roll vector is needed: the ordered
+segment tangent and skin normal define the local seam frame. Dimensions or
+feature variants that alter the electromagnetic response belong in
+`dataset_id`, not in an amplitude or geometric scale column. The repository
+includes `line_features_template.csv` with the exact header.
 
 ## Building a door or seam delta
 
@@ -158,7 +232,8 @@ For the 2-D cross-section pair:
 2. Solve both TM and TE on identical frequency and angular grids.
 3. Preserve complex amplitudes and form `featured - clean` with
    `feature_sum.make_delta_grim`, CEM Tools, or GRIM coherent subtraction.
-4. Draw the 3-D perimeter head-to-tail in the CAD frame.
+4. Draw the 3-D perimeter head-to-tail in the fixed line-placement CSV and
+   supply the outward normal at both endpoints of every segment.
 5. Ensure the perimeter lies on the body skin within the configured distance
    and worst-case two-way phase tolerances.
 

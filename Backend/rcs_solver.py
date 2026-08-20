@@ -25,7 +25,7 @@ import math
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 from geometry_io import (
@@ -40,6 +40,10 @@ try:
     from scipy import linalg as _SCIPY_LINALG
 except Exception:
     _SCIPY_LINALG = None
+try:
+    from scipy import sparse as _SCIPY_SPARSE
+except Exception:
+    _SCIPY_SPARSE = None
 try:
     from scipy.sparse import linalg as _SCIPY_SPARSE_LINALG
 except Exception:
@@ -2213,6 +2217,95 @@ def _integrate_linear_pair_box_sk_vectorized(
     scale = obs_len * src_len
     return s_block * scale, k_block * scale
 
+
+def _integrate_linear_pairs_box_sk_batched(
+    elements: 'Sequence[LinearElement]',
+    obs_indices: 'np.ndarray',
+    src_indices: 'np.ndarray',
+    k0: 'Union[complex, float]',
+    obs_normal_deriv: 'bool',
+    order: 'int',
+    compute_single_layer: 'bool' = True,
+    compute_double_layer: 'bool' = True,
+) -> 'Tuple[np.ndarray, np.ndarray]':
+    """Tensor-Gauss S/K blocks for many full-interval element pairs.
+
+    This is the same calculation as `_integrate_linear_pair_box_sk_vectorized`
+    with an additional leading pair axis. It is used only for separated near
+    pairs whose adaptive classifier selected a fixed tensor rule; singular,
+    touching, and recursively adaptive pairs retain their dedicated paths.
+    """
+
+    obs_ids = np.asarray(obs_indices, dtype=np.int64).reshape(-1)
+    src_ids = np.asarray(src_indices, dtype=np.int64).reshape(-1)
+    if obs_ids.size != src_ids.size:
+        raise ValueError("Batched near-pair index arrays must have equal length.")
+    npairs = int(obs_ids.size)
+    zero = np.zeros((npairs, 2, 2), dtype=np.complex128)
+    if npairs == 0:
+        return zero.copy(), zero.copy()
+    if not bool(compute_single_layer) and not bool(compute_double_layer):
+        raise ValueError("At least one batched near-pair operator is required.")
+
+    qt, qw = _get_quadrature(max(2, int(order)))
+    q = np.asarray(qt, dtype=float)
+    weights = np.asarray(qw, dtype=float)
+    phi = np.column_stack((1.0 - q, q))
+    obs_elems = [elements[int(index)] for index in obs_ids]
+    src_elems = [elements[int(index)] for index in src_ids]
+    obs_p0 = np.asarray([elem.p0 for elem in obs_elems], dtype=float)
+    src_p0 = np.asarray([elem.p0 for elem in src_elems], dtype=float)
+    obs_seg = np.asarray([elem.p1 - elem.p0 for elem in obs_elems], dtype=float)
+    src_seg = np.asarray([elem.p1 - elem.p0 for elem in src_elems], dtype=float)
+    obs_pts = obs_p0[:, None, :] + q[None, :, None] * obs_seg[:, None, :]
+    src_pts = src_p0[:, None, :] + q[None, :, None] * src_seg[:, None, :]
+    diff = obs_pts[:, :, None, :] - src_pts[:, None, :, :]
+    dist = np.sqrt(np.sum(diff * diff, axis=3))
+    dist_safe = np.maximum(dist, EPS)
+    kr = np.asarray(complex(k0) * dist_safe, dtype=np.complex128)
+    kr[np.abs(kr) <= 1e-12] = 1e-12 + 0.0j
+    w_outer = np.outer(weights, weights)
+
+    if compute_single_layer:
+        h0 = _hankel2_0_array(kr.reshape(-1)).reshape(dist.shape)
+        weighted_g = w_outer[None, :, :] * (0.25j * h0)
+        s_blocks = np.einsum(
+            'pij,ia,jb->pab', weighted_g, phi, phi
+        )
+    else:
+        s_blocks = zero.copy()
+
+    if compute_double_layer:
+        h1 = _hankel2_1_array(kr.reshape(-1)).reshape(dist.shape)
+        if obs_normal_deriv:
+            normals = np.asarray(
+                [elem.normal for elem in obs_elems], dtype=float
+            )
+            proj = np.sum(
+                diff * normals[:, None, None, :], axis=3
+            ) / dist_safe
+            dk_vals = (-0.25j * complex(k0)) * h1 * proj
+        else:
+            normals = np.asarray(
+                [elem.normal for elem in src_elems], dtype=float
+            )
+            proj = np.sum(
+                diff * normals[:, None, None, :], axis=3
+            ) / dist_safe
+            dk_vals = (0.25j * complex(k0)) * h1 * proj
+        dk_vals[dist <= EPS] = 0.0
+        k_blocks = np.einsum(
+            'pij,ia,jb->pab', w_outer[None, :, :] * dk_vals, phi, phi
+        )
+    else:
+        k_blocks = zero.copy()
+
+    scales = np.asarray(
+        [obs.length * src.length for obs, src in zip(obs_elems, src_elems)],
+        dtype=float,
+    )[:, None, None]
+    return s_blocks * scales, k_blocks * scales
+
 def _single_layer_self_block_exact(
     elem: 'LinearElement',
     k0: 'Union[complex, float]',
@@ -3338,7 +3431,9 @@ def _assemble_linear_operator_matrices_multi(
     far_ratio: 'float' = 3.0,
     compute_single_layer: 'bool' = True,
     compute_double_layer: 'bool' = True,
+    compute_double_layer_many: 'Optional[Sequence[bool]]' = None,
     single_layer_observation_coefficients: 'Optional[np.ndarray]' = None,
+    single_layer_observation_coefficients_many: 'Optional[Sequence[Optional[np.ndarray]]]' = None,
 ) -> 'List[Tuple[np.ndarray, np.ndarray]]':
     """
     Assemble S and K/K' for several source-element masks in ONE traversal.
@@ -3353,9 +3448,11 @@ def _assemble_linear_operator_matrices_multi(
 
     Returns one (S, K) pair per mask, in the order given.  A mask selecting no
     element gets zero matrices without costing anything.  When
-    ``single_layer_observation_coefficients`` is supplied, the returned S
-    matrix is the Galerkin operator with the piecewise-constant element
-    coefficient inside the observation integral,
+    ``single_layer_observation_coefficients`` is supplied, every returned S
+    matrix uses that piecewise-constant coefficient inside the observation
+    integral. ``single_layer_observation_coefficients_many`` instead supplies
+    one coefficient vector per source mask.  This permits several differently
+    weighted S matrices to share exactly the same kernel/quadrature traversal.
 
         S_c[i,j] = sum_e integral_e phi_i(x) c_e (S phi_j)(x) ds,
 
@@ -3366,12 +3463,11 @@ def _assemble_linear_operator_matrices_multi(
     Two passes, as before:
     1. Far interactions: batched numpy quadrature over cache-sized element
        tiles, one kernel evaluation per unordered pair.
-    2. Near interactions: per-element-pair recursive/Duffy quadrature.  Masks
-       are disjoint in practice, so this pass does not duplicate work either.
+    2. Near interactions: per-element-pair recursive/Duffy quadrature over the
+       union of all masks, followed by deterministic distribution to every
+       requested output. Overlapping weighted/unweighted masks therefore do
+       not duplicate singular-kernel evaluation.
     """
-
-    if not bool(compute_single_layer) and not bool(compute_double_layer):
-        raise ValueError("At least one linear operator must be requested.")
 
     nnodes = len(mesh.nodes)
     elements = list(mesh.elements)
@@ -3379,6 +3475,17 @@ def _assemble_linear_operator_matrices_multi(
     n_masks = len(source_element_masks)
     if n_masks == 0:
         raise ValueError("At least one source-element mask must be requested.")
+    if compute_double_layer_many is None:
+        want_k_masks = [bool(compute_double_layer)] * n_masks
+    else:
+        want_k_masks = [bool(value) for value in compute_double_layer_many]
+        if len(want_k_masks) != n_masks:
+            raise ValueError(
+                "compute_double_layer_many length must match "
+                "source_element_masks."
+            )
+    if not bool(compute_single_layer) and not any(want_k_masks):
+        raise ValueError("At least one linear operator must be requested.")
     # Preserve the long-standing shaped-zero return contract for a skipped
     # operator without allocating and zero-filling another dense N-by-N
     # array.  The zero-stride views are read-only, which is intentional: a
@@ -3393,8 +3500,8 @@ def _assemble_linear_operator_matrices_multi(
     ]
     k_mats = [
         np.zeros((nnodes, nnodes), dtype=np.complex128)
-        if compute_double_layer else zero_view
-        for _ in range(n_masks)
+        if want_k_masks[index] else zero_view
+        for index in range(n_masks)
     ]
     if not elements:
         return list(zip(s_mats, k_mats))
@@ -3409,23 +3516,47 @@ def _assemble_linear_operator_matrices_multi(
             raise ValueError("source_element_mask length must match mesh element count.")
         src_masks.append(resolved)
 
-    if single_layer_observation_coefficients is None:
-        slp_obs_coeff = None
-    else:
-        slp_obs_coeff = np.asarray(
-            single_layer_observation_coefficients, dtype=np.complex128
-        ).reshape(-1)
-        if slp_obs_coeff.size != nelems:
+    if (
+        single_layer_observation_coefficients is not None
+        and single_layer_observation_coefficients_many is not None
+    ):
+        raise ValueError(
+            "Supply either shared or per-mask single-layer observation "
+            "coefficients, not both."
+        )
+
+    def _validated_slp_coeff(value):
+        if value is None:
+            return None
+        resolved = np.asarray(value, dtype=np.complex128).reshape(-1)
+        if resolved.size != nelems:
             raise ValueError(
                 "single_layer_observation_coefficients length must match "
                 "mesh element count."
             )
         if not np.all(
-            np.isfinite(slp_obs_coeff.real) & np.isfinite(slp_obs_coeff.imag)
+            np.isfinite(resolved.real) & np.isfinite(resolved.imag)
         ):
             raise ValueError(
                 "single-layer observation coefficients must all be finite."
             )
+        return resolved
+
+    if single_layer_observation_coefficients_many is not None:
+        supplied_coeffs = list(single_layer_observation_coefficients_many)
+        if len(supplied_coeffs) != n_masks:
+            raise ValueError(
+                "single_layer_observation_coefficients_many length must "
+                "match source_element_masks."
+            )
+        slp_obs_coeffs = [
+            _validated_slp_coeff(value) for value in supplied_coeffs
+        ]
+    else:
+        shared_coeff = _validated_slp_coeff(
+            single_layer_observation_coefficients
+        )
+        slp_obs_coeffs = [shared_coeff] * n_masks
     # An empty mask contributes nothing; drop it from the traversal entirely
     # rather than paying a tile sweep to produce zeros.
     active = [index for index, mask in enumerate(src_masks) if bool(np.any(mask))]
@@ -3440,7 +3571,7 @@ def _assemble_linear_operator_matrices_multi(
     normals_arr = np.stack([e.normal for e in elements], axis=0)      # (nelems, 2)
 
     want_s = bool(compute_single_layer)
-    want_k = bool(compute_double_layer)
+    want_k = any(want_k_masks)
 
     # The near pass keeps the requested orders; only the far quadrature honours
     # the override, because that is the only place the integrand is smooth
@@ -3502,10 +3633,11 @@ def _assemble_linear_operator_matrices_multi(
     real_k = _wavenumber_is_real(k0)
     # `_dgreen_dn_obs` carries the minus sign; `_dgreen_dn_src` does not.
     dgreen_sign = -1.0 if obs_normal_deriv else 1.0
-    # One near-pair list per mask: the masks are disjoint in the formulations
-    # that use them, so the near pass costs the same in total as one assembly
-    # over their union.
-    near_chunks = [[] for _ in range(n_masks)]  # type: List[List[Tuple[int, int, int, np.ndarray, bool]]]
+    # Near-pair geometry is independent of the output mask. Record the union
+    # once, evaluate each singular/near-singular block once, then distribute
+    # that block to every output whose source mask contains the source element.
+    # This matters when weighted and unweighted outputs intentionally overlap.
+    near_chunks: 'List[Tuple[int, np.ndarray, int, np.ndarray, bool]]' = []
     write_lock = threading.Lock()
 
     def _far_pass(i0: 'int', i1: 'int') -> 'None':
@@ -3518,7 +3650,7 @@ def _assemble_linear_operator_matrices_multi(
         obs_seg = seg_arr[obs_slice]
         obs_ctr = centers[obs_slice]
         obs_pts_cache: 'Dict[int, np.ndarray]' = {}
-        local_near = [[] for _ in range(n_masks)]
+        local_near: 'List[Tuple[int, np.ndarray, int, np.ndarray, bool]]' = []
 
         for j0 in range(i0 if symmetric else 0, n_src, tile):
             j1 = min(j0 + tile, n_src)
@@ -3561,21 +3693,21 @@ def _assemble_linear_operator_matrices_multi(
                 fij = far_sym & src_msk[None, :]
                 far_ij[mi] = fij
                 any_ij = any_ij or bool(fij.any())
-                near = ~fij
-                near &= src_msk[None, :]
-                flat = np.flatnonzero(near.ravel())
-                if flat.size:
-                    local_near[mi].append((i0, src_global, nb, flat, False))
                 if mirrored:
                     obs_msk = mask[obs_slice]
                     fji = far_sym & obs_msk[:, None]
                     far_ji[mi] = fji
                     any_ji = any_ji or bool(fji.any())
-                    near_t = ~fji
-                    near_t &= obs_msk[:, None]
-                    flat_t = np.flatnonzero(near_t.ravel())
-                    if flat_t.size:
-                        local_near[mi].append((i0, src_global, nb, flat_t, True))
+
+            near_union = (~far_sym) & union_mask[src_global][None, :]
+            flat = np.flatnonzero(near_union.ravel())
+            if flat.size:
+                local_near.append((i0, src_global, nb, flat, False))
+            if mirrored:
+                near_union_t = (~far_sym) & union_mask[obs_slice][:, None]
+                flat_t = np.flatnonzero(near_union_t.ravel())
+                if flat_t.size:
+                    local_near.append((i0, src_global, nb, flat_t, True))
 
             if not (any_ij or any_ji):
                 continue
@@ -3697,6 +3829,7 @@ def _assemble_linear_operator_matrices_multi(
                     fij = far_ij[mi]
                     if fij.any():
                         scale_ij = len_prod * fij
+                        slp_obs_coeff = slp_obs_coeffs[mi]
                         if slp_obs_coeff is not None:
                             scale_s_ij = (
                                 scale_ij
@@ -3711,12 +3844,13 @@ def _assemble_linear_operator_matrices_multi(
                                 if acc_s is not None:
                                     np.add.at(s_mats[mi], (rows, cols),
                                               acc_s[2 * a + b] * scale_s_ij)
-                                if acc_k is not None:
+                                if acc_k is not None and want_k_masks[mi]:
                                     np.add.at(k_mats[mi], (rows, cols),
                                               acc_k[2 * a + b] * scale_ij)
                     fji = far_ji.get(mi)
                     if fji is not None and fji.any():
                         scale_ji = len_prod * fji
+                        slp_obs_coeff = slp_obs_coeffs[mi]
                         if slp_obs_coeff is not None:
                             scale_s_ji = (
                                 scale_ji
@@ -3733,31 +3867,84 @@ def _assemble_linear_operator_matrices_multi(
                                     # transpose of block (i,j)[b][a].
                                     np.add.at(s_mats[mi], (rows, cols),
                                               (acc_s[2 * b + a] * scale_s_ji).T)
-                                if acc_kt is not None:
+                                if acc_kt is not None and want_k_masks[mi]:
                                     np.add.at(k_mats[mi], (rows, cols),
                                               (acc_kt[2 * a + b] * scale_ji).T)
 
-        if any(local_near):
+        if local_near:
             with write_lock:
-                for mi in range(n_masks):
-                    near_chunks[mi].extend(local_near[mi])
+                near_chunks.extend(local_near)
 
     _run_tiled_obs_blocks(nelems, tile, _far_pass)
 
     # --- Pass 2: Near interactions (self, touching, close pairs) ---
-    for mi in range(n_masks):
-        obs_idx, src_idx = _expand_near_chunks(near_chunks[mi])
-        last_obs = -1
-        obs_elem = None
-        obs_ids = None
-        for pos in range(obs_idx.size):
-            obs_index = int(obs_idx[pos])
-            if obs_index != last_obs:
-                last_obs = obs_index
-                obs_elem = elements[obs_index]
-                obs_ids = np.asarray(obs_elem.node_ids, dtype=int)
-            src_elem = elements[int(src_idx[pos])]
-            src_ids = src_elem.node_ids
+    obs_idx, src_idx = _expand_near_chunks(near_chunks)
+
+    # Fixed-rule separated-near pairs have identical tensor-Gauss structure.
+    # Batch their Hankel calls by rule order, but retain the original sorted
+    # scatter order below so global matrix accumulation stays deterministic.
+    fixed_positions_by_order: 'Dict[int, List[int]]' = {}
+    for pos in range(obs_idx.size):
+        obs_elem_eval = elements[int(obs_idx[pos])]
+        src_elem_eval = elements[int(src_idx[pos])]
+        if obs_elem_eval.panel_index == src_elem_eval.panel_index:
+            continue
+        shared = _linear_shared_interval_endpoint_info(
+            obs_elem_eval,
+            (0.0, 1.0),
+            src_elem_eval,
+            (0.0, 1.0),
+            tol=1.0e-9,
+        )
+        if shared is not None:
+            continue
+        distance = float(np.linalg.norm(obs_elem_eval.center - src_elem_eval.center))
+        scale = max(obs_elem_eval.length, src_elem_eval.length, EPS)
+        if distance / scale < 0.75:
+            continue
+        adapt_order, _ = _near_singular_scheme(distance, scale)
+        tensor_order = max(
+            int(max(obs_order, src_order)),
+            min(16, int(max(5, adapt_order))),
+        )
+        fixed_positions_by_order.setdefault(tensor_order, []).append(pos)
+
+    fixed_blocks: 'Dict[int, Tuple[np.ndarray, np.ndarray]]' = {}
+    for tensor_order, positions in fixed_positions_by_order.items():
+        # Bound the pair x Q x Q kernel arrays to roughly one million entries.
+        batch_pairs = max(1, 1_000_000 // max(1, tensor_order * tensor_order))
+        for start in range(0, len(positions), batch_pairs):
+            selected = positions[start:start + batch_pairs]
+            selected_arr = np.asarray(selected, dtype=np.int64)
+            s_batch, k_batch = _integrate_linear_pairs_box_sk_batched(
+                elements,
+                obs_idx[selected_arr],
+                src_idx[selected_arr],
+                k0,
+                obs_normal_deriv,
+                tensor_order,
+                compute_single_layer=compute_single_layer,
+                compute_double_layer=want_k,
+            )
+            for local, original_pos in enumerate(selected):
+                fixed_blocks[int(original_pos)] = (
+                    s_batch[local], k_batch[local]
+                )
+
+    last_obs = -1
+    obs_elem = None
+    obs_ids = None
+    for pos in range(obs_idx.size):
+        obs_index = int(obs_idx[pos])
+        src_index = int(src_idx[pos])
+        if obs_index != last_obs:
+            last_obs = obs_index
+            obs_elem = elements[obs_index]
+            obs_ids = np.asarray(obs_elem.node_ids, dtype=int)
+        src_elem = elements[src_index]
+        src_ids = src_elem.node_ids
+        precomputed = fixed_blocks.get(pos)
+        if precomputed is None:
             s_blk, k_blk = _sk_blocks_near_linear(
                 obs_elem=obs_elem,
                 src_elem=src_elem,
@@ -3766,15 +3953,21 @@ def _assemble_linear_operator_matrices_multi(
                 obs_order=obs_order,
                 src_order=src_order,
                 compute_single_layer=compute_single_layer,
-                compute_double_layer=compute_double_layer,
+                compute_double_layer=want_k,
             )
+        else:
+            s_blk, k_blk = precomputed
+        for mi in active:
+            if not bool(src_masks[mi][src_index]):
+                continue
             if compute_single_layer:
+                slp_obs_coeff = slp_obs_coeffs[mi]
                 coeff = (
                     complex(slp_obs_coeff[obs_index])
                     if slp_obs_coeff is not None else 1.0 + 0.0j
                 )
                 s_mats[mi][np.ix_(obs_ids, src_ids)] += coeff * s_blk
-            if compute_double_layer:
+            if want_k_masks[mi]:
                 k_mats[mi][np.ix_(obs_ids, src_ids)] += k_blk
     return list(zip(s_mats, k_mats))
 
@@ -4142,12 +4335,16 @@ def _farfield_linear_density_many(
     potential: 'str',
     order: 'int' = 8,
     element_mask: 'Optional[np.ndarray]' = None,
+    projection: 'str' = "matched",
 ) -> 'np.ndarray':
-    """Vectorized SLP/DLP far field for one or matched-many densities.
+    """Vectorized SLP/DLP far field for matched or rectangular projections.
 
     ``density`` may contain one column (one incidence projected at every
     observation angle) or one column per observation angle (the monostatic
-    batched-solve case). Element tiling bounds the temporary phase matrix.
+    batched-solve case). With ``projection='grid'``, every density column is
+    projected at every observation angle and the result has shape
+    ``(density_columns, observation_angles)``. Element tiling bounds the
+    temporary phase matrix in either mode.
     """
 
     obs = np.asarray(observation_angles_deg, dtype=float).reshape(-1)
@@ -4156,7 +4353,10 @@ def _farfield_linear_density_many(
         rho = rho[:, None]
     if rho.shape[0] != len(mesh.nodes):
         raise ValueError("Far-field density height must match mesh node count.")
-    if rho.shape[1] not in (1, obs.size):
+    projection_mode = str(projection).strip().lower()
+    if projection_mode not in {"matched", "grid"}:
+        raise ValueError("Far-field projection must be 'matched' or 'grid'.")
+    if projection_mode == "matched" and rho.shape[1] not in (1, obs.size):
         raise ValueError(
             "Far-field density must have one column or one per observation angle."
         )
@@ -4172,7 +4372,8 @@ def _farfield_linear_density_many(
             raise ValueError("Far-field element mask must match mesh element count.")
         elements = [elem for elem, keep in zip(mesh.elements, mask) if keep]
     if not elements:
-        return np.zeros(obs.size, dtype=np.complex128)
+        shape = (rho.shape[1], obs.size) if projection_mode == "grid" else (obs.size,)
+        return np.zeros(shape, dtype=np.complex128)
     qt, qw = _get_quadrature(max(2, int(order)))
     q = np.asarray(qt, dtype=float)
     wq = np.asarray(qw, dtype=float)
@@ -4186,7 +4387,11 @@ def _farfield_linear_density_many(
     lengths = np.asarray([elem.length for elem in elements], dtype=float)
     normals = np.asarray([elem.normal for elem in elements], dtype=float)
 
-    amp = np.zeros(obs.size, dtype=np.complex128)
+    amp = (
+        np.zeros((rho.shape[1], obs.size), dtype=np.complex128)
+        if projection_mode == "grid"
+        else np.zeros(obs.size, dtype=np.complex128)
+    )
     phase_entries = 2_000_000  # about 32 MB of complex128 phase data
     tile = max(1, min(
         len(elements), phase_entries // max(1, obs.size * q.size)
@@ -4206,7 +4411,11 @@ def _farfield_linear_density_many(
         if kind == "DLP":
             dot_n = dirs @ normals[start:stop].T
             phase *= (1j * float(k_air)) * dot_n[:, :, None]
-        if rho.shape[1] == 1:
+        if projection_mode == "grid":
+            amp += np.einsum(
+                'aeq,eqc,eq->ca', phase, rho_q, weights
+            )
+        elif rho.shape[1] == 1:
             amp += np.einsum(
                 'aeq,eq,eq->a', phase, rho_q[:, :, 0], weights
             )
@@ -4277,6 +4486,7 @@ def _linear_coupled_node_report(
 def _build_linear_junction_constraints(
     mesh: 'LinearMesh',
     infos: 'List[PanelCoupledInfo]',
+    materialize: 'bool' = True,
 ) -> 'Tuple[np.ndarray, Dict[str, int]]':
     """
     Build nodal junction constraints for the linear/Galerkin coupled solve.
@@ -4285,7 +4495,8 @@ def _build_linear_junction_constraints(
     interface-aware mesh intentionally splits nodes at the same geometric coordinate, we
     restore pointwise continuity at true shared geometric junctions with explicit trace
     constraints. We also add region-wise flux-balance constraints using the endpoint sign
-    convention.
+    convention. When ``materialize`` is false, compute the same candidate counts and
+    orientation diagnostics without allocating the dense trace/flux matrix.
     """
 
     nnodes = len(mesh.nodes)
@@ -4332,16 +4543,17 @@ def _build_linear_junction_constraints(
         if len(unique_nodes) > 1:
             ref_nid = unique_nodes[0]
             for other_nid in unique_nodes[1:]:
-                row = np.zeros(2 * nnodes, dtype=np.complex128)
-                row[ref_nid] = 1.0 + 0.0j
-                row[other_nid] = -1.0 + 0.0j
-                rows.append(row)
+                if materialize:
+                    row = np.zeros(2 * nnodes, dtype=np.complex128)
+                    row[ref_nid] = 1.0 + 0.0j
+                    row[other_nid] = -1.0 + 0.0j
+                    rows.append(row)
                 trace_count += 1
                 constrained_nodes.add(ref_nid)
                 constrained_nodes.add(other_nid)
 
         for region in sorted(region_set):
-            row = np.zeros(2 * nnodes, dtype=np.complex128)
+            sparse_row: 'Dict[int, complex]' = {}
             terms = 0
             for eidx, local_end, nid in entries:
                 endpoint_sign = +1 if int(local_end) == 0 else -1
@@ -4361,19 +4573,28 @@ def _build_linear_junction_constraints(
 
                 w = complex(float(endpoint_sign), 0.0)
                 nid_i = int(nid)
-                row[nid_i] += w * coeff_u
-                row[nnodes + nid_i] += w * coeff_q
+                sparse_row[nid_i] = sparse_row.get(nid_i, 0.0j) + w * coeff_u
+                flux_index = nnodes + nid_i
+                sparse_row[flux_index] = (
+                    sparse_row.get(flux_index, 0.0j) + w * coeff_q
+                )
                 terms += 1
                 constrained_nodes.add(nid_i)
                 constrained_elems.add(int(eidx))
 
-            if terms >= 2 and np.linalg.norm(row) > 0.0:
-                rows.append(row)
+            row_norm_sq = sum(abs(value) ** 2 for value in sparse_row.values())
+            if terms >= 2 and row_norm_sq > 0.0:
+                if materialize:
+                    row = np.zeros(2 * nnodes, dtype=np.complex128)
+                    for index, value in sparse_row.items():
+                        row[index] = value
+                    rows.append(row)
                 flux_count += 1
 
         junction_nodes += 1
 
-    if not rows:
+    constraint_count = int(trace_count + flux_count)
+    if constraint_count == 0:
         return np.zeros((0, 2 * nnodes), dtype=np.complex128), {
             "junction_nodes": 0,
             "junction_constraints": 0,
@@ -4383,10 +4604,14 @@ def _build_linear_junction_constraints(
             "junction_orientation_conflict_nodes": int(orientation_conflict_nodes),
         }
 
-    c_mat = np.vstack(rows)
+    c_mat = (
+        np.vstack(rows)
+        if materialize
+        else np.zeros((0, 0), dtype=np.complex128)
+    )
     return c_mat, {
         "junction_nodes": int(junction_nodes),
-        "junction_constraints": int(c_mat.shape[0]),
+        "junction_constraints": constraint_count,
         "junction_panels": int(len(constrained_elems)),
         "junction_trace_constraints": int(trace_count),
         "junction_flux_constraints": int(flux_count),
@@ -4418,6 +4643,41 @@ def _assemble_linear_mass_matrix(mesh: 'LinearMesh') -> 'np.ndarray':
         ids = np.asarray(elem.node_ids, dtype=int)
         m_mat[np.ix_(ids, ids)] += _linear_mass_block(elem)
     return m_mat
+
+
+def _assemble_linear_mass_matrix_sparse(mesh: 'LinearMesh'):
+    """Assemble the same consistent mass operator as a real CSR matrix.
+
+    Matrix-free formulations only apply M to complex vectors or extract small
+    interface blocks. Keeping the globally sparse O(N) operator avoids an
+    otherwise unnecessary complex O(N^2) allocation without changing any
+    element coefficient or quadrature.
+    """
+
+    if _SCIPY_SPARSE is None:
+        raise ImportError("Sparse mass assembly requires scipy.sparse.")
+    nnodes = len(mesh.nodes)
+    if not mesh.elements:
+        return _SCIPY_SPARSE.csr_matrix((nnodes, nnodes), dtype=float)
+    node_ids = np.asarray(
+        [elem.node_ids for elem in mesh.elements], dtype=np.int64
+    )
+    lengths = np.asarray(
+        [elem.length for elem in mesh.elements], dtype=float
+    )
+    rows = np.column_stack((
+        node_ids[:, 0], node_ids[:, 0], node_ids[:, 1], node_ids[:, 1]
+    )).reshape(-1)
+    cols = np.column_stack((
+        node_ids[:, 0], node_ids[:, 1], node_ids[:, 0], node_ids[:, 1]
+    )).reshape(-1)
+    data = (
+        lengths[:, None]
+        * np.asarray([1.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 3.0])
+    ).reshape(-1)
+    return _SCIPY_SPARSE.coo_matrix(
+        (data, (rows, cols)), shape=(nnodes, nnodes)
+    ).tocsr()
 
 
 def _assemble_linear_weighted_mass_matrix(
@@ -5315,7 +5575,7 @@ def evaluate_quality_gate(
             violations.append(
                 "residual_nonfinite_count is missing a valid non-negative integer value"
             )
-    if int(metadata.get("junction_constraints", 0) or 0) > 0 and (
+    if bool(metadata.get("junction_constraints_applied", False)) and (
         (not math.isfinite(constraint_value)) or constraint_value > constraint_limit
     ):
         violations.append(
@@ -5676,7 +5936,7 @@ def _solve_te_robin_mfie(
             from fmm_helmholtz_2d import FMMOperator
         except ImportError:
             raise ImportError("FMM solver requires fmm_helmholtz_2d.py in the Python path.")
-        mass_mat = _assemble_linear_mass_matrix(mesh)
+        mass_mat = _assemble_linear_mass_matrix_sparse(mesh)
         fmm_kp = FMMOperator(mesh, k0, obs_normal_deriv=True, n_digits=6)
         fmm_s = FMMOperator(mesh, k0, obs_normal_deriv=False, n_digits=6) if has_ibc else None
 
@@ -5880,14 +6140,11 @@ def _solve_dielectric_indirect(
         obs_order=obs_order, src_order=src_order,
         compute_single_layer=False,
     )
-    _, Kp1 = _assemble_linear_operator_matrices(
+    S1, Kp1 = _assemble_linear_operator_matrices(
         mesh, k1, obs_normal_deriv=True,
         obs_order=obs_order, src_order=src_order,
-        compute_single_layer=False,
+        compute_single_layer=True,
     )
-    S1, _ = _assemble_linear_operator_matrices(mesh, k1, obs_normal_deriv=False,
-        obs_order=obs_order, src_order=src_order,
-        compute_double_layer=False)
     D0 = _assemble_linear_hypersingular_matrix(
         mesh, k0, obs_order=obs_order, src_order=src_order,
     )
@@ -6744,7 +7001,11 @@ def _solve_multi_region_indirect(
                     "element-weighted Galerkin path; no nodal row-scaling "
                     "approximation was used."
                 )
-    M_global = _assemble_linear_mass_matrix(mesh)
+    M_global = (
+        _assemble_linear_mass_matrix_sparse(mesh)
+        if use_fmm
+        else _assemble_linear_mass_matrix(mesh)
+    )
 
     if use_fmm:
         try:
@@ -6761,7 +7022,7 @@ def _solve_multi_region_indirect(
     if not use_fmm:
         op_cache = {}
         def get_ops(k_val, src_mask):
-            key = (complex(k_val), tuple(src_mask.tolist()))
+            key = (complex(k_val), id(src_mask))
             if key not in op_cache:
                 S, Kp = _assemble_linear_operator_matrices(
                     mesh, k_val, True, obs_order, src_order,
@@ -6773,9 +7034,12 @@ def _solve_multi_region_indirect(
         weighted_s_cache = {}
         def get_weighted_s(k_val, src_mask, obs_coeff):
             coeff_eval = np.asarray(obs_coeff, dtype=np.complex128)
-            key = (
-                complex(k_val), tuple(src_mask.tolist()), coeff_eval.tobytes()
-            )
+            key = (complex(k_val), id(src_mask), id(obs_coeff))
+            if not np.any(np.abs(coeff_eval) > EPS):
+                return np.broadcast_to(
+                    np.zeros((), dtype=np.complex128),
+                    (nnodes, nnodes),
+                )
             if key not in weighted_s_cache:
                 S_alpha, _ = _assemble_linear_operator_matrices(
                     mesh, k_val, True, obs_order, src_order,
@@ -6786,32 +7050,66 @@ def _solve_multi_region_indirect(
                 weighted_s_cache[key] = S_alpha
             return weighted_s_cache[key]
 
-        # Prefetch, grouped by wavenumber.  Every (k, mask) the matrix build
-        # will ask for is already determined by the region/interface structure:
-        # each region contributes its own wavenumber paired with the mask of
-        # every interface touching it.  The masks only select which source
-        # elements survive -- they are applied after the quadrature -- so
-        # assembling one interface at a time repeats the element-pair sweep,
-        # which is ~90% of the cost of a solve on a geometry with materials.
-        # Grouping them means that sweep runs once per distinct wavenumber.
-        _by_k = {}
+        # Prefetch every unweighted S/K' output and every Robin-weighted S
+        # output in one traversal per distinct wavenumber. Kernel values and
+        # near-pair blocks depend on geometry and k, not on which source mask
+        # or observation coefficient consumes them.
+        _requests_by_k = {}
+        _request_seen = {}
         for _rid, _mis in region_ifaces.items():
             _k = complex(region_props[_rid]['k'])
-            _slot = _by_k.setdefault(_k, [])
+            _slot = _requests_by_k.setdefault(_k, [])
+            _seen = _request_seen.setdefault(_k, set())
             for _mi in _mis:
                 _mask = ifaces[_mi]['mask']
-                _key = tuple(_mask.tolist())
-                if _key not in {tuple(m.tolist()) for m in _slot}:
-                    _slot.append(_mask)
-        for _k, _masks in _by_k.items():
-            if len(_masks) < 2:
-                continue          # nothing to share; let get_ops do it lazily
-            for _mask, _ops in zip(_masks, _assemble_linear_operator_matrices_multi(
-                mesh=mesh, k0=_k, obs_normal_deriv=True,
+                _token = ("plain", id(_mask))
+                if _token in _seen:
+                    continue
+                _seen.add(_token)
+                _slot.append(("plain", _mask, None))
+
+        for _mi, _ifc in enumerate(ifaces):
+            if not (_ifc['pec_minus'] or _ifc['pec_plus']):
+                continue
+            _rid = _ifc['r_p'] if _ifc['pec_minus'] else _ifc['r_m']
+            _k = complex(region_props[_rid]['k'])
+            _slot = _requests_by_k.setdefault(_k, [])
+            _seen = _request_seen.setdefault(_k, set())
+            for _mj in region_ifaces.get(_rid, []):
+                _src_mask = ifaces[_mj]['mask']
+                _obs_coeff = _ifc['robin_alpha_elements']
+                if not np.any(np.abs(_obs_coeff) > EPS):
+                    continue
+                _token = ("weighted", id(_src_mask), id(_obs_coeff))
+                if _token in _seen:
+                    continue
+                _seen.add(_token)
+                _slot.append(("weighted", _src_mask, _obs_coeff))
+
+        for _k, _requests in _requests_by_k.items():
+            _masks = [request[1] for request in _requests]
+            _coeffs = [request[2] for request in _requests]
+            _want_k = [request[0] == "plain" for request in _requests]
+            _outputs = _assemble_linear_operator_matrices_multi(
+                mesh=mesh,
+                k0=_k,
+                obs_normal_deriv=True,
                 source_element_masks=_masks,
-                obs_order=obs_order, src_order=src_order,
-            )):
-                op_cache[(_k, tuple(_mask.tolist()))] = _ops
+                obs_order=obs_order,
+                src_order=src_order,
+                compute_double_layer=True,
+                compute_double_layer_many=_want_k,
+                single_layer_observation_coefficients_many=_coeffs,
+            )
+            for (_kind, _mask, _coeff), (_s_mat, _k_mat) in zip(
+                _requests, _outputs
+            ):
+                if _kind == "plain":
+                    op_cache[(_k, id(_mask))] = (_s_mat, _k_mat)
+                else:
+                    weighted_s_cache[
+                        (_k, id(_mask), id(_coeff))
+                    ] = _s_mat
         def sub(mat, obs_n, src_n):
             return mat[np.ix_(obs_n, src_n)]
     else:
@@ -7149,7 +7447,7 @@ def _solve_multi_region_indirect(
                 dm = dof_map[(mi, dof_side)]
                 k_d = region_props[region_id]['k']
                 fmm_S, fmm_Kp = get_fmm_ops(k_d, ifc['mask'])
-                M_s = M_global[np.ix_(obs_n, obs_n)]
+                M_s = M_global[np.ix_(obs_n, obs_n)].toarray()
                 # Per-node TM PEC mask (see dense path for derivation).
                 tm_pec_mask = (np.abs(alpha) <= EPS) if pol == 'TM' else np.zeros(nm, dtype=bool)
                 # Extract dense submatrices from the sparse CSR near-field operators.
@@ -7172,7 +7470,7 @@ def _solve_multi_region_indirect(
                 inv_beta = 1.0 / beta
                 fmm_Sm, fmm_Kpm = get_fmm_ops(k_m_val, ifc['mask'])
                 fmm_Sp, fmm_Kpp = get_fmm_ops(k_p_val, ifc['mask'])
-                M_s = M_global[np.ix_(obs_n, obs_n)]
+                M_s = M_global[np.ix_(obs_n, obs_n)].toarray()
                 # Dense submatrix extracts -- see comment above for why .toarray() is required.
                 Sm_sub = fmm_Sm._near_mat[np.ix_(obs_n, obs_n)].toarray()
                 Sp_sub = fmm_Sp._near_mat[np.ix_(obs_n, obs_n)].toarray()
@@ -7244,7 +7542,15 @@ def _solve_multi_region_indirect(
             continue
         density = sol[dm[0]:dm[0]+dm[1], :]
         for li, nid in enumerate(ifc['nodes']):
-            ext_density_global[nid, :] += density[li, :]
+            # The exterior Green representation used by the multi-region
+            # equations is u_scat = -S[sigma_ext].  Keep that representation
+            # sign on the returned density itself so monostatic, bistatic,
+            # boundary-density export, and every downstream far-field caller
+            # share the same physical complex-amplitude convention as the
+            # single-dielectric DLP formulation.  Omitting this minus sign
+            # preserved RCS power but introduced a formulation-dependent
+            # 180-degree phase jump in coherent GRIM data.
+            ext_density_global[nid, :] -= density[li, :]
         for eidx in ifc['eids']:
             ext_elem_mask[eidx] = True
 
@@ -7358,6 +7664,9 @@ def solve_monostatic_rcs_2d(
     reused_matrix_solve_count = 0
     max_parallel_workers_used = 1
     formulation_label = "2D BIE/MoM coupled dielectric trace formulation (linear Galerkin)"
+    junction_treatment = "none"
+    junction_constraints_applied = False
+    junction_constraint_residual_applicable = False
     junction_stats = {
         "junction_nodes": 0,
         "junction_constraints": 0,
@@ -7429,7 +7738,7 @@ def solve_monostatic_rcs_2d(
         # Build once at reference freq; topology-based constraints are stable.
         ref_coupled = _build_linear_coupled_infos(cached_mesh, materials, mesh_ref_ghz, pol, ref_k0)
         cached_junction_constraints, cached_junction_stats = _build_linear_junction_constraints(
-            cached_mesh, ref_coupled,
+            cached_mesh, ref_coupled, materialize=False,
         )
         materials.warn_once(
             f"Mesh topology cached using the shortest referenced-material "
@@ -7629,7 +7938,7 @@ def solve_monostatic_rcs_2d(
             linear_junction_stats = dict(cached_junction_stats)
         else:
             linear_junction_constraints, linear_junction_stats = _build_linear_junction_constraints(
-                mesh, coupled_infos,
+                mesh, coupled_infos, materialize=False,
             )
         junction_stats.update(linear_mesh_stats_local)
         junction_stats.update(linear_junction_stats)
@@ -7642,17 +7951,29 @@ def solve_monostatic_rcs_2d(
                 "fix the geometry so shared junctions have a consistent "
                 "plus/minus side assignment."
             )
-        if linear_junction_constraints.size > 0:
-            formulation_label = "2D BIE/MoM coupled dielectric trace formulation (linear Galerkin + junction constraints)"
-            materials.warn_once(
-                (
-                    "Applied "
-                    f"{int(linear_junction_stats.get('junction_constraints', 0))} linear/Galerkin junction constraint(s) "
-                    f"(trace={int(linear_junction_stats.get('junction_trace_constraints', 0))}, "
-                    f"flux={int(linear_junction_stats.get('junction_flux_constraints', 0))}) "
-                    f"across {int(linear_junction_stats.get('junction_nodes', 0))} node(s)."
+        if int(linear_junction_stats.get("junction_constraints", 0)) > 0:
+            candidate_count = int(linear_junction_stats.get("junction_constraints", 0))
+            if _is_multi_region(coupled_infos):
+                junction_treatment = "implicit_multi_region_indirect"
+                materials.warn_once(
+                    (
+                        f"Detected {candidate_count} physical trace/flux junction "
+                        "relation(s). The active multi-region indirect formulation "
+                        "uses interface-specific SLP densities, so that diagnostic "
+                        "trace/flux matrix is not applied to its different unknowns; "
+                        "junction coupling is represented implicitly by the shared "
+                        "regional potentials."
+                    )
                 )
-            )
+            else:
+                junction_treatment = "diagnostic_only"
+                materials.warn_once(
+                    (
+                        f"Detected {candidate_count} physical trace/flux junction "
+                        "relation(s); the diagnostic matrix is not applied by the "
+                        "active formulation."
+                    )
+                )
 
         check_abort()
 
@@ -7899,6 +8220,7 @@ def solve_monostatic_rcs_2d(
         "residual_nonfinite_count": residual_nonfinite_count,
         "constraint_residual_norm_max": float(np.max(constraint_residual_values)) if constraint_residual_values else 0.0,
         "constraint_residual_norm_mean": float(np.mean(constraint_residual_values)) if constraint_residual_values else 0.0,
+        "constraint_residual_applicable": bool(junction_constraint_residual_applicable),
         "condition_est_max": float(np.max(cond_values)) if cond_values else float("nan"),
         "condition_est_mean": float(np.mean(cond_values)) if cond_values else float("nan"),
         "condition_est_computed": bool(condition_est_computed),
@@ -7917,6 +8239,10 @@ def solve_monostatic_rcs_2d(
         "cfie_alpha": float(cfie_alpha),
         "junction_nodes": int(junction_stats.get("junction_nodes", 0)),
         "junction_constraints": int(junction_stats.get("junction_constraints", 0)),
+        "junction_constraint_candidates": int(junction_stats.get("junction_constraints", 0)),
+        "junction_constraints_applied": bool(junction_constraints_applied),
+        "junction_constraints_applied_count": 0,
+        "junction_treatment": junction_treatment,
         "junction_panels": int(junction_stats.get("junction_panels", 0)),
         "junction_trace_constraints": int(junction_stats.get("junction_trace_constraints", 0)),
         "junction_flux_constraints": int(junction_stats.get("junction_flux_constraints", 0)),
@@ -8369,13 +8695,9 @@ def solve_bistatic_rcs_2d(
                 mesh, k0, obs_normal_deriv=False,
                 compute_single_layer=False,
             )
-            _, Kp1 = _assemble_linear_operator_matrices(
+            S1, Kp1 = _assemble_linear_operator_matrices(
                 mesh, k1, obs_normal_deriv=True,
-                compute_single_layer=False,
-            )
-            S1, _ = _assemble_linear_operator_matrices(
-                mesh, k1, obs_normal_deriv=False,
-                compute_double_layer=False,
+                compute_single_layer=True,
             )
             D0 = _assemble_linear_hypersingular_matrix(mesh, k0)
             M = _assemble_linear_mass_matrix(mesh)
@@ -8422,49 +8744,42 @@ def solve_bistatic_rcs_2d(
                 "No deprecated coupled-trace fallback was performed."
             )
 
+        # Project every solved incidence density at every observation angle
+        # in one tiled pass. The geometry/quadrature phase matrix depends only
+        # on observation angle, so rebuilding it once per incidence repeated
+        # identical work for a rectangular bistatic sweep.
+        if use_sheet or use_mixed_sheet:
+            batch_far_density = batch_solution
+            batch_far_potential = "SLP" if pol == "TM" else "DLP"
+        elif use_multi_region:
+            batch_far_density = batch_exterior_density
+            batch_far_potential = "SLP"
+        elif use_te_robin_mfie or use_tm_robin_bie:
+            batch_far_density = batch_solution
+            batch_far_potential = "SLP"
+        elif use_diel_indirect:
+            batch_far_density = batch_solution[:nnodes, :]
+            batch_far_potential = "DLP"
+        else:
+            raise AssertionError("Unreachable bistatic far-field dispatch.")
+
+        batch_amp = _farfield_linear_density_many(
+            mesh,
+            batch_far_density,
+            k0,
+            obs_arr,
+            batch_far_potential,
+            projection="grid",
+        )
+        batch_rcs_lin = _rcs_sigma_from_amp(batch_amp, k0)
+        batch_rcs_db = _rcs_db_from_sigma(batch_rcs_lin)
+
         for inc_index, inc_deg in enumerate(inc_angles):
             check_abort()
-
-            if use_sheet or use_mixed_sheet:
-                density = batch_solution[:, inc_index]
-                residual_local = float(batch_residuals[inc_index])
-                if pol == "TM":
-                    rcs_lin, amp = _farfield_at_angles_slp(mesh, density, k0, obs_arr)
-                else:
-                    rcs_lin, amp = _farfield_at_angles_dlp(mesh, density, k0, obs_arr)
-
-            elif use_multi_region:
-                residual_local = float(batch_residuals[inc_index])
-                rcs_lin, amp = _farfield_at_angles_slp(
-                    mesh,
-                    batch_exterior_density[:, inc_index],
-                    k0,
-                    obs_arr,
-                )
-
-            elif use_te_robin_mfie:
-                sigma = batch_solution[:, inc_index]
-                residual_local = float(batch_residuals[inc_index])
-                rcs_lin, amp = _farfield_at_angles_slp(mesh, sigma, k0, obs_arr)
-
-            elif use_tm_robin_bie:
-                sigma = batch_solution[:, inc_index]
-                residual_local = float(batch_residuals[inc_index])
-                rcs_lin, amp = _farfield_at_angles_slp(
-                    mesh, sigma, k0, obs_arr
-                )
-
-            elif use_diel_indirect:
-                residual_local = float(batch_residuals[inc_index])
-                mu = batch_solution[:nnodes, inc_index]
-                rcs_lin, amp = _farfield_at_angles_dlp(mesh, mu, k0, obs_arr)
-
-            else:
-                raise AssertionError(
-                    "Unreachable bistatic formulation dispatch."
-                )
-
-            rcs_db = _rcs_db_from_sigma(rcs_lin)
+            residual_local = float(batch_residuals[inc_index])
+            amp = batch_amp[inc_index, :]
+            rcs_lin = batch_rcs_lin[inc_index, :]
+            rcs_db = batch_rcs_db[inc_index, :]
             residual_values.append(float(residual_local))
             for idx, obs_deg in enumerate(obs_angles):
                 amp_val = complex(amp[idx])
@@ -9005,11 +9320,8 @@ def compute_boundary_densities(
         _, K0 = _assemble_linear_operator_matrices(
             mesh, k0, False, compute_single_layer=False
         )
-        _, Kp1 = _assemble_linear_operator_matrices(
-            mesh, k1, True, compute_single_layer=False
-        )
-        S1, _ = _assemble_linear_operator_matrices(
-            mesh, k1, False, compute_double_layer=False
+        S1, Kp1 = _assemble_linear_operator_matrices(
+            mesh, k1, True, compute_single_layer=True
         )
         D0 = _assemble_linear_hypersingular_matrix(mesh, k0)
         M = _assemble_linear_mass_matrix(mesh)

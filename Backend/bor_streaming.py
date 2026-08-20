@@ -306,25 +306,25 @@ class StreamingFarBlocks:
             return Fs
         if which == "mfie":
             return _mfie_brackets(
-                g.rho[rows][:, None] * np.ones(P)[None, :],
-                g.z[rows][:, None] * np.ones(P)[None, :],
-                g.trho[rows][:, None] * np.ones(P)[None, :],
-                g.tz[rows][:, None] * np.ones(P)[None, :],
-                g.rho[None, :] * np.ones(nr)[:, None],
-                g.z[None, :] * np.ones(nr)[:, None],
-                g.trho[None, :] * np.ones(nr)[:, None],
-                g.tz[None, :] * np.ones(nr)[:, None],
+                g.rho[rows][:, None],
+                g.z[rows][:, None],
+                g.trho[rows][:, None],
+                g.tz[rows][:, None],
+                g.rho[None, :],
+                g.z[None, :],
+                g.trho[None, :],
+                g.tz[None, :],
                 k, xi)
-        one = np.ones((nr, P))
+        pair_shape = (nr, P)
         Fs = _ibc_brackets_grid(
-            (g.rho[rows][:, None] * one).ravel(),
-            (g.z[rows][:, None] * one).ravel(),
-            (g.trho[rows][:, None] * one).ravel(),
-            (g.tz[rows][:, None] * one).ravel(),
-            (g.rho[None, :] * one).ravel(),
-            (g.z[None, :] * one).ravel(),
-            (g.trho[None, :] * one).ravel(),
-            (g.tz[None, :] * one).ravel(),
+            np.broadcast_to(g.rho[rows][:, None], pair_shape).ravel(),
+            np.broadcast_to(g.z[rows][:, None], pair_shape).ravel(),
+            np.broadcast_to(g.trho[rows][:, None], pair_shape).ravel(),
+            np.broadcast_to(g.tz[rows][:, None], pair_shape).ravel(),
+            np.broadcast_to(g.rho[None, :], pair_shape).ravel(),
+            np.broadcast_to(g.z[None, :], pair_shape).ravel(),
+            np.broadcast_to(g.trho[None, :], pair_shape).ravel(),
+            np.broadcast_to(g.tz[None, :], pair_shape).ravel(),
             k, np.broadcast_to(xi, (nr * P, nx_b)))
         return tuple(F.reshape(nr, P, nx_b) for F in Fs)
 

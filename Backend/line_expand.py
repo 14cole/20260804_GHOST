@@ -22,7 +22,9 @@ Two quantities, in this order:
     centred on the 2D origin (0, 0) so the coefficient carries no placement
     phase of its own -- the placement phase comes from the perimeter.
 
-2.  **Perimeter expansion** -- with the coefficient in hand,
+2.  **Perimeter expansion** -- with the coefficient in hand, the ordered
+    segment tangent and interpolated endpoint outward normals define the local
+    seam frame, and
 
         F(d) = (1 / 4pi) * Int_perimeter
                [w_TM e^{j psi_TM} dA_TM + w_TE e^{j psi_TE} dA_TE]
@@ -451,12 +453,17 @@ def _transverse_seam_basis(t_hat: 'np.ndarray',
     return e_tm, e_te
 
 
-def _subdivide(segments: 'np.ndarray', max_len: 'float') -> 'Tuple[np.ndarray, np.ndarray, np.ndarray]':
+def _subdivide(segments: 'np.ndarray', max_len: 'float',
+               segment_normals: 'Optional[np.ndarray]' = None
+               ) -> 'Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]':
     """Split each segment so no piece exceeds ``max_len``.
 
-    Returns (start points, unit tangents, lengths).  The phase integral over
-    each piece is then evaluated in closed form, so subdivision only has to
-    resolve variation of the COEFFICIENT, not of the phase.
+    Returns (start points, unit tangents, lengths, midpoint normals).  When
+    ``segment_normals`` is supplied it has shape (n_segments, 2, 3) and its
+    endpoint vectors are linearly interpolated to each subdivided midpoint.
+    The phase integral over each piece is evaluated in closed form, so
+    subdivision only has to resolve variation of the coefficient and frame,
+    not of the phase.
     """
     segments = np.asarray(segments, dtype=float)
     max_len = float(max_len)
@@ -466,10 +473,20 @@ def _subdivide(segments: 'np.ndarray', max_len: 'float') -> 'Tuple[np.ndarray, n
         raise ValueError("perimeter contains NaN or infinite coordinates.")
     if not math.isfinite(max_len) or max_len <= 0.0:
         raise ValueError("maximum subdivision length must be positive and finite.")
+    normals = None
+    if segment_normals is not None:
+        normals = np.asarray(segment_normals, dtype=float)
+        if normals.shape != segments.shape or not np.all(np.isfinite(normals)):
+            raise ValueError(
+                "segment_normals must contain two finite 3-vectors per segment."
+            )
+        if np.any(np.linalg.norm(normals, axis=2) <= 1.0e-12):
+            raise ValueError("segment_normals contains a zero-length normal.")
     starts: 'List[np.ndarray]' = []
     tangents: 'List[np.ndarray]' = []
     lengths: 'List[float]' = []
-    for a, b in segments:
+    midpoint_normals: 'List[np.ndarray]' = []
+    for segment_index, (a, b) in enumerate(segments):
         v = b - a
         L = float(np.linalg.norm(v))
         if L <= 0.0:
@@ -481,24 +498,39 @@ def _subdivide(segments: 'np.ndarray', max_len: 'float') -> 'Tuple[np.ndarray, n
             starts.append(a + u * (i * dL))
             tangents.append(u)
             lengths.append(dL)
+            if normals is not None:
+                fraction = (i + 0.5) / n
+                midpoint_normals.append(
+                    (1.0 - fraction) * normals[segment_index, 0]
+                    + fraction * normals[segment_index, 1]
+                )
     if not starts:
         raise ValueError("perimeter has no non-degenerate segments.")
-    return (np.asarray(starts), np.asarray(tangents), np.asarray(lengths))
+    return (
+        np.asarray(starts), np.asarray(tangents), np.asarray(lengths),
+        None if normals is None else np.asarray(midpoint_normals),
+    )
 
 
 def expand_perimeter(segments: 'np.ndarray',
                      coefficients: 'SeamCoefficients',
-                     normal_fn: 'Callable[[np.ndarray], np.ndarray]',
+                     normal_fn: 'Optional[Callable[[np.ndarray], np.ndarray]]',
                      directions: 'np.ndarray',
                      frequency_ghz: 'Optional[float]' = None,
                      psi_tm_deg: 'float' = 0.0,
                      psi_te_deg: 'float' = 0.0,
                      grazing_taper_deg: 'float' = 10.0,
                      max_piece_wavelengths: 'float' = 0.05,
-                     occluder=None) -> 'Dict[str, np.ndarray]':
+                     occluder=None,
+                     segment_normals: 'Optional[np.ndarray]' = None
+                     ) -> 'Dict[str, np.ndarray]':
     """Expand a seam coefficient along a 3D perimeter.
 
     ``segments``    (n_seg, 2, 3) vehicle-frame metres, head-to-tail.
+    ``segment_normals`` optional (n_seg, 2, 3) endpoint outward normals.
+                    When supplied these define the local skin frame and
+                    ``normal_fn`` must be None.  The endpoint normals are
+                    interpolated along each segment before normalization.
     ``directions``  (n_dir, 3) unit COMING-FROM look directions.
     ``psi_tm_deg``  inter-solver constant phase for the 2D TM coefficient
                     (ring-gate calibrated; == PSI_HH_DEG, since phi-pol/HH is
@@ -527,11 +559,19 @@ def expand_perimeter(segments: 'np.ndarray',
     if (not math.isfinite(max_piece_wavelengths)
             or max_piece_wavelengths <= 0.0):
         raise ValueError("max_piece_wavelengths must be positive and finite.")
-    r0, t_hat, dL = _subdivide(
-        np.asarray(segments, dtype=float), max_piece_wavelengths * lam
+    if segment_normals is not None and normal_fn is not None:
+        raise ValueError("supply segment_normals or normal_fn, not both.")
+    r0, t_hat, dL, supplied_normals = _subdivide(
+        np.asarray(segments, dtype=float), max_piece_wavelengths * lam,
+        segment_normals=segment_normals,
     )
     r_mid = r0 + t_hat * (dL[:, None] / 2.0)
-    n_hat = np.asarray(normal_fn(r_mid), dtype=float)
+    if supplied_normals is None:
+        if normal_fn is None:
+            raise ValueError("normal_fn is required when segment_normals is absent.")
+        n_hat = np.asarray(normal_fn(r_mid), dtype=float)
+    else:
+        n_hat = supplied_normals
     if n_hat.shape != r_mid.shape or not np.all(np.isfinite(n_hat)):
         raise ValueError(
             "normal_fn must return one finite 3-vector per perimeter point."

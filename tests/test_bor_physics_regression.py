@@ -3,6 +3,7 @@
 
 import json
 import math
+import shlex
 import sys
 import tempfile
 import unittest
@@ -43,6 +44,7 @@ from line_expand import SeamCoefficients, expand_perimeter  # noqa: E402
 
 
 FREQUENCY_HZ = 1.0e9
+SPHERE_ASPECTS_DEG = [0.0, 31.0, 73.0, 90.0, 137.0, 180.0]
 
 
 def _sphere(radius_m, elements):
@@ -101,16 +103,40 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
     def _assert_spherical_channels(self, result, reference, tolerance_db):
         vv = np.asarray(result["sigma_vv"], dtype=float)
         hh = np.asarray(result["sigma_hh"], dtype=float)
+        amp_vv = np.asarray(result["amp_vv"], dtype=complex)
+        amp_hh = np.asarray(result["amp_hh"], dtype=complex)
         self.assertTrue(np.all(np.isfinite(vv)))
         self.assertTrue(np.all(np.isfinite(hh)))
-        self.assertLess(_error_db(vv[0], reference), tolerance_db)
-        self.assertLess(_error_db(hh[0], reference), tolerance_db)
-        self.assertLess(_error_db(vv[0], hh[0]), 0.08)
+        self.assertEqual(result["theta_deg"], SPHERE_ASPECTS_DEG)
+        for value in vv:
+            self.assertLess(_error_db(value, reference), tolerance_db)
+        for value in hh:
+            self.assertLess(_error_db(value, reference), tolerance_db)
+        for value_vv, value_hh in zip(vv, hh):
+            self.assertLess(_error_db(value_vv, value_hh), 0.08)
+        np.testing.assert_allclose(
+            vv, 4.0 * math.pi * np.abs(amp_vv) ** 2,
+            rtol=2.0e-14, atol=0.0,
+        )
+        np.testing.assert_allclose(
+            hh, 4.0 * math.pi * np.abs(amp_hh) ** 2,
+            rtol=2.0e-14, atol=0.0,
+        )
+        # At an axial look the polarization basis is arbitrary.  A sphere is
+        # also fore/aft symmetric, so both channels and both poles must share
+        # one coherent complex amplitude, not merely the same RCS power.
+        np.testing.assert_allclose(
+            amp_vv[[0, -1]], amp_hh[[0, -1]],
+            rtol=2.0e-12, atol=2.0e-13,
+        )
+        np.testing.assert_allclose(
+            amp_vv[0], amp_vv[-1], rtol=2.0e-12, atol=2.0e-13,
+        )
 
     def test_pec_sphere_matches_mie(self):
         radius = 3.0 * C0 / (2.0 * math.pi * FREQUENCY_HZ)
         result = solve_bor(
-            _sphere(radius, 45), FREQUENCY_HZ, [0.0],
+            _sphere(radius, 45), FREQUENCY_HZ, SPHERE_ASPECTS_DEG,
             formulation="cfie", workers=2,
             assembly="streaming", stream_budget_gb=0.25,
         )
@@ -122,7 +148,7 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
         radius = 1.5 * C0 / (2.0 * math.pi * FREQUENCY_HZ)
         impedance = 50.0 + 10.0j
         result = solve_bor(
-            _sphere(radius, 45), FREQUENCY_HZ, [0.0],
+            _sphere(radius, 45), FREQUENCY_HZ, SPHERE_ASPECTS_DEG,
             formulation="efie", zs=impedance, workers=2,
         )
         self._assert_spherical_channels(
@@ -136,7 +162,7 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
         eps_r = 3.0 - 0.1j
         mu_r = 1.0 - 0.02j
         result = solve_bor_dielectric(
-            _sphere(radius, 45), FREQUENCY_HZ, [0.0], eps_r, mu_r,
+            _sphere(radius, 45), FREQUENCY_HZ, SPHERE_ASPECTS_DEG, eps_r, mu_r,
             workers=2,
         )
         self._assert_spherical_channels(
@@ -153,10 +179,10 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
         eps_r = 3.0 - 0.1j
         mu_r = 1.0 - 0.02j
         result = solve_bor_coated_pec(
-            _sphere(outer_radius, 50),
-            _sphere(core_radius, 40),
+            _sphere(outer_radius, 60),
+            _sphere(core_radius, 48),
             FREQUENCY_HZ,
-            [0.0],
+            SPHERE_ASPECTS_DEG,
             eps_r,
             mu_r,
             workers=2,
@@ -216,7 +242,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 prepared.amplitude[-1], prepared.amplitude[0]
             )
 
-            # The COMPACT_FEATURES entry itself declares the role. A GUI is
+            # The POINT_FEATURE_DATASETS entry itself declares the role. A GUI is
             # allowed to omit the redundant domain tag entirely.
             payload.pop("rcs_domain")
             with path.open("wb") as stream:
@@ -896,7 +922,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         )
         backend = str(Path(run_hpc_bor_monostatic.__file__).resolve().parent)
         self.assertIn(
-            f"export PYTHONPATH={backend}:${{PYTHONPATH:-}}",
+            f"export PYTHONPATH={shlex.quote(backend)}:${{PYTHONPATH:-}}",
             text,
         )
 

@@ -66,7 +66,7 @@ python Backend/run_local_bor.py
 python Backend/run_hpc_monostatic.py
 python Backend/run_hpc_bor_monostatic.py
 
-# After a BoR or imported 3-D run: edit its hard-coded feature lists, then
+# After a BoR or imported 3-D run: select feature datasets and placement CSVs
 python Backend/place_features.py
 
 # Build placement-ready 2-D deltas from the newest complete FRD/OPN run
@@ -123,10 +123,15 @@ deltas and `sigma_3d` for body and compact data), preserve finite power
 and phase, and contain the channels and angular support actually used. Stale
 descriptive metadata copied by a GUI is superseded by the launcher entry.
 
-For both `LINE_FEATURES` and `COMPACT_FEATURES`, set
-`subtraction_order="featured-clean"` for the normal OPN-FRD result. If the GUI
-file was formed as FRD-OPN, use `"clean-featured"`; placement negates the
-complex delta to recover the canonical featured-minus-clean definition.
+Point features use `POINT_FEATURE_DATASETS` plus one
+`POINT_FEATURE_LOCATIONS_CSV`; line-expanded features use
+`LINE_FEATURE_DATASETS` plus one `LINE_FEATURE_LOCATIONS_CSV`. See
+[FEATURE_VALIDATION_GUIDE.md](FEATURE_VALIDATION_GUIDE.md#one-point-placement-csv)
+and [the line CSV section](FEATURE_VALIDATION_GUIDE.md#one-line-placement-csv).
+The point CSV contains a dataset selector, position, normal, and roll vector.
+The line CSV contains a dataset selector, ordered endpoints, and endpoint
+outward normals. Both workflows accept only the canonical OPN-FRD
+(`featured - clean`) complex delta and do not offer a sign-reversal option.
 Relative settings paths are resolved from the repository root, so the launcher
 works the same way regardless of the terminal's current directory.
 

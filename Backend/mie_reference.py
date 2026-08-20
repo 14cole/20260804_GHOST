@@ -317,3 +317,164 @@ def sigma_coated_pec_cylinder(a_inner_m, a_outer_m, eps_r, mu_r,
     amp = np.sum(a_n * (-1.0)**n_arr)
     sigma = (4.0 / k0) * abs(amp)**2
     return float(sigma)
+
+
+def sigma_two_layer_dielectric_cylinder(
+    a_core_m,
+    a_outer_m,
+    eps_shell,
+    mu_shell,
+    eps_core,
+    mu_core,
+    freq_hz,
+    polarization,
+):
+    """Monostatic width of a concentric two-dielectric cylinder in air.
+
+    Region 0 is air, region 1 is the annular shell, and region 2 is the
+    homogeneous core.  Each cylindrical harmonic is obtained from an
+    independent four-unknown boundary match, making this a useful reference
+    for TYPE 3 + TYPE 5 multi-region geometries.
+    """
+
+    if not (0.0 < float(a_core_m) < float(a_outer_m)):
+        raise ValueError("Require 0 < a_core_m < a_outer_m.")
+
+    pol = polarization.upper()
+    k0 = 2.0 * np.pi * freq_hz / C0
+    n_shell = np.sqrt(complex(eps_shell) * complex(mu_shell))
+    n_core = np.sqrt(complex(eps_core) * complex(mu_core))
+    k_shell = k0 * n_shell
+    k_core = k0 * n_core
+
+    if pol == "TM":
+        zeta0 = 1.0 + 0.0j
+        zeta_shell = complex(mu_shell)
+        zeta_core = complex(mu_core)
+    elif pol == "TE":
+        zeta0 = 1.0 + 0.0j
+        zeta_shell = complex(eps_shell)
+        zeta_core = complex(eps_core)
+    else:
+        raise ValueError(f"Unknown polarization {polarization}")
+
+    q0 = k0 / zeta0
+    q_shell = k_shell / zeta_shell
+    q_core = k_core / zeta_core
+    x0_outer = k0 * a_outer_m
+    xs_outer = k_shell * a_outer_m
+    xs_core = k_shell * a_core_m
+    xc_core = k_core * a_core_m
+    nmax = _nmax_for_ka(max(
+        abs(x0_outer), abs(xs_outer), abs(xs_core), abs(xc_core)
+    ))
+    n_arr = np.arange(-nmax, nmax + 1)
+    a_n = np.zeros(n_arr.shape, dtype=complex)
+
+    for idx, n_raw in enumerate(n_arr):
+        n = int(n_raw)
+        j0 = sp.jv(n, x0_outer)
+        j0p = sp.jvp(n, x0_outer, 1)
+        h0 = sp.hankel2(n, x0_outer)
+        h0p = sp.h2vp(n, x0_outer, 1)
+
+        js_o = sp.jv(n, xs_outer)
+        js_op = sp.jvp(n, xs_outer, 1)
+        ys_o = sp.yv(n, xs_outer)
+        ys_op = sp.yvp(n, xs_outer, 1)
+        js_i = sp.jv(n, xs_core)
+        js_ip = sp.jvp(n, xs_core, 1)
+        ys_i = sp.yv(n, xs_core)
+        ys_ip = sp.yvp(n, xs_core, 1)
+        jc = sp.jv(n, xc_core)
+        jcp = sp.jvp(n, xc_core, 1)
+
+        # Unknowns are [a_n, b_n, c_n, d_n] for exterior H2,
+        # shell J/Y, and regular core J coefficients respectively.
+        matrix = np.asarray([
+            [h0, -js_o, -ys_o, 0.0],
+            [q0 * h0p, -q_shell * js_op, -q_shell * ys_op, 0.0],
+            [0.0, js_i, ys_i, -jc],
+            [0.0, q_shell * js_ip, q_shell * ys_ip, -q_core * jcp],
+        ], dtype=complex)
+        rhs = np.asarray([-j0, -q0 * j0p, 0.0, 0.0], dtype=complex)
+        a_n[idx] = np.linalg.solve(matrix, rhs)[0]
+
+    amp = np.sum(a_n * (-1.0) ** n_arr)
+    return float((4.0 / k0) * abs(amp) ** 2)
+
+
+def sigma_coated_impedance_cylinder(
+    a_inner_m,
+    a_outer_m,
+    eps_r,
+    mu_r,
+    zs_ohm,
+    freq_hz,
+    polarization,
+):
+    """Monostatic width of a dielectric-coated impedance cylinder.
+
+    The annular dielectric is bounded by air at ``a_outer_m`` and by a
+    Leontovich surface at ``a_inner_m``.  This independently exercises the
+    solver's TYPE 4 dielectric/IBC boundary rather than only its PEC limit.
+    """
+
+    if not (0.0 < float(a_inner_m) < float(a_outer_m)):
+        raise ValueError("Require 0 < a_inner_m < a_outer_m.")
+    z_s = complex(zs_ohm)
+    if abs(z_s) == 0.0:
+        return sigma_coated_pec_cylinder(
+            a_inner_m, a_outer_m, eps_r, mu_r, freq_hz, polarization
+        )
+
+    pol = polarization.upper()
+    k0 = 2.0 * np.pi * freq_hz / C0
+    n_rel = np.sqrt(complex(eps_r) * complex(mu_r))
+    k1 = k0 * n_rel
+    eta1 = ETA0 * complex(mu_r) / n_rel
+
+    if pol == "TM":
+        zeta_out = 1.0 + 0.0j
+        zeta_in = complex(mu_r)
+        beta = -1j * k1 * eta1 / z_s
+    elif pol == "TE":
+        zeta_out = 1.0 + 0.0j
+        zeta_in = complex(eps_r)
+        beta = -1j * k1 * z_s / eta1
+    else:
+        raise ValueError(f"Unknown polarization {polarization}")
+
+    p = k1 / zeta_in
+    q = k0 / zeta_out
+    x_inner = k1 * a_inner_m
+    x_outer_inner = k1 * a_outer_m
+    x_outer = k0 * a_outer_m
+    nmax = _nmax_for_ka(max(abs(x_inner), abs(x_outer_inner), abs(x_outer)))
+    n_arr = np.arange(-nmax, nmax + 1)
+    a_n = np.zeros(n_arr.shape, dtype=complex)
+
+    for idx, n_raw in enumerate(n_arr):
+        n = int(n_raw)
+        j_i = sp.jv(n, x_inner)
+        y_i = sp.yv(n, x_inner)
+        jp_i = sp.jvp(n, x_inner, 1)
+        yp_i = sp.yvp(n, x_inner, 1)
+        j_oi = sp.jv(n, x_outer_inner)
+        y_oi = sp.yv(n, x_outer_inner)
+        jp_oi = sp.jvp(n, x_outer_inner, 1)
+        yp_oi = sp.yvp(n, x_outer_inner, 1)
+        j_o = sp.jv(n, x_outer)
+        jp_o = sp.jvp(n, x_outer, 1)
+        h_o = sp.hankel2(n, x_outer)
+        hp_o = sp.h2vp(n, x_outer, 1)
+
+        alpha = -(k1 * jp_i + beta * j_i) / (k1 * yp_i + beta * y_i)
+        phi_o = j_oi + alpha * y_oi
+        phip_o = jp_oi + alpha * yp_oi
+        numerator = -(p * phip_o * j_o - q * phi_o * jp_o)
+        denominator = p * phip_o * h_o - q * phi_o * hp_o
+        a_n[idx] = numerator / denominator
+
+    amp = np.sum(a_n * (-1.0) ** n_arr)
+    return float((4.0 / k0) * abs(amp) ** 2)
