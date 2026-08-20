@@ -366,6 +366,29 @@ def _require_units(grim: 'Dict[str, Any]', label: 'str', *,
     return units
 
 
+def _require_linear_quantity(grim, label, expected):
+    """Require the dimensional linear field; display-unit labels are optional."""
+    units = _units_metadata(grim, label)
+    got = str(units.get("rcs_linear_quantity", "")).strip().lower()
+    if got != expected:
+        raise ValueError(
+            f"{label}: require units.rcs_linear_quantity={expected!r}; "
+            f"got {got or '<missing>'!r}."
+        )
+    # A GRIM axis is standardized as degrees/GHz. Missing descriptive keys are
+    # harmless, but an explicit different unit must never be interpreted as
+    # the standard axis silently.
+    for key, standard in (
+        ("azimuth", "deg"), ("elevation", "deg"), ("frequency", "ghz")
+    ):
+        if key in units and str(units[key]).strip().lower() != standard:
+            raise ValueError(
+                f"{label}: GRIM {key} values must be stored in {standard}; "
+                f"got units.{key}={units[key]!r}."
+            )
+    return units
+
+
 def _require_singleton_zero_elevation(
         grim: 'Dict[str, Any]', label: 'str'
 ) -> 'None':
@@ -607,49 +630,76 @@ def load_coefficients_from_grim(paths: 'PathOrList', frequency_ghz: 'float',
                                os.path.basename(str(paths)))
 
 
+def _signed_seam(coefficients: 'SeamCoefficients', delta_sign: 'float'
+                 ) -> 'SeamCoefficients':
+    """Apply the declared subtraction order without changing interpolation."""
+    sign = float(delta_sign)
+    if not math.isfinite(sign) or sign not in (-1.0, 1.0):
+        raise ValueError("delta_sign must be exactly +1 or -1.")
+    if sign == 1.0:
+        return coefficients
+    return SeamCoefficients(
+        coefficients.frequency_ghz,
+        coefficients.phi_deg,
+        -coefficients.dA_tm,
+        -coefficients.dA_te,
+        label=coefficients.label,
+    )
+
+
 def load_seam_from_grim(path: 'str', frequency_ghz: 'float',
-                        tol_ghz: 'float' = 1e-6) -> 'SeamCoefficients':
+                        tol_ghz: 'float' = 1e-6, *,
+                        declared_coherent_delta: 'bool' = False,
+                        delta_sign: 'float' = 1.0,
+                        _grim_payload=None) -> 'SeamCoefficients':
     """Load a delta .grim at one frequency into a SeamCoefficients.
 
     Both physical channels are required.  HH is the accepted alias for TM and
     VV is the accepted alias for TE.
     """
-    g = _load_grim(path)
-    dom = str(g.get("rcs_domain", ""))
-    if dom != "delta":
-        raise ValueError(
-            f"{path}: rcs_domain is {dom!r}, not 'delta'.  That tag is what says "
-            f"the samples are a DIFFERENCE (featured - clean) rather than a whole "
-            f"object, and the two are placed differently, so it is not assumed.\n"
-            f"  If you subtracted this yourself (e.g. in the viewer), attest "
-            f"the source convention with tag_as_delta(path, "
-            f"source_2d_grim=...).")
-    if _metadata_text(g, "power_domain", path) != "linear_rcs":
-        raise ValueError(
-            f"{path}: a production seam delta must have "
-            "power_domain='linear_rcs'.")
-    _require_units(
-        g, path, linear_quantity="sigma_2d", log_unit="dBke")
+    g = _load_grim(path) if _grim_payload is None else _grim_payload
+    dom = str(g.get("rcs_domain", "")).strip()
+    normalized_domain = dom.lower().replace("-", "_")
+    if declared_coherent_delta:
+        # Listing a file as a LINE_FEATURES dataset is the role declaration.
+        # GUI derived grids often preserve the numerical complex field as
+        # power+phase while dropping or retaining stale source semantics. The
+        # declaration supersedes those descriptive strings. Dimensional units
+        # and the numerical power/phase normalization remain strict below.
+        pass
+    else:
+        if normalized_domain != "delta":
+            raise ValueError(
+                f"{path}: rcs_domain is {dom!r}, not 'delta'. A direct API "
+                "call must provide a canonical delta or set "
+                "declared_coherent_delta=True after verifying that the file "
+                "is featured minus clean."
+            )
+        if _metadata_text(g, "power_domain", path) != "linear_rcs":
+            raise ValueError(
+                f"{path}: a production seam delta must have "
+                "power_domain='linear_rcs'.")
+    if declared_coherent_delta:
+        _require_linear_quantity(g, path, "sigma_2d")
+    else:
+        _require_units(
+            g, path, linear_quantity="sigma_2d", log_unit="dBke")
     _require_singleton_zero_elevation(g, path)
-    field_domain = _metadata_text(g, "complex_field_domain", path)
-    phase_reference = _metadata_text(g, "phase_reference", path)
-    amplitude_convention = _metadata_text(
-        g, "amplitude_convention", path)
-    if field_domain != DELTA_FIELD_DOMAIN:
-        raise ValueError(
-            f"{path}: delta complex_field_domain is {field_domain!r}; require "
-            f"{DELTA_FIELD_DOMAIN!r}.")
     expected_phase_reference = (
         PHYSICAL_2D_PHASE_REFERENCE + DELTA_PHASE_SUFFIX)
-    if phase_reference != expected_phase_reference:
-        raise ValueError(
-            f"{path}: delta phase_reference is not the canonical 2-D solver "
-            "reference plus featured-clean placement reference.")
-    if amplitude_convention != PHYSICAL_2D_AMPLITUDE_CONVENTION:
-        raise ValueError(
-            f"{path}: delta amplitude_convention is "
-            f"{amplitude_convention!r}; require "
-            f"{PHYSICAL_2D_AMPLITUDE_CONVENTION!r}.")
+    expected_metadata = {
+        "complex_field_domain": DELTA_FIELD_DOMAIN,
+        "phase_reference": expected_phase_reference,
+        "amplitude_convention": PHYSICAL_2D_AMPLITUDE_CONVENTION,
+    }
+    for key, expected_value in expected_metadata.items():
+        if declared_coherent_delta:
+            continue
+        got = _metadata_text(g, key, path)
+        if got != expected_value:
+            raise ValueError(
+                f"{path}: incompatible line-delta {key}: got {got!r}; "
+                f"require {expected_value!r}.")
     # Also rejects absent/unknown dimensional normalization.  Legacy
     # delta_amp_sq artifacts are intentionally not accepted by the production
     # placement path: they are not 2-D scattering widths and must be rebuilt.
@@ -661,8 +711,10 @@ def load_seam_from_grim(path: 'str', frequency_ghz: 'float',
     )
     if not np.allclose(scale, expected, rtol=1.0e-14, atol=0.0):
         raise ValueError(f"{path}: a seam delta must use sigma_2d normalization.")
-    return _coeffs_from_tables(_amp_tables([g]), frequency_ghz, tol_ghz,
-                               os.path.basename(path))
+    coefficients = _coeffs_from_tables(
+        _amp_tables([g]), frequency_ghz, tol_ghz, os.path.basename(path)
+    )
+    return _signed_seam(coefficients, delta_sign)
 
 
 def tag_as_delta(path: 'str', *, source_2d_grim: 'Optional[str]' = None) -> 'str':
@@ -1726,40 +1778,13 @@ def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
                                      ) -> 'None':
     expected = point_pattern_convention_metadata()
     if declared_coherent_delta:
-        domain = _metadata_text(metadata, "rcs_domain", label)
-        normalized_domain = domain.strip().lower().replace("-", "_")
-        if normalized_domain not in {"delta", "power_phase"}:
-            raise ValueError(
-                f"{label}: declared compact delta has rcs_domain={domain!r}; "
-                "accept only 'delta' or a GUI coherent-subtraction "
-                "'power_phase' container."
-            )
         # Listing this file in COMPACT_FEATURES declares both the operation
         # meaning (installed feature minus matching clean skin) and the cavity
-        # frame/origin convention documented by place_features.py. GRIM's
-        # generic coherent-subtraction grid may drop these semantic tags. A
-        # missing tag is therefore supplied by that explicit declaration, but
-        # any retained tag must still agree exactly.
-        if "phase_reference" in metadata:
-            phase = _metadata_text(metadata, "phase_reference", label)
-            if phase != expected["phase_reference"]:
-                raise ValueError(
-                    f"{label}: incompatible compact-pattern phase_reference: "
-                    f"got {phase!r}; require {expected['phase_reference']!r}."
-                )
-        for key in (
-            "amplitude_convention",
-            "complex_field_domain",
-            "pattern_frame_convention",
-        ):
-            if key not in metadata:
-                continue
-            got = _metadata_text(metadata, key, label)
-            if got != expected[key]:
-                raise ValueError(
-                    f"{label}: incompatible compact-pattern {key}: got "
-                    f"{got!r}; require {expected[key]!r}."
-                )
+        # frame/origin convention documented by place_features.py. A GUI may
+        # drop these strings or carry stale source strings into its derived
+        # output, so the explicit declaration supersedes all of them. Units,
+        # normalization, finite fields, channels, and angular coverage are
+        # independently checked by _load_pattern.
         return
     for key, required in expected.items():
         got = _metadata_text(metadata, key, label)
@@ -1771,7 +1796,8 @@ def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
                 "normalization are explicit.")
 
 
-def _load_pattern(pattern, *, declared_coherent_delta=False):
+def _load_pattern(pattern, *, declared_coherent_delta=False,
+                  assume_missing_cross_pol_zero=False):
     """Return (az_deg, el_deg, freqs_ghz, amp[az,el,freq,pol], {ch:idx}) for a
     3-D delta pattern given as a .grim path or a dict with the same axes.  The
     pattern is the COMPLEX differential scattering (featured - clean) of the
@@ -1811,16 +1837,10 @@ def _load_pattern(pattern, *, declared_coherent_delta=False):
                 f"{pattern}: compact-feature patterns require preserved raw "
                 "complex amplitudes, or a declared GUI coherent subtraction "
                 "with finite power and phase.")
-        try:
-            pattern_units = json.loads(str(g.get("units", "") or "{}"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{pattern}: invalid units metadata.") from exc
-        if pattern_units.get("rcs_linear_quantity") != "sigma_3d":
-            raise ValueError(
-                f"{pattern}: compact-feature pattern must be a 3-D "
-                "sigma_3d/dBsm dataset, not "
-                f"{pattern_units.get('rcs_linear_quantity')!r}.")
-        if str(pattern_units.get("rcs_log_unit", "")).strip().lower() != "dbsm":
+        pattern_units = _require_linear_quantity(g, pattern, "sigma_3d")
+        if (not declared_coherent_delta and
+                str(pattern_units.get("rcs_log_unit", "")).strip().lower()
+                != "dbsm"):
             raise ValueError(
                 f"{pattern}: compact-feature pattern must use dBsm display "
                 "units for sigma_3d.")
@@ -1930,34 +1950,58 @@ def _load_pattern(pattern, *, declared_coherent_delta=False):
                              f"for {key}.")
         idx[key] = i
     missing = [p for p in ("VV", "HH", "VH") if p not in idx]
-    if missing:
+    if missing == ["VH"] and assume_missing_cross_pol_zero:
+        amp = np.concatenate(
+            [amp, np.zeros(amp.shape[:-1] + (1,), dtype=complex)], axis=-1
+        )
+        idx["VH"] = amp.shape[-1] - 1
+    elif missing:
         raise ValueError(
             f"point pattern is missing {missing}. A general compact 3-D "
             "scatterer requires the full reciprocal Jones matrix VV/HH/VH; "
-            "missing channels are not assumed to be zero.")
+            "missing channels are not assumed to be zero. For a locally "
+            "diagonal reciprocal feature, explicitly set "
+            "assume_missing_cross_pol_zero=True.")
     return az, el, fr, amp, idx
 
 
-def prepare_point_pattern(pattern, *, declared_coherent_delta=False
+def prepare_point_pattern(pattern, *, declared_coherent_delta=False,
+                          delta_sign: 'float' = 1.0,
+                          assume_missing_cross_pol_zero: 'bool' = False
                           ) -> 'PreparedPointPattern':
     """Validate and load one compact pattern once for repeated placement.
 
     ``declared_coherent_delta=True`` is for a GUI power/phase result that the
     caller explicitly attests is installed-feature minus clean-skin in the
     documented cavity frame and phase origin. It supplies only convention tags
-    lost by that GUI operation; units, grid, polarization, seam, normalization,
-    and any convention metadata that remains in the file stay strict.
+    lost or copied stale by that GUI operation; units, grid, polarization,
+    seam, and numerical normalization remain strict.
     """
-    if isinstance(pattern, PreparedPointPattern):
-        return pattern
-    return PreparedPointPattern(*_load_pattern(
-        pattern, declared_coherent_delta=declared_coherent_delta
-    ))
+    sign = float(delta_sign)
+    if not math.isfinite(sign) or sign not in (-1.0, 1.0):
+        raise ValueError("delta_sign must be exactly +1 or -1.")
+    loaded = pattern if isinstance(pattern, PreparedPointPattern) else PreparedPointPattern(
+        *_load_pattern(
+            pattern,
+            declared_coherent_delta=declared_coherent_delta,
+            assume_missing_cross_pol_zero=assume_missing_cross_pol_zero,
+        )
+    )
+    if sign == 1.0:
+        return loaded
+    return PreparedPointPattern(
+        loaded.azimuths,
+        loaded.elevations,
+        loaded.frequencies,
+        -loaded.amplitude,
+        loaded.channel_indices,
+    )
 
 
 def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
                               frequency_ghz, roll_ref=None,
-                              tol_ghz: 'float' = 1e-6, occluder=None) -> 'Dict[str, np.ndarray]':
+                              tol_ghz: 'float' = 1e-6, occluder=None,
+                              _interpolator_cache=None) -> 'Dict[str, np.ndarray]':
     """Place a precomputed 3-D delta pattern at a single body coordinate.
 
     Unlike the line-expanded features (distributed along a perimeter/span), a
@@ -1992,15 +2036,22 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
     j = int(np.argmin(np.abs(fr - float(frequency_ghz))))
     if abs(fr[j] - float(frequency_ghz)) > tol_ghz:
         raise ValueError(f"point pattern has no {frequency_ghz} GHz (has {fr.tolist()}).")
-    def _mk(ch):
-        if ch not in idx:
-            return None
-        a2 = amp[:, :, j, idx[ch]]
-        return (RegularGridInterpolator(
-                    (az, el), a2.real, bounds_error=True),
-                RegularGridInterpolator(
-                    (az, el), a2.imag, bounds_error=True))
-    interp = {c: _mk(c) for c in ("VV", "HH", "VH")}
+    cache_key = (id(pattern), j)
+    interp = None if _interpolator_cache is None else _interpolator_cache.get(
+        cache_key
+    )
+    if interp is None:
+        def _mk(ch):
+            if ch not in idx:
+                return None
+            a2 = amp[:, :, j, idx[ch]]
+            return (RegularGridInterpolator(
+                        (az, el), a2.real, bounds_error=True),
+                    RegularGridInterpolator(
+                        (az, el), a2.imag, bounds_error=True))
+        interp = {c: _mk(c) for c in ("VV", "HH", "VH")}
+        if _interpolator_cache is not None:
+            _interpolator_cache[cache_key] = interp
 
     zc = np.asarray(aperture_normal, float)
     if zc.shape != (3,) or not np.all(np.isfinite(zc)) \
@@ -2200,7 +2251,9 @@ def sum_features(bor_result: 'Dict[str, Any]',
                  psi_te_deg: 'float' = PSI_VV_DEG,
                  corners: 'Sequence[Dict[str, Any]]' = (),
                  points: 'Sequence[Dict[str, Any]]' = (),
-                 occluder=None) -> 'Dict[str, np.ndarray]':
+                 occluder=None,
+                 retain_feature_amplitudes: 'bool' = True
+                 ) -> 'Dict[str, np.ndarray]':
     """Combine the BoR body with any number of line-expanded features.
 
     ``bor_result``  a solve_monostatic_rcs_bor / solve_bor result (needs
@@ -2253,6 +2306,24 @@ def sum_features(bor_result: 'Dict[str, Any]',
 
     warnings: 'List[str]' = []
     feats: 'List[Dict[str, np.ndarray]]' = []
+    stream_features = (
+        not bool(retain_feature_amplitudes)
+        and str(mode).strip().lower() == "coherent"
+    )
+    feature_total = {
+        key: np.zeros(len(dirs), dtype=complex)
+        for key in ("F_vv", "F_hh", "F_vh")
+    }
+
+    def _record_feature(feature):
+        if stream_features:
+            for key in feature_total:
+                feature_total[key] += np.asarray(
+                    feature.get(key, 0.0), dtype=complex
+                )
+        else:
+            feats.append(feature)
+
     for pl in placements:
         coef = pl["delta"]
         if isinstance(coef, SeamCoefficients):
@@ -2272,7 +2343,13 @@ def sum_features(bor_result: 'Dict[str, Any]',
             kind = str(pl.get("kind", "") or "").strip().lower()
             dom = str(_load_grim(str(coef)).get("rcs_domain", ""))
             if kind in ("delta", "seam"):
-                coef = load_seam_from_grim(str(coef), frequency_ghz)
+                coef = load_seam_from_grim(
+                    str(coef), frequency_ghz,
+                    declared_coherent_delta=bool(
+                        pl.get("declared_coherent_delta", False)
+                    ),
+                    delta_sign=float(pl.get("delta_sign", 1.0)),
+                )
             elif kind in ("object", "full", "coefficient"):
                 if dom == "delta":
                     raise ValueError(
@@ -2288,10 +2365,12 @@ def sum_features(bor_result: 'Dict[str, Any]',
         per = pl["perimeter"]
         if not isinstance(per, np.ndarray):
             per = read_perimeter_txt(str(per), scale=float(pl.get("scale", perimeter_scale)))
-        feats.append(expand_perimeter(per, coef, _placement_normal_fn(pl), dirs,
-                                      frequency_ghz=frequency_ghz,
-                                      psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
-                                      occluder=occluder))
+        _record_feature(expand_perimeter(
+            per, coef, _placement_normal_fn(pl), dirs,
+            frequency_ghz=frequency_ghz,
+            psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
+            occluder=occluder,
+        ))
 
     for cn in corners:
         cf = corner_amplitude(cn["fold"], cn["n_wing"], cn["n_body"],
@@ -2301,18 +2380,23 @@ def sum_features(bor_result: 'Dict[str, Any]',
                               occluder=occluder)
         if "warning" in cf:
             warnings.append(cf.pop("warning"))
-        feats.append(cf)
+        _record_feature(cf)
 
+    point_interpolator_cache = {}
     for pt in points:
-        feats.append(point_scatterer_amplitude(
+        _record_feature(point_scatterer_amplitude(
             pt["pattern"], pt["location"], pt["aperture_normal"], dirs, frequency_ghz,
-            roll_ref=pt.get("roll_ref"), occluder=occluder))
+            roll_ref=pt.get("roll_ref"), occluder=occluder,
+            _interpolator_cache=point_interpolator_cache))
 
-    out = combine(body, feats, mode=mode)
+    combined_features = [feature_total] if stream_features else feats
+    out = combine(body, combined_features, mode=mode)
     for ch in ("vv", "hh", "vh"):
         out[f"dbsm_{ch}"] = dbsm(out[f"sigma_{ch}"])
     out["body_amp"] = body
-    out["feature_amps"] = feats
+    out["feature_amps"] = feats if retain_feature_amplitudes else None
+    if stream_features:
+        out["feature_amp_total"] = feature_total
     out["n_corners"] = len(corners)
     out["frequency_ghz"] = float(frequency_ghz)
     if warnings:
@@ -2323,6 +2407,37 @@ def sum_features(bor_result: 'Dict[str, Any]',
 # -----------------------------------------------------------------------------
 # Export a combined vehicle signature to .grim
 # -----------------------------------------------------------------------------
+
+
+def _prepared_line_placements_at_frequency(
+    placements, frequency_ghz, payload_cache
+):
+    """Resolve declared line deltas while loading each source GRIM only once."""
+    prepared = []
+    for placement in placements:
+        coefficient = placement.get("delta")
+        kind = str(placement.get("kind", "") or "").strip().lower()
+        if (
+            kind in {"delta", "seam"}
+            and isinstance(coefficient, (str, os.PathLike))
+        ):
+            source = os.path.abspath(str(coefficient))
+            if source not in payload_cache:
+                payload_cache[source] = _load_grim(source)
+            resolved = dict(placement)
+            resolved["delta"] = load_seam_from_grim(
+                source,
+                float(frequency_ghz),
+                declared_coherent_delta=bool(
+                    placement.get("declared_coherent_delta", False)
+                ),
+                delta_sign=float(placement.get("delta_sign", 1.0)),
+                _grim_payload=payload_cache[source],
+            )
+            prepared.append(resolved)
+        else:
+            prepared.append(placement)
+    return prepared
 
 def export_signature_grim(out_path: 'str', *,
                           bor_result: 'Optional[Dict[str, Any]]',
@@ -2368,12 +2483,17 @@ def export_signature_grim(out_path: 'str', *,
     # [roll, aspect, freq] per channel
     amp = {c: np.zeros((n_r, n_a, n_f), dtype=complex) for c in chans}
     power = {c: np.zeros((n_r, n_a, n_f), dtype=float) for c in chans}
+    line_payload_cache = {}
     for fi, f in enumerate(freqs):
-        res = sum_features(_pick_body(bor_result, f), placements, dirs, float(f),
+        frequency_placements = _prepared_line_placements_at_frequency(
+            placements, float(f), line_payload_cache
+        )
+        res = sum_features(_pick_body(bor_result, f), frequency_placements, dirs, float(f),
                            normal_fn=normal_fn, mode=mode,
                            perimeter_scale=perimeter_scale,
                            psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
-                           corners=corners, points=points, occluder=occluder)
+                           corners=corners, points=points, occluder=occluder,
+                           retain_feature_amplitudes=False)
         for c in chans:
             a = np.asarray(res[f"amp_{c}"]).reshape(n_a, n_r).T       # -> [roll, aspect]
             s = np.asarray(res[f"sigma_{c}"]).reshape(n_a, n_r).T
@@ -2682,12 +2802,17 @@ def export_radar_grim(out_path: 'str', *,
     n_pol = 3
     shape = (len(az), len(el), len(freqs), n_pol)
     amp = np.zeros(shape, dtype=complex)
+    line_payload_cache = {}
     for fi, f in enumerate(freqs):
-        res = sum_features(_pick_body(bor_result, f), placements, d_v_flat, float(f),
+        frequency_placements = _prepared_line_placements_at_frequency(
+            placements, float(f), line_payload_cache
+        )
+        res = sum_features(_pick_body(bor_result, f), frequency_placements, d_v_flat, float(f),
                            normal_fn=normal_fn, mode="coherent",
                            perimeter_scale=perimeter_scale,
                            psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
-                           corners=corners, points=points, occluder=occluder)
+                           corners=corners, points=points, occluder=occluder,
+                           retain_feature_amplitudes=False)
         S = np.zeros((len(d_v_flat), 2, 2), dtype=complex)
         S[:, 0, 0] = res["amp_vv"]
         S[:, 1, 1] = res["amp_hh"]
@@ -2910,6 +3035,94 @@ def save_monostatic_grim(
     return destination
 
 
+def _validate_declared_coherent_base(base_payload, label):
+    """Validate a GUI-derived platform field under an explicit declaration.
+
+    GRIM may retain only sigma and phase after a derived operation. Selecting
+    that file as BASE_MONOSTATIC_GRIM attests the missing common-origin,
+    radar-frame coherent semantics; metadata that remains must not contradict
+    the declaration. The returned payload is a canonical in-memory view used
+    only for validation and summation.
+    """
+    from components import (
+        COMPONENT_AMPLITUDE_CONVENTION,
+        COMPONENT_COMPLEX_FIELD_DOMAIN,
+        COMPONENT_PHASE_REFERENCE,
+        validate_component_schema,
+    )
+
+    candidate = dict(base_payload)
+    if "combine_role" in candidate:
+        role = _metadata_text(candidate, "combine_role", label).strip().lower()
+        if role != "coherent":
+            raise ValueError(
+                f"{label}: BASE_MONOSTATIC_GRIM is explicitly tagged "
+                f"combine_role={role!r}; a power-only field cannot receive "
+                "coherent placed features."
+            )
+    candidate["combine_role"] = np.asarray("coherent")
+
+    units = _require_linear_quantity(candidate, label, "sigma_3d")
+    units["rcs_log_unit"] = "dBsm"
+    units.setdefault("azimuth", "deg")
+    units.setdefault("elevation", "deg")
+    units.setdefault("frequency", "GHz")
+    candidate["units"] = np.asarray(json.dumps(units, sort_keys=True))
+
+    expected = {
+        "rcs_domain": "power_phase",
+        "power_domain": "linear_rcs",
+        "phase_reference": COMPONENT_PHASE_REFERENCE,
+        "amplitude_convention": COMPONENT_AMPLITUDE_CONVENTION,
+        "complex_field_domain": COMPONENT_COMPLEX_FIELD_DOMAIN,
+    }
+    for key, required in expected.items():
+        # The BASE_MONOSTATIC_GRIM selection supersedes descriptive metadata
+        # that a GUI may omit or copy from an input grid. The loaded numerical
+        # sigma/phase normalization and combine_role='power' remain hard gates.
+        candidate[key] = np.asarray(required)
+
+    amplitude = np.asarray(candidate["_amp"], dtype=np.complex128)
+    candidate["rcs_amp_real"] = amplitude.real.astype(np.float64)
+    candidate["rcs_amp_imag"] = amplitude.imag.astype(np.float64)
+    candidate["raw_complex_amplitude_preserved"] = np.asarray(True)
+    validate_component_schema(candidate, label)
+    return candidate
+
+
+def _canonical_3d_channel_indices(polarizations, label, *, require_all=True):
+    """Return (channel names, indices) in canonical radar order."""
+    indices = {}
+    for index, raw in enumerate(np.asarray(polarizations).ravel()):
+        value = str(raw).strip().upper()
+        canonical = (
+            "VV" if value in {"VV", "V", "VERTICAL"}
+            else "HH" if value in {"HH", "H", "HORIZONTAL"}
+            else "VH" if value in {"VH", "HV"}
+            else value
+        )
+        if canonical not in {"VV", "HH", "VH"}:
+            raise ValueError(
+                f"{label}: unsupported polarization label {raw!r}; use VV, "
+                "HH, or reciprocal VH/HV."
+            )
+        if canonical in indices:
+            raise ValueError(
+                f"{label}: duplicate polarization alias for {canonical}."
+            )
+        indices[canonical] = index
+    required = {"VV", "HH", "VH"}
+    if require_all and set(indices) != required:
+        raise ValueError(
+            f"{label}: require exactly VV, HH, and reciprocal VH/HV; got "
+            f"{[str(value) for value in np.asarray(polarizations).ravel()]}."
+        )
+    channels = [channel for channel in ("VV", "HH", "VH") if channel in indices]
+    if not channels:
+        raise ValueError(f"{label}: no usable radar polarization channels.")
+    return channels, [indices[channel] for channel in channels]
+
+
 def add_features_to_monostatic_grim(
     base_path: 'str',
     out_path: 'str',
@@ -2920,6 +3133,7 @@ def add_features_to_monostatic_grim(
     occluder=None,
     radar_grid: 'Optional[Dict[str, Any]]' = None,
     surface_normal_fn=None,
+    declared_coherent_base: 'bool' = False,
     feature_provenance: 'Optional[Dict[str, Any]]' = None,
     history: 'str' = "",
 ) -> 'str':
@@ -2933,9 +3147,14 @@ def add_features_to_monostatic_grim(
     base = os.path.abspath(str(base_path))
     if not os.path.isfile(base):
         raise FileNotFoundError(f"Base monostatic GRIM does not exist: {base}")
-    from components import validate_component_schema
     base_payload = _load_grim(base)
-    validate_component_schema(base_payload, os.path.basename(base))
+    label = os.path.basename(base)
+    if declared_coherent_base:
+        validated_base = _validate_declared_coherent_base(base_payload, label)
+    else:
+        from components import validate_component_schema
+        validate_component_schema(base_payload, label)
+        validated_base = base_payload
     embedded_grid = load_body_requested_radar_grid(base)
     grid = dict(radar_grid) if radar_grid is not None else embedded_grid
     if grid is None:
@@ -2991,15 +3210,27 @@ def add_features_to_monostatic_grim(
             history="placed coherent feature field",
         )
         component = _load_grim(component_tmp)
-        for key in ("azimuths", "elevations", "frequencies", "polarizations"):
+        for key in ("azimuths", "elevations", "frequencies"):
             if not np.array_equal(base_payload[key], component[key]):
                 raise ValueError(
                     f"Feature field {key} does not match the base monostatic "
                     "grid."
                 )
-        total = np.asarray(base_payload["_amp"], dtype=np.complex128) + np.asarray(
-            component["_amp"], dtype=np.complex128
+        base_channels, base_order = _canonical_3d_channel_indices(
+            base_payload["polarizations"], label, require_all=False
         )
+        component_channels, component_order = _canonical_3d_channel_indices(
+            component["polarizations"], "placed feature field"
+        )
+        feature_lookup = dict(zip(component_channels, component_order))
+        component_order = [feature_lookup[channel] for channel in base_channels]
+        base_amplitude = np.asarray(
+            validated_base["_amp"], dtype=np.complex128
+        )[..., base_order]
+        feature_amplitude = np.asarray(
+            component["_amp"], dtype=np.complex128
+        )[..., component_order]
+        total = base_amplitude + feature_amplitude
         with np.load(base, allow_pickle=False) as stored:
             payload = {
                 key: np.array(stored[key], copy=True) for key in stored.files
@@ -3008,10 +3239,33 @@ def add_features_to_monostatic_grim(
         imag = total.imag.astype(np.float64)
         payload["rcs_amp_real"] = real
         payload["rcs_amp_imag"] = imag
+        payload["polarizations"] = np.asarray(base_channels)
+        for key in list(payload):
+            if key.startswith("polarization_alias"):
+                payload.pop(key, None)
         payload["rcs_power"] = (
             4.0 * math.pi * (real * real + imag * imag)
         ).astype(np.float32)
         payload["rcs_phase"] = np.angle(total).astype(np.float32)
+        from components import (
+            COMPONENT_AMPLITUDE_CONVENTION,
+            COMPONENT_COMPLEX_FIELD_DOMAIN,
+            COMPONENT_PHASE_REFERENCE,
+        )
+        payload["combine_role"] = np.asarray("coherent")
+        payload["combine_role_note"] = np.asarray(
+            "base platform plus coherently placed feature deltas"
+        )
+        payload["rcs_domain"] = np.asarray("power_phase")
+        payload["power_domain"] = np.asarray("linear_rcs")
+        payload["phase_reference"] = np.asarray(COMPONENT_PHASE_REFERENCE)
+        payload["amplitude_convention"] = np.asarray(
+            COMPONENT_AMPLITUDE_CONVENTION
+        )
+        payload["complex_field_domain"] = np.asarray(
+            COMPONENT_COMPLEX_FIELD_DOMAIN
+        )
+        payload["raw_complex_amplitude_preserved"] = np.asarray(True)
         payload["history"] = (
             str(np.asarray(payload.get("history", "")).reshape(-1)[0])
             + " | " + (history or "coherently added placed features")

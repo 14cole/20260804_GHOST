@@ -91,8 +91,9 @@ A standalone cavity field is not a valid compact delta: adding it to the body
 would retain the unbroken skin response and omit installation coupling. Solve
 the installed feature and clean reference with the same surrounding skin, then
 coherently subtract them. Mesh certification is optional for all of these
-datasets; format, normalization, phase-reference, and grid checks are always
-enforced.
+datasets. Selecting a base or feature in `place_features.py` supplies semantic
+tags a GUI may have dropped; normalization, finite-field, coordinate, angular
+support, and the explicit power-only role check remain enforced.
 
 The experimental wing/fin line-expansion code remains separate for now. Its
 2-D-to-span expansion is usable in isolation, but a phase-unknown wing-root

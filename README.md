@@ -113,6 +113,21 @@ Triangles and quads are accepted; winding must point outward, or set
 it does not model diffraction, creeping waves, or new body-feature multiple
 scattering.
 
+The launcher entry is the declaration of each file's role, so GUI-derived
+power/phase datasets do not need `combine_role`, `phase_reference`,
+`complex_field_domain`, or `rcs_domain` bookkeeping tags. The numerical data
+must still identify their dimensional normalization (`sigma_2d` for line
+deltas and `sigma_3d` for body and compact data), preserve finite power
+and phase, and contain the channels and angular support actually used. Stale
+descriptive metadata copied by a GUI is superseded by the launcher entry.
+
+For both `LINE_FEATURES` and `COMPACT_FEATURES`, set
+`subtraction_order="featured-clean"` for the normal OPN-FRD result. If the GUI
+file was formed as FRD-OPN, use `"clean-featured"`; placement negates the
+complex delta to recover the canonical featured-minus-clean definition.
+Relative settings paths are resolved from the repository root, so the launcher
+works the same way regardless of the terminal's current directory.
+
 ## Numerical validation
 
 Performance-only changes are checked against a pristine copy of the

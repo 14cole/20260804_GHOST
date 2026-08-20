@@ -193,7 +193,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 "power_domain": np.asarray("linear_rcs"),
                 "units": np.asarray(json.dumps({
                     "azimuth": "deg", "elevation": "deg",
-                    "frequency": "GHz", "rcs_log_unit": "dBsm",
+                    "frequency": "GHz",
                     "rcs_linear_quantity": "sigma_3d",
                 })),
             }
@@ -215,15 +215,46 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 prepared.amplitude[-1], prepared.amplitude[0]
             )
 
-            # A retained convention is authoritative and cannot contradict
-            # the explicit COMPACT_FEATURES declaration.
-            payload["phase_reference"] = np.asarray("wrong origin")
+            # The COMPACT_FEATURES entry itself declares the role. A GUI is
+            # allowed to omit the redundant domain tag entirely.
+            payload.pop("rcs_domain")
             with path.open("wb") as stream:
                 np.savez(stream, **payload)
-            with self.assertRaisesRegex(ValueError, "phase_reference"):
+            untagged = feature_sum.prepare_point_pattern(
+                str(path), declared_coherent_delta=True,
+                delta_sign=-1.0,
+            )
+            np.testing.assert_allclose(
+                untagged.amplitude[:-1], -amplitude,
+                rtol=2.0e-6, atol=2.0e-7,
+            )
+            payload["rcs_domain"] = np.asarray("power-phase")
+
+            two_pol = dict(payload)
+            two_pol["polarizations"] = np.asarray(["VV", "HH"])
+            two_pol["rcs_power"] = payload["rcs_power"][..., :2]
+            two_pol["rcs_phase"] = payload["rcs_phase"][..., :2]
+            with path.open("wb") as stream:
+                np.savez(stream, **two_pol)
+            with self.assertRaisesRegex(ValueError, r"missing \['VH'\]"):
                 feature_sum.prepare_point_pattern(
                     str(path), declared_coherent_delta=True
                 )
+            diagonal = feature_sum.prepare_point_pattern(
+                str(path), declared_coherent_delta=True,
+                assume_missing_cross_pol_zero=True,
+            )
+            np.testing.assert_array_equal(diagonal.amplitude[..., 2], 0.0)
+
+            # GUI-derived grids can carry stale source semantics. The explicit
+            # feature declaration supersedes those strings.
+            payload["phase_reference"] = np.asarray("wrong origin")
+            with path.open("wb") as stream:
+                np.savez(stream, **payload)
+            stale_metadata = feature_sum.prepare_point_pattern(
+                str(path), declared_coherent_delta=True
+            )
+            self.assertEqual(len(stale_metadata.azimuths), 3601)
 
             payload.pop("phase_reference")
             payload["azimuths"] = source["azimuths"][:-1]
@@ -235,6 +266,83 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 feature_sum.prepare_point_pattern(
                     str(path), declared_coherent_delta=True
                 )
+
+    def test_declared_gui_line_delta_needs_no_semantic_metadata(self):
+        frequency = 2.0
+        angles = np.asarray([60.0, 90.0, 120.0])
+        amplitudes = np.empty((3, 1, 1, 2), dtype=np.complex128)
+        amplitudes[..., 0] = np.asarray([
+            1.0 + 0.2j, 1.2 - 0.1j, 0.9 + 0.3j
+        ])[:, None, None]
+        amplitudes[..., 1] = np.asarray([
+            0.5 - 0.4j, 0.7 + 0.2j, 0.6 - 0.1j
+        ])[:, None, None]
+        wave_number = 2.0 * math.pi * frequency * 1.0e9 / C0
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gui_2d_subtraction.grim"
+            payload = {
+                "azimuths": angles,
+                "elevations": np.asarray([0.0]),
+                "frequencies": np.asarray([frequency]),
+                "polarizations": np.asarray(["VV", "HH"]),
+                "rcs_power": (
+                    np.abs(amplitudes) ** 2 / (4.0 * wave_number)
+                ).astype(np.float32),
+                "rcs_phase": np.angle(amplitudes).astype(np.float32),
+                "units": np.asarray(json.dumps({
+                    "azimuth": "deg", "elevation": "deg",
+                    "frequency": "GHz",
+                    "rcs_linear_quantity": "sigma_2d",
+                })),
+            }
+            with path.open("wb") as stream:
+                np.savez(stream, **payload)
+
+            with self.assertRaisesRegex(ValueError, "rcs_domain"):
+                feature_sum.load_seam_from_grim(str(path), frequency)
+            positive = feature_sum.load_seam_from_grim(
+                str(path), frequency, declared_coherent_delta=True
+            )
+            negative = feature_sum.load_seam_from_grim(
+                str(path), frequency, declared_coherent_delta=True,
+                delta_sign=-1.0,
+            )
+            np.testing.assert_allclose(
+                positive.dA_te, amplitudes[:, 0, 0, 0],
+                rtol=2.0e-6, atol=2.0e-7,
+            )
+            np.testing.assert_allclose(
+                positive.dA_tm, amplitudes[:, 0, 0, 1],
+                rtol=2.0e-6, atol=2.0e-7,
+            )
+            np.testing.assert_allclose(negative.dA_te, -positive.dA_te)
+            np.testing.assert_allclose(negative.dA_tm, -positive.dA_tm)
+
+            payload["phase_reference"] = np.asarray("wrong origin")
+            with path.open("wb") as stream:
+                np.savez(stream, **payload)
+            stale_metadata = feature_sum.load_seam_from_grim(
+                str(path), frequency, declared_coherent_delta=True
+            )
+            np.testing.assert_allclose(
+                stale_metadata.dA_te, positive.dA_te
+            )
+
+            placement = {
+                "delta": str(path), "perimeter": np.zeros((1, 2, 3)),
+                "kind": "delta", "declared_coherent_delta": True,
+            }
+            cache = {}
+            with mock.patch.object(
+                feature_sum, "_load_grim", wraps=feature_sum._load_grim
+            ) as loader:
+                feature_sum._prepared_line_placements_at_frequency(
+                    [placement], frequency, cache
+                )
+                feature_sum._prepared_line_placements_at_frequency(
+                    [placement], frequency, cache
+                )
+            self.assertEqual(loader.call_count, 1)
 
     def test_indexed_facet_surface_preserves_skin_and_winding(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -271,6 +379,10 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             base = Path(directory) / "external.grim"
             combined = Path(directory) / "external_with_cavity.grim"
             shadowed = Path(directory) / "external_shadowed_cavity.grim"
+            gui_base = Path(directory) / "gui_platform.grim"
+            gui_combined = Path(directory) / "gui_platform_with_cavity.grim"
+            vv_base = Path(directory) / "gui_platform_vv_only.grim"
+            vv_combined = Path(directory) / "gui_platform_vv_with_cavity.grim"
             grid = {
                 "frequencies_ghz": [1.0],
                 "azimuths_deg": [0.0],
@@ -311,6 +423,70 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             self.assertTrue(np.all(original_field == 0.0))
             self.assertGreater(float(np.max(np.abs(updated_field))), 0.0)
             np.testing.assert_array_equal(blocked_field, original_field)
+
+            with np.load(base, allow_pickle=False) as stored:
+                gui_payload = {
+                    key: np.array(stored[key], copy=True)
+                    for key in stored.files
+                }
+            for key in (
+                "combine_role", "combine_role_note", "phase_reference",
+                "amplitude_convention", "complex_field_domain",
+                "raw_complex_amplitude_preserved", "rcs_amp_real",
+                "rcs_amp_imag",
+            ):
+                gui_payload.pop(key, None)
+            gui_payload["rcs_domain"] = np.asarray("power-phase")
+            gui_units = json.loads(str(gui_payload["units"]))
+            gui_units.pop("rcs_log_unit", None)
+            gui_payload["units"] = np.asarray(json.dumps(gui_units))
+            order = [2, 0, 1]
+            gui_payload["polarizations"] = np.asarray(["HV", "VV", "HH"])
+            for key in ("rcs_power", "rcs_phase"):
+                gui_payload[key] = np.asarray(gui_payload[key])[..., order]
+            with gui_base.open("wb") as stream:
+                np.savez(stream, **gui_payload)
+
+            with self.assertRaisesRegex(ValueError, "missing combine_role"):
+                feature_sum.add_features_to_monostatic_grim(
+                    str(gui_base), str(gui_combined), points=[point],
+                    radar_grid=grid,
+                )
+            feature_sum.add_features_to_monostatic_grim(
+                str(gui_base), str(gui_combined), points=[point],
+                radar_grid=grid, declared_coherent_base=True,
+            )
+            with np.load(gui_combined, allow_pickle=False) as updated:
+                self.assertEqual(str(updated["combine_role"]), "coherent")
+                self.assertTrue(bool(updated["raw_complex_amplitude_preserved"]))
+                self.assertIn("rcs_amp_real", updated.files)
+                self.assertIn("rcs_amp_imag", updated.files)
+                np.testing.assert_array_equal(
+                    updated["polarizations"], ["VV", "HH", "VH"]
+                )
+
+            vv_payload = dict(gui_payload)
+            vv_payload["polarizations"] = np.asarray(["V"])
+            for key in ("rcs_power", "rcs_phase"):
+                vv_payload[key] = np.asarray(gui_payload[key])[..., [1]]
+            with vv_base.open("wb") as stream:
+                np.savez(stream, **vv_payload)
+            feature_sum.add_features_to_monostatic_grim(
+                str(vv_base), str(vv_combined), points=[point],
+                radar_grid=grid, declared_coherent_base=True,
+            )
+            with np.load(vv_combined, allow_pickle=False) as updated:
+                np.testing.assert_array_equal(updated["polarizations"], ["VV"])
+                self.assertEqual(updated["rcs_power"].shape[-1], 1)
+
+            gui_payload["combine_role"] = np.asarray("power")
+            with gui_base.open("wb") as stream:
+                np.savez(stream, **gui_payload)
+            with self.assertRaisesRegex(ValueError, "power-only"):
+                feature_sum.add_features_to_monostatic_grim(
+                    str(gui_base), str(gui_combined), points=[point],
+                    radar_grid=grid, declared_coherent_base=True,
+                )
 
     def test_feature_reconstruction_comparison_does_not_fit_away_phase_error(self):
         amplitude = 1.0 / math.sqrt(4.0 * math.pi)

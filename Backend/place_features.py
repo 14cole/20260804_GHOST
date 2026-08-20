@@ -7,10 +7,9 @@ Edit only the USER SETTINGS block, then run:
 
 The base may be a self-contained GHOST BoR monostatic GRIM or an attested
 external monostatic GRIM paired with an indexed ASCII ``.facet``/STL platform
-surface.  Line datasets must be coherent 2-D ``featured - clean`` delta GRIMs.
-Compact datasets must be calibrated installed-feature-minus-clean-skin 3-D
-patterns; using a standalone cavity field would double-count the unbroken body
-skin and omit installation coupling.
+surface. GUI power/phase subtraction results are accepted directly. The
+feature entries declare their physical role and subtraction order; metadata
+that merely repeats that declaration is optional.
 """
 
 import csv
@@ -23,6 +22,9 @@ import numpy as np
 # USER SETTINGS
 # =============================================================================
 
+# Selecting this file explicitly attests that it is the coherent monostatic
+# platform field in the GHOST global-origin radar VV/HH/VH convention. A GRIM
+# GUI file may omit those tags; an explicitly power-only file is still refused.
 BASE_MONOSTATIC_GRIM = "rcs_runs_bor/run_x/results/body.grim"
 OUTPUT_MONOSTATIC_GRIM = "rcs_runs_bor/run_x/results/body_with_features.grim"
 COORDINATE_UNITS = "inches"
@@ -42,7 +44,8 @@ SHADOW_BIAS_M = None              # normally leave None for mesh-scaled default
 # Perimeter text rows: x1 y1 z1 x2 y2 z2 in the CAD frame
 # (+y nose, +x right, +z up). The dataset must be a 2-D coherent delta.
 LINE_FEATURES = [
-    # {"dataset": "door_delta.grim", "coordinates": "door_perimeter.txt"},
+    # {"dataset": "door_delta.grim", "coordinates": "door_perimeter.txt",
+    #  "subtraction_order": "featured-clean"},
 ]
 
 # Placement CSV rows: x,y,z and optional nx,ny,nz and rx,ry,rz. If the normal
@@ -53,9 +56,19 @@ LINE_FEATURES = [
 # This accepts a GRIM GUI subtraction that dropped those convention tags and
 # whose generic container remains tagged power_phase. Incorrect placement
 # declarations produce incorrect coherent phase; do not list standalone fields.
+# Descriptive metadata in a GUI-derived grid is ignored in favor of this entry.
 COMPACT_FEATURES = [
-    # {"dataset": "cavity_delta.grim", "coordinates": "cavities.csv"},
+    # {"dataset": "cavity_delta.grim", "coordinates": "cavities.csv",
+    #  "subtraction_order": "featured-clean"},
+    # A locally diagonal/axisymmetric pattern exported with only VV and HH may
+    # add "assume_missing_cross_pol_zero": True. This is a physical model
+    # choice, not a file-format repair; do not use it for a general feature.
 ]
+
+# Existing GHOST/GRIM OPN-FRD subtraction is featured-clean. If a GUI file was
+# deliberately formed as FRD-OPN instead, set that feature's subtraction_order
+# to "clean-featured"; the complex field (not just its displayed phase) is
+# negated before placement.
 
 # Coordinate-to-skin validation.  The tighter of the distance and two-way
 # phase limits is enforced at the highest frequency in the body file.
@@ -91,9 +104,29 @@ from occluder import Occluder  # noqa: E402
 from surface_mesh import TriangleSurface, read_surface_mesh  # noqa: E402
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 def _path(value):
     path = Path(value).expanduser()
-    return path.resolve() if path.is_absolute() else (Path.cwd() / path).resolve()
+    return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
+def _subtraction_sign(specification):
+    """Convert a user-facing subtraction order to canonical featured-clean."""
+    raw = str(
+        specification.get("subtraction_order", "featured-clean")
+    ).strip().lower().replace("_", "-").replace(" ", "")
+    positive = {"featured-clean", "opn-frd", "feature-reference"}
+    negative = {"clean-featured", "frd-opn", "reference-feature"}
+    if raw in positive:
+        return 1.0, "featured-clean"
+    if raw in negative:
+        return -1.0, "clean-featured"
+    raise ValueError(
+        "subtraction_order must be 'featured-clean'/'OPN-FRD' or "
+        "'clean-featured'/'FRD-OPN'."
+    )
 
 
 def _unit(value, label):
@@ -163,6 +196,7 @@ def _line_placements(profile, surface, scale, limit, wavelength):
     for specification in LINE_FEATURES:
         dataset = _path(specification["dataset"])
         coordinates = _path(specification["coordinates"])
+        delta_sign, subtraction_order = _subtraction_sign(specification)
         perimeter = to_axis_frame(read_perimeter_txt(str(coordinates), scale=scale))
         if surface is None:
             offset = perimeter_surface_deviation(
@@ -176,10 +210,14 @@ def _line_placements(profile, surface, scale, limit, wavelength):
                 f"({720.0*offset/wavelength:.1f} deg two-way phase); allowed "
                 f"{limit*1e3:.3f} mm."
             )
-        placements.append({"delta": str(dataset), "perimeter": perimeter, "kind": "delta"})
+        placements.append({
+            "delta": str(dataset), "perimeter": perimeter, "kind": "delta",
+            "declared_coherent_delta": True, "delta_sign": delta_sign,
+        })
         records.append({
             "kind": "line_delta", "dataset": str(dataset),
             "coordinates": str(coordinates), "max_skin_offset_m": float(offset),
+            "input_subtraction_order": subtraction_order,
         })
     return placements, records
 
@@ -194,8 +232,13 @@ def _compact_points(profile, surface, scale, limit, wavelength):
     for specification in COMPACT_FEATURES:
         dataset = _path(specification["dataset"])
         coordinates = _path(specification["coordinates"])
+        delta_sign, subtraction_order = _subtraction_sign(specification)
         pattern = prepare_point_pattern(
-            str(dataset), declared_coherent_delta=True
+            str(dataset), declared_coherent_delta=True,
+            delta_sign=delta_sign,
+            assume_missing_cross_pol_zero=bool(
+                specification.get("assume_missing_cross_pol_zero", False)
+            ),
         )
         for row_index, row in enumerate(_placement_rows(coordinates), 1):
             location = to_axis_frame(np.array([row["x"], row["y"], row["z"]]) * scale)
@@ -222,13 +265,21 @@ def _compact_points(profile, surface, scale, limit, wavelength):
                     )
             else:
                 normal = derived
+            explicit_roll = "rx" in row
             roll_cad = (
                 [row["rx"], row["ry"], row["rz"]]
-                if "rx" in row else DEFAULT_ROLL_REF_CAD
+                if explicit_roll else DEFAULT_ROLL_REF_CAD
             )
             roll = _unit(to_axis_frame(roll_cad), "roll reference")
             if np.linalg.norm(roll - float(roll @ normal) * normal) <= 1e-9:
-                raise ValueError(f"{coordinates}:row {row_index} roll reference is parallel to normal.")
+                if explicit_roll:
+                    raise ValueError(
+                        f"{coordinates}:row {row_index} explicit roll "
+                        "reference is parallel to the surface normal."
+                    )
+                # Let point_scatterer_amplitude select its stable transverse
+                # fallback. This only defines clocking when the CSV omitted it.
+                roll = None
             points.append({
                 "pattern": pattern, "location": location,
                 "aperture_normal": normal, "roll_ref": roll,
@@ -237,6 +288,14 @@ def _compact_points(profile, surface, scale, limit, wavelength):
                 "kind": "compact_3d_delta", "dataset": str(dataset),
                 "coordinates": str(coordinates), "row": row_index,
                 "skin_offset_m": offset,
+                "input_subtraction_order": subtraction_order,
+                "assumed_missing_cross_pol_zero": bool(
+                    specification.get("assume_missing_cross_pol_zero", False)
+                ),
+                "roll_reference": (
+                    "automatic_transverse" if roll is None
+                    else "csv" if explicit_roll else "default_cad"
+                ),
             })
     return points, records
 
@@ -308,6 +367,7 @@ def main():
         radar_grid=grid,
         surface_normal_fn=normal_fn,
         occluder=occluder,
+        declared_coherent_base=True,
         feature_provenance={
             "coordinate_units": COORDINATE_UNITS,
             "surface_mesh": None if surface_path is None else str(surface_path),

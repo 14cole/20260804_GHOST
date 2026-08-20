@@ -104,6 +104,15 @@ attested external GRIM and `SURFACE_MESH` to the matching indexed ASCII
 the GRIM supplies the exact frequency/azimuth/elevation grid on which the
 feature field is evaluated and coherently added.
 
+Selecting `BASE_MONOSTATIC_GRIM` attests that the file is the coherent physical
+platform far field at the global vehicle origin in radar-frame VV/HH/VH. This
+supplies role/convention tags or raw real/imaginary redundancy stripped by a
+GRIM GUI save; the stored sigma and phase still undergo full normalization and
+consistency checks. A base explicitly tagged `combine_role=power` remains
+invalid; other descriptive metadata is superseded by the explicit base
+selection. The combined output is written back with the complete canonical
+coherent schema.
+
 The platform GRIM, surface mesh, and placement CSV must use the same physical
 origin and orientation. A mismatch creates a deterministic two-way phase error
 even when the feature magnitude looks plausible. Use `SHADOW=True` for binary
@@ -116,14 +125,30 @@ generic `power_phase` domain label and omit redundant raw real/imaginary arrays.
 Listing it in `COMPACT_FEATURES` explicitly attests that operation to be
 installed-feature minus clean-skin with the local origin at the aperture phase
 centre, `exp(+j omega t)`, and the documented cavity-frame VV/HH/VH basis. This
-supplies convention tags lost by the GUI; any retained contradictory tag is
-still rejected. The loader reconstructs `F` from stored sigma and phase and
-continues to enforce sigma_3d/dBsm normalization, the full VV/HH/VH matrix, a
+supplies convention semantics lost or copied stale by the GUI. The loader
+reconstructs `F` from stored sigma and phase and
+continues to enforce sigma_3d normalization, the full VV/HH/VH matrix, a
 complete azimuth period, and compatible frequency/elevation coverage. The
 normal unique-look form (`0..359` by 1 degree, for example) is accepted and
 closed internally by copying the first complex sample to the interpolation
 seam. A dataset that already contains both 0 and 360 is also accepted when
 those complex samples match; incomplete or irregular partial coverage is not.
+
+The same declaration model applies to a 2-D GUI subtraction listed in
+`LINE_FEATURES`: missing semantic tags are not a blocker. Its stored linear
+quantity must still be sigma_2d, elevation must be the singleton zero cut, and both
+TE/VV and TM/HH must be present. For a compact locally diagonal or axisymmetric
+feature exported with only VV and HH, the per-feature setting
+`assume_missing_cross_pol_zero=True` is available. That is an explicit physical
+assumption that local VH is zero, not a format conversion, and is unsuitable
+for a general asymmetric feature.
+
+Subtraction order changes the coherent answer. The canonical delta is
+`featured - clean`, which is OPN-FRD in the supplied GHOST/CEM workflow. Set a
+feature's `subtraction_order` to `"clean-featured"` only when its input was
+actually made as FRD-OPN; the placer then multiplies the complete complex field
+by -1. Reversing order without this correction changes the delta by 180 degrees
+and changes its interference with the platform.
 
 ## Building a door or seam delta
 
@@ -132,7 +157,7 @@ For the 2-D cross-section pair:
 1. Use the same clean host stack and feature-centred origin.
 2. Solve both TM and TE on identical frequency and angular grids.
 3. Preserve complex amplitudes and form `featured - clean` with
-   `feature_sum.make_delta_grim`.
+   `feature_sum.make_delta_grim`, CEM Tools, or GRIM coherent subtraction.
 4. Draw the 3-D perimeter head-to-tail in the CAD frame.
 5. Ensure the perimeter lies on the body skin within the configured distance
    and worst-case two-way phase tolerances.
