@@ -44,11 +44,6 @@ try:
     from scipy.sparse import linalg as _SCIPY_SPARSE_LINALG
 except Exception:
     _SCIPY_SPARSE_LINALG = None
-try:
-    from scipy.linalg import blas as _SCIPY_BLAS
-except Exception:
-    _SCIPY_BLAS = None
-
 _GMRES_KWARGS = None
 
 

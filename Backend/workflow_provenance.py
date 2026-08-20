@@ -741,8 +741,9 @@ def manifest_solve_spec_fingerprint(manifest: 'Dict[str, Any]') -> 'str':
     Completion status and byte inventories are written after individual unit
     attestations, so they are deliberately excluded. Editing a grid, unit,
     solver control, or source/runtime hash changes this fingerprint and
-    invalidates every stale per-unit output. Derived az/el configuration has a
-    separate attestation because it does not change the underlying VV/HH solve.
+    invalidates every stale per-unit output. Legacy derived-grid configuration
+    has a separate attestation because it does not change the underlying VV/HH
+    solve.
     """
 
     mutable_fields = {
@@ -750,8 +751,9 @@ def manifest_solve_spec_fingerprint(manifest: 'Dict[str, Any]') -> 'str':
         "output_sha256",
         "collection",
         "collection_manifest",
-        # Derived radar-grid settings do not change the underlying VV/HH
-        # aspect solves; their own output attestations bind this separately.
+        # Legacy manifests called the derived radar-grid block ``azel_config``.
+        # It does not change the underlying VV/HH aspect solves, and keeping it
+        # excluded preserves restart compatibility with those completed runs.
         "azel_config",
     }
     solve_spec = {

@@ -82,8 +82,8 @@ class Occluder:
         # too; it is capped at 1% of the body size so a mesh made of a few huge
         # facets cannot get a bias large enough to swallow real blockage, and
         # floored at the old 1e-4 x diagonal for very fine meshes.
-        # Calibrate on your own mesh: on a CONVEX body the occluder must change
-        # nothing (calibrate it with 0_calibrate_shadowing).
+        # Validate on your own mesh: on a CONVEX body the occluder must change
+        # nothing, so any loss there identifies an excessive self-shadow bias.
         self.bias = (float(bias) if bias is not None
                      else max(1e-4 * self.diag,
                               min(0.2 * self.median_edge, 1e-2 * self.diag)))

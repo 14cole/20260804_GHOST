@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""
-Component files: how step 4 knows what may interfere with what.
+"""Physical and semantic validation for coherent component GRIM files.
 
-Steps 3a / 3b / 3c each export ONE COMPONENT ALONE as an az x el x freq x pol
-.grim.  Step 4 sums them.  But they are not all the same KIND of number:
+A component is an azimuth x elevation x frequency x polarization field. Not
+every component contains the same kind of numerical result:
 
   role = "coherent"   the complex amplitude is trustworthy against other
                       components.  Doors and wings: the line expansion is
@@ -12,7 +11,7 @@ Steps 3a / 3b / 3c each export ONE COMPONENT ALONE as an az x el x freq x pol
                       together (exact, ~1e-8).
 
   role = "power"      the amplitude's PHASE is not trustworthy against other
-                      components, so step 4 includes this one's POWER only in a
+                      components, so a consumer includes this one's POWER in a
                       separately labelled statistical/engineering estimate.
                       The primary rcs_power remains the power of the stored
                       coherent field.  A PO-level wing-root corner whose
@@ -25,13 +24,11 @@ trustworthy phase relative to the other components.
 
 Do not place a phase-unknown term in the same component file as a coherent
 term: their internal interference would already be invented before the role
-tag could help.  Step 3b therefore writes the wing and corner estimate as
-separate files.
+tag could help.
 """
 
 import json
 import math
-import os
 from typing import Any, Dict
 
 import numpy as np
@@ -39,8 +36,8 @@ import numpy as np
 ROLES = ("coherent", "power")
 _KEY = "combine_role"
 
-# Component files consumed by step 4 are radar-frame, physical 3-D far-field
-# amplitudes.  Coherent addition is meaningful only when every file uses this
+# Component files are radar-frame, physical 3-D far-field amplitudes. Coherent
+# addition is meaningful only when every file uses this
 # exact common origin, time convention, polarization frame, and normalization.
 COMPONENT_PHASE_REFERENCE = (
     "origin=(0,0,0) vehicle frame, convention=exp(+jwt), "
@@ -66,52 +63,8 @@ def _schema_error(label: 'str', detail: 'str') -> 'ValueError':
     return ValueError(f"{label}: invalid component .grim schema: {detail}")
 
 
-def combine_component_fields(body_amp, coherent_amps=(), power_amps=(),
-                             mode: 'str' = "coherent"):
-    """Combine component arrays without conflating fields and estimates.
-
-    Returns ``(total_amp, coherent_power, estimate_power)``.  The first two
-    always obey ``coherent_power = 4*pi*abs(total_amp)**2``.  Phase-unknown
-    ``power_amps`` affect only the separately labelled estimate.
-    """
-    mode = str(mode).strip().lower()
-    if mode not in ("coherent", "hybrid", "envelope"):
-        raise ValueError(f"unknown combination estimate mode {mode!r}.")
-    body = np.asarray(body_amp, dtype=complex)
-    coherent = [np.asarray(a, dtype=complex) for a in coherent_amps]
-    unknown = [np.asarray(a, dtype=complex) for a in power_amps]
-    for label, arrays in (("coherent", coherent), ("power", unknown)):
-        for a in arrays:
-            if a.shape != body.shape:
-                raise ValueError(
-                    f"{label} component shape {a.shape} != body shape "
-                    f"{body.shape}.")
-            if not np.all(np.isfinite(a.real) & np.isfinite(a.imag)):
-                raise ValueError(f"{label} component contains non-finite values.")
-    if not np.all(np.isfinite(body.real) & np.isfinite(body.imag)):
-        raise ValueError("body amplitude contains non-finite values.")
-
-    cluster = sum(coherent, np.zeros_like(body))
-    total = body + cluster
-    coherent_power = 4.0 * np.pi * np.abs(total) ** 2
-    unknown_power = sum(
-        (np.abs(a) ** 2 for a in unknown), np.zeros(body.shape, dtype=float))
-    if mode == "coherent":
-        estimate = coherent_power + 4.0 * np.pi * unknown_power
-    elif mode == "hybrid":
-        estimate = 4.0 * np.pi * (
-            np.abs(body) ** 2 + np.abs(cluster) ** 2 + unknown_power)
-    else:
-        estimate = 4.0 * np.pi * (
-            np.abs(body) ** 2
-            + sum((np.abs(a) ** 2 for a in coherent),
-                  np.zeros(body.shape, dtype=float))
-            + unknown_power)
-    return total, coherent_power, estimate
-
-
 def tag_component(path: 'str', role: 'str', note: 'str' = "") -> 'str':
-    """Stamp a component .grim with how step 4 must combine it."""
+    """Stamp a component .grim with how downstream tools may combine it."""
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}, got {role!r}.")
     with np.load(path, allow_pickle=False) as z:
@@ -266,36 +219,3 @@ def validate_component_schema(grim: 'Dict[str, Any]',
             label, "require rcs_power=4*pi*|F|^2 for the stored amplitude "
             f"(worst absolute mismatch {worst:.3e}).")
     return role
-
-
-def keep_pols(path: 'str', wanted) -> 'str':
-    """Trim a component file to POLARIZATIONS, in that order.
-
-    The exporter always writes VV, HH, VH; a study that only wants co-pol should
-    not carry a cross-pol column around, and step 4 requires every component to
-    agree on the pol list.
-    """
-    import json
-    wanted = list(wanted)
-    with np.load(path, allow_pickle=False) as z:
-        d = {k: z[k] for k in z.files}
-    have = [str(p) for p in np.asarray(d["polarizations"]).ravel()]
-    gone = [p for p in wanted if p not in have]
-    if gone:
-        raise SystemExit(f"{os.path.basename(path)}: POLARIZATIONS {gone} not "
-                         f"produced (have {have}).")
-    idx = [have.index(p) for p in wanted]
-    if idx == list(range(len(have))):
-        return path
-    for k in ("rcs_power", "rcs_phase", "rcs_amp_real", "rcs_amp_imag"):
-        if k in d:
-            d[k] = np.asarray(d[k])[:, :, :, idx]
-    for key in ("rcs_amp_real", "rcs_amp_imag"):
-        if key in d:
-            d[key] = np.asarray(d[key], dtype=np.float64)
-    d["polarizations"] = np.asarray(wanted, dtype=str)
-    d["polarization_alias_primary"] = ",".join(wanted)
-    d["polarization_aliases_json"] = json.dumps(wanted)
-    with open(path, "wb") as fh:
-        np.savez(fh, **d)
-    return path

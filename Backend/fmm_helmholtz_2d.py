@@ -13,7 +13,7 @@ Usage:
 """
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 import numpy as np
 from scipy.special import jv as _jv, hankel2 as _h2
 
@@ -367,7 +367,7 @@ class FMMOperator:
 
     def _build_near_matrix(self):
         """Pre-assemble near-field matrix as a sparse CSR. Uses C extension for real-k regular pairs."""
-        from rcs_solver import _near_singular_scheme, _get_quadrature, EPS
+        from rcs_solver import _near_singular_scheme, _get_quadrature
         from scipy.sparse import coo_matrix
         N = self.nnodes
         # Accumulate into COO triples; convert to CSR at the end.

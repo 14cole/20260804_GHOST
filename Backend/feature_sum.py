@@ -2457,13 +2457,13 @@ def export_signature_grim(out_path: 'str', *,
                           source_path: 'str' = "", history: 'str' = "") -> 'List[str]':
     """Combine body + features (+ optional wing-body ``corners``) over an
     (aspect x roll x frequency) grid and write one .grim per channel (VV, HH,
-    VH), mirroring save_bor_az_el_grim.
+    VH), using the same physical field normalization as the radar exporter.
 
     Axes are BODY-FRAME: ``azimuth`` = roll about the body axis, ``elevation``
     = aspect from +axis (0 = nose-on).  This is NOT a radar az/el frame -- no
     earth-vertical rotation is applied, so the VV/HH labels are the body's
-    meridian pols and avoid the radar-frame V/H swap trap.  Reuse
-    bor_dispatch.bor_az_el_grid downstream if a true radar frame is needed.
+    meridian pols and avoid the radar-frame V/H swap trap. Use
+    ``export_radar_grim`` when a true radar-frame product is needed.
 
     ``rcs_power`` always equals 4*pi times the squared magnitude of the stored
     coherent ``rcs_amp_real/imag`` field.  If ``mode`` is hybrid or envelope,
@@ -2737,9 +2737,8 @@ def export_radar_grim(out_path: 'str', *,
     The vehicle sits at attitude (axis_az, axis_el, roll) in the earth frame.
     For each radar (az, el) look this evaluates the COHERENT body+feature
     scattering in the vehicle meridian basis, then rotates the full 2x2
-    scattering matrix into the radar's earth-vertical V/H basis (the same
-    rotation as bor_dispatch.bor_az_el_grid, extended to the non-diagonal
-    matrix the features produce and to a full 3-DOF attitude):
+    scattering matrix into the radar's earth-vertical V/H basis, extended to
+    the non-diagonal matrix the features produce and to a full 3-DOF attitude:
 
         S_radar = M^T S_vehicle M,   M[i,j] = (vehicle meridian basis_i . radar basis_j)
 
@@ -2972,9 +2971,9 @@ def save_monostatic_grim(
     """Publish one complete BoR monostatic deliverable.
 
     Its primary arrays are the requested radar-frame azimuth/elevation VV, HH,
-    and VH response.  The exact body-frame aspect amplitudes and profile needed
+    and VH response. The exact body-frame aspect amplitudes and profile needed
     for later coherent feature placement travel inside the same GRIM, so users
-    never have to choose between ``bodies`` and ``azel`` products.
+    never have to manage separate radar-grid and body-model products.
     """
 
     frequencies = sorted(float(value) for value in bodies)

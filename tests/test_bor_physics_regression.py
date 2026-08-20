@@ -888,33 +888,6 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         )
         self.assertGreater(relative, BOR_LINEAR_RESIDUAL_MAX)
 
-    def test_azel_writer_accepts_per_channel_metadata(self):
-        grid = {
-            "azimuths_deg": np.asarray([0.0]),
-            "elevations_deg": np.asarray([0.0]),
-            "frequencies_ghz": np.asarray([1.0]),
-            "axis_az_deg": 0.0,
-            "axis_el_deg": 0.0,
-            "amp": {
-                channel: np.ones((1, 1, 1), dtype=np.complex128)
-                for channel in ("VV", "HH", "VH")
-            },
-        }
-        metadata = {
-            channel: {"output_attestation": {"channel": channel}}
-            for channel in ("VV", "HH", "VH")
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            written = grim_io.save_bor_az_el_grim(
-                grid,
-                str(Path(directory) / "azel.grim"),
-                channel_metadata=metadata,
-            )
-            self.assertEqual(len(written), 3)
-            with np.load(written[0], allow_pickle=False) as payload:
-                stored = json.loads(str(payload["solver_metadata_json"]))
-            self.assertIn("output_attestation", stored["metadata"])
-
     def test_bor_slurm_pins_the_submitting_backend_first(self):
         text = run_hpc_bor_monostatic._build_slurm(
             Path("/tmp/run/driver_configured.py"),

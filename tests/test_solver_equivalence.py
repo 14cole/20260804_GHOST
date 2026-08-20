@@ -43,9 +43,9 @@ CASES = [
     ("geometries/body.geo", [3.0, 9.0], "TM", "meters"),
     ("geometries/body.geo", [3.0, 9.0], "TE", "meters"),
     ("geometries/body.geo", [18.0], "TM", "meters"),
-    ("1b_solve_2d_hpc/geometries/FRD/SEAL-00-01_0.006gap.geo", [2.0], "TM", "meters"),
-    ("1b_solve_2d_hpc/geometries/FRD/SEAL-00-01_0.010gap.geo", [4.0], "TE", "meters"),
-    ("1b_solve_2d_hpc/geometries/OPN/SEAL-00-01_0.017gap.geo", [3.0], "TM", "meters"),
+    ("tests/fixtures/geometries/coupon_frd.geo", [2.0], "TM", "meters"),
+    ("tests/fixtures/geometries/coupon_frd.geo", [4.0], "TE", "meters"),
+    ("tests/fixtures/geometries/coupon_opn_017.geo", [3.0], "TM", "meters"),
 ]
 
 ANGLES = list(np.linspace(0.0, 180.0, 19))
@@ -97,8 +97,9 @@ def main():
     for rel_geo, freqs, pol, units in CASES:
         geo = REPO / rel_geo
         if not geo.is_file():
-            print(f"  [skip] {rel_geo}")
-            continue
+            raise FileNotFoundError(
+                f"required equivalence fixture is missing: {rel_geo}"
+            )
         label = f"{Path(rel_geo).name} {freqs} {pol}"
         try:
             ref_result, ref_time = solve(ref, geo, freqs, pol, units)

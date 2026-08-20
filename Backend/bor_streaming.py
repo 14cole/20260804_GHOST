@@ -32,13 +32,12 @@ solver adds its near corrections on top of these far blocks as before.
 """
 
 import ctypes
-import math
 import os
 import platform
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 

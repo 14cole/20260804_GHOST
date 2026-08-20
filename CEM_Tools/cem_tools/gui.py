@@ -113,7 +113,7 @@ class DirectoryField(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.edit = QLineEdit()
-        browse = QPushButton("Browse…")
+        browse = QPushButton("Browse...")
         browse.clicked.connect(self._browse)
         layout.addWidget(self.edit, 1)
         layout.addWidget(browse)
@@ -263,7 +263,7 @@ class MainWindow(QMainWindow):
         if self.active_spec.identifier == "rename" and values["in_place"]:
             values["output_dir"] = None
         self.run_button.setEnabled(False)
-        self.log.appendPlainText(f"Running {self.active_spec.title}…")
+        self.log.appendPlainText(f"Running {self.active_spec.title}...")
         worker = ToolWorker(self.active_spec, values)
         worker.signals.succeeded.connect(self._succeeded)
         worker.signals.failed.connect(self._failed)

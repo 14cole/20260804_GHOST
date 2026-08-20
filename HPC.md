@@ -466,7 +466,7 @@ The message now names the files:
 
 ```
 Solver source/native artifacts differ from the HPC run manifest ...
-(changed: Backend/solver_utils.py; added: Backend/my_patch.py;
+(changed: Backend/rcs_solver.py; added: Backend/my_patch.py;
  removed: Backend/occluder.py). Either restore the recorded source or submit
 a new run with the code you actually want to execute.
 ```

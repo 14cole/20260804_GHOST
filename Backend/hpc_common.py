@@ -15,11 +15,10 @@ Shared plumbing for the HPC steps -- three small jobs, all of them explicit.
    each step stages exactly the files it wants into its own outputs/geometries/
    and points the configured copy at that (absolute) path.
 
-3. COLLECT.  Each unit writes results/<POL>_<FREQ:.3f>GHz_<stem>.grim -- ONE
-   FILE PER FREQUENCY.  The local pipeline wants one artefact per body
-   (``body.grim``, both pols, all frequencies) or one grim per polarization
-   spanning ALL frequencies for a coupon, so ``read_unit_grims`` /
-   ``merge_frequency_grims`` / ``bodies_from_units`` put the pieces back together.
+3. COLLECT. Each BoR unit writes one frequency/channel GRIM. The publication
+   path uses ``read_unit_grims`` and ``bodies_from_units`` to assemble the one
+   self-contained monostatic body product. Coupon joins are handled by the
+   shared CEM Tools operations rather than a second implementation here.
 """
 
 import os
@@ -460,62 +459,14 @@ def read_unit_grims(results_dir: 'os.PathLike') -> 'List[Dict[str, Any]]':
     return out
 
 
-def merge_frequency_grims(paths: 'Sequence[os.PathLike]', out_path: 'os.PathLike'
-                          ) -> 'Path':
-    """Concatenate several single-frequency grims of ONE polarization into one
-    multi-frequency grim, sorted by frequency.
-
-    Needed because feature_sum._amp_tables (so make_delta_grim, and the seam /
-    wing loaders) requires every grim it is handed to share ONE (angle,
-    frequency) grid -- it merges polarizations, not frequencies.
-    """
-    paths = [Path(p) for p in paths]
-    if not paths:
-        raise ValueError("no grims to merge.")
-    base = {k: v for k, v in np.load(str(paths[0])).items()}
-    ang = np.asarray(base["azimuths"], float)
-    rows = []
-    for p in paths:
-        with np.load(str(p)) as d:
-            if not np.array_equal(np.asarray(d["azimuths"], float), ang):
-                raise ValueError(f"{p.name}: different angle sweep from "
-                                 f"{paths[0].name} -- cannot merge.")
-            pols = [str(x) for x in np.asarray(d["polarizations"]).ravel()]
-            if len(pols) != 1:
-                raise ValueError(f"{p.name}: expected one polarization, got {pols}.")
-            for kf, f in enumerate(np.asarray(d["frequencies"], float)):
-                rows.append((float(f),
-                             np.asarray(d["rcs_amp_real"], float)[:, :, kf, :],
-                             np.asarray(d["rcs_amp_imag"], float)[:, :, kf, :],
-                             np.asarray(d["rcs_power"], float)[:, :, kf, :],
-                             np.asarray(d["rcs_phase"], float)[:, :, kf, :]))
-    rows.sort(key=lambda r: r[0])
-    freqs = np.asarray([r[0] for r in rows], float)
-    if len(set(freqs.tolist())) != len(freqs):
-        raise ValueError("duplicate frequencies among the grims to merge.")
-    base["frequencies"] = freqs
-    # A per-unit solver audit cannot truthfully describe the merged frequency
-    # sweep. The frozen HPC manifest and unit files retain the individual
-    # audits; do not stamp the first unit's metadata onto every frequency.
-    base.pop("solver_metadata_json", None)
-    for key, idx in (("rcs_amp_real", 1), ("rcs_amp_imag", 2),
-                     ("rcs_power", 3), ("rcs_phase", 4)):
-        dtype = np.float64 if key.startswith("rcs_amp_") else np.float32
-        base[key] = np.stack([r[idx] for r in rows], axis=2).astype(dtype)
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    from grim_io import _save_grim_npz
-    return Path(_save_grim_npz(base, str(out_path)))
-
-
 def bodies_from_units(units: 'Sequence[Dict[str, Any]]', stem: 'Optional[str]' = None
                       ) -> 'Dict[float, Dict[str, np.ndarray]]':
     """Per-unit BoR grims -> the {frequency: body solve} dict the local pipeline
     uses (``theta_deg``, ``amp_vv``, ``amp_hh``), i.e. exactly what
     feature_sum.solve_vehicle_body returns and sum_features expects.
 
-    Aspects above 180 (the EXPAND_TO_360 mirror) are dropped: they are the same
-    monostatic response reflected, and the local interpolation works on 0..180.
+    Any noncanonical aspects above 180 are dropped: they are the same monostatic
+    response reflected, and the body interpolation works on 0..180.
     """
     stems = sorted({u["stem"] for u in units})
     if stem is None:

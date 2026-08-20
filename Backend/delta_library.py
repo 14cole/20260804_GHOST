@@ -47,10 +47,9 @@ Gated by tests/validate_delta_library.py.
 """
 
 import glob
-import math
 import os
 import re
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import numpy as np
 

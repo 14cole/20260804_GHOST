@@ -24,6 +24,7 @@ Usage:
 """
 
 import sys
+import subprocess
 import unicodedata
 from pathlib import Path
 
@@ -33,8 +34,27 @@ REPO = Path(__file__).resolve().parent.parent
 def main():
     offenders = []
     scanned = 0
-    for path in sorted(REPO.rglob("*.py")):
-        if any(part in {".git", "__pycache__"} for part in path.parts):
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "*.py"],
+        cwd=str(REPO),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if tracked.returncode == 0:
+        paths = [
+            REPO / raw.decode("utf-8")
+            for raw in tracked.stdout.split(b"\0")
+            if raw
+        ]
+    else:
+        paths = [
+            path for path in REPO.rglob("*.py")
+            if not any(part in {".git", "__pycache__"} for part in path.parts)
+        ]
+    for path in sorted(paths):
+        # A tracked file may be intentionally deleted in the current change.
+        if not path.is_file():
             continue
         scanned += 1
         raw = path.read_bytes()

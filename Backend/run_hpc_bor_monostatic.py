@@ -39,7 +39,6 @@ Internal worker invocation (called by SLURM, not by the user):
 import argparse
 import json
 import math
-import os
 import shlex
 import shutil
 import subprocess
@@ -92,7 +91,7 @@ N_NODES = 1
 N_JOBS  = 1
 
 # ===============================================================================
-# ADVANCED -- fine tuning (SLURM resources, solver knobs, az/el product)
+# ADVANCED -- fine tuning (SLURM resources, solver knobs, monostatic grid)
 # ===============================================================================
 
 SLURM_PARTITION = "compute"

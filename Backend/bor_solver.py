@@ -42,7 +42,7 @@ from scipy.linalg import get_lapack_funcs
 from scipy.spatial import cKDTree
 
 from bor_kernels import (
-    C0, ETA0, Generatrix, GaussData, cached_leggauss, gauss_on_generatrix,
+    C0, ETA0, Generatrix, cached_leggauss, gauss_on_generatrix,
     modal_kernels_fft, modal_kernels_near, kernels_for_mode,
     mfie_kernels_fft, mfie_kernels_near, mfie_for_mode,
     ibc_kernels_fft, ibc_kernels_near, n_xi_for_pairs,

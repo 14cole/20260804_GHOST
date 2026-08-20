@@ -50,7 +50,6 @@ GRIM_Revised_2.  Everything here degrades to a clear error if it is absent; the
 rest of this repo never imports it.
 """
 
-import json
 import math
 import os
 import sys

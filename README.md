@@ -49,9 +49,9 @@ Backend/
   validate_feature_reconstruction.py  compare truth to reconstructed fields
   build_bor_stream_kernel.py  build the optional native BoR streaming sampler
   ...                         geometry/material I/O, quality gates, provenance, grim export
-0_calibrate_shadowing/        shadowing bias calibration
 1c_build_deltas/              delta assembly from solved coupons
 CEM_Tools/                    headless/GUI GRIM join, conversion, and coherent subtraction
+tests/fixtures/geometries/    solver-only regression geometry inputs
 tests/                        equivalence, scheduling, and benchmark scripts
 ```
 

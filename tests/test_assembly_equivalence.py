@@ -76,8 +76,8 @@ CASES = [
     ("geometries/body.geo", 8.0, "TM", "meters", True),
     ("geometries/body.geo", 12.0, "TE", "meters", False),
     ("geometries/body.geo", 30.0, "TM", "meters", False),
-    ("1b_solve_2d_hpc/geometries/FRD/SEAL-00-01_0.006gap.geo", 2.0, "TM", "meters", False),
-    ("1b_solve_2d_hpc/geometries/OPN/SEAL-00-01_0.010gap.geo", 6.0, "TE", "meters", False),
+    ("tests/fixtures/geometries/coupon_frd.geo", 2.0, "TM", "meters", False),
+    ("tests/fixtures/geometries/coupon_opn_010.geo", 6.0, "TE", "meters", False),
 ]
 
 # (source mask?, lossy wavenumber?, obs_normal_deriv, want_S, want_K)
@@ -110,8 +110,9 @@ def main():
     for rel_geo, freq, pol, units, do_hyper in CASES:
         geo = REPO / rel_geo
         if not geo.is_file():
-            print(f"  [skip] {rel_geo} not present")
-            continue
+            raise FileNotFoundError(
+                f"required equivalence fixture is missing: {rel_geo}"
+            )
         mesh_new, k0 = build_mesh(new, geo, freq, pol, units)
         mesh_ref, k0_ref = build_mesh(ref, geo, freq, pol, units)
         assert len(mesh_new.elements) == len(mesh_ref.elements)

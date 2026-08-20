@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QBrush, QColor
     from PySide6.QtWidgets import (
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,
@@ -12,7 +11,6 @@ try:
     )
 except ImportError:
     from PySide2.QtCore import Qt  # type: ignore
-    from PySide2.QtGui import QBrush, QColor  # type: ignore
     from PySide2.QtWidgets import (  # type: ignore
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,

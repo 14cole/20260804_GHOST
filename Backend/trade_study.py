@@ -159,7 +159,6 @@ def _fab_delta(path: 'str', freqs, scale: 'float') -> 'str':
 
 
 def main() -> 'None':
-    import shutil
     out = "_trade_demo"
     os.makedirs(out, exist_ok=True)
     freqs = [6.0]
@@ -195,7 +194,6 @@ def main() -> 'None':
                      body=body, out_dir=out, csv_path=os.path.join(out, "trade.csv"))
     print(f"\n  per-design grims + trade.csv in {os.path.abspath(out)}/")
     # keep outputs for inspection; delete _trade_demo/ to clean up
-    del shutil
 
 
 if __name__ == "__main__":
