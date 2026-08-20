@@ -16,10 +16,11 @@ Workflow (mirrors the 2D driver):
 - Distribute units round-robin across N_NODES x N_JOBS slots, write sbatch
   job-array scripts, submit. Restartable: units whose .grim exists are
   skipped.
-- Per-unit files are hidden restart state in .solver_units/. Once complete,
-  one self-contained <geometry>.grim is published in results/. Its primary
-  arrays are the requested monostatic az/el/frequency VV/HH/VH response and it
-  embeds the exact body model/profile needed for coherent feature placement.
+- Every completed frequency immediately publishes its solver-frame VV and HH
+  GRIMs under results/by_frequency/. Once complete, one self-contained
+  <geometry>.grim is also published in results/. Its primary arrays are the
+  requested monostatic az/el/frequency VV/HH/VH response and it embeds the
+  exact body model/profile needed for coherent feature placement.
 
 BoR-specific notes:
 - A BoR unit parallelizes INTERNALLY (threads across azimuthal modes and
@@ -268,7 +269,8 @@ def _unit_output_path(run_dir, unit):
     pol  = unit["polarization"]
     freq = float(unit["frequency_ghz"])
     stem = unit["geometry_stem"]
-    return run_dir / ".solver_units" / f"{pol}_{freq:.3f}GHz_{stem}.grim"
+    return (run_dir / "results" / "by_frequency" /
+            f"{pol}_{freq:.3f}GHz_{stem}.grim")
 
 
 def publish_monostatic(run_dir_str, require_complete=True):
@@ -289,7 +291,6 @@ def publish_monostatic(run_dir_str, require_complete=True):
                 f"Cannot publish monostatic response: {len(missing)} solver "
                 f"unit(s) remain; first missing: {missing[0]}."
             )
-        return 0, 0
 
     from hpc_common import (
         bodies_from_units,
@@ -298,7 +299,18 @@ def publish_monostatic(run_dir_str, require_complete=True):
         require_hpc_run_provenance,
     )
     require_hpc_run_provenance(manifest, "ghost.hpc.bor-run.v1")
-    require_hpc_output_attestations(run_dir, manifest)
+    if not missing:
+        require_hpc_output_attestations(run_dir, manifest)
+    else:
+        # Partial publication is allowed only for a geometry whose own units
+        # are all present. Verify every available unit against the immutable
+        # manifest before using it; do not require unrelated geometries yet.
+        for unit in units:
+            path = _unit_output_path(run_dir, unit)
+            if path.is_file():
+                verify_embedded_attestation(
+                    str(path), _unit_attestation_fields(manifest, unit)
+                )
     records = read_unit_grims(run_dir / str(manifest["unit_output_dir"]))
 
     from feature_sum import (
@@ -315,6 +327,11 @@ def publish_monostatic(run_dir_str, require_complete=True):
     written = skipped = 0
     for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
         matching = [unit for unit in units if unit["geometry_stem"] == stem]
+        if any(
+            not _unit_output_path(run_dir, unit).is_file()
+            for unit in matching
+        ):
+            continue
         geometry = Path(str(matching[0]["geometry"]))
         destination = out_dir / f"{stem}.grim"
         if destination.is_file():
@@ -666,7 +683,7 @@ def submit():
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "logs").mkdir()
     (run_dir / "results").mkdir()
-    (run_dir / ".solver_units").mkdir()
+    (run_dir / "results" / "by_frequency").mkdir()
     (run_dir / "claims").mkdir()
 
     # Freeze the exact solver inputs inside the run.  Referencing the discovery
@@ -745,7 +762,7 @@ def submit():
         "aspects_deg":     aspects,
         "polarizations":   pols,
         "expand_to_360":   False,
-        "unit_output_dir": ".solver_units",
+        "unit_output_dir": "results/by_frequency",
         "n_nodes":         int(N_NODES),
         "n_jobs":          int(N_JOBS),
         "n_slots":         int(N_NODES) * int(N_JOBS),

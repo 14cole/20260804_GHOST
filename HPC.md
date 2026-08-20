@@ -16,7 +16,7 @@ cancelled, or is preempted cannot strand work.
 | Solver | SLURM entry point | Same sweep, one machine | Output |
 |---|---|---|---|
 | 2-D arbitrary geometry | `Backend/run_hpc_monostatic.py` | `Backend/run_local_monostatic.py` | `<OUTPUT_DIR>/run_*/results/{FRD,OPN}/` |
-| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | one monostatic `results/<geometry>.grim`; hidden restart units in `.solver_units/` |
+| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | immediate `results/by_frequency/` VV/HH units plus final monostatic `results/<geometry>.grim` |
 
 Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
 knobs below mean the same thing in each.
@@ -40,7 +40,8 @@ sweep finishes and what it leaves behind --
 - assembly threads sized from the concurrency memory will actually permit
   (section 2, *Threads*);
 - 2-D unit GRIMs in `results/`; one complete BoR monostatic GRIM per geometry
-  in `results/`, with internal restart units under `.solver_units/` (section 3);
+  in `results/`, with visible incremental units under `results/by_frequency/`
+  (section 3);
 - the shared angular grid stored once, not once per unit (section 3);
 - resumption by verifying the binding carried inside each existing result.
 
@@ -336,12 +337,14 @@ from any compatible dataset library. Geometry/result stems must follow the
 canonical final `_OPN` and `_FRD` role markers so clean/featured cases can be
 paired unambiguously.
 
-For BoR runs, `results/<geometry>.grim` is the sole user-facing monostatic
-dataset. It contains the requested azimuth/elevation/frequency VV/HH/VH arrays
-and embeds the exact BoR aspect field plus outer profile needed for coherent
-feature placement. Per-frequency co-solved units live in `.solver_units/` only
-as verified restart state. Publication performs no additional field solve and
-can be rerun explicitly with:
+For BoR runs, each completed physical frequency solve immediately writes its
+solver-meridian VV and HH aspect files under `results/by_frequency/`. These
+files can be opened in GRIM while the sweep is still running and also serve as
+verified restart state. Once every frequency for a geometry exists,
+`results/<geometry>.grim` is published with the requested radar-frame
+azimuth/elevation/frequency VV/HH/VH arrays and the embedded BoR aspect field
+plus outer profile needed for coherent feature placement. Final publication
+performs no additional field solve and can be rerun explicitly with:
 
 ```bash
 python Backend/run_hpc_bor_monostatic.py --publish /path/to/run_dir

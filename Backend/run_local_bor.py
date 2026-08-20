@@ -18,9 +18,10 @@ power of frequency (elements^3 x modes), so a frequency sweep is badly
 lopsided; units are costed and run dearest-first, and concurrent solves are
 admitted against a memory budget instead of filling every core.
 
-Per-frequency solver-unit files are restart/provenance state under the hidden
-.solver_units/ directory, not alternative datasets. Certification remains a
-user-selected solve option and does not gate publication or downstream use.
+Each frequency publishes its solver-frame VV and HH files immediately under
+results/by_frequency/. They are also the verified restart units used to build
+the final combined monostatic result. Certification remains a user-selected
+solve option and does not gate publication or downstream use.
 
 Edit the CONFIG block and run:
 
@@ -521,7 +522,7 @@ def main() -> 'None':
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
     run_dir = Path(OUTPUT_DIR).resolve() / run_id
     results_dir = run_dir / "results"
-    unit_dir = run_dir / ".solver_units"
+    unit_dir = results_dir / "by_frequency"
     run_dir.mkdir(parents=True, exist_ok=False)
     results_dir.mkdir()
     unit_dir.mkdir()
@@ -548,7 +549,7 @@ def main() -> 'None':
         "frequencies_ghz": [float(f) for f in FREQUENCIES_GHZ],
         "aspects_deg": aspects,
         "polarizations": pols,
-        "unit_output_dir": ".solver_units",
+        "unit_output_dir": "results/by_frequency",
         "radar_grid": {
             "azimuths_deg": [float(value) for value in AZIMUTHS_DEG],
             "elevations_deg": [float(value) for value in ELEVATIONS_DEG],

@@ -90,8 +90,10 @@ against a memory budget rather than filling every core. See
 The BoR launchers take the requested frequencies, radar azimuths, and radar
 elevations directly. Each geometry produces one user-facing
 `results/<geometry>.grim` containing the monostatic VV/HH/VH grid and the exact
-body model needed for later coherent placement. The hidden `.solver_units/`
-directory is restart/provenance state, not another dataset to choose from.
+body model needed for later coherent placement. Visible
+`results/by_frequency/` VV/HH files appear as each frequency finishes and also
+serve as restart state; the combined monostatic dataset is published when the
+geometry is complete.
 
 `Backend/place_features.py` also accepts an attested external monostatic GRIM
 plus a platform `.facet` or STL surface. Set `SURFACE_MESH` and its units; the

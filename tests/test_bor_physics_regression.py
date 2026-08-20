@@ -779,6 +779,29 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(len(pairs), 2)
         self.assertTrue(all(len(pair["channel_units"]) == 2 for pair in pairs))
 
+    def test_bor_frequency_outputs_are_immediately_user_visible(self):
+        unit = {
+            "geometry_stem": "cylinder",
+            "polarization": "VV",
+            "frequency_ghz": 3.0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run"
+            expected = (
+                run_dir / "results" / "by_frequency" /
+                "VV_3.000GHz_cylinder.grim"
+            )
+            self.assertEqual(
+                run_hpc_bor_monostatic._unit_output_path(run_dir, unit),
+                expected,
+            )
+            self.assertEqual(
+                run_local_bor._unit_output_path(
+                    run_dir / "results" / "by_frequency", unit
+                ),
+                expected,
+            )
+
     def test_scaled_stable_lu_is_not_rejected_by_rhs_residual_alone(self):
         rng = np.random.default_rng(1)
         size = 8

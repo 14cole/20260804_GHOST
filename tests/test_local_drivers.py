@@ -287,11 +287,17 @@ def test_local_bor_downstream_collection(workspace):
     """A base-mesh BoR run must still produce a usable downstream body."""
 
     print("\nrun_local_bor.py downstream collection")
+    geometry_dir = workspace / "geometries" / "BOR"
+    geometry_dir.mkdir(parents=True)
+    shutil.copy2(
+        str(REPO / "geometries" / "body.geo"),
+        str(geometry_dir / "body.geo"),
+    )
     script = DRIVER_HARNESS.format(
         backend=str(BACKEND),
         module="run_local_bor",
         overrides=_overrides(
-            GEOMETRY_DIRS=[str(REPO / "geometries")],
+            GEOMETRY_DIRS=[str(geometry_dir)],
             FREQUENCIES_GHZ=[1.0],
             AZIMUTHS_DEG=[0.0, 90.0, 180.0],
             ELEVATIONS_DEG=[0.0],
@@ -308,6 +314,15 @@ def test_local_bor_downstream_collection(workspace):
                      f"{result.stdout}\n{result.stderr}")
         return
     runs = sorted((workspace / "bor_runs").glob("run_*"))
+    frequency_paths = sorted(
+        (runs[-1] / "results" / "by_frequency").glob("*.grim")
+    ) if runs else []
+    check(
+        [path.name for path in frequency_paths] == [
+            "HH_1.000GHz_body.grim", "VV_1.000GHz_body.grim"
+        ],
+        "completed frequency publishes visible VV and HH unit files",
+    )
     body_paths = sorted(runs[-1].glob("results/*.grim")) if runs else []
     check(len(body_paths) == 1,
           f"one monostatic body GRIM was written (got {len(body_paths)})")

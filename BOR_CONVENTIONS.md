@@ -68,11 +68,12 @@ aspect required by that radar grid; the complex body field is not interpolated
 between coarse aspect samples. Do not include both 0 and 360 degrees because
 they are the same physical azimuth.
 
-Each geometry publishes one `results/<geometry>.grim`. Its primary arrays are
-the requested radar-frame monostatic VV, HH, and VH response. The same file
-also embeds the body-aspect field and `(rho,z)` profile required for downstream
-placement. Files in `.solver_units/` are hidden checkpoint/provenance state and
-are not separate physical answers.
+Each completed frequency immediately publishes solver-meridian VV and HH files
+under `results/by_frequency/`. These are physical body-aspect results and the
+restart inputs for final assembly. When the geometry is complete it also
+publishes one `results/<geometry>.grim`; its primary arrays are the requested
+radar-frame monostatic VV, HH, and VH response, and it embeds the body-aspect
+field and `(rho,z)` profile required for downstream placement.
 
 Edit and run `Backend/place_features.py` to coherently add:
 
