@@ -22,6 +22,7 @@ phase-1 gate battery before any solver uses them.
 
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import List, Tuple
 
 import numpy as np
@@ -29,6 +30,22 @@ import numpy as np
 C0 = 299_792_458.0
 ETA0 = 376.730313668
 AXIS_TOL = 1e-12
+
+
+@lru_cache(maxsize=None)
+def cached_leggauss(order: 'int') -> 'Tuple[np.ndarray, np.ndarray]':
+    """Immutable Gauss-Legendre rule shared by every BoR kernel build.
+
+    Near-pair preparation requests the same small set of orders hundreds of
+    times.  ``leggauss`` constructs those rules through an eigensolve, so
+    rebuilding them for every element pair is pure overhead.  The returned
+    arrays are read-only to keep the process-wide cache safe.
+    """
+
+    x, w = np.polynomial.legendre.leggauss(int(order))
+    x.setflags(write=False)
+    w.setflags(write=False)
+    return x, w
 
 
 # -----------------------------------------------------------------------------
@@ -101,7 +118,7 @@ class GaussData:
 
 
 def gauss_on_generatrix(gen: 'Generatrix', order: 'int' = 4) -> 'GaussData':
-    xg, wg = np.polynomial.legendre.leggauss(order)
+    xg, wg = cached_leggauss(order)
     s = 0.5 * (xg + 1.0)
     w = 0.5 * wg
     ne = gen.n_elems
@@ -227,7 +244,8 @@ def modal_kernels_fft(rho_p, z_p, rho_q, z_q, k, m_max: 'int', n_xi: 'int' = 0):
     return out.reshape(shape + (m_max + 2,))
 
 
-def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 48):
+def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 48,
+                       tail_order: 'int' = 0):
     """
     G_m for m = 0..m_max+1 at near-singular point pairs.
 
@@ -274,7 +292,7 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     # range, the fixed-order sinh grid cannot resolve the cos(m xi)/e^{-jkR}
     # oscillation (that job belongs to the oscillation-scaled tail).
     s0 = np.minimum(0.25, 20.0 * d / a)
-    xg, wg = np.polynomial.legendre.leggauss(order)
+    xg, wg = cached_leggauss(order)
     u01 = 0.5 * (xg + 1.0)
     w01 = 0.5 * wg
 
@@ -292,13 +310,13 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     w_all = wv * dxi_dv
     cosmx = np.cos(xi[:, :, None] * m[None, None, :])
     gw = g * w_all
-    acc = 2.0 * (np.einsum("pv,pvm->pm", gw.real, cosmx)
-                 + 1j * np.einsum("pv,pvm->pm", gw.imag, cosmx))
+    acc = 2.0 * np.matmul(gw[:, None, :], cosmx).squeeze(1)
 
     # -- tail --
     osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
-    n_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
-    xt, wt = np.polynomial.legendre.leggauss(n_tail)
+    required_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
+    n_tail = max(required_tail, int(tail_order))
+    xt, wt = cached_leggauss(n_tail)
     u01t = 0.5 * (xt + 1.0)
     w01t = 0.5 * wt
     xi0 = 2.0 * np.arcsin(s0)
@@ -310,8 +328,7 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     gt = np.exp(-1j * complex(k) * Rt) / (4.0 * np.pi * Rt)
     cosmt = np.cos(xi_t[:, :, None] * m[None, None, :])
     gtw = gt * w_t
-    acc += 2.0 * (np.einsum("pv,pvm->pm", gtw.real, cosmt)
-                  + 1j * np.einsum("pv,pvm->pm", gtw.imag, cosmt))
+    acc += 2.0 * np.matmul(gtw[:, None, :], cosmt).squeeze(1)
 
     out[idx, :] = acc
     return out
@@ -413,20 +430,23 @@ def _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m) -> 'List[np.ndarray]':
     arg = xi_pos[:, :, None] * m[None, None, :]
     cosm = np.cos(arg)
     sinm = np.sin(arg)
-    outs = []
-    for Fpos, Fneg in zip(Fp, Fm):
-        S = (Fpos + Fneg) * w_pos
-        D = (Fpos - Fneg) * w_pos
-        pc = np.einsum("pv,pvm->pm", S.real, cosm) + \
-             1j * np.einsum("pv,pvm->pm", S.imag, cosm)
-        ps = np.einsum("pv,pvm->pm", D.real, sinm) + \
-             1j * np.einsum("pv,pvm->pm", D.imag, sinm)
-        outs.append(pc - 1j * ps)
-    return outs
+    # Stack the four vector-component brackets and use batched matrix
+    # products over their shared quadrature axis.  This performs the same
+    # pairwise modal projections while avoiding eight small einsum dispatches
+    # per near-kernel call.
+    S = np.stack(
+        [(Fpos + Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)], axis=1
+    )
+    D = np.stack(
+        [(Fpos - Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)], axis=1
+    )
+    projected = np.matmul(S, cosm) - 1j * np.matmul(D, sinm)
+    return [projected[:, i, :] for i in range(projected.shape[1])]
 
 
 def mfie_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
-                      m_max: 'int', order: 'int' = 48):
+                      m_max: 'int', order: 'int' = 48,
+                      tail_order: 'int' = 0):
     """Modal MFIE kernels for near point pairs (1-D pair lists) via the
     same capped sinh core + oscillation tail as modal_kernels_near, mirrored
     to negative xi (the brackets have mixed parity).  Returns four arrays
@@ -448,7 +468,7 @@ def mfie_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     s0 = np.minimum(0.25, 20.0 * d / np.maximum(a, 1e-300))
     s0 = np.where(rr4 <= 1e-30, 1.0, s0)   # axis pairs: no singular core structure
 
-    xg, wg = np.polynomial.legendre.leggauss(order)
+    xg, wg = cached_leggauss(order)
     u01 = 0.5 * (xg + 1.0)
     w01 = 0.5 * wg
     # core in s = sin(xi/2), sinh-graded
@@ -461,8 +481,9 @@ def mfie_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     w_c = wv * 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
     # tail
     osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
-    n_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
-    xt, wt = np.polynomial.legendre.leggauss(n_tail)
+    required_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
+    n_tail = max(required_tail, int(tail_order))
+    xt, wt = cached_leggauss(n_tail)
     xi0 = 2.0 * np.arcsin(np.minimum(s0, 1.0))
     span = np.pi - xi0
     xi_t = xi0[:, None] + 0.5 * (xt + 1.0)[None, :] * span[:, None]
@@ -559,15 +580,15 @@ def ibc_kernels_fft(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
             np.outer(rho_p, rho_q), 0.0))))
         n_xi = int(2 ** math.ceil(math.log2(max(128, 6 * (m_max + 2), 8 * (osc + 4)))))
     xi = 2.0 * np.pi * np.arange(n_xi) / n_xi - np.pi
-    one = np.ones((Pp, Pq))
-    pr = (np.asarray(rho_p)[:, None] * one).ravel()
-    pz = (np.asarray(z_p)[:, None] * one).ravel()
-    ptr = (np.asarray(tr_p)[:, None] * one).ravel()
-    ptz = (np.asarray(tz_p)[:, None] * one).ravel()
-    qr = (np.asarray(rho_q)[None, :] * one).ravel()
-    qz = (np.asarray(z_q)[None, :] * one).ravel()
-    qtr = (np.asarray(tr_q)[None, :] * one).ravel()
-    qtz = (np.asarray(tz_q)[None, :] * one).ravel()
+    pair_shape = (Pp, Pq)
+    pr = np.broadcast_to(np.asarray(rho_p)[:, None], pair_shape).ravel()
+    pz = np.broadcast_to(np.asarray(z_p)[:, None], pair_shape).ravel()
+    ptr = np.broadcast_to(np.asarray(tr_p)[:, None], pair_shape).ravel()
+    ptz = np.broadcast_to(np.asarray(tz_p)[:, None], pair_shape).ravel()
+    qr = np.broadcast_to(np.asarray(rho_q)[None, :], pair_shape).ravel()
+    qz = np.broadcast_to(np.asarray(z_q)[None, :], pair_shape).ravel()
+    qtr = np.broadcast_to(np.asarray(tr_q)[None, :], pair_shape).ravel()
+    qtz = np.broadcast_to(np.asarray(tz_q)[None, :], pair_shape).ravel()
     m = np.arange(-m_max, m_max + 1)
     bins = np.where(m >= 0, m, n_xi + m)
     phase = np.exp(1j * np.pi * m) * (2.0 * np.pi / n_xi)
@@ -587,7 +608,8 @@ def ibc_kernels_fft(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
 
 
 def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
-                     m_max: 'int', order: 'int' = 48):
+                     m_max: 'int', order: 'int' = 48,
+                     tail_order: 'int' = 0):
     """Modal IBC kernels for near point-pair lists [n_pairs, 2*m_max+1],
     same two-piece grid as mfie_kernels_near."""
 
@@ -607,7 +629,7 @@ def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     s0 = np.minimum(0.25, 20.0 * d / np.maximum(a, 1e-300))
     s0 = np.where(rr4 <= 1e-30, 1.0, s0)
 
-    xg, wg = np.polynomial.legendre.leggauss(order)
+    xg, wg = cached_leggauss(order)
     u01 = 0.5 * (xg + 1.0)
     w01 = 0.5 * wg
     vmax = np.arcsinh((a / d) * s0)
@@ -618,8 +640,9 @@ def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     ds_dv = (d / a)[:, None] * np.cosh(v)
     w_c = wv * 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
     osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
-    n_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
-    xt, wt = np.polynomial.legendre.leggauss(n_tail)
+    required_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
+    n_tail = max(required_tail, int(tail_order))
+    xt, wt = cached_leggauss(n_tail)
     xi0 = 2.0 * np.arcsin(np.minimum(s0, 1.0))
     span = np.pi - xi0
     xi_t = xi0[:, None] + 0.5 * (xt + 1.0)[None, :] * span[:, None]

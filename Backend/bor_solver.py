@@ -32,6 +32,7 @@ e^{+jk d.r} (matches the 2D solver), theta-pol (VV) / phi-pol (HH).
 """
 
 import math
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -41,7 +42,7 @@ from scipy.linalg import get_lapack_funcs
 from scipy.spatial import cKDTree
 
 from bor_kernels import (
-    C0, ETA0, Generatrix, GaussData, gauss_on_generatrix,
+    C0, ETA0, Generatrix, GaussData, cached_leggauss, gauss_on_generatrix,
     modal_kernels_fft, modal_kernels_near, kernels_for_mode,
     mfie_kernels_fft, mfie_kernels_near, mfie_for_mode,
     ibc_kernels_fft, ibc_kernels_near, n_xi_for_pairs,
@@ -100,13 +101,13 @@ def _cell_points(kind: 'str', gorder: 'int' = 4) -> 'Tuple[np.ndarray, np.ndarra
     key = f"{kind}:{gorder}"
     if key in _CELL_CACHE:
         return _CELL_CACHE[key]
-    xg, wg = np.polynomial.legendre.leggauss(gorder)
+    xg, wg = cached_leggauss(gorder)
     u = 0.5 * (xg + 1.0)
     w = 0.5 * wg
     # Source axis uses order+1 so test/source nodes NEVER coincide exactly:
     # a coincident pair (R = 0) underflows the 1/R^3 MFIE kernel into NaN
     # and adds ln(eps)-noise to the EFIE log cells.
-    xq, wq_ = np.polynomial.legendre.leggauss(gorder + 1)
+    xq, wq_ = cached_leggauss(gorder + 1)
     uq = 0.5 * (xq + 1.0)
     wq = 0.5 * wq_
     S, SP, W = [], [], []
@@ -128,7 +129,7 @@ def _regular_cell_points(gorder: 'int' = 12) -> 'Tuple[np.ndarray, np.ndarray, n
     key = f"regular:{int(gorder)}"
     if key in _CELL_CACHE:
         return _CELL_CACHE[key]
-    xg, wg = np.polynomial.legendre.leggauss(int(gorder))
+    xg, wg = cached_leggauss(int(gorder))
     u = 0.5 * (xg + 1.0)
     w = 0.5 * wg
     s, sp = np.meshgrid(u, u, indexing="ij")
@@ -338,6 +339,11 @@ class BorPecSolver:
         self._G_table = None
         self._stream = None
         self._near_cache: 'Dict[int, Dict[Tuple[int, int], Tuple]]' = {}
+        self._near_contractions: 'Dict[Tuple[str, int], Dict[str, np.ndarray]]' = {}
+        self._mass_cache = None
+        self._weighted_mass_cache = None
+        self._basis_mask_cache: 'Dict[int, np.ndarray]' = {}
+        self._angular_local = threading.local()
 
     def enable_streaming(self, m_max: 'int', efie: 'bool' = True,
                          mfie: 'bool' = False,
@@ -366,13 +372,47 @@ class BorPecSolver:
         self.P = P
         Nn = self.Nn
         T = np.zeros((Nn, P)); D = np.zeros((Nn, P))
-        for p in range(P):
-            e = g.elem[p]
-            T[e, p] = g.T0[p];     D[e, p] = g.dRT0[p]
-            T[e + 1, p] = g.T1[p]; D[e + 1, p] = g.dRT1[p]
+        p = np.arange(P)
+        e = g.elem.astype(int, copy=False)
+        T[e, p] = g.T0;     D[e, p] = g.dRT0
+        T[e + 1, p] = g.T1; D[e + 1, p] = g.dRT1
         self.B_T, self.B_D = T, D
         # element adjacency classes for pair routing
         self.elem_of_pt = g.elem
+
+    def _test_accumulate(self, point_values: 'np.ndarray') -> 'np.ndarray':
+        """Apply the triangle test basis without the dense ``B_T`` matrix.
+
+        Every Gauss point belongs to exactly one element and therefore touches
+        only its two endpoint nodes.  Explicit local scatter is O(P), whereas
+        the mathematically equivalent dense multiply is O(Nn*P).
+        """
+
+        values = np.asarray(point_values)
+        if values.shape[0] != self.P:
+            raise ValueError("BoR point-value array has the wrong leading size.")
+        trailing = values.shape[1:]
+        scale_shape = (self.P,) + (1,) * len(trailing)
+        out = np.zeros((self.Nn,) + trailing,
+                       dtype=np.result_type(values.dtype, np.float64))
+        elem = self.g.elem.astype(int, copy=False)
+        np.add.at(out, elem, self.g.T0.reshape(scale_shape) * values)
+        np.add.at(out, elem + 1, self.g.T1.reshape(scale_shape) * values)
+        return out
+
+    def _basis_evaluate(self, nodal_values: 'np.ndarray') -> 'np.ndarray':
+        """Evaluate nodal triangle coefficients at Gauss points in O(P)."""
+
+        values = np.asarray(nodal_values)
+        if values.shape[0] != self.Nn:
+            raise ValueError("BoR nodal array has the wrong leading size.")
+        trailing = values.shape[1:]
+        scale_shape = (self.P,) + (1,) * len(trailing)
+        elem = self.g.elem.astype(int, copy=False)
+        return (
+            self.g.T0.reshape(scale_shape) * values[elem]
+            + self.g.T1.reshape(scale_shape) * values[elem + 1]
+        )
 
     def _far_gap(self) -> 'float':
         """True minimum distance among topologically far element pairs.
@@ -465,10 +505,12 @@ class BorPecSolver:
         if self._G_table is not None and self._G_table.shape[-1] >= m_max + 2:
             return self._G_table
         g = self.g
-        RP = g.rho[:, None] * np.ones(self.P)[None, :]
-        RQ = g.rho[None, :] * np.ones(self.P)[:, None]
-        ZP = g.z[:, None] * np.ones(self.P)[None, :]
-        ZQ = g.z[None, :] * np.ones(self.P)[:, None]
+        # The kernel builder accepts broadcastable coordinate views; avoid
+        # materializing four redundant P-by-P coordinate matrices.
+        RP = g.rho[:, None]
+        RQ = g.rho[None, :]
+        ZP = g.z[:, None]
+        ZQ = g.z[None, :]
         ediff = np.abs(g.elem[:, None].astype(int) - g.elem[None, :].astype(int))
         near_mask = ediff <= self.near_span
         n_xi = n_xi_for_pairs(self.k, float(np.max(g.rho)), m_max,
@@ -527,35 +569,41 @@ class BorPecSolver:
                 G, Gc, Gs,
             )
 
-        # near element pairs (self + two topological neighbours): refined path
-        ne = self.gen.n_elems
-        for e in range(ne):
-            for f in range(e - self.near_span, e + self.near_span + 1):
-                if f < 0 or f >= ne:
-                    continue
-                (s, sp, w, rho_p, tr_p, tz_p, Tp, Dp,
-                 rho_q, tr_q, tz_q, Tq, Dq, Gm) = self._near_pair_data(e, f, m_max)
-                Gn, Gcn, Gsn = kernels_for_mode(Gm, m)
-                # point-pair kernels are 1-D lists here: build diag-style
-                # products via elementwise weighting (pairs are matched 1:1).
-                wp = np.sqrt(np.abs(w))  # split weight symmetrically
-                # For matched point-pair lists the "matrix" contraction
-                # degenerates to sums over pairs:
-                rr = rho_p * rho_q * w
-                ktt = rr * ((tr_p * tr_q) * Gcn + (tz_p * tz_q) * Gn)
-                ksc = w * Gn
-                ktf = rr * (tr_p * Gsn)
-                kft = -rr * (tr_q * Gsn)
-                kff = rr * Gcn
-                btt = np.einsum("ip,p,jp->ij", Tp, ktt, Tq) - (1.0 / k ** 2) * np.einsum("ip,p,jp->ij", Dp, ksc, Dq)
-                btf = np.einsum("ip,p,jp->ij", Tp, ktf, Tq) - (1j * m / k ** 2) * np.einsum("ip,p,jp->ij", Dp, ksc, Tq)
-                bft = np.einsum("ip,p,jp->ij", Tp, kft, Tq) + (1j * m / k ** 2) * np.einsum("ip,p,jp->ij", Tp, ksc, Dq)
-                bff = np.einsum("ip,p,jp->ij", Tp, kff, Tq) - (m ** 2 / k ** 2) * np.einsum("ip,p,jp->ij", Tp, ksc, Tq)
-                rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
-                ztt[np.ix_(rows, cols)] += btt
-                ztf[np.ix_(rows, cols)] += btf
-                zft[np.ix_(rows, cols)] += bft
-                zff[np.ix_(rows, cols)] += bff
+        # Near element pairs (self + two topological neighbours) use the same
+        # refined kernels as before.  ``prepare_operators`` precontracts every
+        # signed mode into compact band-entry arrays, eliminating thousands of
+        # tiny 2x2 einsums during the mode sweep.  Keep the direct fallback for
+        # callers that assemble an operator without first preparing it.
+        prepared = self._near_contractions.get(("efie", m_max))
+        if prepared is not None:
+            midx = m + m_max
+            rc = (prepared["rows"], prepared["cols"])
+            for uv, tgt in enumerate((ztt, ztf, zft, zff)):
+                np.add.at(tgt, rc, prepared["values"][uv, midx])
+        else:
+            ne = self.gen.n_elems
+            for e in range(ne):
+                for f in range(e - self.near_span, e + self.near_span + 1):
+                    if f < 0 or f >= ne:
+                        continue
+                    (s, sp, w, rho_p, tr_p, tz_p, Tp, Dp,
+                     rho_q, tr_q, tz_q, Tq, Dq, Gm) = self._near_pair_data(e, f, m_max)
+                    Gn, Gcn, Gsn = kernels_for_mode(Gm, m)
+                    rr = rho_p * rho_q * w
+                    ktt = rr * ((tr_p * tr_q) * Gcn + (tz_p * tz_q) * Gn)
+                    ksc = w * Gn
+                    ktf = rr * (tr_p * Gsn)
+                    kft = -rr * (tr_q * Gsn)
+                    kff = rr * Gcn
+                    btt = np.einsum("ip,p,jp->ij", Tp, ktt, Tq) - (1.0 / k ** 2) * np.einsum("ip,p,jp->ij", Dp, ksc, Dq)
+                    btf = np.einsum("ip,p,jp->ij", Tp, ktf, Tq) - (1j * m / k ** 2) * np.einsum("ip,p,jp->ij", Dp, ksc, Tq)
+                    bft = np.einsum("ip,p,jp->ij", Tp, kft, Tq) + (1j * m / k ** 2) * np.einsum("ip,p,jp->ij", Tp, ksc, Dq)
+                    bff = np.einsum("ip,p,jp->ij", Tp, kff, Tq) - (m ** 2 / k ** 2) * np.einsum("ip,p,jp->ij", Tp, ksc, Tq)
+                    rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
+                    ztt[np.ix_(rows, cols)] += btt
+                    ztf[np.ix_(rows, cols)] += btf
+                    zft[np.ix_(rows, cols)] += bft
+                    zff[np.ix_(rows, cols)] += bff
 
         C = 1j * k * self.eta * 2.0 * np.pi
         Nn = self.Nn
@@ -575,11 +623,10 @@ class BorPecSolver:
             return self._K_tables
         g = self.g
         P = self.P
-        one = np.ones((P, P))
-        args = (g.rho[:, None] * one, g.z[:, None] * one,
-                g.trho[:, None] * one, g.tz[:, None] * one,
-                g.rho[None, :] * one, g.z[None, :] * one,
-                g.trho[None, :] * one, g.tz[None, :] * one)
+        args = (g.rho[:, None], g.z[:, None],
+                g.trho[:, None], g.tz[:, None],
+                g.rho[None, :], g.z[None, :],
+                g.trho[None, :], g.tz[None, :])
         n_xi = n_xi_for_pairs(self.k, float(np.max(g.rho)), m_max,
                               self._far_gap(), bracket=True)
         K = mfie_kernels_fft(*args, self.k, m_max, n_xi=n_xi)
@@ -620,10 +667,36 @@ class BorPecSolver:
         per-Gauss-point array (default 1) -- used for the MFIE J/2 term and
         the IBC Z_s term (with weight = Z_s at the Gauss points)."""
 
+        if weight is None and self._mass_cache is not None:
+            return self._mass_cache
+
         g = self.g
-        wgt = np.ones(self.P) if weight is None else np.asarray(weight)
-        K = (g.w * g.rho * wgt)
-        return 2.0 * np.pi * (self.B_T * K[None, :]) @ self.B_T.T
+        if weight is None:
+            wgt = 1.0
+            signature = None
+        else:
+            wgt = np.asarray(weight)
+            if wgt.shape != (self.P,):
+                raise ValueError("BoR mass weight must have one value per Gauss point.")
+            signature = (wgt.dtype.str, wgt.shape, wgt.tobytes())
+            cached = self._weighted_mass_cache
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+
+        K = g.w * g.rho * wgt
+        elem = g.elem.astype(int, copy=False)
+        M = np.zeros((self.Nn, self.Nn),
+                     dtype=np.result_type(K, np.float64))
+        factor = 2.0 * np.pi
+        np.add.at(M, (elem, elem), factor * K * g.T0 * g.T0)
+        np.add.at(M, (elem, elem + 1), factor * K * g.T0 * g.T1)
+        np.add.at(M, (elem + 1, elem), factor * K * g.T1 * g.T0)
+        np.add.at(M, (elem + 1, elem + 1), factor * K * g.T1 * g.T1)
+        if weight is None:
+            self._mass_cache = M
+        else:
+            self._weighted_mass_cache = (signature, M)
+        return M
 
     def assemble_mfie_mode(self, m: 'int', m_max: 'int') -> 'np.ndarray':
         """Z_MFIE = (1/2) M - K  (node-based [2Nn, 2Nn]), where K is the
@@ -641,18 +714,25 @@ class BorPecSolver:
                 blocks.append(2.0 * np.pi * (self.B_T * wrho[None, :]) @ Km @ (self.B_T * wrho[None, :]).T)
         ktt, ktf, kft, kff = blocks
 
-        ne = self.gen.n_elems
-        for e in range(ne):
-            for f in range(e - self.near_span, e + self.near_span + 1):
-                if f < 0 or f >= ne:
-                    continue
-                w, rho_p, Tp, rho_q, Tq, Kn = self._near_mfie_data(e, f, m_max)
-                rr = rho_p * rho_q * w
-                rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
-                for uv, tgt in enumerate((ktt, ktf, kft, kff)):
-                    Km = mfie_for_mode(Kn[uv], m, m_max)
-                    blk = 2.0 * np.pi * np.einsum("ip,p,jp->ij", Tp, rr * Km, Tq)
-                    tgt[np.ix_(rows, cols)] += blk
+        prepared = self._near_contractions.get(("mfie", m_max))
+        if prepared is not None:
+            midx = m + m_max
+            rc = (prepared["rows"], prepared["cols"])
+            for uv, tgt in enumerate((ktt, ktf, kft, kff)):
+                np.add.at(tgt, rc, prepared["values"][uv, midx])
+        else:
+            ne = self.gen.n_elems
+            for e in range(ne):
+                for f in range(e - self.near_span, e + self.near_span + 1):
+                    if f < 0 or f >= ne:
+                        continue
+                    w, rho_p, Tp, rho_q, Tq, Kn = self._near_mfie_data(e, f, m_max)
+                    rr = rho_p * rho_q * w
+                    rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
+                    for uv, tgt in enumerate((ktt, ktf, kft, kff)):
+                        Km = mfie_for_mode(Kn[uv], m, m_max)
+                        blk = 2.0 * np.pi * np.einsum("ip,p,jp->ij", Tp, rr * Km, Tq)
+                        tgt[np.ix_(rows, cols)] += blk
 
         Nn = self.Nn
         M = self.mass_blocks()
@@ -663,20 +743,39 @@ class BorPecSolver:
         Z[Nn:, Nn:] = 0.5 * M - kff
         return Z
 
+    def _angular_data(self, m: 'int', theta_deg: 'float'):
+        """Shared cylindrical-wave data for one mode and look direction.
+
+        EFIE, MFIE, VV, HH, and monostatic far-field evaluation all reuse the
+        same Bessel functions and axial phase.  A thread-local single-entry
+        cache avoids recomputation without retaining a mesh-sized table for
+        every requested angle.
+        """
+
+        key = (int(m), float(theta_deg))
+        entry = getattr(self._angular_local, "entry", None)
+        if entry is not None and entry[0] == key:
+            return entry[1]
+        th = math.radians(theta_deg)
+        st, ct = math.sin(th), math.cos(th)
+        u = self.k * self.g.rho * st
+        phase = np.exp(1j * self.k * ct * self.g.z)
+        jm = lambda n: (1j) ** n * sp.jv(n, u)
+        Jm = jm(m)
+        Jm_m1 = jm(m - 1)
+        Jm_p1 = jm(m + 1)
+        Ic = math.pi * (Jm_m1 + Jm_p1)
+        Is = (math.pi / 1j) * (Jm_m1 - Jm_p1)
+        I1 = 2.0 * math.pi * Jm
+        data = (st, ct, phase, Ic, Is, I1)
+        self._angular_local.entry = (key, data)
+        return data
+
     def rhs_mfie_mode(self, m: 'int', theta_inc_deg: 'float', pol: 'str') -> 'np.ndarray':
         """<W, n_hat x H_inc> for the plane wave (see phase-2 derivation)."""
 
         g = self.g
-        k = self.k
-        th = math.radians(theta_inc_deg)
-        st, ct = math.sin(th), math.cos(th)
-        u = k * g.rho * st
-        P = np.exp(1j * k * ct * g.z)
-        jm = lambda n: (1j) ** n * sp.jv(n, u)
-        Jm = jm(m); Jm_m1 = jm(m - 1); Jm_p1 = jm(m + 1)
-        Ic = math.pi * (Jm_m1 + Jm_p1)
-        Is = (math.pi / 1j) * (Jm_m1 - Jm_p1)
-        I1 = 2.0 * math.pi * Jm
+        st, ct, P, Ic, Is, I1 = self._angular_data(m, theta_inc_deg)
         if pol.upper() in ("VV", "THETA", "TM"):
             # H_inc = -(1/eta0) y_hat e^{jk d.r}
             et = Ic / ETA0
@@ -685,8 +784,8 @@ class BorPecSolver:
             # H_inc = +(1/eta0) e_theta e^{jk d.r}
             et = (ct * Is) / ETA0
             ef = (ct * g.trho * Ic - st * g.tz * I1) / ETA0
-        vt = self.B_T @ (g.w * g.rho * P * et)
-        vf = self.B_T @ (g.w * g.rho * P * ef)
+        vt = self._test_accumulate(g.w * g.rho * P * et)
+        vf = self._test_accumulate(g.w * g.rho * P * ef)
         return np.concatenate([vt, vf])
 
     # -- IBC operator (Phase 2): 0.5 Z_s mass + magnetic-current K' term --
@@ -750,21 +849,35 @@ class BorPecSolver:
                 Km = mfie_for_mode(Kt[uv], m, m_max)
                 blocks.append(2.0 * np.pi * (self.B_T * wrho_p[None, :]) @ Km @ (self.B_T * wrho_q[None, :]).T)
 
-        ne = self.gen.n_elems
-        for e in range(ne):
-            for f in range(e - self.near_span, e + self.near_span + 1):
-                if f < 0 or f >= ne:
-                    continue
-                welem = 1.0 if src_welem is None else src_welem[f]
-                if abs(welem) == 0.0:
-                    continue
-                w, rho_p, Tp, rho_q, Tq, Kn = self._near_ibc_data(e, f, m_max)
-                rr = rho_p * rho_q * w * welem
-                rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
-                for uv, tgt in enumerate(blocks):
-                    Km = mfie_for_mode(Kn[uv], m, m_max)
-                    blk = 2.0 * np.pi * np.einsum("ip,p,jp->ij", Tp, rr * Km, Tq)
-                    tgt[np.ix_(rows, cols)] += blk
+        prepared = self._near_contractions.get(("ibc", m_max))
+        if prepared is not None:
+            midx = m + m_max
+            rc = (prepared["rows"], prepared["cols"])
+            source_weight = (
+                1.0 if src_welem is None
+                else np.asarray(src_welem)[prepared["source_elems"]]
+            )
+            for uv, tgt in enumerate(blocks):
+                np.add.at(
+                    tgt, rc,
+                    prepared["values"][uv, midx] * source_weight,
+                )
+        else:
+            ne = self.gen.n_elems
+            for e in range(ne):
+                for f in range(e - self.near_span, e + self.near_span + 1):
+                    if f < 0 or f >= ne:
+                        continue
+                    welem = 1.0 if src_welem is None else src_welem[f]
+                    if abs(welem) == 0.0:
+                        continue
+                    w, rho_p, Tp, rho_q, Tq, Kn = self._near_ibc_data(e, f, m_max)
+                    rr = rho_p * rho_q * w * welem
+                    rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
+                    for uv, tgt in enumerate(blocks):
+                        Km = mfie_for_mode(Kn[uv], m, m_max)
+                        blk = 2.0 * np.pi * np.einsum("ip,p,jp->ij", Tp, rr * Km, Tq)
+                        tgt[np.ix_(rows, cols)] += blk
         return tuple(blocks)
 
     def assemble_ibc_extra(self, m: 'int', m_max: 'int', zs_pt: 'np.ndarray',
@@ -810,6 +923,256 @@ class BorPecSolver:
         P[Nn:, Nn:] = Bft
         return P
 
+    def _prepare_near_contractions(self, kind: 'str', pairs, m_max: 'int') -> 'None':
+        """Precontract refined near kernels for all signed modes.
+
+        The raw near kernels already contain every Fourier order.  Contracting
+        one 2x2 block at a time inside every mode assembly repeated the same
+        NumPy dispatch tens of thousands of times.  This routine performs the
+        identical Galerkin sums with a mode axis, then stores only the four
+        compact nodal entries per directed element pair.
+        """
+
+        key = (kind, int(m_max))
+        if key in self._near_contractions:
+            return
+        pair_count = len(pairs)
+        mode_count = 2 * m_max + 1
+        entry_count = 4 * pair_count
+        rows = np.empty(entry_count, dtype=np.intp)
+        cols = np.empty(entry_count, dtype=np.intp)
+        source_elems = np.empty(entry_count, dtype=np.intp)
+        values = np.empty(
+            (4, mode_count, entry_count), dtype=np.complex128
+        )
+        modes = np.arange(-m_max, m_max + 1, dtype=int)
+
+        def contract(left, weighted_kernel, right):
+            return np.einsum(
+                "ip,pm,jp->ijm", left, weighted_kernel, right,
+                optimize=False,
+            )
+
+        for pi, (e, f) in enumerate(pairs):
+            offset = 4 * pi
+            sl = slice(offset, offset + 4)
+            rows[sl] = (e, e, e + 1, e + 1)
+            cols[sl] = (f, f + 1, f, f + 1)
+            source_elems[sl] = f
+
+            if kind == "efie":
+                (_s, _sp, w, rho_p, tr_p, tz_p, Tp, Dp,
+                 rho_q, tr_q, tz_q, Tq, Dq, Gm) = self._near_pair_data(
+                    e, f, m_max
+                )
+                am = np.abs(modes)
+                gm_m1 = Gm[:, np.abs(am - 1)]
+                gm_p1 = Gm[:, am + 1]
+                Gn = Gm[:, am]
+                Gcn = 0.5 * (gm_m1 + gm_p1)
+                Gsn = (gm_m1 - gm_p1) / 2j
+                Gsn[:, modes < 0] *= -1.0
+                rr = (rho_p * rho_q * w)[:, None]
+                ksc = w[:, None] * Gn
+                inv_k2 = 1.0 / self.k ** 2
+                btt = (
+                    contract(
+                        Tp,
+                        rr * (
+                            (tr_p * tr_q) * Gcn
+                            + (tz_p * tz_q) * Gn
+                        ),
+                        Tq,
+                    )
+                    - inv_k2 * contract(Dp, ksc, Dq)
+                )
+                btf = (
+                    contract(Tp, rr * tr_p * Gsn, Tq)
+                    - (1j * modes[None, None, :] * inv_k2)
+                    * contract(Dp, ksc, Tq)
+                )
+                bft = (
+                    contract(Tp, -rr * tr_q * Gsn, Tq)
+                    + (1j * modes[None, None, :] * inv_k2)
+                    * contract(Tp, ksc, Dq)
+                )
+                bff = (
+                    contract(Tp, rr * Gcn, Tq)
+                    - ((modes ** 2)[None, None, :] * inv_k2)
+                    * contract(Tp, ksc, Tq)
+                )
+                pair_blocks = (btt, btf, bft, bff)
+            else:
+                if kind == "mfie":
+                    w, rho_p, Tp, rho_q, Tq, Kn = self._near_mfie_data(
+                        e, f, m_max
+                    )
+                elif kind == "ibc":
+                    w, rho_p, Tp, rho_q, Tq, Kn = self._near_ibc_data(
+                        e, f, m_max
+                    )
+                else:
+                    raise ValueError(f"Unknown BoR near-contraction kind {kind!r}.")
+                rr = (2.0 * np.pi * rho_p * rho_q * w)[:, None]
+                pair_blocks = tuple(
+                    contract(Tp, rr * kernel, Tq) for kernel in Kn
+                )
+
+            for uv, block in enumerate(pair_blocks):
+                values[uv, :, sl] = block.reshape(4, mode_count).T
+
+        self._near_contractions[key] = {
+            "rows": rows,
+            "cols": cols,
+            "source_elems": source_elems,
+            "values": values,
+        }
+        raw_key = m_max if kind == "efie" else (kind, m_max)
+        # The precontracted representation is much smaller than the raw
+        # point-pair kernels and is the only form used after preparation.
+        self._near_cache.pop(raw_key, None)
+
+    def _prepare_near_kernel_cache(self, kind: 'str', pairs, m_max: 'int',
+                                   workers: 'int' = 1) -> 'None':
+        """Build refined near kernels in bounded vector batches.
+
+        Each element pair retains its original tail quadrature order.  Pairs
+        with the same order are concatenated only along the independent pair
+        axis, so quadrature nodes, weights, modal projections, and physical
+        accuracy are unchanged.  The batch is memory-capped because the
+        temporary ``pair x quadrature x mode`` arrays can otherwise be large.
+        """
+
+        raw_key = m_max if kind == "efie" else (kind, m_max)
+        cache = self._near_cache.setdefault(raw_key, {})
+        pending = []
+        for e, f in pairs:
+            if (e, f) in cache:
+                continue
+            if e == f:
+                s, sp_, w = _cell_points("diag")
+            elif abs(e - f) == 1:
+                cell_kind = "corner10" if f == e + 1 else "corner01"
+                s, sp_, w = _cell_points(cell_kind)
+            else:
+                s, sp_, w = _regular_cell_points()
+
+            if kind == "efie":
+                rp = _points_on_element(self.gen, e, s)
+                rq = _points_on_element(self.gen, f, sp_)
+                (rho_p, z_p, tr_p, tz_p, T0p, T1p, D0p, D1p, Lp) = rp
+                (rho_q, z_q, tr_q, tz_q, T0q, T1q, D0q, D1q, Lq) = rq
+                prefix = (
+                    s, sp_, w * Lp * Lq,
+                    rho_p, tr_p, tz_p, np.vstack([T0p, T1p]),
+                    np.vstack([D0p, D1p]),
+                    rho_q, tr_q, tz_q, np.vstack([T0q, T1q]),
+                    np.vstack([D0q, D1q]),
+                )
+                args = (rho_p, z_p, rho_q, z_q)
+                rr4 = 4.0 * rho_p * rho_q
+                active = rr4 > 1.0e-30
+                if np.any(active):
+                    amax = float(np.max(np.sqrt(rr4[active])))
+                    osc = abs(complex(self.k)) * amax / math.pi + (m_max + 2)
+                    tail_order = int(min(1024, max(64, math.ceil(4.0 * osc))))
+                else:
+                    tail_order = 0
+            elif kind in ("mfie", "ibc"):
+                rp = _points_on_element(self.gen, e, s)
+                rq = _points_on_element(self.gen, f, sp_)
+                (rho_p, z_p, tr_p, tz_p, T0p, T1p, _D0p, _D1p, Lp) = rp
+                (rho_q, z_q, tr_q, tz_q, T0q, T1q, _D0q, _D1q, Lq) = rq
+                tr_pa = np.full_like(rho_p, tr_p)
+                tz_pa = np.full_like(rho_p, tz_p)
+                tr_qa = np.full_like(rho_q, tr_q)
+                tz_qa = np.full_like(rho_q, tz_q)
+                prefix = (
+                    w * Lp * Lq, rho_p, np.vstack([T0p, T1p]),
+                    rho_q, np.vstack([T0q, T1q]),
+                )
+                args = (
+                    rho_p, z_p, tr_pa, tz_pa,
+                    rho_q, z_q, tr_qa, tz_qa,
+                )
+                amax = float(np.max(np.sqrt(np.maximum(
+                    4.0 * rho_p * rho_q, 1.0e-300
+                ))))
+                osc = abs(complex(self.k)) * amax / math.pi + (m_max + 2)
+                tail_order = int(min(1024, max(64, math.ceil(4.0 * osc))))
+            else:
+                raise ValueError(f"Unknown BoR near-kernel kind {kind!r}.")
+            pending.append(((e, f), prefix, args, tail_order))
+
+        groups: 'Dict[int, List[Tuple]]' = {}
+        for record in pending:
+            groups.setdefault(record[3], []).append(record)
+
+        mode_count = (m_max + 2) if kind == "efie" else (2 * m_max + 1)
+        worker_count = max(1, int(workers))
+        budget = 128.0e6 / worker_count
+        for tail_order, records in groups.items():
+            quadrature_count = 48 + max(64, tail_order)
+            # Conservative bound for simultaneous trig, bracket, and modal
+            # projection temporaries.  A single large record is still allowed.
+            bytes_per_pair_point = max(
+                1.0, 64.0 * quadrature_count * mode_count
+            )
+            point_limit = max(1, int(budget / bytes_per_pair_point))
+            chunks = []
+            chunk = []
+            point_count = 0
+            for record in records:
+                count = len(record[2][0])
+                if chunk and point_count + count > point_limit:
+                    chunks.append(chunk)
+                    chunk = []
+                    point_count = 0
+                chunk.append(record)
+                point_count += count
+            if chunk:
+                chunks.append(chunk)
+
+            def build_batch(batch):
+                arg_count = len(batch[0][2])
+                args = tuple(
+                    np.concatenate([record[2][i] for record in batch])
+                    for i in range(arg_count)
+                )
+                if kind == "efie":
+                    result = modal_kernels_near(
+                        *args, self.k, m_max, tail_order=tail_order
+                    )
+                    results = (result,)
+                elif kind == "mfie":
+                    results = mfie_kernels_near(
+                        *args, self.k, m_max, tail_order=tail_order
+                    )
+                else:
+                    results = ibc_kernels_near(
+                        *args, self.k, m_max, tail_order=tail_order
+                    )
+                built = []
+                start = 0
+                for pair, prefix, pair_args, _tail in batch:
+                    stop = start + len(pair_args[0])
+                    sliced = tuple(result[start:stop] for result in results)
+                    built.append((
+                        pair,
+                        prefix + (sliced[0] if kind == "efie" else sliced,),
+                    ))
+                    start = stop
+                return built
+
+            if worker_count > 1 and len(chunks) > 1:
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    built_chunks = executor.map(build_batch, chunks)
+                    for built in built_chunks:
+                        cache.update(built)
+            else:
+                for batch in chunks:
+                    cache.update(build_batch(batch))
+
     # -- cache warm-up (thread safety for parallel mode assembly) --
     def prepare_operators(self, m_max: 'int', efie: 'bool' = True,
                           mfie: 'bool' = False, ibc: 'bool' = False,
@@ -827,28 +1190,31 @@ class BorPecSolver:
             if 0 <= f < ne
         ]
         streaming = self._stream is not None   # far blocks already built
-        jobs = []
         if efie:
             if not streaming:
                 self._kernel_tables(m_max)
-            jobs += [(self._near_pair_data, p) for p in pairs]
+            self._prepare_near_kernel_cache("efie", pairs, m_max, workers)
         if mfie:
             if not streaming:
                 self._mfie_tables(m_max)
-            jobs += [(self._near_mfie_data, p) for p in pairs]
+            self._prepare_near_kernel_cache("mfie", pairs, m_max, workers)
         if ibc:
             if not (streaming and self._stream.B is not None):
                 self._ibc_tables(m_max)
-            jobs += [(self._near_ibc_data, p) for p in pairs]
-        if max(1, int(workers)) <= 1:
-            for fn, (e, f) in jobs:
-                fn(e, f, m_max)
-        else:
-            with ThreadPoolExecutor(max_workers=int(workers)) as ex:
-                list(ex.map(lambda job: job[0](job[1][0], job[1][1], m_max), jobs))
+            self._prepare_near_kernel_cache("ibc", pairs, m_max, workers)
+        if efie:
+            self._prepare_near_contractions("efie", pairs, m_max)
+        if mfie:
+            self._prepare_near_contractions("mfie", pairs, m_max)
+        if ibc:
+            self._prepare_near_contractions("ibc", pairs, m_max)
 
     # -- active-basis mask per mode --
     def basis_mask(self, m: 'int') -> 'np.ndarray':
+        category = 0 if m == 0 else (1 if abs(m) == 1 else 2)
+        cached = self._basis_mask_cache.get(category)
+        if cached is not None:
+            return cached
         Nn = self.Nn
         t_act = np.ones(Nn, dtype=bool)
         f_act = np.ones(Nn, dtype=bool)
@@ -859,30 +1225,182 @@ class BorPecSolver:
             else:
                 t_act[end] = False   # open edge: J_t vanishes
                 f_act[end] = True
-        return np.concatenate([t_act, f_act])
+        mask = np.concatenate([t_act, f_act])
+        mask.setflags(write=False)
+        self._basis_mask_cache[category] = mask
+        return mask
 
     # -- excitation --
     def rhs_mode(self, m: 'int', theta_inc_deg: 'float', pol: 'str') -> 'np.ndarray':
         g = self.g
-        k = self.k
-        th = math.radians(theta_inc_deg)
-        st, ct = math.sin(th), math.cos(th)
-        u = k * g.rho * st
-        P = np.exp(1j * k * ct * g.z)
-        jm = lambda n: (1j) ** n * sp.jv(n, u)
-        Jm = jm(m); Jm_m1 = jm(m - 1); Jm_p1 = jm(m + 1)
-        Ic = math.pi * (Jm_m1 + Jm_p1)
-        Is = (math.pi / 1j) * (Jm_m1 - Jm_p1)
-        I1 = 2.0 * math.pi * Jm
+        st, ct, P, Ic, Is, I1 = self._angular_data(m, theta_inc_deg)
         if pol.upper() in ("VV", "THETA", "TM"):
             et = ct * g.trho * Ic - st * g.tz * I1
             ef = -ct * Is
         else:
             et = g.trho * Is
             ef = Ic
-        vt = self.B_T @ (g.w * g.rho * P * et)
-        vf = self.B_T @ (g.w * g.rho * P * ef)
+        vt = self._test_accumulate(g.w * g.rho * P * et)
+        vf = self._test_accumulate(g.w * g.rho * P * ef)
         return np.concatenate([vt, vf])
+
+    def rhs_vv_hh_batch(self, m: 'int', thetas_deg,
+                        efie_scale: 'complex' = 1.0,
+                        mfie_scale: 'complex' = 0.0,
+                        angle_chunk: 'int' = 64) -> 'np.ndarray':
+        """Return interleaved VV/HH RHS columns for all requested aspects.
+
+        The result order is ``theta0-VV, theta0-HH, theta1-VV, ...`` to match
+        ``_mode_sweep``.  Bessel/phase arrays are bounded by ``angle_chunk``;
+        both polarizations and the EFIE/MFIE pieces share each evaluation.
+        """
+
+        thetas = np.atleast_1d(np.asarray(thetas_deg, dtype=float))
+        count = len(thetas)
+        out = np.zeros((2 * self.Nn, 2 * count), dtype=np.complex128)
+        g = self.g
+        base_weight = g.w * g.rho
+        chunk_size = max(1, int(angle_chunk))
+        for i0 in range(0, count, chunk_size):
+            i1 = min(i0 + chunk_size, count)
+            th = np.radians(thetas[i0:i1])
+            st = np.sin(th)[:, None]
+            ct = np.cos(th)[:, None]
+            u = self.k * st * g.rho[None, :]
+            phase = np.exp(1j * self.k * ct * g.z[None, :])
+            jm = lambda n: (1j) ** n * sp.jv(n, u)
+            Jm = jm(m)
+            Jm_m1 = jm(m - 1)
+            Jm_p1 = jm(m + 1)
+            Ic = math.pi * (Jm_m1 + Jm_p1)
+            Is = (math.pi / 1j) * (Jm_m1 - Jm_p1)
+            I1 = 2.0 * math.pi * Jm
+            common = phase * base_weight[None, :]
+
+            columns = np.arange(2 * i0, 2 * i1)
+            vv = columns[0::2]
+            hh = columns[1::2]
+            if efie_scale != 0.0:
+                et_vv = ct * g.trho[None, :] * Ic - st * g.tz[None, :] * I1
+                ef_vv = -ct * Is
+                et_hh = g.trho[None, :] * Is
+                ef_hh = Ic
+                out[:self.Nn, vv] += efie_scale * self._test_accumulate(
+                    (common * et_vv).T
+                )
+                out[self.Nn:, vv] += efie_scale * self._test_accumulate(
+                    (common * ef_vv).T
+                )
+                out[:self.Nn, hh] += efie_scale * self._test_accumulate(
+                    (common * et_hh).T
+                )
+                out[self.Nn:, hh] += efie_scale * self._test_accumulate(
+                    (common * ef_hh).T
+                )
+            if mfie_scale != 0.0:
+                scale = mfie_scale / ETA0
+                et_vv = Ic
+                ef_vv = -g.trho[None, :] * Is
+                et_hh = ct * Is
+                ef_hh = (
+                    ct * g.trho[None, :] * Ic
+                    - st * g.tz[None, :] * I1
+                )
+                out[:self.Nn, vv] += scale * self._test_accumulate(
+                    (common * et_vv).T
+                )
+                out[self.Nn:, vv] += scale * self._test_accumulate(
+                    (common * ef_vv).T
+                )
+                out[:self.Nn, hh] += scale * self._test_accumulate(
+                    (common * et_hh).T
+                )
+                out[self.Nn:, hh] += scale * self._test_accumulate(
+                    (common * ef_hh).T
+                )
+        return out
+
+    def farfield_vv_hh_batch(self, m: 'int', solutions: 'np.ndarray',
+                             thetas_deg, zs_pt: 'Optional[np.ndarray]' = None,
+                             msolutions: 'Optional[np.ndarray]' = None,
+                             angle_chunk: 'int' = 64) -> 'np.ndarray':
+        """Monostatic VV/HH modal contributions for interleaved solutions."""
+
+        thetas = np.atleast_1d(np.asarray(thetas_deg, dtype=float))
+        solutions = np.asarray(solutions)
+        if solutions.shape != (2 * self.Nn, 2 * len(thetas)):
+            raise ValueError("BoR batch solution matrix has incompatible dimensions.")
+        if msolutions is not None:
+            msolutions = np.asarray(msolutions)
+            if msolutions.shape != solutions.shape:
+                raise ValueError(
+                    "BoR batch magnetic-current matrix has incompatible dimensions."
+                )
+        out = np.zeros((2, len(thetas)), dtype=np.complex128)
+        g = self.g
+        k = self.k
+        base_weight = g.w * g.rho
+        pref_j = -1j * k * ETA0 / (4.0 * math.pi)
+        pref_m = 1j * k / (4.0 * math.pi)
+        chunk_size = max(1, int(angle_chunk))
+        for i0 in range(0, len(thetas), chunk_size):
+            i1 = min(i0 + chunk_size, len(thetas))
+            th = np.radians(thetas[i0:i1])
+            st = np.sin(th)[:, None]
+            ct = np.cos(th)[:, None]
+            u = k * st * g.rho[None, :]
+            phase = np.exp(1j * k * ct * g.z[None, :])
+            jm = lambda n: (1j) ** n * sp.jv(n, u)
+            Jm = jm(m)
+            Jm_m1 = jm(m - 1)
+            Jm_p1 = jm(m + 1)
+            Icos = math.pi * (Jm_m1 + Jm_p1)
+            Isin = (math.pi / 1j) * (Jm_p1 - Jm_m1)
+            I1 = 2.0 * math.pi * Jm
+            common = (phase * base_weight[None, :]).T
+            theta_t = (
+                ct * g.trho[None, :] * Icos
+                - st * g.tz[None, :] * I1
+            ).T
+            theta_f = (-ct * Isin).T
+            phi_t = (g.trho[None, :] * Isin).T
+            phi_f = Icos.T
+
+            columns = np.arange(2 * i0, 2 * i1)
+            Jt = self._basis_evaluate(solutions[:self.Nn, columns])
+            Jf = self._basis_evaluate(solutions[self.Nn:, columns])
+            Jt_vv, Jt_hh = Jt[:, 0::2], Jt[:, 1::2]
+            Jf_vv, Jf_hh = Jf[:, 0::2], Jf[:, 1::2]
+            vv_theta = np.sum(
+                common * (Jt_vv * theta_t + Jf_vv * theta_f), axis=0
+            )
+            hh_phi = np.sum(
+                common * (Jt_hh * phi_t + Jf_hh * phi_f), axis=0
+            )
+            out[0, i0:i1] = pref_j * vv_theta
+            out[1, i0:i1] = pref_j * hh_phi
+
+            if zs_pt is not None:
+                zs = np.asarray(zs_pt)[:, None]
+                Mt_vv, Mf_vv = zs * Jf_vv, -zs * Jt_vv
+                Mt_hh, Mf_hh = zs * Jf_hh, -zs * Jt_hh
+            elif msolutions is not None:
+                Mt = self._basis_evaluate(msolutions[:self.Nn, columns])
+                Mf = self._basis_evaluate(msolutions[self.Nn:, columns])
+                Mt_vv, Mt_hh = Mt[:, 0::2], Mt[:, 1::2]
+                Mf_vv, Mf_hh = Mf[:, 0::2], Mf[:, 1::2]
+            else:
+                Mt_vv = None
+            if Mt_vv is not None:
+                vv_phi_m = np.sum(
+                    common * (Mt_vv * phi_t + Mf_vv * phi_f), axis=0
+                )
+                hh_theta_m = np.sum(
+                    common * (Mt_hh * theta_t + Mf_hh * theta_f), axis=0
+                )
+                out[0, i0:i1] -= pref_m * vv_phi_m
+                out[1, i0:i1] += pref_m * hh_theta_m
+        return out
 
     def rhs_h_mode(self, m: 'int', theta_inc_deg: 'float', pol: 'str') -> 'np.ndarray':
         """UNROTATED <W, H_inc> (PMCHWT H-row; the MFIE rhs is the rotated
@@ -912,17 +1430,12 @@ class BorPecSolver:
         g = self.g
         k = self.k
         Nn = self.Nn
-        th = math.radians(theta_s_deg)
-        st, ct = math.sin(th), math.cos(th)
-        u = k * g.rho * st
-        P = np.exp(1j * k * ct * g.z)
-        jm = lambda n: (1j) ** n * sp.jv(n, u)
-        Jm = jm(m); Jm_m1 = jm(m + 1); Jp = jm(m - 1)
-        Icos = math.pi * (Jm_m1 + Jp)
-        Isin = (math.pi / 1j) * (Jm_m1 - Jp)
-        I1 = 2.0 * math.pi * Jm
-        Jt = self.B_T.T @ sol[:Nn]     # current values at Gauss points
-        Jf = self.B_T.T @ sol[Nn:]
+        st, ct, P, Icos, Is_rhs, I1 = self._angular_data(m, theta_s_deg)
+        # The RHS convention stores J_{m-1} - J_{m+1}; the radiation
+        # projection uses the opposite sine ordering.
+        Isin = -Is_rhs
+        Jt = self._basis_evaluate(sol[:Nn])
+        Jf = self._basis_evaluate(sol[Nn:])
         common = g.w * g.rho * P
 
         def proj_theta(Xt, Xf):
@@ -939,8 +1452,8 @@ class BorPecSolver:
             Mt = zs_pt * Jf
             Mf = -zs_pt * Jt
         elif msol is not None:
-            Mt = self.B_T.T @ msol[:Nn]
-            Mf = self.B_T.T @ msol[Nn:]
+            Mt = self._basis_evaluate(msol[:Nn])
+            Mf = self._basis_evaluate(msol[Nn:])
         if Mt is not None:
             pref_m = 1j * k / (4.0 * math.pi)
             f_theta += -pref_m * proj_phi(Mt, Mf)
@@ -953,7 +1466,9 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 prepare: 'Optional[Callable]' = None, workers: 'int' = 1,
                 progress: 'Optional[Callable]' = None,
                 check_abort: 'Optional[Callable]' = None,
-                monitor_cond: 'bool' = False):
+                monitor_cond: 'bool' = False,
+                rhs_batch: 'Optional[Callable]' = None,
+                farfield_batch: 'Optional[Callable]' = None):
     """
     Shared adaptive azimuthal-mode loop for every BoR formulation.
 
@@ -1052,9 +1567,21 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                     f"BoR mode m={m} produced a non-finite system matrix; "
                     "no field is returned."
                 )
-            cols = [rhs(m, th, pol) if mask is None else rhs(m, th, pol)[mask]
-                    for th in thetas for pol in pols]
-            B = np.stack(cols, axis=1)
+            if rhs_batch is not None:
+                full_B = np.asarray(rhs_batch(m, thetas, pols))
+                expected = (n_dofs, len(thetas) * len(pols))
+                if full_B.shape != expected:
+                    raise RuntimeError(
+                        f"BoR mode m={m} batch excitation has shape "
+                        f"{full_B.shape}, expected {expected}."
+                    )
+                B = full_B if mask is None else full_B[mask]
+            else:
+                cols = [
+                    rhs(m, th, pol) if mask is None else rhs(m, th, pol)[mask]
+                    for th in thetas for pol in pols
+                ]
+                B = np.stack(cols, axis=1)
             if not np.all(np.isfinite(B)):
                 raise RuntimeError(
                     f"BoR mode m={m} produced a non-finite excitation; "
@@ -1188,26 +1715,60 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 )
             res = max(res, residual)
             backward = max(backward, backward_error)
-            ci = 0
-            for it, th in enumerate(thetas):
-                for ip, pol in enumerate(pols):
+            if farfield_batch is not None:
+                # Reconstruct masked full solutions only for a bounded angle
+                # chunk.  Holding a second full [unknown, all-RHS] matrix here
+                # would double peak memory on very dense aspect sweeps.
+                angle_chunk = 64
+                for i0 in range(0, len(thetas), angle_chunk):
+                    i1 = min(i0 + angle_chunk, len(thetas))
+                    c0 = i0 * len(pols)
+                    c1 = i1 * len(pols)
                     if mask is None:
-                        sol = X[:, ci]
+                        full_X = X[:, c0:c1]
                     else:
-                        sol = np.zeros(n_dofs, dtype=np.complex128)
-                        sol[mask] = X[:, ci]
-                    ci += 1
-                    contribution = complex(farfield(m, sol, th, pol))
-                    if not (
-                        math.isfinite(contribution.real)
-                        and math.isfinite(contribution.imag)
-                    ):
-                        raise RuntimeError(
-                            f"BoR mode m={m} produced a non-finite far-field "
-                            f"contribution at aspect {float(th):g} deg, "
-                            f"polarization {pol}; no field is returned."
+                        full_X = np.zeros(
+                            (n_dofs, c1 - c0), dtype=np.complex128
                         )
-                    dF[ip, it] += contribution
+                        full_X[mask] = X[:, c0:c1]
+                    contributions = np.asarray(
+                        farfield_batch(
+                            m, full_X, thetas[i0:i1], pols
+                        )
+                    )
+                    expected = (len(pols), i1 - i0)
+                    if contributions.shape != expected:
+                        raise RuntimeError(
+                            f"BoR mode m={m} batch far field has shape "
+                            f"{contributions.shape}, expected {expected}."
+                        )
+                    if not np.all(np.isfinite(contributions)):
+                        raise RuntimeError(
+                            f"BoR mode m={m} produced a non-finite batch "
+                            "far-field contribution; no field is returned."
+                        )
+                    dF[:, i0:i1] += contributions
+            else:
+                ci = 0
+                for it, th in enumerate(thetas):
+                    for ip, pol in enumerate(pols):
+                        if mask is None:
+                            sol = X[:, ci]
+                        else:
+                            sol = np.zeros(n_dofs, dtype=np.complex128)
+                            sol[mask] = X[:, ci]
+                        ci += 1
+                        contribution = complex(farfield(m, sol, th, pol))
+                        if not (
+                            math.isfinite(contribution.real)
+                            and math.isfinite(contribution.imag)
+                        ):
+                            raise RuntimeError(
+                                f"BoR mode m={m} produced a non-finite far-field "
+                                f"contribution at aspect {float(th):g} deg, "
+                                f"polarization {pol}; no field is returned."
+                            )
+                        dF[ip, it] += contribution
         return dF, res, backward, refinement_count, cond
 
     modes_used = 0
@@ -1595,13 +2156,23 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                                  workers=workers)
 
     def assemble(m):
-        Z = np.zeros((n_dofs, n_dofs), dtype=np.complex128)
+        Z = None
         if alpha > 0.0:
-            Z += alpha * solver.assemble_mode(m, m_max)
+            Z = solver.assemble_mode(m, m_max)
+            if alpha != 1.0:
+                Z *= alpha
             if zs_pt is not None:
-                Z += alpha * solver.assemble_ibc_extra(m, m_max, zs_pt, zs_elem)
+                extra = solver.assemble_ibc_extra(m, m_max, zs_pt, zs_elem)
+                if alpha != 1.0:
+                    extra *= alpha
+                Z += extra
         if alpha < 1.0:
-            Z += (1.0 - alpha) * ETA0 * solver.assemble_mfie_mode(m, m_max)
+            mfie = solver.assemble_mfie_mode(m, m_max)
+            mfie *= (1.0 - alpha) * ETA0
+            if Z is None:
+                Z = mfie
+            else:
+                Z += mfie
         mask = solver.basis_mask(m)
         return Z[np.ix_(mask, mask)], mask
 
@@ -1616,6 +2187,23 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     def farfield(m, full, th, pol):
         fth, fph = solver.farfield_mode(m, full, th, zs_pt=zs_pt)
         return fth if pol == "VV" else fph
+
+    def rhs_batch(m, batch_thetas, batch_pols):
+        if tuple(batch_pols) != ("VV", "HH"):
+            raise ValueError("BoR optimized batch path requires VV/HH ordering.")
+        return solver.rhs_vv_hh_batch(
+            m,
+            batch_thetas,
+            efie_scale=alpha,
+            mfie_scale=(1.0 - alpha) * ETA0,
+        )
+
+    def farfield_batch(m, full, batch_thetas, batch_pols):
+        if tuple(batch_pols) != ("VV", "HH"):
+            raise ValueError("BoR optimized batch path requires VV/HH ordering.")
+        return solver.farfield_vv_hh_batch(
+            m, full, batch_thetas, zs_pt=zs_pt
+        )
 
     # Interior-resonance guard: a closed body on the plain EFIE with a
     # LOSSLESS (purely reactive) surface impedance has nothing damping the
@@ -1645,7 +2233,9 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                                        prepare=prepare, workers=workers,
                                        progress=progress,
                                        check_abort=check_abort,
-                                       monitor_cond=True)
+                                       monitor_cond=True,
+                                       rhs_batch=rhs_batch,
+                                       farfield_batch=farfield_batch)
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -1740,12 +2330,34 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
                                     msol=ETA0 * full[2 * Nn:])
         return fth if pol == "VV" else fph
 
+    def rhs_batch(m, batch_thetas, batch_pols):
+        if tuple(batch_pols) != ("VV", "HH"):
+            raise ValueError("BoR optimized batch path requires VV/HH ordering.")
+        electric = se.rhs_vv_hh_batch(m, batch_thetas)
+        out = np.empty((4 * Nn, electric.shape[1]), dtype=np.complex128)
+        out[:2 * Nn] = electric
+        out[2 * Nn:, 0::2] = -electric[:, 1::2]
+        out[2 * Nn:, 1::2] = electric[:, 0::2]
+        return out
+
+    def farfield_batch(m, full, batch_thetas, batch_pols):
+        if tuple(batch_pols) != ("VV", "HH"):
+            raise ValueError("BoR optimized batch path requires VV/HH ordering.")
+        return se.farfield_vv_hh_batch(
+            m,
+            full[:2 * Nn],
+            batch_thetas,
+            msolutions=ETA0 * full[2 * Nn:],
+        )
+
     F, modes_used, stats = _mode_sweep(4 * Nn, thetas, ("VV", "HH"), m_max,
                                        mode_tol, assemble, rhs, farfield,
                                        prepare=prepare, workers=workers,
                                        progress=progress,
                                        check_abort=check_abort,
-                                       monitor_cond=True)
+                                       monitor_cond=True,
+                                       rhs_batch=rhs_batch,
+                                       farfield_batch=farfield_batch)
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -1880,7 +2492,7 @@ class BorCrossOperators:
             s, sp_, W = _cell_points(kind)
         else:
             n = self.near_order
-            xg, wg = np.polynomial.legendre.leggauss(n)
+            xg, wg = cached_leggauss(n)
             u = 0.5 * (xg + 1.0); w1 = 0.5 * wg
             S, SP = np.meshgrid(u, u, indexing="ij")
             W = np.outer(w1, w1).ravel()
@@ -2056,12 +2668,34 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
         fth, fph = se.farfield_mode(m, full[iJ], th, msol=ETA0 * full[iM])
         return fth if pol == "VV" else fph
 
+    def rhs_batch(m, batch_thetas, batch_pols):
+        if tuple(batch_pols) != ("VV", "HH"):
+            raise ValueError("BoR optimized batch path requires VV/HH ordering.")
+        electric = se.rhs_vv_hh_batch(m, batch_thetas)
+        out = np.zeros((ntot, electric.shape[1]), dtype=np.complex128)
+        out[iJ] = electric
+        out[iM, 0::2] = -electric[:, 1::2]
+        out[iM, 1::2] = electric[:, 0::2]
+        return out
+
+    def farfield_batch(m, full, batch_thetas, batch_pols):
+        if tuple(batch_pols) != ("VV", "HH"):
+            raise ValueError("BoR optimized batch path requires VV/HH ordering.")
+        return se.farfield_vv_hh_batch(
+            m,
+            full[iJ],
+            batch_thetas,
+            msolutions=ETA0 * full[iM],
+        )
+
     F, modes_used, stats = _mode_sweep(ntot, thetas, ("VV", "HH"), m_max,
                                        mode_tol, assemble, rhs, farfield,
                                        prepare=prepare, workers=workers,
                                        progress=progress,
                                        check_abort=check_abort,
-                                       monitor_cond=True)
+                                       monitor_cond=True,
+                                       rhs_batch=rhs_batch,
+                                       farfield_batch=farfield_batch)
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),

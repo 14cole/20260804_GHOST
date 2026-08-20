@@ -23,10 +23,11 @@ import run_hpc_bor_monostatic  # noqa: E402
 import run_local_bor  # noqa: E402
 import surface_mesh  # noqa: E402
 import validate_feature_reconstruction  # noqa: E402
-from bor_kernels import C0  # noqa: E402
+from bor_kernels import C0, ETA0  # noqa: E402
 from bor_solver import (  # noqa: E402
     BOR_LINEAR_BACKWARD_ERROR_MAX,
     BOR_LINEAR_RESIDUAL_MAX,
+    BorPecSolver,
     _mode_sweep,
     solve_bor,
     solve_bor_coated_pec,
@@ -730,6 +731,52 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 np.asarray(stream[key]), np.asarray(table[key]),
                 rtol=2.0e-10, atol=2.0e-12,
             )
+
+    def test_batched_rhs_and_farfield_match_scalar_paths(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        solver = BorPecSolver(_sphere(radius, 16), FREQUENCY_HZ)
+        thetas = np.asarray([0.0, 23.0, 71.0, 90.0])
+        mode = 2
+        alpha = 0.5
+        scalar_rhs = np.stack([
+            alpha * solver.rhs_mode(mode, theta, pol)
+            + (1.0 - alpha) * ETA0
+            * solver.rhs_mfie_mode(mode, theta, pol)
+            for theta in thetas for pol in ("VV", "HH")
+        ], axis=1)
+        batch_rhs = solver.rhs_vv_hh_batch(
+            mode,
+            thetas,
+            efie_scale=alpha,
+            mfie_scale=(1.0 - alpha) * ETA0,
+            angle_chunk=2,
+        )
+        np.testing.assert_allclose(
+            batch_rhs, scalar_rhs, rtol=5.0e-14, atol=5.0e-14
+        )
+
+        rng = np.random.default_rng(17)
+        solutions = (
+            rng.normal(size=(2 * solver.Nn, 2 * len(thetas)))
+            + 1j * rng.normal(size=(2 * solver.Nn, 2 * len(thetas)))
+        )
+        zs_pt = np.full(solver.P, 35.0 + 8.0j, dtype=np.complex128)
+        scalar_far = np.empty((2, len(thetas)), dtype=np.complex128)
+        for it, theta in enumerate(thetas):
+            vv = solver.farfield_mode(
+                mode, solutions[:, 2 * it], theta, zs_pt=zs_pt
+            )
+            hh = solver.farfield_mode(
+                mode, solutions[:, 2 * it + 1], theta, zs_pt=zs_pt
+            )
+            scalar_far[0, it] = vv[0]
+            scalar_far[1, it] = hh[1]
+        batch_far = solver.farfield_vv_hh_batch(
+            mode, solutions, thetas, zs_pt=zs_pt, angle_chunk=2
+        )
+        np.testing.assert_allclose(
+            batch_far, scalar_far, rtol=5.0e-14, atol=5.0e-14
+        )
 
     def test_survey_entry_point_is_unambiguously_marked(self):
         raw = {
