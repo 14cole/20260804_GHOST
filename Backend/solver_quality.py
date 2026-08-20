@@ -174,36 +174,57 @@ def evaluate_mesh_convergence(
     if not base_samples or not fine_samples:
         raise ValueError("Both base_result and fine_result must contain samples.")
 
-    def unique_by_key(samples, label):
-        indexed = {}
-        for row in samples:
-            key = _sample_key(row)
-            if key in indexed:
-                raise ValueError(
-                    f"Mesh convergence {label} contains duplicate sample "
-                    f"key {key}."
-                )
-            indexed[key] = row
-        return indexed
+    def exact_sample_coordinates(row):
+        return (
+            float(row.get("frequency_ghz", 0.0)),
+            float(row.get("theta_inc_deg", 0.0)),
+            float(row.get("theta_scat_deg", 0.0)),
+        )
 
-    base_by_key = unique_by_key(base_samples, "base_result")
-    fine_by_key = unique_by_key(fine_samples, "fine_result")
+    def group_by_key(samples, label):
+        """Group samples that collide only because the tolerant key is rounded."""
+
+        grouped = {}
+        exact_coordinates = set()
+        for row in samples:
+            coordinates = exact_sample_coordinates(row)
+            if coordinates in exact_coordinates:
+                raise ValueError(
+                    f"Mesh convergence {label} contains duplicate exact sample "
+                    f"coordinates {coordinates}."
+                )
+            exact_coordinates.add(coordinates)
+            grouped.setdefault(_sample_key(row), []).append(row)
+        for rows in grouped.values():
+            # Base and refined solves may serialize their samples in different
+            # orders.  Sorting within a rounded-key bucket preserves every
+            # requested look while pairing the same sub-nanodegree directions.
+            rows.sort(key=exact_sample_coordinates)
+        return grouped
+
+    base_by_key = group_by_key(base_samples, "base_result")
+    fine_by_key = group_by_key(fine_samples, "fine_result")
     base_keys = set(base_by_key)
     fine_keys = set(fine_by_key)
-    missing = sorted(base_keys - fine_keys)
-    extra = sorted(fine_keys - base_keys)
-    if missing or extra:
+    all_keys = base_keys | fine_keys
+    missing_count = sum(
+        max(0, len(base_by_key.get(key, ())) - len(fine_by_key.get(key, ())))
+        for key in all_keys
+    )
+    extra_count = sum(
+        max(0, len(fine_by_key.get(key, ())) - len(base_by_key.get(key, ())))
+        for key in all_keys
+    )
+    if missing_count or extra_count:
         raise ValueError(
             "Mesh convergence sample grids differ: "
-            f"{len(missing)} missing and {len(extra)} extra fine-result "
+            f"{missing_count} missing and {extra_count} extra fine-result "
             "sample point(s)."
         )
 
     matched: 'List[Tuple[Dict[str, Any], Dict[str, Any]]]' = []
-
-    for row in base_samples:
-        key = _sample_key(row)
-        matched.append((row, fine_by_key[key]))
+    for key in sorted(base_keys):
+        matched.extend(zip(base_by_key[key], fine_by_key[key]))
     if not matched:
         raise ValueError("Mesh convergence comparison produced no overlapping samples.")
 
