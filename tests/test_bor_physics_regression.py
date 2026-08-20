@@ -182,9 +182,15 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 "7 10 20 30 40\n",
                 encoding="ascii",
             )
-            triangles = surface_mesh.read_surface_mesh(str(path))
-            self.assertEqual(triangles.shape, (2, 3, 3))
-            surface = surface_mesh.TriangleSurface(triangles)
+            # NumPy releases on older HPC images reject tuple reduction axes
+            # in np.ptp. Surface loading/construction must not depend on it.
+            with mock.patch.object(
+                surface_mesh.np, "ptp",
+                side_effect=TypeError("tuple axis unsupported"),
+            ):
+                triangles = surface_mesh.read_surface_mesh(str(path))
+                self.assertEqual(triangles.shape, (2, 3, 3))
+                surface = surface_mesh.TriangleSurface(triangles)
             distance, closest, normal, _index = surface.nearest(
                 [[0.25, 0.75, 0.2], [1.2, 0.5, 0.0]]
             )

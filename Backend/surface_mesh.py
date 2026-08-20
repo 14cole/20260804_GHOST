@@ -20,6 +20,13 @@ from typing import Tuple
 import numpy as np
 
 
+def _mesh_extent(triangles):
+    """Largest Cartesian span, compatible with old NumPy releases."""
+    vertices = np.asarray(triangles, dtype=float).reshape(-1, 3)
+    spans = np.max(vertices, axis=0) - np.min(vertices, axis=0)
+    return max(float(np.max(spans)), 1.0)
+
+
 def _data_lines(path: str):
     with open(path, "r", encoding="utf-8-sig") as stream:
         for number, raw in enumerate(stream, 1):
@@ -109,7 +116,7 @@ def read_facet(path: str) -> np.ndarray:
 
     result = np.asarray(triangles, dtype=float)
     cross = np.cross(result[:, 1] - result[:, 0], result[:, 2] - result[:, 0])
-    scale = max(float(np.ptp(result, axis=(0, 1)).max()), 1.0)
+    scale = _mesh_extent(result)
     if np.any(np.linalg.norm(cross, axis=1) <= 1e-14 * scale * scale):
         raise ValueError(f"{path}: mesh contains a degenerate triangle.")
     return result
@@ -153,7 +160,7 @@ class TriangleSurface:
             self.triangles[:, 2] - self.triangles[:, 0],
         )
         magnitude = np.linalg.norm(raw, axis=1)
-        extent = max(float(np.ptp(self.triangles, axis=(0, 1)).max()), 1.0)
+        extent = _mesh_extent(self.triangles)
         if np.any(magnitude <= 1e-14 * extent * extent):
             raise ValueError("triangle surface contains a degenerate triangle.")
         sign = -1.0 if bool(flip_normals) else 1.0
