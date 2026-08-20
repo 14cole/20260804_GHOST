@@ -170,6 +170,50 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
 
 
 class BoRWorkflowRegressionTests(unittest.TestCase):
+    def test_declared_gui_compact_subtraction_reconstructs_physical_field(self):
+        source = _constant_compact_pattern()
+        amplitude = source["amp"]
+        metadata = feature_sum.point_pattern_convention_metadata()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "gui_coherent_subtraction.grim"
+            payload = {
+                "azimuths": source["azimuths"],
+                "elevations": source["elevations"],
+                "frequencies": source["frequencies"],
+                "polarizations": source["polarizations"],
+                "rcs_power": (
+                    4.0 * math.pi * np.abs(amplitude) ** 2
+                ).astype(np.float32),
+                "rcs_phase": np.angle(amplitude).astype(np.float32),
+                "rcs_domain": np.asarray("power-phase"),
+                "power_domain": np.asarray("linear_rcs"),
+                "phase_reference": np.asarray(metadata["phase_reference"]),
+                "units": np.asarray(json.dumps({
+                    "azimuth": "deg", "elevation": "deg",
+                    "frequency": "GHz", "rcs_log_unit": "dBsm",
+                    "rcs_linear_quantity": "sigma_3d",
+                })),
+            }
+            with path.open("wb") as stream:
+                np.savez(stream, **payload)
+
+            with self.assertRaisesRegex(ValueError, "rcs_domain"):
+                feature_sum.prepare_point_pattern(str(path))
+            prepared = feature_sum.prepare_point_pattern(
+                str(path), declared_coherent_delta=True
+            )
+            np.testing.assert_allclose(
+                prepared.amplitude, amplitude, rtol=2.0e-6, atol=2.0e-7
+            )
+
+            payload["phase_reference"] = np.asarray("wrong origin")
+            with path.open("wb") as stream:
+                np.savez(stream, **payload)
+            with self.assertRaisesRegex(ValueError, "phase_reference"):
+                feature_sum.prepare_point_pattern(
+                    str(path), declared_coherent_delta=True
+                )
+
     def test_indexed_facet_surface_preserves_skin_and_winding(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "platform.facet"

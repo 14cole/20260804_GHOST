@@ -1721,8 +1721,43 @@ class PreparedPointPattern(NamedTuple):
 
 
 def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
-                                     label: 'str') -> 'None':
+                                     label: 'str', *,
+                                     declared_coherent_delta: 'bool' = False
+                                     ) -> 'None':
     expected = point_pattern_convention_metadata()
+    if declared_coherent_delta:
+        domain = _metadata_text(metadata, "rcs_domain", label)
+        normalized_domain = domain.strip().lower().replace("-", "_")
+        if normalized_domain not in {"delta", "power_phase"}:
+            raise ValueError(
+                f"{label}: declared compact delta has rcs_domain={domain!r}; "
+                "accept only 'delta' or a GUI coherent-subtraction "
+                "'power_phase' container."
+            )
+        # Listing this file in COMPACT_FEATURES declares the operation meaning
+        # (installed feature minus matching clean skin). The GUI's generic
+        # coherent-subtraction grid may drop these semantic tags, but it must
+        # retain the exact phase origin. Any retained tag must still agree.
+        phase = _metadata_text(metadata, "phase_reference", label)
+        if phase != expected["phase_reference"]:
+            raise ValueError(
+                f"{label}: incompatible compact-pattern phase_reference: "
+                f"got {phase!r}; require {expected['phase_reference']!r}."
+            )
+        for key in (
+            "amplitude_convention",
+            "complex_field_domain",
+            "pattern_frame_convention",
+        ):
+            if key not in metadata:
+                continue
+            got = _metadata_text(metadata, key, label)
+            if got != expected[key]:
+                raise ValueError(
+                    f"{label}: incompatible compact-pattern {key}: got "
+                    f"{got!r}; require {expected[key]!r}."
+                )
+        return
     for key, required in expected.items():
         got = _metadata_text(metadata, key, label)
         if got != required:
@@ -1733,7 +1768,7 @@ def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
                 "normalization are explicit.")
 
 
-def _load_pattern(pattern):
+def _load_pattern(pattern, *, declared_coherent_delta=False):
     """Return (az_deg, el_deg, freqs_ghz, amp[az,el,freq,pol], {ch:idx}) for a
     3-D delta pattern given as a .grim path or a dict with the same axes.  The
     pattern is the COMPLEX differential scattering (featured - clean) of the
@@ -1755,15 +1790,24 @@ def _load_pattern(pattern):
         pattern = load_pattern_any(pattern)
     if isinstance(pattern, str):
         g = _load_grim(pattern)
-        _validate_point_pattern_metadata(g, pattern)
+        _validate_point_pattern_metadata(
+            g, pattern, declared_coherent_delta=declared_coherent_delta
+        )
         az = np.asarray(g["azimuths"], float); el = np.asarray(g["elevations"], float)
         fr = np.asarray(g["frequencies"], float)
         pols = [str(p) for p in np.asarray(g["polarizations"]).ravel()]
-        if "rcs_amp_real" not in g or "rcs_amp_imag" not in g:
+        if "rcs_amp_real" in g and "rcs_amp_imag" in g:
+            amp = g["rcs_amp_real"] + 1j * g["rcs_amp_imag"]
+        elif declared_coherent_delta and g.get("_amp_from_power_phase", False):
+            # A GRIM GUI coherent subtraction stores the same complex field as
+            # sigma plus phase. _load_grim reverses the declared sigma_3d
+            # normalization, including exact physical nulls.
+            amp = np.asarray(g["_amp"], dtype=np.complex128)
+        else:
             raise ValueError(
                 f"{pattern}: compact-feature patterns require preserved raw "
-                "complex amplitudes.")
-        amp = g["rcs_amp_real"] + 1j * g["rcs_amp_imag"]
+                "complex amplitudes, or a declared GUI coherent subtraction "
+                "with finite power and phase.")
         try:
             pattern_units = json.loads(str(g.get("units", "") or "{}"))
         except json.JSONDecodeError as exc:
@@ -1781,10 +1825,7 @@ def _load_pattern(pattern):
             raise ValueError(f"{pattern}: compact-feature pattern has no rcs_power.")
         stored_power = np.asarray(g["rcs_power"], dtype=float)
         with np.errstate(over="ignore", invalid="ignore"):
-            amplitude_squared = (
-                np.asarray(g["rcs_amp_real"], dtype=float) ** 2
-                + np.asarray(g["rcs_amp_imag"], dtype=float) ** 2
-            )
+            amplitude_squared = np.abs(np.asarray(amp, dtype=complex)) ** 2
             predicted_power = 4.0 * math.pi * amplitude_squared
         if stored_power.shape != amp.shape:
             raise ValueError(
@@ -1860,11 +1901,20 @@ def _load_pattern(pattern):
     return az, el, fr, amp, idx
 
 
-def prepare_point_pattern(pattern) -> 'PreparedPointPattern':
-    """Validate and load one compact pattern once for repeated placement."""
+def prepare_point_pattern(pattern, *, declared_coherent_delta=False
+                          ) -> 'PreparedPointPattern':
+    """Validate and load one compact pattern once for repeated placement.
+
+    ``declared_coherent_delta=True`` is for a GUI power/phase result that the
+    caller explicitly declares to be installed-feature minus clean-skin. It
+    relaxes only metadata lost by that GUI operation; physical phase origin,
+    units, grid, polarization, seam, and normalization checks remain strict.
+    """
     if isinstance(pattern, PreparedPointPattern):
         return pattern
-    return PreparedPointPattern(*_load_pattern(pattern))
+    return PreparedPointPattern(*_load_pattern(
+        pattern, declared_coherent_delta=declared_coherent_delta
+    ))
 
 
 def point_scatterer_amplitude(pattern, location, aperture_normal, directions,

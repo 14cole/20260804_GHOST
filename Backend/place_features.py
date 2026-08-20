@@ -46,7 +46,10 @@ LINE_FEATURES = [
 ]
 
 # Placement CSV rows: x,y,z and optional nx,ny,nz and rx,ry,rz. If the normal
-# is omitted it is derived from the BoR skin. r* sets pattern clocking.
+# is omitted it is derived from the platform skin. r* sets pattern clocking.
+# Listing a dataset here explicitly declares that it is the coherent
+# installed-feature-minus-clean-skin delta. This also accepts a GRIM GUI
+# coherent subtraction whose generic container remains tagged power_phase.
 COMPACT_FEATURES = [
     # {"dataset": "cavity_delta.grim", "coordinates": "cavities.csv"},
 ]
@@ -188,7 +191,9 @@ def _compact_points(profile, surface, scale, limit, wavelength):
     for specification in COMPACT_FEATURES:
         dataset = _path(specification["dataset"])
         coordinates = _path(specification["coordinates"])
-        pattern = prepare_point_pattern(str(dataset))
+        pattern = prepare_point_pattern(
+            str(dataset), declared_coherent_delta=True
+        )
         for row_index, row in enumerate(_placement_rows(coordinates), 1):
             location = to_axis_frame(np.array([row["x"], row["y"], row["z"]]) * scale)
             offset = float(

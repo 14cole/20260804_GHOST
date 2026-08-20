@@ -111,6 +111,14 @@ mesh ray blockage and `SHADOW=False` to disable that nonlocal test. Neither
 choice adds body-feature mutual coupling: that limitation must still be
 measured against a directly featured full-wave platform solve.
 
+A compact result made with GRIM's **Coherent subtraction** may retain the
+generic `power_phase` domain label and omit redundant raw real/imaginary arrays.
+Listing it in `COMPACT_FEATURES` explicitly declares that operation to be
+installed-feature minus clean-skin. The placement loader reconstructs `F` from
+the stored sigma and phase, but continues to require the exact cavity phase
+origin, sigma_3d/dBsm normalization, full VV/HH/VH matrix, complete azimuth
+seam, and compatible frequency/elevation coverage.
+
 ## Building a door or seam delta
 
 For the 2-D cross-section pair:
