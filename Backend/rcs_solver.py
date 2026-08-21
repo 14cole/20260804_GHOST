@@ -6593,13 +6593,14 @@ def _assemble_robin_bie_system(
     is immune: a resonant null density sigma_0 has S sigma_0 = 0 on the
     contour, so by exterior uniqueness S sigma_0 vanishes IDENTICALLY
     outside -- the null space radiates nothing, and a direct solve stays
-    accurate (validated at the discrete resonance of a PEC circle:
-    <= 0.01 dB vs the Mie series with cond spiked 40x;
-    tests/validate_2d_resonance.py).  A Robin-style "CFIE" combination of
-    trace and normal-derivative rows was tried and REJECTED: with the SLP
-    ansatz it imposes a second, physically false boundary condition on PEC
-    (u = 0 for TE, du/dn = 0 for TM) and shifts the RCS by ~9.5 dB
-    everywhere.  A genuine resonance-free indirect scheme needs the
+    accurate (validated at the first interior resonance of a PEC circle for
+    both polarizations, including complex field and base/fine convergence;
+    see ``PecInteriorResonanceAcceptanceTests`` in
+    tests/test_2d_capability_acceptance.py).  A Robin-style "CFIE"
+    combination of trace and normal-derivative rows was tried and REJECTED:
+    with the SLP ansatz it imposes a second, physically false boundary
+    condition on PEC (u = 0 for TE, du/dn = 0 for TM) and shifts the RCS by
+    ~9.5 dB everywhere.  A genuine resonance-free indirect scheme needs the
     Brakhage-Werner combined-SOURCE ansatz (double-layer + hypersingular
     operators) -- only worth building if iterative (GMRES/FMM) solves near
     dense resonance spectra ever stall; direct solves do not need it.

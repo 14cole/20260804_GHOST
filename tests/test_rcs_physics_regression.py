@@ -20,6 +20,7 @@ sys.path.insert(0, str(REPO / "Backend"))
 
 import rcs_solver as rcs  # noqa: E402
 from mie_reference import (  # noqa: E402
+    pec_cylinder_backscatter_amplitude,
     sigma_coated_pec_cylinder,
     sigma_dielectric_cylinder,
     sigma_impedance_cylinder,
@@ -483,6 +484,57 @@ class CylinderPhysicsTests(unittest.TestCase):
             )
             self.assertLess(abs(10.0 * math.log10(got_pec / ref_pec)), 0.01)
             self.assertLess(abs(10.0 * math.log10(got_diel / ref_diel)), 0.01)
+
+    def test_pec_circle_complex_field_survives_first_interior_resonance(self):
+        """The indirect resonant nullspace must not contaminate radiation."""
+
+        radius = 0.1
+        # First zero of J_0.  This is an interior Dirichlet eigenvalue and is
+        # shared by the TM SLP-EFIE and TE adjoint-MFIE formulations.
+        resonance_ka = 2.404825557695773
+        snapshot = {
+            "segments": [_circle_segment(radius, 64, 2)],
+            "ibcs": [],
+            "dielectrics": [],
+        }
+
+        for pol in ("TM", "TE"):
+            conditions = []
+            resonant_error = None
+            for delta_ka in (-0.02, 0.0, 0.02):
+                ka = resonance_ka + delta_ka
+                frequency_hz = rcs.C0 * ka / (2.0 * math.pi * radius)
+                result = rcs.solve_monostatic_rcs_2d(
+                    snapshot,
+                    frequencies_ghz=[frequency_hz / 1.0e9],
+                    elevations_deg=[0.0],
+                    polarization=pol,
+                    geometry_units="meters",
+                    strict_quality_gate=False,
+                    compute_condition_number=True,
+                    max_panels=1000,
+                )
+                conditions.append(float(
+                    result["metadata"]["condition_est_max"]
+                ))
+                if delta_ka == 0.0:
+                    sample = result["samples"][0]
+                    actual = complex(
+                        sample["rcs_amp_real"], sample["rcs_amp_imag"]
+                    )
+                    reference = pec_cylinder_backscatter_amplitude(
+                        radius, frequency_hz, pol
+                    )
+                    resonant_error = abs(actual - reference) / abs(reference)
+                    self.assertLess(
+                        float(sample["linear_residual"]), 1.0e-10, msg=pol
+                    )
+
+            # Ensure this regression truly exercises the conditioning spike,
+            # rather than merely sampling an ordinary PEC-circle frequency.
+            shoulder = max(conditions[0], conditions[2])
+            self.assertGreater(conditions[1] / shoulder, 3.0, msg=pol)
+            self.assertLess(resonant_error, 5.0e-3, msg=pol)
 
     def test_impedance_cylinder_both_polarizations(self):
         radius = 0.1

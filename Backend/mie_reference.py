@@ -60,6 +60,37 @@ def _nmax_for_ka(ka, pad=10):
     return max(10, n + pad)
 
 
+def pec_cylinder_backscatter_amplitude(radius_m, freq_hz, polarization):
+    """Return the PEC-circle backscatter amplitude in the solver convention.
+
+    The solver stores the bare layer-potential amplitude ``B`` and reports
+    ``sigma_2D = |B|^2 / (4*k)``.  Its physical asymptotic amplitude is
+    ``A = +j*B``.  For the cylindrical-wave series ``f`` used below these
+    conventions give ``B = -4j*f``.
+
+    Keeping this complex reference public lets resonance tests catch phase
+    and sign errors that an RCS-only comparison would hide.
+    """
+
+    pol = polarization.upper()
+    k = 2.0 * np.pi * freq_hz / C0
+    ka = k * radius_m
+    N = _nmax_for_ka(ka)
+    n_arr = np.arange(-N, N + 1)
+
+    if pol == 'TM':
+        # E_z polarization.  BC: E_z = 0 on PEC, i.e., total field vanishes.
+        a_n = -_jn(n_arr, ka) / _hankel2(n_arr, ka)
+    elif pol == 'TE':
+        # H_z polarization.  BC: dH_z/drho = 0 on PEC.
+        a_n = -_jn_prime(n_arr, ka) / _hankel2_prime(n_arr, ka)
+    else:
+        raise ValueError(f"Unknown polarization {polarization}")
+
+    series_amplitude = np.sum(a_n * (-1.0)**n_arr)
+    return complex(-4.0j * series_amplitude)
+
+
 def sigma_pec_cylinder(radius_m, freq_hz, polarization):
     """
     Monostatic 2D backscatter sigma_2D for a PEC circular cylinder.
@@ -77,33 +108,11 @@ def sigma_pec_cylinder(radius_m, freq_hz, polarization):
     -------
     sigma_2D in meters.
     """
-    pol = polarization.upper()
     k = 2.0 * np.pi * freq_hz / C0
-    ka = k * radius_m
-    N = _nmax_for_ka(ka)
-
-    if pol == 'TM':
-        # E_z polarization.  BC: E_z = 0 on PEC, i.e., total field vanishes.
-        # Scattered-field expansion coefficient:
-        #   a_n = -J_n(ka) / H_n^{(2)}(ka)
-        # Monostatic scattered field amplitude at phi = pi (backscatter):
-        #   f(phi=pi) = sum_{n=-inf}^{inf} a_n e^{jn pi}
-        n_arr = np.arange(-N, N + 1)
-        a_n = -_jn(n_arr, ka) / _hankel2(n_arr, ka)
-        # Backscatter factor: e^{jn pi} = (-1)^n
-        amp = np.sum(a_n * (-1.0)**n_arr)
-    elif pol == 'TE':
-        # H_z polarization.  BC: dH_z/drho = 0 on PEC.
-        #   a_n = -J_n'(ka) / H_n^{(2)}'(ka)
-        n_arr = np.arange(-N, N + 1)
-        a_n = -_jn_prime(n_arr, ka) / _hankel2_prime(n_arr, ka)
-        amp = np.sum(a_n * (-1.0)**n_arr)
-    else:
-        raise ValueError(f"Unknown polarization {polarization}")
-
-    # 2D scattering width (RCS per unit length):
-    #   sigma_2D = (4 / k) * |sum a_n e^{j n phi}|^2
-    sigma = (4.0 / k) * abs(amp)**2
+    amplitude = pec_cylinder_backscatter_amplitude(
+        radius_m, freq_hz, polarization
+    )
+    sigma = abs(amplitude)**2 / (4.0 * k)
     return float(sigma)
 
 

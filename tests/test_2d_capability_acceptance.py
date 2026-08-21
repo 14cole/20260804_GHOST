@@ -10,7 +10,8 @@ directly to the supported geometry contract:
 * dielectric/dielectric (TYPE 5),
 * air/air impedance sheets (TYPE 1),
 * disconnected bodies that share material properties, and
-* air/PEC/dielectric high-degree junctions.
+* air/PEC/dielectric high-degree junctions, and
+* PEC interior-resonance robustness with complex-field certification.
 
 Run directly; pytest is not required:
 
@@ -35,6 +36,7 @@ import rcs_solver as rcs  # noqa: E402
 
 try:
     from mie_reference import (  # noqa: E402
+        pec_cylinder_backscatter_amplitude,
         sigma_coated_impedance_cylinder,
         sigma_dielectric_cylinder,
         sigma_impedance_cylinder,
@@ -238,6 +240,62 @@ class BoundaryReferenceAcceptanceTests(unittest.TestCase):
                 pol,
             )
             _assert_reference_db(self, got, reference, 0.05, f"TYPE 4 IBC {pol}")
+
+
+@unittest.skipUnless(HAVE_SCIPY, "SciPy is required for trusted 2-D physics references")
+class PecInteriorResonanceAcceptanceTests(unittest.TestCase):
+    """Production gate at a closed-PEC operator's known singular limit."""
+
+    def test_certified_complex_field_at_first_dirichlet_eigenfrequency(self):
+        radius = 0.1
+        resonance_ka = 2.404825557695773  # first zero of J_0
+        frequency_hz = rcs.C0 * resonance_ka / (
+            2.0 * math.pi * radius
+        )
+        angles = (0.0, 37.0)
+        snapshot = {
+            # Certification subdivides the polygon's straight edges; using
+            # 96 original chords also keeps circle-geometry error below the
+            # complex analytic-reference tolerance.
+            "segments": [_circle("pec_resonance", radius, 96, 2)],
+            "ibcs": [],
+            "dielectrics": [],
+        }
+
+        for pol in ("TM", "TE"):
+            result = rcs.solve_monostatic_rcs_2d_certified(
+                snapshot,
+                frequencies_ghz=[frequency_hz / 1.0e9],
+                elevations_deg=list(angles),
+                polarization=pol,
+                geometry_units="meters",
+                max_panels=1000,
+            )
+            metadata = result["metadata"]
+            convergence = metadata["mesh_convergence"]
+            quality = metadata["quality_gate"]
+
+            self.assertTrue(metadata["mesh_convergence_certified"], msg=pol)
+            self.assertTrue(convergence["passed"], msg=pol)
+            self.assertTrue(quality["passed"], msg=pol)
+            self.assertGreater(
+                convergence["fine_panel_count"],
+                convergence["base_panel_count"],
+                msg=pol,
+            )
+            # A lower bound proves the acceptance case is stressing the
+            # resonant operator; the production gate supplies the upper bound.
+            self.assertGreater(metadata["condition_est_max"], 100.0, msg=pol)
+
+            reference = pec_cylinder_backscatter_amplitude(
+                radius, frequency_hz, pol
+            )
+            actual = _amplitudes(result)
+            relative = np.abs(actual - reference) / abs(reference)
+            self.assertLess(float(np.max(relative)), 2.5e-3, msg=pol)
+            self.assertLess(
+                convergence["complex_max_normalized"], 5.0e-4, msg=pol
+            )
 
 
 @unittest.skipUnless(HAVE_SCIPY, "SciPy is required for trusted 2-D production solves")
