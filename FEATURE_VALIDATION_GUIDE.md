@@ -25,6 +25,47 @@ For an all-GHOST line-expansion check, use a circumferential seam or groove:
 that feature remains axisymmetric and can be modeled both explicitly by BoR and
 as a 2-D delta expanded around the same ring.
 
+## Assembly tab workflow
+
+The normal interactive path is GRIM's **Assembly** tab in the unified
+**Plotting | ISAR | Assembly | GHOST** application. It contains the one
+canonical Assembly tree and the 3-D placement preview:
+
+1. Select the clean base monostatic GRIM and the output path.
+2. For an external 3-D base, select its matching STL or indexed ASCII `.facet`
+   surface and its units. A self-contained GHOST BoR result may preview the
+   revolved profile embedded in its GRIM without a separate surface.
+3. Select the exact point-placement and/or line-placement CSV. The form reads
+   the `dataset_id` values and creates the dataset mapping rows automatically;
+   choose one canonical OPN-FRD response for every row.
+4. Select **Validate & Preview**. Check the body, feature locations, line
+   ordering, units, normals, and CAD orientation (`+x` right, `+y` nose,
+   `+z` up).
+5. Select **Assemble & Save** only after the preview and validation report are
+   correct. The saved result is automatically available to GRIM as a dataset.
+
+Per-node **Show** checkboxes and the global **Show All** checkbox are preview
+controls only. They never include or exclude a feature from the calculation,
+change coherent/incoherent response membership, or alter the saved field. Do
+not use visual hiding as a physics-selection mechanism.
+
+The coherent/incoherent branches of the mathematical Assembly tree accept
+commensurate response datasets, not unexpanded feature coupons. In particular,
+a 2-D `sigma_2d` solver result is not a positioned 3-D field and must not be
+coherently added to a `sigma_3d` body. It can be loaded for inspection and
+response-library organization, but its OPN-FRD delta contributes to a vehicle
+only through the line-feature form and line-expansion calculation.
+
+The embedded **GHOST** tab calls the same numerical backend as standalone
+GHOST. Its solver exports load automatically into GRIM; embedding changes the
+application workflow, not the electromagnetic implementation.
+
+For unattended studies, `Backend/place_features.py` remains a settings wrapper
+and `Backend/feature_workflow.py` exposes the Qt-free
+`FeatureAssemblyRequest` service. Both call the same validation and placement
+implementation used by the GUI; they are automation alternatives, not a
+second physics path.
+
 ## External 3-D solver conventions
 
 Use the following without post-solve fitting:
@@ -98,13 +139,14 @@ multiple scattering.
 ## Placing on an external platform result
 
 An imported clean-platform monostatic GRIM does not need to originate in the
-BoR solver. In `Backend/place_features.py`, set `BASE_MONOSTATIC_GRIM` to the
-attested external GRIM and `SURFACE_MESH` to the matching indexed ASCII
-`.facet` or STL surface. The surface supplies skin checks and outward normals;
-the GRIM supplies the exact frequency/azimuth/elevation grid on which the
-feature field is evaluated and coherently added.
+BoR solver. In the Assembly form, select the attested external GRIM as the base
+and select its matching indexed ASCII `.facet` or STL surface. The surface
+supplies skin checks and outward normals; the GRIM supplies the exact
+frequency/azimuth/elevation grid on which the feature field is evaluated and
+coherently added. Unlike a self-contained BoR profile, an external base cannot
+be validated for placement without that surface.
 
-Selecting `BASE_MONOSTATIC_GRIM` attests that the file is the coherent physical
+Selecting the base GRIM attests that the file is the coherent physical
 platform far field at the global vehicle origin in radar-frame VV/HH/VH. This
 supplies role/convention tags or raw real/imaginary redundancy stripped by a
 GRIM GUI save; the stored sigma and phase still undergo full normalization and
@@ -115,10 +157,12 @@ coherent schema.
 
 The platform GRIM, surface mesh, and placement CSV must use the same physical
 origin and orientation. A mismatch creates a deterministic two-way phase error
-even when the feature magnitude looks plausible. Use `SHADOW=True` for binary
-mesh ray blockage and `SHADOW=False` to disable that nonlocal test. Neither
-choice adds body-feature mutual coupling: that limitation must still be
-measured against a directly featured full-wave platform solve.
+even when the feature magnitude looks plausible. Enabling **Shadowing** uses
+the triangle mesh for binary geometric ray blockage; therefore shadowing is
+unavailable without an STL/facet surface. Disabling it retains the local
+outward-facing test. Neither choice adds diffraction, creeping waves, or
+body-feature mutual coupling: those limitations must still be measured against
+a directly featured full-wave platform solve.
 
 For a point feature, form the installed-minus-clean complex delta in the 3-D
 solver or an independently validated lossless export process. Preserve the raw
@@ -143,8 +187,8 @@ incomplete or irregular partial angular coverage is not.
 
 Every point pattern must contain VV, HH, and reciprocal VH/HV. For a locally
 diagonal or axisymmetric fastener, write the physically zero VH channel into
-the dataset rather than asking placement to infer it. The same declaration
-model applies to a 2-D GUI subtraction listed in `LINE_FEATURE_DATASETS`:
+the dataset rather than asking placement to infer it. The same explicit-role
+model applies when a 2-D GUI subtraction is selected for a line `dataset_id`:
 missing semantic tags are not a blocker. Its stored linear quantity must still
 be sigma_2d, elevation must be the singleton zero cut, and both TE/VV and
 TM/HH must be present.
@@ -159,15 +203,11 @@ changes the delta by 180 degrees and changes its interference with the platform.
 ## One point-placement CSV
 
 All fasteners, antennas, compact cavities, and other point features share one
-CSV. Configure a dataset lookup in `Backend/place_features.py`:
-
-```python
-POINT_FEATURE_LOCATIONS_CSV = "point_features.csv"
-POINT_FEATURE_DATASETS = {
-    "fastener": "fastener_opn_minus_frd.grim",
-    "antenna": "antenna_opn_minus_frd.grim",
-}
-```
+CSV. Select it in the Assembly form. The GUI validates the header, discovers
+`fastener`, `antenna`, and any other `dataset_id` values actually present, and
+creates one response-file selector for each ID. The user supplies the correct
+OPN-FRD point dataset; the software does not infer a feature type from a file
+name or CSV shape.
 
 The CSV header and order are fixed:
 
@@ -178,8 +218,10 @@ fastener_002,fastener,-1.2,8.4,0.5,0,0,1,1,0,0
 antenna_001,antenna,0,12.7,2.1,0,0,1,1,0,0
 ```
 
-Values use `COORDINATE_UNITS` and the CAD frame (`+y` nose, `+x` right,
-`+z` up). `dataset_id` must exactly match the configured lookup.
+Values use the coordinate units selected in the form and the CAD frame
+(`+x` right, `+y` nose, `+z` up). `dataset_id` must exactly match its generated
+mapping row (`COORDINATE_UNITS` and the dataset dictionary are the automation
+equivalents).
 `placement_id` must be unique. The normal is the local pattern `+z` direction
 and is checked against the outward body normal. The roll vector defines local
 pattern `+x`/azimuth zero after projection into the tangent plane; it must not
@@ -195,16 +237,10 @@ and phase.
 ## One line-placement CSV
 
 All doors, seams, panel gaps, coating edges, and other locally two-dimensional
-features share one CSV. Configure the dataset lookup in
-`Backend/place_features.py`:
-
-```python
-LINE_FEATURE_LOCATIONS_CSV = "line_features.csv"
-LINE_FEATURE_DATASETS = {
-    "door_seam": "door_seam_opn_minus_frd.grim",
-    "panel_gap": "panel_gap_opn_minus_frd.grim",
-}
-```
+features share one CSV. Select it in the Assembly form. The GUI validates the
+header, discovers `door_seam`, `panel_gap`, and any other `dataset_id` values
+actually present, and creates one response-file selector for each ID. Select
+the correct OPN-FRD TE/TM dataset for each mapping.
 
 The CSV header and order are fixed:
 
@@ -215,8 +251,9 @@ door_001,door_seam,2,1.0,9.0,0.0,0.0,9.5,0.2,0,0,1,0,0.1,0.995
 gap_001,panel_gap,1,-2.0,6.0,0.0,-2.0,10.0,0.0,0,0,1,0,0,1
 ```
 
-Values use `COORDINATE_UNITS` and the CAD frame (`+y` nose, `+x` right,
-`+z` up). `line_id` identifies one physical chain; repeated instances use
+Values use the coordinate units selected in the form and the CAD frame
+(`+x` right, `+y` nose, `+z` up). `line_id` identifies one physical chain;
+repeated instances use
 different IDs even when they share a dataset. Rows for an ID must be contiguous,
 `segment_index` must start at 1 and increase without gaps, and each endpoint
 must meet the next segment head-to-tail. An open chain and a closed loop are

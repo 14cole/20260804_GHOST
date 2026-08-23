@@ -15,7 +15,7 @@ BACKEND = ROOT / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from ghost_gui import GhostMainWindow, main  # noqa: E402
+from ghost_gui import GhostMainWindow, GhostWorkspace, main  # noqa: E402
 
 try:  # noqa: E402
     from PySide6.QtWidgets import QApplication
@@ -41,6 +41,25 @@ class TestGuiEntrypoint(unittest.TestCase):
             self.assertIs(window.solver_tab.geometry_tab, window.geometry_tab)
         finally:
             window.close()
+
+    def test_workspace_is_embeddable_and_forwards_exports(self):
+        workspace = GhostWorkspace()
+        received = []
+        workspace.files_exported.connect(
+            lambda paths, kind: received.append((list(paths), kind))
+        )
+        try:
+            self.assertEqual(workspace.count(), 2)
+            self.assertIs(
+                workspace.solver_tab.geometry_tab, workspace.geometry_tab
+            )
+            workspace.solver_tab.files_exported.emit(
+                ["example.grim"], "2d"
+            )
+            self.assertEqual(received, [(["example.grim"], "2d")])
+            self.assertFalse(workspace.solve_is_running())
+        finally:
+            workspace.close()
 
 
 if __name__ == "__main__":

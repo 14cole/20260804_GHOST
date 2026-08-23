@@ -407,6 +407,11 @@ class _SolveWorker(QObject):
 
 
 class SolverTab(QWidget):
+    # Unified hosts use this to load newly published solver files directly
+    # into their dataset/project tree.  The second value is the stable result
+    # family ("2d" or "bor"), not a display label.
+    files_exported = Signal(list, str)
+
     def __init__(self, geometry_tab=None, parent=None):
         super().__init__(parent)
         self.geometry_tab = geometry_tab
@@ -985,6 +990,10 @@ class SolverTab(QWidget):
                     + " Exported "
                     + ", ".join(os.path.basename(path) for path in files)
                 )
+                self.files_exported.emit(
+                    [str(path) for path in files],
+                    "bor" if _result_kind(result) == "bor" else "2d",
+                )
             except Exception as exc:
                 QMessageBox.warning(self, "Export Warning", f"Solve completed, but export failed:\n{exc}")
 
@@ -1186,6 +1195,10 @@ class SolverTab(QWidget):
             return
         QMessageBox.information(self, "Exported", "\n".join(files))
         self.lbl_status.setText("Exported: " + ", ".join(os.path.basename(path) for path in files))
+        self.files_exported.emit(
+            [str(path) for path in files],
+            "bor" if _result_kind(self.last_result) == "bor" else "2d",
+        )
 
     def _display_db_from_linear(
         self,

@@ -8,6 +8,7 @@ import sys
 from typing import Sequence
 
 try:
+    from PySide6.QtCore import Signal
     from PySide6.QtWidgets import (
         QApplication,
         QMainWindow,
@@ -15,6 +16,7 @@ try:
         QTabWidget,
     )
 except ImportError:
+    from PySide2.QtCore import Signal  # type: ignore
     from PySide2.QtWidgets import (  # type: ignore
         QApplication,
         QMainWindow,
@@ -26,6 +28,32 @@ from geometry_tab import GeometryTab
 from solver_tab import SolverTab
 
 
+class GhostWorkspace(QTabWidget):
+    """Reusable GHOST geometry/solver workspace for standalone or GRIM hosts."""
+
+    files_exported = Signal(list, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setDocumentMode(True)
+
+        self.geometry_tab = GeometryTab(self)
+        self.solver_tab = SolverTab(self.geometry_tab, self)
+        self.addTab(self.geometry_tab, "Geometry")
+        self.addTab(self.solver_tab, "Solver")
+        self.setTabToolTip(
+            0, "Load, edit, visualize, validate, and save 2-D geometry."
+        )
+        self.setTabToolTip(
+            1, "Solve the current Geometry tab or an explicitly selected .geo file."
+        )
+        self.solver_tab.files_exported.connect(self.files_exported.emit)
+
+    def solve_is_running(self) -> bool:
+        thread = getattr(self.solver_tab, "_solve_thread", None)
+        return bool(thread is not None and thread.isRunning())
+
+
 class GhostMainWindow(QMainWindow):
     """Host the existing geometry editor and solver as one application."""
 
@@ -35,28 +63,20 @@ class GhostMainWindow(QMainWindow):
         self.resize(1500, 900)
         self.setMinimumSize(1000, 650)
 
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-
-        self.geometry_tab = GeometryTab(self)
-        self.solver_tab = SolverTab(self.geometry_tab, self)
-        self.tabs.addTab(self.geometry_tab, "Geometry")
-        self.tabs.addTab(self.solver_tab, "Solver")
-        self.tabs.setTabToolTip(
-            0, "Load, edit, visualize, validate, and save 2-D geometry."
-        )
-        self.tabs.setTabToolTip(
-            1, "Solve the current Geometry tab or an explicitly selected .geo file."
-        )
-        self.setCentralWidget(self.tabs)
+        self.workspace = GhostWorkspace(self)
+        # Backward-compatible attributes for scripts/tests that used the thin
+        # standalone window directly.
+        self.tabs = self.workspace
+        self.geometry_tab = self.workspace.geometry_tab
+        self.solver_tab = self.workspace.solver_tab
+        self.setCentralWidget(self.workspace)
 
         self.statusBar().showMessage(
             "Load or build a geometry, validate it, then open the Solver tab."
         )
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
-        thread = getattr(self.solver_tab, "_solve_thread", None)
-        if thread is not None and thread.isRunning():
+        if self.workspace.solve_is_running():
             QMessageBox.warning(
                 self,
                 "Solver Still Running",
