@@ -40,9 +40,10 @@ PHYSICAL_2D_PHASE_REFERENCE = (
 )
 PHYSICAL_2D_AMPLITUDE_CONVENTION = "A_physical_asymptotic = +j * B_stored"
 PHYSICAL_2D_FIELD_DOMAIN = "2d_layer_potential_bare_integral_amplitude_B"
+# Legacy/advisory evidence retained for explicit source-file inspection only.
+# Numerical CEM transforms neither interpret nor copy this field.
 MESH_CERTIFICATION_KEY = "production_mesh_certification_json"
 MESH_CERTIFICATION_SCHEMA = "ghost.workflow.mesh-certified-sources.v1"
-SOURCE_CERTIFICATION_SCOPE = "source_field_mesh_and_quality_gates"
 DUAL_OUTPUT_POLARIZATIONS = ("VV", "HH")
 EMBEDDED_ATTESTATION_SCHEMA = "ghost.workflow.embedded-attestation.v1"
 _ATTESTATION_SHA256_FIELDS = (
@@ -315,7 +316,11 @@ def _mesh_certification_sources(
     payload: 'dict[str, np.ndarray]',
     label: 'str',
 ) -> 'list[dict[str, Any]] | None':
-    """Decode a raw solver certificate or one propagated by CEM joins."""
+    """Explicitly audit optional source evidence, including legacy CEM chains.
+
+    Normal joins and subtraction deliberately do not call this helper; mesh
+    certification is advisory and never authorizes a numerical operation.
+    """
 
     if MESH_CERTIFICATION_KEY in payload:
         try:
@@ -511,47 +516,6 @@ def _mesh_certification_sources(
     }]
 
 
-def _propagated_mesh_certification(
-    payloads: 'list[dict[str, np.ndarray]]',
-    labels: 'list[str]',
-) -> 'np.ndarray | None':
-    decoded = [
-        _mesh_certification_sources(payload, label)
-        for payload, label in zip(payloads, labels)
-    ]
-    present = [sources is not None for sources in decoded]
-    if any(present) and not all(present):
-        raise CemToolError(
-            "cannot combine a mixture of source-field-certified and uncertified "
-            "datasets"
-        )
-    if not any(present):
-        return None
-    sources = [
-        source
-        for group in decoded
-        for source in (group or [])
-    ]
-    return np.asarray(json.dumps(
-        {
-            "schema": MESH_CERTIFICATION_SCHEMA,
-            "passed": True,
-            "published_mesh": "fine",
-            "certification_scope": SOURCE_CERTIFICATION_SCOPE,
-            "certifies_coherent_delta_convergence": False,
-            "note": (
-                "Every listed source field passed its mesh and algebraic quality "
-                "gates. This source-chain certificate does not establish "
-                "convergence of an OPN-FRD coherent delta."
-            ),
-            "source_count": len(sources),
-            "sources": sources,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ))
-
-
 def _grid_shape(payload: 'dict[str, np.ndarray]') -> 'tuple[int, int, int, int]':
     return tuple(len(np.asarray(payload[key]).ravel()) for key in AXIS_KEYS)
 
@@ -736,6 +700,7 @@ def _merge_metadata(
         "source_path",
         "history",
         "solver_metadata_json",
+        MESH_CERTIFICATION_KEY,
         "polarization_alias_primary",
         "polarization_aliases_json",
     }
@@ -866,11 +831,6 @@ def join_payloads(
         + ", ".join(Path(label).name for label in labels)
     )
     result = _merge_metadata(payloads, shape, history)
-    mesh_certification = _propagated_mesh_certification(
-        payloads, labels
-    )
-    if mesh_certification is not None:
-        result[MESH_CERTIFICATION_KEY] = mesh_certification
     result.update(axes)
     result.update(merged_arrays)
     if "rcs_amp_real" in result and "rcs_amp_imag" in result:
@@ -1029,11 +989,6 @@ def subtract_payloads(
         delta.shape,
         f"CEM Tools coherent subtraction: {featured_label} - {clean_label}",
     )
-    mesh_certification = _propagated_mesh_certification(
-        [featured, clean], [featured_label, clean_label]
-    )
-    if mesh_certification is not None:
-        result[MESH_CERTIFICATION_KEY] = mesh_certification
     for key in AXIS_KEYS[:-1]:
         result[key] = np.array(featured[key], copy=True)
     result["polarizations"] = np.asarray(["VV", "HH"], dtype=str)

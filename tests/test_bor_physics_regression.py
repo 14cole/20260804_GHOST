@@ -321,7 +321,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "valid BoR body"):
                 feature_sum.require_body_mesh_certification(str(nonbody))
 
-    def test_bor_unit_audits_must_agree_before_collection(self):
+    def test_bor_unit_audits_are_advisory_but_integrity_checked(self):
         metadata = {
             "mesh_convergence_certified": False,
             "certified_entry_point": False,
@@ -364,6 +364,31 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 disagreeing, stem="body"
             )
 
+        certification_different = copy.deepcopy(records)
+        certification_different[1]["solver_audit"]["metadata"].update({
+            "mesh_convergence_certified": True,
+            "certified_entry_point": True,
+            "published_mesh": "fine",
+            "mesh_convergence": {
+                "schema": "ghost.solver.mesh-convergence.v1",
+                "passed": True,
+                "published_mesh": "fine",
+            },
+        })
+        self.assertIsNone(
+            hpc_common.bor_solver_diagnostics_from_units(
+                certification_different, stem="body"
+            )
+        )
+
+        partially_audited = copy.deepcopy(records)
+        partially_audited[1]["solver_audit"] = None
+        self.assertIsNone(
+            hpc_common.bor_solver_diagnostics_from_units(
+                partially_audited, stem="body"
+            )
+        )
+
         with self.assertRaisesRegex(ValueError, "exactly one VV and one HH"):
             hpc_common.bor_solver_diagnostics_from_units(
                 records[:1], stem="body"
@@ -374,6 +399,15 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not a monostatic BoR"):
             hpc_common.bor_solver_diagnostics_from_units(
                 missing_schema, stem="body"
+            )
+
+        wrong_attestation = copy.deepcopy(records)
+        wrong_attestation[1]["solver_audit"]["metadata"][
+            "output_attestation"
+        ] = {"frequency_ghz": 2.0, "polarization": "HH"}
+        with self.assertRaisesRegex(ValueError, "does not match its field"):
+            hpc_common.bor_solver_diagnostics_from_units(
+                wrong_attestation, stem="body"
             )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -708,6 +742,66 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                     str(gui_base), str(gui_combined), points=[point],
                     radar_grid=grid, declared_coherent_base=True,
                 )
+
+    def test_feature_output_drops_stale_solver_certification_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "certified_platform.grim"
+            combined = Path(directory) / "platform_with_feature.grim"
+            grid = {
+                "frequencies_ghz": [1.0],
+                "azimuths_deg": [0.0],
+                "elevations_deg": [0.0],
+                "axis_az_deg": 0.0,
+                "axis_el_deg": 0.0,
+                "roll_deg": 0.0,
+            }
+            feature_sum.export_radar_grim(
+                str(base), bor_result=None, placements=[], **grid
+            )
+            with np.load(base, allow_pickle=False) as stored:
+                payload = {
+                    key: np.array(stored[key], copy=True)
+                    for key in stored.files
+                }
+            payload.update({
+                "solver_metadata_json": np.asarray(json.dumps({
+                    "schema": grim_io.SOLVER_METADATA_SCHEMA,
+                    "metadata": {"mesh_convergence_certified": True},
+                })),
+                "production_mesh_certification_json": np.asarray(
+                    '{"passed":true}'
+                ),
+                "source_body_mesh_certification_json": np.asarray(
+                    '{"passed":true}'
+                ),
+            })
+            with base.open("wb") as stream:
+                np.savez_compressed(stream, **payload)
+
+            point = {
+                "pattern": feature_sum.prepare_point_pattern(
+                    _constant_compact_pattern()
+                ),
+                "location": [0.0, 0.0, 0.0],
+                "aperture_normal": [0.0, 0.0, 1.0],
+                "roll_ref": [1.0, 0.0, 0.0],
+            }
+            feature_sum.add_features_to_monostatic_grim(
+                str(base), str(combined), points=[point], radar_grid=grid
+            )
+            with np.load(combined, allow_pickle=False) as updated:
+                for key in (
+                    "solver_metadata_json",
+                    "production_mesh_certification_json",
+                    "source_body_mesh_certification_json",
+                ):
+                    self.assertNotIn(key, updated.files)
+                field = (
+                    np.asarray(updated["rcs_amp_real"], dtype=float)
+                    + 1j * np.asarray(updated["rcs_amp_imag"], dtype=float)
+                )
+                self.assertGreater(float(np.max(np.abs(field))), 0.0)
+                self.assertIn("feature_provenance_json", updated.files)
 
     def test_feature_reconstruction_comparison_does_not_fit_away_phase_error(self):
         amplitude = 1.0 / math.sqrt(4.0 * math.pi)

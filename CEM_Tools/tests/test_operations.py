@@ -36,7 +36,7 @@ from feature_sum import (
 
 
 def assert_source_mesh_certification(payload, label):
-    """Test assertion over the same parser used by real CEM operations."""
+    """Explicitly audit optional source certification metadata in a test."""
 
     sources = _mesh_certification_sources(payload, label)
     if not sources:
@@ -434,44 +434,35 @@ class OperationsTest(unittest.TestCase):
         np.testing.assert_allclose(amplitude[..., 0], 0.4 + 0.1j)
         np.testing.assert_allclose(amplitude[..., 1], -0.2 + 0.3j)
 
-    def test_mesh_certification_propagates_through_join_and_subtract(self):
-        """The original workflow-unit single-pol contract remains valid."""
+    def test_certification_is_advisory_and_not_inherited(self):
+        """Transforms accept certified inputs without certifying their output."""
 
         opn, frd = self.library()
         for folder in (opn, frd):
             for path in folder.glob("*.grim"):
                 certify_source(path)
+                assert_source_mesh_certification(load_grim(path), str(path))
 
         pol_out = self.root / "cert_pol"
         for path in concatenate_polarizations(opn, pol_out).written:
             payload = load_grim(path)
-            self.assertIn(MESH_CERTIFICATION_KEY, payload)
-            assert_source_mesh_certification(payload, str(path))
+            self.assertNotIn(MESH_CERTIFICATION_KEY, payload)
+            self.assertNotIn("solver_metadata_json", payload)
 
         freq_out = self.root / "cert_freq"
         joined = concatenate_frequencies(pol_out, freq_out).written[0]
-        assert_source_mesh_certification(
-            load_grim(joined), str(joined)
-        )
+        joined_payload = load_grim(joined)
+        self.assertNotIn(MESH_CERTIFICATION_KEY, joined_payload)
+        self.assertNotIn("solver_metadata_json", joined_payload)
 
         delta = subtract_datasets(
             opn, frd, self.root / "cert_delta"
         ).written[0]
         payload = load_grim(delta)
-        assert_source_mesh_certification(payload, str(delta))
-        decoded = json.loads(str(payload[MESH_CERTIFICATION_KEY]))
-        self.assertEqual(decoded["source_count"], 8)
-        self.assertEqual(
-            decoded["certification_scope"],
-            "source_field_mesh_and_quality_gates",
-        )
-        self.assertIs(decoded["certifies_coherent_delta_convergence"], False)
-        self.assertEqual(
-            {source["contract"] for source in decoded["sources"]},
-            {"legacy-workflow-unit.v1"},
-        )
+        self.assertNotIn(MESH_CERTIFICATION_KEY, payload)
+        self.assertNotIn("solver_metadata_json", payload)
 
-    def test_dual_channel_source_chain_is_accepted_and_propagated(self):
+    def test_dual_channel_certification_is_advisory(self):
         opn = self.root / "OPN"
         frd = self.root / "FRD"
         opn.mkdir()
@@ -494,25 +485,14 @@ class OperationsTest(unittest.TestCase):
             opn, frd, self.root / "dual_delta"
         ).written[0]
         delta = load_grim(delta_path)
-        assert_source_mesh_certification(delta, str(delta_path))
+        self.assertNotIn(MESH_CERTIFICATION_KEY, delta)
+        self.assertNotIn("solver_metadata_json", delta)
         np.testing.assert_array_equal(delta["polarizations"], ["VV", "HH"])
         amplitude = delta["rcs_amp_real"] + 1j * delta["rcs_amp_imag"]
         np.testing.assert_allclose(amplitude[..., 0], 0.4 + 0.1j)
         np.testing.assert_allclose(amplitude[..., 1], -0.2 + 0.3j)
 
-        certificate = json.loads(str(delta[MESH_CERTIFICATION_KEY]))
-        self.assertEqual(certificate["source_count"], 2)
-        self.assertEqual(
-            {source["contract"] for source in certificate["sources"]},
-            {"embedded-dual-output-attestation.v1"},
-        )
-        self.assertIs(
-            certificate["certifies_coherent_delta_convergence"], False
-        )
-        for source in certificate["sources"]:
-            self.assertEqual(set(source["channels"]), {"VV", "HH"})
-
-    def test_dual_source_chain_rejects_one_failed_channel(self):
+    def test_failed_channel_certification_does_not_block_subtraction(self):
         clean_vv = np.asarray([1.0 + 0.2j, 0.5 - 0.1j, -0.2 + 0.3j])
         clean_hh = np.asarray([0.2 + 0.8j, -0.4 + 0.1j, 0.7 - 0.2j])
         for failed_gate, expected in (
@@ -542,7 +522,44 @@ class OperationsTest(unittest.TestCase):
                 )
                 certify_dual_source(clean_path)
                 with self.assertRaisesRegex(CemToolError, expected):
-                    subtract_datasets(opn, frd, case_root / "delta")
+                    _mesh_certification_sources(
+                        load_grim(featured_path), str(featured_path)
+                    )
+                delta = load_grim(
+                    subtract_datasets(
+                        opn, frd, case_root / "delta"
+                    ).written[0]
+                )
+                self.assertNotIn(MESH_CERTIFICATION_KEY, delta)
+                amplitude = (
+                    delta["rcs_amp_real"] + 1j * delta["rcs_amp_imag"]
+                )
+                np.testing.assert_allclose(amplitude[..., 0], 0.4)
+                np.testing.assert_allclose(amplitude[..., 1], 0.2j)
+
+    def test_mixed_certification_is_advisory(self):
+        opn, frd = self.library()
+        certify_source(next(opn.glob("*.grim")))
+        delta = load_grim(
+            subtract_datasets(opn, frd, self.root / "delta").written[0]
+        )
+        self.assertNotIn(MESH_CERTIFICATION_KEY, delta)
+
+    def test_malformed_certification_is_advisory(self):
+        opn, frd = self.library()
+        source_path = next(opn.glob("*.grim"))
+        with np.load(source_path, allow_pickle=False) as source:
+            payload = {
+                key: np.array(source[key], copy=True)
+                for key in source.files
+            }
+        payload[MESH_CERTIFICATION_KEY] = np.asarray("{not-json")
+        with source_path.open("wb") as stream:
+            np.savez(stream, **payload)
+        delta = load_grim(
+            subtract_datasets(opn, frd, self.root / "delta").written[0]
+        )
+        self.assertNotIn(MESH_CERTIFICATION_KEY, delta)
 
     def test_embedded_single_channel_contract_remains_valid(self):
         path = self.root / "TE_3.000GHz_LEGACY-00-00_FRD.grim"

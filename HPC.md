@@ -390,6 +390,11 @@ With the default `MESH_CERTIFICATION = True`, the drivers call
 agree. Cost scales with the square of the node count, so that second solve is
 most of the wall clock and all of the peak memory.
 
+Certification is atomic across the dual output: VV and HH must both pass their
+quality and base/fine comparisons. If either channel fails, the certified unit
+fails and no partially certified `.grim` is written. Select survey mode when a
+finite base-mesh field is intentionally wanted without that certification.
+
 Set `MESH_CERTIFICATION = False` in any driver to solve the base mesh
 only:
 
@@ -428,10 +433,13 @@ collected into a body, and used in feature summation. Raw solver metadata still
 records which choice produced the field so the two are not ambiguous later.
 The choice is also part of the unit fingerprint, so changing it starts the
 appropriate solve rather than silently reusing a result from the other mode.
-Within one CEM join or subtraction, however, every input must carry the same
-evidence class: either all inputs have a complete source-field certificate
-chain or all inputs are uncertified. Mixing the two fails closed rather than
-publishing an ambiguous certificate.
+CEM joins and subtraction do not use that optional status to admit or reject
+an input. Certified, uncertified, mixed-origin, and imported files are treated
+the same when their physical grids and field conventions are compatible.
+Because a transform has not itself undergone the solver's mesh comparison, its
+output does not inherit or claim source mesh certification. Engineers may
+inspect the original source metadata when certification evidence matters to a
+particular study.
 
 There is no way to weaken certification without switching it off: the policy
 enforces `fine_factor > 1.0`, so you cannot quietly shrink the refinement and

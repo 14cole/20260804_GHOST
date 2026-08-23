@@ -82,6 +82,11 @@ omitted.
   appear.
 - Concatenation verifies all non-joined axes and physical convention metadata,
   detects conflicting overlap, and keeps solver raw complex arrays.
+- Solver certification metadata is advisory. It never admits or rejects a CEM
+  operation, so certified, uncertified, mixed-origin, and imported datasets may
+  be combined when their physical data are compatible. A joined or subtracted
+  output does not inherit a source certification claim; inspect the unchanged
+  source files when that evidence is relevant.
 - Conversion inputs are `.grim`, `.out`, `.pio`, `.cmplx_di`, `.csv`, `.txt`,
   and `.ss`. Outputs are `.grim`, `.pio`, `.cmplx_di`, `.csv`, `.txt`, and
   `.out`. `.ss` remains read-only because the referenced GRIM library has no

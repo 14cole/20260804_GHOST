@@ -551,13 +551,19 @@ def bor_solver_diagnostics_from_units(
     units: 'Sequence[Dict[str, Any]]',
     stem: 'Optional[str]' = None,
 ) -> 'Optional[Dict[float, Dict[str, Any]]]':
-    """Collect verified restart-unit audits into the body-file contract.
+    """Collect uniformly usable restart-unit audits into the body contract.
 
     Current BoR runs publish separate VV and HH restart records even though
     they are co-solved. Their physical solver metadata must agree after the
-    channel-specific output attestation is removed. Fully legacy collections
-    with no embedded audit remain readable; a partially audited collection is
-    rejected instead of silently dropping provenance.
+    channel-specific output attestation is removed.  Audit/certification
+    metadata is optional evidence, not authorization to use otherwise valid
+    fields: absent, partially present, or polarization-disagreeing
+    certification evidence therefore returns ``None`` and the body publisher
+    omits the derived solver-audit envelope.
+
+    Evidence that *is* present is still checked against its own file.  A
+    malformed solver contract, a selected-channel mismatch, or an attestation
+    that names another field remains a hard provenance-integrity error.
     """
 
     selected = [
@@ -569,10 +575,8 @@ def bor_solver_diagnostics_from_units(
     audits = [unit.get("solver_audit") for unit in selected]
     if all(audit is None for audit in audits):
         return None
-    if any(audit is None for audit in audits):
-        raise ValueError(
-            "BoR solver units mix audited and unaudited artifacts."
-        )
+
+    complete_evidence = not any(audit is None for audit in audits)
 
     grouped = {}  # type: Dict[float, List[Dict[str, Any]]]
     for unit in selected:
@@ -596,10 +600,18 @@ def bor_solver_diagnostics_from_units(
             )
 
         common_metadata = None
-        common_serialized = None
+        metadata_by_certification = {}
+        certification_classes = set()
         source_attestations = {}
         for record in records:
-            audit = dict(record["solver_audit"])
+            raw_audit = record.get("solver_audit")
+            if raw_audit is None:
+                continue
+            if not isinstance(raw_audit, dict):
+                raise ValueError(
+                    f"{record['path'].name}: solver audit must be a mapping."
+                )
+            audit = dict(raw_audit)
             record_polarizations = list(record.get("polarizations") or [])
             if (
                 audit.get("schema") != SOLVER_METADATA_SCHEMA
@@ -634,6 +646,11 @@ def bor_solver_diagnostics_from_units(
                 )
             metadata = dict(audit.get("metadata", {}) or {})
             attestation = metadata.pop("output_attestation", None)
+            if attestation is not None and not isinstance(attestation, dict):
+                raise ValueError(
+                    f"{record['path'].name}: embedded unit attestation is "
+                    "malformed."
+                )
             if isinstance(attestation, dict):
                 attested_frequency = float(
                     attestation.get("frequency_ghz", math.nan)
@@ -655,20 +672,54 @@ def bor_solver_diagnostics_from_units(
                         f"{record['path'].name}: embedded unit attestation "
                         "does not match its field."
                     )
+            certification = {
+                "mesh_convergence_certified": metadata.get(
+                    "mesh_convergence_certified"
+                ),
+                "certified_entry_point": metadata.get(
+                    "certified_entry_point"
+                ),
+                "published_mesh": metadata.get("published_mesh"),
+                "survey_mode": metadata.get("survey_mode"),
+                "mesh_convergence": metadata.get("mesh_convergence"),
+                "quality_gate_certification": {
+                    key: metadata.get("quality_gate", {}).get(key)
+                    for key in (
+                        "mesh_convergence_certified",
+                        "certification_scope",
+                    )
+                    if isinstance(metadata.get("quality_gate"), dict)
+                    and key in metadata["quality_gate"]
+                },
+            }
+            certification_serialized = json.dumps(
+                certification, sort_keys=True, separators=(",", ":")
+            )
+            certification_classes.add(certification_serialized)
             serialized = json.dumps(
                 metadata, sort_keys=True, separators=(",", ":")
             )
-            if common_serialized is None:
-                common_serialized = serialized
-                common_metadata = metadata
-            elif serialized != common_serialized:
+            previous = metadata_by_certification.get(
+                certification_serialized
+            )
+            if previous is None:
+                metadata_by_certification[certification_serialized] = serialized
+            elif serialized != previous:
                 raise ValueError(
                     f"{frequency:g} GHz VV/HH solver diagnostics disagree."
                 )
+            if common_metadata is None:
+                common_metadata = metadata
             if isinstance(attestation, dict):
                 for polarization in record.get("polarizations") or []:
                     source_attestations[str(polarization)] = attestation
-        assert common_metadata is not None
+        if len(certification_classes) != 1:
+            # Different certification classes cannot truthfully be collapsed
+            # into one body-level solver-audit envelope.
+            complete_evidence = False
+        if common_metadata is None:
+            complete_evidence = False
+            continue
         if source_attestations:
             common_metadata = dict(common_metadata)
             common_metadata["source_output_attestations"] = (
@@ -683,7 +734,7 @@ def bor_solver_diagnostics_from_units(
             "certification_frequency_scope_ghz": [frequency],
             "metadata": common_metadata,
         }
-    return diagnostics
+    return diagnostics if complete_evidence else None
 
 
 def bodies_from_units(units: 'Sequence[Dict[str, Any]]', stem: 'Optional[str]' = None

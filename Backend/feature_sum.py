@@ -1075,6 +1075,11 @@ def solve_vehicle_body(geometry, frequencies_ghz, aspects_deg,
 _BODY_AZ_MEANING = ("BoR aspect from the +z rotation axis (0 = nose-on, "
                     "90 = broadside, 180 = tail-on) -- NOT radar azimuth")
 _MONOSTATIC_BODY_MODEL_SCHEMA = "ghost.workflow.embedded-bor-body-model.v1"
+_DERIVED_FIELD_STALE_AUDIT_KEYS = (
+    "solver_metadata_json",
+    "production_mesh_certification_json",
+    "source_body_mesh_certification_json",
+)
 
 
 def verify_body_artifact_bundle(body_grim: 'str') -> 'Dict[str, Any]':
@@ -3446,6 +3451,13 @@ def add_features_to_monostatic_grim(
             payload = {
                 key: np.array(stored[key], copy=True) for key in stored.files
             }
+        # The base solver/certification audit describes the unmodified body
+        # field.  Once a feature contribution changes that field it is useful
+        # only as source provenance, not as a certificate for the derived
+        # artifact.  feature_provenance_json below records the source hash
+        # without leaving a stale pass/fail envelope on the new numerical data.
+        for key in _DERIVED_FIELD_STALE_AUDIT_KEYS:
+            payload.pop(key, None)
         real = total.real.astype(np.float64)
         imag = total.imag.astype(np.float64)
         payload["rcs_amp_real"] = real
