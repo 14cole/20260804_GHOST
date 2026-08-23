@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import inspect
 import unittest
+from unittest import mock
 
 from ibc.compute import MaterialTable, MixComponent
 
 try:
     from ibc.ui import ImpedanceGui
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     UI_IMPORTABLE = True
 except Exception:
@@ -15,6 +19,48 @@ except Exception:
 
 @unittest.skipUnless(UI_IMPORTABLE, "GUI dependencies are unavailable")
 class MaterialMixUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_workspace_accepts_optional_parent(self) -> None:
+        signature = inspect.signature(ImpedanceGui.__init__)  # type: ignore[union-attr]
+        parent = signature.parameters["parent"]
+        self.assertIsNone(parent.default)
+
+    def test_workspace_exposes_background_job_close_contract(self) -> None:
+        class WorkspaceState:
+            _task_running = False
+            job_is_running = ImpedanceGui.job_is_running  # type: ignore[union-attr]
+            can_close = ImpedanceGui.can_close  # type: ignore[union-attr]
+
+        state = WorkspaceState()
+        self.assertFalse(state.job_is_running())
+        self.assertTrue(state.can_close())
+
+        state._task_running = True
+        self.assertTrue(state.job_is_running())
+        self.assertFalse(state.can_close())
+
+    def test_standalone_close_is_blocked_while_background_job_runs(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            workspace._task_running = True
+            blocked = QCloseEvent()
+            with mock.patch.object(QMessageBox, "warning") as warning:
+                workspace.closeEvent(blocked)
+            self.assertFalse(blocked.isAccepted())
+            warning.assert_called_once()
+
+            workspace._task_running = False
+            allowed = QCloseEvent()
+            workspace.closeEvent(allowed)
+            self.assertTrue(allowed.isAccepted())
+        finally:
+            workspace._task_running = False
+            workspace.deleteLater()
+            self.app.processEvents()
+
     def test_forward_display_honors_selected_frequency_grid(self) -> None:
         first = MaterialTable(
             [1.0, 2.0, 3.0],

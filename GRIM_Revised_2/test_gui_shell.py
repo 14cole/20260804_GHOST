@@ -16,6 +16,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QToolButton, QVBoxLayout, QWidget
 
 import grim_cut_gui
+import freddy_integration
 import ghost_integration
 from assembly_tree import (
     AssemblyTreePanel,
@@ -40,6 +41,24 @@ class _FakeGhostIntegration(QWidget):
         return self.running
 
     def focus_solver(self) -> None:
+        self.focus_called = True
+
+
+class _FakeFreddyIntegration(QWidget):
+    # Deliberately expose a GHOST-shaped signal: the shell must not connect
+    # FREDDY material/IBC CSV exports to GRIM's RCS dataset loader.
+    files_exported = Signal(list, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.running = False
+        self.focus_called = False
+        self.setLayout(QVBoxLayout())
+
+    def job_is_running(self) -> bool:
+        return self.running
+
+    def focus_workspace(self) -> None:
         self.focus_called = True
 
 
@@ -101,14 +120,20 @@ class UnifiedGuiShellTest(unittest.TestCase):
             "load_ghost_module",
             return_value=self.feature_service,
         )
+        self.freddy_patch = mock.patch.object(
+            grim_cut_gui, "FreddyIntegrationWidget", _FakeFreddyIntegration
+        )
         self.ghost_patch.start()
         self.feature_patch.start()
+        self.freddy_patch.start()
         self.window = _RecordingWindow()
 
     def tearDown(self) -> None:
         self.window.ghost_integration.running = False
+        self.window.freddy_integration.running = False
         self.window.deleteLater()
         self.app.processEvents()
+        self.freddy_patch.stop()
         self.feature_patch.stop()
         self.ghost_patch.stop()
 
@@ -117,12 +142,17 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.main_tabs.tabText(index)
             for index in range(self.window.main_tabs.count())
         ]
-        self.assertEqual(labels, ["Plotting", "ISAR", "Assembly", "GHOST"])
+        self.assertEqual(
+            labels, ["Plotting", "ISAR", "Assembly", "GHOST", "FREDDY"]
+        )
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.assembly_workspace), 2
         )
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.ghost_integration), 3
+        )
+        self.assertEqual(
+            self.window.main_tabs.indexOf(self.window.freddy_integration), 4
         )
 
         panels = self.window.findChildren(AssemblyTreePanel)
@@ -156,6 +186,21 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertEqual(candidates[0], expected)
         self.assertEqual(discovered, expected)
 
+    def test_bundled_freddy_root_is_the_primary_builtin_candidate(self) -> None:
+        expected = (
+            Path(freddy_integration.__file__).resolve().parents[1]
+            / "tools"
+            / "FREDDY"
+        ).resolve()
+        with mock.patch.dict(
+            os.environ, {freddy_integration.FREDDY_ROOT_ENV: ""}, clear=False
+        ):
+            candidates = list(freddy_integration.freddy_root_candidates())
+            discovered = freddy_integration.discover_freddy_root()
+
+        self.assertEqual(candidates[0], expected)
+        self.assertEqual(discovered, expected)
+
     def test_workspace_and_ghost_outputs_enter_existing_dataset_paths(self) -> None:
         self.window.assembly_workspace.files_to_load.emit(["assembly.grim"])
         self.window.ghost_integration.files_exported.emit(
@@ -180,6 +225,12 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertEqual(
             self.window.table.item(start_rows + 1, 0).text(), "featured"
         )
+
+    def test_freddy_outputs_do_not_enter_rcs_dataset_loader(self) -> None:
+        self.window.freddy_integration.files_exported.emit(
+            ["impedance.csv"], "ibc"
+        )
+        self.assertEqual(self.window.loaded_path_batches, [])
 
     def test_feature_panel_preview_and_output_use_workspace_paths(self) -> None:
         plan = SimpleNamespace(
@@ -236,6 +287,19 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertIs(
             self.window.main_tabs.currentWidget(), self.window.assembly_workspace
         )
+
+    def test_running_freddy_job_blocks_close_and_focuses_workspace(self) -> None:
+        self.window.freddy_integration.running = True
+        event = QCloseEvent()
+        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        warning.assert_called_once()
+        self.assertIs(
+            self.window.main_tabs.currentWidget(), self.window.freddy_integration
+        )
+        self.assertTrue(self.window.freddy_integration.focus_called)
 
     def test_branch_drop_uses_canonical_workspace_tree(self) -> None:
         tree = self.window.assembly_workspace.assembly_tree_panel.tree

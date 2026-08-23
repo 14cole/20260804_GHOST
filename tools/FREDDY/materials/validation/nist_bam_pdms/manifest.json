@@ -10,6 +10,7 @@
     "frequency_unit": "Hz (unchanged)",
     "measured_nonpassive_policy": "omit and count; never clamp or change sign",
     "minimum_frequency_hz": 100000000.0,
+    "output_significant_digits": 13,
     "source_loss_columns": "positive loss magnitudes",
     "volume_fraction_30wt": 0.0726,
     "volume_fraction_60wt": 0.215

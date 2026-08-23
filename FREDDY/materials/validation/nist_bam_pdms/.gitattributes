@@ -1,3 +1,0 @@
-# Preserve the checksum-verified NIST source files byte-for-byte. Their CRLF
-# line endings and terminal whitespace are part of the published artifacts.
-source/* -diff -text

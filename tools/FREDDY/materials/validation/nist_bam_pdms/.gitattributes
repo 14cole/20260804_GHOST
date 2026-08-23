@@ -1,0 +1,8 @@
+# Preserve the checksum-verified NIST source files byte-for-byte. Their CRLF
+# line endings and terminal whitespace are part of the published artifacts.
+source/* -diff -text
+
+# The converter writes deterministic LF CSV output on every platform. Keep
+# checked-in references in that exact form so byte-for-byte tests also pass on
+# Windows when core.autocrlf is enabled.
+freddy/*.csv text eol=lf

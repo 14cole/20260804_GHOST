@@ -30,6 +30,7 @@ py-modules = [
   "assembly_tree",
   "assembly_workspace",
   "feature_assembly_panel",
+  "freddy_integration",
   "grim_cut_dataset_mixin",
   "grim_cut_gui",
   "grim_cut_plot_mixin",

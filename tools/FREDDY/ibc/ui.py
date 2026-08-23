@@ -1122,8 +1122,9 @@ class MixComponentDialog(QDialog):
 
 
 class ImpedanceGui(QMainWindow):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Build the FREDDY workspace as a window or an embedded child widget."""
+        super().__init__(parent)
         self.setWindowTitle(APP_TITLE)
         self.resize(1180, 820)
         self.setMinimumSize(960, 640)
@@ -1346,6 +1347,27 @@ class ImpedanceGui(QMainWindow):
                 )
             )
             self._refresh_layers()
+
+    def job_is_running(self) -> bool:
+        """Return whether FREDDY currently owns an active background job."""
+        return bool(self._task_running)
+
+    def can_close(self) -> bool:
+        """Return whether a host may safely remove or close this workspace."""
+        return not self.job_is_running()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt callback name
+        """Keep standalone FREDDY alive until its background write finishes."""
+        if self.job_is_running():
+            QMessageBox.warning(
+                self,
+                "FREDDY Task Still Running",
+                "A FREDDY material or IBC task is still running. Wait for it "
+                "to finish before closing FREDDY.",
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _build_ui(self) -> None:
         def _entry(var: StringVar, chars: int | None = None) -> QLineEdit:

@@ -26,6 +26,7 @@ MIN_FREQUENCY_HZ = 100_000_000.0
 VOLUME_FRACTION_30WT = 0.0726
 VOLUME_FRACTION_60WT = 0.215
 BAM_EPSILON = complex(16.65, 0.0)
+OUTPUT_SIGNIFICANT_DIGITS = 13
 
 SOURCE_SHA256 = {
     "README.txt": "19467fd7cb303ecf1f5cb702be162705c391418305fba18286b27ff8fac1a319",
@@ -202,11 +203,11 @@ def write_material(path: Path, rows: list[MaterialRow]) -> None:
                 raise ValueError(f"Non-passive/invalid row passed to writer: {row}")
             writer.writerow(
                 [
-                    format(row.frequency_hz, ".15g"),
-                    format(row.epsilon.real, ".15g"),
-                    format(row.epsilon.imag, ".15g"),
-                    format(row.mu.real, ".15g"),
-                    format(row.mu.imag, ".15g"),
+                    format(row.frequency_hz, f".{OUTPUT_SIGNIFICANT_DIGITS}g"),
+                    format(row.epsilon.real, f".{OUTPUT_SIGNIFICANT_DIGITS}g"),
+                    format(row.epsilon.imag, f".{OUTPUT_SIGNIFICANT_DIGITS}g"),
+                    format(row.mu.real, f".{OUTPUT_SIGNIFICANT_DIGITS}g"),
+                    format(row.mu.imag, f".{OUTPUT_SIGNIFICANT_DIGITS}g"),
                 ]
             )
             previous = row.frequency_hz
@@ -286,6 +287,10 @@ def convert(source_dir: Path, output_dir: Path) -> dict[str, object]:
             "bam_particle_mu": "inverted from the published 30 wt% MG fit",
             "volume_fraction_30wt": VOLUME_FRACTION_30WT,
             "volume_fraction_60wt": VOLUME_FRACTION_60WT,
+            # Two guard digits below binary64 precision make the serialized
+            # references byte-stable across Python/libm builds while keeping
+            # far more precision than the source measurement data.
+            "output_significant_digits": OUTPUT_SIGNIFICANT_DIGITS,
         },
         "outputs": {
             name: {"rows": len(rows), "dropped_nonpassive_rows": dropped.get(name, 0)}
@@ -294,7 +299,9 @@ def convert(source_dir: Path, output_dir: Path) -> dict[str, object]:
     }
     manifest_path = output_dir.parent / "manifest.json"
     manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
     return manifest
 

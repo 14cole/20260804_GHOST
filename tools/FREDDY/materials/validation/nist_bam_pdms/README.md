@@ -64,9 +64,11 @@ transformation.
 Run from the repository root:
 
 ```text
-python3 FREDDY/tools/convert_nist_bam_pdms.py
-python3 FREDDY/tools/validate_material_mix.py
+py -3 tools/FREDDY/tools/convert_nist_bam_pdms.py
+py -3 tools/FREDDY/tools/validate_material_mix.py
 ```
+
+On macOS or Linux, replace `py -3` with `python3`.
 
 The validator loads the generated files through FREDDY's production material
 parser and evaluates them with FREDDY's production Maxwell-Garnett function.

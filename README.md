@@ -31,10 +31,17 @@ py -m pip install -e .
 grim
 ```
 
+The integrated desktop distribution is intentionally run from this complete
+source tree (or an editable install), because the GHOST and FREDDY tabs include
+their tools, validation data, launchers, and workflows from `tools/`. A wheel
+containing only the GRIM Python modules is not the single-folder distribution.
+
 On Windows, `Launch_GRIM_GUI.bat` provides the same source-checkout launch and
 prints the installation command if the selected Python is missing a dependency.
 
-Standalone tool windows remain available:
+Standalone tool windows remain available. On Windows, use
+`tools\GHOST\Launch_GHOST_GUI.bat` or
+`tools\FREDDY\Launch_FREDDY_GUI.bat`. The equivalent direct commands are:
 
 ```powershell
 cd tools\GHOST
@@ -44,11 +51,13 @@ cd ..\FREDDY
 py impedance_gui.py
 ```
 
+On macOS, each tool folder contains a matching `.command` launcher.
+
 ## Primary workflows
 
 - Use **FREDDY** to analyze infinite planar material stacks or design a mixed
-  material. Its nominal three-column impedance CSV and five-column material
-  CSV are directly compatible with GHOST inputs.
+  material. Save either a nominal three-column IBC impedance CSV or a
+  five-column material CSV for use by GHOST.
 - Use **GHOST** to create and solve 2-D or axisymmetric BoR geometries. Solver
   `.grim` exports are loaded directly into GRIM.
 - Use **Assembly** to map point or line-feature dataset IDs to OPN-FRD GRIM
@@ -60,6 +69,11 @@ FREDDY does not calculate finite-object RCS or produce `.grim` datasets.
 Therefore its CSV outputs are not sent to GRIM's RCS dataset loader. Save an
 IBC or material CSV beside the applicable GHOST `.geo` file, then select it
 from the GHOST Geometry tab.
+
+GRIM embeds the authoritative FREDDY implementation from `tools/FREDDY`.
+`FREDDY_ROOT_PATH` is an optional development override for a different FREDDY
+root. GRIM prevents the application from closing while a FREDDY background
+calculation is running; those calculations are not cancellable mid-run.
 
 Preview visibility controls affect only the Assembly 3-D display. They never
 enable or disable a feature in the electromagnetic assembly.

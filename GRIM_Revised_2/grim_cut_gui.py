@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 from assembly_tree import MIME_BRANCH, MIME_DATASET
 from assembly_workspace import AssemblyWorkspace
 from feature_assembly_panel import FeatureAssemblyPanel
+from freddy_integration import FreddyIntegrationWidget
 from ghost_integration import GhostIntegrationWidget, load_ghost_module
 from grim_dataset import RcsGrid
 from grim_cut_dataset_mixin import DatasetOpsMixin
@@ -667,6 +668,12 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         # actionable unavailable message when its backend is not installed.
         self.ghost_integration = GhostIntegrationWidget(self)
         self.main_tabs.addTab(self.ghost_integration, "GHOST")
+
+        # FREDDY is a material/IBC design workspace, not an RCS dataset
+        # producer. Keep it as an independent top-level tool tab and do not
+        # connect its CSV outputs to GRIM's RCS dataset loader.
+        self.freddy_integration = FreddyIntegrationWidget(self)
+        self.main_tabs.addTab(self.freddy_integration, "FREDDY")
 
         try:
             feature_service = load_ghost_module(
@@ -1644,6 +1651,17 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             )
             self.main_tabs.setCurrentWidget(self.ghost_integration)
             self.ghost_integration.focus_solver()
+            event.ignore()
+            return
+        if self.freddy_integration.job_is_running():
+            QMessageBox.warning(
+                self,
+                "FREDDY Task Still Running",
+                "A FREDDY material or IBC task is still running. Wait for it "
+                "to finish before closing GRIM.",
+            )
+            self.main_tabs.setCurrentWidget(self.freddy_integration)
+            self.freddy_integration.focus_workspace()
             event.ignore()
             return
         super().closeEvent(event)
