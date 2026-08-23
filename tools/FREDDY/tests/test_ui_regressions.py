@@ -7,7 +7,7 @@ from unittest import mock
 from ibc.compute import MaterialTable, MixComponent
 
 try:
-    from ibc.ui import ImpedanceGui
+    from ibc.ui import DARK_THEME, LIGHT_THEME, ImpedanceGui
     from PySide6.QtGui import QCloseEvent
     from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -27,6 +27,64 @@ class MaterialMixUiTests(unittest.TestCase):
         signature = inspect.signature(ImpedanceGui.__init__)  # type: ignore[union-attr]
         parent = signature.parameters["parent"]
         self.assertIsNone(parent.default)
+
+    def test_themes_use_grim_blue_slate_contract(self) -> None:
+        expected_dark = {
+            "window_bg": "#0f172a",
+            "panel_bg": "#0b1222",
+            "head_bg": "#172554",
+            "text": "#dbeafe",
+            "field_bg": "#0b1222",
+            "button_active_bg": "#1d4ed8",
+            "selection_bg": "#2563eb",
+            "accent": "#3b82f6",
+            "preview_border": "#1e3a8a",
+            "plot_bg": "#0b1222",
+            "plot_axes_bg": "#0b1222",
+            "plot_text": "#dbeafe",
+            "plot_grid": "#475569",
+        }
+        for role, color in expected_dark.items():
+            self.assertEqual(DARK_THEME[role], color, role)
+
+        legacy_colors = {
+            "#661111",
+            "#273c1d",
+            "#16210f",
+            "#243a1c",
+            "#101a0a",
+            "#2f4a24",
+            "#a01e1e",
+        }
+        for theme in (LIGHT_THEME, DARK_THEME):
+            used = {
+                str(color).lower()
+                for value in theme.values()
+                for color in (value if isinstance(value, list) else [value])
+            }
+            self.assertTrue(used.isdisjoint(legacy_colors), used & legacy_colors)
+
+    def test_dark_theme_applies_to_widgets_and_plot_canvas(self) -> None:
+        from matplotlib.colors import to_hex
+
+        workspace = ImpedanceGui()
+        try:
+            self.assertEqual(workspace._colors, DARK_THEME)
+            qss = workspace.styleSheet().lower()
+            for color in ("#0f172a", "#0b1222", "#2563eb", "#3b82f6"):
+                self.assertIn(color, qss)
+            self.assertNotIn("#661111", qss)
+            self.assertNotIn("#273c1d", qss)
+            self.assertEqual(
+                to_hex(workspace.fig.get_facecolor()), DARK_THEME["plot_bg"]
+            )
+            self.assertEqual(
+                to_hex(workspace.ax_heatmap.get_facecolor()),
+                DARK_THEME["plot_axes_bg"],
+            )
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
 
     def test_workspace_exposes_background_job_close_contract(self) -> None:
         class WorkspaceState:

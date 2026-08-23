@@ -362,96 +362,96 @@ ABOUT_TEXT = (
     "slab in dB (accounts for both reflection and transmission)."
 )
 
-# --- Freddy Krueger palette ---------------------------------------------
-# Built around the user's two signature colors: dark green #273c1d (the
-# sweater green / surface base) and blood red #661111 (selection, borders,
-# accents), with bone-cream text and a red/green "sweater stripe" layer set.
-#
-# LIGHT_THEME = a grimy "daytime" variant on aged-paper backgrounds.
-# DARK_THEME  = the iconic nightmare look on near-black green backgrounds.
+# --- GRIM blue/slate palette --------------------------------------------
+# The dark theme shares GRIM's exact application chrome colors. The light
+# variant keeps the same blue identity for standalone users who prefer a
+# bright workspace. Plot traces use blue, amber, and violet so adjacent data
+# remains distinguishable without the former red/green theme.
 
 LIGHT_THEME = {
-    "window_bg": "#e7e3d4",
-    "panel_bg": "#e7e3d4",
-    "text": "#241a17",
-    "muted_text": "#5c5648",
-    "field_bg": "#f4f1e6",
-    "field_fg": "#1f1712",
-    "field_disabled_bg": "#d8d3c2",
-    "field_disabled_fg": "#8a8474",
-    "button_bg": "#d6d0bd",
-    "button_active_bg": "#c3bca5",
-    "selection_bg": "#661111",
-    "selection_fg": "#f4f1e6",
-    "accent": "#661111",
-    "preview_bg": "#efece0",
-    "preview_border": "#273c1d",
-    "preview_outline": "#4a4636",
-    "preview_text": "#3a3528",
-    "preview_empty": "#6c6553",
-    "preview_layer_text": "#1f1a12",
-    "preview_layer_border": "#efece0",
+    "window_bg": "#f1f5f9",
+    "panel_bg": "#e2e8f0",
+    "head_bg": "#dbeafe",
+    "text": "#0f172a",
+    "muted_text": "#475569",
+    "field_bg": "#f8fafc",
+    "field_fg": "#0f172a",
+    "field_disabled_bg": "#cbd5e1",
+    "field_disabled_fg": "#64748b",
+    "button_bg": "#e2e8f0",
+    "button_active_bg": "#bfdbfe",
+    "selection_bg": "#2563eb",
+    "selection_fg": "#ffffff",
+    "accent": "#1d4ed8",
+    "preview_bg": "#f8fafc",
+    "preview_border": "#3b82f6",
+    "preview_outline": "#64748b",
+    "preview_text": "#0f172a",
+    "preview_empty": "#64748b",
+    "preview_layer_text": "#eff6ff",
+    "preview_layer_border": "#f8fafc",
     "layer_colors": [
-        "#a83a2a",
-        "#5b7a3c",
-        "#c75a4a",
-        "#7d9a52",
-        "#8a2020",
-        "#3f5e2a",
-        "#d98c6a",
-        "#9bb56a",
+        "#1d4ed8",
+        "#0369a1",
+        "#4f46e5",
+        "#0e7490",
+        "#2563eb",
+        "#475569",
+        "#7c3aed",
+        "#0284c7",
     ],
-    "plot_bg": "#f4f1e6",
-    "plot_axes_bg": "#faf8ef",
-    "plot_text": "#241a17",
-    "plot_spine": "#5c5648",
-    "plot_grid": "#cfc9b5",
-    "plot_line_freq": "#8a1414",
-    "plot_line_angle": "#4d7c2f",
-    "plot_worst": "#b01e1e",
-    "plot_crosshair": "#241a17",
+    "plot_bg": "#f8fafc",
+    "plot_axes_bg": "#ffffff",
+    "plot_text": "#0f172a",
+    "plot_spine": "#64748b",
+    "plot_grid": "#cbd5e1",
+    "plot_line_freq": "#0369a1",
+    "plot_line_angle": "#6d28d9",
+    "plot_worst": "#b45309",
+    "plot_crosshair": "#0f172a",
 }
 
 DARK_THEME = {
-    "window_bg": "#16210f",
-    "panel_bg": "#243a1c",
-    "text": "#e7dfc8",
-    "muted_text": "#9aa384",
-    "field_bg": "#101a0a",
-    "field_fg": "#f1ead4",
-    "field_disabled_bg": "#1c2b13",
-    "field_disabled_fg": "#6f7558",
-    "button_bg": "#2f4a24",
-    "button_active_bg": "#661111",
-    "selection_bg": "#661111",
-    "selection_fg": "#f1ead4",
-    "accent": "#a01e1e",
-    "preview_bg": "#101a0a",
-    "preview_border": "#661111",
-    "preview_outline": "#a0a07a",
-    "preview_text": "#d7cfb4",
-    "preview_empty": "#8a8568",
-    "preview_layer_text": "#f5efdc",
-    "preview_layer_border": "#101a0a",
+    "window_bg": "#0f172a",
+    "panel_bg": "#0b1222",
+    "head_bg": "#172554",
+    "text": "#dbeafe",
+    "muted_text": "#94a3b8",
+    "field_bg": "#0b1222",
+    "field_fg": "#dbeafe",
+    "field_disabled_bg": "#172554",
+    "field_disabled_fg": "#64748b",
+    "button_bg": "#0b1222",
+    "button_active_bg": "#1d4ed8",
+    "selection_bg": "#2563eb",
+    "selection_fg": "#ffffff",
+    "accent": "#3b82f6",
+    "preview_bg": "#0b1222",
+    "preview_border": "#1e3a8a",
+    "preview_outline": "#64748b",
+    "preview_text": "#dbeafe",
+    "preview_empty": "#94a3b8",
+    "preview_layer_text": "#eff6ff",
+    "preview_layer_border": "#0b1222",
     "layer_colors": [
-        "#661111",
-        "#2f4a24",
-        "#8a2020",
-        "#3f5e2a",
-        "#4a0d0d",
-        "#1f3015",
-        "#a83a2a",
-        "#567a38",
+        "#1e3a8a",
+        "#1d4ed8",
+        "#172554",
+        "#2563eb",
+        "#1e40af",
+        "#3b82f6",
+        "#334155",
+        "#0284c7",
     ],
-    "plot_bg": "#101a0a",
-    "plot_axes_bg": "#16210f",
-    "plot_text": "#d7cfb4",
-    "plot_spine": "#8a8568",
-    "plot_grid": "#2f4022",
-    "plot_line_freq": "#c0392b",
-    "plot_line_angle": "#7fae4f",
-    "plot_worst": "#e23b2e",
-    "plot_crosshair": "#e7dfc8",
+    "plot_bg": "#0b1222",
+    "plot_axes_bg": "#0b1222",
+    "plot_text": "#dbeafe",
+    "plot_spine": "#1e3a8a",
+    "plot_grid": "#475569",
+    "plot_line_freq": "#38bdf8",
+    "plot_line_angle": "#a78bfa",
+    "plot_worst": "#fbbf24",
+    "plot_crosshair": "#dbeafe",
 }
 
 HEATMAP_METRIC_OPTIONS = [
@@ -2301,7 +2301,7 @@ class ImpedanceGui(QMainWindow):
             color: {colors['text']};
             padding: 5px 10px;
         }}
-        QTabBar::tab:selected {{ background: {colors['field_bg']}; color: {colors['field_fg']}; }}
+        QTabBar::tab:selected {{ background: {colors['head_bg']}; color: {colors['field_fg']}; }}
         QTabBar::tab:hover {{ background: {colors['button_active_bg']}; }}
         QProgressBar {{
             background-color: {colors['field_disabled_bg']};
@@ -3179,7 +3179,7 @@ class ImpedanceGui(QMainWindow):
             mid = (y + yn) * 0.5
 
             if layer.is_sheet:
-                pen = QPen(QColor(colors.get("accent", "#661111")))
+                pen = QPen(QColor(colors.get("accent", "#3b82f6")))
                 pen.setWidth(2)
                 pen.setStyle(Qt.CustomDashLine)
                 pen.setDashPattern([6, 3])

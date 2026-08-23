@@ -13,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 import freddy_integration
+from grim_cut_gui import BLUE_PALETTE
 
 
 class _FocusProbe(QWidget):
@@ -77,6 +78,22 @@ class FreddyIntegrationTest(unittest.TestCase):
                 sys.modules.pop("ibc", None)
             else:
                 sys.modules["ibc"] = previous
+
+    def test_bundled_dark_theme_matches_grim_application_palette(self) -> None:
+        theme = freddy_integration.load_freddy_ui_module().DARK_THEME
+        expected = {
+            "window_bg": BLUE_PALETTE["win_bg"],
+            "panel_bg": BLUE_PALETTE["panel_bg"],
+            "head_bg": BLUE_PALETTE["head_bg"],
+            "text": BLUE_PALETTE["text"],
+            "button_active_bg": BLUE_PALETTE["hover"],
+            "selection_bg": BLUE_PALETTE["checked_bg"],
+            "accent": BLUE_PALETTE["checked_border"],
+            "preview_border": BLUE_PALETTE["border"],
+            "plot_grid": BLUE_PALETTE["grid"],
+        }
+        for role, color in expected.items():
+            self.assertEqual(theme[role], color, role)
 
     def test_widget_embeds_workspace_and_delegates_busy_state_and_focus(self) -> None:
         with mock.patch.object(
