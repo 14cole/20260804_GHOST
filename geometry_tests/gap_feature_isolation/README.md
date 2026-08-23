@@ -10,7 +10,10 @@ The illuminated surface is flat and the remote surface is a symmetric,
 D-backed rounded contour. A cubic Bezier curve creates outward-rounded
 shoulders and a curved lower closure, avoiding the four artificial corners and
 long parallel back surface of the earlier rectangular coupon. The curve is
-written as 48 straight `.geo` primitives by default.
+written as straight `.geo` primitives whose maximum chord length is limited
+to 0.05 wavelength (lambda/20) by default. This geometric refinement is
+separate from the solver's panels-per-wavelength mesh refinement: subdividing
+a straight primitive does not remove a polygonal corner.
 
 The generator sizes that contour until every generated backing chord is at
 least the requested number of wavelengths from the groove walls and floor.
@@ -44,6 +47,16 @@ Use different clearance values with:
 python geometry_tests/gap_feature_isolation/generate_gap_geometry_study.py \
     --clearance-lambda 3.75 4.5 5.25
 ```
+
+Change the geometric chord limit with:
+
+```text
+python geometry_tests/gap_feature_isolation/generate_gap_geometry_study.py \
+    --max-backing-chord-lambda 0.025
+```
+
+For an explicit facet-convergence study, `--backing-segments 256` disables
+automatic chord sizing and uses that fixed even number of backing chords.
 
 The output organization is frequency first and then solver role:
 

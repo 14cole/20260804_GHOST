@@ -12,6 +12,7 @@ sys.path.insert(0, str(STUDY_DIR))
 
 from generate_gap_geometry_study import (  # noqa: E402
     C0_M_PER_S,
+    DEFAULT_MAX_BACKING_CHORD_LAMBDA,
     INCHES_PER_METER,
     _minimum_feature_clearance,
 )
@@ -28,6 +29,7 @@ def validate():
     _require(len(paths) == 90, f"expected 90 geometries, found {len(paths)}")
 
     pairs = {}
+    segment_counts = []
     for path in paths:
         frequency_ghz = float(path.parts[-4][:-3])
         role = path.parts[-3]
@@ -36,7 +38,7 @@ def validate():
             clearance_tag[1:-len("lambda")].replace("p", ".")
         )
 
-        _title, segments, ibcs, dielectrics = parse_geometry(
+        title, segments, ibcs, dielectrics = parse_geometry(
             path.read_text(encoding="ascii")
         )
         _require(len(segments) == 1, f"{path}: expected one segment")
@@ -48,7 +50,14 @@ def validate():
             zip(segment.x[0::2], segment.y[0::2]),
             zip(segment.x[1::2], segment.y[1::2]),
         ))
-        expected_edges = 51 if role == "FRD" else 53
+        metadata = dict(
+            token.split("=", 1)
+            for token in title.split()
+            if "=" in token
+        )
+        backing_segment_count = int(metadata["backing_segments"])
+        segment_counts.append(backing_segment_count)
+        expected_edges = backing_segment_count + (3 if role == "FRD" else 5)
         _require(
             len(edges) == expected_edges,
             f"{path}: expected {expected_edges} edges, found {len(edges)}",
@@ -71,7 +80,7 @@ def validate():
         )
         _require(twice_area < 0.0, f"{path}: expected clockwise winding")
 
-        backing_edges = edges[-48:]
+        backing_edges = edges[-backing_segment_count:]
         backing = [backing_edges[0][0]] + [
             end for _start, end in backing_edges
         ]
@@ -79,10 +88,20 @@ def validate():
             C0_M_PER_S / (frequency_ghz * 1.0e9) * INCHES_PER_METER
         )
         achieved_lambda = _minimum_feature_clearance(backing) / wavelength_in
+        maximum_chord_lambda = max(
+            ((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5
+            for start, end in backing_edges
+        ) / wavelength_in
         _require(
             achieved_lambda >= target_lambda * (1.0 - 2.0e-8),
             f"{path}: achieved {achieved_lambda:g} lambda, "
             f"expected at least {target_lambda:g}",
+        )
+        _require(
+            maximum_chord_lambda
+            <= DEFAULT_MAX_BACKING_CHORD_LAMBDA * (1.0 + 2.0e-8),
+            f"{path}: maximum backing chord is "
+            f"{maximum_chord_lambda:g} lambda",
         )
 
         key = (frequency_ghz, clearance_tag)
@@ -98,7 +117,9 @@ def validate():
 
     print(
         "Validated 90 geometries: 45 matched FRD/OPN pairs, closed "
-        "clockwise, 48 backing chords, requested clearance achieved."
+        "clockwise, requested clearance achieved, maximum backing chord "
+        f"<= {DEFAULT_MAX_BACKING_CHORD_LAMBDA:g} lambda "
+        f"({min(segment_counts)}--{max(segment_counts)} chords)."
     )
 
 

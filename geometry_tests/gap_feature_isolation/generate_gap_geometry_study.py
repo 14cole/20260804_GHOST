@@ -14,7 +14,8 @@ Override the electrical spacings explicitly when extending the study:
 The flat illuminated face transitions into a faceted cubic-Bezier backing.
 That D-backed contour has rounded, outward shoulders and no parallel flat back.
 The envelope is enlarged until every backing chord is at least the requested
-distance from the groove walls and floor.
+distance from the groove walls and floor. Its geometric facets are refined
+automatically to a maximum chord length of lambda/20 by default.
 """
 
 import argparse
@@ -30,7 +31,9 @@ DEFAULT_CLEARANCES_LAMBDA = (3.5, 4.25, 5.0)
 GAP_WIDTH_IN = 0.5
 GAP_DEPTH_IN = 1.0
 PANELS_PER_WAVELENGTH = 100
-DEFAULT_BACKING_SEGMENTS = 48
+MIN_BACKING_SEGMENTS = 48
+MAX_BACKING_SEGMENTS = 8192
+DEFAULT_MAX_BACKING_CHORD_LAMBDA = 0.05
 DEFAULT_OUTPUT_ROOT = Path(__file__).resolve().parent / "generated"
 
 # Cubic-Bezier shape controls. The binary clearance solve below, rather than
@@ -166,6 +169,63 @@ def _clearance_backing(clearance_in, segment_count):
     return backing, _minimum_feature_clearance(backing), upper
 
 
+def _maximum_chord_length(backing):
+    return max(
+        math.hypot(end[0] - start[0], end[1] - start[1])
+        for start, end in zip(backing[:-1], backing[1:])
+    )
+
+
+def _resolved_backing(
+    clearance_in,
+    wavelength_in,
+    max_chord_lambda,
+    fixed_segment_count=None,
+):
+    """Build a clearance-safe contour with wavelength-limited facets."""
+    if fixed_segment_count is not None:
+        backing, actual_clearance, envelope_scale = _clearance_backing(
+            clearance_in, fixed_segment_count
+        )
+        return (
+            backing,
+            actual_clearance,
+            envelope_scale,
+            fixed_segment_count,
+            _maximum_chord_length(backing),
+        )
+
+    target_chord = max_chord_lambda * wavelength_in
+    segment_count = MIN_BACKING_SEGMENTS
+    for _ in range(20):
+        backing, actual_clearance, envelope_scale = _clearance_backing(
+            clearance_in, segment_count
+        )
+        maximum_chord = _maximum_chord_length(backing)
+        if maximum_chord <= target_chord * (1.0 + 1.0e-12):
+            return (
+                backing,
+                actual_clearance,
+                envelope_scale,
+                segment_count,
+                maximum_chord,
+            )
+
+        estimated = int(math.ceil(
+            segment_count * maximum_chord / target_chord * 1.01
+        ))
+        segment_count = max(segment_count + 2, estimated)
+        if segment_count % 2:
+            segment_count += 1
+        if segment_count > MAX_BACKING_SEGMENTS:
+            raise RuntimeError(
+                "automatic backing refinement exceeded "
+                f"{MAX_BACKING_SEGMENTS} segments"
+            )
+
+    raise RuntimeError("automatic backing refinement did not converge")
+
+
 def _geo_text(
     role,
     frequency_ghz,
@@ -174,6 +234,8 @@ def _geo_text(
     backing,
     actual_clearance_in,
     envelope_scale,
+    backing_segments,
+    maximum_chord_in,
 ):
     half_gap = 0.5 * GAP_WIDTH_IN
     top_half_width = backing[0][0]
@@ -198,12 +260,15 @@ def _geo_text(
         raise ValueError("role must be FRD or OPN")
 
     actual_clearance_lambda = actual_clearance_in / wavelength_in
+    maximum_chord_lambda = maximum_chord_in / wavelength_in
     lines = [
         (
             f"Title: gap_{frequency_ghz:.3f}GHz_{role} units=inches "
             f"backing=rounded_bezier "
             f"target_clearance={clearance_lambda:g}lambda "
             f"actual_min_clearance={actual_clearance_lambda:.8g}lambda "
+            f"backing_segments={backing_segments} "
+            f"max_backing_chord={maximum_chord_lambda:.8g}lambda "
             f"envelope_scale={envelope_scale:.8g}"
         ),
         f"Segment: gap_coupon_{role.lower()} 2",
@@ -251,8 +316,17 @@ def _parse_args():
     parser.add_argument(
         "--backing-segments",
         type=int,
-        default=DEFAULT_BACKING_SEGMENTS,
-        help="even number of chords on the rounded backing (default: 48)",
+        default=None,
+        help=(
+            "fixed even number of backing chords; overrides automatic "
+            "wavelength-based refinement"
+        ),
+    )
+    parser.add_argument(
+        "--max-backing-chord-lambda",
+        type=float,
+        default=DEFAULT_MAX_BACKING_CHORD_LAMBDA,
+        help="maximum backing chord in wavelengths (default: 0.05)",
     )
     parser.add_argument(
         "--output-root",
@@ -271,8 +345,15 @@ def main():
     )
     if GAP_WIDTH_IN <= 0.0 or GAP_DEPTH_IN <= 0.0:
         raise ValueError("GAP_WIDTH_IN and GAP_DEPTH_IN must be positive")
-    if args.backing_segments < 8 or args.backing_segments % 2:
+    if args.backing_segments is not None and (
+        args.backing_segments < 8 or args.backing_segments % 2
+    ):
         raise ValueError("backing-segments must be an even integer >= 8")
+    if (
+        not math.isfinite(args.max_backing_chord_lambda)
+        or args.max_backing_chord_lambda <= 0.0
+    ):
+        raise ValueError("max-backing-chord-lambda must be finite and positive")
     if PANELS_PER_WAVELENGTH < 1:
         raise ValueError("PANELS_PER_WAVELENGTH must be positive")
 
@@ -285,8 +366,17 @@ def main():
         frequency_dir = output_root / f"{frequency_ghz:06.3f}GHz"
         for clearance_lambda in clearances_lambda:
             clearance_in = clearance_lambda * wavelength_in
-            backing, actual_clearance_in, envelope_scale = _clearance_backing(
-                clearance_in, args.backing_segments
+            (
+                backing,
+                actual_clearance_in,
+                envelope_scale,
+                backing_segments,
+                maximum_chord_in,
+            ) = _resolved_backing(
+                clearance_in,
+                wavelength_in,
+                args.max_backing_chord_lambda,
+                fixed_segment_count=args.backing_segments,
             )
             tag = _clearance_tag(clearance_lambda)
             for role in ("FRD", "OPN"):
@@ -304,6 +394,8 @@ def main():
                         backing,
                         actual_clearance_in,
                         envelope_scale,
+                        backing_segments,
+                        maximum_chord_in,
                     ),
                     encoding="ascii",
                 )
@@ -312,6 +404,8 @@ def main():
                 f"{frequency_ghz:6.3f} GHz, {clearance_lambda:g} lambda: "
                 f"lambda={wavelength_in:.6g} in, "
                 f"minimum clearance={actual_clearance_in:.6g} in, "
+                f"backing segments={backing_segments}, "
+                f"max chord={maximum_chord_in / wavelength_in:.6g} lambda, "
                 f"envelope scale={envelope_scale:.6g}"
             )
 
