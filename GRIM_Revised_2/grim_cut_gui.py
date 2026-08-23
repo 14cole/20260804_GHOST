@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -39,7 +40,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from assembly_tree import AssemblyTreePanel, MIME_BRANCH, MIME_DATASET
+from assembly_tree import MIME_BRANCH, MIME_DATASET
+from assembly_workspace import AssemblyWorkspace
+from feature_assembly_panel import FeatureAssemblyPanel
+from ghost_integration import GhostIntegrationWidget, load_ghost_module
 from grim_dataset import RcsGrid
 from grim_cut_dataset_mixin import DatasetOpsMixin
 from grim_cut_plot_mixin import PlotOpsMixin
@@ -154,7 +158,7 @@ def build_qss(palette: dict[str, str]) -> str:
     QListWidget::item:selected {{
         background: {palette['checked_bg']}; color: white; border-bottom: 1px solid {palette['grid']};
     }}
-    QToolButton, QDoubleSpinBox, QCheckBox, QLineEdit, QComboBox {{
+    QToolButton, QPushButton, QDoubleSpinBox, QCheckBox, QLineEdit, QComboBox {{
         background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']};
         border-radius: 6px; padding: 6px;
     }}
@@ -168,7 +172,8 @@ def build_qss(palette: dict[str, str]) -> str:
         background: {palette['checked_bg']};
         border-color: {palette['checked_border']};
     }}
-    QToolButton:hover {{ border-color: {palette['hover']}; }}
+    QToolButton:hover, QPushButton:hover {{ border-color: {palette['hover']}; }}
+    QPushButton:disabled {{ color: {palette['grid']}; border-color: {palette['grid']}; }}
     QToolButton:checked {{ background: {palette['checked_bg']}; color: white; border-color: {palette['checked_border']}; }}
     QComboBox QAbstractItemView {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; }}
     QTableWidget::item:selected {{ background: {palette['checked_bg']}; color: white; }}
@@ -177,6 +182,8 @@ def build_qss(palette: dict[str, str]) -> str:
         border-radius: 4px; padding: 2px 6px; font-family: "Consolas","Courier New",monospace; font-size: 11px;
     }}
     QScrollArea#controlDock {{ background: {palette['win_bg']}; border: none; }}
+    QScrollArea#featureAssemblyScroll {{ background: {palette['panel_bg']}; border: none; }}
+    QWidget#featureAssemblyContent {{ background: {palette['panel_bg']}; }}
     QWidget#dockBody {{ background: {palette['win_bg']}; }}
     QToolButton#sectionHeader {{
         background: {palette['head_bg']}; color: {palette['text']};
@@ -645,6 +652,32 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.main_tabs.addTab(self.tab_isar, "ISAR")
         self._tab_key_for_index[self.main_tabs.count() - 1] = "isar"
 
+        # One canonical Assembly workspace replaces the two independent,
+        # hidden trees that used to live inside the Plotting and ISAR views.
+        self.assembly_workspace = AssemblyWorkspace(self)
+        self.feature_assembly_panel = FeatureAssemblyPanel(
+            self.assembly_workspace
+        )
+        self.assembly_workspace.set_feature_controls(
+            self.feature_assembly_panel
+        )
+        self.main_tabs.addTab(self.assembly_workspace, "Assembly")
+
+        # GHOST remains optional at runtime. The integration widget shows an
+        # actionable unavailable message when its backend is not installed.
+        self.ghost_integration = GhostIntegrationWidget(self)
+        self.main_tabs.addTab(self.ghost_integration, "GHOST")
+
+        try:
+            feature_service = load_ghost_module(
+                "feature_workflow", self.ghost_integration.backend_path
+            )
+            self.feature_assembly_panel.set_service(feature_service)
+        except Exception as exc:
+            self.assembly_workspace.lbl_status.setText(
+                "Feature assembly backend is unavailable: " + str(exc)
+            )
+
         self.status = self.statusBar()
         self.status.showMessage("Ready")
 
@@ -663,9 +696,29 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.table.files_dropped.connect(self._handle_files_dropped)
         self.table.assembly_branch_dropped.connect(self._on_assembly_branch_dropped)
         self.table.rows_reordered.connect(self._on_dataset_rows_reordered)
-        for context in self._plot_contexts.values():
-            context.assembly_tree_panel.files_to_load.connect(self._handle_files_dropped)
-            context.assembly_tree_panel.platform_built.connect(self._on_platform_built)
+        self.assembly_workspace.files_to_load.connect(self._handle_files_dropped)
+        self.assembly_workspace.platform_built.connect(self._on_platform_built)
+        self.assembly_workspace.feature_built.connect(
+            self._on_assembly_feature_built
+        )
+        self.assembly_workspace.feature_build_failed.connect(
+            self.status.showMessage
+        )
+        self.feature_assembly_panel.preview_ready.connect(
+            self._on_feature_preview_ready
+        )
+        self.feature_assembly_panel.feature_built.connect(
+            self._on_feature_file_built
+        )
+        self.feature_assembly_panel.build_failed.connect(
+            self.status.showMessage
+        )
+        self.feature_assembly_panel.status_changed.connect(
+            self.status.showMessage
+        )
+        self.ghost_integration.files_exported.connect(
+            self._on_ghost_files_exported
+        )
         self.table.itemSelectionChanged.connect(self._on_dataset_selection_changed)
         self.table.customContextMenuRequested.connect(self._on_dataset_context_menu)
         self.table.horizontalHeader().sectionDoubleClicked.connect(self._on_dataset_header_double_clicked)
@@ -770,7 +823,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             sc.setContext(Qt.ApplicationShortcut)
             sc.activated.connect(slot)
         for tab_key, context in self._plot_contexts.items():
-            context.btn_assembly_tree.toggled.connect(context.assembly_tree_panel.setVisible)
             context.btn_dataset_ops.toggled.connect(self._toggle_dataset_ops)
             context.btn_settings.toggled.connect(context.settings_frame.setVisible)
             context.btn_export_plot.clicked.connect(self._export_plot)
@@ -873,14 +925,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         plot_title.setObjectName("plotTitle")
         topbar.addWidget(plot_title)
         topbar.addStretch(1)
-        btn_assembly_tree = QToolButton(text="Assembly Tree")
-        btn_assembly_tree.setCheckable(True)
         btn_dataset_ops = QToolButton(text="Dataset Operations")
         btn_dataset_ops.setCheckable(True)
         btn_export_plot = QToolButton(text="Export Plot")
         btn_settings = QToolButton(text="Plot Settings")
         btn_settings.setCheckable(True)
-        topbar.addWidget(btn_assembly_tree)
         topbar.addWidget(btn_dataset_ops)
         topbar.addWidget(btn_export_plot)
         topbar.addWidget(btn_settings)
@@ -1287,26 +1336,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             plot_ops_bar_layout.addLayout(bar_row)
         self._plot_controls_by_tab[tab_key] = plot_controls
 
-        assembly_tree_panel = AssemblyTreePanel()
-        assembly_tree_panel.setVisible(False)
-
-        inner_split = QSplitter(Qt.Horizontal)
-        inner_split.addWidget(assembly_tree_panel)
-        inner_split.addWidget(plot_frame)
-        inner_split.setStretchFactor(0, 0)
-        inner_split.setStretchFactor(1, 1)
-        inner_split.setSizes([240, 9999])
-        left_layout.addWidget(inner_split, 1)
+        left_layout.addWidget(plot_frame, 1)
         # Toolbar sits just below the Display header (index 0), above the plot.
         left_layout.insertWidget(1, plot_ops_bar)
 
         return PlotContext(
             btn_export_plot=btn_export_plot,
-            btn_assembly_tree=btn_assembly_tree,
             btn_dataset_ops=btn_dataset_ops,
             btn_settings=btn_settings,
             settings_frame=settings_frame,
-            assembly_tree_panel=assembly_tree_panel,
             spin_plot_xmin=spin_plot_xmin,
             spin_plot_xmax=spin_plot_xmax,
             spin_plot_xstep=spin_plot_xstep,
@@ -1459,15 +1497,14 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         """
         from assembly_tree import build_assembly_grid
 
-        branch_item = None
-        for context in self._plot_contexts.values():
-            tree = getattr(context.assembly_tree_panel, "tree", None)
-            if tree is None:
-                continue
-            candidate = getattr(tree, "_branch_drag_item", None)
-            if candidate is not None and candidate.text(0) == branch_name:
-                branch_item = candidate
-                break
+        panel = getattr(self.assembly_workspace, "assembly_tree_panel", None)
+        tree = getattr(panel, "tree", None)
+        candidate = getattr(tree, "_branch_drag_item", None)
+        branch_item = (
+            candidate
+            if candidate is not None and candidate.text(0) == branch_name
+            else None
+        )
 
         if branch_item is not None:
             try:
@@ -1516,6 +1553,100 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             return
         self._add_dataset_row(grid, name, history or f"Σ {name}", file_name="")
         self.status.showMessage(f"Built platform: {name}")
+
+    def _on_assembly_feature_built(
+        self, name: str, payload, history: str
+    ) -> None:
+        """Publish a completed feature result into GRIM's dataset workflow."""
+        if isinstance(payload, RcsGrid):
+            self._add_dataset_row(
+                payload,
+                name,
+                history or f"Feature assembly: {name}",
+                file_name="",
+            )
+            self.status.showMessage(f"Feature assembly added: {name}")
+            return
+
+        paths: list[str] = []
+        if isinstance(payload, (str, os.PathLike)):
+            paths = [os.fspath(payload)]
+        elif isinstance(payload, (list, tuple)) and all(
+            isinstance(value, (str, os.PathLike)) for value in payload
+        ):
+            paths = [os.fspath(value) for value in payload]
+        elif isinstance(payload, dict):
+            path_value = payload.get("output_path", payload.get("path"))
+            if isinstance(path_value, (str, os.PathLike)):
+                paths = [os.fspath(path_value)]
+
+        if paths:
+            self._handle_files_dropped(paths)
+            return
+        self.status.showMessage(
+            "Feature build completed, but returned neither an RcsGrid nor "
+            "a dataset path."
+        )
+
+    def _on_feature_preview_ready(self, plan) -> None:
+        """Render only the backend's already-validated CAD-metre geometry."""
+        try:
+            self.assembly_workspace.load_feature_preview(plan)
+        except Exception as exc:
+            self.status.showMessage(f"Feature preview failed: {exc}")
+
+    def _on_feature_file_built(self, path: str) -> None:
+        """Publish a saved feature result through the normal GRIM loader."""
+        output = os.fspath(path)
+        name = os.path.splitext(os.path.basename(output))[0]
+        self.assembly_workspace.publish_feature_build(
+            name,
+            output,
+            "Coherently assembled placed features",
+        )
+
+    def _on_ghost_files_exported(self, paths: list, solver_kind: str) -> None:
+        """Load GHOST exports through the same path as user-dropped datasets."""
+        exported = [
+            os.fspath(path)
+            for path in paths
+            if isinstance(path, (str, os.PathLike))
+        ]
+        if not exported:
+            self.status.showMessage("GHOST export did not contain a dataset path.")
+            return
+        self.status.showMessage(
+            f"Loading {len(exported)} GHOST {str(solver_kind).upper()} export(s)…"
+        )
+        self._handle_files_dropped(exported)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        """Keep the unified app alive while background physics work runs."""
+        feature_busy = bool(
+            getattr(self.feature_assembly_panel, "job_is_running", lambda: False)()
+        )
+        if feature_busy:
+            QMessageBox.warning(
+                self,
+                "Feature Assembly Still Running",
+                "Feature validation or assembly is still running. Wait for it "
+                "to finish before closing GRIM.",
+            )
+            self.main_tabs.setCurrentWidget(self.assembly_workspace)
+            event.ignore()
+            return
+        if self.ghost_integration.solve_is_running():
+            QMessageBox.warning(
+                self,
+                "Solver Still Running",
+                "A GHOST solve is still running. Click Cancel in the GHOST "
+                "Solver tab, wait for cancellation to finish, and then close GRIM.",
+            )
+            self.main_tabs.setCurrentWidget(self.ghost_integration)
+            self.ghost_integration.focus_solver()
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 def main() -> int:

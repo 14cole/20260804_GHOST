@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QToolButton,
-    QWidget,
 )
 
 
@@ -20,11 +19,9 @@ from PySide6.QtWidgets import (
 @dataclass
 class PlotContext:
     btn_export_plot: QToolButton
-    btn_assembly_tree: QToolButton
     btn_dataset_ops: QToolButton
     btn_settings: QToolButton
     settings_frame: QFrame
-    assembly_tree_panel: QWidget
     spin_plot_xmin: QDoubleSpinBox
     spin_plot_xmax: QDoubleSpinBox
     spin_plot_xstep: QDoubleSpinBox

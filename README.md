@@ -10,6 +10,52 @@ python -m pip install -e .
 grim
 ```
 
+The unified desktop window is organized as **Plotting | ISAR | Assembly |
+GHOST**. Plotting and ISAR share the loaded-dataset table. Assembly owns the
+one canonical Assembly tree and its 3-D preview; there are no separate hidden
+trees in the plot tabs. GHOST embeds the existing 2-D Geometry and Solver tabs
+in the same application. It still calls the same GHOST numerical backend as
+the standalone solver, and a solver export is automatically loaded into
+GRIM's dataset table.
+
+## Assembly and feature placement
+
+Use the **Assembly** tab for point scatterers and line-expanded features:
+
+1. Choose the clean base monostatic `.grim`.
+2. For an external 3-D body, choose its matching STL or indexed ASCII
+   `.facet` surface and declare its units. A self-contained GHOST BoR result
+   may instead preview its embedded revolved profile. A triangle surface is
+   still required if geometric shadowing is enabled.
+3. Choose the exact point-placement and/or line-placement CSV. The form reads
+   each CSV's `dataset_id` values and creates the required dataset mappings;
+   select the corresponding OPN-FRD `.grim` for every ID.
+4. Click **Validate & Preview**. The 3-D view uses the vehicle CAD frame:
+   `+x` right, `+y` nose, and `+z` up.
+5. Inspect the body, point groups, and line groups, then click
+   **Assemble & Save** to write and load the combined result.
+
+The tree's per-node **Show** boxes and global **Show All** box control only the
+3-D preview. They never include or exclude a response from the mathematical
+assembly and never alter feature-placement physics. Likewise, a display mesh
+or decimated preview is not substituted for the full surface used for skin,
+normal, or shadowing checks.
+
+Point patterns must be coherent OPN-FRD (`featured - clean`) 3-D deltas with
+VV, HH, and reciprocal VH/HV response. Line patterns must be coherent OPN-FRD
+2-D deltas containing both TE and TM. Shadowing is a geometric ray-blockage
+mask; it does not add diffraction, creeping waves, or body-feature multiple
+scattering.
+
+Do not place a raw 2-D solver result under a coherent-sum Assembly branch as
+though it were an already positioned 3-D field. Its `sigma_2d` response has to
+be expanded along the line CSV before it can contribute to a `sigma_3d` body.
+The file may be loaded into GRIM for inspection and organized as a response
+dataset, while the feature form supplies its placement semantics. The ordinary
+coherent/incoherent Assembly branches remain for commensurate response
+datasets that already share the required physical quantity, axes, units, and
+phase convention.
+
 The Qt-free command-line tool can join or add explicit files:
 
 ```bash

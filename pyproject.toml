@@ -28,11 +28,14 @@ ppt-image-imprinter = "ppt_image_imprinter:main"
 package-dir = {"" = "GRIM_Revised_2"}
 py-modules = [
   "assembly_tree",
+  "assembly_workspace",
+  "feature_assembly_panel",
   "grim_cut_dataset_mixin",
   "grim_cut_gui",
   "grim_cut_plot_mixin",
   "grim_dataset",
   "grim_headless",
+  "ghost_integration",
   "ppt_image_imprinter",
   "plot_models",
   "read_ss",
