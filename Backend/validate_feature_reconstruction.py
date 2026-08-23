@@ -36,9 +36,9 @@ REFERENCE_PAIRS = [
 # They remain included in normalized complex-field error.
 ACTIVE_FIELD_FLOOR_DB = -40.0
 
-# Initial reduced-order-model release gates. Projects may tighten these after
-# establishing a validated reference family. The line model's existing ring
-# benchmark supports the 3.5 dB / 25 degree starting envelope.
+# Initial engineering release gates only. No supporting calibration fixture is
+# shipped; projects must justify or tighten them with their own independent
+# reference family before releasing a feature library.
 MAX_NORMALIZED_COMPLEX_RMS = 0.25
 MAX_MAGNITUDE_ERROR_P95_DB = 3.5
 MAX_PHASE_ERROR_RMS_DEG = 25.0

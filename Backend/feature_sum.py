@@ -7,8 +7,9 @@ Pipeline the user drives:
   1.  Solve a 2D CROSS-SECTION of the joint twice with rcs_solver: the CLEAN
       background and the FEATURED one (same mesh, same units, same pols),
       export each to .grim.
-  2.  ``make_delta_grim(clean, featured, "seam.grim")`` -- coherently subtracts
-      the complex amplitudes into a reusable, VEHICLE-INDEPENDENT delta .grim.
+  2.  Run ``1c_build_deltas/subtract_datasets.py``. The strict CEM operation
+      pairs canonical OPN/FRD cases, joins compatible axes, and subtracts the
+      preserved float64 complex amplitudes into a reusable delta GRIM.
   3.  For each place the joint appears on a vehicle, supply its perimeter file
       (segmented ``x1 y1 z1 x2 y2 z2`` in the vehicle frame) and hand a list of
       placements to ``sum_features`` together with the vehicle's BoR result.
@@ -21,9 +22,10 @@ is consistent without a hand-applied range correction. Physical reuse still
 requires the same feature cross-section, clean local material/coating stack,
 frequency, units, phase origin, polarization convention, and sufficiently
 similar local curvature; body-feature coupling remains omitted. The remaining
-inter-solver constants are local-TE and local-TM phase factors
-(line_expand.PSI_VV_DEG / PSI_HH_DEG), measured jointly by the ring gate and
-applied before their polarization projections are added.
+inter-solver constants are legacy local-TE and local-TM phase factors
+(line_expand.PSI_VV_DEG / PSI_HH_DEG). Their original calibration fixture is
+not shipped, so each feature family must be checked against an independent BoR
+or full-3D reference before release.
 
 Conventions the delta MUST honour (all satisfied automatically if the coupon is
 drawn per the guide below):
@@ -37,11 +39,10 @@ drawn per the guide below):
   * The CLEAN coupon must equal the body the BoR solves (bare PEC ground plane,
     or a MAGRAM-coated one) so the subtraction cancels everything but the joint.
 
-The canonical PEC-groove benchmark supports broadside +/-
-VALIDITY_HALF_ANGLE_DEG of the LOCAL edge under its measured error limits.
-A smooth closed perimeter often concentrates its asymptotic contribution near
-``d.t_hat == 0``, but that does not itself guarantee near-normal cut incidence
-or bound corner/end/junction contributions.
+No universal grazing-angle validity gate is currently enforced. A smooth
+closed perimeter often concentrates its asymptotic contribution near
+``d.t_hat == 0``, but that does not guarantee near-normal cut incidence or
+bound corner/end/junction contributions.
 """
 
 import json
@@ -519,7 +520,12 @@ def _amp_tables(grims: 'Sequence[Dict[str, Any]]') -> 'Dict[str, Any]':
 
 def make_delta_grim(clean: 'PathOrList', featured: 'PathOrList', out_path: 'str',
                     history: 'str' = "") -> 'str':
-    """Coherently subtract featured - clean 2D amplitudes -> a delta .grim.
+    """Compatibility API for coherently subtracting featured - clean fields.
+
+    New production workflows use ``1c_build_deltas/subtract_datasets.py`` so
+    canonical OPN/FRD pairing and automatic axis joining cannot be bypassed.
+    This lower-level function remains for existing library callers and focused
+    tests that already supply an explicitly matched pair.
 
     ``clean`` / ``featured`` are each a single .grim or a list of them (e.g. one
     per polarization).  Matching pols on a shared (angle, frequency) grid are
@@ -891,6 +897,125 @@ def surface_of_revolution_distance(generatrix: 'np.ndarray',
                           axis=1))
 
 
+def bodies_from_bor_solver_result(
+    result: 'Dict[str, Any]',
+) -> 'Dict[float, Dict[str, np.ndarray]]':
+    """Convert one co-solved BoR result into the reusable body-model form."""
+
+    channels = result.get("co_solved_samples")
+    if not isinstance(channels, dict) or set(channels) != {"VV", "HH"}:
+        raise ValueError(
+            "BoR result must contain exactly the co-solved VV and HH fields."
+        )
+    grouped = {}  # type: Dict[str, Dict[float, List[Dict[str, Any]]]]
+    for polarization in ("VV", "HH"):
+        by_frequency = {}  # type: Dict[float, List[Dict[str, Any]]]
+        for row in list(channels[polarization] or []):
+            frequency = float(row.get("frequency_ghz", math.nan))
+            angle = float(row.get("theta_inc_deg", math.nan))
+            real = float(row.get("rcs_amp_real", math.nan))
+            imag = float(row.get("rcs_amp_imag", math.nan))
+            if not all(math.isfinite(value) for value in (
+                frequency, angle, real, imag
+            )) or frequency <= 0.0:
+                raise ValueError(
+                    f"BoR {polarization} samples must have finite frequency, "
+                    "aspect, and complex amplitude."
+                )
+            by_frequency.setdefault(frequency, []).append(row)
+        if not by_frequency:
+            raise ValueError(f"BoR result has no {polarization} samples.")
+        grouped[polarization] = by_frequency
+    if set(grouped["VV"]) != set(grouped["HH"]):
+        raise ValueError("Co-solved BoR VV/HH frequency axes differ.")
+
+    bodies = {}
+    for frequency in sorted(grouped["VV"]):
+        rows_by_channel = {}
+        for polarization in ("VV", "HH"):
+            rows = sorted(
+                grouped[polarization][frequency],
+                key=lambda row: float(row["theta_inc_deg"]),
+            )
+            aspects = np.asarray([
+                float(row["theta_inc_deg"]) for row in rows
+            ], dtype=float)
+            if len(aspects) != len(np.unique(aspects)):
+                raise ValueError(
+                    f"BoR {polarization} has duplicate aspect samples at "
+                    f"{frequency:g} GHz."
+                )
+            amplitudes = np.asarray([
+                complex(row["rcs_amp_real"], row["rcs_amp_imag"])
+                for row in rows
+            ], dtype=np.complex128)
+            rows_by_channel[polarization] = (aspects, amplitudes)
+        vv_aspects, vv_amplitude = rows_by_channel["VV"]
+        hh_aspects, hh_amplitude = rows_by_channel["HH"]
+        if not np.array_equal(vv_aspects, hh_aspects):
+            raise ValueError(
+                f"Co-solved BoR VV/HH aspect axes differ at {frequency:g} GHz."
+            )
+        bodies[frequency] = {
+            "theta_deg": vv_aspects,
+            "amp_vv": vv_amplitude,
+            "amp_hh": hh_amplitude,
+        }
+    return bodies
+
+
+def bor_solver_diagnostics_by_frequency(
+    result: 'Dict[str, Any]',
+) -> 'Dict[float, Dict[str, Any]]':
+    """Normalize one dual-channel BoR audit into body-file frequency records.
+
+    A certified multi-frequency BoR solve has one aggregate mesh gate.  Each
+    frequency record retains that gate and explicitly records its full
+    frequency scope; the bulky per-frequency telemetry list is reduced to the
+    matching frequency instead of being duplicated in every record.
+    """
+
+    frequencies = sorted(bodies_from_bor_solver_result(result))
+    if result.get("polarizations") != ["VV", "HH"] or result.get(
+        "polarization_mapping"
+    ) != {"VV": "VV", "HH": "HH"}:
+        raise ValueError(
+            "BoR diagnostics require the canonical co-solved VV/HH contract."
+        )
+    metadata = dict(result.get("metadata", {}) or {})
+    telemetry = metadata.get("per_frequency")
+    diagnostics = {}
+    for frequency in frequencies:
+        scoped = dict(metadata)
+        if isinstance(telemetry, list):
+            scoped["per_frequency"] = [
+                dict(row) for row in telemetry
+                if isinstance(row, dict)
+                and math.isclose(
+                    float(row.get("frequency_ghz", math.nan)),
+                    frequency,
+                    rel_tol=0.0,
+                    abs_tol=1.0e-12,
+                )
+            ]
+        if isinstance(scoped.get("mesh_convergence"), dict):
+            scoped["mesh_convergence_scope_ghz"] = frequencies
+        diagnostics[frequency] = {
+            "solver": str(result.get("solver", "")),
+            "scattering_mode": str(result.get("scattering_mode", "")),
+            "polarizations": ["VV", "HH"],
+            "polarization_mapping": {"VV": "VV", "HH": "HH"},
+            "certification_frequency_scope": (
+                "single_frequency_unit"
+                if len(frequencies) == 1
+                else "joint_requested_frequency_grid"
+            ),
+            "certification_frequency_scope_ghz": frequencies,
+            "metadata": scoped,
+        }
+    return diagnostics
+
+
 def solve_vehicle_body(geometry, frequencies_ghz, aspects_deg,
                        geometry_units: 'str' = "meters", cfie_alpha: 'float' = 0.5,
                        workers: 'int' = 4, material_base_dir=None,
@@ -928,48 +1053,16 @@ def solve_vehicle_body(geometry, frequencies_ghz, aspects_deg,
               material_base_dir=material_base_dir, expand_to_360=False)
     for f in frequencies_ghz:
         result = solve_monostatic_rcs_bor(
-            snap, [float(f)], aspects, "VV", **kw
+            snap, [float(f)], aspects, **kw
         )
-        co_solved = result.get("co_solved_samples")
-        if (
-            not isinstance(co_solved, dict)
-            or set(co_solved) != {"VV", "HH"}
-        ):
+        solved_bodies = bodies_from_bor_solver_result(result)
+        if set(solved_bodies) != {float(f)}:
             raise RuntimeError(
-                "BoR dispatcher did not return its co-solved VV/HH fields; "
-                "refusing to repeat or combine mismatched body solves."
-            )
-        sv = sorted(
-            co_solved["VV"], key=lambda sample: sample["theta_inc_deg"]
+                "Single-frequency BoR solve returned an unexpected frequency "
+                "axis."
         )
-        sh = sorted(
-            co_solved["HH"], key=lambda sample: sample["theta_inc_deg"]
-        )
-        if [row["theta_inc_deg"] for row in sv] != [
-            row["theta_inc_deg"] for row in sh
-        ]:
-            raise RuntimeError(
-                "Co-solved BoR VV/HH aspect grids differ."
-            )
-        hh = {
-            round(sample["theta_inc_deg"], 6):
-                complex(
-                    sample["rcs_amp_real"],
-                    sample["rcs_amp_imag"],
-                )
-            for sample in sh
-        }
-        th = [s["theta_inc_deg"] for s in sv]
-        bodies[float(f)] = {
-            "theta_deg": th,
-            "amp_vv": [complex(s["rcs_amp_real"], s["rcs_amp_imag"]) for s in sv],
-            "amp_hh": [hh[round(t, 6)] for t in th]}
-        diagnostics[float(f)] = {
-            "solver": result.get("solver", ""),
-            "scattering_mode": result.get("scattering_mode", ""),
-            "co_solved_polarizations": ["VV", "HH"],
-            "metadata": dict(result.get("metadata", {}) or {}),
-        }
+        bodies.update(solved_bodies)
+        diagnostics.update(bor_solver_diagnostics_by_frequency(result))
     if return_diagnostics:
         return bodies, gen, diagnostics
     return bodies, gen
@@ -1002,15 +1095,16 @@ def verify_body_artifact_bundle(body_grim: 'str') -> 'Dict[str, Any]':
     }
 
 
-def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
-    """Explicitly audit that a body used the refined-mesh path.
-
-    This opt-in audit helper is retained for users who want to enforce that
-    policy themselves.  Normal loading and downstream feature operations do
-    not call it.
-    """
+def load_body_solver_diagnostics(path: 'str') -> 'Dict[str, Any]':
+    """Read the canonical per-frequency solver audit from a body artifact."""
 
     label = str(path)
+    try:
+        body = load_body_grim(label)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{label}: not a valid BoR body artifact."
+        ) from exc
     try:
         with np.load(label, allow_pickle=False) as payload:
             frequencies = [
@@ -1024,13 +1118,26 @@ def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
             ).reshape(()).item()
     except KeyError as exc:
         raise ValueError(
-            f"{label}: body has no production mesh certification; rerun "
-            "step 2a/2b with the current solver."
+            f"{label}: body has no solver diagnostics; rerun the body with "
+            "the current solver."
         ) from exc
     except (OSError, TypeError, ValueError) as exc:
         raise ValueError(
-            f"{label}: body mesh certification cannot be read."
+            f"{label}: body solver diagnostics cannot be read."
         ) from exc
+    if (
+        not frequencies
+        or any(
+            not math.isfinite(frequency) or frequency <= 0.0
+            for frequency in frequencies
+        )
+        or len(set(frequencies)) != len(frequencies)
+        or set(body) != set(frequencies)
+    ):
+        raise ValueError(
+            f"{label}: body frequency axis must be nonempty, positive, "
+            "finite, and unique."
+        )
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
     try:
@@ -1038,12 +1145,81 @@ def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
         per_frequency = audit["metadata"]["per_frequency"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(
-            f"{label}: body mesh certification is malformed."
+            f"{label}: body solver diagnostics are malformed."
         ) from exc
+    from grim_io import SOLVER_METADATA_SCHEMA
+    if (
+        audit.get("schema") != SOLVER_METADATA_SCHEMA
+        or audit.get("solver") != "bor_mom_rcs"
+        or audit.get("scattering_mode") != "monostatic"
+        or audit.get("polarizations") != ["VV", "HH"]
+        or audit.get("polarization_mapping")
+        != {"VV": "VV", "HH": "HH"}
+        or audit.get("metadata", {}).get("co_solved_polarizations")
+        != ["VV", "HH"]
+    ):
+        raise ValueError(
+            f"{label}: body solver diagnostics do not declare the canonical "
+            "co-solved VV/HH BoR contract."
+        )
     if not isinstance(per_frequency, dict):
         raise ValueError(
-            f"{label}: body mesh certification has no frequency records."
+            f"{label}: body solver diagnostics have no frequency records."
         )
+    expected = {str(float(frequency)) for frequency in frequencies}
+    if set(per_frequency) != expected or any(
+        not isinstance(per_frequency[key], dict) for key in expected
+    ):
+        raise ValueError(
+            f"{label}: body solver diagnostics do not exactly cover the "
+            "stored frequency axis."
+        )
+    for key in expected:
+        record = per_frequency[key]
+        frequency = float(key)
+        scope = record.get("certification_frequency_scope")
+        scope_frequencies = record.get(
+            "certification_frequency_scope_ghz"
+        )
+        valid_scope = (
+            scope == "single_frequency_unit"
+            and scope_frequencies == [frequency]
+        ) or (
+            scope == "joint_requested_frequency_grid"
+            and scope_frequencies == frequencies
+        )
+        if (
+            record.get("solver") != "bor_mom_rcs"
+            or record.get("scattering_mode") != "monostatic"
+            or record.get("polarizations") != ["VV", "HH"]
+            or record.get("polarization_mapping")
+            != {"VV": "VV", "HH": "HH"}
+            or not isinstance(record.get("metadata"), dict)
+            or not valid_scope
+        ):
+            raise ValueError(
+                f"{label}: {float(key):g} GHz has a malformed dual-channel "
+                "solver record."
+            )
+    return {
+        "frequencies_ghz": frequencies,
+        "per_frequency": per_frequency,
+        "audit": audit,
+    }
+
+
+def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
+    """Explicitly audit that a body used the refined-mesh path.
+
+    This opt-in audit helper is retained for users who want to enforce that
+    policy themselves.  Normal loading and downstream feature operations do
+    not call it.
+    """
+
+    label = str(path)
+    loaded = load_body_solver_diagnostics(label)
+    frequencies = list(loaded["frequencies_ghz"])
+    per_frequency = dict(loaded["per_frequency"])
 
     certified = {}
     for frequency in frequencies:
@@ -1059,9 +1235,19 @@ def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
             else None
         )
         if (
-            not isinstance(mesh, dict)
+            metadata.get("mesh_convergence_certified") is not True
+            or metadata.get("certified_entry_point") is not True
+            or not isinstance(metadata.get("quality_gate"), dict)
+            or metadata["quality_gate"].get("passed") is not True
+            or not isinstance(mesh, dict)
+            or mesh.get("schema") != "ghost.solver.mesh-convergence.v1"
             or mesh.get("passed") is not True
             or mesh.get("published_mesh") != "fine"
+            or mesh.get("co_solved_polarizations") != ["VV", "HH"]
+            or not isinstance(mesh.get("base_quality_gate"), dict)
+            or mesh["base_quality_gate"].get("passed") is not True
+            or not isinstance(mesh.get("fine_quality_gate"), dict)
+            or mesh["fine_quality_gate"].get("passed") is not True
         ):
             raise ValueError(
                 f"{label}: {frequency:g} GHz is not certified as a "
@@ -1091,69 +1277,77 @@ def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
     }
 
 
-def require_delta_mesh_certification(path: 'str') -> 'Dict[str, Any]':
-    """Explicitly audit a delta's refined-mesh source chain.
+def _body_solver_metadata_json(
+    solver_diagnostics: 'Dict[float, Any]',
+    frequencies_ghz: 'Sequence[float]',
+) -> 'str':
+    """Build the one canonical dual-channel body solver-audit envelope."""
 
-    This is an optional user policy check, not a prerequisite for loading or
-    combining the delta.
-    """
-
-    label = str(path)
-    try:
-        with np.load(label, allow_pickle=False) as payload:
-            raw = np.asarray(
-                payload["production_mesh_certification_json"]
-            ).reshape(()).item()
-    except KeyError as exc:
-        raise ValueError(
-            f"{label}: delta has no production mesh certification; rebuild "
-            "it through current steps 1a/1b and 1c."
-        ) from exc
-    except (OSError, TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{label}: delta mesh certification cannot be read."
-        ) from exc
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
-    try:
-        certification = json.loads(str(raw))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f"{label}: delta mesh certification is malformed."
-        ) from exc
-    sources = (
-        certification.get("sources")
-        if isinstance(certification, dict)
-        else None
-    )
-    if (
-        not isinstance(certification, dict)
-        or certification.get("schema")
-        != "ghost.workflow.mesh-certified-sources.v1"
-        or certification.get("passed") is not True
-        or certification.get("published_mesh") != "fine"
-        or not isinstance(sources, list)
-        or not sources
-        or certification.get("source_count") != len(sources)
-    ):
-        raise ValueError(
-            f"{label}: delta mesh certification is incomplete."
-        )
-    for source in sources:
-        mesh = (
-            source.get("mesh_convergence")
-            if isinstance(source, dict)
-            else None
-        )
+    if not isinstance(solver_diagnostics, dict) or not solver_diagnostics:
+        raise ValueError("solver_diagnostics must be a non-empty mapping.")
+    normalized = {}
+    full_frequency_axis = sorted(float(value) for value in frequencies_ghz)
+    for key, record in solver_diagnostics.items():
+        frequency = float(key)
+        if not math.isfinite(frequency) or frequency <= 0.0:
+            raise ValueError(
+                "solver_diagnostics frequency keys must be positive and finite."
+            )
+        canonical_key = str(float(frequency))
+        if canonical_key in normalized or not isinstance(record, dict):
+            raise ValueError(
+                "solver_diagnostics must contain one mapping per frequency."
+            )
         if (
-            not isinstance(mesh, dict)
-            or mesh.get("passed") is not True
-            or mesh.get("published_mesh") != "fine"
+            record.get("solver") != "bor_mom_rcs"
+            or record.get("scattering_mode") != "monostatic"
+            or record.get("polarizations") != ["VV", "HH"]
+            or record.get("polarization_mapping")
+            != {"VV": "VV", "HH": "HH"}
+            or not isinstance(record.get("metadata"), dict)
         ):
             raise ValueError(
-                f"{label}: delta contains an uncertified source field."
+                f"solver_diagnostics[{frequency:g}] does not contain the "
+                "canonical dual-channel BoR audit."
             )
-    return certification
+        scope = record.get("certification_frequency_scope")
+        scope_frequencies = record.get(
+            "certification_frequency_scope_ghz"
+        )
+        if not (
+            (
+                scope == "single_frequency_unit"
+                and scope_frequencies == [frequency]
+            )
+            or (
+                scope == "joint_requested_frequency_grid"
+                and scope_frequencies == full_frequency_axis
+            )
+        ):
+            raise ValueError(
+                f"solver_diagnostics[{frequency:g}] has a contradictory "
+                "frequency-certification scope."
+            )
+        normalized[canonical_key] = dict(record)
+    expected = {str(float(value)) for value in frequencies_ghz}
+    if set(normalized) != expected:
+        raise ValueError(
+            "solver_diagnostics must exactly cover the body frequency axis."
+        )
+    from grim_io import _solver_metadata_json
+    return _solver_metadata_json({
+        "solver": "bor_mom_rcs",
+        "scattering_mode": "monostatic",
+        "polarizations": ["VV", "HH"],
+        "polarization_mapping": {"VV": "VV", "HH": "HH"},
+        "rcs_log_unit": "dBsm",
+        "rcs_linear_quantity": "sigma_3d",
+        "metadata": {
+            "co_solved_polarizations": ["VV", "HH"],
+            "per_frequency": normalized,
+        },
+        "samples": [],
+    })
 
 
 def save_body_grim(bodies: 'Dict[float, Dict[str, Any]]', out_path: 'str', *,
@@ -1243,21 +1437,8 @@ def save_body_grim(bodies: 'Dict[float, Dict[str, Any]]', out_path: 'str', *,
         if value:
             payload[key] = np.asarray(str(value))
     if solver_diagnostics is not None:
-        from grim_io import _solver_metadata_json
         payload["solver_metadata_json"] = np.asarray(
-            _solver_metadata_json({
-                "solver": "bor_mom_rcs",
-                "scattering_mode": "monostatic",
-                "polarization": "VV,HH",
-                "polarization_export": "VV,HH",
-                "rcs_log_unit": "dBsm",
-                "rcs_linear_quantity": "sigma_3d",
-                "metadata": {
-                    "co_solved_polarizations": ["VV", "HH"],
-                    "per_frequency": solver_diagnostics,
-                },
-                "samples": [],
-            })
+            _body_solver_metadata_json(solver_diagnostics, freqs)
         )
     if requested_radar_grid is not None:
         grid = dict(requested_radar_grid)
@@ -2763,8 +2944,8 @@ def export_radar_grim(out_path: 'str', *,
 
     This is the internally field-consistent COHERENT product represented by the
     reduced-order model (phase-summed). The canonical PEC-groove embedding
-    envelope is documented in FEATURE_SUM_GUIDE.md; other features need their
-    own evidence. VV/HH are the radar's earth V/H; VH is the radar-frame
+    envelope is documented in FEATURE_VALIDATION_GUIDE.md; other features need
+    their own evidence. VV/HH are the radar's earth V/H; VH is the radar-frame
     cross-pol present in the modeled component Jones matrices plus basis
     rotation. LABEL NOTE: for a horizontal axis the waterline
     radar-VV equals the vehicle's HH (handled here; don't relabel by hand).
@@ -2985,6 +3166,7 @@ def save_monostatic_grim(
     roll_deg: 'float' = 0.0,
     source_path: 'str' = "",
     history: 'str' = "",
+    solver_diagnostics: 'Optional[Dict[float, Any]]' = None,
     artifact_metadata: 'Optional[Dict[str, Any]]' = None,
 ) -> 'str':
     """Publish one complete BoR monostatic deliverable.
@@ -3042,7 +3224,18 @@ def save_monostatic_grim(
             axis_el_deg=axis_el_deg,
             roll_deg=roll_deg,
         )
+        if solver_diagnostics is not None:
+            payload["solver_metadata_json"] = np.asarray(
+                _body_solver_metadata_json(
+                    solver_diagnostics, frequencies
+                )
+            )
         for key, value in dict(artifact_metadata or {}).items():
+            if str(key) == "solver_metadata_json":
+                raise ValueError(
+                    "solver_metadata_json is generated from "
+                    "solver_diagnostics and cannot be injected or overridden."
+                )
             payload[str(key)] = np.asarray(value)
         from grim_io import _save_grim_npz
         _save_grim_npz(payload, temporary)

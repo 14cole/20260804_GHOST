@@ -28,8 +28,9 @@ Anything else--including TYPE 1 sheets and arbitrary mixed PEC/dielectric
 graphs--raises with a named error. TYPE 5 is accepted only in the explicitly
 classified layouts above, not as a general interface graph.
 
-Entry points mirror rcs_solver.solve_monostatic_rcs_2d so the GUI, the
-runners, and grim_io work unchanged; sigma is 3-D RCS in m^2 (dBsm).
+The production entry points share the 2-D solver's geometry/frequency/aspect
+argument names and dual-channel result schema.  BoR-specific controls remain
+explicit; sigma is 3-D RCS in m^2 (dBsm).
 """
 
 import cmath
@@ -48,7 +49,8 @@ from bor_solver import (BOR_CONDITION_EST_MAX,
                         solve_bor_dielectric, solve_bor_coated_pec,
                         solve_bor_partial_coating, solve_bor_coated2_pec,
                         solve_bor_coated_n_pec, solve_bor_coating_patch,
-                        _MultiRegionBor, _solve_multiregion)
+                        _MultiRegionBor, _solve_multiregion,
+                        _bor_mode_limits)
 from rcs_solver import (
     MaterialLibrary,
     _conservative_mesh_wavelength_for_frequencies,
@@ -74,19 +76,6 @@ def _unit_scale_to_meters(units: 'str') -> 'float':
     if value in {"meter", "meters", "m"}:
         return 1.0
     raise ValueError(f"Unsupported geometry units '{units}'. Use inches or meters.")
-
-
-def _canonical_bor_polarization(label: 'Optional[str]') -> 'str':
-    """BoR polarizations are true 3-D VV (theta-pol) / HH (phi-pol).  The
-    2D solver's elevation-cut aliases map TM->HH and TE->VV, and the same
-    mapping is kept here so .geo/GUI/grim plumbing is shared."""
-
-    text = str(label or "").strip().upper()
-    if text in {"VV", "V", "TE", "VERTICAL"} or not text:
-        return "VV"
-    if text in {"HH", "H", "TM", "HORIZONTAL"}:
-        return "HH"
-    raise ValueError(f"Unsupported polarization '{label}'. Use VV or HH.")
 
 
 def _parse_flag(tok: 'Any', default: 'int' = 0) -> 'int':
@@ -355,6 +344,30 @@ def _classify(chains: 'List[_SegChain]') -> 'str':
                      "the TYPE 2+3+4 partial-coating layout.")
 
 
+def _validate_bor_far_controls(kind: 'str', assembly: 'str',
+                               table_precision: 'str',
+                               stream_budget_gb: 'float') -> 'None':
+    """Apply the same far-table control policy to preview and solve paths."""
+
+    if kind == "conductor":
+        return
+    unsupported = []
+    if assembly != "auto":
+        unsupported.append(f"assembly={assembly!r}")
+    if table_precision != "auto":
+        unsupported.append(f"table_precision={table_precision!r}")
+    if stream_budget_gb != BOR_STREAM_BUDGET_GB_DEFAULT:
+        unsupported.append(f"stream_budget_gb={stream_budget_gb:g}")
+    if unsupported:
+        raise ValueError(
+            f"BoR {kind} formulation does not implement the conductor "
+            "far-table/streaming controls "
+            f"({', '.join(unsupported)}). Leave assembly and "
+            "table_precision at 'auto' and stream_budget_gb at its "
+            f"{BOR_STREAM_BUDGET_GB_DEFAULT:g} GB default."
+        )
+
+
 def estimate_bor_resources(
     geometry_snapshot: 'Dict[str, Any]',
     frequency_ghz: 'float',
@@ -390,10 +403,13 @@ def estimate_bor_resources(
     worker_count = max(1, int(workers))
     precision = str(table_precision).strip().lower()
     assembly_key = str(assembly).strip().lower()
+    stream_budget = float(stream_budget_gb)
     if precision not in {"auto", "single", "double"}:
         raise ValueError("table_precision must be auto, single, or double.")
     if assembly_key not in {"auto", "tables", "streaming"}:
         raise ValueError("assembly must be auto, tables, or streaming.")
+    if not math.isfinite(stream_budget) or stream_budget <= 0.0:
+        raise ValueError("stream_budget_gb must be a positive finite value.")
 
     preview_snapshot = (
         scale_snapshot_panel_density(geometry_snapshot, float(fine_factor))
@@ -402,6 +418,12 @@ def estimate_bor_resources(
     scale = _unit_scale_to_meters(geometry_units)
     base_dir = _material_base_dir_for_snapshot(
         preview_snapshot, material_base_dir
+    )
+    _reject_unsupported_bor_ibc_interfaces(preview_snapshot)
+    validate_geometry_snapshot_for_solver(
+        preview_snapshot,
+        base_dir=base_dir,
+        meters_scale=scale,
     )
     materials = MaterialLibrary.from_entries(
         preview_snapshot.get("ibcs", []) or [],
@@ -415,31 +437,24 @@ def estimate_bor_resources(
     )
     chains = _chains_from_snapshot(preview_snapshot, scale)
     kind = _classify(chains)
-    element_count = sum(
-        _element_count(chain.n_prop, float(length), wavelength)
-        for chain in chains
-        for length in chain.prim_lengths
+    _validate_bor_far_controls(
+        kind, assembly_key, precision, stream_budget
     )
-    if kind == "conductor" and element_count > int(max_elements):
-        raise ValueError(
-            f"BoR mesh would need approximately {element_count} elements "
-            f"(> max {int(max_elements)})."
-        )
+    groups, _tol, _axis_tol = _prepare_bor_groups(chains, kind)
+    surface_layout = _bor_surface_layout(groups, kind, wavelength)
+    element_count = _enforce_total_element_limit(
+        surface_layout, max_elements
+    )
     radius = max(float(np.max(chain.pts[:, 0])) for chain in chains)
     k0 = 2.0 * math.pi * frequency * 1.0e9 / C0
-    sin_max = float(np.max(np.abs(np.sin(np.radians(aspects)))))
-    mode_cap = (
-        max(0, int(n_modes))
-        if n_modes is not None
-        else int(math.ceil(k0 * radius * max(sin_max, 0.05))) + 12
+    mode_cap, mode_tail_start = _bor_mode_limits(
+        k0, radius, aspects, n_modes
     )
     active_modes = min(worker_count, mode_cap + 1)
 
-    surface_count = max(1, len(chains))
-    unknowns = (
-        2 * (element_count + 1)
-        if kind == "conductor"
-        else 4 * (element_count + surface_count)
+    unknowns = sum(
+        (2 if is_conductor else 4) * (int(elements) + 1)
+        for elements, is_conductor in surface_layout
     )
     # Per active mode: assembled/masked matrix, LU copy, residual products,
     # LAPACK/RHS workspace. The safety factor covers allocator fragmentation.
@@ -479,14 +494,25 @@ def estimate_bor_resources(
         )
         persistent_gb = full_double / (2.0 if use_single else 1.0)
         held_assembly_gb = persistent_gb
-        if use_streaming and persistent_gb > float(stream_budget_gb):
+        if use_streaming and persistent_gb > stream_budget:
             per_mode = persistent_gb / max(mode_cap + 1, 1)
-            block = max(1, int(float(stream_budget_gb) / per_mode))
+            block = max(1, int(stream_budget / per_mode))
             held_assembly_gb = persistent_gb * block / max(mode_cap + 1, 1)
         elif not use_streaming:
             held_assembly_gb = 3.5 * persistent_gb
         estimated_assembly = "streaming" if use_streaming else "tables"
         estimated_precision = "single" if use_single else "double"
+    else:
+        # Penetrable and multi-surface formulations currently retain dense
+        # all-mode self/cross-operator tables.  Count every surface's two
+        # medium-side self operators and every directed cross-surface pair.
+        # Some layouts share fewer regions, so this is deliberately a safe
+        # scheduler reservation rather than an optimistic RSS prediction.
+        persistent_gb = _estimate_multisurface_operator_gb(
+            surface_layout, mode_cap
+        )
+        held_assembly_gb = 3.5 * persistent_gb
+        estimated_assembly = "dense-all-mode-tables"
 
     raw_peak = held_assembly_gb + active_modes * (
         matrix_work_gb + rhs_work_gb
@@ -496,8 +522,10 @@ def estimate_bor_resources(
         "frequency_ghz": frequency,
         "geometry_kind": kind,
         "mesh_elements": int(element_count),
+        "surface_count": int(len(surface_layout)),
         "n_unknowns_estimate": int(unknowns),
         "mode_cap_estimate": int(mode_cap),
+        "mode_tail_start_estimate": int(mode_tail_start),
         "active_mode_workers": int(active_modes),
         "assembly_estimate": estimated_assembly,
         "table_precision_estimate": estimated_precision,
@@ -542,11 +570,324 @@ def _stitch_pieces(chains: 'List[_SegChain]', what: 'str',
     return runs
 
 
+def _prepare_bor_groups(chains: 'List[_SegChain]', kind: 'str'):
+    """Build and preflight the material-specific generatrix layout.
+
+    Resource preview and the actual solve must interpret a geometry in exactly
+    the same way.  Keeping this topology construction in one place prevents a
+    scheduler estimate from counting a different set of surfaces than the
+    formulation that will eventually be assembled.
+    """
+
+    diag = max(
+        float(np.ptp(np.vstack([chain.pts for chain in chains]), axis=0).max()),
+        1e-9,
+    )
+    tol = max(1e-12, 1e-9 * diag)
+    axis_tol = 1e-6 * diag
+
+    if kind == "coated":
+        outer_chains = _stitch_generatrix(
+            [chain for chain in chains if chain.seg_type == 3],
+            "outer-interface (TYPE 3)", tol,
+        )
+        core_chains = _stitch_generatrix(
+            [chain for chain in chains if chain.seg_type == 4],
+            "core (TYPE 4)", tol,
+        )
+        _preflight_generatrix(outer_chains, "outer-interface", axis_tol)
+        _preflight_generatrix(core_chains, "core", axis_tol)
+        groups = [outer_chains, core_chains]
+    elif kind == "partial":
+        iface_chains = _stitch_generatrix(
+            [chain for chain in chains if chain.seg_type == 3],
+            "coating-interface (TYPE 3)", tol,
+        )
+        cov_chains = _stitch_generatrix(
+            [chain for chain in chains if chain.seg_type == 4],
+            "covered-core (TYPE 4)", tol,
+        )
+        bare_runs = _stitch_pieces(
+            [chain for chain in chains if chain.seg_type == 2],
+            "bare-conductor (TYPE 2)", tol,
+        )
+        merged = _stitch_generatrix(
+            cov_chains + [chain for run in bare_runs for chain in run],
+            "PEC core (TYPE 2 + TYPE 4)", tol,
+        )
+        _preflight_generatrix(merged, "PEC core", axis_tol)
+        groups = [iface_chains, cov_chains, bare_runs]
+    elif kind == "layered":
+        outer_flag, inner_flag = next(iter({
+            (chain.pos_mat, chain.neg_mat)
+            for chain in chains if chain.seg_type == 5
+        }))
+        mid5_chains = _stitch_generatrix(
+            [chain for chain in chains if chain.seg_type == 5],
+            "layer-interface (TYPE 5)", tol,
+        )
+        core_chains = _stitch_generatrix(
+            [chain for chain in chains if chain.seg_type == 4],
+            "core (TYPE 4)", tol,
+        )
+        patch_chains = _stitch_generatrix(
+            [
+                chain for chain in chains
+                if chain.seg_type == 3 and chain.pos_mat == outer_flag
+            ],
+            "outer-interface (TYPE 3, outer layer)", tol,
+        )
+        bare_mid_runs = _stitch_pieces(
+            [
+                chain for chain in chains
+                if chain.seg_type == 3 and chain.pos_mat == inner_flag
+            ],
+            "exposed-inner-interface (TYPE 3, inner layer)", tol,
+        )
+        _preflight_generatrix(core_chains, "core", axis_tol)
+        merged_mid = _stitch_generatrix(
+            mid5_chains
+            + [chain for run in bare_mid_runs for chain in run],
+            "inner-layer interface (TYPE 5 + TYPE 3)", tol,
+        )
+        _preflight_generatrix(
+            merged_mid, "inner-layer interface", axis_tol
+        )
+        if not bare_mid_runs:
+            _preflight_generatrix(
+                patch_chains, "outer interface", axis_tol
+            )
+        groups = [
+            patch_chains, mid5_chains, bare_mid_runs, core_chains,
+            (outer_flag, inner_flag),
+        ]
+    elif kind == "layered_n":
+        type3 = [chain for chain in chains if chain.seg_type == 3]
+        top_flags = {chain.pos_mat for chain in type3}
+        if len(top_flags) != 1:
+            raise ValueError(
+                "N-layer stacks (multiple TYPE 5 flag pairs) support full "
+                "coverage only: all TYPE 3 chains must reference the "
+                "outermost layer flag (patch layouts are limited to two "
+                "layers)."
+            )
+        top_flag = next(iter(top_flags))
+        core_flags = {
+            chain.pos_mat for chain in chains if chain.seg_type == 4
+        }
+        if len(core_flags) != 1:
+            raise ValueError(
+                "The TYPE 4 core segments must share one pos_mat."
+            )
+        bottom_flag = next(iter(core_flags))
+        pair_map = {}
+        for outer, inner in {
+            (chain.pos_mat, chain.neg_mat)
+            for chain in chains if chain.seg_type == 5
+        }:
+            if outer in pair_map:
+                raise ValueError(
+                    f"Two TYPE 5 interfaces claim outer flag {outer}."
+                )
+            pair_map[outer] = inner
+        flag_order = [top_flag]
+        while flag_order[-1] != bottom_flag:
+            next_flag = pair_map.pop(flag_order[-1], None)
+            if next_flag is None:
+                raise ValueError(
+                    "Layer-flag chain broken: no TYPE 5 interface has "
+                    f"pos_mat {flag_order[-1]} (walking outer flag "
+                    f"{top_flag} toward core flag {bottom_flag})."
+                )
+            flag_order.append(next_flag)
+        if pair_map:
+            raise ValueError(
+                f"TYPE 5 interfaces with flags {sorted(pair_map)} are not "
+                "part of the outer-to-core layer chain."
+            )
+        interface_groups = [
+            _stitch_generatrix(
+                type3, "outer-interface (TYPE 3)", tol
+            )
+        ]
+        for outer, inner in zip(flag_order[:-1], flag_order[1:]):
+            type5 = [
+                chain for chain in chains
+                if chain.seg_type == 5
+                and (chain.pos_mat, chain.neg_mat) == (outer, inner)
+            ]
+            interface_groups.append(_stitch_generatrix(
+                type5,
+                f"layer-interface (TYPE 5, {outer}|{inner})",
+                tol,
+            ))
+        core_chains = _stitch_generatrix(
+            [chain for chain in chains if chain.seg_type == 4],
+            "core (TYPE 4)", tol,
+        )
+        for index, group in enumerate(interface_groups):
+            _preflight_generatrix(group, f"interface {index}", axis_tol)
+        _preflight_generatrix(core_chains, "core", axis_tol)
+        groups = [interface_groups, core_chains, flag_order]
+    elif kind == "banded":
+        def runs_of(predicate, what):
+            subset = [chain for chain in chains if predicate(chain)]
+            return _stitch_pieces(subset, what, tol) if subset else []
+
+        covered_runs = []
+        for flag in sorted({
+            chain.pos_mat for chain in chains if chain.seg_type == 4
+        }):
+            covered_runs += [(flag, run) for run in runs_of(
+                lambda chain, material=flag: (
+                    chain.seg_type == 4 and chain.pos_mat == material
+                ),
+                f"TYPE 4 band (mat {flag})",
+            )]
+        outer_runs = []
+        for flag in sorted({
+            chain.pos_mat for chain in chains if chain.seg_type == 3
+        }):
+            outer_runs += [(flag, run) for run in runs_of(
+                lambda chain, material=flag: (
+                    chain.seg_type == 3 and chain.pos_mat == material
+                ),
+                f"TYPE 3 band surface (mat {flag})",
+            )]
+        wall_runs = []
+        for outer, inner in sorted({
+            (chain.pos_mat, chain.neg_mat)
+            for chain in chains if chain.seg_type == 5
+        }):
+            if outer == inner:
+                raise ValueError(
+                    "A TYPE 5 band wall needs two DIFFERENT material flags "
+                    "(adjacent bands of the same material are one band)."
+                )
+            wall_runs += [((outer, inner), run) for run in runs_of(
+                lambda chain, positive=outer, negative=inner: (
+                    chain.seg_type == 5
+                    and (chain.pos_mat, chain.neg_mat)
+                    == (positive, negative)
+                ),
+                f"TYPE 5 band wall ({outer}|{inner})",
+            )]
+        bare_runs = runs_of(
+            lambda chain: chain.seg_type == 2, "bare (TYPE 2)"
+        )
+        for run in bare_runs:
+            for chain in run:
+                if chain.ibc_flag > 0:
+                    raise ValueError(
+                        "Banded layouts: IBC on bare TYPE 2 pieces is not "
+                        "supported yet (PEC only)."
+                    )
+        groups = [covered_runs, outer_runs, wall_runs, bare_runs]
+    else:
+        ordered = _stitch_generatrix(
+            chains, "TYPE 2" if kind == "conductor" else "TYPE 3", tol
+        )
+        _preflight_generatrix(ordered, "body", axis_tol)
+        groups = [ordered]
+
+    return groups, tol, axis_tol
+
+
+def _run_element_count(run: 'List[_SegChain]', wavelength: 'float') -> 'int':
+    return sum(
+        _element_count(chain.n_prop, float(length), wavelength)
+        for chain in run for length in chain.prim_lengths
+    )
+
+
+def _bor_surface_layout(groups, kind: 'str', wavelength: 'float'):
+    """Return ``[(element_count, is_conductor), ...]`` for a prepared job."""
+
+    def record(run, conductor):
+        return (_run_element_count(run, wavelength), bool(conductor))
+
+    if kind == "conductor":
+        return [record(groups[0], True)]
+    if kind == "dielectric":
+        return [record(groups[0], False)]
+    if kind == "coated":
+        return [record(groups[0], False), record(groups[1], True)]
+    if kind == "partial":
+        return [record(groups[0], False), record(groups[1], True)] + [
+            record(run, True) for run in groups[2]
+        ]
+    if kind == "layered":
+        return [record(groups[0], False), record(groups[1], False)] + [
+            record(run, False) for run in groups[2]
+        ] + [record(groups[3], True)]
+    if kind == "layered_n":
+        return [record(run, False) for run in groups[0]] + [
+            record(groups[1], True)
+        ]
+    if kind == "banded":
+        covered, outer, walls, bare = groups
+        return (
+            [record(run, True) for _flag, run in covered]
+            + [record(run, False) for _flag, run in outer]
+            + [record(run, False) for _flags, run in walls]
+            + [record(run, True) for run in bare]
+        )
+    raise ValueError(f"Unsupported BoR resource layout kind {kind!r}.")
+
+
+def _estimate_multisurface_operator_gb(surface_layout, mode_cap: 'int',
+                                       gauss_order: 'int' = 4) -> 'float':
+    """Conservative retained dense-table storage for nonconductor BoR.
+
+    Each PMCHWT medium-side/self or cross operator retains one scalar modal
+    table plus four rotated-principal-value tables.  Interface surfaces have
+    two medium sides; conductor surfaces have one.  Counting every directed
+    cross-surface pair is exact for a fully connected region and conservative
+    for layered/banded topologies whose surfaces do not all share a region.
+    """
+
+    mode_cap = max(0, int(mode_cap))
+    points = [
+        float(gauss_order) * float(elements)
+        for elements, _conductor in surface_layout
+    ]
+    complex_bytes = 16.0
+
+    def operator_gb(index_a, index_b):
+        pair_points = points[index_a] * points[index_b]
+        scalar = pair_points * float(mode_cap + 2)
+        rotated = 4.0 * pair_points * float(2 * mode_cap + 1)
+        return complex_bytes * (scalar + rotated) / 1.0e9
+
+    total = 0.0
+    for index, (_elements, is_conductor) in enumerate(surface_layout):
+        total += (1.0 if is_conductor else 2.0) * operator_gb(
+            index, index
+        )
+    for index_a in range(len(surface_layout)):
+        for index_b in range(len(surface_layout)):
+            if index_a != index_b:
+                total += operator_gb(index_a, index_b)
+    return total
+
+
+def _enforce_total_element_limit(surface_layout, max_elements: 'int') -> 'int':
+    total = sum(int(elements) for elements, _conductor in surface_layout)
+    limit = int(max_elements)
+    if total > limit:
+        raise ValueError(
+            f"BoR mesh would need approximately {total} total elements "
+            f"across {len(surface_layout)} surface(s) (> max {limit}). "
+            "Reduce frequency or density, or raise max_elements after "
+            "reviewing the resource estimate."
+        )
+    return total
+
+
 def solve_monostatic_rcs_bor(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
     elevations_deg: 'List[float]',
-    polarization: 'str',
     geometry_units: 'str' = "inches",
     material_base_dir: 'Optional[str]' = None,
     progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
@@ -566,9 +907,9 @@ def solve_monostatic_rcs_bor(
     Monostatic 3-D RCS (m^2 / dBsm) of an axisymmetric body described by a
     .geo geometry snapshot.  `elevations_deg` are ASPECT angles measured from
     the +z rotation axis (0 = nose-on, 90 = broadside, 180 = tail-on); the
-    same argument name as the 2D entry point is kept so callers are drop-in.
-    Both polarizations are solved (they share each mode's factorization);
-    `polarization` selects which one the samples report.
+    same argument name as the 2-D entry point is kept for a consistent UI.
+    VV and HH are always co-solved and returned together; there is no channel
+    selector in the production API.
 
     expand_to_360=True mirrors the samples about the axis to fill the full
     polar cut: sigma(360 - theta) = sigma(theta) -- EXACT for a body of
@@ -611,7 +952,6 @@ def solve_monostatic_rcs_bor(
     stream_budget = float(stream_budget_gb)
     if not math.isfinite(stream_budget) or stream_budget <= 0.0:
         raise ValueError("stream_budget_gb must be a positive finite value.")
-    pol = _canonical_bor_polarization(polarization)
     scale = _unit_scale_to_meters(geometry_units)
     base_dir = _material_base_dir_for_snapshot(
         geometry_snapshot, material_base_dir
@@ -662,161 +1002,10 @@ def solve_monostatic_rcs_bor(
 
     chains = _chains_from_snapshot(geometry_snapshot, scale)
     kind = _classify(chains)
-    if kind != "conductor":
-        unsupported_controls = []
-        if assembly_key != "auto":
-            unsupported_controls.append(
-                f"assembly={assembly_key!r}"
-            )
-        if table_precision_key != "auto":
-            unsupported_controls.append(
-                f"table_precision={table_precision_key!r}"
-            )
-        if stream_budget != BOR_STREAM_BUDGET_GB_DEFAULT:
-            unsupported_controls.append(
-                f"stream_budget_gb={stream_budget:g}"
-            )
-        if unsupported_controls:
-            raise ValueError(
-                f"BoR {kind} formulation does not implement the conductor "
-                "far-table/streaming controls "
-                f"({', '.join(unsupported_controls)}). Leave assembly and "
-                "table_precision at 'auto' and stream_budget_gb at its "
-                f"{BOR_STREAM_BUDGET_GB_DEFAULT:g} GB default."
-            )
-    diag = max(float(np.ptp(np.vstack([c.pts for c in chains]), axis=0).max()), 1e-9)
-    tol = max(1e-12, 1e-9 * diag)
-    axis_tol = 1e-6 * diag
-
-    if kind == "coated":
-        outer_chains = _stitch_generatrix([c for c in chains if c.seg_type == 3],
-                                          "outer-interface (TYPE 3)", tol)
-        core_chains = _stitch_generatrix([c for c in chains if c.seg_type == 4],
-                                         "core (TYPE 4)", tol)
-        _preflight_generatrix(outer_chains, "outer-interface", axis_tol)
-        _preflight_generatrix(core_chains, "core", axis_tol)
-        groups = [outer_chains, core_chains]
-    elif kind == "partial":
-        iface_chains = _stitch_generatrix([c for c in chains if c.seg_type == 3],
-                                          "coating-interface (TYPE 3)", tol)
-        cov_chains = _stitch_generatrix([c for c in chains if c.seg_type == 4],
-                                        "covered-core (TYPE 4)", tol)
-        bare_runs = _stitch_pieces([c for c in chains if c.seg_type == 2],
-                                   "bare-conductor (TYPE 2)", tol)
-        # The PEC core as a whole (covered + bare pieces, joined at the
-        # coating-termination junctions) must still be a valid closed body.
-        merged = _stitch_generatrix(
-            cov_chains + [c for run in bare_runs for c in run],
-            "PEC core (TYPE 2 + TYPE 4)", tol)
-        _preflight_generatrix(merged, "PEC core", axis_tol)
-        groups = [iface_chains, cov_chains, bare_runs]
-    elif kind == "layered":
-        outer_flag, inner_flag = next(iter(
-            {(c.pos_mat, c.neg_mat) for c in chains if c.seg_type == 5}))
-        mid5_chains = _stitch_generatrix([c for c in chains if c.seg_type == 5],
-                                         "layer-interface (TYPE 5)", tol)
-        core_chains = _stitch_generatrix([c for c in chains if c.seg_type == 4],
-                                         "core (TYPE 4)", tol)
-        patch_chains = _stitch_generatrix(
-            [c for c in chains if c.seg_type == 3 and c.pos_mat == outer_flag],
-            "outer-interface (TYPE 3, outer layer)", tol)
-        bare_mid_runs = _stitch_pieces(
-            [c for c in chains if c.seg_type == 3 and c.pos_mat == inner_flag],
-            "exposed-inner-interface (TYPE 3, inner layer)", tol)
-        _preflight_generatrix(core_chains, "core", axis_tol)
-        merged_mid = _stitch_generatrix(
-            mid5_chains + [c for run in bare_mid_runs for c in run],
-            "inner-layer interface (TYPE 5 + TYPE 3)", tol)
-        _preflight_generatrix(merged_mid, "inner-layer interface", axis_tol)
-        if not bare_mid_runs:
-            _preflight_generatrix(patch_chains, "outer interface", axis_tol)
-        groups = [patch_chains, mid5_chains, bare_mid_runs, core_chains,
-                  (outer_flag, inner_flag)]
-    elif kind == "layered_n":
-        # N-layer full stack: walk the TYPE 5 pos->neg flag chain from the
-        # TYPE 3 outer interface's pos_mat down to the TYPE 4 core's pos_mat.
-        t3 = [c for c in chains if c.seg_type == 3]
-        top_flags = {c.pos_mat for c in t3}
-        if len(top_flags) != 1:
-            raise ValueError("N-layer stacks (multiple TYPE 5 flag pairs) "
-                             "support full coverage only: all TYPE 3 chains "
-                             "must reference the outermost layer flag "
-                             "(patch layouts are limited to two layers).")
-        f_top = next(iter(top_flags))
-        pm4 = {c.pos_mat for c in chains if c.seg_type == 4}
-        if len(pm4) != 1:
-            raise ValueError("The TYPE 4 core segments must share one pos_mat.")
-        f_bottom = next(iter(pm4))
-        pair_map = {}
-        for (po, ne) in {(c.pos_mat, c.neg_mat) for c in chains if c.seg_type == 5}:
-            if po in pair_map:
-                raise ValueError(f"Two TYPE 5 interfaces claim outer flag {po}.")
-            pair_map[po] = ne
-        flag_order = [f_top]
-        while flag_order[-1] != f_bottom:
-            nxt = pair_map.pop(flag_order[-1], None)
-            if nxt is None:
-                raise ValueError(
-                    f"Layer-flag chain broken: no TYPE 5 interface has "
-                    f"pos_mat {flag_order[-1]} (walking outer flag "
-                    f"{f_top} toward core flag {f_bottom}).")
-            flag_order.append(nxt)
-        if pair_map:
-            raise ValueError(f"TYPE 5 interfaces with flags {sorted(pair_map)} "
-                             "are not part of the outer-to-core layer chain.")
-        iface_groups = [_stitch_generatrix(t3, "outer-interface (TYPE 3)", tol)]
-        for po, ne in zip(flag_order[:-1], flag_order[1:]):
-            seg5 = [c for c in chains if c.seg_type == 5
-                    and (c.pos_mat, c.neg_mat) == (po, ne)]
-            iface_groups.append(_stitch_generatrix(
-                seg5, f"layer-interface (TYPE 5, {po}|{ne})", tol))
-        core_chains = _stitch_generatrix([c for c in chains if c.seg_type == 4],
-                                         "core (TYPE 4)", tol)
-        for gi, g in enumerate(iface_groups):
-            _preflight_generatrix(g, f"interface {gi}", axis_tol)
-        _preflight_generatrix(core_chains, "core", axis_tol)
-        groups = [iface_groups, core_chains, flag_order]
-    elif kind == "banded":
-        # Side-by-side coating bands: one region per TYPE 4 covered run,
-        # discovered by endpoint connectivity (safe under repeated material
-        # flags on non-adjacent bands -- their boundaries never touch).
-        def runs_of(pred, what):
-            subset = [c for c in chains if pred(c)]
-            return _stitch_pieces(subset, what, tol) if subset else []
-
-        cov_runs = []
-        for flag in sorted({c.pos_mat for c in chains if c.seg_type == 4}):
-            cov_runs += [(flag, r) for r in runs_of(
-                lambda c, fl=flag: c.seg_type == 4 and c.pos_mat == fl,
-                f"TYPE 4 band (mat {flag})")]
-        out_runs = []
-        for flag in sorted({c.pos_mat for c in chains if c.seg_type == 3}):
-            out_runs += [(flag, r) for r in runs_of(
-                lambda c, fl=flag: c.seg_type == 3 and c.pos_mat == fl,
-                f"TYPE 3 band surface (mat {flag})")]
-        wall_runs = []
-        for (po, ne) in sorted({(c.pos_mat, c.neg_mat)
-                                for c in chains if c.seg_type == 5}):
-            if po == ne:
-                raise ValueError("A TYPE 5 band wall needs two DIFFERENT "
-                                 "material flags (adjacent bands of the same "
-                                 "material are one band).")
-            wall_runs += [((po, ne), r) for r in runs_of(
-                lambda c, p=po, n=ne: c.seg_type == 5
-                and (c.pos_mat, c.neg_mat) == (p, n),
-                f"TYPE 5 band wall ({po}|{ne})")]
-        bare_band_runs = runs_of(lambda c: c.seg_type == 2, "bare (TYPE 2)")
-        for r in bare_band_runs:
-            for c in r:
-                if c.ibc_flag > 0:
-                    raise ValueError("Banded layouts: IBC on bare TYPE 2 "
-                                     "pieces is not supported yet (PEC only).")
-        groups = [cov_runs, out_runs, wall_runs, bare_band_runs]
-    else:
-        ordered = _stitch_generatrix(chains, "TYPE 2" if kind == "conductor"
-                                     else "TYPE 3", tol)
-        _preflight_generatrix(ordered, "body", axis_tol)
-        groups = [ordered]
+    _validate_bor_far_controls(
+        kind, assembly_key, table_precision_key, stream_budget
+    )
+    groups, tol, axis_tol = _prepare_bor_groups(chains, kind)
 
     def check_abort():
         if abort_event is not None and abort_event.is_set():
@@ -838,6 +1027,10 @@ def solve_monostatic_rcs_bor(
         freq_hz = freq_ghz * 1e9
         current_mesh = mesh_controls[float(freq_ghz)]
         lam0 = float(current_mesh[0])
+        surface_layout = _bor_surface_layout(groups, kind, lam0)
+        total_mesh_elements = _enforce_total_element_limit(
+            surface_layout, max_elements
+        )
 
         def report(modes_done, m_cap):
             if progress_callback is not None:
@@ -1131,6 +1324,7 @@ def solve_monostatic_rcs_bor(
             "frequency_ghz": float(freq_ghz),
             "modes_used": int(out["modes_used"]),
             "mode_cap": int(out.get("mode_cap", out["modes_used"])),
+            "mode_tail_start": int(out.get("mode_tail_start", 0)),
             "mode_converged": bool(out.get("mode_converged", False)),
             "mode_quiet_count": int(out.get("mode_quiet_count", 0)),
             "mode_last_relative_increment": float(
@@ -1158,6 +1352,8 @@ def solve_monostatic_rcs_bor(
             ),
             "stream_mode_block": out.get("stream_mode_block"),
             "stream_sweeps": out.get("stream_sweeps"),
+            "mesh_elements_total": int(total_mesh_elements),
+            "mesh_surface_count": int(len(surface_layout)),
             "mesh_wavelength_m": float(current_mesh[0]),
             "mesh_max_refractive_index": float(current_mesh[1]),
             "mesh_material_flags": list(current_mesh[2]),
@@ -1187,10 +1383,16 @@ def solve_monostatic_rcs_bor(
                 ),
             )
 
-    samples = samples_by_pol[pol]
-    all_physical_samples = (
-        samples_by_pol["VV"] + samples_by_pol["HH"]
-    )
+    samples = []
+    for channel in ("VV", "HH"):
+        for source in samples_by_pol[channel]:
+            row = dict(source)
+            row["polarization"] = channel
+            samples.append(row)
+    samples.sort(key=lambda row: (
+        row["frequency_ghz"], row["polarization"], row["theta_inc_deg"]
+    ))
+    all_physical_samples = samples
 
     residual_values = np.asarray(
         [row.get("linear_residual", math.nan) for row in per_freq_meta],
@@ -1356,8 +1558,8 @@ def solve_monostatic_rcs_bor(
     return {
         "solver": "bor_mom_rcs",
         "scattering_mode": "monostatic",
-        "polarization": pol,
-        "polarization_export": pol,
+        "polarizations": ["VV", "HH"],
+        "polarization_mapping": {"VV": "VV", "HH": "HH"},
         "rcs_log_unit": "dBsm",
         "rcs_linear_quantity": "sigma_3d",
         "samples": samples,
@@ -1432,7 +1634,6 @@ def solve_monostatic_rcs_bor_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
     elevations_deg: 'List[float]',
-    polarization: 'str',
     geometry_units: 'str' = "inches",
     material_base_dir: 'Optional[str]' = None,
     progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
@@ -1461,7 +1662,6 @@ def solve_monostatic_rcs_bor_certified(
     common = dict(
         frequencies_ghz=frequencies_ghz,
         elevations_deg=elevations_deg,
-        polarization=polarization,
         geometry_units=geometry_units,
         material_base_dir=material_base_dir,
         mesh_reference_ghz=mesh_reference_ghz,
@@ -1573,7 +1773,6 @@ def solve_monostatic_rcs_bor_survey(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
     elevations_deg: 'List[float]',
-    polarization: 'str',
     **kwargs: 'Any',
 ) -> 'Dict[str, Any]':
     """Single-mesh BoR solve with explicit uncertified-result metadata."""
@@ -1582,7 +1781,6 @@ def solve_monostatic_rcs_bor_survey(
         geometry_snapshot=geometry_snapshot,
         frequencies_ghz=frequencies_ghz,
         elevations_deg=elevations_deg,
-        polarization=polarization,
         **kwargs,
     )
     metadata = result.setdefault("metadata", {})
@@ -1604,100 +1802,3 @@ def solve_monostatic_rcs_bor_survey(
             "discrete_linear_system_and_modal_truncation_only"
         )
     return result
-
-
-def solve_adaptive_frequency_sweep_bor(
-    geometry_snapshot: 'Dict[str, Any]',
-    freq_start_ghz: 'float',
-    freq_stop_ghz: 'float',
-    elevations_deg: 'List[float]',
-    polarization: 'str',
-    initial_points: 'int' = 11,
-    max_refinements: 'int' = 3,
-    db_threshold: 'float' = 1.0,
-    max_total_points: 'int' = 201,
-    **kwargs,
-) -> 'Dict[str, Any]':
-    """Adaptive broadband sweep for the BoR solver: uniform seed frequencies,
-    then midpoint insertion wherever adjacent samples differ by more than
-    db_threshold dB (mirrors rcs_solver.solve_adaptive_frequency_sweep;
-    midpoints are rounded exactly like the sample keys so a frequency is
-    never re-solved)."""
-
-    if freq_start_ghz <= 0 or freq_stop_ghz <= 0:
-        raise ValueError("Frequencies must be positive.")
-    if freq_start_ghz >= freq_stop_ghz:
-        raise ValueError("freq_start_ghz must be less than freq_stop_ghz.")
-    initial_points = max(3, int(initial_points))
-
-    freqs = sorted({round(float(f), 12)
-                    for f in np.linspace(freq_start_ghz, freq_stop_ghz, initial_points)})
-    all_samples: 'List[Dict[str, Any]]' = []
-    freq_to_samples: 'Dict[float, List[Dict[str, Any]]]' = {}
-    abort_event = kwargs.get("abort_event")
-
-    def run_freqs(freq_list: 'List[float]') -> 'None':
-        if not freq_list:
-            return
-        result = solve_monostatic_rcs_bor(
-            geometry_snapshot=geometry_snapshot,
-            frequencies_ghz=freq_list,
-            elevations_deg=elevations_deg,
-            polarization=polarization,
-            **kwargs,
-        )
-        for s in result.get("samples", []):
-            f = round(float(s["frequency_ghz"]), 12)
-            freq_to_samples.setdefault(f, []).append(s)
-            all_samples.append(s)
-
-    run_freqs(freqs)
-    refinement_count = 0
-    for _ in range(max_refinements):
-        if abort_event is not None and abort_event.is_set():
-            break
-        if len(freqs) >= max_total_points:
-            break
-        new_freqs: 'set' = set()
-        sorted_freqs = sorted(freqs)
-        for aspect in elevations_deg:
-            db_at = {}
-            for f in sorted_freqs:
-                for s in freq_to_samples.get(round(f, 12), []):
-                    if abs(s["theta_inc_deg"] - aspect) < 0.01:
-                        db_at[f] = s["rcs_db"]
-                        break
-            for i in range(len(sorted_freqs) - 1):
-                f0, f1 = sorted_freqs[i], sorted_freqs[i + 1]
-                if f0 in db_at and f1 in db_at and abs(db_at[f1] - db_at[f0]) > db_threshold:
-                    mid = round(0.5 * (f0 + f1), 12)
-                    if mid not in freq_to_samples and mid != f0 and mid != f1:
-                        new_freqs.add(mid)
-        if not new_freqs:
-            break
-        remaining = max_total_points - len(freqs)
-        if remaining <= 0:
-            break
-        new_list = sorted(new_freqs)[:remaining]
-        run_freqs(new_list)
-        freqs = sorted(set(freqs) | set(new_list))
-        refinement_count += 1
-
-    return {
-        "solver": "bor_mom_rcs",
-        "scattering_mode": "monostatic_adaptive",
-        "polarization": _canonical_bor_polarization(polarization),
-        "polarization_export": _canonical_bor_polarization(polarization),
-        "rcs_log_unit": "dBsm",
-        "rcs_linear_quantity": "sigma_3d",
-        "samples": sorted(all_samples, key=lambda s: (s["frequency_ghz"], s["theta_inc_deg"])),
-        "metadata": {
-            "formulation": "BoR adaptive frequency sweep",
-            "initial_points": initial_points,
-            "final_point_count": len(freqs),
-            "refinement_count": refinement_count,
-            "db_threshold": db_threshold,
-            "freq_start_ghz": freq_start_ghz,
-            "freq_stop_ghz": freq_stop_ghz,
-        },
-    }

@@ -14,8 +14,8 @@ sys.path.insert(0, str(ROOT / "Backend"))
 
 from cem_tools.grim_native import (
     MESH_CERTIFICATION_KEY,
+    _mesh_certification_sources,
     load_grim,
-    require_production_mesh_certification,
 )
 from cem_tools.errors import CemToolError
 from cem_tools.operations import (
@@ -33,6 +33,15 @@ from feature_sum import (
     load_seam_from_grim,
     make_delta_grim,
 )
+
+
+def assert_source_mesh_certification(payload, label):
+    """Test assertion over the same parser used by real CEM operations."""
+
+    sources = _mesh_certification_sources(payload, label)
+    if not sources:
+        raise AssertionError(f"{label}: expected source-field certification")
+    return sources
 
 
 def write_source(path: 'Path', frequency: 'float', polarization: 'str', amplitude: 'np.ndarray') -> 'None':
@@ -65,6 +74,8 @@ def write_source(path: 'Path', frequency: 'float', polarization: 'str', amplitud
 
 
 def certify_source(path: 'Path') -> 'None':
+    """Attach the original single-polarization workflow-unit certificate."""
+
     with np.load(path, allow_pickle=False) as source:
         payload = {
             key: np.array(source[key], copy=True) for key in source.files
@@ -88,6 +99,186 @@ def certify_source(path: 'Path') -> 'None':
                 "base_quality_gate": quality,
                 "fine_quality_gate": quality,
             },
+        },
+    }))
+    with path.open("wb") as stream:
+        np.savez(stream, **payload)
+
+
+def _test_output_attestation(
+    frequency: 'float',
+    *,
+    polarizations: 'list[str] | None' = None,
+    polarization: 'str | None' = None,
+) -> 'dict':
+    attestation = {
+        "schema": "ghost.workflow.embedded-attestation.v1",
+        "run_id": "test-run",
+        "solver_source_sha256": "1" * 64,
+        "runtime_environment_sha256": "2" * 64,
+        "geometry_input_sha256": "3" * 64,
+        "run_solve_spec_sha256": "4" * 64,
+        "unit_solve_spec_sha256": "5" * 64,
+        "solver_config_sha256": "6" * 64,
+        "angular_grid_kind": "azimuths_deg",
+        "angular_grid_sha256": "7" * 64,
+        "frequency_ghz": float(frequency),
+    }
+    if polarizations is not None:
+        attestation["polarizations"] = list(polarizations)
+    if polarization is not None:
+        attestation["polarization"] = str(polarization)
+    return attestation
+
+
+def certify_embedded_single_source(path: 'Path') -> 'None':
+    """Attach the pre-dual-output embedded single-channel contract."""
+
+    with np.load(path, allow_pickle=False) as source:
+        payload = {
+            key: np.array(source[key], copy=True) for key in source.files
+        }
+    frequency = float(np.asarray(payload["frequencies"]).ravel()[0])
+    polarization = str(np.asarray(payload["polarizations"]).ravel()[0])
+    quality = {"passed": True}
+    payload["solver_metadata_json"] = np.asarray(json.dumps({
+        "schema": "ghost.solver_metadata.v1",
+        "polarization": polarization,
+        "metadata": {
+            "quality_gate": quality,
+            "mesh_convergence": {
+                "passed": True,
+                "published_mesh": "fine",
+                "base_quality_gate": quality,
+                "fine_quality_gate": quality,
+            },
+            "output_attestation": _test_output_attestation(
+                frequency, polarization=polarization
+            ),
+        },
+    }))
+    with path.open("wb") as stream:
+        np.savez(stream, **payload)
+
+
+def write_dual_source(
+    path: 'Path',
+    frequency: 'float',
+    vv_amplitude: 'np.ndarray',
+    hh_amplitude: 'np.ndarray',
+) -> 'None':
+    k = 2.0 * math.pi * frequency * 1e9 / C0
+    amplitude = np.stack(
+        [np.asarray(vv_amplitude, complex), np.asarray(hh_amplitude, complex)],
+        axis=-1,
+    ).reshape(len(vv_amplitude), 1, 1, 2)
+    units = {
+        "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
+        "rcs_log_unit": "dBke", "rcs_linear_quantity": "sigma_2d",
+    }
+    with path.open("wb") as stream:
+        np.savez(
+            stream,
+            azimuths=np.asarray([-30.0, 0.0, 30.0]),
+            elevations=np.asarray([0.0]),
+            frequencies=np.asarray([frequency]),
+            polarizations=np.asarray(["VV", "HH"]),
+            rcs_power=(np.abs(amplitude) ** 2 / (4.0 * k)).astype(np.float32),
+            rcs_phase=np.angle(amplitude).astype(np.float32),
+            rcs_amp_real=amplitude.real.astype(np.float64),
+            rcs_amp_imag=amplitude.imag.astype(np.float64),
+            rcs_domain=np.asarray("power_phase"),
+            power_domain=np.asarray("linear_rcs"),
+            units=np.asarray(json.dumps(units)),
+            phase_reference=np.asarray(PHYSICAL_2D_PHASE_REFERENCE),
+            amplitude_convention=np.asarray(PHYSICAL_2D_AMPLITUDE_CONVENTION),
+            complex_field_domain=np.asarray(PHYSICAL_2D_FIELD_DOMAIN),
+            raw_complex_amplitude_preserved=np.asarray(True),
+        )
+
+
+def certify_dual_source(
+    path: 'Path', *, failed_channel: 'str | None' = None,
+    failed_gate: 'str' = "quality",
+) -> 'None':
+    """Attach the aggregate VV/HH production certificate and attestation."""
+
+    with np.load(path, allow_pickle=False) as source:
+        payload = {
+            key: np.array(source[key], copy=True) for key in source.files
+        }
+    frequency = float(np.asarray(payload["frequencies"]).ravel()[0])
+
+    channel_metadata = {}
+    mesh_channels = {}
+    quality_channels = {}
+    base_channels = {}
+    fine_channels = {}
+    for polarization in ("VV", "HH"):
+        quality_passed = not (
+            failed_channel == polarization and failed_gate == "quality"
+        )
+        mesh_passed = not (
+            failed_channel == polarization and failed_gate == "mesh"
+        )
+        quality = {"passed": quality_passed}
+        base_quality = {"passed": True}
+        fine_quality = {"passed": True}
+        mesh = {
+            "schema": "ghost.solver.mesh-convergence.v1",
+            "passed": mesh_passed,
+            "published_mesh": "fine",
+            "base_quality_gate": base_quality,
+            "fine_quality_gate": fine_quality,
+        }
+        channel_metadata[polarization] = {
+            "quality_gate": quality,
+            "mesh_convergence": mesh,
+            "mesh_convergence_certified": True,
+            "certified_entry_point": True,
+            "published_mesh": "fine",
+        }
+        mesh_channels[polarization] = mesh
+        quality_channels[polarization] = quality
+        base_channels[polarization] = base_quality
+        fine_channels[polarization] = fine_quality
+
+    aggregate_quality = {
+        # Keep the aggregate true so the consumer must inspect each channel.
+        "passed": True,
+        "channels": quality_channels,
+    }
+    aggregate_mesh = {
+        "schema": "ghost.solver.mesh-convergence.co-polarized.v1",
+        "passed": True,
+        "published_mesh": "fine",
+        "channels": mesh_channels,
+        "polarizations": mesh_channels,
+        "base_quality_gate": {
+            "passed": True,
+            "channels": base_channels,
+        },
+        "fine_quality_gate": {
+            "passed": True,
+            "channels": fine_channels,
+        },
+    }
+    payload["solver_metadata_json"] = np.asarray(json.dumps({
+        "schema": "ghost.solver_metadata.v1",
+        "polarizations": ["VV", "HH"],
+        "polarization_mapping": {"VV": "TE", "HH": "TM"},
+        "metadata": {
+            "polarizations": ["VV", "HH"],
+            "polarization_mapping": {"VV": "TE", "HH": "TM"},
+            "mesh_convergence": aggregate_mesh,
+            "mesh_convergence_certified": True,
+            "quality_gate": aggregate_quality,
+            "channel_metadata": channel_metadata,
+            "certified_entry_point": True,
+            "published_mesh": "fine",
+            "output_attestation": _test_output_attestation(
+                frequency, polarizations=["VV", "HH"]
+            ),
         },
     }))
     with path.open("wb") as stream:
@@ -244,6 +435,8 @@ class OperationsTest(unittest.TestCase):
         np.testing.assert_allclose(amplitude[..., 1], -0.2 + 0.3j)
 
     def test_mesh_certification_propagates_through_join_and_subtract(self):
+        """The original workflow-unit single-pol contract remains valid."""
+
         opn, frd = self.library()
         for folder in (opn, frd):
             for path in folder.glob("*.grim"):
@@ -253,11 +446,11 @@ class OperationsTest(unittest.TestCase):
         for path in concatenate_polarizations(opn, pol_out).written:
             payload = load_grim(path)
             self.assertIn(MESH_CERTIFICATION_KEY, payload)
-            require_production_mesh_certification(payload, str(path))
+            assert_source_mesh_certification(payload, str(path))
 
         freq_out = self.root / "cert_freq"
         joined = concatenate_frequencies(pol_out, freq_out).written[0]
-        require_production_mesh_certification(
+        assert_source_mesh_certification(
             load_grim(joined), str(joined)
         )
 
@@ -265,19 +458,108 @@ class OperationsTest(unittest.TestCase):
             opn, frd, self.root / "cert_delta"
         ).written[0]
         payload = load_grim(delta)
-        require_production_mesh_certification(payload, str(delta))
+        assert_source_mesh_certification(payload, str(delta))
         decoded = json.loads(str(payload[MESH_CERTIFICATION_KEY]))
         self.assertEqual(decoded["source_count"], 8)
+        self.assertEqual(
+            decoded["certification_scope"],
+            "source_field_mesh_and_quality_gates",
+        )
+        self.assertIs(decoded["certifies_coherent_delta_convergence"], False)
+        self.assertEqual(
+            {source["contract"] for source in decoded["sources"]},
+            {"legacy-workflow-unit.v1"},
+        )
 
-    def test_uncertified_source_is_rejected_by_production_preflight(self):
+    def test_dual_channel_source_chain_is_accepted_and_propagated(self):
+        opn = self.root / "OPN"
+        frd = self.root / "FRD"
+        opn.mkdir()
+        frd.mkdir()
+        clean_vv = np.asarray([1.0 + 0.2j, 0.5 - 0.1j, -0.2 + 0.3j])
+        clean_hh = np.asarray([0.2 + 0.8j, -0.4 + 0.1j, 0.7 - 0.2j])
+        featured_path = opn / "3.000GHz_DUAL-00-00_0.010gap_OPN.grim"
+        clean_path = frd / "3.000GHz_DUAL-00-00_0.010gap_FRD.grim"
+        write_dual_source(
+            featured_path, 3.0, clean_vv + (0.4 + 0.1j),
+            clean_hh + (-0.2 + 0.3j),
+        )
+        write_dual_source(clean_path, 3.0, clean_vv, clean_hh)
+        certify_dual_source(featured_path)
+        certify_dual_source(clean_path)
+
+        for path in (featured_path, clean_path):
+            assert_source_mesh_certification(load_grim(path), str(path))
+        delta_path = subtract_datasets(
+            opn, frd, self.root / "dual_delta"
+        ).written[0]
+        delta = load_grim(delta_path)
+        assert_source_mesh_certification(delta, str(delta_path))
+        np.testing.assert_array_equal(delta["polarizations"], ["VV", "HH"])
+        amplitude = delta["rcs_amp_real"] + 1j * delta["rcs_amp_imag"]
+        np.testing.assert_allclose(amplitude[..., 0], 0.4 + 0.1j)
+        np.testing.assert_allclose(amplitude[..., 1], -0.2 + 0.3j)
+
+        certificate = json.loads(str(delta[MESH_CERTIFICATION_KEY]))
+        self.assertEqual(certificate["source_count"], 2)
+        self.assertEqual(
+            {source["contract"] for source in certificate["sources"]},
+            {"embedded-dual-output-attestation.v1"},
+        )
+        self.assertIs(
+            certificate["certifies_coherent_delta_convergence"], False
+        )
+        for source in certificate["sources"]:
+            self.assertEqual(set(source["channels"]), {"VV", "HH"})
+
+    def test_dual_source_chain_rejects_one_failed_channel(self):
+        clean_vv = np.asarray([1.0 + 0.2j, 0.5 - 0.1j, -0.2 + 0.3j])
+        clean_hh = np.asarray([0.2 + 0.8j, -0.4 + 0.1j, 0.7 - 0.2j])
+        for failed_gate, expected in (
+            ("quality", "HH.*quality gate"),
+            ("mesh", "HH.*mesh-convergence"),
+        ):
+            with self.subTest(failed_gate=failed_gate):
+                case_root = self.root / failed_gate
+                opn = case_root / "OPN"
+                frd = case_root / "FRD"
+                opn.mkdir(parents=True)
+                frd.mkdir(parents=True)
+                featured_path = (
+                    opn / "3.000GHz_DUAL-00-00_0.010gap_OPN.grim"
+                )
+                clean_path = (
+                    frd / "3.000GHz_DUAL-00-00_0.010gap_FRD.grim"
+                )
+                write_dual_source(
+                    featured_path, 3.0, clean_vv + 0.4, clean_hh + 0.2j
+                )
+                write_dual_source(clean_path, 3.0, clean_vv, clean_hh)
+                certify_dual_source(
+                    featured_path,
+                    failed_channel="HH",
+                    failed_gate=failed_gate,
+                )
+                certify_dual_source(clean_path)
+                with self.assertRaisesRegex(CemToolError, expected):
+                    subtract_datasets(opn, frd, case_root / "delta")
+
+    def test_embedded_single_channel_contract_remains_valid(self):
+        path = self.root / "TE_3.000GHz_LEGACY-00-00_FRD.grim"
+        write_source(
+            path, 3.0, "TE",
+            np.asarray([1.0 + 0.2j, 0.5 - 0.1j, -0.2 + 0.3j]),
+        )
+        certify_embedded_single_source(path)
+        payload = load_grim(path)
+        assert_source_mesh_certification(payload, str(path))
+
+    def test_uncertified_source_has_no_certificate_evidence(self):
         opn, _frd = self.library()
         path = next(opn.glob("*.grim"))
-        with self.assertRaisesRegex(
-            CemToolError, "no production mesh certification"
-        ):
-            require_production_mesh_certification(
-                load_grim(path), str(path)
-            )
+        self.assertIsNone(
+            _mesh_certification_sources(load_grim(path), str(path))
+        )
 
     def test_rename_copy_and_in_place(self) -> 'None':
         source = self.root / "source"

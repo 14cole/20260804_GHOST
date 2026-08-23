@@ -64,15 +64,21 @@ def _overrides(**values):
 
 def test_run_local_monostatic(workspace):
     print("\nrun_local_monostatic.py")
-    geo_src = REPO / "geometries" / "body.geo"
-    if not geo_src.is_file():
-        print("  [skip] geometries/body.geo not present")
-        return
-
     frd = workspace / "geometries" / "FRD"
     frd.mkdir(parents=True)
+    closed_pec = (
+        "Title: closed 2-D PEC test\n"
+        "Segment: body 2\n"
+        "properties: 2 0 0 0 0\n"
+        "-0.02 -0.02 -0.02 0.02\n"
+        "-0.02 0.02 0.02 0.02\n"
+        "0.02 0.02 0.02 -0.02\n"
+        "0.02 -0.02 -0.02 -0.02\n"
+        "IBCS_Resistances:\n"
+        "Dielectrics:\n"
+    )
     for stem in ("coupon_a", "coupon_b"):
-        shutil.copy2(str(geo_src), str(frd / f"{stem}.geo"))
+        (frd / f"{stem}.geo").write_text(closed_pec, encoding="utf-8")
 
     script = DRIVER_HARNESS.format(
         backend=str(BACKEND),
@@ -82,7 +88,6 @@ def test_run_local_monostatic(workspace):
             OPN_DIR=str(workspace / "geometries" / "OPN"),
             FREQUENCIES_GHZ=[2.0],
             AZIMUTHS_DEG=[0.0, 45.0, 90.0],
-            POLARIZATIONS=["TM"],
             OUTPUT_DIR=str(workspace / "rcs_runs"),
             GEOMETRY_UNITS="meters",
             WORKERS=2,
@@ -108,6 +113,13 @@ def test_run_local_monostatic(workspace):
           "results/ holds no .provenance.json sidecars")
     check(all(path.parent.name == "FRD" for path in entries),
           "2-D results preserve their FRD/OPN role for downstream tools")
+    import numpy as np
+    with np.load(str(entries[0]), allow_pickle=False) as payload:
+        check(
+            np.asarray(payload["polarizations"]).astype(str).tolist()
+            == ["VV", "HH"],
+            "each 2-D result contains canonical VV and HH channels",
+        )
 
     manifest = json.loads((run_dir / "manifest.json").read_text())
     check(manifest["status"] == "complete", "manifest reports the run complete")
@@ -170,8 +182,6 @@ def test_resume_same_run_dir(workspace):
                 manifest["solver_config"]
             ),
         "geometry_units": manifest["solver_config"]["geometry_units"],
-        "solver_method": manifest["solver_config"]["solver_method"],
-        "cfie_alpha": manifest["solver_config"]["cfie_alpha"],
         "max_panels": manifest["solver_config"]["max_panels"],
         "mesh_convergence_policy":
             manifest["solver_config"]["mesh_convergence_policy"],
@@ -200,18 +210,9 @@ def test_polarization_aliases():
           "VV maps to TE and HH maps to TM")
     check(canonical(" vv ") == "TE",
           "labels are case- and whitespace-insensitive")
-    # BoR channels are theta-pol/phi-pol, so there VV/HH is canonical and
-    # TM/TE are the aliases -- the same grouping, spelled the other way.
-    bor = hpc_scheduler.canonical_bor_polarization
-    check(bor("TE") == "VV" and bor("TM") == "HH" and bor("VV") == "VV",
-          "the BoR spelling maps TE to VV and TM to HH")
-
     check(hpc_scheduler.distinct_polarization_channels(["VV", "HH"])
           == ["VV", "HH"],
-          "labels come back as written when the driver names files with them")
-    check(hpc_scheduler.distinct_polarization_channels(["TM", "TE"], bor)
-          == ["HH", "VV"],
-          "and canonicalized when the driver's file names use a fixed spelling")
+          "resource-planning labels come back as written")
 
     # The same-channel-twice case is the one a plain uniqueness check misses,
     # so assert it directly on the shared helper the 2-D drivers call.
@@ -224,17 +225,12 @@ def test_polarization_aliases():
             check(False, f"{bad} was accepted but is one channel twice")
 
     import run_local_monostatic as local_driver
-    previous_method = local_driver.SOLVER_METHOD
-    try:
-        local_driver.SOLVER_METHOD = "fmm"
-        try:
-            local_driver._validate_config()
-        except SystemExit:
-            check(True, "certified local driver rejects matrix-free FMM at startup")
-        else:
-            check(False, "certified local driver accepted matrix-free FMM")
-    finally:
-        local_driver.SOLVER_METHOD = previous_method
+    check(
+        not hasattr(local_driver, "POLARIZATIONS")
+        and not hasattr(local_driver, "SOLVER_METHOD")
+        and not hasattr(local_driver, "CFIE_ALPHA"),
+        "2-D production driver exposes no polarization, method, or dead CFIE control",
+    )
 
 
 def test_bor_driver_loads():
@@ -265,7 +261,7 @@ def test_bor_driver_loads():
         params = set(inspect.signature(solve_monostatic_rcs_bor).parameters)
         forwarded = {{
             "geometry_snapshot", "frequencies_ghz", "elevations_deg",
-            "polarization", "geometry_units", "material_base_dir",
+            "geometry_units", "material_base_dir",
             "cfie_alpha", "n_modes", "mode_tol", "max_elements", "workers",
             "table_precision", "assembly", "stream_budget_gb", "expand_to_360",
         }}
@@ -321,7 +317,7 @@ def test_local_bor_downstream_collection(workspace):
         [path.name for path in frequency_paths] == [
             "HH_1.000GHz_body.grim", "VV_1.000GHz_body.grim"
         ],
-        "completed frequency publishes visible VV and HH unit files",
+        "completed frequency writes visible VV and HH restart records",
     )
     body_paths = sorted(runs[-1].glob("results/*.grim")) if runs else []
     check(len(body_paths) == 1,
@@ -332,6 +328,8 @@ def test_local_bor_downstream_collection(workspace):
     from feature_sum import (  # noqa: E402
         load_body_grim,
         load_body_requested_radar_grid,
+        load_body_solver_diagnostics,
+        require_body_mesh_certification,
         verify_body_artifact_bundle,
     )
     body = load_body_grim(str(body_paths[0]))
@@ -346,6 +344,21 @@ def test_local_bor_downstream_collection(workspace):
     check(grid["azimuths_deg"] == [0.0, 90.0, 180.0]
           and grid["elevations_deg"] == [0.0],
           "the same file carries the requested monostatic radar grid")
+    diagnostics = load_body_solver_diagnostics(str(body_paths[0]))
+    record = diagnostics["per_frequency"].get("1.0", {})
+    check(
+        record.get("polarizations") == ["VV", "HH"]
+        and record.get("metadata", {}).get(
+            "mesh_convergence_certified"
+        ) is False,
+        "the final body preserves both channels' honest survey diagnostics",
+    )
+    try:
+        require_body_mesh_certification(str(body_paths[0]))
+    except ValueError:
+        check(True, "a survey body is explicitly rejected as uncertified")
+    else:
+        check(False, "a survey body was incorrectly accepted as certified")
 
 
 def main():

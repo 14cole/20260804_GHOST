@@ -54,6 +54,14 @@ python3 -m cem_tools.cli convert Original Converted .grim
 
 Add `--overwrite` only when existing outputs should be replaced.
 
+The `concat-pols` and `concat-freqs` commands are general-purpose dataset
+library operations. They are not preprocessing stages for a GHOST feature
+delta: current solver files already contain VV/HH, and `subtract` joins all
+compatible frequency files internally. The repository's production 2-D
+feature entry point is `python 1c_build_deltas/subtract_datasets.py`, which
+also discovers the newest complete canonical solver run when paths are
+omitted.
+
 ## Dataset behavior
 
 - Subtraction is `OPN - FRD` and is performed on float64

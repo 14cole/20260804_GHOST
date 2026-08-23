@@ -5,7 +5,6 @@ Quality gate inputs:
 - `residual <=`: max allowed linear solve residual norm (dimensionless).
 - `cond <=`: max allowed condition-number estimate of the system matrix (dimensionless).
 - `warns <=`: max allowed warning count emitted by the solver.
-- `Require quality gate pass`: fail the solve if any quality threshold is exceeded.
 
 Mesh convergence is enabled by default for both solvers and may be disabled
 explicitly for survey work. Survey results retain the algebraic quality gate
@@ -88,10 +87,37 @@ def _finite_unique_count(
     return len(values)
 
 
+def _result_rows(result: 'Dict[str, Any]') -> 'List[Dict[str, Any]]':
+    """Return every solved channel with an explicit VV/HH row label."""
+
+    channels = result.get("co_solved_samples")
+    if isinstance(channels, dict) and channels:
+        rows: 'List[Dict[str, Any]]' = []
+        for polarization in ("VV", "HH"):
+            for source in channels.get(polarization, []) or []:
+                row = dict(source)
+                row["polarization"] = polarization
+                rows.append(row)
+        if rows:
+            return rows
+    polarization = str(
+        result.get("polarization_export")
+        or result.get("polarization")
+        or ""
+    )
+    rows = []
+    for source in result.get("samples", []) or []:
+        row = dict(source)
+        if polarization:
+            row.setdefault("polarization", polarization)
+        rows.append(row)
+    return rows
+
+
 def _result_sample_counts(result: 'Dict[str, Any]') -> 'Dict[str, int]':
     """Count the axes actually represented by the returned samples."""
 
-    rows = list(result.get("samples", []) or [])
+    rows = _result_rows(result)
     metadata = result.get("metadata", {}) or {}
 
     def count_or_metadata(sample_key: 'str', metadata_key: 'str') -> 'int':
@@ -165,7 +191,6 @@ def _result_history(
     result: 'Dict[str, Any]',
     *,
     units: 'str',
-    polarization: 'str',
     manual_export: 'bool' = False,
 ) -> 'str':
     kind = _result_kind(result)
@@ -187,7 +212,7 @@ def _result_history(
         )
     else:
         fields.append(f"cut_count={counts['observation_count']}")
-    fields.extend([f"units={units}", f"pol={polarization}"])
+    fields.extend([f"units={units}", "pols=VV,HH"])
     if manual_export:
         fields.extend(
             [
@@ -218,17 +243,18 @@ def _display_db_value(
 
 def _result_plot_groups(
     result: 'Dict[str, Any]',
-) -> 'Dict[Tuple[float, Optional[float]], List[Dict[str, Any]]]':
+) -> 'Dict[Tuple[float, Optional[float], str], List[Dict[str, Any]]]':
     """Keep separate bistatic incidence sweeps from becoming one curve."""
 
     bistatic = _result_kind(result) == "2d_bistatic"
-    groups: 'Dict[\n    Tuple[float, Optional[float]],\n    List[Dict[str, Any]],\n]' = {}
-    for row in result.get("samples", []) or []:
+    groups: 'Dict[\n    Tuple[float, Optional[float], str],\n    List[Dict[str, Any]],\n]' = {}
+    for row in _result_rows(result):
         freq = float(row.get("frequency_ghz", 0.0))
         incidence = (
             float(row.get("theta_inc_deg", 0.0)) if bistatic else None
         )
-        groups.setdefault((freq, incidence), []).append(row)
+        polarization = str(row.get("polarization", ""))
+        groups.setdefault((freq, incidence, polarization), []).append(row)
     return groups
 
 
@@ -254,14 +280,11 @@ class _SolveWorker(QObject):
         base_dir: 'str',
         frequencies: 'List[float]',
         elevations: 'List[float]',
-        pol: 'str',
         units: 'str',
         quality_thresholds: 'Dict[str, float | int]',
-        strict_quality_gate: 'bool',
         mesh_certification: 'bool' = True,
         cfie_alpha: 'float' = 0.0,
         abort_event: 'Optional[Any]' = None,
-        solver_method: 'str' = "auto",
         scattering_mode: 'str' = "monostatic",
         observation_angles: 'Optional[List[float]]' = None,
         solver_kind: 'str' = "2d",
@@ -273,14 +296,11 @@ class _SolveWorker(QObject):
         self.base_dir = base_dir
         self.frequencies = frequencies
         self.elevations = elevations
-        self.pol = pol
         self.units = units
         self.quality_thresholds = dict(quality_thresholds)
-        self.strict_quality_gate = strict_quality_gate
         self.mesh_certification = bool(mesh_certification)
         self.cfie_alpha = float(cfie_alpha)
         self.abort_event = abort_event
-        self.solver_method = str(solver_method)
         self.scattering_mode = str(scattering_mode)
         self.observation_angles = observation_angles
 
@@ -294,21 +314,18 @@ class _SolveWorker(QObject):
 
     def _run_bor(self):
         """BoR (axisymmetric) route: elevations are ASPECT angles from the +z
-        rotation axis.  CFIE alpha 0 (the 2D default) is promoted to 0.5 --
-        closed PEC BoR bodies need CFIE against interior resonances."""
+        rotation axis. The displayed BoR CFIE value is passed unchanged."""
 
         if self.scattering_mode == "bistatic":
             raise ValueError("Bistatic sweeps are not supported by the BoR "
                              "solver yet; use Monostatic.")
-        bor_alpha = self.cfie_alpha if self.cfie_alpha > 0.0 else 0.5
         kwargs = dict(
             geometry_snapshot=self.snapshot,
             frequencies_ghz=self.frequencies,
             elevations_deg=self.elevations,
-            polarization=self.pol,
             geometry_units=self.units,
             material_base_dir=self.base_dir,
-            cfie_alpha=bor_alpha,
+            cfie_alpha=self.cfie_alpha,
             abort_event=self.abort_event,
         )
         if self.mesh_certification:
@@ -341,14 +358,11 @@ class _SolveWorker(QObject):
                 frequencies_ghz=self.frequencies,
                 incidence_angles_deg=self.elevations,
                 observation_angles_deg=self.observation_angles,
-                polarization=self.pol,
                 geometry_units=self.units,
                 material_base_dir=self.base_dir,
                 progress_callback=progress_callback,
                 quality_thresholds=self.quality_thresholds,
-                cfie_alpha=self.cfie_alpha,
                 abort_event=self.abort_event,
-                solver_method=self.solver_method,
             )
             if self.mesh_certification:
                 bistatic_kwargs["mesh_convergence_policy"] = mesh_policy
@@ -366,14 +380,11 @@ class _SolveWorker(QObject):
             geometry_snapshot=snapshot,
             frequencies_ghz=self.frequencies,
             elevations_deg=self.elevations,
-            polarization=self.pol,
             geometry_units=self.units,
             material_base_dir=self.base_dir,
             progress_callback=progress_callback,
             quality_thresholds=self.quality_thresholds,
-            cfie_alpha=self.cfie_alpha,
             abort_event=self.abort_event,
-            solver_method=self.solver_method,
         )
         if self.mesh_certification:
             monostatic_kwargs["mesh_convergence_policy"] = mesh_policy
@@ -401,6 +412,8 @@ class SolverTab(QWidget):
         self.geometry_tab = geometry_tab
         self.last_result: 'Optional[Dict[str, Any]]' = None
         self.last_source_path: 'str' = ""
+        self.last_solve_context: 'Optional[Dict[str, Any]]' = None
+        self._pending_solve_context: 'Optional[Dict[str, Any]]' = None
         self._solve_thread: 'Optional[QThread]' = None
         self._solve_worker: 'Optional[_SolveWorker]' = None
         self._is_solving: 'bool' = False
@@ -454,21 +467,7 @@ class SolverTab(QWidget):
         self.cmb_units.addItems(["inches", "meters"])
         self.cmb_units.setCurrentText("inches")
 
-        self.cmb_pol = QComboBox()
-        # Elevation-cut convention: HH <-> TM (E along horizontal z), VV <-> TE.
-        self.cmb_pol.addItem("HH", userData="HH")
-        self.cmb_pol.addItem("VV", userData="VV")
-
         self.lbl_solve_method = QLabel("Linear / Galerkin")
-        self.chk_strict_quality = QCheckBox(
-            "Require quality gate pass (mandatory for 2-D)"
-        )
-        self.chk_strict_quality.setToolTip(
-            "Every 2-D solve requires the algebraic residual, conditioning, "
-            "and field-consistency gate. Mesh convergence is controlled "
-            "separately below."
-        )
-        self.chk_strict_quality.setChecked(True)
         self.chk_mesh_certification = QCheckBox(
             "Compare base/fine meshes (recommended)"
         )
@@ -504,22 +503,11 @@ class SolverTab(QWidget):
         self.edit_cfie_alpha = QLineEdit("0.0")
         self.edit_cfie_alpha.setEnabled(False)
         self.edit_cfie_alpha.setToolTip(
-            "BoR closed-PEC CFIE coupling. The 2-D solver requires 0 because "
-            "its active formulations do not implement a CFIE operator."
-        )
-        self.cmb_solver_method = QComboBox()
-        self.cmb_solver_method.addItem("Auto (dense direct)", userData="auto")
-        self.cmb_solver_method.addItem("Direct (dense LU)", userData="direct")
-        self.cmb_solver_method.setToolTip(
-            "Certified GUI solves use dense direct linear algebra so both "
-            "meshes can report a condition diagnostic. Matrix-free FMM "
-            "remains a low-level diagnostic API and is not a certified "
-            "production option."
+            "BoR closed-PEC CFIE coupling (0.5 recommended; 0 is EFIE). The "
+            "2-D solver has no CFIE control."
         )
 
         advanced_form.addRow("CFIE alpha", self.edit_cfie_alpha)
-        advanced_form.addRow("Solver method", self.cmb_solver_method)
-        advanced_form.addRow("Quality Gate", self.chk_strict_quality)
         advanced_form.addRow("Mesh Certification", self.chk_mesh_certification)
         advanced_form.addRow("Quality Thresholds", quality_threshold_row)
         self.advanced_settings_widget.setVisible(False)
@@ -578,7 +566,7 @@ class SolverTab(QWidget):
 
         options_form.addRow("Solver", self.cmb_solver_kind)
         options_form.addRow("Units In Geometry", self.cmb_units)
-        options_form.addRow("Polarization", self.cmb_pol)
+        options_form.addRow("Output Channels", QLabel("VV and HH (co-solved)"))
         options_form.addRow("Discretization", self.lbl_solve_method)
         options_form.addRow(self.btn_advanced_settings)
         options_form.addRow(self.advanced_settings_widget)
@@ -816,9 +804,7 @@ class SolverTab(QWidget):
         self.edit_output.setEnabled(not solving)
         self.cmb_solver_kind.setEnabled(not solving)
         self.cmb_units.setEnabled(not solving)
-        self.cmb_pol.setEnabled(not solving)
         self.cmb_scatter_mode.setEnabled(not solving and not is_bor)
-        self.cmb_solver_method.setEnabled(not solving and not is_bor)
         self.edit_cfie_alpha.setEnabled(not solving and is_bor)
         self.cmb_freq_mode.setEnabled(not solving)
         self.cmb_elev_mode.setEnabled(not solving)
@@ -831,7 +817,6 @@ class SolverTab(QWidget):
         self.edit_elev_stop.setEnabled(not solving and self.cmb_elev_mode.currentIndex() != 0)
         self.edit_elev_step.setEnabled(not solving and self.cmb_elev_mode.currentIndex() != 0)
         self.chk_export_after_solve.setEnabled(not solving)
-        self.chk_strict_quality.setEnabled(False)
         self.chk_mesh_certification.setEnabled(not solving)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)
@@ -847,16 +832,21 @@ class SolverTab(QWidget):
     def _on_solver_kind_changed(self, _index: 'int' = 0) -> 'None':
         is_bor = (self.cmb_solver_kind.currentData() == "bor")
         if is_bor:
-            # BoR is monostatic-only; the 2D method/quality knobs do not apply.
+            # BoR is monostatic-only; the 2-D quality knobs do not apply.
             self.cmb_scatter_mode.setCurrentIndex(0)
+            try:
+                current_alpha = float(self.edit_cfie_alpha.text().strip())
+            except ValueError:
+                current_alpha = 0.0
+            if current_alpha == 0.0:
+                self.edit_cfie_alpha.setText("0.5")
         else:
-            # The production 2-D API does not expose certification bypasses.
-            self.chk_strict_quality.setChecked(True)
+            # CFIE is a real BoR-only control. Do not let its hidden value
+            # poison a subsequent 2-D solve.
+            self.edit_cfie_alpha.setText("0.0")
         self.cmb_scatter_mode.setEnabled(not is_bor)
-        self.cmb_solver_method.setEnabled(not is_bor)
         self.edit_cfie_alpha.setEnabled(is_bor)
         self.btn_currents.setEnabled(not is_bor and not self._is_solving)
-        self.chk_strict_quality.setEnabled(False)
         self.edit_quality_residual_max.setEnabled(not is_bor)
         self.edit_quality_condition_max.setEnabled(not is_bor)
         self.edit_quality_warnings_max.setEnabled(not is_bor)
@@ -877,25 +867,30 @@ class SolverTab(QWidget):
                 raise ValueError("Need at least one frequency.")
             if not elevations:
                 raise ValueError("Need at least one elevation.")
-            pol = str(self.cmb_pol.currentData() or "TM")
             units = str(self.cmb_units.currentText() or "inches")
-            cfie_text = self.edit_cfie_alpha.text().strip()
-            cfie_alpha = float(cfie_text) if cfie_text else 0.0
         except Exception as exc:
             QMessageBox.critical(self, "Boundary Density Error", str(exc))
             return
 
         self.lbl_status.setText("Computing boundary-integral densities...")
         try:
-            result = compute_boundary_densities(
-                geometry_snapshot=snapshot,
-                frequency_ghz=frequencies[0],
-                elevation_deg=elevations[0],
-                polarization=pol,
-                geometry_units=units,
-                material_base_dir=base_dir,
-                cfie_alpha=cfie_alpha,
-            )
+            channels = {}
+            for label, polarization in (("VV", "TE"), ("HH", "TM")):
+                channels[label] = compute_boundary_densities(
+                    geometry_snapshot=snapshot,
+                    frequency_ghz=frequencies[0],
+                    elevation_deg=elevations[0],
+                    polarization=polarization,
+                    geometry_units=units,
+                    material_base_dir=base_dir,
+                    cfie_alpha=0.0,
+                )
+            result = {
+                "polarizations": ["VV", "HH"],
+                "frequency_ghz": float(frequencies[0]),
+                "cut_angle_deg": float(elevations[0]),
+                "channels": channels,
+            }
         except Exception as exc:
             QMessageBox.critical(self, "Boundary Density Error", str(exc))
             self.lbl_status.setText(f"Boundary-density solve failed: {exc}")
@@ -903,7 +898,7 @@ class SolverTab(QWidget):
 
         import json
         save_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Boundary Densities", "boundary_densities.json", "JSON Files (*.json)",
+            self, "Save Boundary Densities", "boundary_densities_vv_hh.json", "JSON Files (*.json)",
         )
         if not save_path:
             self.lbl_status.setText("Boundary densities computed (not saved).")
@@ -912,10 +907,14 @@ class SolverTab(QWidget):
         try:
             with open(save_path, "w") as f:
                 json.dump(result, f, indent=2)
-            n_elem = result.get("element_count", 0)
-            formulation = result.get("formulation", "?")
+            n_elem = channels["VV"].get("element_count", 0)
+            formulations = ", ".join(
+                f"{label}={channels[label].get('formulation', '?')}"
+                for label in ("VV", "HH")
+            )
             self.lbl_status.setText(
-                f"Boundary densities saved: {save_path} ({n_elem} elements, {formulation})"
+                f"Boundary densities saved: {save_path} "
+                f"({n_elem} elements, {formulations})"
             )
         except Exception as exc:
             QMessageBox.critical(self, "Save Error", str(exc))
@@ -937,12 +936,13 @@ class SolverTab(QWidget):
     def _on_solver_finished(self, result: 'Dict[str, Any]', source_path: 'str'):
         self.last_result = result
         self.last_source_path = source_path
+        self.last_solve_context = self._pending_solve_context
+        self._pending_solve_context = None
         self._populate_results_table(result)
         self._plot_results(result)
 
         metadata = result.get("metadata", {}) or {}
         units = str(metadata.get("geometry_units_in", self.cmb_units.currentText()))
-        pol = str(result.get("polarization", self.cmb_pol.currentData() or "TM"))
         write_summary = _result_summary(result)
         quality_suffix = _quality_gate_suffix(metadata)
         mesh_suffix = ""
@@ -969,15 +969,13 @@ class SolverTab(QWidget):
         if self.chk_export_after_solve.isChecked():
             try:
                 out_text = self.edit_output.text().strip() or "rcs_output.grim"
-                files = export_result_to_grim(
+                files = self._export_result_files(
                     result,
                     out_text,
-                    polarization=result.get("polarization_export", result.get("polarization", "TM")),
                     source_path=source_path,
                     history=_result_history(
                         result,
                         units=units,
-                        polarization=pol,
                     ),
                 )
                 self.lbl_status.setText(
@@ -994,6 +992,7 @@ class SolverTab(QWidget):
 
     @Slot(str)
     def _on_solver_error(self, message: 'str'):
+        self._pending_solve_context = None
         self.progress.setValue(0)
         self.lbl_status.setText(f"Solve failed: {message}")
         QMessageBox.critical(self, "Solver Error", message)
@@ -1012,36 +1011,40 @@ class SolverTab(QWidget):
             frequencies = self._collect_frequency_values()
             elevations = self._collect_elevation_values()
             snapshot, source_path, base_dir = self._load_geometry_for_solver()
-            pol = str(self.cmb_pol.currentData())
             units = self.cmb_units.currentText()
-            strict_quality = bool(self.chk_strict_quality.isChecked())
             mesh_certification = bool(self.chk_mesh_certification.isChecked())
-            quality_residual_max = float(self.edit_quality_residual_max.text().strip())
-            quality_condition_max = float(self.edit_quality_condition_max.text().strip())
-            quality_warnings_max = int(float(self.edit_quality_warnings_max.text().strip()))
-            if quality_residual_max <= 0.0:
-                raise ValueError("Quality residual threshold must be > 0.")
-            if quality_condition_max <= 0.0:
-                raise ValueError("Quality condition threshold must be > 0.")
-            if quality_warnings_max < 0:
-                raise ValueError("Quality warning threshold must be >= 0.")
-            quality_thresholds: 'Dict[str, float | int]' = {
-                "residual_norm_max": quality_residual_max,
-                "condition_est_max": quality_condition_max,
-                "warnings_max": quality_warnings_max,
-            }
+            solver_kind = str(self.cmb_solver_kind.currentData() or "2d")
+            quality_thresholds: 'Dict[str, float | int]' = {}
+            if solver_kind == "2d":
+                quality_residual_max = float(
+                    self.edit_quality_residual_max.text().strip()
+                )
+                quality_condition_max = float(
+                    self.edit_quality_condition_max.text().strip()
+                )
+                quality_warnings_max = int(float(
+                    self.edit_quality_warnings_max.text().strip()
+                ))
+                if quality_residual_max <= 0.0:
+                    raise ValueError("Quality residual threshold must be > 0.")
+                if quality_condition_max <= 0.0:
+                    raise ValueError("Quality condition threshold must be > 0.")
+                if quality_warnings_max < 0:
+                    raise ValueError("Quality warning threshold must be >= 0.")
+                quality_thresholds = {
+                    "residual_norm_max": quality_residual_max,
+                    "condition_est_max": quality_condition_max,
+                    "warnings_max": quality_warnings_max,
+                }
 
             # Advanced settings
-            solver_kind = str(self.cmb_solver_kind.currentData() or "2d")
             cfie_text = self.edit_cfie_alpha.text().strip()
-            cfie_alpha = float(cfie_text) if cfie_text else 0.0
+            cfie_alpha = (
+                float(cfie_text) if solver_kind == "bor" and cfie_text
+                else 0.0
+            )
             if not math.isfinite(cfie_alpha) or cfie_alpha < 0.0:
                 raise ValueError("CFIE alpha must be a non-negative finite number.")
-            if solver_kind == "2d" and cfie_alpha != 0.0:
-                raise ValueError(
-                    "CFIE alpha must be 0 for the 2-D solver; no active 2-D "
-                    "formulation implements a CFIE operator."
-                )
 
             # Scattering mode and observation angles.
             scatter_mode = str(self.cmb_scatter_mode.currentData() or "monostatic")
@@ -1061,6 +1064,12 @@ class SolverTab(QWidget):
 
         abort_event = threading.Event()
         self._abort_event = abort_event
+        self._pending_solve_context = {
+            "snapshot": snapshot,
+            "solver_kind": solver_kind,
+            "units": str(units),
+            "aspects_deg": list(elevations),
+        }
 
         thread = QThread(self)
         worker = _SolveWorker(
@@ -1069,14 +1078,11 @@ class SolverTab(QWidget):
             base_dir=base_dir,
             frequencies=frequencies,
             elevations=elevations,
-            pol=pol,
             units=units,
             quality_thresholds=quality_thresholds,
-            strict_quality_gate=strict_quality,
             mesh_certification=mesh_certification,
             cfie_alpha=cfie_alpha,
             abort_event=abort_event,
-            solver_method=str(self.cmb_solver_method.currentData() or "auto"),
             scattering_mode=scatter_mode,
             observation_angles=obs_angles_list,
             solver_kind=solver_kind,
@@ -1098,6 +1104,56 @@ class SolverTab(QWidget):
         self._solve_worker = worker
         thread.start()
 
+    def _export_result_files(
+        self,
+        result: 'Dict[str, Any]',
+        output_path: 'str',
+        *,
+        source_path: 'str',
+        history: 'str',
+    ) -> 'List[str]':
+        """Publish a generic 2-D field or a feature-ready BoR body file."""
+
+        if _result_kind(result) != "bor":
+            return export_result_to_grim(
+                result,
+                output_path,
+                source_path=source_path,
+                history=history,
+                preserve_raw_complex_amplitude=True,
+            )
+        context = self.last_solve_context
+        if not isinstance(context, dict) or context.get("solver_kind") != "bor":
+            raise ValueError(
+                "The BoR solve context is unavailable; re-run the body before "
+                "exporting it."
+            )
+        from feature_sum import (
+            bodies_from_bor_solver_result,
+            bor_solver_diagnostics_by_frequency,
+            outer_generatrix,
+            save_monostatic_grim,
+        )
+
+        bodies = bodies_from_bor_solver_result(result)
+        profile = outer_generatrix(
+            context["snapshot"], str(context["units"])
+        )
+        written = save_monostatic_grim(
+            bodies,
+            profile,
+            output_path,
+            # The GUI's BoR sweep control is the body aspect. With the default
+            # body axis at radar (az=0, el=0), the azimuth cut at elevation 0
+            # has exactly that 0..180 aspect axis.
+            azimuths_deg=list(context["aspects_deg"]),
+            elevations_deg=[0.0],
+            source_path=source_path,
+            history=history,
+            solver_diagnostics=bor_solver_diagnostics_by_frequency(result),
+        )
+        return [written]
+
     def _export_last_result(self):
         if self._is_solving:
             QMessageBox.information(self, "Export", "Solver is currently running. Please wait for completion.")
@@ -1110,10 +1166,9 @@ class SolverTab(QWidget):
             QMessageBox.warning(self, "Export", "Please provide an output path.")
             return
         try:
-            files = export_result_to_grim(
+            files = self._export_result_files(
                 self.last_result,
                 out_text,
-                polarization=self.last_result.get("polarization_export", self.last_result.get("polarization", "TM")),
                 source_path=self.last_source_path,
                 history=_result_history(
                     self.last_result,
@@ -1123,15 +1178,8 @@ class SolverTab(QWidget):
                             self.cmb_units.currentText(),
                         )
                     ),
-                    polarization=str(
-                        self.last_result.get(
-                            "polarization",
-                            self.cmb_pol.currentData() or "TM",
-                        )
-                    ),
                     manual_export=True,
                 ),
-                preserve_raw_complex_amplitude=True,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Export Error", str(exc))
@@ -1149,19 +1197,21 @@ class SolverTab(QWidget):
     def _populate_results_table(self, result: 'Dict[str, Any]'):
         kind = _result_kind(result)
         rows = sorted(
-            result.get("samples", []),
+            _result_rows(result),
             key=lambda row: (
                 float(row.get("frequency_ghz", 0.0)),
+                str(row.get("polarization", "")),
                 float(row.get("theta_inc_deg", 0.0)),
                 float(row.get("theta_scat_deg", 0.0)),
             ),
         )
         self.table_results.clear()
         if kind == "2d_bistatic":
-            self.table_results.setColumnCount(5)
+            self.table_results.setColumnCount(6)
             self.table_results.setHorizontalHeaderLabels(
                 [
                     "Frequency (GHz)",
+                    "Pol",
                     "Incidence (deg)",
                     "Observation (deg)",
                     "Width (m)",
@@ -1169,20 +1219,22 @@ class SolverTab(QWidget):
                 ]
             )
         elif kind == "bor":
-            self.table_results.setColumnCount(4)
+            self.table_results.setColumnCount(5)
             self.table_results.setHorizontalHeaderLabels(
                 [
                     "Frequency (GHz)",
+                    "Pol",
                     "Aspect (deg)",
                     "RCS (m^2)",
                     "RCS (dBsm)",
                 ]
             )
         else:
-            self.table_results.setColumnCount(4)
+            self.table_results.setColumnCount(5)
             self.table_results.setHorizontalHeaderLabels(
                 [
                     "Frequency (GHz)",
+                    "Pol",
                     "Cut angle (deg)",
                     "Width (m)",
                     "Width (dBke)",
@@ -1196,10 +1248,23 @@ class SolverTab(QWidget):
             lin = float(row.get("rcs_linear", 0.0))
             db = self._display_db_from_linear(result, row)
             self.table_results.setItem(r, 0, QTableWidgetItem(f"{freq:.6g}"))
+            self.table_results.setItem(
+                r, 1, QTableWidgetItem(str(row.get("polarization", "")))
+            )
             if kind == "2d_bistatic":
                 self.table_results.setItem(
-                    r, 1, QTableWidgetItem(f"{inc:.6g}")
+                    r, 2, QTableWidgetItem(f"{inc:.6g}")
                 )
+                self.table_results.setItem(
+                    r, 3, QTableWidgetItem(f"{obs:.6g}")
+                )
+                self.table_results.setItem(
+                    r, 4, QTableWidgetItem(f"{lin:.6e}")
+                )
+                self.table_results.setItem(
+                    r, 5, QTableWidgetItem(f"{db:.3f}")
+                )
+            else:
                 self.table_results.setItem(
                     r, 2, QTableWidgetItem(f"{obs:.6g}")
                 )
@@ -1209,38 +1274,29 @@ class SolverTab(QWidget):
                 self.table_results.setItem(
                     r, 4, QTableWidgetItem(f"{db:.3f}")
                 )
-            else:
-                self.table_results.setItem(
-                    r, 1, QTableWidgetItem(f"{obs:.6g}")
-                )
-                self.table_results.setItem(
-                    r, 2, QTableWidgetItem(f"{lin:.6e}")
-                )
-                self.table_results.setItem(
-                    r, 3, QTableWidgetItem(f"{db:.3f}")
-                )
 
     def _plot_results(self, result: 'Dict[str, Any]'):
         kind = _result_kind(result)
         plot_groups = _result_plot_groups(result)
         ax = self.canvas.ax
         ax.clear()
-        for freq, incidence in sorted(
+        for freq, incidence, polarization in sorted(
             plot_groups.keys(),
             key=lambda key: (
                 key[0],
+                key[2],
                 -math.inf if key[1] is None else key[1],
             ),
         ):
             rows = sorted(
-                plot_groups[(freq, incidence)],
+                plot_groups[(freq, incidence, polarization)],
                 key=lambda row: float(row.get("theta_scat_deg", 0.0)),
             )
             x = [float(row.get("theta_scat_deg", 0.0)) for row in rows]
             y = [
                 self._display_db_from_linear(result, row) for row in rows
             ]
-            label = f"{freq:g} GHz"
+            label = f"{freq:g} GHz, {polarization}"
             if incidence is not None:
                 label += f", incidence {incidence:g}deg"
             ax.plot(x, y, linewidth=1.8, label=label)

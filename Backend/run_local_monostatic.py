@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Local monostatic RCS sweep -- run_hpc_monostatic.py without SLURM.
 
-One .grim per (geometry, frequency, polarization) unit is written to
+One .grim per (geometry, frequency) unit is written to
 <OUTPUT_DIR>/run_YYYYMMDD_HHMMSS/results/{FRD,OPN}/ as soon as that unit
-finishes, named "<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim". The role folders
-can be passed directly to the downstream concatenate/subtract tools.
+finishes, named "<FREQ:.3f>GHz_<geometry_stem>.grim". Every file contains the
+canonical VV and HH channels. The role folders can be passed directly to the
+downstream subtraction tool.
 each file carries its own source/runtime/input attestation inside the artifact,
 so a resumed run verifies what it reuses without a sidecar per output.
 
@@ -56,9 +57,6 @@ OPN_DIR = "geometries/OPN"
 # Sweep.
 FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
-POLARIZATIONS   = ["VV", "HH"]          # any subset of VV, HH, TM, TE
-                                        # (VV = TE, HH = TM). Naming one
-                                        # channel twice is rejected.
 
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "rcs_runs"
@@ -68,10 +66,9 @@ OUTPUT_DIR = "rcs_runs"
 # setting.
 WORKERS = None
 
-# Solver knobs (mirror run_monostatic.py).
+# Solver knobs. Production 2-D runs always use condition-reporting dense LU
+# and co-solve both physical channels (VV/TE and HH/TM).
 GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
-SOLVER_METHOD           = "auto"         # "auto" | "direct"
-CFIE_ALPHA              = 0.0
 MAX_PANELS              = 50_000
 BLAS_THREADS_PER_WORKER = 1
 
@@ -123,7 +120,8 @@ GEOMETRY_EXTS = (".geo",)
 
 # ===============================================================================
 
-MANIFEST_SCHEMA = "ghost.local.2d-run.v2"
+MANIFEST_SCHEMA = "ghost.local.2d-run.v3"
+OUTPUT_POLARIZATIONS = ("VV", "HH")
 
 # Parsed geometry snapshots, filled in the parent before the pool forks so
 # workers inherit them instead of unpickling one per unit.
@@ -199,7 +197,7 @@ def _unit_attestation_fields(
         # stored once in the manifest instead of being repeated in every unit
         # record and every attestation.
         "angular_grid_sha256": str(context["angular_grid_sha256"]),
-        "polarization": str(unit["polarization"]),
+        "polarizations": list(OUTPUT_POLARIZATIONS),
         "frequency_ghz": float(unit["frequency_ghz"]),
     }
 
@@ -249,7 +247,7 @@ def _geometry_role(path: 'Path') -> 'str':
 
 
 def _unit_name(unit: 'Dict[str, Any]') -> 'str':
-    return (f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
+    return (f"{float(unit['frequency_ghz']):.3f}GHz_"
             f"{unit['geometry_stem']}.grim")
 
 
@@ -312,12 +310,9 @@ def _solve_and_export(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(unit["frequency_ghz"])],
         elevations_deg=[float(a) for a in context["azimuths_deg"]],
-        polarization=unit["polarization"],
         geometry_units=context["geometry_units"],
         material_base_dir=material_base,
         max_panels=context["max_panels"],
-        cfie_alpha=context["cfie_alpha"],
-        solver_method=context["solver_method"],
     )
     if context["mesh_certification"]:
         from rcs_solver import solve_monostatic_rcs_2d_certified
@@ -339,7 +334,7 @@ def _solve_and_export(
     written = export_result_to_grim(
         result, str(out_path),
         source_path=str(snapshot.get("source_path", "") or ""),
-        history=(f"run_local_monostatic.py pol={unit['polarization']} "
+        history=(f"run_local_monostatic.py pols=VV,HH "
                  f"freq={unit['frequency_ghz']}GHz"),
     )
     actual_path = str(written[0]) if written else str(out_path)
@@ -370,38 +365,39 @@ def _plan(
     fine_factor: 'float',
     n_angles: 'int',
 ) -> 'Tuple[Dict[str, float], Dict[str, float]]':
-    """Cost and size every unit from the mesh the solver will actually build.
+    """Cost both channels and reserve their sequential peak per output unit."""
 
-    Formulation and interface splitting can depend on polarization, so the
-    resource plan is cached per complete solve unit.
-    """
-
-    resource_cache: 'Dict[Tuple[str, float, str], Dict[str, Any]]' = {}
+    resource_cache: 'Dict[Tuple[str, float], List[Dict[str, Any]]]' = {}
     costs: 'Dict[str, float]' = {}
     peaks: 'Dict[str, float]' = {}
     for unit in units:
-        key = (
-            str(unit["geometry"]), float(unit["frequency_ghz"]),
-            str(unit["polarization"]),
-        )
+        key = (str(unit["geometry"]), float(unit["frequency_ghz"]))
         if key not in resource_cache:
-            resource_cache[key] = hpc_scheduler.predict_2d_resources(
-                key[0], key[1], key[2], GEOMETRY_UNITS, MAX_PANELS,
-                fine_factor=fine_factor, n_angles=n_angles,
-                safety=float(MEMORY_SAFETY),
-            )
-        planned = resource_cache[key]
-        nodes = int(planned["nodes"])
+            resource_cache[key] = [
+                hpc_scheduler.predict_2d_resources(
+                    key[0], key[1], polarization, GEOMETRY_UNITS,
+                    MAX_PANELS, fine_factor=fine_factor,
+                    n_angles=n_angles, safety=float(MEMORY_SAFETY),
+                )
+                for polarization in ("TM", "TE")
+            ]
+        plans = resource_cache[key]
         name = _unit_name(unit)
-        costs[name] = hpc_scheduler.unit_cost(
-            nodes, n_angles, fine_factor,
-            fine_nodes=int(planned["fine_nodes"]),
-            system_dofs=int(planned["base_system_dofs"]),
-            fine_system_dofs=int(planned["fine_system_dofs"]),
-            operator_matrices=int(planned["base_operator_matrices"]),
-            fine_operator_matrices=int(planned["fine_operator_matrices"]),
+        costs[name] = sum(
+            hpc_scheduler.unit_cost(
+                int(planned["nodes"]), n_angles, fine_factor,
+                fine_nodes=int(planned["fine_nodes"]),
+                system_dofs=int(planned["base_system_dofs"]),
+                fine_system_dofs=int(planned["fine_system_dofs"]),
+                operator_matrices=int(planned["base_operator_matrices"]),
+                fine_operator_matrices=int(planned["fine_operator_matrices"]),
+            )
+            for planned in plans
         )
-        peaks[name] = float(planned["peak_gb"])
+        # The canonical API solves the two formulations sequentially while
+        # retaining only their compact sample arrays, so peak dense storage is
+        # the larger channel rather than their sum.
+        peaks[name] = max(float(planned["peak_gb"]) for planned in plans)
     return costs, peaks
 
 
@@ -415,29 +411,29 @@ def _unit_assembly_threads(
     )
 
 
-def _validate_config() -> 'List[str]':
-    pols = [p.strip().upper() for p in POLARIZATIONS if p and p.strip()]
-    if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
+def _validate_config() -> 'Tuple[List[float], List[float]]':
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
-    try:
-        # Accepts TM/TE and the radar aliases VV/HH, and rejects two spellings
-        # of the same channel: ["VV", "TE"] looks like two polarizations and is
-        # one, so it would otherwise solve identical physics twice and publish
-        # it twice under different names.
-        pols = hpc_scheduler.distinct_polarization_channels(pols)
-    except ValueError as exc:
-        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
-    if str(SOLVER_METHOD).strip().lower() not in {"auto", "direct"}:
+    frequencies = [float(value) for value in FREQUENCIES_GHZ]
+    if (
+        not all(math.isfinite(value) and value > 0.0 for value in frequencies)
+        or len(set(frequencies)) != len(frequencies)
+        or len({f"{value:.3f}" for value in frequencies}) != len(frequencies)
+    ):
         sys.exit(
-            "ERROR: SOLVER_METHOD must be 'auto' or 'direct'; certified "
-            "2-D production solves require a condition-reporting dense method."
+            "ERROR: frequencies must be finite, positive, unique, and "
+            "distinct at the 0.001 GHz output-name precision."
         )
-    if not math.isfinite(float(CFIE_ALPHA)) or float(CFIE_ALPHA) != 0.0:
-        sys.exit(
-            "ERROR: CFIE_ALPHA must be 0 for the current 2-D formulations; "
-            "a nonzero value would not select a different operator."
-        )
+    azimuths = [float(value) for value in AZIMUTHS_DEG]
+    if (
+        not all(math.isfinite(value) for value in azimuths)
+        or len(set(azimuths)) != len(azimuths)
+    ):
+        sys.exit("ERROR: AZIMUTHS_DEG must be finite and unique.")
+    if str(GEOMETRY_UNITS).strip().lower() not in {"inches", "meters"}:
+        sys.exit("ERROR: GEOMETRY_UNITS must be 'inches' or 'meters'.")
+    if int(MAX_PANELS) < 1 or int(BLAS_THREADS_PER_WORKER) < 1:
+        sys.exit("ERROR: MAX_PANELS and BLAS_THREADS_PER_WORKER must be >= 1.")
     if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:
         sys.exit("ERROR: MEMORY_HEADROOM must be in (0, 1].")
     if float(MEMORY_SAFETY) < 1.0:
@@ -450,11 +446,11 @@ def _validate_config() -> 'List[str]':
         sys.exit("ERROR: TASKS_PER_CHILD must be >= 1.")
     if WORKERS is not None and int(WORKERS) < 1:
         sys.exit("ERROR: WORKERS must be a positive integer or None.")
-    return pols
+    return frequencies, azimuths
 
 
 def main() -> 'None':
-    pols = _validate_config()
+    frequencies, azimuths = _validate_config()
     if MAX_SOLVE_GB:
         # Read by the solver's own memory gate, in this process and every
         # forked worker.
@@ -478,21 +474,17 @@ def main() -> 'None':
         input_fingerprint = geometry_input_fingerprint(
             str(geom), GEOMETRY_UNITS
         )
-        for pol in pols:
-            for f in FREQUENCIES_GHZ:
-                # The azimuth grid is deliberately NOT repeated per unit: it is
-                # identical for every unit in the run, and carrying it here made
-                # the manifest grow with (units x azimuths) instead of with the
-                # sweep. It lives once at manifest level and is bound into each
-                # attestation by hash.
-                units.append({
-                    "geometry":      str(geom.resolve()),
-                    "geometry_stem": geom.stem,
-                    "geometry_input_sha256": input_fingerprint,
-                    "role":          _geometry_role(geom),
-                    "polarization":  pol,
-                    "frequency_ghz": float(f),
-                })
+        for f in frequencies:
+            # The azimuth grid is deliberately NOT repeated per unit: it is
+            # identical for every unit in the run and is bound by hash.
+            units.append({
+                "geometry":      str(geom.resolve()),
+                "geometry_stem": geom.stem,
+                "geometry_input_sha256": input_fingerprint,
+                "role":          _geometry_role(geom),
+                "polarizations": list(OUTPUT_POLARIZATIONS),
+                "frequency_ghz": float(f),
+            })
 
     mesh_policy = validate_mesh_convergence_policy()
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
@@ -504,8 +496,8 @@ def main() -> 'None':
     (results_dir / "OPN").mkdir()
     solver_config = {
         "geometry_units": GEOMETRY_UNITS,
-        "solver_method": SOLVER_METHOD,
-        "cfie_alpha": float(CFIE_ALPHA),
+        "linear_solver": "dense_lu",
+        "polarizations": list(OUTPUT_POLARIZATIONS),
         "max_panels": int(MAX_PANELS),
         "blas_threads_per_worker": int(BLAS_THREADS_PER_WORKER),
         "mesh_convergence_policy": mesh_policy,
@@ -516,9 +508,9 @@ def main() -> 'None':
         "status": "running",
         "run_id": run_id,
         "created": datetime.now().isoformat(),
-        "frequencies_ghz": [float(f) for f in FREQUENCIES_GHZ],
-        "azimuths_deg": [float(a) for a in AZIMUTHS_DEG],
-        "polarizations": pols,
+        "frequencies_ghz": frequencies,
+        "azimuths_deg": azimuths,
+        "polarizations": list(OUTPUT_POLARIZATIONS),
         "n_units": len(units),
         "solver_source_sha256": _solver_source_fingerprint(),
         # Per-file hashes behind that fingerprint, so a later mismatch can say
@@ -543,14 +535,12 @@ def main() -> 'None':
         "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
         "solver_config_sha256": stable_json_fingerprint(solver_config),
         "geometry_units": GEOMETRY_UNITS,
-        "solver_method": SOLVER_METHOD,
-        "cfie_alpha": float(CFIE_ALPHA),
         "max_panels": int(MAX_PANELS),
         "mesh_convergence_policy": mesh_policy,
         "mesh_certification": bool(MESH_CERTIFICATION),
-        "azimuths_deg": [float(a) for a in AZIMUTHS_DEG],
+        "azimuths_deg": azimuths,
         "angular_grid_sha256": stable_json_fingerprint(
-            [float(a) for a in AZIMUTHS_DEG]
+            azimuths
         ),
     }
 
@@ -561,7 +551,7 @@ def main() -> 'None':
     fine_factor = (
         float(mesh_policy["fine_factor"]) if MESH_CERTIFICATION else 1.0
     )
-    costs, peaks = _plan(units, fine_factor, len(AZIMUTHS_DEG))
+    costs, peaks = _plan(units, fine_factor, len(azimuths))
     # Sorted into a new list, never in place: `units` is the same object the
     # manifest holds, and reordering it after the run fingerprint was taken
     # would make the manifest on disk hash differently from what every
@@ -598,11 +588,11 @@ def main() -> 'None':
     print("=" * 70)
     print(f"  Run dir       : {run_dir}")
     print(f"  Geometries    : {len(geometries)}")
-    print(f"  Polarizations : {', '.join(pols)}")
+    print("  Polarizations : VV, HH (co-solved)")
     print(f"  Frequencies   : {len(FREQUENCIES_GHZ)}  "
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Azimuths      : {len(AZIMUTHS_DEG)}")
-    print(f"  Units total   : {len(ordered)}  (geom x freq x pol)")
+    print(f"  Units total   : {len(ordered)}  (geometry x frequency)")
     print(f"  Mesh check    : {'base + fine comparison' if MESH_CERTIFICATION else 'base only (no mesh comparison)'}")
     print(f"  Workers       : {pool_size} of {cores} cpus  "
           f"(BLAS threads/worker: {BLAS_THREADS_PER_WORKER}, "

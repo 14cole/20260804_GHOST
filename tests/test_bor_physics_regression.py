@@ -2,7 +2,9 @@
 """BoR physics, workflow, and optimized-assembly release regressions."""
 
 import json
+import inspect
 import math
+import copy
 import shlex
 import sys
 import tempfile
@@ -19,6 +21,7 @@ sys.path.insert(0, str(REPO / "Backend"))
 import bor_dispatch  # noqa: E402
 import feature_sum  # noqa: E402
 import grim_io  # noqa: E402
+import hpc_common  # noqa: E402
 import occluder  # noqa: E402
 import run_hpc_bor_monostatic  # noqa: E402
 import run_local_bor  # noqa: E402
@@ -197,6 +200,197 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
 
 
 class BoRWorkflowRegressionTests(unittest.TestCase):
+
+    def test_production_entry_points_have_no_polarization_selector(self):
+        for entry_point in (
+            bor_dispatch.solve_monostatic_rcs_bor,
+            bor_dispatch.solve_monostatic_rcs_bor_certified,
+            bor_dispatch.solve_monostatic_rcs_bor_survey,
+        ):
+            self.assertNotIn(
+                "polarization", inspect.signature(entry_point).parameters
+            )
+
+    def test_body_solver_certificate_round_trip_requires_both_channels(self):
+        quality = {"passed": True}
+        mesh = {
+            "schema": "ghost.solver.mesh-convergence.v1",
+            "passed": True,
+            "published_mesh": "fine",
+            "co_solved_polarizations": ["VV", "HH"],
+            "polarizations": {
+                "VV": {"passed": True},
+                "HH": {"passed": True},
+            },
+            "base_quality_gate": quality,
+            "fine_quality_gate": quality,
+        }
+        diagnostics = {1.0: {
+            "solver": "bor_mom_rcs",
+            "scattering_mode": "monostatic",
+            "polarizations": ["VV", "HH"],
+            "polarization_mapping": {"VV": "VV", "HH": "HH"},
+            "certification_frequency_scope": "single_frequency_unit",
+            "certification_frequency_scope_ghz": [1.0],
+            "metadata": {
+                "mesh_convergence_certified": True,
+                "certified_entry_point": True,
+                "quality_gate": quality,
+                "mesh_convergence": mesh,
+            },
+        }}
+        amplitude = 1.0 / math.sqrt(4.0 * math.pi)
+        bodies = {1.0: {
+            "theta_deg": np.asarray([0.0, 90.0, 180.0]),
+            "amp_vv": np.asarray([amplitude] * 3, complex),
+            "amp_hh": np.asarray([amplitude] * 3, complex),
+        }}
+        profile = np.asarray([[0.0, 1.0], [0.2, 0.0], [0.0, -1.0]])
+        with tempfile.TemporaryDirectory() as directory:
+            valid = Path(directory) / "certified.grim"
+            feature_sum.save_monostatic_grim(
+                bodies,
+                profile,
+                str(valid),
+                azimuths_deg=[0.0, 90.0],
+                elevations_deg=[0.0],
+                solver_diagnostics=diagnostics,
+            )
+            certificate = feature_sum.require_body_mesh_certification(
+                str(valid)
+            )
+            self.assertTrue(certificate["passed"])
+
+            malformed = copy.deepcopy(diagnostics)
+            malformed[1.0]["polarizations"] = ["VV"]
+            with self.assertRaisesRegex(ValueError, "dual-channel"):
+                feature_sum.save_monostatic_grim(
+                    bodies,
+                    profile,
+                    str(Path(directory) / "missing_hh.grim"),
+                    azimuths_deg=[0.0, 90.0],
+                    elevations_deg=[0.0],
+                    solver_diagnostics=malformed,
+                )
+
+            wrong_scope = copy.deepcopy(diagnostics)
+            wrong_scope[1.0]["certification_frequency_scope_ghz"] = [2.0]
+            with self.assertRaisesRegex(ValueError, "frequency-certification"):
+                feature_sum.save_monostatic_grim(
+                    bodies,
+                    profile,
+                    str(Path(directory) / "wrong_scope.grim"),
+                    azimuths_deg=[0.0, 90.0],
+                    elevations_deg=[0.0],
+                    solver_diagnostics=wrong_scope,
+                )
+
+            with self.assertRaisesRegex(ValueError, "cannot be injected"):
+                feature_sum.save_monostatic_grim(
+                    bodies,
+                    profile,
+                    str(Path(directory) / "injected.grim"),
+                    azimuths_deg=[0.0, 90.0],
+                    elevations_deg=[0.0],
+                    artifact_metadata={"solver_metadata_json": "{}"},
+                )
+
+            failed_hh = copy.deepcopy(diagnostics)
+            failed_hh[1.0]["metadata"]["mesh_convergence"][
+                "polarizations"
+            ]["HH"]["passed"] = False
+            failed = Path(directory) / "failed_hh.grim"
+            feature_sum.save_monostatic_grim(
+                bodies,
+                profile,
+                str(failed),
+                azimuths_deg=[0.0, 90.0],
+                elevations_deg=[0.0],
+                solver_diagnostics=failed_hh,
+            )
+            with self.assertRaisesRegex(ValueError, "lacks passed VV/HH"):
+                feature_sum.require_body_mesh_certification(str(failed))
+
+            nonbody = Path(directory) / "not_a_body.grim"
+            with nonbody.open("wb") as stream:
+                np.savez(
+                    stream,
+                    frequencies=np.asarray([], dtype=float),
+                    solver_metadata_json=np.asarray("{}"),
+                )
+            with self.assertRaisesRegex(ValueError, "valid BoR body"):
+                feature_sum.require_body_mesh_certification(str(nonbody))
+
+    def test_bor_unit_audits_must_agree_before_collection(self):
+        metadata = {
+            "mesh_convergence_certified": False,
+            "certified_entry_point": False,
+            "quality_gate": {"passed": True},
+        }
+
+        def unit(polarization):
+            return {
+                "stem": "body",
+                "freq_ghz": 1.0,
+                "polarizations": [polarization],
+                "path": Path(f"{polarization}_1.000GHz_body.grim"),
+                "solver_audit": {
+                    "schema": grim_io.SOLVER_METADATA_SCHEMA,
+                    "solver": "bor_mom_rcs",
+                    "scattering_mode": "monostatic",
+                    "polarization": polarization,
+                    "polarization_export": polarization,
+                    "polarizations": [],
+                    "polarization_mapping": {},
+                    "rcs_log_unit": "dBsm",
+                    "rcs_linear_quantity": "sigma_3d",
+                    "metadata": copy.deepcopy(metadata),
+                },
+            }
+
+        records = [unit("VV"), unit("HH")]
+        collected = hpc_common.bor_solver_diagnostics_from_units(
+            records, stem="body"
+        )
+        self.assertEqual(set(collected), {1.0})
+        self.assertEqual(collected[1.0]["polarizations"], ["VV", "HH"])
+
+        disagreeing = copy.deepcopy(records)
+        disagreeing[1]["solver_audit"]["metadata"]["quality_gate"][
+            "passed"
+        ] = False
+        with self.assertRaisesRegex(ValueError, "diagnostics disagree"):
+            hpc_common.bor_solver_diagnostics_from_units(
+                disagreeing, stem="body"
+            )
+
+        with self.assertRaisesRegex(ValueError, "exactly one VV and one HH"):
+            hpc_common.bor_solver_diagnostics_from_units(
+                records[:1], stem="body"
+            )
+
+        missing_schema = copy.deepcopy(records)
+        missing_schema[1]["solver_audit"].pop("schema")
+        with self.assertRaisesRegex(ValueError, "not a monostatic BoR"):
+            hpc_common.bor_solver_diagnostics_from_units(
+                missing_schema, stem="body"
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            mismatched = Path(directory) / "VV_1.000GHz_body.grim"
+            with mismatched.open("wb") as stream:
+                np.savez(
+                    stream,
+                    raw_complex_amplitude_preserved=np.asarray(True),
+                    rcs_amp_real=np.zeros((1, 1, 1, 1)),
+                    rcs_amp_imag=np.zeros((1, 1, 1, 1)),
+                    polarizations=np.asarray(["HH"]),
+                    azimuths=np.asarray([0.0]),
+                    frequencies=np.asarray([1.0]),
+                )
+            with self.assertRaisesRegex(ValueError, "does not match stored"):
+                hpc_common.read_unit_grims(directory)
+
     def test_declared_gui_compact_subtraction_reconstructs_physical_field(self):
         source = _constant_compact_pattern()
         source["azimuths"] = np.arange(
@@ -724,12 +918,39 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 snapshot,
                 [1.0, 4.0],
                 [0.0, 90.0],
-                "VV",
                 geometry_units="meters",
                 workers=1,
             )
         self.assertEqual([entry[0] for entry in point_counts], [1.0e9, 4.0e9])
         self.assertGreater(point_counts[1][1], point_counts[0][1])
+        self.assertEqual(result["polarizations"], ["VV", "HH"])
+        self.assertEqual(
+            result["polarization_mapping"], {"VV": "VV", "HH": "HH"}
+        )
+        diagnostics = feature_sum.bor_solver_diagnostics_by_frequency(result)
+        self.assertEqual(set(diagnostics), {1.0, 4.0})
+        self.assertTrue(all(
+            record["certification_frequency_scope"]
+            == "joint_requested_frequency_grid"
+            and record["certification_frequency_scope_ghz"] == [1.0, 4.0]
+            for record in diagnostics.values()
+        ))
+        bodies = feature_sum.bodies_from_bor_solver_result(result)
+        self.assertEqual(set(bodies), {1.0, 4.0})
+        np.testing.assert_array_equal(
+            bodies[1.0]["theta_deg"], [0.0, 90.0]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            written = grim_io.export_result_to_grim(
+                result, str(Path(directory) / "dual_bor")
+            )
+            with np.load(written[0], allow_pickle=False) as payload:
+                np.testing.assert_array_equal(
+                    payload["polarizations"], ["VV", "HH"]
+                )
+                self.assertEqual(
+                    str(payload["polarization_alias_primary"]), "VV,HH"
+                )
         per_frequency = result["metadata"]["per_frequency"]
         self.assertLess(
             per_frequency[1]["mesh_wavelength_m"],
@@ -813,7 +1034,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             bor_dispatch, "solve_monostatic_rcs_bor", return_value=raw
         ):
             result = bor_dispatch.solve_monostatic_rcs_bor_survey(
-                {}, [1.0], [0.0], "VV"
+                {}, [1.0], [0.0]
             )
         metadata = result["metadata"]
         self.assertTrue(metadata["survey_mode"])
@@ -834,6 +1055,97 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         self.assertGreater(
             high["estimated_peak_gb"], low["estimated_peak_gb"]
         )
+
+    def test_dielectric_resource_preview_counts_retained_operators(self):
+        snapshot = _pec_sphere_snapshot(explicit_elements=12)
+        snapshot["segments"][0]["seg_type"] = 3
+        snapshot["segments"][0]["properties"] = ["3", "12", "0", "1", "0"]
+        snapshot["dielectrics"] = [["1", "3.0", "-0.05", "1", "0"]]
+        estimate = bor_dispatch.estimate_bor_resources(
+            snapshot,
+            1.0,
+            [0.0, 90.0],
+            geometry_units="meters",
+            workers=2,
+            mesh_certification=False,
+        )
+        self.assertEqual(estimate["geometry_kind"], "dielectric")
+        self.assertEqual(estimate["surface_count"], 1)
+        self.assertEqual(
+            estimate["n_unknowns_estimate"],
+            4 * (estimate["mesh_elements"] + 1),
+        )
+        self.assertGreater(estimate["persistent_assembly_gb"], 0.0)
+        self.assertGreater(
+            estimate["held_assembly_gb"],
+            estimate["persistent_assembly_gb"],
+        )
+
+    def test_total_element_gate_applies_across_bor_surfaces(self):
+        outer = _pec_sphere_snapshot(
+            radius_m=0.04, explicit_elements=6
+        )["segments"][0]
+        outer["seg_type"] = 3
+        outer["properties"] = ["3", "6", "0", "1", "0"]
+        core = _pec_sphere_snapshot(
+            radius_m=0.03, explicit_elements=6
+        )["segments"][0]
+        core["name"] = "core"
+        core["seg_type"] = 4
+        core["properties"] = ["4", "6", "0", "1", "0"]
+        snapshot = {
+            "segments": [outer, core],
+            "ibcs": [],
+            "dielectrics": [["1", "3.0", "-0.05", "1", "0"]],
+        }
+        with self.assertRaisesRegex(ValueError, "total elements"):
+            bor_dispatch.estimate_bor_resources(
+                snapshot,
+                1.0,
+                [90.0],
+                geometry_units="meters",
+                max_elements=100,
+                mesh_certification=False,
+            )
+
+    def test_adaptive_tail_waits_for_physical_modal_bandwidth(self):
+        def contribution(mode, _solution, _theta, _polarization):
+            return 1.0 if abs(mode) == 3 else 0.0
+
+        field, modes_used, stats = _mode_sweep(
+            1,
+            [90.0],
+            ("VV",),
+            6,
+            1.0e-6,
+            lambda _mode: (np.ones((1, 1), dtype=np.complex128), None),
+            lambda _mode, _theta, _polarization: np.ones(
+                1, dtype=np.complex128
+            ),
+            contribution,
+            min_mode_before_tail=3,
+        )
+        self.assertEqual(modes_used, 5)
+        self.assertEqual(stats["mode_tail_start"], 3)
+        self.assertTrue(stats["mode_converged"])
+        np.testing.assert_allclose(field, [[2.0 + 0.0j]])
+
+    def test_hpc_bor_discovers_only_configured_bor_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bor_dir = root / "BOR"
+            other_dir = root / "FRD"
+            bor_dir.mkdir()
+            other_dir.mkdir()
+            (bor_dir / "body.geo").write_text("Properties: 2 1 0 0 0\n")
+            (other_dir / "coupon.geo").write_text("Properties: 2 1 0 0 0\n")
+            with mock.patch.object(
+                run_hpc_bor_monostatic,
+                "GEOMETRY_DIRS",
+                [str(bor_dir)],
+            ):
+                found = run_hpc_bor_monostatic._discover_geometries()
+            self.assertEqual([path.name for path in found], ["body.geo"])
 
     def test_vv_hh_outputs_are_paired_without_manifest_change(self):
         units = [

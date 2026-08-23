@@ -12,15 +12,16 @@ VV and HH together, and publishes one self-contained monostatic GRIM per
 geometry in results/.  That same file opens in GRIM and contains the compact
 body model/profile needed for later coherent door or cavity placement.
 
-Scheduling matches the HPC path. VV and HH are co-solved and still exported as
-separate compatible files. A BoR solve's cost grows roughly as the fourth
+Scheduling matches the HPC path. VV and HH are co-solved; separate visible
+per-frequency files serve only as verified intermediate/restart records. A
+BoR solve's cost grows roughly as the fourth
 power of frequency (elements^3 x modes), so a frequency sweep is badly
 lopsided; units are costed and run dearest-first, and concurrent solves are
 admitted against a memory budget instead of filling every core.
 
-Each frequency publishes its solver-frame VV and HH files immediately under
-results/by_frequency/. They are also the verified restart units used to build
-the final combined monostatic result. Certification remains a user-selected
+Each frequency writes its solver-frame VV and HH restart records immediately
+under results/by_frequency/. The user-facing, feature-ready product is the
+combined monostatic body in results/. Certification remains a user-selected
 solve option and does not gate publication or downstream use.
 
 Edit the CONFIG block and run:
@@ -275,6 +276,9 @@ def _channel_result(
     channel["samples"] = samples
     channel["polarization"] = polarization
     channel["polarization_export"] = polarization
+    channel.pop("polarizations", None)
+    channel.pop("polarization_mapping", None)
+    channel.pop("co_solved_samples", None)
     channel["metadata"] = dict(result.get("metadata", {}) or {})
     return channel
 
@@ -345,7 +349,6 @@ def _solve_and_export(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(pair["frequency_ghz"])],
         elevations_deg=[float(a) for a in context["aspects_deg"]],
-        polarization=missing[0]["polarization"],
         geometry_units=context["geometry_units"],
         material_base_dir=material_base,
         cfie_alpha=context["cfie_alpha"],
@@ -695,12 +698,19 @@ def main() -> 'None':
     _write_json_atomic(manifest_path, manifest)
     if counters["failed"]:
         raise SystemExit(1)
-    from hpc_common import bodies_from_units, read_unit_grims
+    from hpc_common import (
+        bodies_from_units,
+        bor_solver_diagnostics_from_units,
+        read_unit_grims,
+    )
     from feature_sum import outer_generatrix, save_monostatic_grim
 
     records = read_unit_grims(unit_dir)
     for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
         matching = [unit for unit in units if unit["geometry_stem"] == stem]
+        solver_diagnostics = bor_solver_diagnostics_from_units(
+            records, stem=stem
+        )
         snapshot, _material_base = _load_snapshot(str(matching[0]["geometry"]))
         profile = outer_generatrix(snapshot, GEOMETRY_UNITS)
         save_monostatic_grim(
@@ -714,6 +724,7 @@ def main() -> 'None':
             roll_deg=BODY_ROLL_DEG,
             history="run_local_bor.py monostatic response",
             source_path=str(matching[0]["geometry"]),
+            solver_diagnostics=solver_diagnostics,
             artifact_metadata={
                 "geometry_input_sha256": str(
                     matching[0].get("geometry_input_sha256", "")

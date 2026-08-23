@@ -120,19 +120,26 @@ mesh ray blockage and `SHADOW=False` to disable that nonlocal test. Neither
 choice adds body-feature mutual coupling: that limitation must still be
 measured against a directly featured full-wave platform solve.
 
-A compact result made with GRIM's **Coherent subtraction** may retain the
-generic `power_phase` domain label and omit redundant raw real/imaginary arrays.
-Listing it in `POINT_FEATURE_DATASETS` explicitly attests that operation to be
-OPN-FRD: installed feature minus clean skin (`featured - clean`), with the
-local origin at the aperture phase centre, `exp(+j omega t)`, and the documented
-cavity-frame VV/HH/VH basis. This supplies convention semantics lost or copied
-stale by the GUI. The loader reconstructs `F` from stored sigma and phase and
-continues to enforce sigma_3d normalization, the full VV/HH/VH matrix, a
-complete azimuth period, and compatible frequency/elevation coverage. The
-normal unique-look form (`0..359` by 1 degree, for example) is accepted and
-closed internally by copying the first complex sample to the interpolation
-seam. A dataset that already contains both 0 and 360 is also accepted when
-those complex samples match; incomplete or irregular partial coverage is not.
+For a point feature, form the installed-minus-clean complex delta in the 3-D
+solver or an independently validated lossless export process. Preserve the raw
+complex Jones response; do not subtract dBsm or linear RCS. A legacy compact
+result made with GRIM's **Coherent subtraction** can still be loaded when its
+sigma, phase, complete VV/HH/VH matrix, azimuth seam, frequency support, and
+declared conventions pass every check, but that compatibility path is not the
+production delta-building recommendation.
+
+For a 2-D line feature, use only the repository's strict CEM entry point:
+
+```bash
+python 1c_build_deltas/subtract_datasets.py OPN FRD Deltas
+```
+
+It reads the solver's preserved float64 complex fields, joins the compatible
+frequency files, validates their embedded VV/HH pair, and writes canonical
+OPN-FRD (`featured - clean`). Do not pre-concatenate, use GRIM overlap, or
+convert the solver files before subtraction. The normal unique-look form is
+accepted downstream and closed internally at a periodic interpolation seam;
+incomplete or irregular partial angular coverage is not.
 
 Every point pattern must contain VV, HH, and reciprocal VH/HV. For a locally
 diagonal or axisymmetric fastener, write the physically zero VH channel into
@@ -229,9 +236,10 @@ includes `line_features_template.csv` with the exact header.
 For the 2-D cross-section pair:
 
 1. Use the same clean host stack and feature-centred origin.
-2. Solve both TM and TE on identical frequency and angular grids.
-3. Preserve complex amplitudes and form `featured - clean` with
-   `feature_sum.make_delta_grim`, CEM Tools, or GRIM coherent subtraction.
+2. Run the production 2-D sweep on the required frequency and angular grid;
+   every solve automatically stores both VV/TE and HH/TM.
+3. Run `python 1c_build_deltas/subtract_datasets.py OPN FRD Deltas`. This is
+   the production OPN-FRD path and joins compatible solver units internally.
 4. Draw the 3-D perimeter head-to-tail in the fixed line-placement CSV and
    supply the outward normal at both endpoints of every segment.
 5. Ensure the perimeter lies on the body skin within the configured distance
@@ -269,7 +277,8 @@ large nearly constant phase offset usually indicates a mismatched origin, time
 sign, propagation direction, or far-field definition—not a correction that
 should be fitted away.
 
-The default 3.5 dB and 25-degree gates are initial limits based on the existing
-line-model benchmark envelope, not universal proof for every feature. Validate
+The default 3.5 dB and 25-degree gates are uncalibrated initial engineering
+limits; the repository does not contain a reference fixture that establishes
+them. Replace or justify them using your independent comparison, and validate
 representative frequency, aspect, curvature, size, depth, material, and
 placement extremes before distributing a feature library.

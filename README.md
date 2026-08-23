@@ -49,7 +49,7 @@ Backend/
   validate_feature_reconstruction.py  compare truth to reconstructed fields
   build_bor_stream_kernel.py  build the optional native BoR streaming sampler
   ...                         geometry/material I/O, quality gates, provenance, grim export
-1c_build_deltas/              delta assembly from solved coupons
+1c_build_deltas/              strict CEM OPN-FRD delta entry point
 CEM_Tools/                    headless/GUI GRIM join, conversion, and coherent subtraction
 tests/fixtures/geometries/    solver-only regression geometry inputs
 tests/                        equivalence, scheduling, and benchmark scripts
@@ -72,7 +72,7 @@ python Backend/place_features.py
 # Build placement-ready 2-D deltas from the newest complete FRD/OPN run
 python 1c_build_deltas/subtract_datasets.py
 
-# Optional CEM dataset GUI (join, subtract, rename, convert)
+# Optional CEM dataset GUI for inspection and general dataset utilities
 python3 CEM_Tools/run_gui.py
 
 # Check the scheduler and a real two-task sweep end to end
@@ -80,12 +80,28 @@ python tests/test_hpc_scheduling.py
 python tests/test_local_drivers.py
 ```
 
+`1c_build_deltas/subtract_datasets.py` is the sole production path from solved
+2-D coupons to a placement-ready line-feature delta. It performs canonical
+`OPN - FRD` subtraction on preserved float64 complex amplitudes, joins the
+frequency files, and validates the embedded VV/HH pair. Do not concatenate
+the solver outputs first, subtract dB values, or use GRIM overlap as a
+preprocessing step. The general CEM concatenation operations remain available
+for unrelated dataset-library work, but are not part of this workflow.
+
 There is one general-purpose driver family per solver: the `run_hpc_*` driver
 for SLURM and its `run_local_*` twin for one machine. The same result files work
 in GRIM and downstream feature/delta tools whether or not mesh certification
 was selected. They share the scheduler, so units are cost-ordered and admitted
 against a memory budget rather than filling every core. See
 [HPC.md](HPC.md#running-without-slurm).
+
+The 2-D launchers expose geometry, frequency, cut angles, units, and quality
+controls, but no polarization, solver-method, or CFIE selection. By default,
+every `(geometry, frequency)` unit runs the certified dense-LU path for both
+physical channels; setting `MESH_CERTIFICATION = False` selects the clearly
+marked base-mesh survey path. Either path writes one
+`<FREQ:.3f>GHz_<geometry_stem>.grim` containing canonical `VV` (`TE`) and
+`HH` (`TM`).
 
 The BoR launchers take the requested frequencies, radar azimuths, and radar
 elevations directly. Each geometry produces one user-facing

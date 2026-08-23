@@ -79,6 +79,7 @@ def _solver_metadata_json(result: 'Dict[str, Any]') -> 'str':
             'frequency_ghz': row.get('frequency_ghz'),
             'theta_inc_deg': row.get('theta_inc_deg'),
             'theta_scat_deg': row.get('theta_scat_deg'),
+            'polarization': row.get('polarization', ''),
             **values,
         })
     diagnostics.sort(key=lambda row: (
@@ -93,6 +94,8 @@ def _solver_metadata_json(result: 'Dict[str, Any]') -> 'str':
         'scattering_mode': result.get('scattering_mode', ''),
         'polarization': result.get('polarization', ''),
         'polarization_export': result.get('polarization_export', ''),
+        'polarizations': result.get('polarizations', []) or [],
+        'polarization_mapping': result.get('polarization_mapping', {}) or {},
         'rcs_log_unit': result.get('rcs_log_unit', ''),
         'rcs_linear_quantity': result.get('rcs_linear_quantity', ''),
         'amplitude_convention': result.get('amplitude_convention', ''),
@@ -384,6 +387,87 @@ def _build_grid_for_samples(
         payload['complex_field_domain'] = complex_field_domain
     return payload
 
+
+def _build_grid_for_co_solved_samples(
+    co_solved_samples: 'Dict[str, List[Dict[str, Any]]]',
+    polarization_mapping: 'Dict[str, str]',
+    source_path: 'str' = '',
+    history: 'str' = '',
+    preserve_raw_complex_amplitude: 'bool' = True,
+    rcs_log_unit: 'str' = 'dBke',
+    rcs_linear_quantity: 'str' = 'sigma_2d',
+) -> 'Dict[str, Any]':
+    """Build one rectangular VV/HH GRIM payload from co-solved channels."""
+
+    required = ('VV', 'HH')
+    if set(co_solved_samples) != set(required):
+        raise ValueError(
+            "A co-polarized GRIM export requires exactly VV and HH channels."
+        )
+    channel_payloads = []
+    for polarization in required:
+        channel_payloads.append(_build_grid_for_samples(
+            list(co_solved_samples[polarization] or []),
+            polarization,
+            source_path=source_path,
+            history=history,
+            preserve_raw_complex_amplitude=preserve_raw_complex_amplitude,
+            rcs_log_unit=rcs_log_unit,
+            rcs_linear_quantity=rcs_linear_quantity,
+        ))
+
+    reference = channel_payloads[0]
+    for payload in channel_payloads[1:]:
+        for axis_name in ('azimuths', 'elevations', 'frequencies'):
+            if not np.array_equal(payload[axis_name], reference[axis_name]):
+                raise ValueError(
+                    f"VV and HH cannot share one GRIM file because their "
+                    f"{axis_name} axes differ."
+                )
+        for metadata_name in (
+            'rcs_domain', 'power_domain', 'units', 'phase_reference',
+            'amplitude_convention', 'complex_field_domain',
+        ):
+            if metadata_name in reference or metadata_name in payload:
+                if str(reference.get(metadata_name, '')) != str(
+                    payload.get(metadata_name, '')
+                ):
+                    raise ValueError(
+                        "VV and HH GRIM metadata disagree on "
+                        f"{metadata_name!r}."
+                    )
+
+    combined = dict(reference)
+    if set(polarization_mapping) != set(required):
+        raise ValueError(
+            "A co-polarized GRIM export requires an explicit mapping for "
+            "exactly VV and HH."
+        )
+    internal_labels = [
+        str(polarization_mapping[channel]).strip().upper()
+        for channel in required
+    ]
+    if any(not label for label in internal_labels):
+        raise ValueError("Co-polarized GRIM mapping labels cannot be empty.")
+
+    combined['polarizations'] = np.asarray(required, dtype=str)
+    # Match the existing multi-polarization interchange convention used by
+    # CEM concatenation: one comma-separated internal primary per stored
+    # channel, plus a same-order JSON list.  Consumers that only understand
+    # the older list form therefore still resolve VV<-TE and HH<-TM correctly.
+    combined['polarization_alias_primary'] = ','.join(internal_labels)
+    combined['polarization_aliases_json'] = json.dumps(internal_labels)
+    for grid_name in ('rcs_power', 'rcs_phase'):
+        combined[grid_name] = np.concatenate(
+            [payload[grid_name] for payload in channel_payloads], axis=-1
+        )
+    if preserve_raw_complex_amplitude:
+        for grid_name in ('rcs_amp_real', 'rcs_amp_imag'):
+            combined[grid_name] = np.concatenate(
+                [payload[grid_name] for payload in channel_payloads], axis=-1
+            )
+    return combined
+
 def _validate_grim_payload(payload: 'Dict[str, Any]') -> 'None':
     """Reject malformed/non-finite grids before opening the destination file."""
 
@@ -621,7 +705,6 @@ def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
 def export_result_to_grim(
     result: 'Dict[str, Any]',
     output_path: 'str',
-    polarization: 'Optional[str]' = None,
     source_path: 'str' = '',
     history: 'str' = '',
     preserve_raw_complex_amplitude: 'bool' = True,
@@ -630,8 +713,30 @@ def export_result_to_grim(
     if not samples:
         raise ValueError('No solver samples were returned, nothing to export.')
 
-    pol = _canonical_user_polarization_label(
-        polarization or result.get('polarization_export') or result.get('polarization') or 'TM'
+    declared_polarizations = [
+        str(value).strip().upper()
+        for value in list(result.get('polarizations', []) or [])
+    ]
+    co_solved = result.get('co_solved_samples', {}) or {}
+    declares_co_solve = bool(declared_polarizations) or bool(co_solved)
+    dual_polarized = (
+        declared_polarizations == ['VV', 'HH']
+        and isinstance(co_solved, dict)
+        and set(co_solved) == {'VV', 'HH'}
+    )
+    polarization_mapping = result.get('polarization_mapping', {}) or {}
+    if declares_co_solve and not dual_polarized:
+        raise ValueError(
+            "A declared co-polarized result must contain ordered "
+            "polarizations [VV, HH] and exactly matching co_solved_samples; "
+            "single-channel fallback was refused."
+        )
+    if dual_polarized and set(polarization_mapping) != {'VV', 'HH'}:
+        raise ValueError(
+            "A co-polarized result must declare its VV/HH physical mapping."
+        )
+    pol = None if dual_polarized else _canonical_user_polarization_label(
+        result.get('polarization_export') or result.get('polarization') or 'TM'
     )
     mode = str(result.get('scattering_mode', 'monostatic')).strip().lower()
     # BoR results carry their own units (sigma_3d / dBsm); 2D defaults apply
@@ -641,16 +746,67 @@ def export_result_to_grim(
         'rcs_linear_quantity': str(result.get('rcs_linear_quantity', 'sigma_2d')),
     }
     if mode != 'bistatic':
-        payload = _build_grid_for_samples(
-            samples,
-            pol,
-            source_path=source_path,
-            history=history,
-            preserve_raw_complex_amplitude=preserve_raw_complex_amplitude,
-            **unit_kwargs,
-        )
+        if dual_polarized:
+            payload = _build_grid_for_co_solved_samples(
+                co_solved,
+                polarization_mapping,
+                source_path=source_path,
+                history=history,
+                preserve_raw_complex_amplitude=preserve_raw_complex_amplitude,
+                **unit_kwargs,
+            )
+        else:
+            payload = _build_grid_for_samples(
+                samples,
+                pol,
+                source_path=source_path,
+                history=history,
+                preserve_raw_complex_amplitude=preserve_raw_complex_amplitude,
+                **unit_kwargs,
+            )
         payload['solver_metadata_json'] = _solver_metadata_json(result)
         return [os.path.abspath(_save_grim_npz(payload, output_path))]
+
+    if dual_polarized:
+        by_channel_inc: 'Dict[str, Dict[float, List[Dict[str, Any]]]]' = {}
+        for channel in ('VV', 'HH'):
+            by_inc_channel: 'Dict[float, List[Dict[str, Any]]]' = {}
+            for row_index, row in enumerate(list(co_solved[channel] or [])):
+                try:
+                    inc = _required_finite_sample_value(row, 'theta_inc_deg')
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid {channel} bistatic solver sample at index "
+                        f"{row_index}: {exc}"
+                    ) from exc
+                by_inc_channel.setdefault(inc, []).append(row)
+            by_channel_inc[channel] = by_inc_channel
+        incidence_sets = [set(by_channel_inc[channel]) for channel in ('VV', 'HH')]
+        if incidence_sets[0] != incidence_sets[1]:
+            raise ValueError(
+                "VV and HH bistatic incidence axes differ and cannot share "
+                "one GRIM collection."
+            )
+
+        rootspec = _ensure_grim_ext(output_path)
+        root_no_ext = rootspec[:-5]
+        written = []
+        for inc in sorted(incidence_sets[0]):
+            payload = _build_grid_for_co_solved_samples(
+                {
+                    channel: by_channel_inc[channel][inc]
+                    for channel in ('VV', 'HH')
+                },
+                polarization_mapping,
+                source_path=source_path,
+                history=(history + f' | theta_inc_deg={inc:g}').strip(' |'),
+                preserve_raw_complex_amplitude=preserve_raw_complex_amplitude,
+                **unit_kwargs,
+            )
+            payload['solver_metadata_json'] = _solver_metadata_json(result)
+            out = f'{root_no_ext}_{_suffix_for_incidence(inc)}.grim'
+            written.append(os.path.abspath(_save_grim_npz(payload, out)))
+        return written
 
     by_inc: 'Dict[float, List[Dict[str, Any]]]' = {}
     for row_index, row in enumerate(samples):

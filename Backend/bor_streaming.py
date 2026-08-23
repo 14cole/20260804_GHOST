@@ -24,8 +24,8 @@ functions:
 with L/R the per-point nodal weights (shape value x rho w x tangent
 component, or the (rho T)' divergence weights).  Because tiles use the same
 xi grid, the same FFT, and the same Galerkin points as the table path, the
-streamed blocks match the table-path contraction to float roundoff -- the
-equivalence gate in tests/validate_bor_streaming.py checks exactly that.
+streamed blocks match the table-path contraction to float roundoff; the
+streaming/table regression in tests/test_bor_physics_regression.py checks that.
 
 The near/self machinery (graded cells, adaptive kernels) is untouched: the
 solver adds its near corrections on top of these far blocks as before.

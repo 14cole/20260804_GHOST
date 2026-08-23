@@ -102,10 +102,6 @@ DEFAULT_PANELS_PER_WAVELENGTH = 20
 # This is only a gross safety floor; production accuracy still requires the
 # separate base/fine complex-field mesh-convergence certification.
 MIN_EXPLICIT_PANELS_PER_WAVELENGTH = 4
-GMRES_NODE_THRESHOLD = 3000
-GMRES_RESTART = 50
-GMRES_MAXITER = 200
-GMRES_TOL = 1e-8
 # Monostatic 2D RCS normalization controls.
 #
 # For the physical asymptotic convention,
@@ -3144,12 +3140,6 @@ def set_far_quadrature_order(order: 'int') -> 'None':
     _FAR_QUAD_ORDER = max(0, int(order))
 
 
-def get_far_quadrature_order() -> 'int':
-    """Active far-pair quadrature override, or 0 when the default rule is used."""
-
-    return int(_FAR_QUAD_ORDER)
-
-
 def set_assembly_threads(count: 'int') -> 'None':
     """
     Set how many threads tiled operator assembly may use (1 = serial).
@@ -4736,111 +4726,6 @@ def _robin_alpha_elements(
         )
     return alpha, pec
 
-def prepare_linear_galerkin_system(
-    geometry_snapshot: 'Dict[str, Any]',
-    frequency_ghz: 'float',
-    polarization: 'str',
-    geometry_units: 'str' = "inches",
-    material_base_dir: 'Optional[str]' = None,
-    max_panels: 'int' = MAX_PANELS_DEFAULT,
-    mesh_reference_ghz: 'Optional[float]' = None,
-    node_snap_tol: 'float' = 1.0e-9,
-    obs_order: 'int' = 8,
-    src_order: 'int' = 8,
-) -> 'Dict[str, Any]':
-    """
-    Build the reusable linear-Galerkin coupled system for one frequency.
-
-    The helper validates the geometry, builds boundary primitives, promotes them to a
-    continuous two-node linear mesh, derives per-element coupled material data, and
-    assembles dense nodal S/K region operators.
-
-    It returns reusable nodal operators and metadata for external scripts.
-    """
-
-    freq_ghz = float(frequency_ghz)
-    if (not math.isfinite(freq_ghz)) or freq_ghz <= 0.0:
-        raise ValueError("frequency_ghz must be a positive finite value.")
-    pol = _normalize_polarization(polarization)
-    unit_scale = _unit_scale_to_meters(geometry_units)
-    base_dir = _material_base_dir_for_snapshot(
-        geometry_snapshot, material_base_dir
-    )
-    mesh_freq_ghz = float(mesh_reference_ghz) if mesh_reference_ghz is not None else freq_ghz
-    if (not math.isfinite(mesh_freq_ghz)) or mesh_freq_ghz <= 0.0:
-        raise ValueError("mesh_reference_ghz must be a positive finite GHz value when provided.")
-    preflight = validate_geometry_snapshot_for_solver(geometry_snapshot, base_dir=base_dir, meters_scale=unit_scale)
-    materials = MaterialLibrary.from_entries(
-        geometry_snapshot.get("ibcs", []) or [],
-        geometry_snapshot.get("dielectrics", []) or [],
-        base_dir=base_dir,
-    )
-    for _msg in list(preflight.get('warnings', []) or []):
-        materials.warn_once(str(_msg))
-    _warn_far_quadrature_override(materials)
-    lambda_min, mesh_max_index, mesh_material_flags = (
-        _conservative_mesh_wavelength_for_frequencies(
-            geometry_snapshot, materials, {freq_ghz, mesh_freq_ghz}
-        )
-    )
-    panels = _build_panels(
-        geometry_snapshot=geometry_snapshot,
-        meters_scale=unit_scale,
-        min_wavelength=lambda_min,
-        max_panels=max_panels,
-    )
-
-    mesh = _build_linear_mesh(panels, node_snap_tol=node_snap_tol)
-    k0 = 2.0 * math.pi * (freq_ghz * 1e9) / C0
-    infos = _build_linear_coupled_infos(mesh, materials, freq_ghz=freq_ghz, pol=pol, k0=k0)
-
-    region_to_k: 'Dict[int, complex]' = {}
-    for info in infos:
-        if info.minus_region >= 0:
-            region_to_k[info.minus_region] = complex(info.k_minus)
-        if info.plus_region >= 0:
-            region_to_k[info.plus_region] = complex(info.k_plus)
-
-    region_ops: 'Dict[int, Tuple[np.ndarray, np.ndarray]]' = {}
-    cache: 'Dict[Tuple[float, float, bool], Tuple[np.ndarray, np.ndarray]]' = {}
-    for region, k_region in region_to_k.items():
-        key = (round(float(np.real(k_region)), 12), round(float(np.imag(k_region)), 12), False)
-        if key not in cache:
-            cache[key] = _assemble_linear_operator_matrices(
-                mesh=mesh,
-                k0=k_region if abs(k_region) > EPS else (EPS + 0.0j),
-                obs_normal_deriv=False,
-                obs_order=obs_order,
-                src_order=src_order,
-            )
-        region_ops[region] = cache[key]
-
-    return {
-        "panels": panels,
-        "mesh": mesh,
-        "materials": materials,
-        "infos": infos,
-        "region_ops": region_ops,
-        "metadata": {
-            "frequency_ghz": float(freq_ghz),
-            "mesh_reference_ghz": float(mesh_freq_ghz),
-            "mesh_wavelength_m": float(lambda_min),
-            "mesh_max_refractive_index": float(mesh_max_index),
-            "mesh_material_flags": list(mesh_material_flags),
-            "polarization_internal": pol,
-            "panel_count": len(panels),
-            "linear_element_count": len(mesh.elements),
-            "linear_node_count": len(mesh.nodes),
-            "node_snap_tol_m": float(node_snap_tol),
-            "obs_order": int(obs_order),
-            "src_order": int(src_order),
-            "warnings": list(materials.warnings),
-            "preflight": dict(preflight),
-            "status": "stage1-system",
-        },
-    }
-
-
 def _medium_eta(eps: 'complex', mu: 'complex') -> 'complex':
     eps, mu = _validate_passive_medium(eps, mu, "Medium")
     # Derive eta from the SAME causal index branch used for k.  This preserves
@@ -5304,6 +5189,55 @@ def _summarize_residuals(values: 'List[float]') -> 'Tuple[float, float, int]':
         mean_value = float(np.mean(finite))
     return max_value, mean_value, int(residuals.size - finite.size)
 
+
+def _equilibrated_scaling_and_norm_1(
+    a_mat: 'np.ndarray',
+    max_block_bytes: 'int' = 16 * 1024 * 1024,
+) -> 'Tuple[np.ndarray, np.ndarray, float]':
+    """Return row/column scales and the equilibrated matrix 1-norm.
+
+    The dense matrix and its LU already dominate solve memory.  Forming
+    ``abs(A)``, the row-equilibrated matrix, and a second scaled temporary used
+    to add several more full N-by-N arrays during certification.  Two
+    column-blocked passes compute the identical scales and column sums while
+    bounding the extra real workspace to ``max_block_bytes``.
+    """
+
+    a_eval = np.asarray(a_mat, dtype=np.complex128)
+    if a_eval.ndim != 2 or a_eval.shape[0] != a_eval.shape[1]:
+        raise ValueError("Condition estimation requires a square matrix.")
+    n = int(a_eval.shape[0])
+    if n < 1:
+        raise ValueError("Condition estimation requires a non-empty matrix.")
+    workspace_bytes = max(8, int(max_block_bytes))
+    block_columns = max(1, min(n, workspace_bytes // (8 * n)))
+
+    row_scale = np.zeros(n, dtype=float)
+    for start in range(0, n, block_columns):
+        stop = min(n, start + block_columns)
+        magnitude = np.abs(a_eval[:, start:stop])
+        np.maximum(row_scale, np.max(magnitude, axis=1), out=row_scale)
+    row_scale = np.where(row_scale > 0.0, row_scale, 1.0)
+
+    col_scale = np.ones(n, dtype=float)
+    norm_a = 0.0
+    for start in range(0, n, block_columns):
+        stop = min(n, start + block_columns)
+        equilibrated = np.abs(a_eval[:, start:stop])
+        equilibrated /= row_scale[:, None]
+        local_col_scale = np.max(equilibrated, axis=0)
+        local_col_scale = np.where(
+            local_col_scale > 0.0, local_col_scale, 1.0
+        )
+        col_scale[start:stop] = local_col_scale
+        equilibrated /= local_col_scale[None, :]
+        norm_a = max(
+            norm_a,
+            float(np.max(np.sum(equilibrated, axis=0))),
+        )
+    return row_scale, col_scale, norm_a
+
+
 def _equilibrated_condition_from_lu(
     a_mat: 'np.ndarray',
     lu: 'np.ndarray',
@@ -5320,15 +5254,7 @@ def _equilibrated_condition_from_lu(
     if _SCIPY_LINALG is None or _SCIPY_SPARSE_LINALG is None:
         raise RuntimeError("equilibrated condition estimation requires SciPy")
     a_eval = np.asarray(a_mat, dtype=np.complex128)
-    magnitude = np.abs(a_eval)
-    row_scale = np.max(magnitude, axis=1)
-    row_scale = np.where(row_scale > 0.0, row_scale, 1.0)
-    row_equilibrated = magnitude / row_scale[:, None]
-    col_scale = np.max(row_equilibrated, axis=0)
-    col_scale = np.where(col_scale > 0.0, col_scale, 1.0)
-    norm_a = float(np.max(np.sum(
-        row_equilibrated / col_scale[None, :], axis=0
-    )))
+    row_scale, col_scale, norm_a = _equilibrated_scaling_and_norm_1(a_eval)
     n = int(a_eval.shape[0])
 
     def _inverse_matvec(vector):
@@ -6083,7 +6009,7 @@ def _assert_no_type1_sheet(infos: 'List[PanelCoupledInfo]') -> 'None':
             "They ARE supported for RCS: use solve_monostatic_rcs_2d or "
             "solve_bistatic_rcs_2d, which route sheet geometries to the "
             "dedicated sheet BIEs (_solve_tm_sheet / _solve_te_sheet / "
-            "_solve_mixed_sheet_pec).  See TAPERED_IBC.md."
+            "_solve_mixed_sheet_pec)."
         )
 
 def _solve_dielectric_indirect(
@@ -7569,7 +7495,7 @@ def _solve_multi_region_indirect(
     rcs_lin = _rcs_sigma_from_amp(amp, k0)
     return rcs_lin, amp, max_res, ext_density_global
 
-def solve_monostatic_rcs_2d(
+def solve_monostatic_rcs_2d_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
     elevations_deg: 'List[float]',
@@ -7586,11 +7512,16 @@ def solve_monostatic_rcs_2d(
     cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
     solver_method: 'str' = "auto",
+    _shared_discretization_cache: 'Optional[Dict[str, Any]]' = None,
 ) -> 'Dict[str, Any]':
     """
-    Low-level monostatic 2-D RCS solve using the formulation selected for the
-    supplied boundary types (Robin/MFIE, dielectric indirect, multi-region,
-    or sheet BIE).
+    Explicit single-polarization diagnostic monostatic 2-D solve.
+
+    Production callers should use :func:`solve_monostatic_rcs_2d` (or its
+    certified/survey variants), which always solves and returns both physical
+    co-polarized channels.  This function remains available for focused
+    formulation tests, density diagnostics, and compatibility with specialist
+    code that genuinely needs one scalar Helmholtz problem.
 
     Per frequency:
     - build the boundary discretization,
@@ -7634,15 +7565,35 @@ def solve_monostatic_rcs_2d(
     pol = _normalize_polarization(polarization)
     unit_scale = _unit_scale_to_meters(geometry_units)
 
-    base_dir = _material_base_dir_for_snapshot(
-        geometry_snapshot, material_base_dir
+    shared_cache = (
+        _shared_discretization_cache
+        if isinstance(_shared_discretization_cache, dict)
+        else None
     )
-    preflight_report = validate_geometry_snapshot_for_solver(geometry_snapshot, base_dir=base_dir, meters_scale=unit_scale)
-    materials = MaterialLibrary.from_entries(
-        geometry_snapshot.get("ibcs", []) or [],
-        geometry_snapshot.get("dielectrics", []) or [],
-        base_dir=base_dir,
-    )
+    prepared = shared_cache.get("prepared") if shared_cache is not None else None
+    if prepared is None:
+        base_dir = _material_base_dir_for_snapshot(
+            geometry_snapshot, material_base_dir
+        )
+        preflight_report = validate_geometry_snapshot_for_solver(
+            geometry_snapshot, base_dir=base_dir, meters_scale=unit_scale
+        )
+        materials = MaterialLibrary.from_entries(
+            geometry_snapshot.get("ibcs", []) or [],
+            geometry_snapshot.get("dielectrics", []) or [],
+            base_dir=base_dir,
+        )
+        if shared_cache is not None:
+            shared_cache["prepared"] = (
+                base_dir, preflight_report, materials, float(unit_scale)
+            )
+    else:
+        base_dir, preflight_report, materials, prepared_scale = prepared
+        if abs(float(prepared_scale) - float(unit_scale)) > EPS:
+            raise ValueError(
+                "A shared 2-D discretization cache cannot be reused across "
+                "different geometry units."
+            )
     for _msg in list(preflight_report.get('warnings', []) or []):
         materials.warn_once(str(_msg))
     _warn_far_quadrature_override(materials)
@@ -7710,7 +7661,19 @@ def solve_monostatic_rcs_2d(
     cached_mesh_max_index: 'Optional[float]' = None
     cached_mesh_material_flags: 'List[int]' = []
 
-    if mesh_ref_ghz is not None and len(frequencies) > 1:
+    fixed_mesh_record = (
+        shared_cache.get("fixed_mesh") if shared_cache is not None else None
+    )
+    if fixed_mesh_record is not None:
+        (
+            cached_panels,
+            cached_mesh,
+            cached_mesh_stats,
+            cached_mesh_wavelength,
+            cached_mesh_max_index,
+            cached_mesh_material_flags,
+        ) = fixed_mesh_record
+    elif mesh_ref_ghz is not None and len(frequencies) > 1:
         (
             ref_lambda,
             cached_mesh_max_index,
@@ -7741,6 +7704,18 @@ def solve_monostatic_rcs_2d(
         cached_junction_constraints, cached_junction_stats = _build_linear_junction_constraints(
             cached_mesh, ref_coupled, materialize=False,
         )
+        if shared_cache is not None:
+            # Panel geometry and interface-aware node topology are independent
+            # of TE/TM.  Constitutive factors, junction flux coefficients, all
+            # operators, RHS vectors, and factorizations remain channel-local.
+            shared_cache["fixed_mesh"] = (
+                cached_panels,
+                cached_mesh,
+                dict(cached_mesh_stats),
+                float(cached_mesh_wavelength),
+                float(cached_mesh_max_index),
+                list(cached_mesh_material_flags),
+            )
         materials.warn_once(
             f"Mesh topology cached using the shortest referenced-material "
             f"wavelength across the requested frequencies and the "
@@ -7763,19 +7738,56 @@ def solve_monostatic_rcs_2d(
             mesh_max_index = float(cached_mesh_max_index)
             mesh_material_flags = list(cached_mesh_material_flags)
         else:
-            (
-                lambda_min,
-                mesh_max_index,
-                mesh_material_flags,
-            ) = _mesh_wavelength_for_snapshot(
-                geometry_snapshot, materials, mesh_freq_ghz
+            shared_frequency_meshes = (
+                shared_cache.setdefault("frequency_meshes", {})
+                if shared_cache is not None else None
             )
-            panels = _build_panels(
-                geometry_snapshot, unit_scale, lambda_min, max_panels=max_panels,
+            mesh_cache_key = (
+                round(float(mesh_freq_ghz), 12),
+                int(max_panels),
             )
-            preview_infos = _build_coupled_panel_info(panels, materials, freq_ghz, pol, k0)
-            mesh, linear_mesh_stats_local = _build_linear_mesh_interface_aware(panels, preview_infos)
-            linear_mesh_stats_local = dict(linear_mesh_stats_local)
+            frequency_mesh_record = (
+                shared_frequency_meshes.get(mesh_cache_key)
+                if shared_frequency_meshes is not None else None
+            )
+            if frequency_mesh_record is not None:
+                (
+                    panels,
+                    mesh,
+                    linear_mesh_stats_local,
+                    lambda_min,
+                    mesh_max_index,
+                    mesh_material_flags,
+                ) = frequency_mesh_record
+                linear_mesh_stats_local = dict(linear_mesh_stats_local)
+            else:
+                (
+                    lambda_min,
+                    mesh_max_index,
+                    mesh_material_flags,
+                ) = _mesh_wavelength_for_snapshot(
+                    geometry_snapshot, materials, mesh_freq_ghz
+                )
+                panels = _build_panels(
+                    geometry_snapshot, unit_scale, lambda_min,
+                    max_panels=max_panels,
+                )
+                preview_infos = _build_coupled_panel_info(
+                    panels, materials, freq_ghz, pol, k0
+                )
+                mesh, linear_mesh_stats_local = (
+                    _build_linear_mesh_interface_aware(panels, preview_infos)
+                )
+                linear_mesh_stats_local = dict(linear_mesh_stats_local)
+                if shared_frequency_meshes is not None:
+                    shared_frequency_meshes[mesh_cache_key] = (
+                        panels,
+                        mesh,
+                        dict(linear_mesh_stats_local),
+                        float(lambda_min),
+                        float(mesh_max_index),
+                        list(mesh_material_flags),
+                    )
 
         panel_lengths = np.asarray([p.length for p in panels], dtype=float)
         mesh_reference_values.append(float(mesh_freq_ghz))
@@ -8274,43 +8286,350 @@ def solve_monostatic_rcs_2d(
     }
 
 
-def _farfield_at_angles_slp(
-    mesh: 'LinearMesh',
-    density: 'np.ndarray',
-    k_air: 'float',
-    obs_angles_deg: 'np.ndarray',
-    order: 'int' = 8,
-) -> 'Tuple[np.ndarray, np.ndarray]':
-    """SLP far-field projector at arbitrary observation angles (for TE PEC MFIE)."""
+_CO_POLARIZED_2D_CHANNELS = (("VV", "TE"), ("HH", "TM"))
 
-    obs = np.asarray(obs_angles_deg, dtype=float).reshape(-1)
-    amp = _farfield_linear_density_many(
-        mesh, density, k_air, obs, "SLP", order=order
+
+def _co_polarized_progress_callback(
+    progress_callback: 'Optional[Callable[[int, int, str], None]]',
+    channel_index: 'int',
+    export_polarization: 'str',
+) -> 'Optional[Callable[[int, int, str], None]]':
+    """Map one scalar-channel progress stream onto the combined solve."""
+
+    if progress_callback is None:
+        return None
+
+    def _mapped(done: 'int', total: 'int', message: 'str') -> 'None':
+        total_i = max(1, int(total))
+        done_i = max(0, min(int(done), total_i))
+        try:
+            progress_callback(
+                int(channel_index) * total_i + done_i,
+                len(_CO_POLARIZED_2D_CHANNELS) * total_i,
+                f"{export_polarization}: {message}",
+            )
+        except Exception:
+            pass
+
+    return _mapped
+
+
+def _finite_metadata_max(
+    channel_metadata: 'Dict[str, Dict[str, Any]]',
+    key: 'str',
+    default: 'float' = 0.0,
+) -> 'float':
+    values = []
+    for metadata in channel_metadata.values():
+        try:
+            value = float(metadata.get(key, float("nan")))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    return float(max(values)) if values else float(default)
+
+
+def _merge_co_polarized_2d_results(
+    channel_results: 'Dict[str, Dict[str, Any]]',
+) -> 'Dict[str, Any]':
+    """Merge exact TE/TM solves without inventing a selected polarization."""
+
+    expected_channels = [item[0] for item in _CO_POLARIZED_2D_CHANNELS]
+    if set(channel_results) != set(expected_channels):
+        raise ValueError(
+            "A co-polarized 2-D result requires exactly VV<-TE and HH<-TM."
+        )
+
+    co_solved_samples: 'Dict[str, List[Dict[str, Any]]]' = {}
+    channel_keys: 'Optional[Set[Tuple[float, float, float]]]' = None
+    flattened: 'List[Dict[str, Any]]' = []
+    channel_metadata: 'Dict[str, Dict[str, Any]]' = {}
+    scattering_modes: 'Set[str]' = set()
+    solver_names: 'Set[str]' = set()
+    amplitude_conventions: 'Set[str]' = set()
+
+    for export_pol, internal_pol in _CO_POLARIZED_2D_CHANNELS:
+        result = channel_results[export_pol]
+        raw_samples = list(result.get("samples", []) or [])
+        if not raw_samples:
+            raise ValueError(
+                f"The co-polarized 2-D solve returned no {export_pol} samples."
+            )
+        labeled_samples = []
+        keys: 'Set[Tuple[float, float, float]]' = set()
+        for row in raw_samples:
+            copied = dict(row)
+            copied["polarization"] = export_pol
+            copied["polarization_internal"] = internal_pol
+            key = (
+                float(copied["frequency_ghz"]),
+                float(copied["theta_inc_deg"]),
+                float(copied["theta_scat_deg"]),
+            )
+            if key in keys:
+                raise ValueError(
+                    f"Duplicate {export_pol} 2-D sample at f/inc/scat={key}."
+                )
+            keys.add(key)
+            labeled_samples.append(copied)
+        if channel_keys is None:
+            channel_keys = keys
+        elif keys != channel_keys:
+            missing = sorted(channel_keys - keys)
+            extra = sorted(keys - channel_keys)
+            raise ValueError(
+                "TE/TM 2-D solves did not return the same physical grid "
+                f"(first missing={missing[:1]}, first extra={extra[:1]})."
+            )
+        labeled_samples.sort(key=lambda row: (
+            float(row["frequency_ghz"]),
+            float(row["theta_inc_deg"]),
+            float(row["theta_scat_deg"]),
+        ))
+        co_solved_samples[export_pol] = labeled_samples
+        flattened.extend(labeled_samples)
+        channel_metadata[export_pol] = dict(result.get("metadata", {}) or {})
+        scattering_modes.add(str(result.get("scattering_mode", "")))
+        solver_names.add(str(result.get("solver", "")))
+        amplitude_conventions.add(str(result.get("amplitude_convention", "")))
+
+    if len(scattering_modes) != 1 or len(solver_names) != 1 \
+            or len(amplitude_conventions) != 1:
+        raise ValueError(
+            "TE/TM channel results disagree on solver, scattering mode, or "
+            "complex-amplitude convention."
+        )
+
+    channel_order = {label: index for index, label in enumerate(expected_channels)}
+    flattened.sort(key=lambda row: (
+        float(row["frequency_ghz"]),
+        float(row["theta_inc_deg"]),
+        float(row["theta_scat_deg"]),
+        channel_order[str(row["polarization"])],
+    ))
+
+    warnings = []
+    for export_pol in expected_channels:
+        for warning in list(channel_metadata[export_pol].get("warnings", []) or []):
+            text = str(warning)
+            if text not in warnings:
+                warnings.append(text)
+
+    quality_by_channel = {
+        export_pol: dict(
+            channel_metadata[export_pol].get("quality_gate", {}) or {}
+        )
+        for export_pol in expected_channels
+    }
+    quality_passed = all(
+        bool(quality_by_channel[label].get("passed", False))
+        for label in expected_channels
+    )
+    quality_gate = {
+        "passed": bool(quality_passed),
+        "channels": quality_by_channel,
+        "reason": (
+            "Both VV<-TE and HH<-TM discrete linear-system quality gates passed"
+            if quality_passed else
+            "At least one co-polarized 2-D channel failed its quality gate"
+        ),
+    }
+
+    mesh_by_channel = {
+        export_pol: dict(
+            channel_metadata[export_pol].get("mesh_convergence", {}) or {}
+        )
+        for export_pol in expected_channels
+        if channel_metadata[export_pol].get("mesh_convergence")
+    }
+    mesh_certified = bool(mesh_by_channel) and all(
+        bool(channel_metadata[label].get("mesh_convergence_certified", False))
+        and bool(mesh_by_channel.get(label, {}).get("passed", False))
+        for label in expected_channels
     )
 
-    rcs_lin = _rcs_sigma_from_amp(amp, k_air)
-    return rcs_lin, amp
+    first_metadata = channel_metadata[expected_channels[0]]
+    metadata: 'Dict[str, Any]' = {
+        "source_path": first_metadata.get("source_path", ""),
+        "segment_count": first_metadata.get("segment_count", 0),
+        "panel_count": int(_finite_metadata_max(channel_metadata, "panel_count")),
+        "panel_count_min": int(_finite_metadata_max(
+            channel_metadata, "panel_count_min"
+        )),
+        "panel_count_max": int(_finite_metadata_max(
+            channel_metadata, "panel_count_max"
+        )),
+        "polarizations": list(expected_channels),
+        "polarization_internal": [item[1] for item in _CO_POLARIZED_2D_CHANNELS],
+        "polarization_mapping": {"VV": "TE", "HH": "TM"},
+        "formulation": "co-polarized 2-D BIE/MoM",
+        "formulations": {
+            label: channel_metadata[label].get("formulation", "")
+            for label in expected_channels
+        },
+        "solver_method": first_metadata.get("solver_method", ""),
+        "solver_method_requested": first_metadata.get(
+            "solver_method_requested", ""
+        ),
+        "residual_norm_max": _finite_metadata_max(
+            channel_metadata, "residual_norm_max"
+        ),
+        "constraint_residual_norm_max": _finite_metadata_max(
+            channel_metadata, "constraint_residual_norm_max"
+        ),
+        "condition_est_max": _finite_metadata_max(
+            channel_metadata, "condition_est_max", default=float("nan")
+        ),
+        "condition_est_computed": all(
+            bool(channel_metadata[label].get("condition_est_computed", False))
+            for label in expected_channels
+        ),
+        "warnings": warnings,
+        "warning_count": len(warnings),
+        "preflight": dict(first_metadata.get("preflight", {}) or {}),
+        "quality_gate": quality_gate,
+        "channel_metadata": channel_metadata,
+        "co_solve_shared_discretization": True,
+        "mesh_convergence_certified": mesh_certified,
+        "certified_entry_point": all(
+            bool(channel_metadata[label].get("certified_entry_point", False))
+            for label in expected_channels
+        ),
+        "survey_mode": all(
+            bool(channel_metadata[label].get("survey_mode", False))
+            for label in expected_channels
+        ),
+        "published_mesh": first_metadata.get("published_mesh", ""),
+    }
+    if mesh_by_channel:
+        base_quality_by_channel = {
+            label: dict(
+                mesh_by_channel[label].get("base_quality_gate", {}) or {}
+            )
+            for label in expected_channels
+        }
+        fine_quality_by_channel = {
+            label: dict(
+                mesh_by_channel[label].get("fine_quality_gate", {}) or {}
+            )
+            for label in expected_channels
+        }
+        aggregate_mesh = {
+            "schema": "ghost.solver.mesh-convergence.co-polarized.v1",
+            "passed": mesh_certified,
+            "published_mesh": "fine" if mesh_certified else "",
+            "channels": mesh_by_channel,
+            # ``polarizations`` is retained as a semantic alias for older
+            # strict workflow consumers that predate the result-level
+            # ``co_solved_samples`` contract.
+            "polarizations": mesh_by_channel,
+            "base_quality_gate": {
+                "passed": all(
+                    bool(base_quality_by_channel[label].get("passed", False))
+                    for label in expected_channels
+                ),
+                "channels": base_quality_by_channel,
+            },
+            "fine_quality_gate": {
+                "passed": all(
+                    bool(fine_quality_by_channel[label].get("passed", False))
+                    for label in expected_channels
+                ),
+                "channels": fine_quality_by_channel,
+            },
+            "reason": (
+                "VV<-TE and HH<-TM mesh-convergence gates passed"
+                if mesh_certified else
+                "At least one co-polarized channel lacks a passing mesh certificate"
+            ),
+        }
+        for metric in (
+            "rms_db", "max_abs_db", "complex_rms", "complex_max",
+            "phase_rms_deg", "phase_max_deg", "base_panel_count",
+            "fine_panel_count", "panel_refinement_ratio", "fine_factor",
+        ):
+            values = []
+            for channel_mesh in mesh_by_channel.values():
+                try:
+                    value = float(channel_mesh.get(metric, float("nan")))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(value):
+                    values.append(value)
+            if values:
+                aggregate_mesh[metric] = max(values)
+        metadata["mesh_convergence"] = aggregate_mesh
+
+    return {
+        "solver": next(iter(solver_names)),
+        "scattering_mode": next(iter(scattering_modes)),
+        "amplitude_convention": next(iter(amplitude_conventions)),
+        "rcs_log_unit": "dBke",
+        "rcs_linear_quantity": "sigma_2d",
+        "polarizations": list(expected_channels),
+        "polarization_mapping": {"VV": "TE", "HH": "TM"},
+        "samples": flattened,
+        "co_solved_samples": co_solved_samples,
+        "metadata": metadata,
+    }
 
 
-def _farfield_at_angles_dlp(
-    mesh: 'LinearMesh',
-    density: 'np.ndarray',
-    k_air: 'float',
-    obs_angles_deg: 'np.ndarray',
-    order: 'int' = 8,
-) -> 'Tuple[np.ndarray, np.ndarray]':
-    """DLP far-field projector at arbitrary observation angles (for dielectric indirect)."""
+def solve_monostatic_rcs_2d(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    elevations_deg: 'List[float]',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
+    strict_quality_gate: 'bool' = True,
+    compute_condition_number: 'bool' = False,
+    max_panels: 'int' = MAX_PANELS_DEFAULT,
+    mesh_reference_ghz: 'Optional[float]' = None,
+    rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
+    abort_event: 'Optional[threading.Event]' = None,
+) -> 'Dict[str, Any]':
+    """Solve the complete 2-D monostatic co-polarized response.
 
-    obs = np.asarray(obs_angles_deg, dtype=float).reshape(-1)
-    amp = _farfield_linear_density_many(
-        mesh, density, k_air, obs, "DLP", order=order
-    )
+    This is the canonical low-level result contract: VV is the TE scalar
+    problem, HH is the TM scalar problem, and neither channel can be omitted or
+    selected by a user-facing polarization argument.  Geometry validation,
+    materials, panels, and interface-aware mesh topology are reused; physical
+    operators and factorizations remain separate because their boundary
+    conditions differ.
+    """
 
-    rcs_lin = _rcs_sigma_from_amp(amp, k_air)
-    return rcs_lin, amp
+    shared_cache: 'Dict[str, Any]' = {}
+    channel_results = {}
+    for index, (export_pol, internal_pol) in enumerate(
+        _CO_POLARIZED_2D_CHANNELS
+    ):
+        channel_results[export_pol] = solve_monostatic_rcs_2d_single_polarization(
+            geometry_snapshot=geometry_snapshot,
+            frequencies_ghz=frequencies_ghz,
+            elevations_deg=elevations_deg,
+            polarization=internal_pol,
+            geometry_units=geometry_units,
+            material_base_dir=material_base_dir,
+            progress_callback=_co_polarized_progress_callback(
+                progress_callback, index, export_pol
+            ),
+            quality_thresholds=quality_thresholds,
+            strict_quality_gate=strict_quality_gate,
+            compute_condition_number=compute_condition_number,
+            max_panels=max_panels,
+            mesh_reference_ghz=mesh_reference_ghz,
+            rcs_normalization_mode=rcs_normalization_mode,
+            cfie_alpha=0.0,
+            abort_event=abort_event,
+            solver_method="direct",
+            _shared_discretization_cache=shared_cache,
+        )
+    return _merge_co_polarized_2d_results(channel_results)
 
 
-def solve_bistatic_rcs_2d(
+def solve_bistatic_rcs_2d_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
     incidence_angles_deg: 'List[float]',
@@ -8329,7 +8648,10 @@ def solve_bistatic_rcs_2d(
     solver_method: 'str' = "auto",
 ) -> 'Dict[str, Any]':
     """
-    Bistatic 2D RCS solver.
+    Explicit single-polarization bistatic 2-D RCS diagnostic.
+
+    Production callers should use :func:`solve_bistatic_rcs_2d`, which always
+    returns both VV<-TE and HH<-TM channels on the same physical grid.
 
     For each frequency and incidence angle, solves the boundary integral equation
     and evaluates the far-field RCS at all requested observation angles.
@@ -8851,12 +9173,61 @@ def solve_bistatic_rcs_2d(
     }
 
 
+def solve_bistatic_rcs_2d(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    incidence_angles_deg: 'List[float]',
+    observation_angles_deg: 'List[float]',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
+    strict_quality_gate: 'bool' = True,
+    compute_condition_number: 'bool' = False,
+    max_panels: 'int' = MAX_PANELS_DEFAULT,
+    mesh_reference_ghz: 'Optional[float]' = None,
+    abort_event: 'Optional[threading.Event]' = None,
+) -> 'Dict[str, Any]':
+    """Solve both physical co-polarized bistatic 2-D channels."""
+
+    channel_results = {}
+    for index, (export_pol, internal_pol) in enumerate(
+        _CO_POLARIZED_2D_CHANNELS
+    ):
+        channel_results[export_pol] = solve_bistatic_rcs_2d_single_polarization(
+            geometry_snapshot=geometry_snapshot,
+            frequencies_ghz=frequencies_ghz,
+            incidence_angles_deg=incidence_angles_deg,
+            observation_angles_deg=observation_angles_deg,
+            polarization=internal_pol,
+            geometry_units=geometry_units,
+            material_base_dir=material_base_dir,
+            progress_callback=_co_polarized_progress_callback(
+                progress_callback, index, export_pol
+            ),
+            quality_thresholds=quality_thresholds,
+            strict_quality_gate=strict_quality_gate,
+            compute_condition_number=compute_condition_number,
+            max_panels=max_panels,
+            mesh_reference_ghz=mesh_reference_ghz,
+            cfie_alpha=0.0,
+            abort_event=abort_event,
+            solver_method="direct",
+        )
+    merged = _merge_co_polarized_2d_results(channel_results)
+    # The bistatic implementation still constructs channel-local meshes.  Do
+    # not claim the monostatic shared-discretization optimization in metadata.
+    merged["metadata"]["co_solve_shared_discretization"] = False
+    return merged
+
+
 def _run_certified_2d_pair(
     low_level_solver: 'Callable[..., Dict[str, Any]]',
     geometry_snapshot: 'Dict[str, Any]',
     solver_kwargs: 'Dict[str, Any]',
     mesh_convergence_policy: 'Optional[Dict[str, Any]]',
     progress_callback: 'Optional[Callable[[int, int, str], None]]',
+    shared_discretization_caches: 'Optional[Tuple[Dict[str, Any], Dict[str, Any]]]' = None,
 ) -> 'Dict[str, Any]':
     """Run base/fine 2-D solves and publish only a certified fine result."""
 
@@ -8909,6 +9280,10 @@ def _run_certified_2d_pair(
     base_kwargs = dict(common)
     base_kwargs["geometry_snapshot"] = geometry_snapshot
     base_kwargs["progress_callback"] = _phase_callback("base")
+    if shared_discretization_caches is not None:
+        base_kwargs["_shared_discretization_cache"] = (
+            shared_discretization_caches[0]
+        )
     base_result = low_level_solver(**base_kwargs)
 
     fine_snapshot = scale_snapshot_panel_density(
@@ -8928,6 +9303,10 @@ def _run_certified_2d_pair(
     fine_kwargs = dict(common)
     fine_kwargs["geometry_snapshot"] = fine_snapshot
     fine_kwargs["progress_callback"] = _phase_callback("fine")
+    if shared_discretization_caches is not None:
+        fine_kwargs["_shared_discretization_cache"] = (
+            shared_discretization_caches[1]
+        )
     fine_result = low_level_solver(**fine_kwargs)
 
     base_panel_count = int(
@@ -8997,7 +9376,7 @@ def _run_certified_2d_pair(
     return result
 
 
-def solve_monostatic_rcs_2d_certified(
+def solve_monostatic_rcs_2d_certified_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
     elevations_deg: 'List[float]',
@@ -9013,11 +9392,12 @@ def solve_monostatic_rcs_2d_certified(
     cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
     solver_method: 'str' = "auto",
+    _shared_discretization_caches: 'Optional[Tuple[Dict[str, Any], Dict[str, Any]]]' = None,
 ) -> 'Dict[str, Any]':
-    """Canonical production monostatic entry: algebraic plus mesh certification."""
+    """Explicit single-polarization algebraic plus mesh certification."""
 
     return _run_certified_2d_pair(
-        solve_monostatic_rcs_2d,
+        solve_monostatic_rcs_2d_single_polarization,
         geometry_snapshot,
         {
             "frequencies_ghz": frequencies_ghz,
@@ -9035,87 +9415,11 @@ def solve_monostatic_rcs_2d_certified(
         },
         mesh_convergence_policy,
         progress_callback,
+        _shared_discretization_caches,
     )
 
 
-def solve_monostatic_rcs_2d_survey(
-    geometry_snapshot: 'Dict[str, Any]',
-    frequencies_ghz: 'List[float]',
-    elevations_deg: 'List[float]',
-    polarization: 'str',
-    geometry_units: 'str' = "inches",
-    material_base_dir: 'Optional[str]' = None,
-    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
-    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
-    max_panels: 'int' = MAX_PANELS_DEFAULT,
-    mesh_reference_ghz: 'Optional[float]' = None,
-    rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
-    cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
-    abort_event: 'Optional[threading.Event]' = None,
-    solver_method: 'str' = "auto",
-) -> 'Dict[str, Any]':
-    """Single-mesh monostatic solve: algebraically gated, NOT mesh-certified.
-
-    `solve_monostatic_rcs_2d_certified` solves the geometry twice -- once on
-    the requested mesh and once refined by the policy's ``fine_factor`` -- and
-    publishes the fine result only if the two agree.  That second solve is
-    where most of the wall clock and all of the peak memory go, because cost
-    scales with the square of the node count.
-
-    This entry runs the base mesh alone. The discrete
-    linear system is still certified (the algebraic quality gate is untouched,
-    so a badly conditioned or non-converged solve still fails closed); what is
-    missing is any evidence that the *discretization* is fine enough, which is
-    the error that silently biases an RCS number rather than announcing
-    itself.
-
-    The result remains usable by viewers and downstream combination tools.
-    Metadata and warnings record that no mesh comparison was performed, so an
-    artifact found later identifies itself without imposing that accuracy
-    policy on the user.
-    """
-
-    result = solve_monostatic_rcs_2d(
-        geometry_snapshot=geometry_snapshot,
-        frequencies_ghz=frequencies_ghz,
-        elevations_deg=elevations_deg,
-        polarization=polarization,
-        geometry_units=geometry_units,
-        material_base_dir=material_base_dir,
-        progress_callback=progress_callback,
-        quality_thresholds=quality_thresholds,
-        strict_quality_gate=True,
-        compute_condition_number=True,
-        max_panels=max_panels,
-        mesh_reference_ghz=mesh_reference_ghz,
-        rcs_normalization_mode=rcs_normalization_mode,
-        cfie_alpha=cfie_alpha,
-        abort_event=abort_event,
-        solver_method=solver_method,
-    )
-    metadata = result.setdefault("metadata", {})
-    metadata["mesh_convergence_certified"] = False
-    metadata["certified_entry_point"] = False
-    metadata["published_mesh"] = "base"
-    metadata["survey_mode"] = True
-    warning = (
-        "SURVEY MODE: solved on the base mesh only. No mesh-convergence "
-        "certificate exists for this field -- the discretization was never "
-        "compared against a refined one, so its error is unmeasured. Use "
-        "solve_monostatic_rcs_2d_certified for anything published, compared, "
-        "or fed into a body or delta."
-    )
-    warnings = metadata.setdefault("warnings", [])
-    if warning not in warnings:
-        warnings.append(warning)
-    quality_gate = metadata.get("quality_gate")
-    if isinstance(quality_gate, dict):
-        quality_gate["mesh_convergence_certified"] = False
-        quality_gate["certification_scope"] = "discrete_linear_system_only"
-    return result
-
-
-def solve_bistatic_rcs_2d_certified(
+def solve_bistatic_rcs_2d_certified_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
     incidence_angles_deg: 'List[float]',
@@ -9132,10 +9436,10 @@ def solve_bistatic_rcs_2d_certified(
     abort_event: 'Optional[threading.Event]' = None,
     solver_method: 'str' = "auto",
 ) -> 'Dict[str, Any]':
-    """Canonical production bistatic entry: algebraic plus mesh certification."""
+    """Explicit single-polarization bistatic mesh certification."""
 
     return _run_certified_2d_pair(
-        solve_bistatic_rcs_2d,
+        solve_bistatic_rcs_2d_single_polarization,
         geometry_snapshot,
         {
             "frequencies_ghz": frequencies_ghz,
@@ -9156,30 +9460,93 @@ def solve_bistatic_rcs_2d_certified(
     )
 
 
-def solve_bistatic_rcs_2d_survey(
+def solve_monostatic_rcs_2d_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
-    incidence_angles_deg: 'List[float]',
-    observation_angles_deg: 'List[float]',
-    polarization: 'str',
+    elevations_deg: 'List[float]',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
+    mesh_convergence_policy: 'Optional[Dict[str, Any]]' = None,
+    max_panels: 'int' = MAX_PANELS_DEFAULT,
+    mesh_reference_ghz: 'Optional[float]' = None,
+    rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
+    abort_event: 'Optional[threading.Event]' = None,
+) -> 'Dict[str, Any]':
+    """Canonical production monostatic entry; both channels must certify."""
+
+    channel_results = {}
+    shared_discretization_caches = ({}, {})
+    for index, (export_pol, internal_pol) in enumerate(
+        _CO_POLARIZED_2D_CHANNELS
+    ):
+        channel_results[export_pol] = (
+            solve_monostatic_rcs_2d_certified_single_polarization(
+                geometry_snapshot=geometry_snapshot,
+                frequencies_ghz=frequencies_ghz,
+                elevations_deg=elevations_deg,
+                polarization=internal_pol,
+                geometry_units=geometry_units,
+                material_base_dir=material_base_dir,
+                progress_callback=_co_polarized_progress_callback(
+                    progress_callback, index, export_pol
+                ),
+                quality_thresholds=quality_thresholds,
+                mesh_convergence_policy=mesh_convergence_policy,
+                max_panels=max_panels,
+                mesh_reference_ghz=mesh_reference_ghz,
+                rcs_normalization_mode=rcs_normalization_mode,
+                cfie_alpha=0.0,
+                abort_event=abort_event,
+                solver_method="direct",
+                _shared_discretization_caches=shared_discretization_caches,
+            )
+        )
+    result = _merge_co_polarized_2d_results(channel_results)
+    result["metadata"]["co_solve_shared_discretization"] = True
+    return result
+
+
+def _mark_co_polarized_survey_result(
+    result: 'Dict[str, Any]',
+    warning: 'str',
+) -> 'Dict[str, Any]':
+    metadata = result.setdefault("metadata", {})
+    metadata["mesh_convergence_certified"] = False
+    metadata["certified_entry_point"] = False
+    metadata["published_mesh"] = "base"
+    metadata["survey_mode"] = True
+    warnings = metadata.setdefault("warnings", [])
+    if warning not in warnings:
+        warnings.append(warning)
+    metadata["warning_count"] = len(warnings)
+    quality_gate = metadata.get("quality_gate")
+    if isinstance(quality_gate, dict):
+        quality_gate["mesh_convergence_certified"] = False
+        quality_gate["certification_scope"] = "discrete_linear_system_only"
+    return result
+
+
+def solve_monostatic_rcs_2d_survey(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    elevations_deg: 'List[float]',
     geometry_units: 'str' = "inches",
     material_base_dir: 'Optional[str]' = None,
     progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
     quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
     max_panels: 'int' = MAX_PANELS_DEFAULT,
     mesh_reference_ghz: 'Optional[float]' = None,
-    cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
+    rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
-    solver_method: 'str' = "auto",
 ) -> 'Dict[str, Any]':
-    """Single-mesh bistatic solve with explicit survey provenance."""
+    """Co-polarized single-mesh survey with explicit non-certification."""
 
-    result = solve_bistatic_rcs_2d(
+    result = solve_monostatic_rcs_2d(
         geometry_snapshot=geometry_snapshot,
         frequencies_ghz=frequencies_ghz,
-        incidence_angles_deg=incidence_angles_deg,
-        observation_angles_deg=observation_angles_deg,
-        polarization=polarization,
+        elevations_deg=elevations_deg,
         geometry_units=geometry_units,
         material_base_dir=material_base_dir,
         progress_callback=progress_callback,
@@ -9188,27 +9555,97 @@ def solve_bistatic_rcs_2d_survey(
         compute_condition_number=True,
         max_panels=max_panels,
         mesh_reference_ghz=mesh_reference_ghz,
-        cfie_alpha=cfie_alpha,
+        rcs_normalization_mode=rcs_normalization_mode,
         abort_event=abort_event,
-        solver_method=solver_method,
     )
-    metadata = result.setdefault("metadata", {})
-    metadata["mesh_convergence_certified"] = False
-    metadata["certified_entry_point"] = False
-    metadata["published_mesh"] = "base"
-    metadata["survey_mode"] = True
-    warning = (
-        "SURVEY MODE: solved on the base mesh only. No mesh-convergence "
-        "certificate exists for this bistatic field."
+    return _mark_co_polarized_survey_result(
+        result,
+        "SURVEY MODE: VV and HH were solved on the base mesh only; no "
+        "mesh-convergence certificate exists for either channel.",
     )
-    warnings = metadata.setdefault("warnings", [])
-    if warning not in warnings:
-        warnings.append(warning)
-    quality_gate = metadata.get("quality_gate")
-    if isinstance(quality_gate, dict):
-        quality_gate["mesh_convergence_certified"] = False
-        quality_gate["certification_scope"] = "discrete_linear_system_only"
+
+
+def solve_bistatic_rcs_2d_certified(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    incidence_angles_deg: 'List[float]',
+    observation_angles_deg: 'List[float]',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
+    mesh_convergence_policy: 'Optional[Dict[str, Any]]' = None,
+    max_panels: 'int' = MAX_PANELS_DEFAULT,
+    mesh_reference_ghz: 'Optional[float]' = None,
+    abort_event: 'Optional[threading.Event]' = None,
+) -> 'Dict[str, Any]':
+    """Canonical certified bistatic entry; both channels must certify."""
+
+    channel_results = {}
+    for index, (export_pol, internal_pol) in enumerate(
+        _CO_POLARIZED_2D_CHANNELS
+    ):
+        channel_results[export_pol] = (
+            solve_bistatic_rcs_2d_certified_single_polarization(
+                geometry_snapshot=geometry_snapshot,
+                frequencies_ghz=frequencies_ghz,
+                incidence_angles_deg=incidence_angles_deg,
+                observation_angles_deg=observation_angles_deg,
+                polarization=internal_pol,
+                geometry_units=geometry_units,
+                material_base_dir=material_base_dir,
+                progress_callback=_co_polarized_progress_callback(
+                    progress_callback, index, export_pol
+                ),
+                quality_thresholds=quality_thresholds,
+                mesh_convergence_policy=mesh_convergence_policy,
+                max_panels=max_panels,
+                mesh_reference_ghz=mesh_reference_ghz,
+                cfie_alpha=0.0,
+                abort_event=abort_event,
+                solver_method="direct",
+            )
+        )
+    result = _merge_co_polarized_2d_results(channel_results)
+    result["metadata"]["co_solve_shared_discretization"] = False
     return result
+
+
+def solve_bistatic_rcs_2d_survey(
+    geometry_snapshot: 'Dict[str, Any]',
+    frequencies_ghz: 'List[float]',
+    incidence_angles_deg: 'List[float]',
+    observation_angles_deg: 'List[float]',
+    geometry_units: 'str' = "inches",
+    material_base_dir: 'Optional[str]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+    quality_thresholds: 'Optional[Dict[str, Union[float, int]]]' = None,
+    max_panels: 'int' = MAX_PANELS_DEFAULT,
+    mesh_reference_ghz: 'Optional[float]' = None,
+    abort_event: 'Optional[threading.Event]' = None,
+) -> 'Dict[str, Any]':
+    """Co-polarized bistatic base-mesh survey."""
+
+    result = solve_bistatic_rcs_2d(
+        geometry_snapshot=geometry_snapshot,
+        frequencies_ghz=frequencies_ghz,
+        incidence_angles_deg=incidence_angles_deg,
+        observation_angles_deg=observation_angles_deg,
+        geometry_units=geometry_units,
+        material_base_dir=material_base_dir,
+        progress_callback=progress_callback,
+        quality_thresholds=quality_thresholds,
+        strict_quality_gate=True,
+        compute_condition_number=True,
+        max_panels=max_panels,
+        mesh_reference_ghz=mesh_reference_ghz,
+        abort_event=abort_event,
+    )
+    return _mark_co_polarized_survey_result(
+        result,
+        "SURVEY MODE: bistatic VV and HH were solved on the base mesh only; "
+        "no mesh-convergence certificate exists for either channel.",
+    )
 
 
 def compute_boundary_densities(
@@ -9397,184 +9834,4 @@ def compute_boundary_densities(
         "density_imag": np.imag(density).tolist(),
         "density_abs": np.abs(density).tolist(),
         "density_phase_deg": np.degrees(np.angle(density)).tolist(),
-    }
-
-
-def compute_surface_currents(
-    geometry_snapshot: 'Dict[str, Any]',
-    frequency_ghz: 'float',
-    elevation_deg: 'float',
-    polarization: 'str',
-    geometry_units: 'str' = "inches",
-    material_base_dir: 'Optional[str]' = None,
-    cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
-    max_panels: 'int' = MAX_PANELS_DEFAULT,
-) -> 'Dict[str, Any]':
-    """Backward-compatible alias for :func:`compute_boundary_densities`.
-
-    The old name was physically misleading: the returned arrays are indirect
-    layer densities, not generally electromagnetic surface currents.
-    """
-    return compute_boundary_densities(
-        geometry_snapshot=geometry_snapshot,
-        frequency_ghz=frequency_ghz,
-        elevation_deg=elevation_deg,
-        polarization=polarization,
-        geometry_units=geometry_units,
-        material_base_dir=material_base_dir,
-        cfie_alpha=cfie_alpha,
-        max_panels=max_panels,
-    )
-
-
-def solve_adaptive_frequency_sweep(
-    geometry_snapshot: 'Dict[str, Any]',
-    freq_start_ghz: 'float',
-    freq_stop_ghz: 'float',
-    elevations_deg: 'List[float]',
-    polarization: 'str',
-    geometry_units: 'str' = "inches",
-    material_base_dir: 'Optional[str]' = None,
-    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
-    max_panels: 'int' = MAX_PANELS_DEFAULT,
-    cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
-    abort_event: 'Optional[threading.Event]' = None,
-    solver_method: 'str' = "auto",
-    initial_points: 'int' = 11,
-    max_refinements: 'int' = 3,
-    db_threshold: 'float' = 1.0,
-    max_total_points: 'int' = 201,
-) -> 'Dict[str, Any]':
-    """
-    Adaptive broadband frequency sweep with automatic refinement.
-
-    Starts with ``initial_points`` uniformly spaced frequencies, then inserts
-    midpoints in intervals where adjacent samples differ by more than
-    ``db_threshold`` dB.  Repeats up to ``max_refinements`` times or until
-    ``max_total_points`` is reached.
-
-    Parameters
-    ----------
-    freq_start_ghz, freq_stop_ghz : float
-        Frequency range in GHz.
-    initial_points : int
-        Number of uniformly spaced initial samples (default 11).
-    max_refinements : int
-        Maximum number of adaptive refinement passes (default 3).
-    db_threshold : float
-        Insert midpoints where adjacent samples differ by more than this (default 1.0 dB).
-    max_total_points : int
-        Hard cap on total frequency points (default 201).
-
-    Returns
-    -------
-    dict
-        Same format as solve_monostatic_rcs_2d with additional metadata about
-        the adaptive process (refinement_count, final_point_count).
-    """
-
-    if freq_start_ghz <= 0 or freq_stop_ghz <= 0:
-        raise ValueError("Frequencies must be positive.")
-    if freq_start_ghz >= freq_stop_ghz:
-        raise ValueError("freq_start_ghz must be less than freq_stop_ghz.")
-    if initial_points < 3:
-        initial_points = 3
-
-    # Round to the same precision used for freq_to_samples keys so midpoint
-    # membership tests below compare like with like (an unrounded mid used to
-    # slip past the rounded-key check and re-solve/duplicate a frequency).
-    freqs = sorted({round(float(f), 12) for f in np.linspace(freq_start_ghz, freq_stop_ghz, initial_points)})
-    all_samples: 'List[Dict[str, Any]]' = []
-    freq_to_samples: 'Dict[float, List[Dict[str, Any]]]' = {}
-    mesh_certifications: 'List[Dict[str, Any]]' = []
-
-    def run_freqs(freq_list: 'List[float]') -> 'None':
-        if not freq_list:
-            return
-        result = solve_monostatic_rcs_2d_certified(
-            geometry_snapshot=geometry_snapshot,
-            frequencies_ghz=freq_list,
-            elevations_deg=elevations_deg,
-            polarization=polarization,
-            geometry_units=geometry_units,
-            material_base_dir=material_base_dir,
-            progress_callback=progress_callback,
-            max_panels=max_panels,
-            cfie_alpha=cfie_alpha,
-            abort_event=abort_event,
-            solver_method=solver_method,
-        )
-        mesh_certifications.append(dict(
-            result.get("metadata", {}).get("mesh_convergence", {}) or {}
-        ))
-        for s in result.get("samples", []):
-            f = round(float(s["frequency_ghz"]), 12)
-            freq_to_samples.setdefault(f, []).append(s)
-            all_samples.append(s)
-
-    run_freqs(freqs)
-    refinement_count = 0
-
-    for _ in range(max_refinements):
-        if abort_event is not None and abort_event.is_set():
-            break
-        if len(freqs) >= max_total_points:
-            break
-
-        # For each elevation, find intervals needing refinement.
-        new_freqs: 'set' = set()
-        sorted_freqs = sorted(freqs)
-        for elev in elevations_deg:
-            db_at_freq = {}
-            for f in sorted_freqs:
-                for s in freq_to_samples.get(round(f, 12), []):
-                    if abs(s["theta_inc_deg"] - elev) < 0.01:
-                        db_at_freq[f] = s["rcs_db"]
-                        break
-
-            for i in range(len(sorted_freqs) - 1):
-                f0, f1 = sorted_freqs[i], sorted_freqs[i + 1]
-                db0 = db_at_freq.get(f0)
-                db1 = db_at_freq.get(f1)
-                if db0 is not None and db1 is not None:
-                    if abs(db1 - db0) > db_threshold:
-                        mid = round(0.5 * (f0 + f1), 12)
-                        if mid not in freq_to_samples and mid != f0 and mid != f1:
-                            new_freqs.add(mid)
-
-        if not new_freqs:
-            break
-
-        remaining = max_total_points - len(freqs)
-        if remaining <= 0:
-            break
-        new_list = sorted(new_freqs)[:remaining]
-        run_freqs(new_list)
-        freqs = sorted(set(freqs) | set(new_list))
-        refinement_count += 1
-
-    return {
-        "solver": "2d_bie_mom_rcs",
-        "scattering_mode": "monostatic_adaptive",
-        "amplitude_convention": RCS_AMPLITUDE_CONVENTION,
-        "polarization": _canonical_user_polarization_label(polarization),
-        "samples": sorted(all_samples, key=lambda s: (s["frequency_ghz"], s["theta_inc_deg"])),
-        "metadata": {
-            "formulation": "adaptive frequency sweep",
-            "initial_points": initial_points,
-            "final_point_count": len(freqs),
-            "refinement_count": refinement_count,
-            "db_threshold": db_threshold,
-            "freq_start_ghz": freq_start_ghz,
-            "freq_stop_ghz": freq_stop_ghz,
-            "mesh_convergence_certified": bool(
-                mesh_certifications
-                and all(
-                    bool(record.get("passed", False))
-                    for record in mesh_certifications
-                )
-            ),
-            "mesh_convergence_batches": mesh_certifications,
-            "certified_entry_point": True,
-        },
     }

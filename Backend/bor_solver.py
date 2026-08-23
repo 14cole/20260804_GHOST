@@ -3,7 +3,7 @@ BoR-MoM solver: PEC EFIE/CFIE + IBC (phases 1-2), PMCHWT dielectrics and
 coated PEC (phase 3).
 
 Mixed-potential EFIE, Galerkin-tested per azimuthal mode m (see
-BOR_CONVENTIONS.md and BOR_SOLVER_PLAN.md):
+BOR_CONVENTIONS.md):
 
   Z I = V,   Z = j k eta0 * 2pi * [ vector-potential - (1/k^2) scalar ] terms
 
@@ -1499,7 +1499,8 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 check_abort: 'Optional[Callable]' = None,
                 monitor_cond: 'bool' = False,
                 rhs_batch: 'Optional[Callable]' = None,
-                farfield_batch: 'Optional[Callable]' = None):
+                farfield_batch: 'Optional[Callable]' = None,
+                min_mode_before_tail: 'int' = 0):
     """
     Shared adaptive azimuthal-mode loop for every BoR formulation.
 
@@ -1517,7 +1518,11 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
     `workers` modes run on threads (BLAS releases the GIL); call prepare
     first so kernel/near caches are read-only during the parallel section.
     Accumulation and the 2-quiet-modes truncation test remain in strict mode
-    order, so results are identical to the serial loop.
+    order, so results are identical to the serial loop.  Tail convergence is
+    not eligible before ``min_mode_before_tail``.  Production callers set
+    that floor from the incident-wave azimuthal bandwidth ``k*rho*sin(theta)``
+    so two accidentally quiet low modes cannot terminate an electrically
+    large solve before its physically expected modal content is reached.
     """
 
     thetas = np.atleast_1d(np.asarray(thetas, dtype=float))
@@ -1526,6 +1531,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
     if prepare is not None:
         prepare(m_max)
     workers = max(1, int(workers))
+    min_mode_before_tail = max(0, int(min_mode_before_tail))
 
     def linear_error_metrics(A, X, B):
         """Return residual matrix, RHS-relative residual, and backward error.
@@ -1832,7 +1838,10 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 modes_used = w_am
                 scale = max(float(np.max(np.abs(F))), 1e-30)
                 last_relative_increment = float(np.max(np.abs(dF))) / scale
-                if last_relative_increment < mode_tol:
+                if (
+                    w_am >= min_mode_before_tail
+                    and last_relative_increment < mode_tol
+                ):
                     quiet += 1
                     if quiet >= 2:
                         break
@@ -1847,6 +1856,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
         "linear_refinement_steps": int(refinement_steps),
         "mode_converged": bool(quiet >= 2),
         "mode_cap": int(m_max),
+        "mode_tail_start": int(min_mode_before_tail),
         "mode_quiet_count": int(quiet),
         "mode_last_relative_increment": float(last_relative_increment),
         "linear_residual_limit": float(BOR_LINEAR_RESIDUAL_MAX),
@@ -1872,10 +1882,18 @@ def _mode_cap_warning(stats: 'Dict', mode_tol: 'float') -> 'Optional[str]':
     if bool(stats.get("mode_converged", False)):
         return None
     cap = int(stats.get("mode_cap", -1))
+    tail_start = int(stats.get("mode_tail_start", 0))
     tail = float(stats.get("mode_last_relative_increment", math.inf))
+    if cap < tail_start:
+        return (
+            f"Azimuthal mode cap m={cap} is below the incident-wave physical "
+            f"bandwidth estimate m={tail_start}. Increase n_modes; adaptive "
+            "tail convergence was intentionally not evaluated."
+        )
     return (
         "Azimuthal mode truncation did not reach two consecutive increments "
-        f"below mode_tol={float(mode_tol):.3g} before the cap m={cap} "
+        f"below mode_tol={float(mode_tol):.3g} at or above the physical "
+        f"tail start m={tail_start} before the cap m={cap} "
         f"(last relative increment {tail:.3g}). Increase n_modes or verify "
         "mode convergence before trusting this result."
     )
@@ -2066,6 +2084,34 @@ def _validated_bor_aspects(thetas_deg) -> 'np.ndarray':
     return thetas
 
 
+def _bor_mode_limits(k, rho_max: 'float', thetas,
+                     n_modes: 'Optional[int]') -> 'Tuple[int, int]':
+    """Return ``(mode_cap, physical_tail_start)`` for a BoR sweep.
+
+    A plane wave incident at polar aspect ``theta`` has useful azimuthal
+    content through approximately ``k*rho*sin(theta)``.  The historical
+    ``+12`` cap margin is retained, while the adaptive tail test is now held
+    off until that physical bandwidth has actually been accumulated.  The
+    small 0.05 floor preserves the established axial-look safety margin.
+    """
+
+    theta_array = np.atleast_1d(np.asarray(thetas, dtype=float))
+    sin_max = float(np.max(np.abs(np.sin(np.radians(theta_array)))))
+    bandwidth = int(math.ceil(
+        abs(complex(k)) * float(rho_max) * max(sin_max, 0.05)
+    ))
+    if n_modes is None:
+        mode_cap = bandwidth + 12
+    else:
+        try:
+            mode_cap = int(n_modes)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("n_modes must be a non-negative integer or None.") from exc
+        if mode_cap != n_modes or mode_cap < 0:
+            raise ValueError("n_modes must be a non-negative integer or None.")
+    return mode_cap, bandwidth
+
+
 def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
               cfie_alpha: 'float' = 0.5, zs=None, n_modes: 'Optional[int]' = None,
               gauss_order: 'int' = 4, mode_tol: 'float' = 1e-6, workers: 'int' = 1,
@@ -2096,10 +2142,9 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     k = solver.k
     thetas = _validated_bor_aspects(thetas_deg)
     rho_max = float(np.max(solver.gen.nodes[:, 0]))
-    st_max = float(np.max(np.abs(np.sin(np.radians(thetas)))))
-    if n_modes is None:
-        n_modes = int(math.ceil(k * rho_max * max(st_max, 0.05))) + 12
-    m_max = n_modes
+    m_max, mode_tail_start = _bor_mode_limits(
+        k, rho_max, thetas, n_modes
+    )
 
     # Per-Gauss-point / per-element surface impedance.
     zs_pt = None
@@ -2266,7 +2311,8 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                                        check_abort=check_abort,
                                        monitor_cond=True,
                                        rhs_batch=rhs_batch,
-                                       farfield_batch=farfield_batch)
+                                       farfield_batch=farfield_batch,
+                                       min_mode_before_tail=mode_tail_start)
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -2286,14 +2332,6 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
         "warnings": solve_warnings,
         **stats,
     }
-
-
-def solve_bor_pec(points, freq_hz: 'float', thetas_deg, n_modes: 'Optional[int]' = None,
-                  gauss_order: 'int' = 4, mode_tol: 'float' = 1e-6) -> 'Dict':
-    """Phase-1 entry point: PEC EFIE (kept for the phase-1 gate battery)."""
-
-    return solve_bor(points, freq_hz, thetas_deg, formulation="efie",
-                     n_modes=n_modes, gauss_order=gauss_order, mode_tol=mode_tol)
 
 
 # -----------------------------------------------------------------------------
@@ -2329,10 +2367,9 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
     k = se.k
     thetas = _validated_bor_aspects(thetas_deg)
     rho_max = float(np.max(se.gen.nodes[:, 0]))
-    st_max = float(np.max(np.abs(np.sin(np.radians(thetas)))))
-    if n_modes is None:
-        n_modes = int(math.ceil(k * rho_max * max(st_max, 0.05))) + 12
-    m_max = n_modes
+    m_max, mode_tail_start = _bor_mode_limits(
+        k, rho_max, thetas, n_modes
+    )
     Nn = se.Nn
     eta_ratio2 = (ETA0 / si.eta) ** 2
 
@@ -2388,7 +2425,8 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
                                        check_abort=check_abort,
                                        monitor_cond=True,
                                        rhs_batch=rhs_batch,
-                                       farfield_batch=farfield_batch)
+                                       farfield_batch=farfield_batch,
+                                       min_mode_before_tail=mode_tail_start)
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -2463,8 +2501,6 @@ class BorCrossOperators:
                     raise ValueError("Cross-operator surfaces share a whole "
                                      "element (overlapping geometry).")
                 if shared:
-                    if _JN_DEBUG.get("skip_corners"):
-                        continue
                     a, b = shared[0]
                     self.near_pairs.append((e, f))
                     self.pair_kind[(e, f)] = f"corner{a}{b}"
@@ -2655,10 +2691,9 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
     k = se.k
     thetas = _validated_bor_aspects(thetas_deg)
     rho_max = float(np.max(se.gen.nodes[:, 0]))
-    st_max = float(np.max(np.abs(np.sin(np.radians(thetas)))))
-    if n_modes is None:
-        n_modes = int(math.ceil(k * rho_max * max(st_max, 0.05))) + 12
-    m_max = n_modes
+    m_max, mode_tail_start = _bor_mode_limits(
+        k, rho_max, thetas, n_modes
+    )
     No, Nc = se.Nn, sLc.Nn
     eta_ratio2 = (ETA0 / sLo.eta) ** 2
     ntot = 4 * No + 2 * Nc
@@ -2727,7 +2762,8 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
                                        check_abort=check_abort,
                                        monitor_cond=True,
                                        rhs_batch=rhs_batch,
-                                       farfield_batch=farfield_batch)
+                                       farfield_batch=farfield_batch,
+                                       min_mode_before_tail=mode_tail_start)
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -2748,8 +2784,6 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
 # -----------------------------------------------------------------------------
 # Partial coatings: coating terminating ON the PEC surface (junctions).
 # -----------------------------------------------------------------------------
-
-_JN_DEBUG: 'Dict[str, object]' = {}   # debug-only switches for the gate harness
 
 def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                               freq_hz: 'float', thetas_deg, eps_r: 'complex',
@@ -2949,10 +2983,9 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
     rho_max = max([float(np.max(sd_e.gen.nodes[:, 0])),
                    float(np.max(s2_L.gen.nodes[:, 0]))] +
                   [float(np.max(b.gen.nodes[:, 0])) for b in bares])
-    st_max = float(np.max(np.abs(np.sin(np.radians(thetas)))))
-    if n_modes is None:
-        n_modes = int(math.ceil(k * rho_max * max(st_max, 0.05))) + 12
-    m_max = n_modes
+    m_max, mode_tail_start = _bor_mode_limits(
+        k, rho_max, thetas, n_modes
+    )
     eta_ratio2 = (ETA0 / sd_L.eta) ** 2
 
     Nd, N2 = sd_e.Nn, s2_L.Nn
@@ -3046,9 +3079,10 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
         Q = np.zeros((n_full, red), dtype=np.complex128)
         active = col >= 0
         Q[np.flatnonzero(active), col[active]] = 1.0
-        # ties: slaves follow the interface's junction-end coefficients
-        tie_mode = _JN_DEBUG.get("tie_mode", "full")
-        extra = []
+        # Ties: slaves follow the interface's junction-end coefficients.
+        # Earlier gate-only switches could silently disable one or both ties;
+        # the validated full continuity relation is now the sole production
+        # path.
         for jn in junctions:
             dn = jn["d_node"]
             cn = jn["c_node"]
@@ -3056,23 +3090,11 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             master_t = col[off_Jd + dn]
             master_f = col[off_Jd + Nd + dn]
             if master_t >= 0:
-                if tie_mode == "none":
-                    extra += [off_J2 + cn, off_J1[bi] + bn]
-                else:
-                    Q[off_J2 + cn, master_t] = 1.0
-                    Q[off_J1[bi] + bn, master_t] = 1.0
+                Q[off_J2 + cn, master_t] = 1.0
+                Q[off_J1[bi] + bn, master_t] = 1.0
             if master_f >= 0:
-                if tie_mode in ("none", "tonly"):
-                    extra += [off_J2 + N2 + cn, off_J1[bi] + N1[bi] + bn]
-                else:
-                    Q[off_J2 + N2 + cn, master_f] = -1.0
-                    Q[off_J1[bi] + N1[bi] + bn, master_f] = 1.0
-        if extra:
-            Qx = np.zeros((n_full, red + len(extra)), dtype=np.complex128)
-            Qx[:, :red] = Q
-            for i, row in enumerate(extra):
-                Qx[row, red + i] = 1.0
-            Q = Qx
+                Q[off_J2 + N2 + cn, master_f] = -1.0
+                Q[off_J1[bi] + N1[bi] + bn, master_f] = 1.0
         _Q_cache[m] = Q
         return Q
 
@@ -3107,7 +3129,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             # through the SAME cross operators via the nodal column map Sb
             A[iE, sl_b] = X_d1[bi].assemble_T(m, m_max)
             A[iH, sl_b] = ETA0 * X_d1[bi].assemble_P(m, m_max)
-            if Sb is not None and not _JN_DEBUG.get("no_cross_m1"):
+            if Sb is not None:
                 A[iE, sl_b] += -X_d1[bi].assemble_P(m, m_max) @ Sb
                 A[iH, sl_b] += (1.0 / ETA0) * (X_d1[bi].assemble_T(m, m_max) @ Sb)
             A[sl_b, sl_Jd] = X_1d[bi].assemble_T(m, m_max)
@@ -3135,8 +3157,6 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
 
     def farfield(m, x_red, th, pol):
         x = build_Q(m) @ x_red
-        if "capture" in _JN_DEBUG:
-            _JN_DEBUG["capture"].append((m, th, pol, x.copy()))
         fth, fph = sd_e.farfield_mode(m, x[off_Jd:off_Jd + 2 * Nd], th,
                                       msol=ETA0 * x[off_M:off_M + 2 * Nd])
         for bi, b in enumerate(bares):
@@ -3150,7 +3170,8 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                                        prepare=prepare, workers=workers,
                                        progress=progress,
                                        check_abort=check_abort,
-                                       monitor_cond=True)
+                                       monitor_cond=True,
+                                       min_mode_before_tail=mode_tail_start)
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -3444,16 +3465,15 @@ def _solve_multiregion(sys_: '_MultiRegionBor', freq_hz, thetas_deg, n_modes,
                        formulation: 'str', extra: 'Dict') -> 'Dict':
     thetas = _validated_bor_aspects(thetas_deg)
     k = 2.0 * math.pi * freq_hz / C0
-    st_max = float(np.max(np.abs(np.sin(np.radians(thetas)))))
-    if n_modes is None:
-        n_modes = int(math.ceil(k * sys_.rho_max() * max(st_max, 0.05))) + 12
-    m_max = n_modes
+    m_max, mode_tail_start = _bor_mode_limits(
+        k, sys_.rho_max(), thetas, n_modes
+    )
     F, modes_used, stats = _mode_sweep(
         sys_.n_full, thetas, ("VV", "HH"), m_max, mode_tol,
         lambda m: sys_.assemble(m, m_max), sys_.rhs, sys_.farfield,
         prepare=lambda mm: sys_.prepare(mm, workers=workers),
         workers=workers, progress=progress, check_abort=check_abort,
-        monitor_cond=True)
+        monitor_cond=True, min_mode_before_tail=mode_tail_start)
     _require_mode_convergence(stats, mode_tol)
     extra = {**extra, **stats}
     warnings = list(extra.get("warnings", []) or [])

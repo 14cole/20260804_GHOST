@@ -286,6 +286,32 @@ class WeightedGalerkinTests(unittest.TestCase):
 
 
 class NumericalCertificationTests(unittest.TestCase):
+    def test_blocked_condition_scaling_matches_dense_reference(self):
+        rng = np.random.default_rng(29)
+        matrix = rng.normal(size=(19, 19)) + 1j * rng.normal(size=(19, 19))
+        matrix[3, :] *= 1.0e-7
+        matrix[:, 11] *= 1.0e5
+
+        magnitude = np.abs(matrix)
+        expected_rows = np.max(magnitude, axis=1)
+        expected_rows = np.where(expected_rows > 0.0, expected_rows, 1.0)
+        row_equilibrated = magnitude / expected_rows[:, None]
+        expected_cols = np.max(row_equilibrated, axis=0)
+        expected_cols = np.where(expected_cols > 0.0, expected_cols, 1.0)
+        expected_norm = float(np.max(np.sum(
+            row_equilibrated / expected_cols[None, :], axis=0
+        )))
+
+        rows, cols, norm_value = rcs._equilibrated_scaling_and_norm_1(
+            matrix,
+            # Force seven blocks so this cannot silently pass through the
+            # old full-matrix allocation path.
+            max_block_bytes=8 * matrix.shape[0] * 3,
+        )
+        np.testing.assert_array_equal(rows, expected_rows)
+        np.testing.assert_array_equal(cols, expected_cols)
+        self.assertEqual(norm_value, expected_norm)
+
     def test_condition_estimate_reuses_lu_without_svd(self):
         rng = np.random.default_rng(17)
         matrix = (
@@ -315,7 +341,7 @@ class NumericalCertificationTests(unittest.TestCase):
             "dielectrics": [],
         }
         with self.assertRaisesRegex(ValueError, "cfie_alpha is not implemented"):
-            rcs.solve_monostatic_rcs_2d(
+            rcs.solve_monostatic_rcs_2d_single_polarization(
                 snapshot,
                 frequencies_ghz=[1.0],
                 elevations_deg=[0.0],
@@ -347,7 +373,7 @@ class NumericalCertificationTests(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(MemoryError, "sheet"):
-                rcs.solve_monostatic_rcs_2d(
+                rcs.solve_monostatic_rcs_2d_single_polarization(
                     snapshot,
                     frequencies_ghz=[1.0],
                     elevations_deg=[0.0],
@@ -451,7 +477,7 @@ class FarFieldProjectionTests(unittest.TestCase):
 
 class CylinderPhysicsTests(unittest.TestCase):
     def _solve(self, snapshot, pol, freq_hz):
-        result = rcs.solve_monostatic_rcs_2d(
+        result = rcs.solve_monostatic_rcs_2d_single_polarization(
             snapshot,
             frequencies_ghz=[freq_hz / 1.0e9],
             elevations_deg=[0.0],
@@ -504,7 +530,7 @@ class CylinderPhysicsTests(unittest.TestCase):
             for delta_ka in (-0.02, 0.0, 0.02):
                 ka = resonance_ka + delta_ka
                 frequency_hz = rcs.C0 * ka / (2.0 * math.pi * radius)
-                result = rcs.solve_monostatic_rcs_2d(
+                result = rcs.solve_monostatic_rcs_2d_single_polarization(
                     snapshot,
                     frequencies_ghz=[frequency_hz / 1.0e9],
                     elevations_deg=[0.0],
@@ -607,7 +633,7 @@ class TaperedImpedanceTests(unittest.TestCase):
         }
 
     def _amplitudes(self, snapshot, pol):
-        result = rcs.solve_monostatic_rcs_2d(
+        result = rcs.solve_monostatic_rcs_2d_single_polarization(
             snapshot,
             frequencies_ghz=[1.0],
             elevations_deg=self._ANGLES,
@@ -677,7 +703,7 @@ class SheetLimitAndMixedTests(unittest.TestCase):
         }
 
     def _amplitudes(self, snapshot, pol):
-        result = rcs.solve_monostatic_rcs_2d(
+        result = rcs.solve_monostatic_rcs_2d_single_polarization(
             snapshot,
             frequencies_ghz=[0.75],
             elevations_deg=self._ANGLES,
@@ -772,7 +798,7 @@ class BistaticReciprocityTests(unittest.TestCase):
         }
         angles = [20.0, 110.0]
         for pol in ("TM", "TE"):
-            result = rcs.solve_bistatic_rcs_2d(
+            result = rcs.solve_bistatic_rcs_2d_single_polarization(
                 snapshot,
                 frequencies_ghz=[1.0],
                 incidence_angles_deg=angles,

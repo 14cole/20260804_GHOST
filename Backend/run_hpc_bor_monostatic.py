@@ -7,16 +7,16 @@ Edit the CONFIG block below and run:
 
     python run_hpc_bor_monostatic.py
 
-Workflow (mirrors the 2D driver):
-- Discover geometry files under FRD_DIR + OPN_DIR (BoR .geo files: x = rho,
+Workflow:
+- Discover geometry files under GEOMETRY_DIRS (BoR .geo files: x = rho,
   y = z, generatrices traversed +z -> -z; see bor_dispatch).
 - The user requests frequencies, radar azimuths, and radar elevations. Exact
   BoR body-aspect RHS columns are derived automatically. VV and HH share each
   azimuthal-mode factorization.
-- Distribute units round-robin across N_NODES x N_JOBS slots, write sbatch
-  job-array scripts, submit. Restartable: units whose .grim exists are
-  skipped.
-- Every completed frequency immediately publishes its solver-frame VV and HH
+- Cost-balance units across N_NODES x N_JOBS slots, write sbatch job-array
+  scripts, and submit. Idle workers may claim remaining work. Restartable:
+  units whose .grim exists are skipped.
+- Every completed frequency writes solver-frame VV and HH intermediate/restart
   GRIMs under results/by_frequency/. Once complete, one self-contained
   <geometry>.grim is also published in results/. Its primary arrays are the
   requested monostatic az/el/frequency VV/HH/VH response and it embeds the
@@ -69,8 +69,7 @@ from workflow_provenance import (
 # CONFIG -- the only section most users need to edit
 # ===============================================================================
 
-FRD_DIR = "geometries/FRD"
-OPN_DIR = "geometries/OPN"
+GEOMETRY_DIRS = ["geometries/BOR"]
 
 # Requested monostatic grid.
 FREQUENCIES_GHZ = [1.0, 2.0, 3.0]
@@ -238,7 +237,7 @@ def _discover_geometries():
     # type: () -> List[Path]
     found = []   # type: List[Path]
     seen = set()  # type: set
-    for d in (FRD_DIR, OPN_DIR):
+    for d in GEOMETRY_DIRS:
         root = Path(d)
         if not root.is_dir():
             print(f"  [warn] dir not found: {root}", file=sys.stderr)
@@ -293,6 +292,7 @@ def publish_monostatic(run_dir_str, require_complete=True):
 
     from hpc_common import (
         bodies_from_units,
+        bor_solver_diagnostics_from_units,
         read_unit_grims,
         require_hpc_output_attestations,
         require_hpc_run_provenance,
@@ -313,8 +313,6 @@ def publish_monostatic(run_dir_str, require_complete=True):
     records = read_unit_grims(run_dir / str(manifest["unit_output_dir"]))
 
     from feature_sum import (
-        load_body_grim,
-        load_body_requested_radar_grid,
         outer_generatrix,
         save_monostatic_grim,
     )
@@ -323,7 +321,7 @@ def publish_monostatic(run_dir_str, require_complete=True):
     grid = dict(manifest["radar_grid"])
     out_dir = run_dir / "results"
     out_dir.mkdir(exist_ok=True)
-    written = skipped = 0
+    written = 0
     for stem in sorted({str(unit["geometry_stem"]) for unit in units}):
         matching = [unit for unit in units if unit["geometry_stem"] == stem]
         if any(
@@ -331,27 +329,11 @@ def publish_monostatic(run_dir_str, require_complete=True):
             for unit in matching
         ):
             continue
+        solver_diagnostics = bor_solver_diagnostics_from_units(
+            records, stem=stem
+        )
         geometry = Path(str(matching[0]["geometry"]))
         destination = out_dir / f"{stem}.grim"
-        if destination.is_file():
-            try:
-                load_body_grim(str(destination))
-                stored_grid = load_body_requested_radar_grid(str(destination))
-                comparable = {
-                    key: stored_grid[key]
-                    for key in (
-                        "azimuths_deg", "elevations_deg", "frequencies_ghz",
-                        "axis_az_deg", "axis_el_deg", "roll_deg",
-                    )
-                }
-                if comparable == {
-                    key: grid[key]
-                    for key in comparable
-                }:
-                    skipped += 1
-                    continue
-            except (OSError, TypeError, ValueError):
-                pass
         snapshot = build_geometry_snapshot(
             *parse_geometry(geometry.read_text(encoding="utf-8"))
         )
@@ -369,6 +351,7 @@ def publish_monostatic(run_dir_str, require_complete=True):
             roll_deg=float(grid.get("roll_deg", 0.0)),
             history="run_hpc_bor_monostatic.py monostatic response",
             source_path=str(matching[0].get("geometry_original", geometry)),
+            solver_diagnostics=solver_diagnostics,
             artifact_metadata={
                 "geometry_input_sha256": str(
                     matching[0].get("geometry_input_sha256", "")
@@ -383,7 +366,7 @@ def publish_monostatic(run_dir_str, require_complete=True):
             },
         )
         written += 1
-    return written, skipped
+    return written, 0
 
 
 def _paired_solve_units(output_units):
@@ -424,6 +407,9 @@ def _channel_result(result, polarization):
     channel["samples"] = samples
     channel["polarization"] = polarization
     channel["polarization_export"] = polarization
+    channel.pop("polarizations", None)
+    channel.pop("polarization_mapping", None)
+    channel.pop("co_solved_samples", None)
     channel["metadata"] = dict(result.get("metadata", {}) or {})
     return channel
 
@@ -485,7 +471,6 @@ def _solve_and_export(pair, snapshot, material_base, run_dir_str):
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(pair["frequency_ghz"])],
         elevations_deg=[float(a) for a in manifest["aspects_deg"]],
-        polarization=missing[0]["polarization"],
         geometry_units=str(solver_config.get(
             "geometry_units", GEOMETRY_UNITS
         )),
@@ -604,7 +589,9 @@ def submit():
     # type: () -> None
     geometries = _discover_geometries()
     if not geometries:
-        sys.exit("ERROR: no geometry files (*.geo) found under FRD_DIR or OPN_DIR.")
+        sys.exit(
+            "ERROR: no BoR geometry files (*.geo) found under GEOMETRY_DIRS."
+        )
 
     pols = ["VV", "HH"]
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
@@ -754,8 +741,9 @@ def submit():
         "run_id":          run_id,
         "created":         datetime.now().isoformat(),
         "solver":          "bor_mom_rcs",
-        "frd_dir":         str(Path(FRD_DIR).resolve()),
-        "opn_dir":         str(Path(OPN_DIR).resolve()),
+        "geometry_dirs":   [
+            str(Path(directory).resolve()) for directory in GEOMETRY_DIRS
+        ],
         "output_dir":      str(run_dir),
         "frequencies_ghz": list(FREQUENCIES_GHZ),
         "aspects_deg":     aspects,

@@ -21,6 +21,7 @@ Shared plumbing for the HPC steps -- three small jobs, all of them explicit.
    shared CEM Tools operations rather than a second implementation here.
 """
 
+import json
 import os
 import re
 import shutil
@@ -40,6 +41,55 @@ BOR_DRIVER = BACKEND / "run_hpc_bor_monostatic.py"
 TWOD_DRIVER = BACKEND / "run_hpc_monostatic.py"
 
 _UNIT_RE = re.compile(r"^(?P<pol>[A-Z]{2})_(?P<freq>[0-9.]+)GHz_(?P<stem>.+)\.grim$")
+_DUAL_UNIT_RE = re.compile(r"^(?P<freq>[0-9.]+)GHz_(?P<stem>.+)\.grim$")
+
+
+def _unit_output_contract(unit: 'Dict[str, Any]', schema: 'str') -> 'tuple':
+    """Return ``(name, polarizations)`` for a validated solver unit.
+
+    The v2 2-D driver co-solves both channels into one file; legacy 2-D and
+    BoR intermediate manifests retain one polarization per unit.
+    """
+
+    stem = unit.get("geometry_stem")
+    frequency = unit.get("frequency_ghz")
+    if (
+        not isinstance(stem, str)
+        or not stem
+        or stem in (".", "..")
+        or "/" in stem
+        or "\\" in stem
+        or isinstance(frequency, bool)
+        or not isinstance(frequency, (int, float))
+        or not math.isfinite(float(frequency))
+        or float(frequency) <= 0.0
+    ):
+        raise ValueError("HPC unit cannot form a safe output filename.")
+    if schema == "ghost.hpc.2d-run.v2":
+        polarizations = unit.get("polarizations")
+        if list(polarizations or []) != ["VV", "HH"]:
+            raise ValueError(
+                "2-D v2 HPC units must contain canonical polarizations "
+                "['VV', 'HH']."
+            )
+        name = f"{float(frequency):.3f}GHz_{stem}.grim"
+        return name, ["VV", "HH"]
+
+    valid = {
+        "ghost.hpc.2d-run.v1": {"TM", "TE"},
+        "ghost.hpc.bor-run.v1": {"VV", "HH"},
+    }.get(schema)
+    polarization = unit.get("polarization")
+    if (
+        valid is None
+        or not isinstance(polarization, str)
+        or "/" in polarization
+        or "\\" in polarization
+        or polarization not in valid
+    ):
+        raise ValueError("HPC unit has an invalid polarization.")
+    name = f"{polarization}_{float(frequency):.3f}GHz_{stem}.grim"
+    return name, [polarization]
 
 
 # -----------------------------------------------------------------------------
@@ -165,12 +215,9 @@ def require_hpc_run_provenance(
     from feature_sum import geometry_input_fingerprint
     checked = {}
     output_names = set()
-    valid_polarizations = {
-        "ghost.hpc.2d-run.v1": {"TM", "TE"},
-        "ghost.hpc.bor-run.v1": {"VV", "HH"},
-    }.get(expected_schema)
     expected_angle_key = {
         "ghost.hpc.2d-run.v1": "azimuths_deg",
+        "ghost.hpc.2d-run.v2": "azimuths_deg",
         "ghost.hpc.bor-run.v1": "aspects_deg",
     }.get(expected_schema)
     # The angular grid is declared once for the run rather than repeated in
@@ -215,15 +262,6 @@ def require_hpc_run_provenance(
             raise ValueError(
                 "HPC unit has an unsafe or geometry-inconsistent output stem."
             )
-        polarization = unit.get("polarization")
-        if (
-            not isinstance(polarization, str)
-            or (
-                valid_polarizations is not None
-                and polarization not in valid_polarizations
-            )
-        ):
-            raise ValueError("HPC unit has an invalid polarization.")
         frequency = unit.get("frequency_ghz")
         if (
             isinstance(frequency, bool)
@@ -234,8 +272,8 @@ def require_hpc_run_provenance(
             raise ValueError(
                 "HPC unit has a non-positive or non-finite frequency."
             )
-        output_name = (
-            f"{polarization}_{float(frequency):.3f}GHz_{stem}.grim"
+        output_name, _polarizations = _unit_output_contract(
+            unit, expected_schema
         )
         if output_name in output_names:
             raise ValueError(
@@ -274,10 +312,10 @@ def require_hpc_output_attestations(
         verify_embedded_attestation,
     )
 
-    # Solver-unit GRIMs are restart/provenance state, not user deliverables.
-    # New BoR runs keep them in a hidden directory and publish one monostatic
-    # GRIM in results/.  Older runs and the 2-D driver continue to default to
-    # results/, so archived manifests remain verifiable.
+    # Per-frequency BoR GRIMs are visible intermediate/restart records under
+    # results/by_frequency/. The collected results/<geometry>.grim remains the
+    # production body artifact. Older manifests and the 2-D driver may use
+    # results/ directly, so keep the manifest-defined relative directory.
     unit_output_dir = str(manifest.get("unit_output_dir", "results"))
     if (
         not unit_output_dir
@@ -289,15 +327,12 @@ def require_hpc_output_attestations(
     if not isinstance(manifest, dict):
         raise ValueError("HPC manifest must be a JSON object.")
     schema = manifest.get("schema")
-    valid_polarizations = {
-        "ghost.hpc.2d-run.v1": {"TM", "TE"},
-        "ghost.hpc.bor-run.v1": {"VV", "HH"},
-    }.get(schema)
     expected_angle_key = {
         "ghost.hpc.2d-run.v1": "azimuths_deg",
+        "ghost.hpc.2d-run.v2": "azimuths_deg",
         "ghost.hpc.bor-run.v1": "aspects_deg",
     }.get(schema)
-    if valid_polarizations is None or expected_angle_key is None:
+    if expected_angle_key is None:
         raise ValueError(
             f"HPC manifest has an unsupported schema {schema!r}."
         )
@@ -356,7 +391,6 @@ def require_hpc_output_attestations(
         if not isinstance(unit, dict):
             raise ValueError("Every HPC unit must be an object.")
         stem = unit.get("geometry_stem")
-        polarization = unit.get("polarization")
         frequency = unit.get("frequency_ghz")
         if (
             not isinstance(stem, str)
@@ -364,17 +398,13 @@ def require_hpc_output_attestations(
             or stem in (".", "..")
             or "/" in stem
             or "\\" in stem
-            or not isinstance(polarization, str)
-            or "/" in polarization
-            or "\\" in polarization
-            or polarization not in valid_polarizations
             or isinstance(frequency, bool)
             or not isinstance(frequency, (int, float))
             or not math.isfinite(float(frequency))
             or float(frequency) <= 0.0
         ):
             raise ValueError("HPC unit cannot form a safe output filename.")
-        name = f"{polarization}_{float(frequency):.3f}GHz_{stem}.grim"
+        name, polarizations = _unit_output_contract(unit, schema)
         if name in expected_names:
             raise ValueError(
                 "HPC manifest contains colliding result filenames."
@@ -400,9 +430,12 @@ def require_hpc_output_attestations(
                 "unit_solve_spec_sha256": unit_solve_spec_fingerprint(unit),
                 "solver_config_sha256": config_sha,
                 "angular_grid_kind": expected_angle_key,
-                "polarization": polarization,
                 "frequency_ghz": float(frequency),
         }
+        if schema == "ghost.hpc.2d-run.v2":
+            expected_attestation["polarizations"] = polarizations
+        else:
+            expected_attestation["polarization"] = polarizations[0]
         if schema == "ghost.hpc.bor-run.v1":
             expected_attestation["angular_grid_deg"] = [
                 float(value) for value in raw_angles
@@ -415,15 +448,11 @@ def require_hpc_output_attestations(
         str(path.relative_to(results_dir))
         for path in results_dir.rglob("*.grim")
     }
-    expected_paths = {
-        str(Path(str(unit.get("role", "")).strip().upper()) /
-            f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
-            f"{unit['geometry_stem']}.grim")
-        if str(unit.get("role", "")).strip() else
-        f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
-        f"{unit['geometry_stem']}.grim"
-        for unit in units
-    }
+    expected_paths = set()
+    for unit in units:
+        name, _polarizations = _unit_output_contract(unit, schema)
+        role = str(unit.get("role", "")).strip().upper()
+        expected_paths.add(str(Path(role) / name) if role else name)
     if actual_names != expected_paths:
         raise ValueError(
             "HPC results do not contain the exact manifest output set "
@@ -433,8 +462,13 @@ def require_hpc_output_attestations(
 
 
 def read_unit_grims(results_dir: 'os.PathLike') -> 'List[Dict[str, Any]]':
-    """Parse results/<POL>_<FREQ>GHz_<stem>.grim into
-    {pol, freq_ghz, stem, path, angles_deg, amp[angle, freq]} records.
+    """Read legacy single-channel and current dual-channel result units.
+
+    Legacy ``<POL>_<FREQ>GHz_<stem>.grim`` records expose a one-item
+    ``polarizations`` list and ``amp[angle, frequency]``. Current
+    ``<FREQ>GHz_<stem>.grim`` records expose their stored polarization list and
+    ``amp[angle, frequency, polarization]``. One record is returned per file,
+    matching the scheduler's definition of a unit.
 
     ``angles_deg`` is the driver's sweep axis, stored in the grim's 'azimuths':
     for the BoR driver that is the ASPECT from the rotation axis (0 = nose-on,
@@ -443,20 +477,213 @@ def read_unit_grims(results_dir: 'os.PathLike') -> 'List[Dict[str, Any]]':
     """
     out: 'List[Dict[str, Any]]' = []
     for p in sorted(Path(results_dir).rglob("*.grim")):
-        m = _UNIT_RE.match(p.name)
-        if not m:
+        legacy_match = _UNIT_RE.match(p.name)
+        dual_match = _DUAL_UNIT_RE.match(p.name)
+        if legacy_match is None and dual_match is None:
             continue
         with np.load(str(p)) as d:
             if not bool(d["raw_complex_amplitude_preserved"]):
                 raise ValueError(f"{p.name}: complex amplitudes were not preserved.")
             amp = (np.asarray(d["rcs_amp_real"], float)
                    + 1j * np.asarray(d["rcs_amp_imag"], float))
-            out.append({"pol": m.group("pol"), "freq_ghz": float(m.group("freq")),
-                        "stem": m.group("stem"), "path": p,
-                        "angles_deg": np.asarray(d["azimuths"], float),
-                        "frequencies_ghz": np.asarray(d["frequencies"], float),
-                        "amp": amp[:, 0, :, 0]})
+            if legacy_match is not None:
+                match = legacy_match
+                polarizations = [match.group("pol")]
+                stored_polarizations = [
+                    str(value) for value in np.asarray(
+                        d["polarizations"], dtype=str
+                    ).reshape(-1)
+                ]
+                if stored_polarizations != polarizations:
+                    raise ValueError(
+                        f"{p.name}: filename channel {polarizations[0]} does "
+                        f"not match stored polarization axis "
+                        f"{stored_polarizations}."
+                    )
+                amplitude = amp[:, 0, :, 0]
+                legacy_pol = polarizations[0]
+            else:
+                match = dual_match
+                polarizations = [
+                    str(value) for value in np.asarray(
+                        d["polarizations"], dtype=str
+                    ).reshape(-1)
+                ]
+                if polarizations != ["VV", "HH"]:
+                    raise ValueError(
+                        f"{p.name}: a polarization-free unit filename requires "
+                        "the canonical [VV, HH] polarization axis."
+                    )
+                amplitude = amp[:, 0, :, :]
+                legacy_pol = ""
+            solver_audit = None
+            if "solver_metadata_json" in d.files:
+                raw_audit = np.asarray(
+                    d["solver_metadata_json"]
+                ).reshape(()).item()
+                if isinstance(raw_audit, bytes):
+                    raw_audit = raw_audit.decode("utf-8")
+                try:
+                    solver_audit = json.loads(str(raw_audit))
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    raise ValueError(
+                        f"{p.name}: solver diagnostics are malformed."
+                    ) from exc
+                if not isinstance(solver_audit, dict):
+                    raise ValueError(
+                        f"{p.name}: solver diagnostics must be a mapping."
+                    )
+            out.append({
+                "pol": legacy_pol,
+                "polarizations": polarizations,
+                "freq_ghz": float(match.group("freq")),
+                "stem": match.group("stem"),
+                "path": p,
+                "angles_deg": np.asarray(d["azimuths"], float),
+                "frequencies_ghz": np.asarray(d["frequencies"], float),
+                "amp": amplitude,
+                "solver_audit": solver_audit,
+            })
     return out
+
+
+def bor_solver_diagnostics_from_units(
+    units: 'Sequence[Dict[str, Any]]',
+    stem: 'Optional[str]' = None,
+) -> 'Optional[Dict[float, Dict[str, Any]]]':
+    """Collect verified restart-unit audits into the body-file contract.
+
+    Current BoR runs publish separate VV and HH restart records even though
+    they are co-solved. Their physical solver metadata must agree after the
+    channel-specific output attestation is removed. Fully legacy collections
+    with no embedded audit remain readable; a partially audited collection is
+    rejected instead of silently dropping provenance.
+    """
+
+    selected = [
+        unit for unit in units
+        if stem is None or str(unit.get("stem")) == str(stem)
+    ]
+    if not selected:
+        raise ValueError(f"No BoR solver units found for {stem!r}.")
+    audits = [unit.get("solver_audit") for unit in selected]
+    if all(audit is None for audit in audits):
+        return None
+    if any(audit is None for audit in audits):
+        raise ValueError(
+            "BoR solver units mix audited and unaudited artifacts."
+        )
+
+    grouped = {}  # type: Dict[float, List[Dict[str, Any]]]
+    for unit in selected:
+        grouped.setdefault(float(unit["freq_ghz"]), []).append(unit)
+
+    from grim_io import SOLVER_METADATA_SCHEMA
+
+    diagnostics = {}
+    for frequency, records in sorted(grouped.items()):
+        coverage = {
+            polarization: sum(
+                polarization in list(record.get("polarizations") or [])
+                for record in records
+            )
+            for polarization in ("VV", "HH")
+        }
+        if coverage != {"VV": 1, "HH": 1}:
+            raise ValueError(
+                f"{frequency:g} GHz BoR diagnostics require exactly one "
+                "VV and one HH source field."
+            )
+
+        common_metadata = None
+        common_serialized = None
+        source_attestations = {}
+        for record in records:
+            audit = dict(record["solver_audit"])
+            record_polarizations = list(record.get("polarizations") or [])
+            if (
+                audit.get("schema") != SOLVER_METADATA_SCHEMA
+                or audit.get("solver") != "bor_mom_rcs"
+                or audit.get("scattering_mode") != "monostatic"
+                or audit.get("rcs_log_unit") != "dBsm"
+                or audit.get("rcs_linear_quantity") != "sigma_3d"
+            ):
+                raise ValueError(
+                    f"{record['path'].name}: not a monostatic BoR solver audit."
+                )
+            if len(record_polarizations) == 1:
+                polarization = record_polarizations[0]
+                if (
+                    audit.get("polarization") != polarization
+                    or audit.get("polarization_export") != polarization
+                    or audit.get("polarizations") not in (None, [])
+                    or audit.get("polarization_mapping") not in (None, {})
+                ):
+                    raise ValueError(
+                        f"{record['path'].name}: selected-channel solver "
+                        "audit does not match its filename."
+                    )
+            elif (
+                record_polarizations != ["VV", "HH"]
+                or audit.get("polarizations") != ["VV", "HH"]
+                or audit.get("polarization_mapping")
+                != {"VV": "VV", "HH": "HH"}
+            ):
+                raise ValueError(
+                    f"{record['path'].name}: malformed dual-channel audit."
+                )
+            metadata = dict(audit.get("metadata", {}) or {})
+            attestation = metadata.pop("output_attestation", None)
+            if isinstance(attestation, dict):
+                attested_frequency = float(
+                    attestation.get("frequency_ghz", math.nan)
+                )
+                attested_polarization = str(
+                    attestation.get("polarization", "")
+                )
+                if (
+                    len(record_polarizations) != 1
+                    or attested_polarization != record_polarizations[0]
+                    or not math.isclose(
+                        attested_frequency,
+                        frequency,
+                        rel_tol=0.0,
+                        abs_tol=1.0e-12,
+                    )
+                ):
+                    raise ValueError(
+                        f"{record['path'].name}: embedded unit attestation "
+                        "does not match its field."
+                    )
+            serialized = json.dumps(
+                metadata, sort_keys=True, separators=(",", ":")
+            )
+            if common_serialized is None:
+                common_serialized = serialized
+                common_metadata = metadata
+            elif serialized != common_serialized:
+                raise ValueError(
+                    f"{frequency:g} GHz VV/HH solver diagnostics disagree."
+                )
+            if isinstance(attestation, dict):
+                for polarization in record.get("polarizations") or []:
+                    source_attestations[str(polarization)] = attestation
+        assert common_metadata is not None
+        if source_attestations:
+            common_metadata = dict(common_metadata)
+            common_metadata["source_output_attestations"] = (
+                source_attestations
+            )
+        diagnostics[frequency] = {
+            "solver": "bor_mom_rcs",
+            "scattering_mode": "monostatic",
+            "polarizations": ["VV", "HH"],
+            "polarization_mapping": {"VV": "VV", "HH": "HH"},
+            "certification_frequency_scope": "single_frequency_unit",
+            "certification_frequency_scope_ghz": [frequency],
+            "metadata": common_metadata,
+        }
+    return diagnostics
 
 
 def bodies_from_units(units: 'Sequence[Dict[str, Any]]', stem: 'Optional[str]' = None
@@ -479,20 +706,33 @@ def bodies_from_units(units: 'Sequence[Dict[str, Any]]', stem: 'Optional[str]' =
             continue
         keep = u["angles_deg"] <= 180.0 + 1e-9
         th = u["angles_deg"][keep]
+        polarizations = list(u.get("polarizations") or [u.get("pol")])
+        amplitude = np.asarray(u["amp"])
+        if len(polarizations) == 1 and amplitude.ndim == 2:
+            amplitude = amplitude[:, :, None]
+        if amplitude.ndim != 3 or amplitude.shape[2] != len(polarizations):
+            raise ValueError(
+                f"{u['path'].name}: amplitude/polarization axes disagree."
+            )
         for kf, f in enumerate(u["frequencies_ghz"]):
             b = bodies.setdefault(float(f), {"theta_deg": th})
             if not np.array_equal(b["theta_deg"], th):
                 raise ValueError(f"{u['path'].name}: aspect sweep differs from "
                                  f"the other polarization at {f} GHz.")
-            key = {"VV": "amp_vv", "HH": "amp_hh",
-                   "TE": "amp_vv", "TM": "amp_hh"}.get(u["pol"])
-            if key is None:
-                raise ValueError(f"{u['path'].name}: unexpected polarization "
-                                 f"{u['pol']!r}.")
-            b[key] = u["amp"][keep, kf]
+            for kp, polarization in enumerate(polarizations):
+                key = {"VV": "amp_vv", "HH": "amp_hh",
+                       "TE": "amp_vv", "TM": "amp_hh"}.get(polarization)
+                if key is None:
+                    raise ValueError(
+                        f"{u['path'].name}: unexpected polarization "
+                        f"{polarization!r}."
+                    )
+                b[key] = amplitude[keep, kf, kp]
     for f, b in sorted(bodies.items()):
         miss = [k for k in ("amp_vv", "amp_hh") if k not in b]
         if miss:
-            raise ValueError(f"{f} GHz is missing {miss} -- solve BOTH "
-                             f"polarizations (POLARIZATIONS = ['VV', 'HH']).")
+            raise ValueError(
+                f"{f} GHz is missing {miss}; the body artifact must contain "
+                "both VV and HH."
+            )
     return bodies

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
-# IBCS row shape constants -- see TAPERED_IBC.md for the full spec.
+# IBCS row shapes are documented in GEOMETRY_INPUT_CHEATSHEET.md.
 IBC_KINDS = ("constant", "linear", "cosine", "exp")
 # Legacy compatibility only: a one-token flag above this threshold resolves
 # to the historical whitespace/GHz ``mat.<flag>`` sidecar.  New file-backed

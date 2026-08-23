@@ -240,6 +240,51 @@ class EndpointNormalExpansionTests(unittest.TestCase):
                 rtol=2.0e-14, atol=2.0e-14,
             )
 
+    def test_phase_integral_uses_actual_path_tangent(self):
+        """A slightly off-skin chord must not change when split in two.
+
+        The skin-projected tangent defines the local polarization frame, but
+        translation phase follows the actual geometric path.  Mixing those
+        tangents makes the closed-form integral depend on arbitrary CSV
+        segmentation whenever endpoint normals are not exactly perpendicular
+        to the chord.
+        """
+
+        coefficients = SeamCoefficients(
+            1.0,
+            np.asarray([0.0, 90.0, 180.0]),
+            np.asarray([1.0 + 0.2j] * 3),
+            np.asarray([0.7 - 0.1j] * 3),
+        )
+        start = np.asarray([0.0, 0.0, 0.0])
+        middle = np.asarray([0.10, 0.0, 0.01])
+        end = np.asarray([0.20, 0.0, 0.02])
+        whole = np.asarray([[start, end]])
+        split = np.asarray([[start, middle], [middle, end]])
+        normal = np.asarray([0.0, 0.0, 1.0])
+        whole_normals = np.tile(normal, (1, 2, 1))
+        split_normals = np.tile(normal, (2, 2, 1))
+        direction = np.asarray([[0.6, 0.0, 0.8]])
+        common = dict(
+            coefficients=coefficients,
+            normal_fn=None,
+            directions=direction,
+            frequency_ghz=1.0,
+            # Keep each supplied CSV segment as one analytic phase piece.
+            max_piece_wavelengths=10.0,
+        )
+        one_piece = expand_perimeter(
+            whole, segment_normals=whole_normals, **common
+        )
+        two_pieces = expand_perimeter(
+            split, segment_normals=split_normals, **common
+        )
+        for channel in ("F_vv", "F_hh", "F_vh"):
+            np.testing.assert_allclose(
+                one_piece[channel], two_pieces[channel],
+                rtol=3.0e-14, atol=3.0e-14,
+            )
+
     def test_repeated_line_instances_prepare_one_coefficient(self):
         source = str(REPO / "same_line_delta.grim")
         placements = [

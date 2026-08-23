@@ -8,15 +8,15 @@ Edit the CONFIG block below and run:
 
 Workflow:
 - Discover geometry files under FRD_DIR + OPN_DIR.
-- Expand into a (geometry x frequency x polarization) unit list. All azimuths
-  for a unit are solved in a single solver call (matrix factored once).
+- Expand into a (geometry x frequency) unit list. Both physical channels and
+  all azimuths for a unit are solved in one production call.
 - Cost every unit from the mesh the solver will actually build, deal the units
   out longest-processing-time-first, and write that plan beside the manifest.
 - Write N_JOBS sbatch job arrays and submit them. Every array task runs the
   same worker: each takes its planned share, then steals whatever is still
   unclaimed, so the tail of a run rebalances itself.
-- As each unit finishes, its result is exported immediately to
-  "<POL>_<FREQ:.3f>GHz_<geometry_stem>.grim" in
+- As each unit finishes, its VV/HH result is exported immediately to
+  "<FREQ:.3f>GHz_<geometry_stem>.grim" in
   <run_dir>/results/{FRD,OPN}/.  The role-preserving layout can be passed
   directly to the downstream concatenate/subtract tools.
 
@@ -90,7 +90,6 @@ OPN_DIR = "geometries/OPN"
 # Requested sweep.
 FREQUENCIES_GHZ = [2.0, 4.0, 6.0, 8.0, 10.0]
 AZIMUTHS_DEG    = [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0]
-POLARIZATIONS   = ["VV", "HH"]          # any subset of: VV, HH, TM, TE
 
 # Output root. A new run_YYYYMMDD_HHMMSS/ subfolder is created inside.
 OUTPUT_DIR = "rcs_runs"
@@ -160,13 +159,10 @@ SLURM_EXTRA_SBATCH = []  # type: List[str]  # raw extra lines, e.g. "--constrain
 
 JOB_PROLOGUE = []  # type: List[str]
 
-# --- Solver knobs (mirror run_monostatic.py) -------------------------------
+# --- Solver knobs ----------------------------------------------------------
+# Production 2-D runs always use condition-reporting dense LU and co-solve
+# VV/TE plus HH/TM. There is no user-selectable polarization or method.
 GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
-SOLVER_METHOD           = "auto"         # "auto" | "direct"
-# The present 2-D SLP formulations do not implement a distinct CFIE operator.
-# Keep this at zero; nonzero values are rejected instead of acting as a dead
-# production control.
-CFIE_ALPHA              = 0.0
 MAX_PANELS              = 50_000
 
 # Mesh-convergence certification. True solves every unit twice -- the requested
@@ -208,8 +204,9 @@ SUBMIT        = True                     # False -> write .slurm files but don't
 # ===============================================================================
 
 _SBATCH = shutil.which("sbatch") or "sbatch"
-MANIFEST_SCHEMA = "ghost.hpc.2d-run.v1"
-SCHEDULE_SCHEMA = "ghost.hpc.2d-schedule.v1"
+MANIFEST_SCHEMA = "ghost.hpc.2d-run.v2"
+SCHEDULE_SCHEMA = "ghost.hpc.2d-schedule.v2"
+OUTPUT_POLARIZATIONS = ("VV", "HH")
 
 # Parsed geometry snapshots, filled in the parent before the pool forks so
 # workers inherit them instead of unpickling one per unit.
@@ -297,7 +294,7 @@ def _unit_attestation_fields(context, unit):
         "solver_config_sha256": str(context["solver_config_sha256"]),
         "angular_grid_kind": "azimuths_deg",
         "angular_grid_sha256": str(context["angular_grid_sha256"]),
-        "polarization": str(unit["polarization"]),
+        "polarizations": list(OUTPUT_POLARIZATIONS),
         "frequency_ghz": float(unit["frequency_ghz"]),
     }
 
@@ -351,7 +348,7 @@ def _geometry_role(path):
 
 def _unit_name(unit):
     # type: (Dict[str, Any]) -> str
-    return (f"{unit['polarization']}_{float(unit['frequency_ghz']):.3f}GHz_"
+    return (f"{float(unit['frequency_ghz']):.3f}GHz_"
             f"{unit['geometry_stem']}.grim")
 
 
@@ -414,12 +411,9 @@ def _solve_and_export(unit, context, run_dir_str):
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(unit["frequency_ghz"])],
         elevations_deg=[float(a) for a in context["azimuths_deg"]],
-        polarization=unit["polarization"],
         geometry_units=context["geometry_units"],
         material_base_dir=material_base,
         max_panels=context["max_panels"],
-        cfie_alpha=context["cfie_alpha"],
-        solver_method=context["solver_method"],
     )
     if context["mesh_certification"]:
         from rcs_solver import solve_monostatic_rcs_2d_certified
@@ -441,7 +435,7 @@ def _solve_and_export(unit, context, run_dir_str):
     written = export_result_to_grim(
         result, str(out_path),
         source_path=str(snapshot.get("source_path", "") or ""),
-        history=(f"run_hpc_monostatic.py pol={unit['polarization']} "
+        history=(f"run_hpc_monostatic.py pols=VV,HH "
                  f"freq={unit['frequency_ghz']}GHz"),
     )
     actual_path = str(written[0]) if written else str(out_path)
@@ -474,26 +468,22 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
     # type: (List[Dict[str, Any]], int, float, int) -> Dict[str, Any]
     """Cost every unit, size its memory, and deal the units out to slots.
 
-    Geometry validation/material loading is batched once per geometry, and
-    polarization-independent frequency meshes are shared only when their
-    complete interface signatures match. Every unit still receives an exact
-    formulation-specific memory record.
+    Geometry validation/material loading is batched once per geometry.  TM
+    and TE receive exact formulation-specific records, then their costs are
+    summed and their sequential peak memory is reserved as one output unit.
     """
 
     resource_cache = {}  # type: Dict[Tuple[str, float, str], Dict[str, Any]]
     grouped = {}  # type: Dict[str, Dict[str, List[Any]]]
     for unit in units:
         geometry = str(unit["geometry"])
-        group = grouped.setdefault(geometry, {"frequencies": [], "polarizations": []})
+        group = grouped.setdefault(geometry, {"frequencies": []})
         frequency = float(unit["frequency_ghz"])
-        polarization = str(unit["polarization"])
         if frequency not in group["frequencies"]:
             group["frequencies"].append(frequency)
-        if polarization not in group["polarizations"]:
-            group["polarizations"].append(polarization)
 
     total = sum(
-        len(group["frequencies"]) * len(group["polarizations"])
+        len(group["frequencies"]) * 2
         for group in grouped.values()
     )
     started = time.monotonic()
@@ -530,7 +520,7 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
         batch = hpc_scheduler.predict_2d_resources_many(
             geometry,
             group["frequencies"],
-            group["polarizations"],
+            ["TM", "TE"],
             GEOMETRY_UNITS,
             MAX_PANELS,
             fine_factor=fine_factor,
@@ -543,31 +533,43 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
 
     records = []     # type: List[Dict[str, Any]]
     for unit in units:
-        key = (
-            str(unit["geometry"]), float(unit["frequency_ghz"]),
-            str(unit["polarization"]),
-        )
-        planned = resource_cache[key]
-        nodes = int(planned["nodes"])
+        geometry = str(unit["geometry"])
+        frequency = float(unit["frequency_ghz"])
+        plans = {
+            polarization: resource_cache[(geometry, frequency, polarization)]
+            for polarization in ("TM", "TE")
+        }
         records.append({
             "unit": _unit_name(unit),
-            "nodes": nodes,
-            "fine_nodes": int(planned["fine_nodes"]),
-            "base_system_dofs": int(planned["base_system_dofs"]),
-            "system_dofs": int(planned["system_dofs"]),
-            "n_regions": int(planned["n_regions"]),
-            "formulation": str(planned["formulation"]),
-            "cost": (
+            "nodes": max(int(p["nodes"]) for p in plans.values()),
+            "fine_nodes": max(
+                int(p["fine_nodes"]) for p in plans.values()
+            ),
+            "base_system_dofs": max(
+                int(p["base_system_dofs"]) for p in plans.values()
+            ),
+            "system_dofs": max(
+                int(p["system_dofs"]) for p in plans.values()
+            ),
+            "n_regions": max(int(p["n_regions"]) for p in plans.values()),
+            "formulations": {
+                "HH": str(plans["TM"]["formulation"]),
+                "VV": str(plans["TE"]["formulation"]),
+            },
+            "cost": sum(
                 hpc_scheduler.unit_cost(
-                    nodes, n_angles, fine_factor,
+                    int(planned["nodes"]), n_angles, fine_factor,
                     fine_nodes=int(planned["fine_nodes"]),
                     system_dofs=int(planned["base_system_dofs"]),
                     fine_system_dofs=int(planned["fine_system_dofs"]),
                     operator_matrices=int(planned["base_operator_matrices"]),
                     fine_operator_matrices=int(planned["fine_operator_matrices"]),
                 )
+                for planned in plans.values()
             ),
-            "peak_gb": float(planned["peak_gb"]),
+            "peak_gb": max(
+                float(planned["peak_gb"]) for planned in plans.values()
+            ),
         })
     assignment = hpc_scheduler.balance_units(records, n_slots)
     for record, slot in zip(records, assignment):
@@ -593,19 +595,9 @@ def _plan_schedule(units, n_slots, fine_factor, n_angles):
 
 
 def _validate_config():
-    # type: () -> Tuple[List[str], List[float], List[float]]
-    pols = [p.strip().upper() for p in POLARIZATIONS if p and p.strip()]
-    if not pols:            sys.exit("ERROR: POLARIZATIONS is empty.")
+    # type: () -> Tuple[List[float], List[float]]
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
-    try:
-        # Rejects an unknown label and, just as importantly, two spellings of
-        # the same channel: ["VV", "TE"] looks like two polarizations and is
-        # one, so it would otherwise solve identical physics twice and publish
-        # it twice under different names.
-        pols = hpc_scheduler.distinct_polarization_channels(pols)
-    except ValueError as exc:
-        sys.exit(f"ERROR: POLARIZATIONS is invalid -- {exc}")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
     if (
         not all(math.isfinite(value) and value > 0.0 for value in frequencies)
@@ -622,16 +614,8 @@ def _validate_config():
         or len(set(azimuths)) != len(azimuths)
     ):
         sys.exit("ERROR: AZIMUTHS_DEG must be finite and unique.")
-    if str(SOLVER_METHOD).strip().lower() not in {"auto", "direct"}:
-        sys.exit(
-            "ERROR: SOLVER_METHOD must be 'auto' or 'direct'; certified "
-            "2-D production solves require a condition-reporting dense method."
-        )
-    if not math.isfinite(float(CFIE_ALPHA)) or float(CFIE_ALPHA) != 0.0:
-        sys.exit(
-            "ERROR: CFIE_ALPHA must be 0 for the current 2-D formulations; "
-            "a nonzero value would not select a different operator."
-        )
+    if str(GEOMETRY_UNITS).strip().lower() not in {"inches", "meters"}:
+        sys.exit("ERROR: GEOMETRY_UNITS must be 'inches' or 'meters'.")
     if int(MAX_PANELS) < 1 or int(BLAS_THREADS_PER_WORKER) < 1:
         sys.exit("ERROR: MAX_PANELS and BLAS_THREADS_PER_WORKER must be >= 1.")
     if int(N_NODES) < 1 or int(N_JOBS) < 1:
@@ -650,7 +634,7 @@ def _validate_config():
         sys.exit("ERROR: CLAIM_STALE_SECONDS must be at least 60.")
     if MAX_SOLVE_GB is not None and float(MAX_SOLVE_GB) <= 0.0:
         sys.exit("ERROR: MAX_SOLVE_GB must be positive or None.")
-    return pols, frequencies, azimuths
+    return frequencies, azimuths
 
 
 def submit():
@@ -659,7 +643,7 @@ def submit():
     if not geometries:
         sys.exit("ERROR: no geometry files (*.geo) found under FRD_DIR or OPN_DIR.")
 
-    pols, _frequencies, _azimuths = _validate_config()
+    frequencies, azimuths = _validate_config()
 
     stems = [g.stem for g in geometries]
     if len(stems) != len(set(stems)):
@@ -693,21 +677,18 @@ def submit():
     from feature_sum import geometry_input_fingerprint
     for original, geom in frozen_geometries:
         input_fingerprint = geometry_input_fingerprint(str(geom), GEOMETRY_UNITS)
-        for pol in pols:
-            for f in FREQUENCIES_GHZ:
-                # The angular grid is identical for every unit and is
-                # recorded once at manifest level. Repeating it per unit made
-                # the file 13x larger than it needed to be -- 52 MB for a
-                # 9 100-unit sweep, 93% of it the same list over and over.
-                units.append({
-                    "geometry":      str(geom.resolve()),
-                    "geometry_stem": geom.stem,
-                    "geometry_original": str(original.resolve()),
-                    "geometry_input_sha256": input_fingerprint,
-                    "role":          _geometry_role(original),
-                    "polarization":  pol,
-                    "frequency_ghz": float(f),
-                })
+        for f in frequencies:
+            # The angular grid is identical for every unit and is recorded
+            # once at manifest level.
+            units.append({
+                "geometry":      str(geom.resolve()),
+                "geometry_stem": geom.stem,
+                "geometry_original": str(original.resolve()),
+                "geometry_input_sha256": input_fingerprint,
+                "role":          _geometry_role(original),
+                "polarizations": list(OUTPUT_POLARIZATIONS),
+                "frequency_ghz": float(f),
+            })
 
     mesh_policy = validate_mesh_convergence_policy()
     source_driver = Path(__file__).resolve()
@@ -718,9 +699,9 @@ def submit():
         "frd_dir":         str(Path(FRD_DIR).resolve()),
         "opn_dir":         str(Path(OPN_DIR).resolve()),
         "output_dir":      str(run_dir),
-        "frequencies_ghz": list(FREQUENCIES_GHZ),
-        "azimuths_deg":    list(AZIMUTHS_DEG),
-        "polarizations":   pols,
+        "frequencies_ghz": frequencies,
+        "azimuths_deg":    azimuths,
+        "polarizations":   list(OUTPUT_POLARIZATIONS),
         "n_nodes":         int(N_NODES),
         "n_jobs":          int(N_JOBS),
         "n_slots":         int(N_NODES) * int(N_JOBS),
@@ -732,8 +713,8 @@ def submit():
         "runtime_environment_sha256": runtime_environment_fingerprint(),
         "solver_config": {
             "geometry_units":          GEOMETRY_UNITS,
-            "solver_method":           SOLVER_METHOD,
-            "cfie_alpha":              CFIE_ALPHA,
+            "linear_solver":           "dense_lu",
+            "polarizations":           list(OUTPUT_POLARIZATIONS),
             "max_panels":              MAX_PANELS,
             "blas_threads_per_worker": BLAS_THREADS_PER_WORKER,
             "cores_per_node":          CORES_PER_NODE,
@@ -752,7 +733,7 @@ def submit():
     schedule = _plan_schedule(
         units, n_slots,
         float(mesh_policy["fine_factor"]) if MESH_CERTIFICATION else 1.0,
-        len(AZIMUTHS_DEG),
+        len(azimuths),
     )
     (run_dir / "schedule.json").write_text(json.dumps(schedule, indent=2))
 
@@ -796,11 +777,11 @@ def submit():
     print("=" * 70)
     print(f"  Run dir       : {run_dir}")
     print(f"  Geometries    : {len(geometries)}")
-    print(f"  Polarizations : {', '.join(pols)}")
+    print("  Polarizations : VV, HH (co-solved)")
     print(f"  Frequencies   : {len(FREQUENCIES_GHZ)}  "
           f"({min(FREQUENCIES_GHZ):g}-{max(FREQUENCIES_GHZ):g} GHz)")
     print(f"  Azimuths      : {len(AZIMUTHS_DEG)}")
-    print(f"  Units total   : {len(units)}  (geom x freq x pol)")
+    print(f"  Units total   : {len(units)}  (geometry x frequency)")
     print(f"  Slots         : {N_JOBS} job(s) x {N_NODES} node(s) "
           f"= {n_slots} parallel nodes")
     cores_str = str(CORES_PER_NODE) if CORES_PER_NODE is not None else "auto (--exclusive)"
@@ -965,8 +946,6 @@ def worker(run_dir_str, submission_index, task_index):
         "run_solve_spec_sha256": manifest_solve_spec_fingerprint(manifest),
         "solver_config_sha256": stable_json_fingerprint(solver_config),
         "geometry_units": solver_config["geometry_units"],
-        "solver_method": solver_config["solver_method"],
-        "cfie_alpha": solver_config["cfie_alpha"],
         "max_panels": solver_config["max_panels"],
         "mesh_convergence_policy": solver_config["mesh_convergence_policy"],
         "azimuths_deg": list(manifest["azimuths_deg"]),

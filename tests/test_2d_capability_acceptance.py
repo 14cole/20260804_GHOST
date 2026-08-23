@@ -94,7 +94,7 @@ def _circle(
 
 
 def _solve(snapshot, polarization, frequency_hz, angles_deg=(0.0,)):
-    return rcs.solve_monostatic_rcs_2d(
+    return rcs.solve_monostatic_rcs_2d_single_polarization(
         snapshot,
         frequencies_ghz=[float(frequency_hz) / 1.0e9],
         elevations_deg=list(angles_deg),
@@ -106,7 +106,7 @@ def _solve(snapshot, polarization, frequency_hz, angles_deg=(0.0,)):
 
 
 def _solve_bistatic(snapshot, polarization, frequency_hz, angles_deg):
-    return rcs.solve_bistatic_rcs_2d(
+    return rcs.solve_bistatic_rcs_2d_single_polarization(
         snapshot,
         frequencies_ghz=[float(frequency_hz) / 1.0e9],
         incidence_angles_deg=list(angles_deg),
@@ -263,7 +263,7 @@ class PecInteriorResonanceAcceptanceTests(unittest.TestCase):
         }
 
         for pol in ("TM", "TE"):
-            result = rcs.solve_monostatic_rcs_2d_certified(
+            result = rcs.solve_monostatic_rcs_2d_certified_single_polarization(
                 snapshot,
                 frequencies_ghz=[frequency_hz / 1.0e9],
                 elevations_deg=list(angles),

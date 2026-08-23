@@ -36,16 +36,16 @@ Two quantities, in this order:
     perimeter file share a coordinate frame, the modeled translation phase is
     consistent without a hand-applied range correction.
 
-``psi_TM`` and ``psi_TE`` are the two local-coefficient phase mappings this
-cannot derive between the 2D solver's bare-integral amplitudes and the BoR
-far-field convention. They are measured jointly by
-``tests/validate_line_expansion.py`` (ring gate) and applied before the
-polarization contributions are added. Magnitudes are absolute--the
-|A|^2/(4k) and 4pi|F|^2
-normalisations are both pinned, and the resulting broadside limit reproduces
-the 2L^2/lambda strip relation already gated in validate_bor_phase1.py.
+``psi_TM`` and ``psi_TE`` are legacy empirical local-coefficient phase
+mappings between the 2D solver's bare-integral amplitudes and the BoR
+far-field convention. They are applied before the polarization contributions
+are added.  Their original ring-calibration fixture is not currently shipped
+with this repository, so they must be revalidated against the independent BoR
+or full-3D comparison described in ``FEATURE_VALIDATION_GUIDE.md`` before a
+feature family is released. Magnitudes are absolute: the |A|^2/(4k) and
+4pi|F|^2 normalisations are not fitted.
 
-Conventions (see GEOMETRY_GUIDE.md):
+Conventions:
   - e^{+jwt}; look directions ``d`` are COMING-FROM unit vectors.
   - 2D cut frame: +x = b_hat (in-surface, across the seam), +y = n_hat
     (outward surface normal).  Normal incidence on the outward face is
@@ -62,24 +62,22 @@ import numpy as np
 
 C0 = 299792458.0
 
-# Local-polarization inter-solver calibration constants, measured jointly by
-# the ring gate (tests/validate_line_expansion.py). They multiply the 2-D TM
-# and TE coefficients BEFORE their projections are added. A finite perimeter
+# Legacy local-polarization inter-solver calibration constants.  The original
+# ring-calibration fixture is not present in this repository; see
+# FEATURE_VALIDATION_GUIDE.md for the required independent validation before
+# releasing a feature family.  They multiply the 2-D TM and TE coefficients
+# BEFORE their projections are added. A finite perimeter
 # mixes both local coefficients into an HH/VV channel away from broadside, so a
 # phase measured from an already-summed output channel cannot simply be applied
 # back to one coefficient. Magnitudes are absolute--there is no fitted
 # amplitude scale. Re-measure if either solver's far-field convention changes.
 PSI_VV_DEG = -9.2       # theta-pol-dominant channel (2D TE coefficient)
 PSI_HH_DEG = 166.9      # phi-pol-dominant channel   (2D TM coefficient)
-# The line expansion is a flat-coupon (normal-incidence) approximation; the
-# converged ring gate maps its demonstrated validity to broadside +/- 20 deg
-# of the LOCAL edge. A smooth closed perimeter has stationary-phase points with
-# d.t_hat=0, but this does not guarantee near-normal cut incidence or suppress
-# every corner/end/junction contribution.
-# On that one canonical PEC-groove benchmark the bound is 3.5 dB magnitude and
-# 25 deg residual phase.  This is a measured reduced-order-model envelope, not
-# a universal error guarantee for arbitrary seam cross-sections or materials.
-VALIDITY_HALF_ANGLE_DEG = 20.0
+# No runtime grazing-angle gate is claimed here. The original ring-calibration
+# fixture is absent, and a single angular constant would not be transferable
+# across arbitrary cross-sections, materials, corners, and junctions. Validate
+# the chosen coupon and placement envelope as described in
+# FEATURE_VALIDATION_GUIDE.md.
 
 
 # -----------------------------------------------------------------------------
@@ -180,14 +178,21 @@ def coefficients_from_2d(snapshot: 'Dict',
 
     kw = dict(solver_kwargs or {})
     angles = [float(a) for a in phi_deg]
+    result = solve_monostatic_rcs_2d_certified(
+        geometry_snapshot=snapshot,
+        frequencies_ghz=[float(frequency_ghz)],
+        elevations_deg=angles,
+        geometry_units=geometry_units,
+        material_base_dir=material_base_dir,
+        **kw,
+    )
+    channels = result.get("co_solved_samples", {}) or {}
     amp: 'Dict[str, np.ndarray]' = {}
-    for pol in ("TM", "TE"):
-        res = solve_monostatic_rcs_2d_certified(
-            geometry_snapshot=snapshot, frequencies_ghz=[float(frequency_ghz)],
-            elevations_deg=angles, polarization=pol, geometry_units=geometry_units,
-            material_base_dir=material_base_dir, **kw)
-        a = _amp_by_angle(res)
-        amp[pol] = np.array([a[round(x / 1e-6) * 1e-6] for x in angles], dtype=complex)
+    for pol, exported in (("TM", "HH"), ("TE", "VV")):
+        a = _amp_by_angle({"samples": channels.get(exported, [])})
+        amp[pol] = np.array(
+            [a[round(x / 1e-6) * 1e-6] for x in angles], dtype=complex
+        )
     return SeamCoefficients(float(frequency_ghz), np.array(angles, dtype=float),
                             amp["TM"], amp["TE"], label=label)
 
@@ -218,17 +223,25 @@ def seam_coefficients_from_2d(featured_snapshot: 'Dict',
 
     kw = dict(solver_kwargs or {})
     angles = [float(a) for a in phi_deg]
+    shared = dict(
+        frequencies_ghz=[float(frequency_ghz)],
+        elevations_deg=angles,
+        geometry_units=geometry_units,
+        material_base_dir=material_base_dir,
+        **kw,
+    )
+    featured = solve_monostatic_rcs_2d_certified(
+        geometry_snapshot=featured_snapshot, **shared
+    )
+    smooth = solve_monostatic_rcs_2d_certified(
+        geometry_snapshot=smooth_snapshot, **shared
+    )
+    featured_channels = featured.get("co_solved_samples", {}) or {}
+    smooth_channels = smooth.get("co_solved_samples", {}) or {}
     dA: 'Dict[str, np.ndarray]' = {}
-    for pol in ("TM", "TE"):
-        feat = solve_monostatic_rcs_2d_certified(
-            geometry_snapshot=featured_snapshot, frequencies_ghz=[float(frequency_ghz)],
-            elevations_deg=angles, polarization=pol, geometry_units=geometry_units,
-            material_base_dir=material_base_dir, **kw)
-        smooth = solve_monostatic_rcs_2d_certified(
-            geometry_snapshot=smooth_snapshot, frequencies_ghz=[float(frequency_ghz)],
-            elevations_deg=angles, polarization=pol, geometry_units=geometry_units,
-            material_base_dir=material_base_dir, **kw)
-        fa, sa = _amp_by_angle(feat), _amp_by_angle(smooth)
+    for pol, exported in (("TM", "HH"), ("TE", "VV")):
+        fa = _amp_by_angle({"samples": featured_channels.get(exported, [])})
+        sa = _amp_by_angle({"samples": smooth_channels.get(exported, [])})
         dA[pol] = np.array([fa[round(a / 1e-6) * 1e-6] - sa[round(a / 1e-6) * 1e-6]
                             for a in angles], dtype=complex)
     return SeamCoefficients(float(frequency_ghz), np.array(angles, dtype=float),
@@ -532,14 +545,14 @@ def expand_perimeter(segments: 'np.ndarray',
                     ``normal_fn`` must be None.  The endpoint normals are
                     interpolated along each segment before normalization.
     ``directions``  (n_dir, 3) unit COMING-FROM look directions.
-    ``psi_tm_deg``  inter-solver constant phase for the 2D TM coefficient
-                    (ring-gate calibrated; == PSI_HH_DEG, since phi-pol/HH is
-                    driven by TM).  Applied to the COEFFICIENT so cross-pol is
-                    consistent too.
+    ``psi_tm_deg``  candidate inter-solver phase for the 2D TM coefficient
+                    (== PSI_HH_DEG, since phi-pol/HH is driven by TM). Applied
+                    to the COEFFICIENT so cross-pol is consistent too.
     ``psi_te_deg``  same for the 2D TE coefficient (== PSI_VV_DEG).
 
-    Pass 0/0 to measure the constants (what the ring gate does); pass the
-    calibrated values to build a signature.
+    Pass 0/0 when comparing against an independent reference to determine
+    whether any phase mapping is required. Do not treat the legacy defaults as
+    certified without that comparison.
 
     Returns ``{"F_vv", "F_hh", "F_vh"}`` complex arrays over directions, in the
     BoR amplitude normalisation (sigma = 4 pi |F|^2).
@@ -561,11 +574,11 @@ def expand_perimeter(segments: 'np.ndarray',
         raise ValueError("max_piece_wavelengths must be positive and finite.")
     if segment_normals is not None and normal_fn is not None:
         raise ValueError("supply segment_normals or normal_fn, not both.")
-    r0, t_hat, dL, supplied_normals = _subdivide(
+    r0, path_t_hat, dL, supplied_normals = _subdivide(
         np.asarray(segments, dtype=float), max_piece_wavelengths * lam,
         segment_normals=segment_normals,
     )
-    r_mid = r0 + t_hat * (dL[:, None] / 2.0)
+    r_mid = r0 + path_t_hat * (dL[:, None] / 2.0)
     if supplied_normals is None:
         if normal_fn is None:
             raise ValueError("normal_fn is required when segment_normals is absent.")
@@ -580,14 +593,20 @@ def expand_perimeter(segments: 'np.ndarray',
     if np.any(normal_norm <= 1.0e-12):
         raise ValueError("normal_fn returned a zero-length surface normal.")
     n_hat = n_hat / normal_norm[:, None]
-    # orthogonalise the tangent against the surface normal, then close the frame
-    t_hat = t_hat - (np.sum(t_hat * n_hat, axis=1)[:, None] * n_hat)
-    tn = np.linalg.norm(t_hat, axis=1)
+    # Keep the actual chord tangent for the translation integral.  Project a
+    # separate copy into the skin tangent plane only to construct the local
+    # polarization/cross-section frame.  Using the projected vector in beta
+    # while r0 and dL still followed the original chord made phase depend on
+    # how the same geometric line happened to be split into CSV segments.
+    frame_t_hat = path_t_hat - (
+        np.sum(path_t_hat * n_hat, axis=1)[:, None] * n_hat
+    )
+    tn = np.linalg.norm(frame_t_hat, axis=1)
     if np.any(tn < 1e-9):
         raise ValueError("a perimeter segment is normal to the skin -- check that "
                          "the perimeter and the generatrix share a frame.")
-    t_hat /= tn[:, None]
-    b_hat = np.cross(t_hat, n_hat)
+    frame_t_hat /= tn[:, None]
+    b_hat = np.cross(frame_t_hat, n_hat)
 
     dirs = np.atleast_2d(np.asarray(directions, dtype=float))
     if dirs.ndim != 2 or dirs.shape[1] != 3 or len(dirs) == 0:
@@ -611,7 +630,7 @@ def expand_perimeter(segments: 'np.ndarray',
     for i, d in enumerate(dirs):
         d_n = n_hat @ d
         d_b = b_hat @ d
-        d_t = t_hat @ d
+        d_path = path_t_hat @ d
         lit = d_n > 0.0
         if not np.any(lit):
             continue
@@ -628,11 +647,13 @@ def expand_perimeter(segments: 'np.ndarray',
         if occluder is not None:
             w_lit = w_lit * occluder.visible(r_mid, d).astype(float)
         # closed-form phase integral over each piece: Int e^{j beta u} du
-        beta = 2.0 * k * d_t
+        beta = 2.0 * k * d_path
         x = 0.5 * beta * dL
         phase = (np.exp(2j * k * (r0 @ d)) * dL
                  * np.exp(1j * x) * np.sinc(x / math.pi))
-        e_tm_local, e_te_local = _transverse_seam_basis(t_hat, b_hat, d)
+        e_tm_local, e_te_local = _transverse_seam_basis(
+            frame_t_hat, b_hat, d
+        )
         for key, e_t, e_r in (("F_vv", e_vv[i], e_vv[i]),
                               ("F_hh", e_hh[i], e_hh[i]),
                               ("F_vh", e_hh[i], e_vv[i])):

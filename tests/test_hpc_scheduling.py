@@ -517,7 +517,6 @@ def test_fingerprint_cache():
 DRIVER_SETTINGS = {
     "FREQUENCIES_GHZ": [2.0, 3.0, 4.0],
     "AZIMUTHS_DEG": [0.0, 45.0, 90.0],
-    "POLARIZATIONS": ["TM"],
     "GEOMETRY_UNITS": "meters",
     "MAX_PANELS": 20000,
     "N_NODES": 2,
@@ -529,11 +528,30 @@ DRIVER_SETTINGS = {
 }
 
 
+def _write_closed_2d_geometry(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "Title: closed 2-D PEC test\n"
+        "Segment: body 2\n"
+        "properties: 2 0 0 0 0\n"
+        "-0.02 -0.02 -0.02 0.02\n"
+        "-0.02 0.02 0.02 0.02\n"
+        "0.02 0.02 0.02 -0.02\n"
+        "0.02 -0.02 -0.02 -0.02\n"
+        "IBCS_Resistances:\n"
+        "Dielectrics:\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def _stage_run(root):
     """Configure a private copy of the driver, as hpc_common intends."""
 
     geom_root = root / "geometries"
-    sources = [REPO / "geometries" / "body.geo"]
+    source = _write_closed_2d_geometry(root / "closed_body.geo")
+    sources = [source]
     hpc_common.stage_geometry(sources, geom_root)
     # A second geometry so the sweep has more than one stem.
     shutil.copyfile(str(sources[0]), str(geom_root / "FRD" / "body_two.geo"))
@@ -547,12 +565,22 @@ def _stage_run(root):
     )
 
 
+def _subprocess_env():
+    """Keep the caller's numerical runtime while adding the staged backend."""
+
+    inherited = str(os.environ.get("PYTHONPATH", "")).strip()
+    pythonpath = str(BACKEND)
+    if inherited:
+        pythonpath = os.pathsep.join((pythonpath, inherited))
+    return {**os.environ, "PYTHONPATH": pythonpath}
+
+
 def _run(driver, args, timeout=1800):
     return subprocess.run(
         [sys.executable, str(driver)] + list(args),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         universal_newlines=True, timeout=timeout,
-        env={**os.environ, "PYTHONPATH": str(BACKEND)},
+        env=_subprocess_env(),
     )
 
 
@@ -571,7 +599,7 @@ def test_no_task_starvation():
     root = Path(tempfile.mkdtemp(prefix="ghost-starve-"))
     try:
         geom_root = root / "geometries"
-        source = REPO / "geometries" / "body.geo"
+        source = _write_closed_2d_geometry(root / "closed_body.geo")
         hpc_common.stage_geometry([source], geom_root)
         shutil.copyfile(str(source), str(geom_root / "FRD" / "body_two.geo"))
         tasks = 6
@@ -582,14 +610,13 @@ def test_no_task_starvation():
             "OUTPUT_DIR": str(root / "runs"),
             "FREQUENCIES_GHZ": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             "AZIMUTHS_DEG": [0.0, 90.0],
-            "POLARIZATIONS": ["TM"],
             "N_NODES": tasks,
             "MAX_WORKERS_PER_NODE": None,
         })
         driver = hpc_common.configure_driver(
             BACKEND / "run_hpc_monostatic.py", root / "driver.py", settings
         )
-        env = {**os.environ, "PYTHONPATH": str(BACKEND)}
+        env = _subprocess_env()
         if subprocess.run([sys.executable, str(driver)], stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, env=env).returncode:
             check(False, "submit failed")
@@ -633,7 +660,7 @@ def test_end_to_end():
 
         run_dir = hpc_common.latest_run_dir(root / "runs")
         manifest = json.loads((run_dir / "manifest.json").read_text())
-        expected_units = 2 * 3 * 1  # geometries x frequencies x polarizations
+        expected_units = 2 * 3  # geometries x frequencies; each holds VV+HH
         check(manifest["n_units"] == expected_units,
               f"manifest holds {expected_units} units")
         check((run_dir / "schedule.json").is_file(), "schedule.json was written")
@@ -650,7 +677,7 @@ def test_end_to_end():
         costs = {r["unit"]: r["cost"] for r in schedule["units"]}
         by_freq = {}
         for name, cost in costs.items():
-            by_freq.setdefault(name.split("_")[1], []).append(cost)
+            by_freq.setdefault(name.split("_")[0], []).append(cost)
         check(max(map(max, by_freq.values())) > 2.0 * min(map(min, by_freq.values())),
               "the cost model separates cheap and expensive frequencies")
         check(len(list(run_dir.glob("submit_job*.slurm"))) == 1,
@@ -694,7 +721,7 @@ def test_end_to_end():
                 [sys.executable, str(driver), "--worker", str(run_dir), "0", str(task)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 universal_newlines=True,
-                env={**os.environ, "PYTHONPATH": str(BACKEND)},
+                env=_subprocess_env(),
             )
             for task in (0, 1)
         ]
@@ -717,7 +744,7 @@ def test_end_to_end():
               "both tasks did real work rather than one doing everything")
 
         # Attestations must verify, which is what makes a restart safe.
-        hpc_common.require_hpc_run_provenance(manifest, "ghost.hpc.2d-run.v1")
+        hpc_common.require_hpc_run_provenance(manifest, "ghost.hpc.2d-run.v2")
         hpc_common.require_hpc_output_attestations(run_dir, manifest)
         check(True, "manifest provenance and every output attestation verify")
 

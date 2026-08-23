@@ -55,28 +55,23 @@ Run one with no arguments:
 python Backend/run_local_monostatic.py
 ```
 
-### Naming polarizations
+### Polarization outputs
 
-The 2-D drivers take either spelling of the same two physical channels:
+Every production 2-D solve computes both physical channels. They are stored in
+one file with canonical radar labels `VV` and `HH`; polarization is not a user
+sweep setting. The aliases are:
 
 | Radar | 2-D | Why |
 |---|---|---|
 | `HH` | `TM` | these geometries are elevation cuts, so the out-of-plane z axis is *horizontal*; E along z is HH |
 | `VV` | `TE` | TE's in-plane E carries the vertical component |
 
-`V`, `H`, `VERTICAL`, and `HORIZONTAL` are accepted too. Which spelling reaches
-the output file names depends on the driver, and it is fixed per driver so that
-changing what you type in CONFIG never forks a sweep into two sets of files:
-
-- `run_hpc_monostatic.py` / `run_local_monostatic.py` name files with the label
-  you wrote, and default to `["VV", "HH"]`.
-- The BoR drivers always co-solve VV and HH and publish VV, HH, and the derived
-  radar-frame VH channel in the one monostatic file. Polarization is therefore
-  not a user sweep control for BoR.
-
-Listing one channel under two names (`["VV", "TE"]`) is rejected rather than
-silently solving the same physics twice and publishing it under two names,
-which a downstream concatenation would then treat as independent channels.
+The 2-D output name is `<FREQ:.3f>GHz_<geometry_stem>.grim`; both channels are
+axes inside that artifact. The driver exposes no `POLARIZATIONS`,
+`SOLVER_METHOD`, or 2-D `CFIE_ALPHA` setting: the certified production path
+uses condition-reporting dense LU and the implemented 2-D formulations do not
+claim CFIE. The BoR drivers likewise co-solve VV and HH, then publish VV, HH,
+and the derived radar-frame VH channel in the final monostatic body file.
 
 ---
 
@@ -261,9 +256,9 @@ Assembly cost grows as the square of the boundary-node count, and node count
 grows linearly with frequency, so across a 2–18 GHz sweep the most expensive
 unit is roughly **80×** the cheapest.
 
-At submit time each unit is meshed with the solver's own rule (once per
-`(geometry, frequency)` — polarization does not change the discretization),
-costed, and dealt out longest-processing-time-first. The plan is written to
+At submit time each `(geometry, frequency)` unit is meshed with the solver's
+own rule, costed for both physical channels, and dealt out
+longest-processing-time-first. The plan is written to
 `schedule.json` beside the manifest. It is deliberately *not* part of the
 manifest: it says where work should run, not what is solved, and the manifest
 fingerprint that per-unit attestations bind to must cover only the latter.
@@ -320,12 +315,10 @@ To force a completely fresh sweep, delete `claims/`.
 
 ### What lands in results/
 
-For 2-D runs, those unit files are placed under `results/FRD/` and
-`results/OPN/`, preserving the geometry role expected by the concatenate and
-subtract tools. `1c_build_deltas/concat_pols.py` automatically selects the
-newest complete `rcs_runs/run_*/results/` folder when no input path is given.
-The subtraction tool can join raw frequency/polarization units internally, so
-the normal direct path needs only:
+For 2-D runs, one `<FREQ:.3f>GHz_<geometry_stem>.grim` per geometry and
+frequency is placed under `results/FRD/` or `results/OPN/`, preserving the
+geometry role required by strict coherent subtraction. Each file already
+contains canonical VV and HH. The sole production delta-building path is:
 
 ```bash
 python 1c_build_deltas/subtract_datasets.py
@@ -335,7 +328,10 @@ With no paths it selects the newest complete 2-D run containing both roles.
 Explicit `OPN`, `FRD`, and output folders may be passed to enter the workflow
 from any compatible dataset library. Geometry/result stems must follow the
 canonical final `_OPN` and `_FRD` role markers so clean/featured cases can be
-paired unambiguously.
+paired unambiguously. The command joins compatible frequency files, validates
+the embedded VV/HH pair, and subtracts the preserved float64 complex
+amplitudes as `OPN - FRD`; do not concatenate, overlap, or convert the files
+first.
 
 For BoR runs, each completed physical frequency solve immediately writes its
 solver-meridian VV and HH aspect files under `results/by_frequency/`. These
@@ -365,18 +361,15 @@ expected file set.
 
 ### What the manifest holds
 
-The run header and one compact record per unit: geometry, polarization,
-frequency, input hash. Anything identical across units -- the angular grid
-above all -- is recorded once at manifest level.
+The run header and one compact record per unit: geometry, frequency, and input
+hash. The canonical output polarization pair and anything else identical
+across units -- the angular grid above all -- are recorded once at manifest
+level.
 
-That matters at scale, because the grid was the bulk of the file:
-
-| Sweep | Old manifest | Now |
-|---|---:|---:|
-| 10 geom x 91 freq x 2 pol, 361 azimuths | 7.6 MB | 0.67 MB |
-| 50 geom x 91 freq x 2 pol, 361 azimuths | ~52 MB | ~4 MB |
-
-93% of the old file was the same azimuth list repeated once per unit.
+That matters at scale: the former per-polarization inventory doubled the unit
+count and repeated the same angular data in every record. Co-solving and
+storing shared axes once remove both sources of manifest and scheduler
+overhead.
 
 ### Restarts
 
@@ -390,7 +383,8 @@ different inputs or a different solver build.
 
 ## 4. Skipping mesh certification for quick results
 
-`solve_monostatic_rcs_2d_certified` — what the drivers call — solves every unit
+With the default `MESH_CERTIFICATION = True`, the drivers call
+`solve_monostatic_rcs_2d_certified`, which solves every unit
 **twice**: once on the requested mesh and once refined by the policy's
 `fine_factor` (default **1.5**), publishing the fine result only if the two
 agree. Cost scales with the square of the node count, so that second solve is
@@ -434,6 +428,10 @@ collected into a body, and used in feature summation. Raw solver metadata still
 records which choice produced the field so the two are not ambiguous later.
 The choice is also part of the unit fingerprint, so changing it starts the
 appropriate solve rather than silently reusing a result from the other mode.
+Within one CEM join or subtraction, however, every input must carry the same
+evidence class: either all inputs have a complete source-field certificate
+chain or all inputs are uncertified. Mixing the two fails closed rather than
+publishing an ambiguous certificate.
 
 There is no way to weaken certification without switching it off: the policy
 enforces `fine_factor > 1.0`, so you cannot quietly shrink the refinement and

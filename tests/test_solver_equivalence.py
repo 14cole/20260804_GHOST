@@ -58,7 +58,7 @@ def solve(module, geo, freqs, pol, units):
     snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
     snapshot["source_path"] = str(geo)
     started = time.time()
-    result = module.solve_monostatic_rcs_2d(
+    result = module.solve_monostatic_rcs_2d_single_polarization(
         geometry_snapshot=snapshot,
         frequencies_ghz=list(freqs),
         elevations_deg=ANGLES,
