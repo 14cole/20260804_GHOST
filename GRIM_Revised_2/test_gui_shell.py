@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -15,6 +16,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QToolButton, QVBoxLayout, QWidget
 
 import grim_cut_gui
+import ghost_integration
 from assembly_tree import (
     AssemblyTreePanel,
     _TYPE_BRANCH,
@@ -137,6 +139,22 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertIs(
             self.window.feature_assembly_panel.service(), self.feature_service
         )
+
+    def test_bundled_ghost_backend_is_the_primary_builtin_candidate(self) -> None:
+        expected = (
+            Path(ghost_integration.__file__).resolve().parents[1]
+            / "tools"
+            / "GHOST"
+            / "Backend"
+        ).resolve()
+        with mock.patch.dict(
+            os.environ, {ghost_integration.GHOST_BACKEND_ENV: ""}, clear=False
+        ):
+            candidates = list(ghost_integration.ghost_backend_candidates())
+            discovered = ghost_integration.discover_ghost_backend()
+
+        self.assertEqual(candidates[0], expected)
+        self.assertEqual(discovered, expected)
 
     def test_workspace_and_ghost_outputs_enter_existing_dataset_paths(self) -> None:
         self.window.assembly_workspace.files_to_load.emit(["assembly.grim"])

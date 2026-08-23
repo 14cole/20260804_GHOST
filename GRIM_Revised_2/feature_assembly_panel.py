@@ -364,6 +364,7 @@ try:  # Keep the model importable on headless/minimal installations.
         QDoubleSpinBox,
         QFileDialog,
         QFormLayout,
+        QFrame,
         QGroupBox,
         QHBoxLayout,
         QHeaderView,
@@ -580,10 +581,14 @@ if GUI_AVAILABLE:
 
             scroll = QScrollArea(self)
             scroll.setObjectName("featureAssemblyScroll")
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setAutoFillBackground(False)
+            scroll.viewport().setAutoFillBackground(False)
             scroll.setWidgetResizable(True)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             content = QWidget(scroll)
             content.setObjectName("featureAssemblyContent")
+            content.setAutoFillBackground(False)
             self.form_content = content
             content_layout = QVBoxLayout(content)
             content_layout.setContentsMargins(0, 0, 0, 0)

@@ -1,9 +1,9 @@
 """Optional application-shell integration for the GHOST solver workspace.
 
-GRIM remains usable as a viewer when the solver backend is not installed.  In
-the combined source-tree layout used by this project, the bridge also discovers
-a sibling ``rcs-acceptance/Backend`` directory.  A packaged deployment can put
-the same modules on Python's import path and needs no environment setting.
+GRIM remains usable as a viewer when the solver backend is not installed.  The
+single-checkout distribution bundles the authoritative backend at
+``tools/GHOST/Backend``.  The environment override and the former sibling
+worktree layout remain available for development and migration.
 """
 
 from __future__ import annotations
@@ -31,7 +31,11 @@ def ghost_backend_candidates(explicit: str | os.PathLike[str] | None = None):
     if configured:
         raw.append(Path(configured))
     here = Path(__file__).resolve()
-    # Development/worktree layout:
+    # Single-checkout distribution:
+    #   <repo>/GRIM_Revised_2/ghost_integration.py
+    #   <repo>/tools/GHOST/Backend/ghost_gui.py
+    raw.append(here.parents[1] / "tools" / "GHOST" / "Backend")
+    # Former development/worktree layout retained as a migration fallback:
     #   <shared>/grim-acceptance/GRIM_Revised_2/ghost_integration.py
     #   <shared>/rcs-acceptance/Backend/ghost_gui.py
     raw.append(here.parents[2] / "rcs-acceptance" / "Backend")
@@ -125,8 +129,8 @@ class GhostIntegrationWidget(QWidget):
             self.load_error = str(exc)
             message = QLabel(
                 "GHOST solver workspace is unavailable.\n\n"
-                "Install the GHOST backend modules, place the rcs-acceptance "
-                "checkout beside this GRIM checkout, or set "
+                "Keep tools/GHOST with this GRIM checkout, install the GHOST "
+                "backend modules, or set "
                 f"{GHOST_BACKEND_ENV} to its Backend folder.\n\n"
                 f"Details: {self.load_error}"
             )

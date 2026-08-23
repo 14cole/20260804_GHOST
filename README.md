@@ -31,6 +31,9 @@ py -m pip install -e .
 grim
 ```
 
+On Windows, `Launch_GRIM_GUI.bat` provides the same source-checkout launch and
+prints the installation command if the selected Python is missing a dependency.
+
 For solver-only work, the standalone GHOST window remains available:
 
 ```powershell
