@@ -5,3 +5,13 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Solver run products and restart state
+rcs_runs/
+rcs_runs_bor/
+claims/
+hpc_logs/
+results/
+
+# Platform-specific optional native kernels are rebuilt locally.
+**/Backend/bor_stream_kernel*.so
