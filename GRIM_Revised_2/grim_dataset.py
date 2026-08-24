@@ -3382,6 +3382,88 @@ class RcsGrid:
                 "Scat/Inc magnitude and phase pairs."
             )
 
+        def _canonical_sentri_unit(raw_value):
+            text = str(raw_value or "").strip().lower().replace("²", "2")
+            if text == "°":
+                return "deg"
+            compact = re.sub(r"[^a-z0-9]+", "", text)
+            aliases = {
+                "hz": "hz",
+                "hertz": "hz",
+                "mhz": "mhz",
+                "megahertz": "mhz",
+                "deg": "deg",
+                "degree": "deg",
+                "degrees": "deg",
+                "dbsm": "dbsm",
+                "dbm2": "dbsm",
+                "dbsqm": "dbsm",
+                "dbsquaremeter": "dbsm",
+                "dbsquaremetre": "dbsm",
+            }
+            return aliases.get(compact, compact)
+
+        # CREATE-RF exports may put parameter names on row 1 and their units
+        # on row 2.  Preserve compatibility with older header+data tables, but
+        # when the first nonblank post-header row is nonnumeric, require it to
+        # be the complete, physically consistent units row rather than letting
+        # it fall into the numeric parser.
+        data_start_idx = header_idx + 1
+        while data_start_idx < len(rows) and (
+            not rows[data_start_idx]
+            or all(not str(cell).strip() for cell in rows[data_start_idx])
+        ):
+            data_start_idx += 1
+        has_units_row = False
+        if data_start_idx < len(rows):
+            candidate = rows[data_start_idx]
+            frequency_cell_idx = columns["frequency"]
+            frequency_cell = (
+                str(candidate[frequency_cell_idx]).strip()
+                if frequency_cell_idx < len(candidate)
+                else ""
+            )
+            try:
+                float(frequency_cell)
+            except ValueError:
+                expected_frequency_unit = (
+                    "mhz" if schema_name == "compact MHz" else "hz"
+                )
+                expected_units = {
+                    "frequency": expected_frequency_unit,
+                    "theta": "deg",
+                    "phi": "deg",
+                    "rcs_vv": "dbsm",
+                    "phase_vv": "deg",
+                    "rcs_hv": "dbsm",
+                    "phase_hv": "deg",
+                    "rcs_vh": "dbsm",
+                    "phase_vh": "deg",
+                    "rcs_hh": "dbsm",
+                    "phase_hh": "deg",
+                }
+                bad_units = []
+                for key, expected_unit in expected_units.items():
+                    column_idx = columns[key]
+                    raw_unit = (
+                        candidate[column_idx]
+                        if column_idx < len(candidate)
+                        else ""
+                    )
+                    actual_unit = _canonical_sentri_unit(raw_unit)
+                    if actual_unit != expected_unit:
+                        bad_units.append(
+                            f"{key}={str(raw_unit).strip()!r} "
+                            f"(expected {expected_unit})"
+                        )
+                if bad_units:
+                    raise ValueError(
+                        f"line {data_start_idx + 1}: invalid SENTRi units row: "
+                        + "; ".join(bad_units)
+                    )
+                has_units_row = True
+                data_start_idx += 1
+
         def _number(row, key, line_no, *, allow_negative_infinity=False):
             idx = columns[key]
             text = str(row[idx]).strip() if idx < len(row) else ""
@@ -3409,7 +3491,9 @@ class RcsGrid:
         )
         records = []
         seen = {}
-        for row_idx, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
+        for row_idx, row in enumerate(
+            rows[data_start_idx:], start=data_start_idx + 1
+        ):
             if not row or all(not str(cell).strip() for cell in row):
                 continue
             raw_frequency = _number(row, "frequency", row_idx)
@@ -3514,6 +3598,7 @@ class RcsGrid:
                     "GRIM complex amplitude = 10^(dBsm/20) "
                     "* exp(-j*deg2rad(reported_phase_deg))"
                 ),
+                "sentri_units_row_present": bool(has_units_row),
             },
         )
 

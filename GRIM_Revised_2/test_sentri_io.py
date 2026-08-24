@@ -19,11 +19,19 @@ COMPACT_HEADER = (
     "efield_phase_tp_deg_"
 )
 
+COMPACT_UNITS = (
+    "MHz,deg,deg,dBsm,deg,dBsm,deg,dBsm,deg,dBsm,deg"
+)
+
 DESCRIPTIVE_HEADER = (
     "Frequency,Theta,Phi,RCSPhiScat_PhiInc,PhasePhi_Phi,"
     "RCSThetaScat_ThetaInc,PhaseTheta_Theta,"
     "RCSPhiScat_ThetaInc,PhasePhi_Theta,"
     "RCSThetaScat_PhiInc,PhaseTheta_Phi"
+)
+
+DESCRIPTIVE_UNITS = (
+    "Hz,deg,deg,dBsm,deg,dBsm,deg,dBsm,deg,dBsm,deg"
 )
 
 
@@ -41,6 +49,8 @@ class SentriReaderTest(unittest.TestCase):
         path = self._write(
             ".csv",
             COMPACT_HEADER
+            + "\n"
+            + COMPACT_UNITS
             + "\n1000,80,190,0,90,-20,-45,-6.020599913,180,"
             + "6.020599913,0\n",
             bom=True,
@@ -61,11 +71,13 @@ class SentriReaderTest(unittest.TestCase):
             np.sqrt(expected_power) * np.exp(1j * expected_phase),
         )
         self.assertIn("stored phase=-reported", grid.history)
+        self.assertTrue(grid.extra["sentri_units_row_present"])
 
     def test_descriptive_schema_and_tab_delimited_dispatch(self) -> None:
         header = DESCRIPTIVE_HEADER.replace(",", "\t")
+        units = DESCRIPTIVE_UNITS.replace(",", "\t")
         row = "1000000000\t100\t10\t0\t10\t-10\t20\t-20\t30\t-30\t40\n"
-        path = self._write(".txt", header + "\n" + row)
+        path = self._write(".txt", header + "\n" + units + "\n" + row)
 
         direct = read_SENTRi(path)
         dropped = load_dataset(path)
@@ -81,6 +93,53 @@ class SentriReaderTest(unittest.TestCase):
             direct.rcs_power[0, 0, 0, :],
             10.0 ** (np.asarray([-10.0, -20.0, -30.0, 0.0]) / 10.0),
         )
+        self.assertTrue(direct.extra["sentri_units_row_present"])
+
+    def test_units_row_is_validated_instead_of_treated_as_data(self) -> None:
+        wrong_units = self._write(
+            ".csv",
+            DESCRIPTIVE_HEADER
+            + "\nGHz,deg,deg,dBsm,deg,dBsm,deg,dBsm,deg,dBsm,deg"
+            + "\n1,90,0,0,0,0,0,0,0,0,0\n",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid SENTRi units row"):
+            load_dataset(wrong_units)
+
+        wrong_angle = self._write(
+            ".csv",
+            DESCRIPTIVE_HEADER
+            + "\nHz,rad,deg,dBsm,deg,dBsm,deg,dBsm,deg,dBsm,deg"
+            + "\n1000000000,1,0,0,0,0,0,0,0,0,0\n",
+        )
+        with self.assertRaisesRegex(ValueError, "theta='rad'.*expected deg"):
+            load_dataset(wrong_angle)
+
+        truncated_units = self._write(
+            ".csv",
+            DESCRIPTIVE_HEADER
+            + "\nHz,deg,deg"
+            + "\n1000000000,90,0,0,0,0,0,0,0,0,0\n",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid SENTRi units row"):
+            load_dataset(truncated_units)
+
+        no_units = self._write(
+            ".csv",
+            DESCRIPTIVE_HEADER
+            + "\n1000000000,90,0,0,0,0,0,0,0,0,0\n",
+        )
+        legacy_grid = load_dataset(no_units)
+        self.assertFalse(legacy_grid.extra["sentri_units_row_present"])
+
+        bad_data_after_units = self._write(
+            ".csv",
+            DESCRIPTIVE_HEADER
+            + "\n"
+            + DESCRIPTIVE_UNITS
+            + "\n1000000000,bad,0,0,0,0,0,0,0,0,0\n",
+        )
+        with self.assertRaisesRegex(ValueError, "line 3: invalid theta"):
+            load_dataset(bad_data_after_units)
 
     def test_csv_drop_dispatch_prefers_strict_sentri_signature(self) -> None:
         path = self._write(

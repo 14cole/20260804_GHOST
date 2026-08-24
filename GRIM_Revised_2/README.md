@@ -63,7 +63,10 @@ Hz `PhiScat/ThetaScat` columns. SENTRi is not treated as CST. Its vendor mapping
 is `elevation=Theta-90`, and GRIM stores the coherent phase with the negative
 of the reported E-field phase. The four channels map to `VV=tt`, `HV=pt`,
 `VH=tp`, and `HH=pp`. Generic unitless theta/phi tables are not guessed to be
-SENTRi. A recognizable vendor-family header commits dispatch to the SENTRi
+SENTRi. The normal two-row export—parameter names followed by an explicit
+`Hz`/`MHz`, `deg`, `dBsm`, `deg` units row—is validated and the units row is
+excluded from the samples; older header-plus-data exports remain supported.
+A recognizable vendor-family header commits dispatch to the SENTRi
 reader, while all 11 required columns must be present for the file to load;
 damaged/partial SENTRi files therefore fail instead of falling through to a
 looser numeric-text reader.
