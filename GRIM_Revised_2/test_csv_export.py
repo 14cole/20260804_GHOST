@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 
 from grim_cut_dataset_mixin import _load_dataset_csv, _write_dataset_csv
-from grim_dataset import RcsGrid
+from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
 
 
 class TestCsvExport(unittest.TestCase):
@@ -54,11 +54,53 @@ class TestCsvExport(unittest.TestCase):
         self.assertEqual(
             {row["rcs_log_unit"] for row in rows}, {"dBsm"}
         )
+        self.assertEqual(
+            {row["angular_coordinate_system"] for row in rows}, {"conic"}
+        )
+        self.assertEqual({row["angular_roll_deg"] for row in rows}, {"0"})
+        self.assertEqual({row["angular_tilt_deg"] for row in rows}, {"0"})
 
         loaded = _load_dataset_csv(self.path)
         np.testing.assert_allclose(loaded.rcs_power, power)
         self.assertTrue(np.isnan(loaded.rcs_phase).all())
         self.assertEqual(loaded.units["frequency"], "GHz")
+        self.assertEqual(loaded.angular_coordinate_system(), "conic")
+
+    def test_great_circle_coordinate_tag_survives_csv_round_trip(self):
+        dataset = RcsGrid(
+            [-10.0, 10.0],
+            [5.0],
+            [3.0],
+            ["VV"],
+            rcs=np.ones((2, 1, 1, 1), dtype=np.complex64),
+            units={
+                "frequency": "GHz",
+                "angular_coordinate_system": "great_circle",
+                "great_circle_coordinate_convention": GRIM_GC_CONVENTION,
+                "angular_roll_deg": 12.5,
+                "angular_tilt_deg": -1.0,
+            },
+        )
+
+        _write_dataset_csv(dataset, self.path, scale="linear", include_phase=True)
+        loaded = _load_dataset_csv(self.path)
+
+        self.assertEqual(loaded.angular_coordinate_system(), "great_circle")
+        self.assertEqual(
+            loaded.great_circle_coordinate_convention(), GRIM_GC_CONVENTION
+        )
+        self.assertEqual(loaded.angular_frame_orientation_deg(), (12.5, -1.0))
+        self.assertEqual(
+            {row["angular_coordinate_system"] for row in self._rows()},
+            {"great_circle"},
+        )
+        self.assertEqual(
+            {
+                row["great_circle_coordinate_convention"]
+                for row in self._rows()
+            },
+            {GRIM_GC_CONVENTION},
+        )
 
     def test_statistics_output_exports_finite_magnitude(self):
         field = np.asarray(

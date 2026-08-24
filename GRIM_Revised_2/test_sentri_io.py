@@ -1,0 +1,198 @@
+"""Format and dispatch regressions for CREATE-RF SENTRi RCS tables."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+
+import numpy as np
+
+from grim_dataset import RcsGrid
+from grim_headless import load_dataset, read_SENTRi
+
+
+COMPACT_HEADER = (
+    "freq_MHz_,theta_deg_,phi_deg_,rcs_pp_dBsm_,"
+    "efield_phase_pp_deg_,rcs_tt_dBsm_,efield_phase_tt_deg_,"
+    "rcs_pt_dBsm_,efield_phase_pt_deg_,rcs_tp_dBsm_,"
+    "efield_phase_tp_deg_"
+)
+
+DESCRIPTIVE_HEADER = (
+    "Frequency,Theta,Phi,RCSPhiScat_PhiInc,PhasePhi_Phi,"
+    "RCSThetaScat_ThetaInc,PhaseTheta_Theta,"
+    "RCSPhiScat_ThetaInc,PhasePhi_Theta,"
+    "RCSThetaScat_PhiInc,PhaseTheta_Phi"
+)
+
+
+class SentriReaderTest(unittest.TestCase):
+    def _write(self, suffix: str, text: str, *, bom: bool = False) -> str:
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        handle.close()
+        encoding = "utf-8-sig" if bom else "utf-8"
+        with open(handle.name, "w", encoding=encoding, newline="") as stream:
+            stream.write(text)
+        self.addCleanup(lambda: os.path.exists(handle.name) and os.unlink(handle.name))
+        return handle.name
+
+    def test_compact_schema_axes_polarizations_power_and_phase(self) -> None:
+        path = self._write(
+            ".csv",
+            COMPACT_HEADER
+            + "\n1000,80,190,0,90,-20,-45,-6.020599913,180,"
+            + "6.020599913,0\n",
+            bom=True,
+        )
+        grid = RcsGrid.read_SENTRi(path)
+
+        np.testing.assert_allclose(grid.frequencies, [1.0])
+        np.testing.assert_allclose(grid.elevations, [-10.0])
+        np.testing.assert_allclose(grid.azimuths, [-170.0])
+        self.assertEqual(grid.polarizations.tolist(), ["VV", "HV", "VH", "HH"])
+
+        expected_power = np.asarray([0.01, 0.25, 4.0, 1.0])
+        np.testing.assert_allclose(grid.rcs_power[0, 0, 0, :], expected_power)
+        expected_phase = np.deg2rad([45.0, -180.0, 0.0, -90.0])
+        np.testing.assert_allclose(grid.rcs_phase[0, 0, 0, :], expected_phase)
+        np.testing.assert_allclose(
+            grid.rcs[0, 0, 0, :],
+            np.sqrt(expected_power) * np.exp(1j * expected_phase),
+        )
+        self.assertIn("stored phase=-reported", grid.history)
+
+    def test_descriptive_schema_and_tab_delimited_dispatch(self) -> None:
+        header = DESCRIPTIVE_HEADER.replace(",", "\t")
+        row = "1000000000\t100\t10\t0\t10\t-10\t20\t-20\t30\t-30\t40\n"
+        path = self._write(".txt", header + "\n" + row)
+
+        direct = read_SENTRi(path)
+        dropped = load_dataset(path)
+        np.testing.assert_allclose(direct.elevations, [10.0])
+        np.testing.assert_allclose(direct.frequencies, [1.0])
+        np.testing.assert_allclose(direct.rcs_power, dropped.rcs_power)
+        np.testing.assert_allclose(direct.rcs_phase, dropped.rcs_phase)
+        np.testing.assert_allclose(
+            direct.rcs_phase[0, 0, 0, :],
+            np.deg2rad([-20.0, -30.0, -40.0, -10.0]),
+        )
+        np.testing.assert_allclose(
+            direct.rcs_power[0, 0, 0, :],
+            10.0 ** (np.asarray([-10.0, -20.0, -30.0, 0.0]) / 10.0),
+        )
+
+    def test_csv_drop_dispatch_prefers_strict_sentri_signature(self) -> None:
+        path = self._write(
+            ".csv",
+            DESCRIPTIVE_HEADER
+            + "\n2000000000,90,0,3,0,2,0,1,0,0,0\n",
+        )
+        grid = load_dataset(path)
+        self.assertTrue(str(grid.extra["source_format"]).startswith("SENTRi"))
+        np.testing.assert_allclose(grid.frequencies, [2.0])
+
+    def test_equivalent_seam_rows_merge_and_conflicts_fail(self) -> None:
+        row = "1000,90,{phi},0,0,0,0,0,0,0,0"
+        matching = self._write(
+            ".csv",
+            COMPACT_HEADER
+            + "\n"
+            + row.format(phi=-180)
+            + "\n"
+            + row.format(phi=180)
+            + "\n",
+        )
+        grid = RcsGrid.read_SENTRi(matching)
+        np.testing.assert_allclose(grid.azimuths, [-180.0])
+
+        conflicting = self._write(
+            ".csv",
+            COMPACT_HEADER
+            + "\n"
+            + row.format(phi=-180)
+            + "\n1000,90,180,1,0,0,0,0,0,0,0\n",
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate SENTRi"):
+            RcsGrid.read_SENTRi(conflicting)
+
+        # A zero-amplitude sample has no physical phase.  SENTRi can report
+        # different arbitrary phase values at the equivalent -180/+180 seam;
+        # they must collapse to the same zero complex sample.
+        zero_seam = self._write(
+            ".csv",
+            COMPACT_HEADER
+            + "\n1000,90,-180,-Inf,0,-Inf,10,-Inf,20,-Inf,30"
+            + "\n1000,90,180,-Inf,40,-Inf,50,-Inf,60,-Inf,70\n",
+        )
+        zero_grid = RcsGrid.read_SENTRi(zero_seam)
+        np.testing.assert_allclose(zero_grid.azimuths, [-180.0])
+        np.testing.assert_allclose(zero_grid.rcs_power, 0.0)
+
+    def test_incomplete_or_generic_theta_phi_table_is_not_sentri(self) -> None:
+        path = self._write(
+            ".csv",
+            "Frequency,Theta,Phi,RCSPhiScat_PhiInc\n1000000000,90,0,0\n",
+        )
+        with self.assertRaisesRegex(ValueError, "complete SENTRi RCS header"):
+            RcsGrid.read_SENTRi(path)
+
+    def test_signed_vendor_header_commits_dispatch_to_sentri(self) -> None:
+        malformed = self._write(
+            ".txt",
+            COMPACT_HEADER.replace(",", "\t")
+            + "\n1000\t200\t0\t0\t0\t0\t0\t0\t0\t0\t0\n",
+        )
+        self.assertTrue(RcsGrid.has_SENTRi_signature(malformed))
+        with self.assertRaisesRegex(ValueError, "theta must be in"):
+            load_dataset(malformed)
+
+        partial = self._write(
+            ".txt",
+            "freq_MHz_,theta_deg_,phi_deg_,rcs_pp_dBsm_,rcs_tt_dBsm_\n"
+            "1000,90,0,0,0\n",
+        )
+        self.assertTrue(RcsGrid.has_SENTRi_signature(partial))
+        with self.assertRaisesRegex(ValueError, "complete SENTRi RCS header"):
+            load_dataset(partial)
+
+    def test_dispatch_does_not_steal_existing_delimited_formats(self) -> None:
+        native = self._write(
+            ".csv",
+            "azimuth,elevation,frequency,frequency_unit,polarization,"
+            "rcs_log_unit,magnitude_linear,phase_deg\n"
+            "0,0,3,GHz,VV,dBsm,2,0\n",
+        )
+        native_grid = load_dataset(native)
+        np.testing.assert_allclose(native_grid.rcs_power, 2.0)
+        self.assertIn("Loaded flat CSV", native_grid.history)
+
+        wide_cst = self._write(
+            ".csv",
+            "Frequency(GHz),Theta(deg),Phi(deg),"
+            "RCS Theta-Theta(dBsm),Phase Theta-Theta(deg)\n"
+            "2,90,0,0,0\n",
+        )
+        cst_grid = load_dataset(wide_cst)
+        self.assertEqual(cst_grid.extra["source_format"], "CST wide theta/phi table")
+
+        legacy_txt = self._write(
+            ".txt",
+            "theta(deg) phi(deg) abs(rcs)(dbm^2) abs(theta)(dbm^2) "
+            "phase(theta)(deg) abs(phi)(dbm^2) phase(phi)(deg) ax.ratio(db)\n"
+            "0 0 0 0 0 0 0 0\n",
+        )
+        legacy_grid = load_dataset(legacy_txt)
+        self.assertIn("Loaded theta/phi TXT", legacy_grid.history)
+
+    def test_sparse_cartesian_cells_remain_nan(self) -> None:
+        row1 = "1000,80,0,0,0,0,0,0,0,0,0"
+        row2 = "2000,100,10,0,0,0,0,0,0,0,0"
+        path = self._write(".csv", COMPACT_HEADER + "\n" + row1 + "\n" + row2 + "\n")
+        grid = RcsGrid.read_SENTRi(path)
+        self.assertEqual(grid.rcs_power.shape, (2, 2, 2, 4))
+        self.assertGreater(int(np.count_nonzero(np.isnan(grid.rcs_power))), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -229,7 +229,17 @@ def load_pattern_any(path: 'str', *, pol_map: 'Optional[Dict[str, str]]' = None,
     if ext not in _LOADERS:
         raise ValueError(f"{path}: no RcsGrid loader for {ext!r} "
                          f"(have {sorted(_LOADERS)}).")
-    grid = getattr(rcsgrid_class(), _LOADERS[ext])(str(path))
+    grid_class = rcsgrid_class()
+    if ext in {".csv", ".txt"}:
+        fallback_name = (
+            "load_theta_phi_csv" if ext == ".csv" else "load_theta_phi_txt"
+        )
+        if grid_class.has_SENTRi_signature(str(path)):
+            grid = grid_class.read_SENTRi(str(path))
+        else:
+            grid = getattr(grid_class, fallback_name)(str(path))
+    else:
+        grid = getattr(grid_class, _LOADERS[ext])(str(path))
     amp = np.asarray(grid.rcs)
     if not np.all(np.isfinite(amp)):
         n = int(np.sum(~np.isfinite(amp)))

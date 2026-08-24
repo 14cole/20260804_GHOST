@@ -1,3 +1,6 @@
+import copy
+from dataclasses import replace
+import hashlib
 import json
 import csv
 import os
@@ -6,6 +9,45 @@ import warnings
 import numpy as np
 
 C0 = 299_792_458.0
+
+# The legacy PTM bytes do not define the sign/origin of their aspect axis or
+# the H/V basis used along a great-circle cut.  GRIM therefore distinguishes
+# its explicit convention from an unmarked legacy PTM instead of silently
+# treating every file as the same coordinate chart.
+GRIM_GC_CONVENTION = "grim_gc_v1"
+LEGACY_PTM_GC_CONVENTION = "legacy_ptm_unspecified"
+_PTM_GRIM_GC_MARKER = "GRIM_GC_V1"
+
+
+def _ptm_configuration_has_grim_gc_marker(value):
+    return bool(
+        re.search(
+            r"(?<![A-Z0-9_])GRIM_GC_V1(?![A-Z0-9_])",
+            str(value or "").upper(),
+        )
+    )
+
+
+def _ptm_configuration_with_grim_gc_marker(value):
+    """Embed GRIM's coordinate convention without discarding legacy text."""
+
+    text = str(value or "").strip()
+    if _ptm_configuration_has_grim_gc_marker(text):
+        return text
+    if not text:
+        return _PTM_GRIM_GC_MARKER
+    available = 50 - len(_PTM_GRIM_GC_MARKER) - 1
+    return f"{_PTM_GRIM_GC_MARKER};{text[:available]}"
+
+
+def _ptm_configuration_without_grim_gc_marker(value):
+    """Remove only GRIM's semicolon-delimited convention marker."""
+
+    parts = [part.strip() for part in str(value or "").split(";")]
+    return ";".join(
+        part for part in parts
+        if part and part.upper() != _PTM_GRIM_GC_MARKER
+    )
 
 _FREQUENCY_UNITS = {
     "hz": "Hz",
@@ -21,6 +63,146 @@ _ANGLE_UNITS = {
     "radian": "rad",
     "radians": "rad",
 }
+
+
+def canonical_angular_coordinate_system(value):
+    """Normalize scalar angular-coordinate metadata without guessing."""
+
+    raw = value
+    if isinstance(raw, np.ndarray) and raw.size == 1:
+        raw = raw.reshape(-1)[0]
+    text = str(raw or "").strip().lower().replace("-", "_")
+    aliases = {
+        "": "conic",
+        "az_el": "conic",
+        "azimuth_elevation": "conic",
+        "spherical": "conic",
+        "gc": "great_circle",
+        "greatcircle": "great_circle",
+    }
+    return aliases.get(text, text)
+
+
+def _read_cst_delimited_rows(path):
+    """Read a CST text export while retaining any leading metadata rows."""
+
+    with open(path, "r", newline="", encoding="utf-8-sig") as stream:
+        sample = stream.read(8192)
+        stream.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+            delimiter = dialect.delimiter
+        except csv.Error:
+            delimiter = max((",", "\t", ";"), key=sample.count)
+        return list(csv.reader(stream, delimiter=delimiter))
+
+
+def _cst_compact_header(value):
+    """Normalize CST/MATLAB table headings without losing their unit text."""
+
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _cst_frequency_unit(value):
+    """Return an exact supported CST frequency unit, never a substring guess."""
+
+    compact = _cst_compact_header(value)
+    for prefix in ("frequency", "freq"):
+        if compact.startswith(prefix):
+            suffix = compact[len(prefix):]
+            return suffix if suffix in {"hz", "khz", "mhz", "ghz"} else None
+    return None
+
+
+def _cst_frequency_scale_to_ghz(value):
+    unit = _cst_frequency_unit(value)
+    scales = {"hz": 1.0e-9, "khz": 1.0e-6, "mhz": 1.0e-3, "ghz": 1.0}
+    if unit is None:
+        raise ValueError(
+            "CST frequency header must explicitly end in exactly Hz, kHz, "
+            "MHz, or GHz; other prefixes and unit guessing are unsupported"
+        )
+    return scales[unit], unit
+
+
+def _wrap_cst_azimuth_deg(value):
+    """Use GRIM's canonical half-open azimuth interval, [-180, 180)."""
+
+    wrapped = float(np.mod(float(value) + 180.0, 360.0) - 180.0)
+    return 0.0 if abs(wrapped) < 1.0e-12 else wrapped
+
+
+def _parse_cst_iq(value):
+    """Parse common Python/MATLAB spellings of one complex IQ sample."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    token = text.replace(" ", "").strip("()[]{}")
+    token = token.replace("*", "").replace("I", "j").replace("i", "j")
+    token = re.sub(r"(?<=\d)[dD](?=[+-]?\d)", "e", token)
+    try:
+        result = complex(token)
+    except ValueError as exc:
+        raise ValueError(f"unsupported IQ value {text!r}") from exc
+    if not (np.isfinite(result.real) and np.isfinite(result.imag)):
+        raise ValueError(f"IQ value must be finite, got {text!r}")
+    return result
+
+
+def _cst_dbsm_to_power(value, *, context="CST magnitude"):
+    """Convert dBsm to finite float64 power with an actionable overflow error."""
+
+    value = float(value)
+    if np.isneginf(value):
+        return 0.0
+    if not np.isfinite(value):
+        raise ValueError(f"{context} must be finite or -Inf, got {value!r}")
+    try:
+        with np.errstate(over="raise", invalid="raise"):
+            result = float(np.power(10.0, value / 10.0))
+    except (FloatingPointError, OverflowError) as exc:
+        raise ValueError(
+            f"{context}={value:g} dBsm overflows finite linear power"
+        ) from exc
+    if not np.isfinite(result):
+        raise ValueError(
+            f"{context}={value:g} dBsm does not produce finite linear power"
+        )
+    return result
+
+
+def _cst_iq_to_power(value, *, context="CST IQ"):
+    """Return finite |IQ|^2 without allowing float64 overflow."""
+
+    amplitude = float(abs(value))
+    if amplitude > float(np.sqrt(np.finfo(np.float64).max)):
+        raise ValueError(f"{context} magnitude overflows finite linear power")
+    result = amplitude * amplitude
+    if not np.isfinite(result):
+        raise ValueError(f"{context} does not produce finite linear power")
+    return result
+
+
+def _cst_samples_equivalent(left_power, left_phase, right_power, right_phase):
+    """Return True when two seam/duplicate rows encode the same field."""
+
+    if not np.isclose(
+        float(left_power), float(right_power), rtol=1.0e-8, atol=1.0e-12
+    ):
+        return False
+    # Phase is undefined for an exactly zero complex sample. Vendor exporters
+    # commonly fill that redundant column with arbitrary values at a null.
+    if float(left_power) == 0.0 and float(right_power) == 0.0:
+        return True
+    left_phase = float(left_phase)
+    right_phase = float(right_phase)
+    if np.isnan(left_phase) and np.isnan(right_phase):
+        return True
+    if not (np.isfinite(left_phase) and np.isfinite(right_phase)):
+        return False
+    phase_error = np.angle(np.exp(1j * (left_phase - right_phase)))
+    return abs(float(phase_error)) <= 1.0e-8
 
 
 def _real_storage_dtype(*values):
@@ -145,8 +327,31 @@ class RcsGrid:
         self.power_domain = "linear_rcs"
         self.source_path = source_path
         self.history = history
-        self.units = units or {}
+        self.units = dict(units or {})
         self.extra = dict(extra or {})
+
+        # Migrate supported legacy/fallback angular metadata into the modeled
+        # units dictionary.  Derived grids copy units, whereas arbitrary extra
+        # arrays are intentionally not propagated, so leaving physical tags
+        # only in extra would let a transform silently turn GC data into conic.
+        unit_coordinate = self.units.get("angular_coordinate_system")
+        extra_coordinate = self.extra.get("angular_coordinate_system")
+        if (
+            (unit_coordinate is None or str(unit_coordinate).strip() == "")
+            and extra_coordinate is not None
+            and str(extra_coordinate).strip() != ""
+        ):
+            self.units["angular_coordinate_system"] = (
+                canonical_angular_coordinate_system(extra_coordinate)
+            )
+        if self.angular_coordinate_system() == "great_circle":
+            self.units.setdefault(
+                "great_circle_coordinate_convention",
+                self.great_circle_coordinate_convention(),
+            )
+            roll, tilt = self.angular_frame_orientation_deg()
+            self.units.setdefault("angular_roll_deg", roll)
+            self.units.setdefault("angular_tilt_deg", tilt)
 
     @staticmethod
     def _clean_power(power_value):
@@ -302,6 +507,251 @@ class RcsGrid:
             raw = raw.reshape(-1)[0]
         return str(raw or "").strip()
 
+    def angular_coordinate_system(self):
+        """Return the physical angular convention used by the two angle axes.
+
+        GRIM's native convention is conic azimuth/elevation.  Legacy PTM cuts
+        use great-circle aspect/pitch; identical numeric axes from those two
+        conventions are not physically interchangeable.
+        """
+        raw = (self.units or {}).get("angular_coordinate_system")
+        if raw is None or str(raw).strip() == "":
+            raw = (self.extra or {}).get("angular_coordinate_system", "")
+        return canonical_angular_coordinate_system(raw)
+
+    def angular_frame_orientation_deg(self):
+        """Return stored great-circle/PTM roll and tilt scalar metadata.
+
+        They remain compatibility fields.  The supplied legacy PTM reference
+        does not define their Euler order or enough geometry to apply them as
+        rotations, so conversion code must require both to be zero.
+        """
+
+        values = []
+        for unit_key, extra_key in (
+            ("angular_roll_deg", "ptm_roll"),
+            ("angular_tilt_deg", "ptm_tilt"),
+        ):
+            raw = (self.units or {}).get(unit_key)
+            if raw is None or str(raw).strip() == "":
+                raw = (self.extra or {}).get(extra_key, 0.0)
+            array = np.asarray(raw)
+            if array.size != 1:
+                raise ValueError(f"{unit_key} must be scalar")
+            value = float(array.reshape(-1)[0])
+            if not np.isfinite(value):
+                raise ValueError(f"{unit_key} must be finite")
+            values.append(value)
+        return tuple(values)
+
+    def great_circle_coordinate_convention(self):
+        """Return the declared great-circle chart/basis convention.
+
+        A GRIM-created equatorial great-circle grid is tagged ``grim_gc_v1``.
+        An imported PTM without GRIM's marker is deliberately reported as
+        ``legacy_ptm_unspecified`` because its byte header does not establish
+        aspect sign/origin or the polarization basis.
+        """
+
+        raw = (self.units or {}).get("great_circle_coordinate_convention")
+        if raw is None or str(raw).strip() == "":
+            raw = (self.extra or {}).get(
+                "great_circle_coordinate_convention", ""
+            )
+        text = str(raw or "").strip().lower().replace("-", "_")
+        aliases = {
+            "": LEGACY_PTM_GC_CONVENTION,
+            "grim": GRIM_GC_CONVENTION,
+            "grim_gc": GRIM_GC_CONVENTION,
+            "legacy": LEGACY_PTM_GC_CONVENTION,
+            "unknown": LEGACY_PTM_GC_CONVENTION,
+            "unspecified": LEGACY_PTM_GC_CONVENTION,
+        }
+        return aliases.get(text, text)
+
+    def convert_equatorial_conic_gc(
+        self,
+        direction,
+        *,
+        attest_legacy_ptm_convention=False,
+    ):
+        """Losslessly change the angular tag for the exact zero-plane case.
+
+        No direction interpolation or polarization rotation occurs.  Under
+        GRIM's declared convention, signed great-circle aspect equals conic
+        azimuth at zero pitch and the V/H bases coincide.  General nonzero-cut
+        conversion is intentionally unsupported because its path is curved in
+        conic coordinates and it requires a full complex scattering-matrix
+        basis rotation.
+
+        An unmarked legacy PTM is accepted only when the caller explicitly
+        attests that it uses GRIM's aspect sign/origin and V/H convention.
+        """
+
+        direction = str(direction or "").strip().lower()
+        if direction not in {"conic_to_gc", "gc_to_conic"}:
+            raise ValueError(
+                "direction must be 'conic_to_gc' or 'gc_to_conic'"
+            )
+        source_system = self.angular_coordinate_system()
+        expected_source = "conic" if direction == "conic_to_gc" else "great_circle"
+        if source_system not in {"conic", "great_circle"}:
+            raise ValueError(
+                "equatorial Conic/GC conversion does not support angular "
+                f"coordinate system {source_system!r}"
+            )
+        if source_system != expected_source:
+            arrow = "Conic→GC" if direction == "conic_to_gc" else "GC→Conic"
+            raise ValueError(
+                f"{arrow} requires a source tagged {expected_source}; got "
+                f"{source_system}"
+            )
+
+        az_unit = self._canonical_unit(
+            (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
+        )
+        el_unit = self._canonical_unit(
+            (self.units or {}).get("elevation"), _ANGLE_UNITS, "deg"
+        )
+        if az_unit not in {"deg", "rad"} or el_unit not in {"deg", "rad"}:
+            raise ValueError(
+                "equatorial Conic/GC conversion requires degree or radian "
+                f"angle axes; got azimuth={az_unit!r}, elevation={el_unit!r}"
+            )
+        azimuths = np.asarray(self.azimuths, dtype=float)
+        elevations = np.asarray(self.elevations, dtype=float)
+        if azimuths.size == 0 or not np.all(np.isfinite(azimuths)):
+            raise ValueError("equatorial Conic/GC conversion needs a finite aspect axis")
+        if elevations.size != 1 or not np.all(np.isfinite(elevations)):
+            raise ValueError("exact Conic/GC conversion requires exactly one finite cut")
+        elevation_deg = (
+            np.rad2deg(elevations) if el_unit == "rad" else elevations
+        )
+        if not np.isclose(elevation_deg[0], 0.0, rtol=0.0, atol=1.0e-7):
+            label = "elevation" if source_system == "conic" else "pitch"
+            raise ValueError(
+                f"exact Conic/GC conversion requires one 0 degree {label} cut"
+            )
+
+        roll, tilt = self.angular_frame_orientation_deg()
+        if not np.allclose((roll, tilt), (0.0, 0.0), rtol=0.0, atol=1.0e-7):
+            raise ValueError(
+                "exact Conic/GC conversion requires stored roll=tilt=0 "
+                f"degrees; got roll={roll:g}, tilt={tilt:g}"
+            )
+        polarizations = [
+            str(value).strip().upper() for value in self.polarizations
+        ]
+        unsupported = sorted(set(polarizations) - {"VV", "HH"})
+        if unsupported:
+            raise ValueError(
+                "exact Conic/GC conversion currently supports VV/HH only; "
+                "legacy PTM cross-polar basis signs are unspecified; got "
+                + ", ".join(unsupported)
+            )
+
+        if direction == "gc_to_conic":
+            convention = self.great_circle_coordinate_convention()
+            if convention != GRIM_GC_CONVENTION:
+                if convention != LEGACY_PTM_GC_CONVENTION:
+                    raise ValueError(
+                        "unsupported great-circle coordinate convention "
+                        f"{convention!r}; only GRIM_GC_V1 or an explicitly "
+                        "attested unmarked legacy PTM is supported"
+                    )
+                if not attest_legacy_ptm_convention:
+                    raise ValueError(
+                        "legacy PTM great-circle convention is unmarked: its "
+                        "aspect sign/origin and V/H basis are unspecified. "
+                        "Explicitly attest the GRIM GC convention before "
+                        "performing this relabel"
+                    )
+                convention_note = "user-attested legacy PTM as GRIM_GC_V1"
+            else:
+                convention_note = "declared GRIM_GC_V1"
+        else:
+            convention_note = "created with GRIM_GC_V1"
+
+        # Canonicalize the periodic primary axis while carrying every sample
+        # and any grid-shaped passthrough array through the same stable order.
+        period = 2.0 * np.pi if az_unit == "rad" else 360.0
+        half_period = 0.5 * period
+        wrapped = np.mod(azimuths + half_period, period) - half_period
+        wrapped[np.isclose(wrapped, 0.0, rtol=0.0, atol=1.0e-12)] = 0.0
+        order = np.argsort(wrapped, kind="stable")
+        wrapped = wrapped[order]
+        tolerance = np.deg2rad(1.0e-7) if az_unit == "rad" else 1.0e-7
+        if wrapped.size > 1 and np.any(np.diff(wrapped) <= tolerance):
+            raise ValueError(
+                "aspect axis contains duplicate or seam-alias directions after wrapping"
+            )
+
+        expected_shape = self.rcs_power.shape
+        converted_extra = {}
+        for key, value in self._extra_to_write().items():
+            array = np.asarray(value)
+            if array.ndim >= 4 and array.shape[:4] == expected_shape:
+                converted_extra[key] = np.array(array[order, ...], copy=True)
+            else:
+                converted_extra[key] = copy.deepcopy(value)
+        # A coordinate-derived file is not the original solver artifact.  Do
+        # not carry a stale grid-bound attestation/certification through the
+        # axis normalization even though those scalar blobs fit structurally.
+        for key in (
+            "solver_metadata_json",
+            "production_mesh_certification_json",
+            "source_body_mesh_certification_json",
+        ):
+            converted_extra.pop(key, None)
+
+        converted_units = copy.deepcopy(self.units or {})
+        if direction == "conic_to_gc":
+            converted_units["angular_coordinate_system"] = "great_circle"
+            converted_units["great_circle_coordinate_convention"] = GRIM_GC_CONVENTION
+            converted_units["angular_roll_deg"] = 0.0
+            converted_units["angular_tilt_deg"] = 0.0
+            converted_extra["angular_coordinate_system"] = "great_circle"
+            converted_extra["great_circle_coordinate_convention"] = GRIM_GC_CONVENTION
+        else:
+            converted_units["angular_coordinate_system"] = "conic"
+            for key in (
+                "great_circle_coordinate_convention",
+                "angular_roll_deg",
+                "angular_tilt_deg",
+            ):
+                converted_units.pop(key, None)
+            for key in (
+                "angular_coordinate_system",
+                "great_circle_coordinate_convention",
+                "ptm_cut_type",
+                "ptm_roll",
+                "ptm_tilt",
+            ):
+                converted_extra.pop(key, None)
+
+        arrow = "Conic->GC" if direction == "conic_to_gc" else "GC->Conic"
+        history_entry = (
+            f"{arrow} exact equatorial relabel; no interpolation; "
+            f"{convention_note}; VV/HH only"
+        )
+        history = (
+            f"{self.history}\n{history_entry}" if self.history else history_entry
+        )
+        return RcsGrid(
+            wrapped,
+            np.asarray([0.0], dtype=self.elevations.dtype),
+            self.frequencies,
+            self.polarizations,
+            rcs=None,
+            rcs_power=np.asarray(self.rcs_power)[order, ...],
+            rcs_phase=np.asarray(self.rcs_phase)[order, ...],
+            rcs_domain=self.rcs_domain,
+            source_path=self.source_path,
+            history=history,
+            units=converted_units,
+            extra=converted_extra,
+        )
+
     def _assert_physical_metadata_compatible(self, other):
         if not isinstance(other, RcsGrid):
             raise TypeError("other must be an RcsGrid")
@@ -324,6 +774,30 @@ class RcsGrid:
                 f"RCS log unit mismatch: {self.default_log_unit()} != "
                 f"{other.default_log_unit()}"
             )
+        left_angles = self.angular_coordinate_system()
+        right_angles = other.angular_coordinate_system()
+        if left_angles != right_angles:
+            raise ValueError(
+                "angular coordinate system mismatch: "
+                f"{left_angles} != {right_angles}"
+            )
+        if left_angles == "great_circle":
+            left_convention = self.great_circle_coordinate_convention()
+            right_convention = other.great_circle_coordinate_convention()
+            if left_convention != right_convention:
+                raise ValueError(
+                    "great-circle coordinate convention mismatch: "
+                    f"{left_convention} != {right_convention}"
+                )
+            left_orientation = self.angular_frame_orientation_deg()
+            right_orientation = other.angular_frame_orientation_deg()
+            if not np.allclose(
+                left_orientation, right_orientation, rtol=0.0, atol=1.0e-7
+            ):
+                raise ValueError(
+                    "great-circle frame orientation mismatch: "
+                    f"roll/tilt {left_orientation} != {right_orientation} deg"
+                )
 
     def _assert_compatible(self, other, *, coherent=False):
         """Validate another grid for element-wise operations.
@@ -367,6 +841,416 @@ class RcsGrid:
                     f"got {left_ref or '<unspecified>'!r} and "
                     f"{right_ref or '<unspecified>'!r}"
                 )
+
+    def range_calibrate(
+        self,
+        measured_calibration,
+        exact_reference,
+        range_offset_m,
+        *,
+        allow_singleton_angular_broadcast=False,
+        convention_attested=False,
+        measured_label=None,
+        exact_label=None,
+        maximum_correction_gain_db=60.0,
+    ):
+        """Apply complex substitution calibration at a signed range offset.
+
+        The stored field is ``A = sqrt(sigma) * exp(1j*phase)``.  For GRIM's
+        ``exp(+j*omega*t)`` convention, with a monostatic range response
+        proportional to ``exp(-j*2*k*R)``, the operation is
+
+        ``A_out = A_dut * A_exact * exp(-j*4*pi*f*dR/c) / A_measured``.
+
+        ``dR`` is positive when the measured calibration target is farther
+        from the radar than the DUT/reference plane.  The caller must attest
+        that the DUT and measured calibration share an acquisition chain and
+        that the exact response has the intended phase center.  No frequency
+        or angular interpolation is performed.
+        """
+
+        measured_calibration, exact_reference = self._ensure_grids(
+            (measured_calibration, exact_reference)
+        )
+        try:
+            offset_m = float(range_offset_m)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("range offset must be a finite distance in metres") from exc
+        if not np.isfinite(offset_m):
+            raise ValueError("range offset must be a finite distance in metres")
+        if not convention_attested:
+            raise ValueError(
+                "range calibration requires confirmation that DUT/measured-cal "
+                "share one acquisition and phase convention and that the exact "
+                "reference uses the intended phase center"
+            )
+        if "range_calibration_json" in self.extra:
+            raise ValueError(
+                "dataset already contains Range Cal provenance; use the original "
+                "measurement to avoid accidental double calibration"
+            )
+        if maximum_correction_gain_db is None:
+            gain_limit_db = None
+        else:
+            try:
+                gain_limit_db = float(maximum_correction_gain_db)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "maximum correction gain must be a finite nonnegative dB value"
+                ) from exc
+            if not np.isfinite(gain_limit_db) or gain_limit_db < 0.0:
+                raise ValueError(
+                    "maximum correction gain must be a finite nonnegative dB value"
+                )
+
+        grids = (
+            ("DUT", self),
+            ("measured calibration", measured_calibration),
+            ("exact reference", exact_reference),
+        )
+        for label, grid in grids:
+            raw_frequency_unit = str(
+                (grid.units or {}).get("frequency", "GHz")
+            ).strip().lower()
+            if raw_frequency_unit not in _FREQUENCY_UNITS:
+                raise ValueError(
+                    f"{label} has unsupported frequency unit "
+                    f"{(grid.units or {}).get('frequency')!r}; Range Cal "
+                    "requires Hz, kHz, MHz, or GHz"
+                )
+            if grid.linear_quantity() != "sigma_3d":
+                raise ValueError(
+                    f"{label} must contain sigma_3d/dBsm data, got "
+                    f"{grid.linear_quantity()}"
+                )
+            raw_log_unit = (grid.units or {}).get("rcs_log_unit")
+            if raw_log_unit is not None and str(raw_log_unit).strip().lower() not in {
+                "dbsm",
+                "dbm2",
+            }:
+                raise ValueError(
+                    f"{label} has unsupported RCS log unit {raw_log_unit!r}; "
+                    "Range Cal requires dBsm"
+                )
+            if grid.default_log_unit().lower() != "dbsm":
+                raise ValueError(
+                    f"{label} must use dBsm, got {grid.default_log_unit()}"
+                )
+        self._assert_physical_metadata_compatible(measured_calibration)
+        self._assert_physical_metadata_compatible(exact_reference)
+        measured_calibration._assert_physical_metadata_compatible(exact_reference)
+
+        def _declared_time_sign(grid, label):
+            values = []
+            for container in (grid.units or {}, grid.extra or {}):
+                for key in (
+                    "time_convention",
+                    "phase_reference",
+                    "amplitude_convention",
+                ):
+                    raw = container.get(key)
+                    if raw is not None:
+                        array = np.asarray(raw)
+                        if array.size != 1:
+                            raise ValueError(
+                                f"{label} metadata {key!r} must be scalar"
+                            )
+                        values.append(str(array.reshape(-1)[0].item()))
+            signs = set()
+            for value in values:
+                compact = (
+                    value.lower()
+                    .replace("ω", "omega")
+                    .replace("*", "")
+                    .replace(" ", "")
+                )
+                if re.search(r"exp\(\+?j(?:omega|w)t\)", compact):
+                    signs.add("+jwt")
+                if re.search(r"exp\(-j(?:omega|w)t\)", compact):
+                    signs.add("-jwt")
+            if len(signs) > 1:
+                raise ValueError(
+                    f"{label} contains contradictory declared time conventions"
+                )
+            return next(iter(signs)) if signs else None
+
+        declared_time_signs = {
+            label: _declared_time_sign(grid, label) for label, grid in grids
+        }
+        incompatible_signs = {
+            label: sign
+            for label, sign in declared_time_signs.items()
+            if sign is not None and sign != "+jwt"
+        }
+        if incompatible_signs:
+            details = ", ".join(
+                f"{label}={sign}" for label, sign in incompatible_signs.items()
+            )
+            raise ValueError(
+                "Range Cal uses GRIM's exp(+j*omega*t) phase law and will not "
+                f"override contradictory declared metadata ({details})"
+            )
+
+        def _canonical_polarizations(grid, label):
+            labels = [str(value).strip().upper() for value in grid.polarizations]
+            if any(not value for value in labels):
+                raise ValueError(f"{label} contains a blank polarization label")
+            if len(set(labels)) != len(labels):
+                raise ValueError(
+                    f"{label} contains duplicate polarization labels after normalization"
+                )
+            return labels
+
+        dut_pols = _canonical_polarizations(self, "DUT")
+        measured_pols = _canonical_polarizations(
+            measured_calibration, "measured calibration"
+        )
+        exact_pols = _canonical_polarizations(exact_reference, "exact reference")
+        missing_measured_pols = [
+            value for value in dut_pols if value not in measured_pols
+        ]
+        missing_exact_pols = [value for value in dut_pols if value not in exact_pols]
+        if missing_measured_pols or missing_exact_pols:
+            missing_parts = []
+            if missing_measured_pols:
+                missing_parts.append(
+                    "measured calibration: " + ", ".join(missing_measured_pols)
+                )
+            if missing_exact_pols:
+                missing_parts.append(
+                    "exact reference: " + ", ".join(missing_exact_pols)
+                )
+            raise ValueError(
+                "calibration references are missing DUT polarization(s) in "
+                + "; ".join(missing_parts)
+            )
+
+        if not np.array_equal(
+            measured_calibration.frequencies, exact_reference.frequencies
+        ):
+            raise ValueError(
+                "measured-calibration and exact-reference frequency axes differ"
+            )
+        if not np.array_equal(self.frequencies, measured_calibration.frequencies):
+            raise ValueError(
+                "DUT and calibration frequency axes differ; align them explicitly first"
+            )
+
+        for axis_name in ("azimuths", "elevations"):
+            measured_axis = np.asarray(getattr(measured_calibration, axis_name))
+            exact_axis = np.asarray(getattr(exact_reference, axis_name))
+            dut_axis = np.asarray(getattr(self, axis_name))
+            if not np.array_equal(measured_axis, exact_axis):
+                raise ValueError(
+                    "measured-calibration and exact-reference "
+                    f"{axis_name[:-1]} axes differ"
+                )
+            if np.array_equal(dut_axis, measured_axis):
+                continue
+            if len(measured_axis) == 1 and allow_singleton_angular_broadcast:
+                continue
+            if len(measured_axis) == 1:
+                raise ValueError(
+                    f"singleton calibration {axis_name[:-1]} requires explicit "
+                    "broadcast confirmation"
+                )
+            raise ValueError(
+                f"DUT and calibration {axis_name[:-1]} axes differ; no angular "
+                "interpolation or averaging is performed"
+            )
+
+        frequency_hz = np.asarray(
+            self._frequency_value_to_hz(self.frequencies), dtype=np.float64
+        )
+        if np.any(~np.isfinite(frequency_hz)) or np.any(frequency_hz <= 0.0):
+            raise ValueError("range calibration requires positive finite frequencies")
+
+        measured_pol_index = [measured_pols.index(label) for label in dut_pols]
+        exact_pol_index = [exact_pols.index(label) for label in dut_pols]
+        measured_amp = np.asarray(
+            measured_calibration.rcs[..., measured_pol_index], dtype=np.complex128
+        )
+        exact_amp = np.asarray(
+            exact_reference.rcs[..., exact_pol_index], dtype=np.complex128
+        )
+        dut_amp = np.asarray(self.rcs, dtype=np.complex128)
+
+        if np.any(~np.isfinite(dut_amp)):
+            raise ValueError(
+                "DUT contains missing/nonfinite complex samples; trim or repair it first"
+            )
+        for label, values in (
+            ("measured calibration", measured_amp),
+            ("exact reference", exact_amp),
+        ):
+            if np.any(~np.isfinite(values)):
+                raise ValueError(
+                    f"{label} contains missing/nonfinite complex samples"
+                )
+            if np.any(np.abs(values) == 0.0):
+                raise ValueError(
+                    f"{label} contains a zero/null sample and cannot define a "
+                    "complex calibration factor"
+                )
+
+        range_phase = np.exp(
+            -1j * (4.0 * np.pi * frequency_hz * offset_m / C0)
+        ).reshape(1, 1, -1, 1)
+        correction = exact_amp * range_phase / measured_amp
+        if np.any(~np.isfinite(correction)):
+            raise ValueError("range calibration factor is nonfinite")
+        correction_gain_db = 20.0 * np.log10(np.abs(correction))
+        if np.any(~np.isfinite(correction_gain_db)):
+            raise ValueError("range calibration gain is nonfinite")
+        if gain_limit_db is not None and np.any(
+            correction_gain_db > gain_limit_db
+        ):
+            count = int(np.count_nonzero(correction_gain_db > gain_limit_db))
+            observed = float(np.max(correction_gain_db))
+            raise ValueError(
+                f"{count} calibration factor(s) exceed the user limit of "
+                f"{gain_limit_db:g} dB (maximum {observed:g} dB); inspect the "
+                "measured-calibration noise floor/nulls or raise the limit explicitly"
+            )
+        try:
+            output_amp = dut_amp * correction
+        except ValueError as exc:
+            raise ValueError(
+                "calibration angular axes cannot broadcast to the DUT grid"
+            ) from exc
+        if output_amp.shape != dut_amp.shape:
+            raise ValueError(
+                f"calibration produced shape {output_amp.shape}, expected {dut_amp.shape}"
+            )
+        if np.any(~np.isfinite(output_amp)):
+            raise ValueError("range calibration produced a nonfinite complex sample")
+        try:
+            with np.errstate(over="raise", invalid="raise"):
+                output_power = np.abs(output_amp) ** 2
+        except FloatingPointError as exc:
+            raise ValueError(
+                "range calibration magnitude overflows finite sigma_3d power"
+            ) from exc
+        if np.any(~np.isfinite(output_power)):
+            raise ValueError(
+                "range calibration magnitude does not produce finite sigma_3d power"
+            )
+
+        gain_summary = {
+            "minimum": float(np.min(correction_gain_db)),
+            "median": float(np.median(correction_gain_db)),
+            "maximum": float(np.max(correction_gain_db)),
+        }
+        measured_name = str(
+            measured_label or measured_calibration.source_path or "measured calibration"
+        )
+        exact_name = str(
+            exact_label or exact_reference.source_path or "exact reference"
+        )
+
+        def _grid_content_sha256(grid):
+            digest = hashlib.sha256()
+            digest.update(b"grim.range-calibration-grid-id.v1\0")
+            for values in (
+                np.asarray(grid.azimuths, dtype=np.float64),
+                np.asarray(grid.elevations, dtype=np.float64),
+                np.asarray(grid.frequencies, dtype=np.float64),
+                np.asarray(grid.rcs_power, dtype=np.float64),
+                np.asarray(grid.rcs_phase, dtype=np.float64),
+            ):
+                contiguous = np.ascontiguousarray(values)
+                digest.update(str(contiguous.shape).encode("ascii"))
+                digest.update(contiguous.tobytes(order="C"))
+            digest.update(
+                json.dumps(
+                    [str(value) for value in grid.polarizations.tolist()],
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(
+                json.dumps(
+                    dict(grid.units or {}),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            )
+            digest.update(grid._phase_reference().encode("utf-8"))
+            return digest.hexdigest()
+
+        measured_sha256 = _grid_content_sha256(measured_calibration)
+        exact_sha256 = _grid_content_sha256(exact_reference)
+        provenance = {
+            "schema": "grim.range-calibration.v1",
+            "mode": "complex_substitution",
+            "formula": (
+                "A_out=A_dut*A_exact*exp(-j*4*pi*f*delta_R/c)/A_measured_cal"
+            ),
+            "range_offset_m": offset_m,
+            "range_offset_positive_direction": "away_from_radar",
+            "phase_law": "exp(+j*omega*t); S(range) proportional to exp(-j*2*k*R)",
+            "axis_policy": (
+                "exact_frequency_and_polarization; exact_or_explicit_singleton_"
+                "broadcast_angular_axes; no_interpolation"
+            ),
+            "singleton_angular_broadcast": bool(
+                allow_singleton_angular_broadcast
+            ),
+            "user_convention_attested": True,
+            "measured_calibration": measured_name,
+            "measured_calibration_content_sha256": measured_sha256,
+            "exact_reference": exact_name,
+            "exact_reference_content_sha256": exact_sha256,
+            "declared_time_conventions": declared_time_signs,
+            "maximum_correction_gain_db": gain_limit_db,
+            "correction_gain_db": gain_summary,
+        }
+
+        # A calibrated field is a new measurement-domain artifact. Carrying
+        # arbitrary DUT extras can resurrect stale solver, delta, raw-field, or
+        # certification semantics because save() deliberately round-trips those
+        # keys. Rebuild only the truthful calibrated metadata below.
+        extra = {}
+        extra["range_calibration_json"] = json.dumps(
+            provenance,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        exact_phase_reference = exact_reference._phase_reference()
+        extra["phase_reference"] = (
+            "range-calibrated complex substitution; exact reference="
+            f"{exact_phase_reference or '<user-attested phase center>'}; "
+            f"exact_content_sha256={exact_sha256}; "
+            f"delta_R={offset_m:.12g} m positive away from radar; "
+            "exp(+j*omega*t), S(range)~exp(-j*2*k*R)"
+        )
+        extra["amplitude_convention"] = (
+            "stored complex field magnitude=sqrt(sigma_3d); calibrated by "
+            "complex substitution"
+        )
+        history_entry = (
+            f"Range Cal complex substitution: measured={measured_name}; "
+            f"exact={exact_name}; delta_R={offset_m:.12g} m positive away "
+            "from radar; no interpolation"
+        )
+        history = (
+            f"{self.history}\n{history_entry}" if self.history else history_entry
+        )
+        return RcsGrid(
+            self.azimuths,
+            self.elevations,
+            self.frequencies,
+            self.polarizations,
+            rcs=output_amp,
+            rcs_power=output_power,
+            rcs_phase=np.angle(output_amp),
+            rcs_domain="complex_amplitude",
+            source_path=None,
+            history=history,
+            units=dict(self.units),
+            extra=extra,
+        )
 
     def coherent_add(self, other):
         """Coherently add two grids (complex sum).
@@ -1402,22 +2286,7 @@ class RcsGrid:
             raise ValueError("overlap must be 'error', 'first', or 'last'")
         ref = grids[0]
         for grid in grids[1:]:
-            for key, aliases, default in (
-                ("azimuth", _ANGLE_UNITS, "deg"),
-                ("elevation", _ANGLE_UNITS, "deg"),
-                ("frequency", _FREQUENCY_UNITS, "GHz"),
-            ):
-                left = cls._canonical_unit((ref.units or {}).get(key), aliases, default)
-                right = cls._canonical_unit((grid.units or {}).get(key), aliases, default)
-                if left != right:
-                    raise ValueError(f"cannot join grids with {key} units {left} and {right}")
-            if ref.linear_quantity() != grid.linear_quantity():
-                raise ValueError(
-                    "cannot join grids with physical quantities "
-                    f"{ref.linear_quantity()} and {grid.linear_quantity()}"
-                )
-            if ref.default_log_unit().lower() != grid.default_log_unit().lower():
-                raise ValueError("cannot join grids with different logarithmic units")
+            ref._assert_physical_metadata_compatible(grid)
             left_ref = ref._phase_reference()
             right_ref = grid._phase_reference()
             if left_ref != right_ref and (left_ref or right_ref):
@@ -2157,7 +3026,801 @@ class RcsGrid:
         )
 
     @classmethod
+    def load_ptm(cls, path):
+        """Load one legacy PTM great-circle RCS cut.
+
+        PTM stores a single polarization and pitch/elevation per file, with
+        uniformly implied aspect and GHz frequency axes.  Its complex float32
+        IQ samples are mapped to GRIM's 3-D RCS power/phase representation.
+        The great-circle coordinate convention is retained explicitly in
+        ``extra`` so it is not silently mistaken for a conic cut.
+        """
+        import ptm_io
+
+        parsed = ptm_io.read_ptm(path)
+        header = parsed.header
+        gc_convention = (
+            GRIM_GC_CONVENTION
+            if _ptm_configuration_has_grim_gc_marker(header.configuration)
+            else LEGACY_PTM_GC_CONVENTION
+        )
+        header_extra = ptm_io.header_to_extra(header)
+        header_extra["great_circle_coordinate_convention"] = gc_convention
+        header_extra["ptm_cut_type_source"] = "legacy_reader_assumption_not_header"
+        complex_grid = parsed.iq[:, np.newaxis, :, np.newaxis]
+        history = (
+            f"Loaded PTM great-circle cut ({header.num_aspects} aspects, "
+            f"{header.num_frequencies} freqs, {header.polarity}, "
+            f"{header.byte_order}-endian): {path}"
+        )
+        return cls(
+            parsed.aspects_deg,
+            np.asarray([header.pitch], dtype=np.float32),
+            parsed.frequencies_ghz,
+            np.asarray([header.polarity]),
+            rcs=complex_grid,
+            rcs_domain="complex_amplitude",
+            source_path=str(path),
+            history=history,
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+                "angular_coordinate_system": "great_circle",
+                "great_circle_coordinate_convention": gc_convention,
+                "angular_roll_deg": float(header.roll),
+                "angular_tilt_deg": float(header.tilt),
+            },
+            extra=header_extra,
+        )
+
+    def save_ptm(self, path, *, el_idx=None, pol_idx=None):
+        """Save one (elevation, polarization) slice as little-endian PTM.
+
+        PTM is a complex 3-D RCS format.  It cannot represent 2-D scattering
+        width, missing phase, nonuniform axes, multiple elevations, or multiple
+        polarizations in one file.  Callers must select one slice when the grid
+        contains more than one elevation or polarization.
+        """
+        import ptm_io
+
+        if self.linear_quantity() != "sigma_3d":
+            raise ValueError(
+                "save_ptm: PTM stores 3-D RCS (sigma_3d/dBsm); "
+                f"dataset quantity is {self.linear_quantity()!r}"
+            )
+        if el_idx is None:
+            if len(self.elevations) == 1:
+                el_idx = 0
+            else:
+                raise ValueError(
+                    f"save_ptm: el_idx required ({len(self.elevations)} elevations present)"
+                )
+        if pol_idx is None:
+            if len(self.polarizations) == 1:
+                pol_idx = 0
+            else:
+                raise ValueError(
+                    f"save_ptm: pol_idx required "
+                    f"({len(self.polarizations)} polarizations present)"
+                )
+        el_idx = int(el_idx)
+        pol_idx = int(pol_idx)
+        if not 0 <= el_idx < len(self.elevations):
+            raise IndexError(f"save_ptm: el_idx {el_idx} is out of range")
+        if not 0 <= pol_idx < len(self.polarizations):
+            raise IndexError(f"save_ptm: pol_idx {pol_idx} is out of range")
+
+        def _angle_axis_to_deg(values, unit_key):
+            unit = str((self.units or {}).get(unit_key, "deg")).strip().lower()
+            array = np.asarray(values, dtype=float)
+            if unit in ("deg", "degree", "degrees", ""):
+                return array
+            if unit in ("rad", "radian", "radians"):
+                return np.rad2deg(array)
+            raise ValueError(f"save_ptm: unsupported {unit_key} unit {unit!r}")
+
+        aspects_deg = _angle_axis_to_deg(self.azimuths, "azimuth")
+        elevations_deg = _angle_axis_to_deg(self.elevations, "elevation")
+        pitch_deg = float(elevations_deg[el_idx])
+        frequencies_ghz = np.asarray(
+            self._frequency_value_to_hz(self.frequencies), dtype=float
+        ) / 1.0e9
+
+        coordinate_system = self.angular_coordinate_system()
+        if coordinate_system not in {"conic", "great_circle"}:
+            raise ValueError(
+                "save_ptm: angular coordinate system must be explicitly "
+                f"conic or great_circle; got {coordinate_system!r}"
+            )
+        is_great_circle = coordinate_system == "great_circle"
+        selected_polarity = str(self.polarizations[pol_idx]).strip().upper()
+        if not is_great_circle:
+            if not np.isclose(pitch_deg, 0.0, atol=1.0e-9, rtol=0.0):
+                raise ValueError(
+                    "save_ptm: PTM uses great-circle aspect/pitch coordinates; "
+                    "a nonzero-elevation conic/untagged slice cannot be "
+                    "exported without a physical basis/path conversion"
+                )
+            roll_deg, tilt_deg = self.angular_frame_orientation_deg()
+            if not np.allclose(
+                (roll_deg, tilt_deg), (0.0, 0.0), rtol=0.0, atol=1.0e-9
+            ):
+                raise ValueError(
+                    "save_ptm: direct conic-equator export requires "
+                    "roll=tilt=0 degrees"
+                )
+            if selected_polarity in {"VH", "HV"}:
+                raise ValueError(
+                    "save_ptm: direct conic-equator PTM export supports VV/HH "
+                    "only; cross-polar data requires explicit polarization-basis "
+                    "rotation"
+                )
+
+        power_slice = self.rcs_power[:, el_idx, :, pol_idx]
+        phase_slice = self.rcs_phase[:, el_idx, :, pol_idx]
+        power_missing = ~np.isfinite(power_slice)
+        if np.any(power_missing):
+            raise ValueError(
+                "save_ptm: PTM has no documented missing-sample marker; "
+                f"{int(np.count_nonzero(power_missing))} sample(s) lack finite power"
+            )
+        phase_missing = (power_slice > 0.0) & ~np.isfinite(phase_slice)
+        if np.any(phase_missing):
+            raise ValueError(
+                "save_ptm: complex PTM export requires phase for every positive-power "
+                f"sample; {int(np.count_nonzero(phase_missing))} sample(s) lack phase"
+            )
+        zero_without_phase = (power_slice == 0.0) & ~np.isfinite(phase_slice)
+        complex_slice = np.asarray(
+            self.rcs_slice((slice(None), el_idx, slice(None), pol_idx))
+        )
+        if np.any(zero_without_phase):
+            complex_slice = np.array(complex_slice, copy=True)
+            complex_slice[zero_without_phase] = 0.0 + 0.0j
+        expected_shape = (len(self.azimuths), len(self.frequencies))
+        if complex_slice.shape != expected_shape:
+            raise ValueError(
+                f"save_ptm: slice shape {complex_slice.shape} != {expected_shape}"
+            )
+
+        header_extra = dict(self.extra or {})
+        roll_deg, tilt_deg = self.angular_frame_orientation_deg()
+        header_extra["ptm_roll"] = roll_deg
+        header_extra["ptm_tilt"] = tilt_deg
+        header = ptm_io.header_from_extra(header_extra)
+        # Only the tested 0-degree, zero-roll/tilt, co-pol subset defines
+        # GRIM's signed aspect and V/H convention.  Preserve that declaration
+        # in the otherwise free-form configuration field.  Strip the marker
+        # from every wider case so a later import cannot overclaim certainty.
+        convention_is_known = (
+            not is_great_circle
+            or self.great_circle_coordinate_convention() == GRIM_GC_CONVENTION
+        )
+        marker_scope_is_trusted = (
+            convention_is_known
+            and np.isclose(pitch_deg, 0.0, atol=1.0e-9, rtol=0.0)
+            and np.allclose(
+                (roll_deg, tilt_deg), (0.0, 0.0), rtol=0.0, atol=1.0e-9
+            )
+            and selected_polarity in {"VV", "HH"}
+        )
+        configuration = (
+            _ptm_configuration_with_grim_gc_marker(header.configuration)
+            if marker_scope_is_trusted
+            else _ptm_configuration_without_grim_gc_marker(header.configuration)
+        )
+        header = replace(header, configuration=configuration)
+        return ptm_io.write_ptm(
+            path,
+            aspects_deg,
+            frequencies_ghz,
+            complex_slice,
+            polarity=selected_polarity,
+            pitch_deg=pitch_deg,
+            header=header,
+        )
+
+    @classmethod
+    def read_CST(cls, path):
+        """Read a supported CST RCS table into a physically tagged grid.
+
+        Two schemas are recognized:
+
+        * CST's wide spherical table (frequency/theta/phi and one magnitude /
+          phase pair per spherical polarization component).
+        * The legacy ``.cst_data`` flat table documented by ``Read_CST.m``
+          (elevation/azimuth/frequency/polarity/magnitude/phase/IQ).
+
+        Standard CST theta is a colatitude, so the wide form is converted to
+        GRIM elevation with ``elevation = 90 - theta``.  Both forms use GRIM's
+        canonical azimuth interval ``[-180, 180)``.
+        """
+
+        rows = _read_cst_delimited_rows(path)
+        if not rows:
+            raise ValueError("CST table is empty")
+
+        def _flat_key(cell_value):
+            compact = _cst_compact_header(cell_value)
+            if compact.startswith("elevation") and (
+                "deg" in compact or "degree" in compact
+            ):
+                return "elevation"
+            if compact.startswith("azimuth") and (
+                "deg" in compact or "degree" in compact
+            ):
+                return "azimuth"
+            if compact in {"pol", "polarity", "polarization"}:
+                return "polarization"
+            if compact in {"iq", "complexiq", "complexsample", "complexamplitude"}:
+                return "iq"
+            if _cst_frequency_unit(cell_value) is not None:
+                return "frequency"
+            if "magnitude" in compact and (
+                "dbsm" in compact or "dbm2" in compact
+            ):
+                return "magnitude_dbsm"
+            if compact.startswith("rcs") and (
+                "dbsm" in compact or "dbm2" in compact
+            ):
+                return "magnitude_dbsm"
+            if "phase" in compact and (
+                "deg" in compact or "degree" in compact
+            ):
+                return "phase_deg"
+            return None
+
+        required = {"elevation", "azimuth", "frequency", "polarization"}
+        for header_idx, row in enumerate(rows):
+            mapped = {}
+            tokens = {}
+            for column_idx, cell in enumerate(row):
+                key = _flat_key(cell)
+                if key is not None and key not in mapped:
+                    mapped[key] = column_idx
+                    tokens[key] = str(cell)
+            if required.issubset(mapped) and (
+                "magnitude_dbsm" in mapped or "iq" in mapped
+            ):
+                return cls._read_cst_flat_rows(
+                    path, rows, header_idx, mapped, tokens
+                )
+
+        if str(path).lower().endswith(".cst_data"):
+            raise ValueError(
+                "Could not find the .cst_data header. Need elevation, azimuth, "
+                "frequency, polarity, and magnitude(dBsm) and/or IQ columns."
+            )
+        return cls._read_cst_theta_phi_csv(path, rows=rows)
+
+    @classmethod
+    def read_SENTRi(cls, path):
+        """Read either RCS table schema emitted by CREATE-RF SENTRi.
+
+        The supplied team ``READ_SENTRi.m`` documents two header families:
+
+        * compact ``freq_MHz`` / ``theta_deg`` / ``rcs_pp_dBsm`` columns;
+        * descriptive ``Frequency`` / ``Theta`` /
+          ``RCSPhiScat_PhiInc`` columns.
+
+        SENTRi's reported spherical angle is converted with
+        ``elevation = theta - 90``.  Its reported E-field phase uses the
+        opposite sign from GRIM's stored complex field, so each sample is
+        reconstructed as
+        ``10**(dBsm/20) * exp(-1j*deg2rad(phase_deg))``.  These
+        format-specific rules are deliberately separate from :meth:`read_CST`.
+        """
+
+        rows = _read_cst_delimited_rows(path)
+        if not rows:
+            raise ValueError("SENTRi table is empty")
+
+        compact_schema = {
+            "freqmhz": "frequency",
+            "thetadeg": "theta",
+            "phideg": "phi",
+            "rcsppdbsm": "rcs_hh",
+            "efieldphaseppdeg": "phase_hh",
+            "rcsttdbsm": "rcs_vv",
+            "efieldphasettdeg": "phase_vv",
+            "rcsptdbsm": "rcs_hv",
+            "efieldphaseptdeg": "phase_hv",
+            "rcstpdbsm": "rcs_vh",
+            "efieldphasetpdeg": "phase_vh",
+        }
+        descriptive_schema = {
+            "frequency": "frequency",
+            "theta": "theta",
+            "phi": "phi",
+            "rcsphiscatphiinc": "rcs_hh",
+            "phasephiphi": "phase_hh",
+            "rcsthetascatthetainc": "rcs_vv",
+            "phasethetatheta": "phase_vv",
+            "rcsphiscatthetainc": "rcs_hv",
+            "phasephitheta": "phase_hv",
+            "rcsthetascatphiinc": "rcs_vh",
+            "phasethetaphi": "phase_vh",
+        }
+        required = {
+            "frequency", "theta", "phi",
+            "rcs_vv", "phase_vv", "rcs_hv", "phase_hv",
+            "rcs_vh", "phase_vh", "rcs_hh", "phase_hh",
+        }
+
+        header_idx = None
+        columns = None
+        frequency_scale = None
+        schema_name = None
+        for row_idx, row in enumerate(rows):
+            normalized = [_cst_compact_header(cell) for cell in row]
+            for aliases, scale, name in (
+                (compact_schema, 1.0e-3, "compact MHz"),
+                (descriptive_schema, 1.0e-9, "descriptive Hz"),
+            ):
+                mapped = {}
+                for column_idx, token in enumerate(normalized):
+                    key = aliases.get(token)
+                    if key is not None and key not in mapped:
+                        mapped[key] = column_idx
+                if required.issubset(mapped):
+                    header_idx = row_idx
+                    columns = mapped
+                    frequency_scale = scale
+                    schema_name = name
+                    break
+            if header_idx is not None:
+                break
+
+        if header_idx is None or columns is None or frequency_scale is None:
+            raise ValueError(
+                "Could not find a complete SENTRi RCS header. Expected either "
+                "freq_MHz/theta_deg/phi_deg with pp/tt/pt/tp magnitude and "
+                "phase columns, or Frequency/Theta/Phi with the four "
+                "Scat/Inc magnitude and phase pairs."
+            )
+
+        def _number(row, key, line_no, *, allow_negative_infinity=False):
+            idx = columns[key]
+            text = str(row[idx]).strip() if idx < len(row) else ""
+            if not text:
+                raise ValueError(f"line {line_no}: {key} is blank")
+            try:
+                value = float(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"line {line_no}: invalid {key} value {text!r}"
+                ) from exc
+            valid = np.isfinite(value) or (
+                allow_negative_infinity and np.isneginf(value)
+            )
+            if not valid:
+                expected = "finite or -Inf" if allow_negative_infinity else "finite"
+                raise ValueError(f"line {line_no}: {key} must be {expected}")
+            return float(value)
+
+        channel_specs = (
+            ("VV", "rcs_vv", "phase_vv"),
+            ("HV", "rcs_hv", "phase_hv"),
+            ("VH", "rcs_vh", "phase_vh"),
+            ("HH", "rcs_hh", "phase_hh"),
+        )
+        records = []
+        seen = {}
+        for row_idx, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
+            if not row or all(not str(cell).strip() for cell in row):
+                continue
+            raw_frequency = _number(row, "frequency", row_idx)
+            frequency_ghz = raw_frequency * frequency_scale
+            if not np.isfinite(frequency_ghz) or frequency_ghz <= 0.0:
+                raise ValueError(f"line {row_idx}: frequency must be positive")
+            theta_deg = _number(row, "theta", row_idx)
+            if theta_deg < -1.0e-9 or theta_deg > 180.0 + 1.0e-9:
+                raise ValueError(
+                    f"line {row_idx}: SENTRi theta must be in [0, 180] deg"
+                )
+            elevation_deg = float(theta_deg - 90.0)
+            azimuth_deg = _wrap_cst_azimuth_deg(
+                _number(row, "phi", row_idx)
+            )
+
+            for polarization, magnitude_key, phase_key in channel_specs:
+                magnitude_dbsm = _number(
+                    row, magnitude_key, row_idx, allow_negative_infinity=True
+                )
+                reported_phase_deg = _number(row, phase_key, row_idx)
+                power = _cst_dbsm_to_power(
+                    magnitude_dbsm,
+                    context=f"line {row_idx} {magnitude_key}",
+                )
+                phase = float(-np.deg2rad(reported_phase_deg))
+                key = (azimuth_deg, elevation_deg, frequency_ghz, polarization)
+                if key in seen:
+                    prior_line, prior_power, prior_phase = seen[key]
+                    if _cst_samples_equivalent(
+                        prior_power, prior_phase, power, phase
+                    ):
+                        continue
+                    raise ValueError(
+                        f"line {row_idx}: conflicting duplicate SENTRi sample "
+                        f"after azimuth wrapping; first defined on line {prior_line}"
+                    )
+                seen[key] = (row_idx, power, phase)
+                records.append(
+                    (
+                        azimuth_deg, elevation_deg, float(frequency_ghz),
+                        polarization, power, phase,
+                    )
+                )
+
+        if not records:
+            raise ValueError("SENTRi table contains no data rows")
+
+        azimuths = np.asarray(sorted({row[0] for row in records}), dtype=float)
+        elevations = np.asarray(sorted({row[1] for row in records}), dtype=float)
+        frequencies = np.asarray(sorted({row[2] for row in records}), dtype=float)
+        polarizations = np.asarray([spec[0] for spec in channel_specs])
+        shape = (
+            len(azimuths), len(elevations), len(frequencies), len(polarizations)
+        )
+        power = np.full(shape, np.nan, dtype=np.float64)
+        phase = np.full(shape, np.nan, dtype=np.float64)
+        az_index = {value: idx for idx, value in enumerate(azimuths.tolist())}
+        el_index = {value: idx for idx, value in enumerate(elevations.tolist())}
+        freq_index = {value: idx for idx, value in enumerate(frequencies.tolist())}
+        pol_index = {value: idx for idx, value in enumerate(polarizations.tolist())}
+        for azimuth, elevation, frequency, polarization, sample_power, sample_phase in records:
+            index = (
+                az_index[azimuth], el_index[elevation], freq_index[frequency],
+                pol_index[polarization],
+            )
+            power[index] = sample_power
+            phase[index] = sample_phase
+
+        mapping = (
+            "elevation=theta-90; phi wrapped to [-180, 180); "
+            "VV=tt/theta-theta, HV=pt/phi-theta, "
+            "VH=tp/theta-phi, HH=pp/phi-phi; "
+            "stored phase=-reported E-field phase"
+        )
+        return cls(
+            azimuths,
+            elevations,
+            frequencies,
+            polarizations,
+            rcs_power=power,
+            rcs_phase=phase,
+            rcs_domain="power_phase",
+            source_path=str(path),
+            history=f"Loaded SENTRi {schema_name} RCS table; {mapping}: {path}",
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+                "angular_coordinate_system": "conic",
+            },
+            extra={
+                "source_format": f"SENTRi {schema_name} RCS table",
+                "sentri_coordinate_mapping": "elevation=theta-90; azimuth=wrapped phi",
+                "sentri_polarization_mapping": (
+                    "VV=tt/theta-theta; HV=pt/phi-theta; "
+                    "VH=tp/theta-phi; HH=pp/phi-phi"
+                ),
+                "sentri_phase_mapping": (
+                    "GRIM complex amplitude = 10^(dBsm/20) "
+                    "* exp(-j*deg2rad(reported_phase_deg))"
+                ),
+            },
+        )
+
+    @classmethod
+    def has_SENTRi_signature(cls, path):
+        """Return whether a delimited file has a recognizable SENTRi family header.
+
+        Dispatchers use this before trying legacy/fallback readers.  Once the
+        vendor signature is present, malformed SENTRi data must fail as SENTRi
+        instead of being silently reinterpreted as an unrelated numeric TXT.
+        """
+
+        # Probe only the header region; full files can be large angular/frequency
+        # sweeps and read_SENTRi() will perform the authoritative parse once.
+        with open(path, "r", newline="", encoding="utf-8-sig") as stream:
+            sample = stream.read(8192)
+            stream.seek(0)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+                delimiter = dialect.delimiter
+            except csv.Error:
+                delimiter = max((",", "\t", ";"), key=sample.count)
+            rows = []
+            for row_index, row in enumerate(csv.reader(stream, delimiter=delimiter)):
+                rows.append(row)
+                if row_index >= 255:
+                    break
+        compact_required = {
+            "freqmhz",
+            "thetadeg",
+            "phideg",
+            "rcsppdbsm",
+            "efieldphaseppdeg",
+            "rcsttdbsm",
+            "efieldphasettdeg",
+            "rcsptdbsm",
+            "efieldphaseptdeg",
+            "rcstpdbsm",
+            "efieldphasetpdeg",
+        }
+        descriptive_required = {
+            "frequency",
+            "theta",
+            "phi",
+            "rcsphiscatphiinc",
+            "phasephiphi",
+            "rcsthetascatthetainc",
+            "phasethetatheta",
+            "rcsphiscatthetainc",
+            "phasephitheta",
+            "rcsthetascatphiinc",
+            "phasethetaphi",
+        }
+        for row in rows:
+            tokens = {_cst_compact_header(cell) for cell in row}
+            if compact_required.issubset(tokens) or descriptive_required.issubset(tokens):
+                return True
+            compact_family = {"freqmhz", "thetadeg", "phideg"}.issubset(tokens) and any(
+                token.startswith(("rcspp", "rcstt", "rcspt", "rcstp"))
+                or token.startswith("efieldphase")
+                for token in tokens
+            )
+            descriptive_family = {"frequency", "theta", "phi"}.issubset(tokens) and any(
+                token.startswith(("rcsphiscat", "rcsthetascat"))
+                for token in tokens
+            )
+            if compact_family or descriptive_family:
+                return True
+        return False
+
+    @classmethod
     def load_theta_phi_csv(cls, path):
+        """Compatibility name for :meth:`read_CST`."""
+
+        return cls.read_CST(path)
+
+    @classmethod
+    def _read_cst_flat_rows(cls, path, rows, header_idx, col_idx, header_tokens):
+        """Parse the legacy row-per-polarization ``.cst_data`` schema."""
+
+        def _cell(row, key):
+            idx = col_idx.get(key, -1)
+            if idx < 0 or idx >= len(row):
+                return ""
+            return str(row[idx]).strip()
+
+        def _required_float(row, key, line_no):
+            text = _cell(row, key)
+            try:
+                value = float(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"line {line_no}: invalid {key} value {text!r}"
+                ) from exc
+            if not np.isfinite(value):
+                raise ValueError(f"line {line_no}: {key} must be finite")
+            return float(value)
+
+        def _optional_float(row, key, line_no):
+            text = _cell(row, key)
+            if not text:
+                return None
+            try:
+                value = float(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"line {line_no}: invalid {key} value {text!r}"
+                ) from exc
+            if np.isnan(value):
+                return None
+            if np.isposinf(value):
+                raise ValueError(f"line {line_no}: {key} cannot be +Inf")
+            return float(value)
+
+        raw_records = []
+        pol_order = []
+        iq_validated = 0
+        iq_only = 0
+        iq_unparsed = 0
+
+        for row_idx, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
+            if not row or all(not str(value).strip() for value in row):
+                continue
+
+            elevation = _required_float(row, "elevation", row_idx)
+            azimuth = _wrap_cst_azimuth_deg(
+                _required_float(row, "azimuth", row_idx)
+            )
+            raw_frequency = _required_float(row, "frequency", row_idx)
+            if raw_frequency <= 0.0:
+                raise ValueError(f"line {row_idx}: frequency must be positive")
+            polarization = _cell(row, "polarization").upper()
+            if not polarization:
+                raise ValueError(f"line {row_idx}: polarity is blank")
+
+            magnitude_dbsm = _optional_float(
+                row, "magnitude_dbsm", row_idx
+            ) if "magnitude_dbsm" in col_idx else None
+            phase_deg = _optional_float(
+                row, "phase_deg", row_idx
+            ) if "phase_deg" in col_idx else None
+
+            iq_text = _cell(row, "iq") if "iq" in col_idx else ""
+            iq_value = None
+            if iq_text:
+                try:
+                    iq_value = _parse_cst_iq(iq_text)
+                except ValueError as exc:
+                    if magnitude_dbsm is None:
+                        raise ValueError(f"line {row_idx}: {exc}") from exc
+                    iq_unparsed += 1
+
+            if magnitude_dbsm is None and iq_value is None:
+                raise ValueError(
+                    f"line {row_idx}: need a finite magnitude(dBsm) or parsable IQ sample"
+                )
+
+            if magnitude_dbsm is None:
+                power = _cst_iq_to_power(
+                    iq_value, context=f"line {row_idx} IQ"
+                )
+            else:
+                power = _cst_dbsm_to_power(
+                    magnitude_dbsm, context=f"line {row_idx} Magnitude(dBsm)"
+                )
+
+            if phase_deg is not None and not np.isfinite(phase_deg):
+                raise ValueError(f"line {row_idx}: phase_deg must be finite")
+            phase = (
+                float(np.deg2rad(phase_deg))
+                if phase_deg is not None
+                else float(np.angle(iq_value)) if iq_value is not None
+                else float("nan")
+            )
+
+            if iq_value is not None and magnitude_dbsm is not None:
+                iq_power = _cst_iq_to_power(
+                    iq_value, context=f"line {row_idx} IQ"
+                )
+                if power == 0.0:
+                    magnitude_matches = iq_power <= 1.0e-20
+                elif iq_power == 0.0:
+                    magnitude_matches = False
+                else:
+                    iq_dbsm = 10.0 * np.log10(iq_power)
+                    magnitude_matches = abs(iq_dbsm - magnitude_dbsm) <= 0.05
+                if not magnitude_matches:
+                    raise ValueError(
+                        f"line {row_idx}: IQ magnitude disagrees with "
+                        "Magnitude(dBsm) by more than 0.05 dB"
+                    )
+
+            if (
+                iq_value is not None
+                and phase_deg is not None
+                and abs(iq_value) > 1.0e-15
+            ):
+                phase_error = np.angle(np.exp(1j * (np.angle(iq_value) - phase)))
+                if abs(float(np.rad2deg(phase_error))) > 0.5:
+                    raise ValueError(
+                        f"line {row_idx}: IQ phase disagrees with Phase(deg) "
+                        "by more than 0.5 deg"
+                    )
+
+            if iq_value is not None:
+                # The team's Read_CST workflow treats IQ as the authoritative
+                # coherent field.  Magnitude/phase columns are rounded
+                # redundant values: validate them above, but do not replace IQ
+                # precision with those display columns.
+                power = _cst_iq_to_power(
+                    iq_value, context=f"line {row_idx} IQ"
+                )
+                phase = float(np.angle(iq_value))
+                if magnitude_dbsm is None and phase_deg is None:
+                    iq_only += 1
+                else:
+                    iq_validated += 1
+            if polarization not in pol_order:
+                pol_order.append(polarization)
+            raw_records.append(
+                (row_idx, azimuth, elevation, raw_frequency, polarization, power, phase)
+            )
+
+        if not raw_records:
+            raise ValueError("CST flat table contains no data rows")
+
+        frequency_scale, _ = _cst_frequency_scale_to_ghz(
+            header_tokens.get("frequency", "")
+        )
+
+        records = []
+        seen = {}
+        for row_idx, azimuth, elevation, raw_frequency, polarization, power, phase in raw_records:
+            frequency = float(raw_frequency * frequency_scale)
+            key = (azimuth, elevation, frequency, polarization)
+            if key in seen:
+                prior_line, prior_power, prior_phase = seen[key]
+                if _cst_samples_equivalent(
+                    prior_power, prior_phase, power, phase
+                ):
+                    continue
+                raise ValueError(
+                    f"line {row_idx}: conflicting duplicate CST sample after "
+                    f"azimuth wrapping; first defined on line {prior_line}"
+                )
+            seen[key] = (row_idx, power, phase)
+            records.append(
+                (azimuth, elevation, frequency, polarization, power, phase)
+            )
+
+        azimuths = np.asarray(sorted({record[0] for record in records}), dtype=float)
+        elevations = np.asarray(sorted({record[1] for record in records}), dtype=float)
+        frequencies = np.asarray(sorted({record[2] for record in records}), dtype=float)
+        polarizations = np.asarray(pol_order, dtype=object)
+        shape = (
+            len(azimuths), len(elevations), len(frequencies), len(polarizations)
+        )
+        power = np.full(shape, np.nan, dtype=np.float64)
+        phase = np.full(shape, np.nan, dtype=np.float64)
+        az_index = {value: index for index, value in enumerate(azimuths.tolist())}
+        el_index = {value: index for index, value in enumerate(elevations.tolist())}
+        freq_index = {value: index for index, value in enumerate(frequencies.tolist())}
+        pol_index = {str(value): index for index, value in enumerate(polarizations.tolist())}
+
+        for azimuth, elevation, frequency, polarization, sample_power, sample_phase in records:
+            index = (
+                az_index[azimuth], el_index[elevation], freq_index[frequency],
+                pol_index[polarization],
+            )
+            power[index] = sample_power
+            phase[index] = sample_phase
+
+        iq_summary = (
+            f"IQ validated={iq_validated}, IQ-only={iq_only}, "
+            f"IQ-unparsed fallback={iq_unparsed}"
+        )
+        return cls(
+            azimuths,
+            elevations,
+            frequencies,
+            polarizations,
+            rcs_power=power,
+            rcs_phase=phase,
+            rcs_domain="power_phase",
+            source_path=path,
+            history=(
+                f"Loaded CST flat cst_data; explicit elevation; azimuth wrapped "
+                f"to [-180, 180); {iq_summary}: {path}"
+            ),
+            units={
+                "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
+                "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
+            },
+            extra={
+                "source_format": "CST flat cst_data",
+                "cst_angle_mapping": (
+                    "explicit elevation; azimuth wrapped to [-180, 180)"
+                ),
+                "cst_polarization_mapping": "labels supplied by Polarity column",
+                "cst_iq_rows_validated": iq_validated,
+                "cst_iq_only_rows": iq_only,
+                "cst_iq_unparsed_fallback_rows": iq_unparsed,
+            },
+        )
+
+    @classmethod
+    def _read_cst_theta_phi_csv(cls, path, *, rows=None):
         """Load a theta/phi scattering CSV into an RcsGrid.
 
         Expected layout:
@@ -2170,8 +3833,8 @@ class RcsGrid:
               phase theta-phi(...), phase phi-phi(...)
 
         Conventions applied:
-            - phi(deg)   -> azimuth axis
-            - theta(deg) -> elevation axis
+            - phi(deg), wrapped to [-180, 180), -> azimuth axis
+            - standard CST theta colatitude -> elevation = 90 - theta
             - theta -> V, phi -> H
               rcs theta-theta -> VV
               rcs phi-theta   -> HV
@@ -2187,28 +3850,10 @@ class RcsGrid:
                 s = s.replace(ch, "")
             return s
 
-        def _infer_freq_scale_to_ghz(freq_header_token: str, freq_values: np.ndarray) -> tuple[float, str]:
-            token = str(freq_header_token or "").lower()
-            if "ghz" in token:
-                return 1.0, "GHz"
-            if "mhz" in token:
-                return 1.0e-3, "MHz"
-            if "khz" in token:
-                return 1.0e-6, "kHz"
-            if "hz" in token:
-                return 1.0e-9, "Hz"
-
-            finite = np.asarray(freq_values, dtype=float)
-            finite = finite[np.isfinite(finite)]
-            if finite.size == 0:
-                return 1.0, "GHz"
-
-            typical = float(np.nanmedian(np.abs(finite)))
-            if typical >= 1.0e6:
-                return 1.0e-9, "Hz"
-            if typical >= 1.0e3:
-                return 1.0e-3, "MHz"
-            return 1.0, "GHz"
+        def _infer_freq_scale_to_ghz(freq_header_token: str) -> tuple[float, str]:
+            scale, unit = _cst_frequency_scale_to_ghz(freq_header_token)
+            labels = {"hz": "Hz", "khz": "kHz", "mhz": "MHz", "ghz": "GHz"}
+            return scale, labels[unit]
 
         alias_to_key = {
             "frequency(hz)": "frequency",
@@ -2221,47 +3866,33 @@ class RcsGrid:
             "frequencykhz": "frequency",
             "frequency": "frequency",
             "theta(deg)": "theta_deg",
-            "theta": "theta_deg",
             "phi(deg)": "phi_deg",
-            "phi": "phi_deg",
             "rcstheta-theta(dbsm)": "rcs_vv_dbsm",
             "rcstheta-thetadbsm": "rcs_vv_dbsm",
             "rcstheta-theta(dbm^2)": "rcs_vv_dbsm",
             "rcstheta-thetadbm2": "rcs_vv_dbsm",
-            "rcstheta-theta": "rcs_vv_dbsm",
             "rcsphi-theta(dbsm)": "rcs_hv_dbsm",
             "rcsphi-thetadbsm": "rcs_hv_dbsm",
             "rcsphi-theta(dbm^2)": "rcs_hv_dbsm",
             "rcsphi-thetadbm2": "rcs_hv_dbsm",
-            "rcsphi-theta": "rcs_hv_dbsm",
             "rcstheta-phi(dbsm)": "rcs_vh_dbsm",
             "rcstheta-phidbsm": "rcs_vh_dbsm",
             "rcstheta-phi(dbm^2)": "rcs_vh_dbsm",
             "rcstheta-phidbm2": "rcs_vh_dbsm",
-            "rcstheta-phi": "rcs_vh_dbsm",
             "rcsphi-phi(dbsm)": "rcs_hh_dbsm",
             "rcsphi-phidbsm": "rcs_hh_dbsm",
             "rcsphi-phi(dbm^2)": "rcs_hh_dbsm",
             "rcsphi-phidbm2": "rcs_hh_dbsm",
-            "rcsphi-phi": "rcs_hh_dbsm",
             "phasetheta-theta(deg)": "phase_vv_deg",
-            "phasetheta-theta(dbsm)": "phase_vv_deg",
-            "phasetheta-theta": "phase_vv_deg",
             "phasephi-theta(deg)": "phase_hv_deg",
-            "phasephi-theta(dbsm)": "phase_hv_deg",
-            "phasephi-theta": "phase_hv_deg",
             "phasetheta-phi(deg)": "phase_vh_deg",
-            "phasetheta-phi(dbsm)": "phase_vh_deg",
-            "phasetheta-phi": "phase_vh_deg",
             "phasephi-phi(deg)": "phase_hh_deg",
-            "phasephi-phi(dbsm)": "phase_hh_deg",
-            "phasephi-phi": "phase_hh_deg",
         }
 
-        with open(path, "r", newline="", encoding="utf-8-sig") as f:
-            rows = list(csv.reader(f))
+        if rows is None:
+            rows = _read_cst_delimited_rows(path)
         if not rows:
-            raise ValueError("CSV is empty")
+            raise ValueError("CST theta/phi table is empty")
 
         def _classify_fuzzy_header(cell_value: str) -> str | None:
             raw = str(cell_value or "").strip().lower()
@@ -2280,6 +3911,7 @@ class RcsGrid:
                 and "phase" not in compact
                 and "rcs" not in compact
                 and "abs" not in compact
+                and ("deg" in compact or "degree" in compact)
             ):
                 return "theta_deg"
             if (
@@ -2287,11 +3919,24 @@ class RcsGrid:
                 and "phase" not in compact
                 and "rcs" not in compact
                 and "abs" not in compact
+                and ("deg" in compact or "degree" in compact)
             ):
                 return "phi_deg"
 
-            has_phase = "phase" in compact
-            has_mag = (("rcs" in compact) or ("abs" in compact) or ("sigma" in compact)) and not has_phase
+            has_phase = "phase" in compact and (
+                "deg" in compact or "degree" in compact
+            )
+            has_explicit_rcs_quantity = (
+                "rcs" in compact
+                or "radarcrosssection" in compact
+                or "sigma" in compact
+            )
+            has_explicit_rcs_unit = "dbsm" in compact or "dbm2" in compact
+            has_mag = (
+                has_explicit_rcs_quantity
+                and has_explicit_rcs_unit
+                and not has_phase
+            )
             if not has_phase and not has_mag:
                 return None
 
@@ -2319,17 +3964,6 @@ class RcsGrid:
                 return f"phase_{pair_key}_deg"
             return f"rcs_{pair_key}_dbsm"
 
-        def _is_numeric_axes_row(row_values: list[str]) -> bool:
-            if len(row_values) < 3:
-                return False
-            try:
-                f_val = float(str(row_values[0]).strip())
-                t_val = float(str(row_values[1]).strip())
-                p_val = float(str(row_values[2]).strip())
-            except ValueError:
-                return False
-            return bool(np.isfinite(f_val) and np.isfinite(t_val) and np.isfinite(p_val))
-
         header_idx = None
         data_start_idx = 0
         col_idx: dict[str, int] = {}
@@ -2338,13 +3972,33 @@ class RcsGrid:
         for i, row in enumerate(rows):
             mapped: dict[str, int] = {}
             mapped_tokens: dict[str, str] = {}
+            ambiguous_physics_headers: list[str] = []
             for j, cell in enumerate(row):
                 key = _classify_fuzzy_header(cell)
                 if key is not None and key not in mapped:
                     mapped[key] = j
                     mapped_tokens[key] = str(cell)
+                    continue
+                compact = re.sub(
+                    r"[^a-z0-9]+", "", str(cell or "").strip().lower()
+                )
+                mentions_basis = "theta" in compact or "phi" in compact
+                mentions_rcs = (
+                    "rcs" in compact
+                    or "radarcrosssection" in compact
+                    or "sigma" in compact
+                )
+                if mentions_basis and ("phase" in compact or mentions_rcs):
+                    ambiguous_physics_headers.append(str(cell))
             has_any_rcs = any(k.startswith("rcs_") for k in mapped.keys())
             if required_axes.issubset(mapped.keys()) and has_any_rcs:
+                if ambiguous_physics_headers:
+                    raise ValueError(
+                        "Ambiguous CST wide-table physics header(s): "
+                        + ", ".join(repr(value) for value in ambiguous_physics_headers)
+                        + ". RCS magnitudes must state dBsm/dBm^2 and phases "
+                        "must state degrees."
+                    )
                 header_idx = i
                 data_start_idx = i + 1
                 col_idx = mapped
@@ -2352,63 +4006,63 @@ class RcsGrid:
                 break
 
         if header_idx is None:
-            for i, row in enumerate(rows):
-                if _is_numeric_axes_row(row):
-                    header_idx = i - 1
-                    data_start_idx = i
-                    col_idx = {"frequency": 0, "theta_deg": 1, "phi_deg": 2}
-                    if len(row) > 3:
-                        col_idx["rcs_vv_dbsm"] = 3
-                    if len(row) > 4:
-                        col_idx["rcs_hv_dbsm"] = 4
-                    if len(row) > 5:
-                        col_idx["rcs_vh_dbsm"] = 5
-                    if len(row) > 6:
-                        col_idx["rcs_hh_dbsm"] = 6
-                    if len(row) > 7:
-                        col_idx["phase_vv_deg"] = 7
-                    if len(row) > 8:
-                        col_idx["phase_hv_deg"] = 8
-                    if len(row) > 9:
-                        col_idx["phase_vh_deg"] = 9
-                    if len(row) > 10:
-                        col_idx["phase_hh_deg"] = 10
-                    break
-
-        if "frequency" not in col_idx or "theta_deg" not in col_idx or "phi_deg" not in col_idx:
             raise ValueError(
-                "Could not find CSV axes. Need frequency/theta/phi columns (header-based or first 3 columns)."
+                "Could not find an explicit CST RCS header. Need frequency "
+                "with units, theta/phi axes, and at least one RCS magnitude "
+                "column explicitly labeled dBsm or dBm^2. Headerless/order-"
+                "guessed and generic Abs(field) tables are not accepted."
             )
 
-        def _parse_float(raw: str) -> float:
-            text = str(raw).strip()
-            if text == "":
-                return float("nan")
-            return float(text)
-
         records: list[tuple[float, float, float, float, float, float, float, float, float, float, float]] = []
-        for row in rows[data_start_idx:]:
+        for row_index, row in enumerate(rows[data_start_idx:], start=data_start_idx):
+            line_no = row_index + 1
             if not row or all(str(cell).strip() == "" for cell in row):
                 continue
-            try:
-                f_hz = _parse_float(row[col_idx["frequency"]]) if col_idx["frequency"] < len(row) else float("nan")
-                theta_deg = _parse_float(row[col_idx["theta_deg"]]) if col_idx["theta_deg"] < len(row) else float("nan")
-                phi_deg = _parse_float(row[col_idx["phi_deg"]]) if col_idx["phi_deg"] < len(row) else float("nan")
-            except ValueError:
-                # Skip non-numeric rows after the header.
-                continue
 
-            if not (np.isfinite(f_hz) and np.isfinite(theta_deg) and np.isfinite(phi_deg)):
-                continue
+            def _axis_cell(key: str) -> float:
+                idx = col_idx[key]
+                raw = row[idx] if idx < len(row) else ""
+                text = str(raw).strip()
+                if not text:
+                    raise ValueError(f"line {line_no}: {key} is blank")
+                try:
+                    value = float(text)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"line {line_no}: invalid {key} value {text!r}"
+                    ) from exc
+                if not np.isfinite(value):
+                    raise ValueError(f"line {line_no}: {key} must be finite")
+                return value
+
+            f_hz = _axis_cell("frequency")
+            if f_hz <= 0.0:
+                raise ValueError(f"line {line_no}: frequency must be positive")
+            theta_deg = _axis_cell("theta_deg")
+            phi_deg = _axis_cell("phi_deg")
 
             def _cell(key: str) -> float:
                 idx = col_idx.get(key, -1)
                 if idx < 0 or idx >= len(row):
                     return float("nan")
-                try:
-                    return _parse_float(row[idx])
-                except ValueError:
+                text = str(row[idx]).strip()
+                if not text:
                     return float("nan")
+                try:
+                    value = float(text)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"line {line_no}: invalid {key} value {text!r}"
+                    ) from exc
+                if key.startswith("phase_") and not np.isfinite(value):
+                    raise ValueError(f"line {line_no}: {key} must be finite")
+                if key.startswith("rcs_") and not (
+                    np.isfinite(value) or np.isneginf(value)
+                ):
+                    raise ValueError(
+                        f"line {line_no}: {key} must be finite or -Inf"
+                    )
+                return value
 
             records.append(
                 (
@@ -2429,89 +4083,107 @@ class RcsGrid:
         if not records:
             raise ValueError("CSV contains no data rows after the header")
 
-        raw_freqs = np.asarray([r[0] for r in records], dtype=float)
-        freq_scale_to_ghz, _ = _infer_freq_scale_to_ghz(header_tokens.get("frequency", ""), raw_freqs)
-        records_ghz = [
-            (
-                float(f_raw * freq_scale_to_ghz),
-                theta_deg,
-                phi_deg,
-                vv_db,
-                hv_db,
-                vh_db,
-                hh_db,
-                vv_ph,
-                hv_ph,
-                vh_ph,
-                hh_ph,
-            )
-            for (
-                f_raw,
-                theta_deg,
-                phi_deg,
-                vv_db,
-                hv_db,
-                vh_db,
-                hh_db,
-                vv_ph,
-                hv_ph,
-                vh_ph,
-                hh_ph,
-            ) in records
+        freq_scale_to_ghz, _ = _infer_freq_scale_to_ghz(
+            header_tokens.get("frequency", "")
+        )
+
+        # Preserve the established CST component-name mapping, but do not add
+        # all-NaN polarization axes merely because the wide schema permits them.
+        channel_specs = (
+            ("VV", 3, 7, "theta-theta"),
+            ("HV", 4, 8, "phi-theta"),
+            ("VH", 5, 9, "theta-phi"),
+            ("HH", 6, 10, "phi-phi"),
+        )
+
+        def _has_magnitude(value):
+            return not bool(np.isnan(value))
+
+        present_specs = [
+            spec for spec in channel_specs
+            if any(_has_magnitude(record[spec[1]]) for record in records)
         ]
+        if not present_specs:
+            raise ValueError(
+                "CST theta/phi table parsed, but no finite RCS magnitude values were found"
+            )
 
-        freqs = np.asarray(sorted({r[0] for r in records_ghz}), dtype=float)
-        elevs = np.asarray(sorted({r[1] for r in records}), dtype=float)   # theta -> elevation
-        azims = np.asarray(sorted({r[2] for r in records}), dtype=float)   # phi -> azimuth
-        pols = np.asarray(["VV", "HV", "VH", "HH"], dtype=object)
+        normalized_records = []
+        for record in records:
+            f_ghz = float(record[0] * freq_scale_to_ghz)
+            theta_deg = float(record[1])
+            if theta_deg < -1.0e-9 or theta_deg > 180.0 + 1.0e-9:
+                raise ValueError(
+                    f"standard CST theta must be within [0, 180] deg, got {theta_deg:g}"
+                )
+            elevation_deg = float(90.0 - theta_deg)
+            azimuth_deg = _wrap_cst_azimuth_deg(record[2])
+            if any(_has_magnitude(record[spec[1]]) for spec in present_specs):
+                normalized_records.append(
+                    (f_ghz, elevation_deg, azimuth_deg, record)
+                )
 
-        f_idx = {float(v): i for i, v in enumerate(freqs.tolist())}
-        el_idx = {float(v): i for i, v in enumerate(elevs.tolist())}
-        az_idx = {float(v): i for i, v in enumerate(azims.tolist())}
+        freqs = np.asarray(
+            sorted({record[0] for record in normalized_records}), dtype=float
+        )
+        elevs = np.asarray(
+            sorted({record[1] for record in normalized_records}), dtype=float
+        )
+        azims = np.asarray(
+            sorted({record[2] for record in normalized_records}), dtype=float
+        )
+        pols = np.asarray([spec[0] for spec in present_specs], dtype=object)
+
+        f_idx = {float(value): index for index, value in enumerate(freqs.tolist())}
+        el_idx = {float(value): index for index, value in enumerate(elevs.tolist())}
+        az_idx = {float(value): index for index, value in enumerate(azims.tolist())}
+        pol_idx = {str(value): index for index, value in enumerate(pols.tolist())}
 
         shape = (len(azims), len(elevs), len(freqs), len(pols))
-        power = np.full(shape, np.nan, dtype=np.float32)
-        phase = np.full(shape, np.nan, dtype=np.float32)
+        power = np.full(shape, np.nan, dtype=np.float64)
+        phase = np.full(shape, np.nan, dtype=np.float64)
 
         def _dbsm_to_linear(value: float) -> float:
-            if not np.isfinite(value):
-                return float("nan")
-            return float(10.0 ** (value / 10.0))
+            return _cst_dbsm_to_power(value, context="CST wide-table magnitude")
 
         def _deg_to_rad(value: float) -> float:
             if not np.isfinite(value):
                 return float("nan")
             return float(np.deg2rad(value))
 
-        for (
-            f_ghz,
-            theta_deg,
-            phi_deg,
-            vv_db,
-            hv_db,
-            vh_db,
-            hh_db,
-            vv_ph,
-            hv_ph,
-            vh_ph,
-            hh_ph,
-        ) in records_ghz:
-            ai = az_idx[phi_deg]
-            ei = el_idx[theta_deg]
+        seen = {}
+        for f_ghz, elevation_deg, azimuth_deg, source_record in normalized_records:
+            ai = az_idx[azimuth_deg]
+            ei = el_idx[elevation_deg]
             fi = f_idx[f_ghz]
-
-            power[ai, ei, fi, 0] = _dbsm_to_linear(vv_db)  # VV (theta-theta)
-            power[ai, ei, fi, 1] = _dbsm_to_linear(hv_db)  # HV (phi-theta)
-            power[ai, ei, fi, 2] = _dbsm_to_linear(vh_db)  # VH (theta-phi)
-            power[ai, ei, fi, 3] = _dbsm_to_linear(hh_db)  # HH (phi-phi)
-
-            phase[ai, ei, fi, 0] = _deg_to_rad(vv_ph)
-            phase[ai, ei, fi, 1] = _deg_to_rad(hv_ph)
-            phase[ai, ei, fi, 2] = _deg_to_rad(vh_ph)
-            phase[ai, ei, fi, 3] = _deg_to_rad(hh_ph)
+            for pol_label, magnitude_index, phase_index, component_name in present_specs:
+                magnitude = source_record[magnitude_index]
+                if not _has_magnitude(magnitude):
+                    continue
+                sample_key = (azimuth_deg, elevation_deg, f_ghz, pol_label)
+                sample_power = _dbsm_to_linear(magnitude)
+                sample_phase = _deg_to_rad(source_record[phase_index])
+                if sample_key in seen:
+                    prior_power, prior_phase = seen[sample_key]
+                    if _cst_samples_equivalent(
+                        prior_power, prior_phase, sample_power, sample_phase
+                    ):
+                        continue
+                    raise ValueError(
+                        "conflicting duplicate CST theta/phi sample after "
+                        "coordinate conversion: "
+                        f"az={azimuth_deg:g}, el={elevation_deg:g}, "
+                        f"f={f_ghz:g} GHz, component={component_name}"
+                    )
+                seen[sample_key] = (sample_power, sample_phase)
+                pi = pol_idx[pol_label]
+                power[ai, ei, fi, pi] = sample_power
+                phase[ai, ei, fi, pi] = sample_phase
 
         if not np.isfinite(power).any():
-            raise ValueError("CSV parsed, but no finite RCS magnitude values were found")
+            raise ValueError(
+                "CST theta/phi table parsed, but no finite RCS magnitude values were found"
+            )
 
         return cls(
             azims,
@@ -2522,10 +4194,22 @@ class RcsGrid:
             rcs_phase=phase,
             rcs_domain="power_phase",
             source_path=path,
-            history=f"Loaded theta/phi CSV: {path}",
+            history=(
+                "Loaded CST theta/phi table; standard theta converted with "
+                f"elevation=90-theta; phi wrapped to [-180, 180): {path}"
+            ),
             units={
                 "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
                 "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
+            },
+            extra={
+                "source_format": "CST wide theta/phi table",
+                "cst_angle_mapping": (
+                    "elevation=90-theta; phi wrapped to [-180, 180)"
+                ),
+                "cst_polarization_mapping": (
+                    "theta=V, phi=H; component pair mapped in written order"
+                ),
             },
         )
 
@@ -2996,6 +4680,12 @@ class RcsGrid:
         Returns:
             The actual path written.
         """
+        if self.angular_coordinate_system() != "conic":
+            raise ValueError(
+                "save_pio: Pioneer azimuth/elevation output cannot represent "
+                f"{self.angular_coordinate_system()!r} angular coordinates; "
+                "retain .grim or use PTM for a great-circle cut"
+            )
         if el_idx is None:
             if len(self.elevations) == 1:
                 el_idx = 0

@@ -46,6 +46,7 @@ from feature_assembly_panel import FeatureAssemblyPanel
 from freddy_integration import FreddyIntegrationWidget
 from ghost_integration import GhostIntegrationWidget, load_ghost_module
 from grim_dataset import RcsGrid
+from grim_headless import is_supported_path
 from grim_cut_dataset_mixin import DatasetOpsMixin
 from grim_cut_plot_mixin import PlotOpsMixin
 from plot_models import PlotContext
@@ -214,7 +215,7 @@ def _extract_supported_drop_paths(mime: QMimeData) -> list[str]:
         if not url.isLocalFile():
             continue
         path = url.toLocalFile()
-        if path.lower().endswith((".grim", ".csv", ".txt", ".out", ".pio", ".cmplx_di", ".ss")):
+        if is_supported_path(path):
             paths.append(path)
     return paths
 
@@ -497,9 +498,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         sec_datasets.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         dataset_actions = QHBoxLayout()
+        self.btn_dataset_load = QToolButton(text="Load…")
         self.btn_dataset_save = QToolButton(text="Save")
         self.btn_dataset_save_all = QToolButton(text="Save All")
         self.btn_dataset_delete = QToolButton(text="Delete")
+        dataset_actions.addWidget(self.btn_dataset_load)
         dataset_actions.addWidget(self.btn_dataset_save)
         dataset_actions.addWidget(self.btn_dataset_save_all)
         dataset_actions.addWidget(self.btn_dataset_delete)
@@ -605,14 +608,27 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Medianize", "btn_medianize"),
             ("Duplicate", "btn_duplicate"),
         ))
+        _ops_pad("Calibration", (
+            ("Range Cal", "btn_range_cal"),
+        ), cols=1)
+        self.btn_range_cal.setToolTip(
+            "Complex substitution calibration using loaded measured-cal and "
+            "exact-reference datasets plus a signed one-way physical "
+            "displacement; GRIM applies the monostatic two-way phase."
+        )
         _ops_pad("Geometry & Units", (
             ("El→Az360", "btn_el_to_az360"),
             ("Swap El/Az", "btn_swap_el_az"),
             ("→ dBke", "btn_to_dbke"),
             ("→ dBsm", "btn_to_dbsm"),
-            ("Conic ↔ GC", "btn_conic_gc"),
+            ("Conic ↔ GC (0°)", "btn_conic_gc"),
             ("Wedge → Conic", "btn_wedge_to_conic"),
         ))
+        self.btn_conic_gc.setToolTip(
+            "Exact 0° Conic/Great-Circle relabel only. General GC cuts are "
+            "blocked because they require curved-path complex interpolation "
+            "and polarization-basis rotation."
+        )
 
         dock_layout.addWidget(sec_datasets, 1)
         dock_layout.addWidget(sec_params)
@@ -802,6 +818,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_shift.clicked.connect(self._shift_selected)
         self.btn_round.clicked.connect(self._round_selected)
         self.btn_offset.clicked.connect(self._offset_selected)
+        self.btn_range_cal.clicked.connect(self._range_cal_selected)
         self.btn_medianize.clicked.connect(self._medianize_selected)
         self.btn_duplicate.clicked.connect(self._duplicate_selected)
         self.btn_el_to_az360.clicked.connect(self._elevation_to_azimuth_360_selected)
@@ -810,6 +827,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_to_dbsm.clicked.connect(self._convert_to_dbsm_selected)
         self.btn_conic_gc.clicked.connect(self._convert_conic_gc_selected)
         self.btn_wedge_to_conic.clicked.connect(self._convert_wedge_to_conic_selected)
+        self.btn_dataset_load.clicked.connect(self._load_dataset_files)
         self.btn_dataset_save.clicked.connect(self._save_selected_datasets)
         self.btn_dataset_save_all.clicked.connect(self._save_all_datasets)
         self.btn_dataset_delete.clicked.connect(self._delete_selected_datasets)
@@ -1629,6 +1647,17 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         """Keep the unified app alive while background physics work runs."""
+        if self._background_job_active():
+            active_name = self._background_worker_name or "A dataset task"
+            QMessageBox.warning(
+                self,
+                "Dataset Task Still Running",
+                f"{active_name} is still running. Wait for it to finish before "
+                "closing GRIM.",
+            )
+            self.main_tabs.setCurrentIndex(0)
+            event.ignore()
+            return
         feature_busy = bool(
             getattr(self.feature_assembly_panel, "job_is_running", lambda: False)()
         )

@@ -10,11 +10,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from grim_dataset import C0, RcsGrid
+from grim_dataset import C0, RcsGrid, canonical_angular_coordinate_system
 from plot_modes.isar_mode import form_isar
 
 
-SUPPORTED_EXTENSIONS = (".grim", ".csv", ".txt", ".out", ".pio", ".cmplx_di", ".ss")
+SUPPORTED_EXTENSIONS = (
+    ".grim",
+    ".csv",
+    ".cst_data",
+    ".txt",
+    ".out",
+    ".pio",
+    ".cmplx_di",
+    ".ptm",
+    ".ss",
+)
 _FREQUENCY_FACTORS = {"Hz": 1.0, "kHz": 1.0e3, "MHz": 1.0e6, "GHz": 1.0e9}
 
 
@@ -71,6 +81,10 @@ def load_flat_csv(path: str) -> RcsGrid:
         records = []
         frequency_units = set()
         log_units = set()
+        angular_coordinate_systems = set()
+        gc_coordinate_conventions = set()
+        angular_rolls = set()
+        angular_tilts = set()
         pol_order = []
         for line_no, row in enumerate(reader, start=2):
             if not any(str(value or "").strip() for value in row.values()):
@@ -94,6 +108,48 @@ def load_flat_csv(path: str) -> RcsGrid:
             log_text = cell(row, "rcs_log_unit") if "rcs_log_unit" in fields else ""
             if log_text:
                 log_units.add(_log_unit(log_text))
+            angular_text = (
+                cell(row, "angular_coordinate_system")
+                if "angular_coordinate_system" in fields else ""
+            )
+            if "angular_coordinate_system" in fields and not angular_text:
+                raise ValueError(
+                    f"line {line_no}: angular_coordinate_system is blank"
+                )
+            if angular_text:
+                angular_coordinate_systems.add(
+                    canonical_angular_coordinate_system(angular_text)
+                )
+                if (
+                    canonical_angular_coordinate_system(angular_text)
+                    == "great_circle"
+                ):
+                    convention_text = (
+                        cell(row, "great_circle_coordinate_convention")
+                        if "great_circle_coordinate_convention" in fields
+                        else ""
+                    )
+                    gc_coordinate_conventions.add(
+                        convention_text or "legacy_ptm_unspecified"
+                    )
+            for key, target in (
+                ("angular_roll_deg", angular_rolls),
+                ("angular_tilt_deg", angular_tilts),
+            ):
+                if key not in fields:
+                    continue
+                value_text = cell(row, key)
+                if not value_text:
+                    raise ValueError(f"line {line_no}: {key} is blank")
+                try:
+                    value = float(value_text)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"line {line_no}: invalid {key} ({exc})"
+                    ) from exc
+                if not np.isfinite(value):
+                    raise ValueError(f"line {line_no}: {key} must be finite")
+                target.add(value)
 
             linear = None
             if "magnitude_linear" in fields and cell(row, "magnitude_linear"):
@@ -112,14 +168,34 @@ def load_flat_csv(path: str) -> RcsGrid:
 
     if not records:
         raise ValueError("CSV contains no data rows")
-    if len(frequency_units) > 1 or len(log_units) > 1:
-        raise ValueError("one grid cannot contain multiple frequency or RCS units")
+    if (
+        len(frequency_units) > 1
+        or len(log_units) > 1
+        or len(angular_coordinate_systems) > 1
+        or len(gc_coordinate_conventions) > 1
+        or len(angular_rolls) > 1
+        or len(angular_tilts) > 1
+    ):
+        raise ValueError(
+            "one grid cannot contain multiple frequency units, RCS units, or "
+            "angular coordinate systems/frame orientations"
+        )
     freq_unit = next(iter(frequency_units)) if frequency_units else _frequency_unit("", [r[2] for r in records])
     log_unit = next(iter(log_units)) if log_units else (
         "dB" if "magnitude_db" in magnitude_keys
         else "dBke" if "magnitude_dbke" in magnitude_keys and "magnitude_dbsm" not in magnitude_keys
         else "dBsm"
     )
+    angular_coordinate_system = (
+        next(iter(angular_coordinate_systems))
+        if angular_coordinate_systems else "conic"
+    )
+    gc_coordinate_convention = (
+        next(iter(gc_coordinate_conventions))
+        if gc_coordinate_conventions else "legacy_ptm_unspecified"
+    )
+    angular_roll_deg = next(iter(angular_rolls)) if angular_rolls else 0.0
+    angular_tilt_deg = next(iter(angular_tilts)) if angular_tilts else 0.0
     az_axis = np.asarray(sorted({r[0] for r in records}), dtype=float)
     el_axis = np.asarray(sorted({r[1] for r in records}), dtype=float)
     freq_axis = np.asarray(sorted({r[2] for r in records}), dtype=float)
@@ -141,15 +217,38 @@ def load_flat_csv(path: str) -> RcsGrid:
     if not np.isfinite(power).any():
         raise ValueError("CSV contains no finite magnitude values")
     quantity = "power_ratio" if log_unit == "dB" else "sigma_2d" if log_unit == "dBke" else "sigma_3d"
+    units = {
+        "azimuth": "deg", "elevation": "deg", "frequency": freq_unit,
+        "rcs_log_unit": log_unit, "rcs_linear_quantity": quantity,
+        "angular_coordinate_system": angular_coordinate_system,
+        "angular_roll_deg": angular_roll_deg,
+        "angular_tilt_deg": angular_tilt_deg,
+    }
+    if angular_coordinate_system == "great_circle":
+        units["great_circle_coordinate_convention"] = gc_coordinate_convention
     return RcsGrid(
         az_axis, el_axis, freq_axis, pol_axis,
         rcs_power=power, rcs_phase=phase, source_path=str(path),
         history=f"Loaded flat CSV: {path}",
-        units={
-            "azimuth": "deg", "elevation": "deg", "frequency": freq_unit,
-            "rcs_log_unit": log_unit, "rcs_linear_quantity": quantity,
-        },
+        units=units,
     )
+
+
+def read_CST(path: str) -> RcsGrid:
+    """Read a supported CST far-field table.
+
+    This is the deliberately named public entry point.  ``RcsGrid.read_CST``
+    recognizes both CST's wide theta/phi CSV export and the row-oriented
+    ``.cst_data`` schema used by the team's MATLAB workflow.  Native GRIM flat
+    CSV remains a separate format handled by :func:`load_flat_csv`.
+    """
+    return RcsGrid.read_CST(path)
+
+
+def read_SENTRi(path: str) -> RcsGrid:
+    """Read a CREATE-RF SENTRi RCS table with its vendor conventions."""
+
+    return RcsGrid.read_SENTRi(path)
 
 
 def load_dataset(path: str, *, allow_legacy_pickle=False) -> RcsGrid:
@@ -162,12 +261,25 @@ def load_dataset(path: str, *, allow_legacy_pickle=False) -> RcsGrid:
         return RcsGrid.load_out(path)
     if lower.endswith(".ss"):
         return RcsGrid.load_ss(path)
+    if lower.endswith(".ptm"):
+        return RcsGrid.load_ptm(path)
     if lower.endswith((".pio", ".cmplx_di")):
         return RcsGrid.load_pio(path)
+    if lower.endswith(".cst_data"):
+        return read_CST(path)
+    if lower.endswith((".csv", ".txt")) and RcsGrid.has_SENTRi_signature(path):
+        # A recognized vendor header commits the file to the SENTRi parser.
+        # Propagate corrupt-data errors instead of falling through to a loose
+        # legacy numeric reader that could reinterpret the same row.
+        return read_SENTRi(path)
     loaders = (
-        (load_flat_csv, RcsGrid.load_theta_phi_csv)
+        (load_flat_csv, read_CST)
         if lower.endswith(".csv")
-        else (RcsGrid.load_theta_phi_txt, load_flat_csv)
+        else (
+            RcsGrid.load_theta_phi_txt,
+            load_flat_csv,
+            read_CST,
+        )
     )
     errors = []
     for loader in loaders:

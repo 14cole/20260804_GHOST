@@ -63,13 +63,23 @@ def load_dataset(path: 'str | os.PathLike[str]') -> 'Any':
             raise CemToolError(f"cannot read {source.name}: {exc}") from exc
         if "azimuth_deg" in first_line and "magnitude_linear" in first_line:
             return _load_flat_table(source, grid_class, "," if extension == ".csv" else "\t")
+    if extension in {".csv", ".txt"}:
+        fallback = (
+            grid_class.load_theta_phi_csv
+            if extension == ".csv"
+            else grid_class.load_theta_phi_txt
+        )
+        try:
+            if grid_class.has_SENTRi_signature(str(source)):
+                return grid_class.read_SENTRi(str(source))
+            return fallback(str(source))
+        except Exception as exc:
+            raise CemToolError(f"cannot load {source.name}: {exc}") from exc
     loaders = {
         ".grim": grid_class.load,
         ".out": grid_class.load_out,
         ".pio": grid_class.load_pio,
         ".cmplx_di": grid_class.load_pio,
-        ".csv": grid_class.load_theta_phi_csv,
-        ".txt": grid_class.load_theta_phi_txt,
         ".ss": grid_class.load_ss,
     }
     try:

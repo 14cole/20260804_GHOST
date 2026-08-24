@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from grim_headless import is_supported_path
+
 # MIME sent FROM the Datasets table TO the tree (single loaded dataset)
 MIME_DATASET = "application/x-grim-dataset"
 
@@ -425,7 +427,8 @@ class AssemblyTree(QTreeWidget):
     Drop IN (onto a branch or root):
       • MIME_DATASET from the Datasets table → leaf; RcsGrid copied from
         DatasetTable._pending_drag_data set during startDrag
-      • dataset file URLs from the file explorer (.grim/.csv/.txt/.out/.pio/.cmplx_di/.ss)
+      • dataset file URLs from the file explorer
+        (.grim/.csv/.cst_data/.txt/.out/.pio/.cmplx_di/.ptm/.ss)
         → .grim creates leaves with loaded data;
         also emits files_to_load so the main window adds them to the table
 
@@ -847,9 +850,7 @@ class AssemblyTree(QTreeWidget):
             from grim_dataset import RcsGrid
             supported_paths = [
                 u.toLocalFile() for u in mime.urls()
-                if u.isLocalFile() and u.toLocalFile().lower().endswith(
-                    (".grim", ".csv", ".txt", ".out", ".pio", ".cmplx_di", ".ss")
-                )
+                if u.isLocalFile() and is_supported_path(u.toLocalFile())
             ]
             grim_paths = [path for path in supported_paths if path.lower().endswith(".grim")]
             if grim_paths:

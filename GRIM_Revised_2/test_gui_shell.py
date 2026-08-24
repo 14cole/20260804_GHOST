@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -11,20 +12,29 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QMimeData, QUrl, Qt, Signal
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QApplication, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 import grim_cut_gui
+import grim_cut_dataset_mixin
 import freddy_integration
 import ghost_integration
+from grim_cut_dataset_mixin import ConicGCDialog, RangeCalibrationDialog
 from assembly_tree import (
     AssemblyTreePanel,
     _TYPE_BRANCH,
     _TYPE_ROOT,
     _attach,
 )
-from grim_dataset import RcsGrid
+from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
 
 
 class _FakeGhostIntegration(QWidget):
@@ -170,6 +180,97 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.feature_assembly_panel.service(), self.feature_service
         )
 
+    def test_range_cal_button_and_dialog_roles_are_explicit(self) -> None:
+        buttons = [
+            button
+            for button in self.window.findChildren(QToolButton)
+            if button.text() == "Range Cal"
+        ]
+        self.assertEqual(buttons, [self.window.btn_range_cal])
+        self.assertIn("signed one-way physical", buttons[0].toolTip())
+        self.assertFalse(self.window.btn_dataset_load.isHidden())
+
+        entries = [("DUT", _grid()), ("Measured cylinder", _grid()), ("Exact", _grid())]
+        dialog = RangeCalibrationDialog(entries, parent=self.window)
+        ok_button = dialog.buttons.button(QDialogButtonBox.Ok)
+        self.assertFalse(ok_button.isEnabled())
+        dialog.combo_measured.setCurrentIndex(1)
+        dialog.combo_exact.setCurrentIndex(2)
+        dialog.spin_offset_m.setValue(0.125)
+        dialog.chk_broadcast.setChecked(True)
+        dialog.chk_attest.setChecked(True)
+        self.assertTrue(ok_button.isEnabled())
+        params = dialog.get_params()
+        self.assertEqual(params["measured"][0], "Measured cylinder")
+        self.assertEqual(params["exact"][0], "Exact")
+        self.assertAlmostEqual(params["range_offset_m"], 0.125)
+        self.assertTrue(params["allow_singleton_angular_broadcast"])
+        self.assertTrue(params["convention_attested"])
+        dialog.deleteLater()
+
+    def test_range_cal_operation_creates_complex_calibrated_dataset(self) -> None:
+        truth = _grid(3.0)
+        measured_cal = _grid(2.0)
+        exact = _grid(1.0)
+        dut_measured = _grid(6.0)
+        self.window._add_dataset_row(dut_measured, "DUT", "", "dut.grim")
+        self.window._add_dataset_row(
+            measured_cal, "Measured cylinder", "", "measured.grim"
+        )
+        self.window._add_dataset_row(exact, "Exact cylinder", "", "exact.grim")
+        self.window.table.selectRow(0)
+        self.app.processEvents()
+
+        class _AcceptedRangeDialog:
+            def __init__(self, _entries, parent=None):
+                self.parent = parent
+
+            @staticmethod
+            def exec():
+                return QDialog.Accepted
+
+            @staticmethod
+            def get_params():
+                return {
+                    "measured": ("Measured cylinder", measured_cal),
+                    "exact": ("Exact cylinder", exact),
+                    "range_offset_m": 0.0,
+                    "allow_singleton_angular_broadcast": False,
+                    "convention_attested": True,
+                }
+
+            @staticmethod
+            def deleteLater():
+                return None
+
+        def _run_worker_now(_job_name, worker):
+            worker.run()
+            return True
+
+        with (
+            mock.patch.object(
+                grim_cut_dataset_mixin,
+                "RangeCalibrationDialog",
+                _AcceptedRangeDialog,
+            ),
+            mock.patch.object(
+                self.window,
+                "_try_start_background_job",
+                side_effect=_run_worker_now,
+            ),
+        ):
+            self.window._range_cal_selected()
+
+        self.assertEqual(self.window.table.rowCount(), 4)
+        result_item = self.window.table.item(3, 0)
+        self.assertEqual(
+            result_item.text(),
+            "DUT [Range Cal: Exact cylinder; ΔR +0 m]",
+        )
+        result = result_item.data(Qt.UserRole)
+        np.testing.assert_allclose(result.rcs, truth.rcs)
+        self.assertIn("Range Cal created 1 dataset", self.window.status.currentMessage())
+
     def test_bundled_ghost_backend_is_the_primary_builtin_candidate(self) -> None:
         expected = (
             Path(ghost_integration.__file__).resolve().parents[1]
@@ -232,6 +333,225 @@ class UnifiedGuiShellTest(unittest.TestCase):
         )
         self.assertEqual(self.window.loaded_path_batches, [])
 
+    def test_ptm_and_cst_data_are_accepted_by_main_drop_filter(self) -> None:
+        mime = QMimeData()
+        mime.setUrls(
+            [
+                QUrl.fromLocalFile(os.path.abspath("legacy.ptm")),
+                QUrl.fromLocalFile(os.path.abspath("far_field.cst_data")),
+                QUrl.fromLocalFile(os.path.abspath("notes.docx")),
+            ]
+        )
+        accepted = grim_cut_gui._extract_supported_drop_paths(mime)
+        self.assertEqual(
+            [os.path.basename(path) for path in accepted],
+            ["legacy.ptm", "far_field.cst_data"],
+        )
+
+    def test_ptm_export_action_uses_single_slice_writer(self) -> None:
+        dataset = _grid(1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = os.path.join(tmp, "target.ptm")
+            with (
+                mock.patch.object(
+                    self.window,
+                    "_selected_datasets_ordered",
+                    return_value=[("target", dataset)],
+                ),
+                mock.patch.object(
+                    grim_cut_gui.QFileDialog,
+                    "getSaveFileName",
+                    return_value=(destination, "PTM Files (*.ptm)"),
+                ),
+                mock.patch.object(
+                    RcsGrid, "save_ptm", autospec=True, return_value=destination
+                ) as save_ptm,
+            ):
+                self.window._export_ptm_selected()
+
+        save_ptm.assert_called_once_with(
+            dataset, destination, el_idx=0, pol_idx=0
+        )
+
+    def test_pioneer_export_reports_great_circle_incompatibility(self) -> None:
+        dataset = _grid(1.0)
+        dataset.units["angular_coordinate_system"] = "great_circle"
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = os.path.join(tmp, "ambiguous.pio")
+            with (
+                mock.patch.object(
+                    self.window,
+                    "_selected_datasets_ordered",
+                    return_value=[("great-circle", dataset)],
+                ),
+                mock.patch.object(
+                    grim_cut_gui.QFileDialog,
+                    "getSaveFileName",
+                    return_value=(destination, "Pioneer Files (*.pio)"),
+                ),
+            ):
+                self.window._export_pio_selected()
+
+        self.assertIn(
+            "cannot represent", self.window.status.currentMessage()
+        )
+
+    def test_ptm_batch_rejects_duplicate_targets_before_writing(self) -> None:
+        dataset = _grid(1.0)
+        plans = [
+            ("first/name", dataset, "same_name", 0, 0),
+            ("second:name", dataset, "same_name", 0, 0),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(RcsGrid, "save_ptm", autospec=True) as writer:
+                with self.assertRaisesRegex(ValueError, "same file more than once"):
+                    self.window._write_ptm_batch(tmp, plans)
+            writer.assert_not_called()
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_duplicate_preserves_ptm_physics_metadata(self) -> None:
+        dataset = _grid(1.0)
+        dataset.units.update(
+            {
+                "angular_coordinate_system": "great_circle",
+                "angular_roll_deg": 12.5,
+                "angular_tilt_deg": -1.0,
+            }
+        )
+        dataset.extra.update(
+            {
+                "angular_coordinate_system": "great_circle",
+                "ptm_roll": 12.5,
+                "ptm_tilt": -1.0,
+                "test_array": np.asarray([1.0, 2.0]),
+            }
+        )
+        start_row = self.window.table.rowCount()
+        with mock.patch.object(
+            self.window,
+            "_selected_datasets_ordered",
+            return_value=[("PTM cut", dataset)],
+        ):
+            self.window._duplicate_selected()
+
+        duplicate = self.window.table.item(start_row, 0).data(Qt.UserRole)
+        self.assertEqual(duplicate.angular_coordinate_system(), "great_circle")
+        self.assertEqual(
+            duplicate.angular_frame_orientation_deg(), (12.5, -1.0)
+        )
+        np.testing.assert_array_equal(duplicate.extra["test_array"], [1.0, 2.0])
+        self.assertIsNot(duplicate.extra["test_array"], dataset.extra["test_array"])
+
+    def test_gc_to_conic_allows_only_exact_equatorial_copol_relabel(self) -> None:
+        azimuths = np.asarray([179.0, -179.0, 0.0])
+        field = np.arange(12, dtype=float).reshape(3, 1, 2, 2) + 1j
+        dataset = RcsGrid(
+            azimuths,
+            [0.0],
+            [9.0, 10.0],
+            ["VV", "HH"],
+            rcs=field,
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+                "angular_coordinate_system": "great_circle",
+                "great_circle_coordinate_convention": GRIM_GC_CONVENTION,
+                "angular_roll_deg": 0.0,
+                "angular_tilt_deg": 0.0,
+            },
+            extra={
+                "angular_coordinate_system": "great_circle",
+                "ptm_cut_type": "GC",
+                "ptm_roll": 0.0,
+                "ptm_tilt": 0.0,
+                "phase_reference": "exp(-jkr)",
+                "ptm_subject": "archive me",
+            },
+        )
+
+        converted, suffix, _ = self.window._conic_gc_relabel(
+            dataset, "gc_to_conic"
+        )
+        self.assertEqual(suffix, "equator")
+        self.assertEqual(converted.angular_coordinate_system(), "conic")
+        np.testing.assert_array_equal(converted.azimuths, [-179.0, 0.0, 179.0])
+        np.testing.assert_array_equal(converted.elevations, [0.0])
+        np.testing.assert_allclose(
+            converted.rcs, field[[1, 2, 0], :, :, :],
+            rtol=1.0e-14, atol=1.0e-14,
+        )
+        self.assertNotIn("angular_roll_deg", converted.units)
+        self.assertNotIn("angular_tilt_deg", converted.units)
+        self.assertNotIn("angular_coordinate_system", converted.extra)
+        self.assertNotIn("ptm_cut_type", converted.extra)
+        self.assertEqual(converted.extra["phase_reference"], "exp(-jkr)")
+        self.assertEqual(converted.extra["ptm_subject"], "archive me")
+
+        dataset.units["angular_roll_deg"] = 1.0
+        with self.assertRaisesRegex(ValueError, "roll=tilt=0"):
+            self.window._conic_gc_relabel(dataset, "gc_to_conic")
+
+        dataset.units["angular_roll_deg"] = 0.0
+        cross_pol = RcsGrid(
+            dataset.azimuths,
+            dataset.elevations,
+            dataset.frequencies,
+            ["VH", "HV"],
+            rcs=field,
+            units=dict(dataset.units),
+        )
+        with self.assertRaisesRegex(ValueError, "VV/HH only"):
+            self.window._conic_gc_relabel(cross_pol, "gc_to_conic")
+
+        conic_source = RcsGrid(
+            [0.0, 90.0, 180.0],
+            [0.0],
+            dataset.frequencies,
+            dataset.polarizations,
+            rcs=field,
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+                "angular_coordinate_system": "conic",
+            },
+        )
+        converted_gc, _, _ = self.window._conic_gc_relabel(
+            conic_source, "conic_to_gc"
+        )
+        self.assertEqual(converted_gc.angular_coordinate_system(), "great_circle")
+        self.assertEqual(
+            converted_gc.great_circle_coordinate_convention(), GRIM_GC_CONVENTION
+        )
+
+    def test_conic_gc_dialog_is_symmetric_and_legacy_attestation_is_explicit(self):
+        conic_dialog = ConicGCDialog(source_coordinate_system="conic")
+        self.assertEqual(
+            conic_dialog.get_params()["direction"], "conic_to_gc"
+        )
+        self.assertFalse(conic_dialog._radio_regrid.isEnabled())
+        self.assertFalse(conic_dialog._chk_attest_legacy.isEnabled())
+        conic_dialog.deleteLater()
+
+        legacy_dialog = ConicGCDialog(
+            source_coordinate_system="great_circle",
+            source_gc_convention="legacy_ptm_unspecified",
+        )
+        self.assertEqual(
+            legacy_dialog.get_params()["direction"], "gc_to_conic"
+        )
+        self.assertTrue(legacy_dialog._chk_attest_legacy.isEnabled())
+        legacy_dialog._chk_attest_legacy.setChecked(True)
+        self.assertTrue(
+            legacy_dialog.get_params()["attest_legacy_ptm_convention"]
+        )
+        legacy_dialog.deleteLater()
+
     def test_feature_panel_preview_and_output_use_workspace_paths(self) -> None:
         plan = SimpleNamespace(
             surface_triangles_cad_m=np.asarray(
@@ -269,6 +589,21 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.main_tabs.currentWidget(), self.window.ghost_integration
         )
         self.assertTrue(self.window.ghost_integration.focus_called)
+
+    def test_running_dataset_job_blocks_close(self) -> None:
+        event = QCloseEvent()
+        self.window._background_worker_name = "Range Cal"
+        with (
+            mock.patch.object(
+                self.window, "_background_job_active", return_value=True
+            ),
+            mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning,
+        ):
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        warning.assert_called_once()
+        self.assertIn("Range Cal", warning.call_args.args[2])
 
     def test_running_feature_job_blocks_close_on_assembly_tab(self) -> None:
         event = QCloseEvent()

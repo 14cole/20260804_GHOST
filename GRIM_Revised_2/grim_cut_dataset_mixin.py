@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import csv
 import os
 import re
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -34,8 +36,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from grim_dataset import C0, RcsGrid
-from grim_headless import load_dataset as load_dataset_headless
+from grim_dataset import C0, RcsGrid, canonical_angular_coordinate_system
+from grim_headless import (
+    SUPPORTED_EXTENSIONS,
+    is_supported_path,
+    load_dataset as load_dataset_headless,
+)
 
 # Characters forbidden in filenames on Windows (and `/` on POSIX). Replaced
 # with `_` so dataset names with op symbols like `|`, `÷`, etc. still save.
@@ -69,37 +75,6 @@ def _sorted_polarization_indices(values, indices) -> list[int]:
 
 def _sorted_polarization_values(values) -> list:
     return [values[idx] for idx in _sorted_polarization_indices(values, range(len(values)))]
-
-
-def _conic_to_gc_deg(phi_deg: np.ndarray, theta_deg: np.ndarray):
-    """Forward map: spherical (φ, θ) → great-circle (α, ψ) angles in degrees.
-
-    Convention: r̂_conic = (cos θ cos φ, cos θ sin φ, sin θ)
-                r̂_gc   = (cos α, cos ψ sin α, sin ψ sin α)
-    So α = arccos(cos θ cos φ) ∈ [0°, 180°],
-       ψ = atan2(sin θ, cos θ sin φ) ∈ (-180°, 180°].
-    """
-    phi = np.deg2rad(np.asarray(phi_deg, dtype=float))
-    theta = np.deg2rad(np.asarray(theta_deg, dtype=float))
-    ct, st = np.cos(theta), np.sin(theta)
-    cp, sp = np.cos(phi), np.sin(phi)
-    # Clip for numerical safety before arccos.
-    x = np.clip(ct * cp, -1.0, 1.0)
-    alpha = np.arccos(x)
-    psi = np.arctan2(st, ct * sp)
-    return np.rad2deg(alpha), np.rad2deg(psi)
-
-
-def _gc_to_conic_deg(alpha_deg: np.ndarray, psi_deg: np.ndarray):
-    """Inverse map: great-circle (α, ψ) → spherical (φ, θ) angles in degrees."""
-    alpha = np.deg2rad(np.asarray(alpha_deg, dtype=float))
-    psi = np.deg2rad(np.asarray(psi_deg, dtype=float))
-    sa, ca = np.sin(alpha), np.cos(alpha)
-    sp, cp = np.sin(psi), np.cos(psi)
-    z = np.clip(sp * sa, -1.0, 1.0)
-    theta = np.arcsin(z)
-    phi = np.arctan2(cp * sa, ca)
-    return np.rad2deg(phi), np.rad2deg(theta)
 
 
 def _wedge_to_conic_deg(phi_deg: np.ndarray, tau_deg: np.ndarray):
@@ -262,6 +237,153 @@ class ShiftDialog(QDialog):
             "azimuth":   (self._chk_az.isChecked(),    float(self._spin_az.value())),
             "elevation": (self._chk_el.isChecked(),    float(self._spin_el.value())),
             "phase":     (self._chk_phase.isChecked(), float(self._spin_phase.value())),
+        }
+
+
+class RangeCalibrationDialog(QDialog):
+    """Assign loaded grids to the measured/exact calibration roles."""
+
+    def __init__(self, dataset_entries, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Range Cal — Complex Substitution")
+        self._entries = list(dataset_entries)
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Selected table rows are the DUT measurement(s) to calibrate. "
+            "Choose a measured calibration target and its trusted complex "
+            "exact/reference response from the loaded datasets."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        form = QGridLayout()
+        self.combo_measured = QComboBox()
+        self.combo_exact = QComboBox()
+        for row_index, (name, _dataset) in enumerate(self._entries, start=1):
+            label = f"[{row_index}] {name}"
+            self.combo_measured.addItem(label)
+            self.combo_exact.addItem(label)
+        if len(self._entries) > 1:
+            self.combo_exact.setCurrentIndex(1)
+        form.addWidget(QLabel("Measured calibration target:"), 0, 0)
+        form.addWidget(self.combo_measured, 0, 1)
+        form.addWidget(QLabel("Exact/reference response:"), 1, 0)
+        form.addWidget(self.combo_exact, 1, 1)
+
+        self.spin_offset_m = QDoubleSpinBox()
+        self.spin_offset_m.setDecimals(9)
+        self.spin_offset_m.setRange(-1.0e6, 1.0e6)
+        self.spin_offset_m.setSingleStep(0.001)
+        self.spin_offset_m.setSuffix(" m")
+        self.spin_offset_m.setToolTip(
+            "Enter the one-way physical displacement. Positive means the "
+            "measured calibration target is farther from radar than the "
+            "DUT/reference plane; GRIM applies the monostatic two-way phase."
+        )
+        form.addWidget(QLabel("Signed calibrator range offset ΔR:"), 2, 0)
+        form.addWidget(self.spin_offset_m, 2, 1)
+
+        gain_row = QHBoxLayout()
+        self.chk_gain_limit = QCheckBox("Limit correction gain")
+        self.chk_gain_limit.setChecked(True)
+        self.spin_gain_limit_db = QDoubleSpinBox()
+        self.spin_gain_limit_db.setDecimals(1)
+        self.spin_gain_limit_db.setRange(0.0, 300.0)
+        self.spin_gain_limit_db.setValue(60.0)
+        self.spin_gain_limit_db.setSuffix(" dB")
+        self.spin_gain_limit_db.setToolTip(
+            "Reject calibration bins whose |Aexact/Ameasured| correction exceeds "
+            "this level. This catches measured-calibration nulls/noise-floor bins."
+        )
+        self.chk_gain_limit.toggled.connect(self.spin_gain_limit_db.setEnabled)
+        gain_row.addWidget(self.chk_gain_limit)
+        gain_row.addWidget(self.spin_gain_limit_db)
+        form.addWidget(QLabel("Calibration validity gate:"), 3, 0)
+        form.addLayout(gain_row, 3, 1)
+        layout.addLayout(form)
+
+        phase_law = QLabel(
+            "Positive ΔR is away from radar. GRIM applies "
+            "Aout = Adut · Aexact · exp(−j4πfΔR/c) / Ameasured."
+        )
+        phase_law.setWordWrap(True)
+        layout.addWidget(phase_law)
+
+        self.chk_broadcast = QCheckBox(
+            "Broadcast singleton calibration azimuth/elevation across DUT angles"
+        )
+        self.chk_broadcast.setToolTip(
+            "No angular averaging or interpolation is performed. Enable only "
+            "when one frequency/polarization correction applies to every DUT look."
+        )
+        layout.addWidget(self.chk_broadcast)
+
+        self.chk_attest = QCheckBox(
+            "I confirm the acquisition, phase-center, and background assumptions."
+        )
+        self.chk_attest.setToolTip(
+            "DUT and measured calibration share one acquisition/phase convention; "
+            "the exact response uses the intended phase center; additive "
+            "background/support scattering has already been removed."
+        )
+        layout.addWidget(self.chk_attest)
+
+        self.validation_label = QLabel("")
+        self.validation_label.setWordWrap(True)
+        layout.addWidget(self.validation_label)
+
+        warning = QLabel(
+            "The exact response must be complex sigma₃D/dBsm data. A finite "
+            "cylinder's 3-D reference must be supplied; GRIM will not substitute "
+            "GHOST's infinite 2-D cylinder solution. Calibration nulls are rejected."
+        )
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.combo_measured.currentIndexChanged.connect(self._update_validity)
+        self.combo_exact.currentIndexChanged.connect(self._update_validity)
+        self.chk_attest.toggled.connect(self._update_validity)
+        self._update_validity()
+
+    def _update_validity(self, *_args) -> None:
+        same_reference = (
+            self.combo_measured.currentIndex() == self.combo_exact.currentIndex()
+        )
+        attested = self.chk_attest.isChecked()
+        ok_button = self.buttons.button(QDialogButtonBox.Ok)
+        ok_button.setEnabled(not same_reference and attested)
+        if same_reference:
+            self.validation_label.setText(
+                "Choose different datasets for measured calibration and exact reference."
+            )
+        elif not attested:
+            self.validation_label.setText(
+                "Confirm the calibration assumptions to enable Range Cal."
+            )
+        else:
+            self.validation_label.setText("Ready to apply complex Range Cal.")
+
+    def get_params(self) -> dict:
+        measured_index = int(self.combo_measured.currentIndex())
+        exact_index = int(self.combo_exact.currentIndex())
+        return {
+            "measured": self._entries[measured_index],
+            "exact": self._entries[exact_index],
+            "range_offset_m": float(self.spin_offset_m.value()),
+            "allow_singleton_angular_broadcast": self.chk_broadcast.isChecked(),
+            "convention_attested": self.chk_attest.isChecked(),
+            "maximum_correction_gain_db": (
+                float(self.spin_gain_limit_db.value())
+                if self.chk_gain_limit.isChecked()
+                else None
+            ),
         }
 
 
@@ -449,36 +571,84 @@ class ExtrusionLengthDialog(QDialog):
 
 
 class ConicGCDialog(QDialog):
-    """Pick direction (conic↔great-circle) and mode (relabel / re-grid). Output
-    grid bounds and sample counts are derived from the input dataset.
+    """Expose only GRIM's exact, convention-tagged equatorial relabel.
+
+    A general conic/great-circle conversion changes both the sampling path and
+    polarization basis.  GRIM does not yet implement the full scattering-matrix
+    basis rotation, and a fixed-pitch PTM cut maps to a curved conic path rather
+    than a rectangular :class:`RcsGrid`.  The one exact exception is an
+    unrotated, zero-pitch, co-polar great-circle cut, which can be relabeled as
+    the same conic equatorial cut without changing VV or HH.
     """
 
-    def __init__(self, parent=None) -> None:
+    def __init__(
+        self,
+        source_coordinate_system=None,
+        source_gc_convention=None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Convert Conic ↔ Great-Circle")
+        self.setWindowTitle("Convert Conic ↔ Great-Circle (Equator)")
         layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel(
+            "This is an exact tag change only: one 0° elevation/pitch, stored "
+            "roll=tilt=0°, and VV/HH. GRIM defines signed GC aspect equal to "
+            "conic azimuth on this plane; no field interpolation occurs. General "
+            "GC cuts need a curved-path representation and Jones-basis rotation."
+        ))
 
         dir_group = QGroupBox("Direction")
         dir_layout = QVBoxLayout(dir_group)
-        self._radio_c2g = QRadioButton("Conic → Great-Circle (input axes are φ, θ; output α, ψ)")
-        self._radio_g2c = QRadioButton("Great-Circle → Conic (input axes are α, ψ; output φ, θ)")
-        self._radio_c2g.setChecked(True)
+        self._radio_c2g = QRadioButton(
+            "Conic → Great-Circle (create a GRIM_GC_V1-tagged equatorial cut)"
+        )
+        self._radio_g2c = QRadioButton(
+            "Great-Circle → Conic (same exact equatorial convention)"
+        )
+        if canonical_angular_coordinate_system(source_coordinate_system) == "great_circle":
+            self._radio_g2c.setChecked(True)
+        else:
+            self._radio_c2g.setChecked(True)
         dir_layout.addWidget(self._radio_c2g)
         dir_layout.addWidget(self._radio_g2c)
         layout.addWidget(dir_group)
 
         mode_group = QGroupBox("Mode")
         mode_layout = QVBoxLayout(mode_group)
-        self._radio_relabel = QRadioButton(
-            "Relabel (flatten to 1D scatter — preserves σ exactly, loses grid structure)"
-        )
+        self._radio_relabel = QRadioButton("Exact equatorial relabel (no interpolation)")
         self._radio_regrid = QRadioButton(
-            "Re-grid (bilinear interpolation onto a uniform output grid, bounds auto-derived)"
+            "General re-grid (unavailable until polarization-basis rotation is implemented)"
         )
-        self._radio_regrid.setChecked(True)
+        self._radio_relabel.setChecked(True)
+        self._radio_regrid.setEnabled(False)
         mode_layout.addWidget(self._radio_relabel)
         mode_layout.addWidget(self._radio_regrid)
         layout.addWidget(mode_group)
+
+        self._chk_attest_legacy = QCheckBox(
+            "For an unmarked legacy PTM, I confirm aspect +90° is conic "
+            "azimuth +90° and its V/H basis follows GRIM_GC_V1"
+        )
+        self._chk_attest_legacy.setToolTip(
+            "The legacy PTM bytes do not define aspect sign/origin or the H/V "
+            "basis. Leave this clear unless the producing tool's convention is known."
+        )
+        source_is_unmarked_gc = (
+            canonical_angular_coordinate_system(source_coordinate_system)
+            == "great_circle"
+            and str(source_gc_convention or "").strip().lower()
+            in {"", "legacy_ptm_unspecified"}
+        )
+        self._chk_attest_legacy.setEnabled(
+            self._radio_g2c.isChecked() and source_is_unmarked_gc
+        )
+        self._radio_g2c.toggled.connect(
+            lambda checked: self._chk_attest_legacy.setEnabled(
+                bool(checked) and source_is_unmarked_gc
+            )
+        )
+        layout.addWidget(self._chk_attest_legacy)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -487,8 +657,11 @@ class ConicGCDialog(QDialog):
 
     def get_params(self) -> dict:
         return {
-            "direction": "conic_to_gc" if self._radio_c2g.isChecked() else "gc_to_conic",
-            "mode": "relabel" if self._radio_relabel.isChecked() else "regrid",
+            "direction": (
+                "conic_to_gc" if self._radio_c2g.isChecked() else "gc_to_conic"
+            ),
+            "mode": "relabel",
+            "attest_legacy_ptm_convention": self._chk_attest_legacy.isChecked(),
         }
 
 
@@ -777,6 +950,12 @@ def _write_dataset_csv(
     rcs_log_unit = _canonical_rcs_log_unit(
         (dataset.units or {}).get("rcs_log_unit", dataset.default_log_unit())
     )
+    angular_coordinate_system = dataset.angular_coordinate_system()
+    great_circle_convention = (
+        dataset.great_circle_coordinate_convention()
+        if angular_coordinate_system == "great_circle" else ""
+    )
+    angular_roll_deg, angular_tilt_deg = dataset.angular_frame_orientation_deg()
     header = [
         "azimuth",
         "elevation",
@@ -784,6 +963,10 @@ def _write_dataset_csv(
         "frequency_unit",
         "polarization",
         "rcs_log_unit",
+        "angular_coordinate_system",
+        "great_circle_coordinate_convention",
+        "angular_roll_deg",
+        "angular_tilt_deg",
     ]
     if scale in ("linear", "both"):
         header.append("magnitude_linear")
@@ -812,6 +995,10 @@ def _write_dataset_csv(
                             frequency_unit,
                             str(pol_v),
                             rcs_log_unit,
+                            angular_coordinate_system,
+                            great_circle_convention,
+                            format(angular_roll_deg, ".10g"),
+                            format(angular_tilt_deg, ".10g"),
                         ]
                         if scale in ("linear", "both"):
                             row.append(_csv_number(mag, ".10g"))
@@ -867,6 +1054,10 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
         has_phase = "phase_deg" in field_map
         has_frequency_unit = "frequency_unit" in field_map
         has_rcs_log_unit = "rcs_log_unit" in field_map
+        has_angular_coordinates = "angular_coordinate_system" in field_map
+        has_gc_convention = "great_circle_coordinate_convention" in field_map
+        has_angular_roll = "angular_roll_deg" in field_map
+        has_angular_tilt = "angular_tilt_deg" in field_map
 
         def _cell(row: dict[str, str], key: str) -> str:
             source = field_map[key]
@@ -878,6 +1069,10 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
         ] = []
         frequency_units_seen: set[str] = set()
         rcs_log_units_seen: set[str] = set()
+        angular_coordinates_seen: set[str] = set()
+        gc_conventions_seen: set[str] = set()
+        angular_rolls_seen: set[float] = set()
+        angular_tilts_seen: set[float] = set()
         pol_order: list[str] = []
         for line_no, row in enumerate(reader, start=2):
             az_text = _cell(row, "azimuth")
@@ -920,6 +1115,43 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
                     )
                 except ValueError as exc:
                     raise ValueError(f"line {line_no}: {exc}") from exc
+            if has_angular_coordinates:
+                angular_text = _cell(row, "angular_coordinate_system")
+                if not angular_text:
+                    raise ValueError(
+                        f"line {line_no}: angular_coordinate_system is blank"
+                    )
+                angular_coordinates_seen.add(
+                    canonical_angular_coordinate_system(angular_text)
+                )
+                if has_gc_convention:
+                    convention_text = _cell(
+                        row, "great_circle_coordinate_convention"
+                    )
+                    if angular_text and canonical_angular_coordinate_system(
+                        angular_text
+                    ) == "great_circle":
+                        gc_conventions_seen.add(
+                            convention_text or "legacy_ptm_unspecified"
+                        )
+            for present, key, target in (
+                (has_angular_roll, "angular_roll_deg", angular_rolls_seen),
+                (has_angular_tilt, "angular_tilt_deg", angular_tilts_seen),
+            ):
+                if not present:
+                    continue
+                value_text = _cell(row, key)
+                if not value_text:
+                    raise ValueError(f"line {line_no}: {key} is blank")
+                try:
+                    value = float(value_text)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"line {line_no}: invalid {key} ({exc})"
+                    ) from exc
+                if not np.isfinite(value):
+                    raise ValueError(f"line {line_no}: {key} must be finite")
+                target.add(value)
 
             lin_value: float | None = None
             dbke_value: float | None = None
@@ -998,6 +1230,30 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
         else "dB" if has_db and not has_dbsm and not has_dbke
         else "dBke" if has_dbke and not has_dbsm else "dBsm"
     )
+    if len(angular_coordinates_seen) > 1:
+        raise ValueError(
+            "CSV contains multiple angular coordinate systems; one RCS grid "
+            "requires a single convention"
+        )
+    angular_coordinate_system = (
+        next(iter(angular_coordinates_seen))
+        if angular_coordinates_seen else "conic"
+    )
+    if len(gc_conventions_seen) > 1:
+        raise ValueError(
+            "CSV contains multiple great-circle coordinate conventions"
+        )
+    gc_convention = (
+        next(iter(gc_conventions_seen))
+        if gc_conventions_seen else "legacy_ptm_unspecified"
+    )
+    if len(angular_rolls_seen) > 1 or len(angular_tilts_seen) > 1:
+        raise ValueError(
+            "CSV contains multiple angular frame orientations; one RCS grid "
+            "requires one roll/tilt pair"
+        )
+    angular_roll_deg = next(iter(angular_rolls_seen)) if angular_rolls_seen else 0.0
+    angular_tilt_deg = next(iter(angular_tilts_seen)) if angular_tilts_seen else 0.0
 
     az_values = np.asarray(sorted({r[0] for r in records}), dtype=float)
     el_values = np.asarray(sorted({r[1] for r in records}), dtype=float)
@@ -1037,6 +1293,22 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
     if not np.isfinite(power).any():
         raise ValueError("CSV contains no finite magnitude values")
 
+    units = {
+        "azimuth": "deg",
+        "elevation": "deg",
+        "frequency": frequency_unit,
+        "rcs_log_unit": rcs_log_unit,
+        "angular_coordinate_system": angular_coordinate_system,
+        "angular_roll_deg": angular_roll_deg,
+        "angular_tilt_deg": angular_tilt_deg,
+        "rcs_linear_quantity": (
+            "power_ratio" if rcs_log_unit == "dB"
+            else "sigma_2d" if rcs_log_unit == "dBke"
+            else "sigma_3d"
+        ),
+    }
+    if angular_coordinate_system == "great_circle":
+        units["great_circle_coordinate_convention"] = gc_convention
     return RcsGrid(
         az_values,
         el_values,
@@ -1046,73 +1318,22 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
         rcs_phase=phase,
         rcs_domain="power_phase",
         source_path=path,
-        units={
-            "azimuth": "deg",
-            "elevation": "deg",
-            "frequency": frequency_unit,
-            "rcs_log_unit": rcs_log_unit,
-            "rcs_linear_quantity": (
-                "power_ratio" if rcs_log_unit == "dB"
-                else "sigma_2d" if rcs_log_unit == "dBke"
-                else "sigma_3d"
-            ),
-        },
+        units=units,
     )
 
 
 def _load_dataset_from_dropped_text(path: str) -> tuple["RcsGrid", str]:
-    """Load dropped delimited files, including theta/phi text variants."""
-    lower = path.lower()
-    attempts = []
-    if lower.endswith(".out"):
-        attempts = [
-            ("OUT", lambda: RcsGrid.load_out(path)),
-        ]
-    elif lower.endswith(".txt"):
-        attempts = [
-            ("theta/phi TXT", lambda: RcsGrid.load_theta_phi_txt(path)),
-            ("delimited table", lambda: _load_dataset_csv(path)),
-        ]
-    elif lower.endswith(".csv"):
-        attempts = [
-            ("delimited table", lambda: _load_dataset_csv(path)),
-            ("theta/phi CSV", lambda: RcsGrid.load_theta_phi_csv(path)),
-        ]
-    elif lower.endswith(".pio") or lower.endswith(".cmplx_di"):
-        attempts = [
-            ("Pioneer", lambda: RcsGrid.load_pio(path)),
-        ]
-    elif lower.endswith(".ss"):
-        attempts = [
-            ("Xpatch SS", lambda: RcsGrid.load_ss(path)),
-        ]
-    else:
-        attempts = [("delimited table", lambda: _load_dataset_csv(path))]
+    """Compatibility wrapper around the authoritative headless dispatcher."""
 
-    errors: list[str] = []
-    for label, loader in attempts:
-        try:
-            dataset = loader()
-            history = str(getattr(dataset, "history", "") or "").strip()
-            if not history:
-                history = f"Imported delimited text: {path}"
-            return dataset, history
-        except Exception as exc:
-            errors.append(f"{label}: {exc}")
-    raise ValueError("; ".join(errors))
+    dataset = load_dataset_headless(path)
+    history = str(getattr(dataset, "history", "") or "").strip()
+    if not history:
+        history = f"Imported dataset: {path}"
+    return dataset, history
 
 
 def _is_supported_dataset_path(path: str) -> bool:
-    lower = str(path).lower()
-    return (
-        lower.endswith(".grim")
-        or lower.endswith(".csv")
-        or lower.endswith(".txt")
-        or lower.endswith(".out")
-        or lower.endswith(".pio")
-        or lower.endswith(".cmplx_di")
-        or lower.endswith(".ss")
-    )
+    return is_supported_path(path)
 
 
 def _available_memory_bytes() -> int | None:
@@ -1297,6 +1518,93 @@ class _JoinDatasetsWorker(QObject):
         self.finished.emit({"ok": True, "merged": merged, "total": total})
 
 
+class _RangeCalibrationWorker(QObject):
+    """Apply one calibration definition to DUT grids off the GUI thread."""
+
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        targets: list[tuple[str, RcsGrid]],
+        measured_entry: tuple[str, RcsGrid],
+        exact_entry: tuple[str, RcsGrid],
+        params: dict[str, object],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._targets = list(targets)
+        self._measured_name, self._measured = measured_entry
+        self._exact_name, self._exact = exact_entry
+        self._params = dict(params)
+
+    def run(self) -> None:
+        total = len(self._targets)
+        results: list[dict[str, object]] = []
+        failed: list[str] = []
+        try:
+            offset_m = float(self._params["range_offset_m"])
+        except (KeyError, TypeError, ValueError) as exc:
+            self.finished.emit(
+                {
+                    "results": results,
+                    "failed": [f"invalid range-calibration parameters ({exc})"],
+                    "total": total,
+                }
+            )
+            return
+        exact_display = str(self._exact_name)
+        if len(exact_display) > 48:
+            exact_display = exact_display[:45] + "..."
+
+        for index, (target_name, target) in enumerate(self._targets, start=1):
+            try:
+                calibrated = target.range_calibrate(
+                    self._measured,
+                    self._exact,
+                    offset_m,
+                    allow_singleton_angular_broadcast=bool(
+                        self._params.get(
+                            "allow_singleton_angular_broadcast", False
+                        )
+                    ),
+                    convention_attested=True,
+                    measured_label=self._measured_name,
+                    exact_label=self._exact_name,
+                    maximum_correction_gain_db=self._params.get(
+                        "maximum_correction_gain_db", 60.0
+                    ),
+                )
+            except Exception as exc:
+                failed.append(f"{target_name} ({exc})")
+                self.progress.emit(index, total, f"Skipped {target_name}")
+                continue
+
+            results.append(
+                {
+                    "dataset": calibrated,
+                    "name": (
+                        f"{target_name} [Range Cal: {exact_display}; "
+                        f"ΔR {offset_m:+.6g} m]"
+                    ),
+                    "history": (
+                        f"Range Cal: {target_name}; measured={self._measured_name}; "
+                        f"exact={self._exact_name}; ΔR={offset_m:+.12g} m "
+                        "(positive away)"
+                    ),
+                }
+            )
+            self.progress.emit(index, total, f"Calibrated {target_name}")
+
+        self.finished.emit(
+            {
+                "results": results,
+                "failed": failed,
+                "total": total,
+            }
+        )
+
+
 class DatasetOpsMixin:
     def _ensure_background_worker_state(self) -> None:
         if hasattr(self, "_background_worker_thread"):
@@ -1408,6 +1716,40 @@ class DatasetOpsMixin:
         self._add_dataset_row(merged, f"Join[{new_name}]", history, file_name="")
         self.status.showMessage(f"Join created. Overlap winner: {names[-1]}.")
 
+    def _on_range_cal_worker_progress(
+        self, done_count: int, total_count: int, detail: str
+    ) -> None:
+        detail_text = str(detail).strip()
+        suffix = f" ({detail_text})" if detail_text else ""
+        self.status.showMessage(
+            f"Range Cal... {done_count}/{total_count}{suffix}"
+        )
+
+    def _on_range_cal_worker_finished(self, payload: dict[str, object]) -> None:
+        raw_results = payload.get("results", [])
+        failed = [str(value) for value in payload.get("failed", [])]
+        produced = 0
+        for entry in raw_results:
+            if not isinstance(entry, dict):
+                failed.append("worker returned a malformed result")
+                continue
+            dataset = entry.get("dataset")
+            if not isinstance(dataset, RcsGrid):
+                failed.append("worker returned an invalid calibrated dataset")
+                continue
+            self._add_dataset_row(
+                dataset,
+                str(entry.get("name", "Range Cal result")),
+                str(entry.get("history", "Range Cal")),
+                file_name="",
+            )
+            produced += 1
+
+        message = f"Range Cal created {produced} dataset(s)."
+        if failed:
+            message += f" Skipped: {', '.join(failed)}"
+        self.status.showMessage(message)
+
     def _handle_files_dropped(self, paths: list[str]) -> None:
         tasks: list[tuple[int, str]] = []
         ignored = 0
@@ -1421,7 +1763,8 @@ class DatasetOpsMixin:
         if not tasks:
             if ignored:
                 self.status.showMessage(
-                    "No supported dropped files. Supported: .grim, .csv, .txt, .out, .pio, .cmplx_di, .ss"
+                    "No supported dropped files. Supported: "
+                    + ", ".join(SUPPORTED_EXTENSIONS)
                 )
             return
 
@@ -1431,6 +1774,19 @@ class DatasetOpsMixin:
         if not self._try_start_background_job("Dataset loading", worker):
             return
         self.status.showMessage(f"Loading datasets... 0/{len(tasks)}")
+
+    def _load_dataset_files(self) -> None:
+        """Choose dataset files and route them through the drop/headless loader."""
+
+        patterns = " ".join(f"*{extension}" for extension in SUPPORTED_EXTENSIONS)
+        paths, _selected_filter = QFileDialog.getOpenFileNames(
+            self,
+            "Load GRIM datasets",
+            "",
+            f"Supported datasets ({patterns});;All files (*)",
+        )
+        if paths:
+            self._handle_files_dropped([str(path) for path in paths])
 
     def _add_dataset_row(self, dataset: RcsGrid, name: str, history: str, file_name: str | None = None) -> None:
         row = self.table.rowCount()
@@ -2077,6 +2433,7 @@ class DatasetOpsMixin:
         action_save = menu.addAction("Save")
         export_menu = menu.addMenu("Export as…")
         action_export_pio = export_menu.addAction("Pioneer (.pio)…")
+        action_export_ptm = export_menu.addAction("PTM (.ptm)…")
         action_export_csv = export_menu.addAction("CSV…")
         action_delete = menu.addAction("Delete")
         menu.addSeparator()
@@ -2087,6 +2444,8 @@ class DatasetOpsMixin:
             self._save_selected_datasets()
         elif action == action_export_pio:
             self._export_pio_selected()
+        elif action == action_export_ptm:
+            self._export_ptm_selected()
         elif action == action_export_csv:
             self._export_csv_selected()
         elif action == action_delete:
@@ -2528,6 +2887,70 @@ class DatasetOpsMixin:
             msg += f" Skipped: {', '.join(skipped)}"
         self.status.showMessage(msg)
 
+    def _range_cal_selected(self) -> None:
+        targets = self._selected_datasets_ordered(
+            empty_message="Select one or more measured DUT datasets to range-calibrate.",
+        )
+        if targets is None:
+            return
+
+        loaded_entries: list[tuple[str, RcsGrid]] = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is None:
+                continue
+            dataset = item.data(Qt.UserRole)
+            if isinstance(dataset, RcsGrid):
+                loaded_entries.append((item.text(), dataset))
+        target_ids = {id(dataset) for _name, dataset in targets}
+        reference_entries = [
+            entry for entry in loaded_entries if id(entry[1]) not in target_ids
+        ]
+        if len(reference_entries) < 2:
+            self.status.showMessage(
+                "Range Cal needs two unselected reference datasets in addition "
+                "to the selected DUT row(s): measured calibration and complex exact."
+            )
+            return
+
+        dialog = RangeCalibrationDialog(reference_entries, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            dialog.deleteLater()
+            return
+        params = dialog.get_params()
+        dialog.deleteLater()
+        measured_name, measured = params["measured"]
+        exact_name, exact = params["exact"]
+        if measured is exact:
+            self.status.showMessage(
+                "Range Cal: measured calibration and exact reference must be "
+                "different datasets."
+            )
+            return
+        if id(measured) in target_ids or id(exact) in target_ids:
+            self.status.showMessage(
+                "Range Cal: select only DUT rows as targets; choose measured and "
+                "exact references in the dialog without selecting their table rows."
+            )
+            return
+        if not params["convention_attested"]:
+            self.status.showMessage(
+                "Range Cal: confirm the acquisition, phase-center, and background "
+                "statement before applying complex calibration."
+            )
+            return
+
+        worker = _RangeCalibrationWorker(
+            targets,
+            (measured_name, measured),
+            (exact_name, exact),
+            params,
+        )
+        worker.progress.connect(self._on_range_cal_worker_progress)
+        worker.finished.connect(self._on_range_cal_worker_finished)
+        self.status.showMessage(f"Range Cal... 0/{len(targets)}")
+        self._try_start_background_job("Range Cal", worker)
+
     def _offset_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
@@ -2773,31 +3196,37 @@ class DatasetOpsMixin:
         if datasets is None:
             return
 
-        dlg = ConicGCDialog(parent=self)
+        first_grid = datasets[0][1]
+        first_coordinate_system = first_grid.angular_coordinate_system()
+        dlg = ConicGCDialog(
+            source_coordinate_system=first_coordinate_system,
+            source_gc_convention=(
+                first_grid.great_circle_coordinate_convention()
+                if first_coordinate_system == "great_circle" else None
+            ),
+            parent=self,
+        )
         if dlg.exec() != QDialog.Accepted:
             return
         params = dlg.get_params()
         direction = params["direction"]
         mode = params["mode"]
+        attest_legacy = bool(params.get("attest_legacy_ptm_convention", False))
 
         produced = 0
         skipped: list[str] = []
         for name, dataset in datasets:
             try:
-                az_in = np.asarray(dataset.azimuths, dtype=float)
-                el_in = np.asarray(dataset.elevations, dtype=float)
-                if az_in.size < 2 or el_in.size < 1:
-                    skipped.append(f"{name} (need ≥2 azimuths and ≥1 elevation)")
-                    continue
-
-                if mode == "relabel":
-                    result, suffix, hist_extra = self._conic_gc_relabel(
-                        dataset, direction
+                if mode != "relabel":
+                    raise ValueError(
+                        "general conic/great-circle conversion is unavailable "
+                        "until full polarization-basis rotation is implemented"
                     )
-                else:
-                    result, suffix, hist_extra = self._conic_gc_regrid(
-                        dataset, direction
-                    )
+                result, suffix, hist_extra = self._conic_gc_relabel(
+                    dataset,
+                    direction,
+                    attest_legacy_ptm_convention=attest_legacy,
+                )
             except Exception as exc:
                 skipped.append(f"{name} ({exc})")
                 continue
@@ -2813,7 +3242,10 @@ class DatasetOpsMixin:
             produced += 1
 
         if produced == 0:
-            self.status.showMessage("Conic↔GC created 0 datasets.")
+            msg = "Conic↔GC created 0 datasets."
+            if skipped:
+                msg += f" Skipped: {', '.join(skipped)}"
+            self.status.showMessage(msg)
             return
         arrow = "Conic→GC" if direction == "conic_to_gc" else "GC→Conic"
         msg = f"{arrow} ({mode}) created {produced} dataset(s)."
@@ -2821,179 +3253,24 @@ class DatasetOpsMixin:
             msg += f" Skipped: {', '.join(skipped)}"
         self.status.showMessage(msg)
 
-    def _conic_gc_relabel(self, dataset: "RcsGrid", direction: str):
-        """Flatten the 2-D (az, el) grid into a 1-D scatter and replace the
-        primary axis with the transformed coordinate. ψ (or θ) varies per
-        sample and is logged into history rather than stored as an axis,
-        because the result is by construction not on a rectangular grid.
-        """
-        az_in = np.asarray(dataset.azimuths, dtype=float)
-        el_in = np.asarray(dataset.elevations, dtype=float)
-        n_az, n_el = az_in.size, el_in.size
-        # Build flat (φ, θ) or (α, ψ) pairs.
-        phi_grid, theta_grid = np.meshgrid(az_in, el_in, indexing="ij")
-        if direction == "conic_to_gc":
-            new_pri, new_sec = _conic_to_gc_deg(phi_grid.ravel(), theta_grid.ravel())
-            pri_label, sec_label = "α", "ψ"
-        else:
-            new_pri, new_sec = _gc_to_conic_deg(phi_grid.ravel(), theta_grid.ravel())
-            pri_label, sec_label = "φ", "θ"
-
-        order = np.argsort(new_pri, kind="stable")
-        flat_power = dataset.rcs_power.reshape(n_az * n_el, dataset.frequencies.size, dataset.polarizations.size)
-        flat_phase = dataset.rcs_phase.reshape(n_az * n_el, dataset.frequencies.size, dataset.polarizations.size)
-        sorted_pri = new_pri[order]
-        sorted_sec = new_sec[order]
-        sorted_power = flat_power[order][:, None, :, :]
-        sorted_phase = flat_phase[order][:, None, :, :]
-
-        result = RcsGrid(
-            sorted_pri,
-            np.array([0.0]),
-            dataset.frequencies,
-            dataset.polarizations,
-            rcs=None,
-            rcs_power=sorted_power,
-            rcs_phase=sorted_phase,
-            rcs_domain=dataset.rcs_domain,
-            units=dict(dataset.units or {}),
-        )
-        # Log the secondary coordinate trajectory (truncated for readability).
-        sec_preview = ", ".join(f"{v:.3g}" for v in sorted_sec[: min(8, sorted_sec.size)])
-        if sorted_sec.size > 8:
-            sec_preview += f", … ({sorted_sec.size} total)"
-        hist_extra = (
-            f"; relabeled axis 0 to {pri_label} (sorted asc); "
-            f"{sec_label} per sample = [{sec_preview}]; "
-            f"{sec_label} ∈ [{sorted_sec.min():.3g}, {sorted_sec.max():.3g}]"
-        )
-        suffix = f"{pri_label}-scatter"
-        return result, suffix, hist_extra
-
-    def _conic_gc_regrid(
+    def _conic_gc_relabel(
         self,
         dataset: "RcsGrid",
         direction: str,
+        *,
+        attest_legacy_ptm_convention=False,
     ):
-        """Bilinearly interpolate the dataset onto a uniform output grid.
+        """Qt-facing compatibility wrapper around the tested grid operation."""
 
-        Output bounds and sample counts are auto-derived: forward-map every
-        input sample to compute the (pri, sec) hull, snap to natural domain
-        edges when the input wraps the full sphere, and preserve the input's
-        per-axis sample count.
-
-        For Conic→GC: input axes are (φ, θ), output is (α, ψ). For each
-        output cell we back-solve to the corresponding (φ, θ) via
-        `_gc_to_conic_deg`, normalise into the input φ range (using periodic
-        wrap when the input spans ≥359°), then call `scipy.interpolate.interpn`
-        once on the multi-channel `rcs_power` and once on `rcs_phase` (nearest
-        for phase — bilinear-interpolating a wrapped angle introduces fake
-        ridges near ±π).
-        """
-        from scipy.interpolate import interpn
-
-        az_in = np.asarray(dataset.azimuths, dtype=float)
-        el_in = np.asarray(dataset.elevations, dtype=float)
-        if np.any(np.diff(az_in) <= 0) or np.any(np.diff(el_in) <= 0):
-            raise ValueError("input axes must be strictly increasing for re-grid")
-
-        # Forward-map every input sample to determine the output hull, then
-        # snap to natural domain edges for full-sphere inputs.
-        in_az_mesh, in_el_mesh = np.meshgrid(az_in, el_in, indexing="ij")
-        if direction == "conic_to_gc":
-            fwd_pri, fwd_sec = _conic_to_gc_deg(in_az_mesh.ravel(), in_el_mesh.ravel())
-            pri_label, sec_label = "α", "ψ"
-        else:
-            fwd_pri, fwd_sec = _gc_to_conic_deg(in_az_mesh.ravel(), in_el_mesh.ravel())
-            pri_label, sec_label = "φ", "θ"
-
-        az_span = float(az_in.max() - az_in.min())
-        el_span = float(el_in.max() - el_in.min())
-        full_sphere = az_span >= 359.0 and el_span >= 179.0
-        if full_sphere and direction == "conic_to_gc":
-            pri_lo, pri_hi = 0.0, 180.0
-            sec_lo, sec_hi = -180.0, 180.0
-        elif full_sphere and direction == "gc_to_conic":
-            pri_lo, pri_hi = -180.0, 180.0
-            sec_lo, sec_hi = -90.0, 90.0
-        else:
-            pri_lo, pri_hi = float(fwd_pri.min()), float(fwd_pri.max())
-            sec_lo, sec_hi = float(fwd_sec.min()), float(fwd_sec.max())
-
-        n_pri = max(int(az_in.size), 2)
-        n_sec = max(int(el_in.size), 2)
-        pri_grid = np.linspace(pri_lo, pri_hi, n_pri, dtype=float)
-        sec_grid = np.linspace(sec_lo, sec_hi, n_sec, dtype=float)
-
-        # Build the output (pri, sec) mesh and back-solve to (φ_query, θ_query).
-        pri_mesh, sec_mesh = np.meshgrid(pri_grid, sec_grid, indexing="ij")
-        if direction == "conic_to_gc":
-            phi_q, theta_q = _gc_to_conic_deg(pri_mesh.ravel(), sec_mesh.ravel())
-        else:
-            # GC→Conic: the input axes carry (α, ψ); the output (pri, sec) =
-            # (φ, θ); we back-solve via _conic_to_gc_deg.
-            phi_q, theta_q = _conic_to_gc_deg(pri_mesh.ravel(), sec_mesh.ravel())
-
-        # Wrap φ_query into the input range when the input is periodic in φ.
-        if az_span >= 359.0:
-            phi_q = ((phi_q - az_in[0]) % 360.0) + az_in[0]
-        if el_span >= 359.0:
-            theta_q = ((theta_q - el_in[0]) % 360.0) + el_in[0]
-
-        query = np.column_stack([phi_q, theta_q])
-
-        phase_complete = not np.any(
-            np.isfinite(dataset.rcs_power) & ~np.isfinite(dataset.rcs_phase)
+        result = dataset.convert_equatorial_conic_gc(
+            direction,
+            attest_legacy_ptm_convention=attest_legacy_ptm_convention,
         )
-        if phase_complete:
-            complex_in = dataset.rcs
-            real_out = interpn(
-                (az_in, el_in), complex_in.real, query, method="linear",
-                bounds_error=False, fill_value=np.nan,
-            )
-            imag_out = interpn(
-                (az_in, el_in), complex_in.imag, query, method="linear",
-                bounds_error=False, fill_value=np.nan,
-            )
-            complex_out = real_out + 1j * imag_out
-            power_out = np.abs(complex_out) ** 2
-            phase_out = np.angle(complex_out)
-        else:
-            power_out = interpn(
-                (az_in, el_in), dataset.rcs_power, query, method="linear",
-                bounds_error=False, fill_value=np.nan,
-            )
-            phase_out = np.full(power_out.shape, np.nan, dtype=power_out.dtype)
-        new_shape = (
-            pri_grid.size,
-            sec_grid.size,
-            dataset.frequencies.size,
-            dataset.polarizations.size,
+        note = (
+            "; exact zero-plane relabel; no interpolation; "
+            "GRIM_GC_V1 convention"
         )
-        power_out = power_out.reshape(new_shape).astype(dataset.rcs_power.dtype)
-        phase_out = phase_out.reshape(new_shape).astype(dataset.rcs_phase.dtype)
-
-        result = RcsGrid(
-            pri_grid,
-            sec_grid,
-            dataset.frequencies,
-            dataset.polarizations,
-            rcs=None,
-            rcs_power=power_out,
-            rcs_phase=phase_out,
-            rcs_domain=dataset.rcs_domain,
-            units=dict(dataset.units or {}),
-        )
-        in_bounds = np.sum(np.isfinite(power_out[..., 0, 0]))
-        total = pri_grid.size * sec_grid.size
-        coverage = 100.0 * in_bounds / max(total, 1)
-        hist_extra = (
-            f"; output axes {pri_label}=[{pri_grid[0]:g}..{pri_grid[-1]:g}/{pri_grid.size}], "
-            f"{sec_label}=[{sec_grid[0]:g}..{sec_grid[-1]:g}/{sec_grid.size}]; "
-            f"coverage {coverage:.1f}%"
-        )
-        suffix = f"{pri_label}×{sec_label}"
-        return result, suffix, hist_extra
+        return result, "equator", note
 
     def _convert_wedge_to_conic_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -3289,21 +3566,25 @@ class DatasetOpsMixin:
                 dataset.azimuths.copy(),
                 dataset.elevations.copy(),
                 dataset.frequencies.copy(),
-                list(dataset.polarizations),
-                dataset.rcs.copy(),
+                dataset.polarizations.copy(),
                 rcs_power=dataset.rcs_power.copy(),
+                rcs_phase=dataset.rcs_phase.copy(),
                 rcs_domain=dataset.rcs_domain,
+                source_path=dataset.source_path,
+                history=dataset.history,
+                units=copy.deepcopy(dataset.units or {}),
+                extra=copy.deepcopy(dataset.extra or {}),
             )
             self._add_dataset_row(dup, f"{name} [Copy]", f"Duplicate of: {name}", file_name="")
         self.status.showMessage(f"Duplicated {len(datasets)} dataset(s).")
 
     def _iter_pio_slices(self, dataset: RcsGrid, base_name: str):
-        """Yield (filename_stem, el_idx, pol_idx) for every (el, pol) slice.
+        """Yield filenames and indices for single-cut complex file formats.
 
-        A .pio file holds a 2-D (azimuth, frequency) complex slice, so any grid
-        with multiple elevations or polarizations must be split into one file
-        per (el, pol) combination. The stem is suffixed only on the axes that
-        actually have multiple values.
+        Pioneer and PTM files each hold one 2-D (azimuth, frequency) complex
+        slice, so a larger grid is split into one file per (elevation,
+        polarization) combination.  The historical method name is retained for
+        compatibility with existing GUI automation.
         """
         safe = _sanitize_filename(base_name)
         n_el = len(dataset.elevations)
@@ -3319,6 +3600,12 @@ class DatasetOpsMixin:
                 yield "_".join(parts), ei, pi
 
     def _export_pio_selected(self) -> None:
+        try:
+            self._export_pio_selected_impl()
+        except (OSError, TypeError, ValueError) as exc:
+            self.status.showMessage(f"Pioneer export failed: {exc}")
+
+    def _export_pio_selected_impl(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
             empty_message="Select one or more datasets to export.",
@@ -3376,6 +3663,101 @@ class DatasetOpsMixin:
                 )
                 produced += 1
         self.status.showMessage(f"Exported {produced} .pio file(s) to {directory}.")
+
+    @staticmethod
+    def _write_ptm_batch(directory: str, plans) -> int:
+        """Validate and stage a PTM fan-out before publishing any target."""
+
+        prepared = []
+        seen_targets: dict[str, str] = {}
+        for _name, dataset, stem, el_idx, pol_idx in plans:
+            target = os.path.abspath(os.path.join(directory, f"{stem}.ptm"))
+            target_key = os.path.normcase(target).casefold()
+            prior = seen_targets.get(target_key)
+            if prior is not None:
+                raise ValueError(
+                    "PTM export would create the same file more than once: "
+                    f"{os.path.basename(target)} (from {prior!r} and {_name!r})"
+                )
+            if os.path.lexists(target):
+                raise FileExistsError(
+                    f"PTM target already exists: {target}. Choose an empty "
+                    "folder or rename/remove the existing file."
+                )
+            seen_targets[target_key] = str(_name)
+            prepared.append((dataset, stem, int(el_idx), int(pol_idx), target))
+
+        # Validate/write every slice into a sibling staging folder first, so a
+        # format/validation failure publishes nothing. Final filesystem moves
+        # are necessarily sequential; a rare move failure can leave a partial
+        # published set and is reported to the user.
+        with tempfile.TemporaryDirectory(prefix=".grim_ptm_", dir=directory) as stage:
+            staged = []
+            for dataset, stem, el_idx, pol_idx, target in prepared:
+                stage_path = os.path.join(stage, f"{stem}.ptm")
+                saved = dataset.save_ptm(
+                    stage_path, el_idx=el_idx, pol_idx=pol_idx
+                )
+                staged.append((saved, target))
+            for stage_path, target in staged:
+                os.replace(stage_path, target)
+        return len(prepared)
+
+    def _export_ptm_selected(self) -> None:
+        """Export selected grids as one legacy PTM per elevation/polarization."""
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select one or more datasets to export.",
+        )
+        if datasets is None:
+            return
+
+        try:
+            if len(datasets) == 1:
+                name, dataset = datasets[0]
+                slices = list(self._iter_pio_slices(dataset, name))
+                if len(slices) == 1:
+                    stem, el_idx, pol_idx = slices[0]
+                    path, _ = QFileDialog.getSaveFileName(
+                        self,
+                        f"Export {name} as PTM",
+                        f"{stem}.ptm",
+                        "PTM Files (*.ptm);;All Files (*)",
+                    )
+                    if not path:
+                        return
+                    saved = dataset.save_ptm(
+                        path, el_idx=el_idx, pol_idx=pol_idx
+                    )
+                    self.status.showMessage(
+                        f"Exported {os.path.basename(saved)}."
+                    )
+                    return
+                directory = QFileDialog.getExistingDirectory(
+                    self,
+                    f"Export {name} ({len(slices)} slices) as .ptm",
+                )
+                if not directory:
+                    return
+                plans = [(name, dataset, *item) for item in slices]
+            else:
+                directory = QFileDialog.getExistingDirectory(
+                    self, "Export Selected Datasets as .ptm"
+                )
+                if not directory:
+                    return
+                plans = [
+                    (name, dataset, stem, el_idx, pol_idx)
+                    for name, dataset in datasets
+                    for stem, el_idx, pol_idx in self._iter_pio_slices(dataset, name)
+                ]
+
+            produced = self._write_ptm_batch(directory, plans)
+            self.status.showMessage(
+                f"Exported {produced} .ptm file(s) to {directory}."
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            self.status.showMessage(f"PTM export failed: {exc}")
 
     def _export_csv_selected(self) -> None:
         datasets = self._selected_datasets_ordered(

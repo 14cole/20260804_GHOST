@@ -39,6 +39,7 @@ py-modules = [
   "ghost_integration",
   "ppt_image_imprinter",
   "plot_models",
+  "ptm_io",
   "read_ss",
 ]
 
