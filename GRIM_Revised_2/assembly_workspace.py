@@ -36,6 +36,7 @@ try:  # Keep the pure scene model importable in headless/minimal environments.
         QPushButton,
         QSizePolicy,
         QSplitter,
+        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
@@ -375,7 +376,7 @@ class AssemblySceneModel:
         *,
         visible: bool = True,
         label: str = "Point features",
-        color: str = "#ef5350",
+        color: str = "#38bdf8",
         size: float = 28.0,
         depthshade: bool = True,
     ) -> AssemblySceneGroup:
@@ -407,7 +408,7 @@ class AssemblySceneModel:
         *,
         visible: bool = True,
         label: str = "Line features",
-        color: str = "#ffca28",
+        color: str = "#f59e0b",
         linewidth: float = 2.0,
         alpha: float = 1.0,
     ) -> AssemblySceneGroup:
@@ -482,6 +483,20 @@ if GUI_AVAILABLE:
     class AssemblySceneCanvas(FigureCanvas):
         """Qt Matplotlib canvas rendering an :class:`AssemblySceneModel`."""
 
+        _FEEDBACK_DEFAULTS = {
+            "empty": (
+                "Nothing to preview yet\n"
+                "Choose a body and/or add point or line placements"
+            ),
+            "loading": "Preparing 3-D placement preview\u2026",
+            "error": "The 3-D preview could not be prepared",
+            "hidden": (
+                "All preview geometry is hidden\n"
+                "Check a Show box in the Assembly tree"
+            ),
+            "ready": "",
+        }
+
         def __init__(
             self,
             parent: QWidget | None = None,
@@ -500,6 +515,48 @@ if GUI_AVAILABLE:
             self.destroyed.connect(self._detach_model_listener)
             self._artists: dict[str, Any] = {}
             self._style_axes()
+            self._feedback_artist = self.axes.text2D(
+                0.5,
+                0.5,
+                "",
+                transform=self.axes.transAxes,
+                ha="center",
+                va="center",
+                color="#dbeafe",
+                fontsize=11,
+                linespacing=1.5,
+                bbox={
+                    "boxstyle": "round,pad=0.8",
+                    "facecolor": "#172554",
+                    "edgecolor": "#3b82f6",
+                    "alpha": 0.94,
+                },
+                zorder=20,
+            )
+            self._stage_artist = self.axes.text2D(
+                0.02,
+                0.98,
+                "",
+                transform=self.axes.transAxes,
+                ha="left",
+                va="top",
+                color="#bfdbfe",
+                fontsize=9,
+                fontweight="bold",
+                bbox={
+                    "boxstyle": "round,pad=0.45",
+                    "facecolor": "#172554",
+                    "edgecolor": "#3b82f6",
+                    "alpha": 0.92,
+                },
+                zorder=21,
+            )
+            self._preview_state = "empty"
+            self._preview_stage = "none"
+            self.set_preview_stage("none")
+            for group_id in self.model.group_ids:
+                self._add_artist(self.model.group(group_id))
+            self.refresh_scene_feedback()
             self.fit_visible()
 
         @property
@@ -513,7 +570,7 @@ if GUI_AVAILABLE:
             axis_color = "#64748b"
             self.figure.patch.set_facecolor(background)
             self.axes.set_facecolor(background)
-            self.axes.set_title("Assembly geometry", color=foreground)
+            self.axes.set_title("3-D placement preview", color=foreground)
             self.axes.set_xlabel("X right (m)", color=foreground)
             self.axes.set_ylabel("Y nose (m)", color=foreground)
             self.axes.set_zlabel("Z up (m)", color=foreground)
@@ -559,7 +616,7 @@ if GUI_AVAILABLE:
                     points[:, 0],
                     points[:, 1],
                     points[:, 2],
-                    c=style.get("color", "#ef5350"),
+                    c=style.get("color", "#38bdf8"),
                     s=style.get("size", 28.0),
                     depthshade=style.get("depthshade", True),
                     label=group.label,
@@ -567,7 +624,7 @@ if GUI_AVAILABLE:
             elif group.kind == "lines":
                 artist = Line3DCollection(
                     group.geometry,
-                    colors=style.get("color", "#ffca28"),
+                    colors=style.get("color", "#f59e0b"),
                     linewidths=style.get("linewidth", 2.0),
                     alpha=style.get("alpha", 1.0),
                     label=group.label,
@@ -577,6 +634,95 @@ if GUI_AVAILABLE:
                 raise ValueError(f"unsupported assembly scene kind {group.kind!r}")
             artist.set_visible(group.visible)
             self._artists[group.group_id] = artist
+
+        @property
+        def preview_state(self) -> str:
+            """Current user-facing preview state."""
+
+            return self._preview_state
+
+        @property
+        def feedback_text(self) -> str:
+            return str(self._feedback_artist.get_text())
+
+        @property
+        def preview_stage(self) -> str:
+            """Preparation stage shown independently from scene visibility."""
+
+            return self._preview_stage
+
+        def set_preview_stage(self, stage: str) -> None:
+            """Label input-only, validated, or stale geometry on the canvas."""
+
+            normalized = str(stage).strip().lower()
+            labels = {
+                "none": ("", "#bfdbfe", "#3b82f6"),
+                "input": (
+                    "INPUT PREVIEW \u2022 NOT PHYSICS-VALIDATED",
+                    "#fde68a",
+                    "#f59e0b",
+                ),
+                "validated": (
+                    "PLACEMENTS VALIDATED",
+                    "#bae6fd",
+                    "#38bdf8",
+                ),
+                "stale": (
+                    "STALE PREVIEW \u2022 INPUTS CHANGED",
+                    "#fed7aa",
+                    "#f97316",
+                ),
+            }
+            if normalized not in labels:
+                raise ValueError(
+                    "preview stage must be none, input, validated, or stale"
+                )
+            text, foreground, border = labels[normalized]
+            self._preview_stage = normalized
+            self._stage_artist.set_text(text)
+            self._stage_artist.set_color(foreground)
+            self._stage_artist.get_bbox_patch().set_edgecolor(border)
+            self._stage_artist.set_visible(bool(text))
+            self.draw_idle()
+
+        def set_feedback(self, state: str, message: str | None = None) -> None:
+            """Show explicit canvas feedback without changing scene geometry.
+
+            This is presentation state only. It is deliberately stored on the
+            canvas rather than :class:`AssemblySceneModel`, so loading/error
+            messages can never affect feature membership or assembly physics.
+            """
+
+            normalized = str(state).strip().lower()
+            if normalized not in self._FEEDBACK_DEFAULTS:
+                raise ValueError(
+                    "preview feedback state must be empty, loading, error, hidden, "
+                    "or ready"
+                )
+            text = self._FEEDBACK_DEFAULTS[normalized] if message is None else str(message)
+            self._preview_state = normalized
+            self._feedback_artist.set_text(text)
+            self._feedback_artist.set_visible(normalized != "ready")
+            if normalized == "error":
+                self._feedback_artist.set_color("#fecaca")
+                self._feedback_artist.get_bbox_patch().set_edgecolor("#f87171")
+            else:
+                self._feedback_artist.set_color("#dbeafe")
+                self._feedback_artist.get_bbox_patch().set_edgecolor("#3b82f6")
+            self.draw_idle()
+
+        def refresh_scene_feedback(self) -> None:
+            """Reflect whether the current display has visible geometry."""
+
+            if not self.model.group_ids:
+                self.set_feedback("empty")
+            elif any(
+                self.model.group(group_id).visible
+                for group_id in self.model.group_ids
+            ):
+                self.set_feedback("ready")
+            else:
+                self.set_feedback("hidden")
 
         def _on_model_change(self, event: str, group_id: str | None) -> None:
             if event == "cleared":
@@ -590,6 +736,10 @@ if GUI_AVAILABLE:
                     artist.set_visible(self.model.group(group_id).visible)
             elif group_id is not None:
                 self._add_artist(self.model.group(group_id))
+            # Direct scene API users receive the same positive feedback as
+            # feature-plan users. Workspace loading subsequently adds a more
+            # detailed count summary beneath the canvas.
+            self.refresh_scene_feedback()
             self.draw_idle()
 
         def _detach_model_listener(self, *_args) -> None:
@@ -602,6 +752,8 @@ if GUI_AVAILABLE:
 
         def clear(self) -> None:
             self.model.clear()
+            if not self.model.group_ids:
+                self.set_feedback("empty")
 
         def add_body_triangles(self, group_id: str, triangles_m: Any, **kwargs):
             return self.model.add_body_triangles(group_id, triangles_m, **kwargs)
@@ -631,6 +783,12 @@ if GUI_AVAILABLE:
             span = bounds[1] - bounds[0]
             reference = max(float(np.max(span)), float(np.max(np.abs(center))), 1.0)
             minimum_span = 1.0e-6 * reference
+            # Keep flat STL facets and isolated point placements visibly
+            # rotatable without distorting the data scale. The plot-box aspect
+            # follows these same limits, so one metre remains one metre on all
+            # three axes.
+            largest_span = max(float(np.max(span)), minimum_span)
+            minimum_span = max(minimum_span, 0.03 * largest_span)
             span = np.maximum(span, minimum_span)
             span = span * (1.0 + 2.0 * padding)
             lower = center - 0.5 * span
@@ -670,6 +828,10 @@ if GUI_AVAILABLE:
                 assembly_tree_panel = AssemblyTreePanel(self)
             self.assembly_tree_panel = assembly_tree_panel
             self.scene_canvas = AssemblySceneCanvas(self, model=scene_model)
+            self.scene_canvas.setToolTip(
+                "Drag to rotate the 3-D view and use the mouse wheel to zoom. "
+                "X is right, Y is nose, Z is up; coordinates are metres."
+            )
             self.scene_model = self.scene_canvas.model
             self._feature_service: FeatureBuildService | Callable[[object], Any] | None = None
             self._pending_visibility: dict[str, bool] = {}
@@ -685,13 +847,25 @@ if GUI_AVAILABLE:
             toolbar = QHBoxLayout()
             title = QLabel("Assembly")
             title.setStyleSheet("font-weight: 600;")
-            self.btn_fit_visible = QPushButton("Fit visible")
+            self.btn_fit_visible = QPushButton("Fit visible geometry")
+            self.btn_fit_visible.setToolTip(
+                "Refit the 3-D camera to the body, points, and lines whose Show "
+                "boxes are checked. This changes the view only."
+            )
+            self.lbl_legend = QLabel(
+                '<span style="color:#94a3b8">\u25a0 Body</span>&nbsp;&nbsp;'
+                '<span style="color:#38bdf8">\u25cf Points</span>&nbsp;&nbsp;'
+                '<span style="color:#f59e0b">\u2501 Lines</span>'
+            )
             self.lbl_status = QLabel(
-                "Attach a body and feature placement controls through the Assembly service."
+                "Preview is empty. Choose an optional STL/facet or BoR body, then "
+                "add point or line placements. The tree Show boxes control only the "
+                "3-D display; they do not change the assembled RCS."
             )
             self.lbl_status.setWordWrap(True)
             toolbar.addWidget(title)
             toolbar.addStretch(1)
+            toolbar.addWidget(self.lbl_legend)
             toolbar.addWidget(self.btn_fit_visible)
             outer.addLayout(toolbar)
 
@@ -700,12 +874,43 @@ if GUI_AVAILABLE:
             left_layout = QVBoxLayout(left_host)
             left_layout.setContentsMargins(0, 0, 0, 0)
             left_layout.setSpacing(6)
-            left_layout.addWidget(self.assembly_tree_panel, 1)
-            self.feature_controls_host = QWidget(left_host)
+
+            self.left_tabs = QTabWidget(left_host)
+            self.place_features_tab = QWidget(self.left_tabs)
+            place_layout = QVBoxLayout(self.place_features_tab)
+            place_layout.setContentsMargins(8, 8, 8, 8)
+            place_layout.setSpacing(6)
+            place_help = QLabel(
+                "Place spatial features here. Select the clean-body response and "
+                "optional STL/facet or BoR geometry, then add point or line CSV "
+                "placements and their response datasets."
+            )
+            place_help.setWordWrap(True)
+            place_layout.addWidget(place_help)
+            self.feature_controls_host = QWidget(self.place_features_tab)
             self.feature_controls_layout = QVBoxLayout(self.feature_controls_host)
             self.feature_controls_layout.setContentsMargins(0, 0, 0, 0)
             self.feature_controls_host.setVisible(False)
-            left_layout.addWidget(self.feature_controls_host, 0)
+            place_layout.addWidget(self.feature_controls_host, 1)
+
+            self.combine_visibility_tab = QWidget(self.left_tabs)
+            combine_layout = QVBoxLayout(self.combine_visibility_tab)
+            combine_layout.setContentsMargins(8, 8, 8, 8)
+            combine_layout.setSpacing(6)
+            combine_help = QLabel(
+                "Combine Datasets adds or subtracts whole GRIM responses. It is "
+                "separate from placing point and line features. The Show column "
+                "controls only the 3-D preview, not response inclusion."
+            )
+            combine_help.setWordWrap(True)
+            combine_layout.addWidget(combine_help)
+            combine_layout.addWidget(self.assembly_tree_panel, 1)
+
+            self.left_tabs.addTab(self.place_features_tab, "Place Features")
+            self.left_tabs.addTab(
+                self.combine_visibility_tab, "Combine Datasets / Visibility"
+            )
+            left_layout.addWidget(self.left_tabs, 1)
             splitter.addWidget(left_host)
 
             viewer = QWidget(self)
@@ -716,7 +921,8 @@ if GUI_AVAILABLE:
             splitter.addWidget(viewer)
             splitter.setStretchFactor(0, 0)
             splitter.setStretchFactor(1, 1)
-            splitter.setSizes([360, 1000])
+            left_host.setMinimumWidth(440)
+            splitter.setSizes([500, 1000])
             outer.addWidget(splitter, 1)
             self.splitter = splitter
             self.left_host = left_host
@@ -901,6 +1107,10 @@ if GUI_AVAILABLE:
             self.clear_feature_preview()
             self._pending_visibility.clear()
             self.scene_canvas.clear()
+            self.lbl_status.setText(
+                "Preview cleared. Choose an optional STL/facet or BoR body, then "
+                "add point or line placements."
+            )
 
         def clear_feature_preview(self) -> None:
             """Remove only the service-owned feature scene and typed tree root."""
@@ -916,6 +1126,7 @@ if GUI_AVAILABLE:
                     self.scene_model.remove_group(group_id)
                 self._pending_visibility.pop(group_id, None)
             self._feature_preview_group_ids.clear()
+            self.scene_canvas.set_preview_stage("none")
 
         @staticmethod
         def _feature_plan_geometry(plan: object):
@@ -935,6 +1146,17 @@ if GUI_AVAILABLE:
                 )
             return tuple(getattr(plan, name) for name in required)
 
+        def _show_preview_error(self, exc: Exception) -> None:
+            """Publish one consistent, non-destructive preview failure state."""
+
+            message = f"Preview unavailable: {exc}"
+            self.scene_canvas.set_feedback("error", message)
+            self.scene_canvas.set_preview_stage("none")
+            self.lbl_status.setText(
+                f"{message}. Correct the highlighted body or placement input; "
+                "no assembly result was changed."
+            )
+
         def load_feature_preview(self, plan: object):
             """Render one already-prepared feature plan in CAD metres.
 
@@ -948,34 +1170,63 @@ if GUI_AVAILABLE:
             feature type at a time.
             """
 
-            surface, profile, point_groups, line_groups = self._feature_plan_geometry(plan)
-            if not isinstance(point_groups, dict) or not isinstance(line_groups, dict):
-                raise TypeError(
-                    "prepared point_locations_cad_m and line_paths_cad_m must be dicts"
+            try:
+                surface, profile, point_groups, line_groups = (
+                    self._feature_plan_geometry(plan)
                 )
-            tree = getattr(self.assembly_tree_panel, "tree", None)
-            if tree is None or not all(
-                callable(getattr(tree, name, None))
-                for name in (
-                    "add_preview_root",
-                    "add_preview_group",
-                    "add_preview_item",
-                    "remove_preview_root",
-                )
-            ):
-                raise RuntimeError("AssemblyTree does not provide typed preview APIs")
+                preview_stage = str(
+                    getattr(plan, "preview_stage", "validated")
+                ).lower()
+                if preview_stage not in {"input", "validated"}:
+                    raise ValueError(
+                        "prepared preview_stage must be 'input' or 'validated'"
+                    )
+                if not isinstance(point_groups, dict) or not isinstance(
+                    line_groups, dict
+                ):
+                    raise TypeError(
+                        "prepared point_locations_cad_m and line_paths_cad_m must "
+                        "be dicts"
+                    )
+                tree = getattr(self.assembly_tree_panel, "tree", None)
+                if tree is None or not all(
+                    callable(getattr(tree, name, None))
+                    for name in (
+                        "add_preview_root",
+                        "add_preview_group",
+                        "add_preview_item",
+                        "remove_preview_root",
+                    )
+                ):
+                    raise RuntimeError(
+                        "AssemblyTree does not provide typed preview APIs"
+                    )
+            except Exception as exc:
+                self.clear_feature_preview()
+                self._show_preview_error(exc)
+                raise
 
             self.clear_feature_preview()
+            self.scene_canvas.set_feedback("loading")
+            self.lbl_status.setText(
+                "Preparing the body and feature placements for the 3-D preview\u2026"
+            )
             root = tree.add_preview_root(
                 "Feature Assembly", stable_key=FEATURE_PREVIEW_ROOT_KEY
             )
             scene_ids: list[str] = []
+            body_description = "no body geometry"
             try:
                 body_id = feature_preview_group_id("body")
                 if surface is not None:
                     body_group = self.add_body_triangles(body_id, surface)
                     scene_ids.append(body_id)
-                    body_label = f"Body ({body_group.source_count:,} triangles)"
+                    body_label = (
+                        f"Body (STL/facet, {body_group.source_count:,} triangles)"
+                    )
+                    body_description = (
+                        f"STL/facet body ({body_group.source_count:,} source triangles)"
+                    )
                     body_item = tree.add_preview_item(
                         root, body_label, stable_key=body_id
                     )
@@ -985,6 +1236,7 @@ if GUI_AVAILABLE:
                     scene_ids.append(body_id)
                     profile_count = int(np.asarray(profile).shape[0])
                     body_label = f"Body (BoR, {profile_count:,} profile points)"
+                    body_description = f"BoR body ({profile_count:,} profile points)"
                     body_item = tree.add_preview_item(
                         root, body_label, stable_key=body_id
                     )
@@ -1016,9 +1268,10 @@ if GUI_AVAILABLE:
                     group_id = feature_preview_group_id("points", dataset_id)
                     self.add_points(group_id, point_groups[dataset_id])
                     scene_ids.append(group_id)
+                    point_word = "point" if count == 1 else "points"
                     item = tree.add_preview_item(
                         point_root,
-                        f"{dataset_id} ({count:,} points)",
+                        f"{dataset_id} ({count:,} {point_word})",
                         stable_key=group_id,
                     )
                     self.bind_tree_item_groups(item, group_id)
@@ -1052,9 +1305,10 @@ if GUI_AVAILABLE:
                     group_id = feature_preview_group_id("lines", dataset_id)
                     self.add_lines(group_id, paths)
                     scene_ids.append(group_id)
+                    line_word = "line" if count == 1 else "lines"
                     item = tree.add_preview_item(
                         line_root,
-                        f"{dataset_id} ({count:,} lines)",
+                        f"{dataset_id} ({count:,} {line_word})",
                         stable_key=group_id,
                     )
                     self.bind_tree_item_groups(item, group_id)
@@ -1069,17 +1323,69 @@ if GUI_AVAILABLE:
                 tree.expandItem(point_root)
                 tree.expandItem(line_root)
                 self.fit_visible()
-                self.lbl_status.setText(
-                    f"Feature preview loaded: {point_total:,} points, "
-                    f"{line_total:,} lines (CAD metres)."
+                self.scene_canvas.refresh_scene_feedback()
+                self.scene_canvas.set_preview_stage(
+                    preview_stage if scene_ids else "none"
                 )
+                if scene_ids:
+                    point_summary = (
+                        "1 point placement"
+                        if point_total == 1
+                        else f"{point_total:,} point placements"
+                    )
+                    line_summary = (
+                        "1 line path"
+                        if line_total == 1
+                        else f"{line_total:,} line paths"
+                    )
+                    if preview_stage == "input":
+                        self.lbl_status.setText(
+                            f"Input preview (not physics-validated) \u2014 "
+                            f"{body_description}; {point_summary}; {line_summary}. "
+                            "Check the locations, then "
+                            "validate before building. Coordinates are CAD metres; "
+                            "tree Show boxes change only this display."
+                        )
+                    else:
+                        self.lbl_status.setText(
+                            f"Validated preview ready \u2014 {body_description}; "
+                            f"{point_summary}; {line_summary}. Coordinates are CAD "
+                            "metres. Drag to rotate and "
+                            "scroll to zoom. Tree Show boxes change only this preview, "
+                            "never the assembled RCS."
+                        )
+                else:
+                    self.lbl_status.setText(
+                        "Nothing is ready to preview yet. Choose an optional STL/facet "
+                        "or BoR body and add at least one point or line placement."
+                    )
                 return root
-            except Exception:
+            except Exception as exc:
                 # Never leave a half-populated tree or stale artists after a
                 # malformed third-party plan reaches this display boundary.
                 self._feature_preview_group_ids.update(scene_ids)
                 self.clear_feature_preview()
+                self._show_preview_error(exc)
                 raise
+
+        def mark_preview_stale(self, reason: str = "") -> None:
+            """Keep the last geometry visible while clearly marking it outdated.
+
+            Controllers call this as soon as a body, response, or placement
+            selection changes. It never mutates prepared geometry or assembly
+            membership; the next :meth:`load_feature_preview` replaces it.
+            """
+
+            if not self._feature_preview_group_ids:
+                return
+            detail = str(reason).strip()
+            self.scene_canvas.set_preview_stage("stale")
+            self.lbl_status.setText(
+                "Preview is stale because the inputs changed. Refresh or validate "
+                "the preview before Build. The previous geometry remains visible "
+                "for reference only."
+                + (f" {detail}" if detail else "")
+            )
 
         def add_body_triangles(self, group_id: str, triangles_m: Any, **kwargs):
             kwargs["visible"] = self._visibility_for_new_group(
@@ -1144,6 +1450,7 @@ if GUI_AVAILABLE:
                 return
             self.feature_controls_layout.addWidget(widget)
             self.feature_controls_host.setVisible(True)
+            self.left_tabs.setCurrentWidget(self.place_features_tab)
 
         @staticmethod
         def _normalize_feature_result(value: Any) -> FeatureBuildResult:

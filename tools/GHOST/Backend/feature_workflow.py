@@ -124,6 +124,38 @@ class FeaturePreviewGeometry:
     line_paths_cad_m: dict[str, dict[str, np.ndarray]]
 
 
+@dataclass(frozen=True)
+class FeatureInputPreview:
+    """Strictly parsed placement geometry for interactive 3-D setup.
+
+    This preview deliberately stops before response loading, skin/normal
+    certification, and coherent assembly. It lets a user verify file choice,
+    units, CAD orientation, IDs, and location paths while completing the form;
+    :func:`prepare_feature_assembly` remains the authoritative physical gate.
+    """
+
+    preview_geometry: FeaturePreviewGeometry
+    dataset_requirements: FeatureDatasetRequirements
+    body_source: str
+    preview_stage: str = "input"
+
+    @property
+    def surface_triangles_cad_m(self) -> Optional[np.ndarray]:
+        return self.preview_geometry.surface_triangles_cad_m
+
+    @property
+    def body_profile_rho_z_m(self) -> Optional[np.ndarray]:
+        return self.preview_geometry.body_profile_rho_z_m
+
+    @property
+    def point_locations_cad_m(self) -> dict[str, np.ndarray]:
+        return self.preview_geometry.point_locations_cad_m
+
+    @property
+    def line_paths_cad_m(self) -> dict[str, dict[str, np.ndarray]]:
+        return self.preview_geometry.line_paths_cad_m
+
+
 @dataclass
 class FeatureAssemblyPlan:
     """Prepared, physically validated inputs ready for coherent execution."""
@@ -162,6 +194,12 @@ class FeatureAssemblyPlan:
     @property
     def line_paths_cad_m(self) -> dict[str, dict[str, np.ndarray]]:
         return self.preview_geometry.line_paths_cad_m
+
+    @property
+    def preview_stage(self) -> str:
+        """Identify this scene as physically prepared, not an input-only view."""
+
+        return "validated"
 
 
 def resolve_path(value: PathValue, *, base_dir: Optional[PathValue] = None) -> Path:
@@ -350,6 +388,159 @@ def discover_feature_dataset_ids(
     return FeatureDatasetRequirements(
         point_dataset_ids=_ordered_dataset_ids(point_rows),
         line_dataset_ids=_ordered_dataset_ids(line_rows),
+    )
+
+
+def _input_line_preview_paths(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    coordinate_scale: float,
+) -> dict[str, dict[str, np.ndarray]]:
+    """Build CAD-metre polylines from already schema-validated line rows."""
+
+    result: dict[str, dict[str, np.ndarray]] = {}
+    start = 0
+    while start < len(rows):
+        line_id = str(rows[start]["line_id"])
+        end = start + 1
+        while end < len(rows) and str(rows[end]["line_id"]) == line_id:
+            end += 1
+        group = rows[start:end]
+        dataset_id = str(group[0]["dataset_id"])
+        segments = np.asarray(
+            [
+                [
+                    [row["x1"], row["y1"], row["z1"]],
+                    [row["x2"], row["y2"], row["z2"]],
+                ]
+                for row in group
+            ],
+            dtype=float,
+        ) * float(coordinate_scale)
+        lengths = np.linalg.norm(segments[:, 1] - segments[:, 0], axis=1)
+        if np.any(lengths <= 0.0):
+            index = int(np.flatnonzero(lengths <= 0.0)[0])
+            raise ValueError(
+                f"line-placement row {group[index]['_csv_line']} has a "
+                "zero-length segment."
+            )
+        extent = float(np.max(np.ptp(segments.reshape(-1, 3), axis=0)))
+        continuity_tolerance = max(
+            1.0e-12,
+            1.0e-6 * max(extent, float(np.max(lengths))),
+        )
+        for index in range(len(segments) - 1):
+            gap = float(np.linalg.norm(
+                segments[index, 1] - segments[index + 1, 0]
+            ))
+            if gap > continuity_tolerance:
+                raise ValueError(
+                    f"line-placement rows {group[index]['_csv_line']} and "
+                    f"{group[index + 1]['_csv_line']} of line_id {line_id!r} "
+                    f"are not head-to-tail (gap {gap:.3e} m)."
+                )
+        path = np.concatenate(
+            [segments[:, 0, :], segments[-1:, 1, :]], axis=0
+        )
+        result.setdefault(dataset_id, {})[line_id] = np.array(
+            path, dtype=float, copy=True
+        )
+        start = end
+    return result
+
+
+def prepare_feature_input_preview(
+    *,
+    base_grim: Optional[PathValue] = None,
+    surface_mesh: Optional[PathValue] = None,
+    coordinate_units: str = "inches",
+    surface_units: str = "inches",
+    point_locations_csv: Optional[PathValue] = None,
+    line_locations_csv: Optional[PathValue] = None,
+    base_dir: Optional[PathValue] = None,
+) -> FeatureInputPreview:
+    """Prepare an input-only CAD preview without response-dataset mappings.
+
+    The same strict placement parsers and unit conversions used by local/HPC
+    feature assembly are used here. No electromagnetic result is produced and
+    this preview is not evidence that skin distance, outward normals, response
+    metadata, or coherent compatibility have passed.
+    """
+
+    if not any((base_grim, surface_mesh, point_locations_csv, line_locations_csv)):
+        raise ValueError(
+            "Select a base GRIM, STL/facet mesh, or placement CSV to preview."
+        )
+
+    profile: Optional[np.ndarray] = None
+    body_source = "none"
+    if base_grim is not None:
+        base = resolve_path(base_grim, base_dir=base_dir)
+        if not base.is_file():
+            raise FileNotFoundError(f"Base monostatic GRIM not found: {base}")
+        embedded_grid = load_body_requested_radar_grid(str(base))
+        if embedded_grid is not None:
+            profile = np.array(
+                load_body_profile_grim(str(base)), dtype=float, copy=True
+            )
+            body_source = "embedded_bor_profile"
+
+    surface_triangles: Optional[np.ndarray] = None
+    if surface_mesh is not None:
+        surface_path = resolve_path(surface_mesh, base_dir=base_dir)
+        if not surface_path.is_file():
+            raise FileNotFoundError(f"Surface mesh not found: {surface_path}")
+        surface_scale = _library_unit_scale(
+            surface_units, label="surface_units"
+        )
+        surface_triangles = (
+            np.asarray(read_surface_mesh(str(surface_path)), dtype=float)
+            * surface_scale
+        )
+        body_source = "surface_mesh"
+
+    coordinate_scale = _library_unit_scale(
+        coordinate_units, label="coordinate_units"
+    )
+    point_rows = (
+        read_point_placement_csv(point_locations_csv, base_dir=base_dir)
+        if point_locations_csv is not None else []
+    )
+    line_rows = (
+        read_line_placement_csv(line_locations_csv, base_dir=base_dir)
+        if line_locations_csv is not None else []
+    )
+    point_groups: dict[str, list[np.ndarray]] = {}
+    for row in point_rows:
+        point_groups.setdefault(str(row["dataset_id"]), []).append(
+            np.asarray([row["x"], row["y"], row["z"]], dtype=float)
+            * coordinate_scale
+        )
+    point_locations = {
+        dataset_id: np.asarray(locations, dtype=float).reshape(-1, 3)
+        for dataset_id, locations in point_groups.items()
+    }
+    line_paths = _input_line_preview_paths(
+        line_rows, coordinate_scale=coordinate_scale
+    )
+    requirements = FeatureDatasetRequirements(
+        point_dataset_ids=_ordered_dataset_ids(point_rows),
+        line_dataset_ids=_ordered_dataset_ids(line_rows),
+    )
+    geometry = FeaturePreviewGeometry(
+        surface_triangles_cad_m=(
+            None
+            if surface_triangles is None
+            else np.array(surface_triangles, dtype=float, copy=True)
+        ),
+        body_profile_rho_z_m=profile,
+        point_locations_cad_m=point_locations,
+        line_paths_cad_m=line_paths,
+    )
+    return FeatureInputPreview(
+        preview_geometry=geometry,
+        dataset_requirements=requirements,
+        body_source=body_source,
     )
 
 
@@ -1023,10 +1214,12 @@ __all__ = [
     "FeatureAssemblyPlan",
     "FeatureAssemblyRequest",
     "FeatureDatasetRequirements",
+    "FeatureInputPreview",
     "FeaturePreviewGeometry",
     "compute_skin_limit",
     "discover_feature_dataset_ids",
     "execute_feature_assembly",
+    "prepare_feature_input_preview",
     "prepare_feature_assembly",
     "prepare_line_placements",
     "prepare_point_placements",

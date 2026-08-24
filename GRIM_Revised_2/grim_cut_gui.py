@@ -730,6 +730,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.feature_assembly_panel.preview_ready.connect(
             self._on_feature_preview_ready
         )
+        self.feature_assembly_panel.preview_stale.connect(
+            self.assembly_workspace.mark_preview_stale
+        )
         self.feature_assembly_panel.feature_built.connect(
             self._on_feature_file_built
         )
@@ -1614,11 +1617,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
 
     def _on_feature_preview_ready(self, plan) -> None:
-        """Render only the backend's already-validated CAD-metre geometry."""
+        """Render only the backend's already-parsed CAD-metre geometry."""
         try:
             self.assembly_workspace.load_feature_preview(plan)
         except Exception as exc:
             self.status.showMessage(f"Feature preview failed: {exc}")
+        else:
+            stage = str(getattr(plan, "preview_stage", "validated")).lower()
+            label = "Input" if stage == "input" else "Validated"
+            self.status.showMessage(f"{label} 3-D feature preview updated.")
 
     def _on_feature_file_built(self, path: str) -> None:
         """Publish a saved feature result through the normal GRIM loader."""

@@ -179,6 +179,38 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertIs(
             self.window.feature_assembly_panel.service(), self.feature_service
         )
+        left_tabs = self.window.assembly_workspace.left_tabs
+        self.assertEqual(
+            [left_tabs.tabText(index) for index in range(left_tabs.count())],
+            ["Place Features", "Combine Datasets / Visibility"],
+        )
+        self.assertIs(
+            left_tabs.currentWidget(),
+            self.window.assembly_workspace.place_features_tab,
+        )
+
+    def test_feature_input_preview_becomes_visibly_stale_after_edit(self) -> None:
+        plan = SimpleNamespace(
+            preview_stage="input",
+            surface_triangles_cad_m=np.asarray(
+                [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]
+            ),
+            body_profile_rho_z_m=None,
+            point_locations_cad_m={"fastener": np.asarray([[0.2, 0.2, 0.0]])},
+            line_paths_cad_m={},
+        )
+
+        self.window._on_feature_preview_ready(plan)
+        self.assertEqual(
+            self.window.assembly_workspace.scene_canvas.preview_stage, "input"
+        )
+
+        self.window.feature_assembly_panel.preview_stale.emit("CSV changed.")
+
+        self.assertEqual(
+            self.window.assembly_workspace.scene_canvas.preview_stage, "stale"
+        )
+        self.assertIn("CSV changed", self.window.assembly_workspace.lbl_status.text())
 
     def test_range_cal_button_and_dialog_roles_are_explicit(self) -> None:
         buttons = [

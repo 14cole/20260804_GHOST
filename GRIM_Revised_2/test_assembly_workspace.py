@@ -187,6 +187,8 @@ class AssemblyGuiTests(unittest.TestCase):
 
     def test_canvas_artist_visibility_and_fit(self):
         canvas = AssemblySceneCanvas()
+        self.assertEqual(canvas.preview_state, "empty")
+        self.assertIn("Nothing to preview", canvas.feedback_text)
         np.testing.assert_allclose(
             canvas.figure.get_facecolor()[:3],
             np.asarray([11.0, 18.0, 34.0]) / 255.0,
@@ -197,11 +199,30 @@ class AssemblyGuiTests(unittest.TestCase):
         canvas.set_group_visible("points:a", False)
         self.assertFalse(canvas.model.group("points:a").visible)
         self.assertFalse(canvas._artists["points:a"].get_visible())
+        canvas.set_group_visible("lines:a", False)
+        self.assertEqual(canvas.preview_state, "hidden")
+        self.assertIn("Show box", canvas.feedback_text)
+        canvas.set_group_visible("lines:a", True)
+        self.assertEqual(canvas.preview_state, "ready")
         canvas.fit_visible()
         canvas.draw()
         canvas._detach_model_listener()
         canvas.model.add_points("points:detached", [[0.0, 0.0, 0.0]])
         self.assertNotIn("points:detached", canvas._artists)
+
+    def test_prepopulated_scene_is_drawn_and_fitted_on_canvas_creation(self):
+        model = AssemblySceneModel()
+        model.add_bor_profile(
+            "body:bor",
+            [[0.0, 1.0], [0.25, 0.0], [0.0, -1.0]],
+            circumferential_samples=8,
+        )
+
+        canvas = AssemblySceneCanvas(model=model)
+
+        self.assertEqual(canvas.preview_state, "ready")
+        self.assertIn("body:bor", canvas._artists)
+        self.assertTrue(canvas._artists["body:bor"].get_visible())
 
     def test_workspace_service_hook_and_deferred_tree_visibility(self):
         from assembly_tree import AssemblyTreePanel, _TYPE_ROOT
@@ -231,6 +252,28 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(emitted, [("assembled", marker, "request-1")])
 
+    def test_workspace_separates_placement_from_dataset_combination(self):
+        from PySide6.QtWidgets import QLabel
+        from assembly_tree import AssemblyTreePanel
+
+        panel = AssemblyTreePanel()
+        workspace = AssemblyWorkspace(assembly_tree_panel=panel)
+
+        self.assertEqual(workspace.left_tabs.count(), 2)
+        self.assertEqual(workspace.left_tabs.tabText(0), "Place Features")
+        self.assertEqual(
+            workspace.left_tabs.tabText(1), "Combine Datasets / Visibility"
+        )
+        self.assertIs(panel.parentWidget(), workspace.combine_visibility_tab)
+
+        controls = QLabel("feature controls")
+        workspace.set_feature_controls(controls)
+        self.assertIs(
+            workspace.left_tabs.currentWidget(), workspace.place_features_tab
+        )
+        self.assertFalse(workspace.feature_controls_host.isHidden())
+        self.assertIs(controls.parentWidget(), workspace.feature_controls_host)
+
     @staticmethod
     def _feature_plan():
         return SimpleNamespace(
@@ -255,6 +298,25 @@ class AssemblyGuiTests(unittest.TestCase):
                 "panel": {
                     "edge": np.asarray([[0.2, 0.0, 0.0], [0.2, 1.0, 0.0]])
                 },
+            },
+        )
+
+    @staticmethod
+    def _bor_feature_plan():
+        return SimpleNamespace(
+            surface_triangles_cad_m=None,
+            body_profile_rho_z_m=np.asarray(
+                [[0.0, 1.0], [0.3, 0.5], [0.3, -0.5], [0.0, -1.0]]
+            ),
+            point_locations_cad_m={
+                "antenna": np.asarray([[0.0, 0.25, 0.3]])
+            },
+            line_paths_cad_m={
+                "panel gap": {
+                    "gap-1": np.asarray(
+                        [[-0.3, 0.0, 0.0], [0.3, 0.0, 0.0]]
+                    )
+                }
             },
         )
 
@@ -287,7 +349,7 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertEqual(line_branch.text(0), "Line Features (3)")
         self.assertEqual(point_branch.childCount(), 2)
         self.assertEqual(line_branch.childCount(), 2)
-        self.assertIn("1 points", point_branch.child(0).text(0))
+        self.assertIn("1 point", point_branch.child(0).text(0))
         self.assertIn("2 points", point_branch.child(1).text(0))
         self.assertIn("2 lines", line_branch.child(0).text(0))
 
@@ -296,6 +358,72 @@ class AssemblyGuiTests(unittest.TestCase):
             self.assertFalse(workspace.scene_model.group(group_id).visible)
         for group_id in (expected_ids[0], *expected_ids[3:]):
             self.assertTrue(workspace.scene_model.group(group_id).visible)
+
+    def test_bor_body_points_and_lines_are_previewed_together(self):
+        from assembly_tree import AssemblyTreePanel
+
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+
+        workspace.load_feature_preview(self._bor_feature_plan())
+
+        expected = {
+            feature_preview_group_id("body"),
+            feature_preview_group_id("points", "antenna"),
+            feature_preview_group_id("lines", "panel gap"),
+        }
+        self.assertEqual(set(workspace.group_ids), expected)
+        self.assertTrue(
+            all(workspace.scene_model.group(key).visible for key in expected)
+        )
+        self.assertEqual(workspace.scene_canvas.preview_state, "ready")
+        self.assertIn("BoR body", workspace.lbl_status.text())
+        self.assertIn("1 point placement", workspace.lbl_status.text())
+        self.assertIn("1 line path", workspace.lbl_status.text())
+        self.assertIn("never the assembled RCS", workspace.lbl_status.text())
+
+    def test_input_preview_and_stale_state_are_unmistakable_but_nonmutating(self):
+        from assembly_tree import AssemblyTreePanel
+
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+        plan = self._bor_feature_plan()
+        plan.preview_stage = "input"
+
+        workspace.load_feature_preview(plan)
+        original_ids = workspace.group_ids
+        original_geometry = {
+            key: workspace.scene_model.group(key).geometry
+            for key in original_ids
+        }
+
+        self.assertEqual(workspace.scene_canvas.preview_stage, "input")
+        self.assertIn("NOT PHYSICS-VALIDATED", workspace.scene_canvas._stage_artist.get_text())
+        self.assertIn("not physics-validated", workspace.lbl_status.text())
+
+        workspace.mark_preview_stale("Point CSV changed.")
+
+        self.assertEqual(workspace.scene_canvas.preview_stage, "stale")
+        self.assertIn("STALE PREVIEW", workspace.scene_canvas._stage_artist.get_text())
+        self.assertIn("Point CSV changed", workspace.lbl_status.text())
+        self.assertEqual(workspace.group_ids, original_ids)
+        for key, geometry in original_geometry.items():
+            self.assertIs(workspace.scene_model.group(key).geometry, geometry)
+
+    def test_invalid_prepared_preview_gives_visible_error_and_cleans_scene(self):
+        from assembly_tree import AssemblyTreePanel
+
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+        invalid = self._feature_plan()
+        invalid.point_locations_cad_m["antenna"] = np.asarray(
+            [[np.nan, 0.0, 0.0]]
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            workspace.load_feature_preview(invalid)
+
+        self.assertEqual(workspace.group_ids, ())
+        self.assertEqual(workspace.scene_canvas.preview_state, "error")
+        self.assertIn("Preview unavailable", workspace.scene_canvas.feedback_text)
+        self.assertIn("no assembly result was changed", workspace.lbl_status.text())
 
     def test_preview_is_excluded_from_response_build_and_serialization(self):
         from assembly_tree import (

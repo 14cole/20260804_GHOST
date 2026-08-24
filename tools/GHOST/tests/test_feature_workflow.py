@@ -69,6 +69,90 @@ class DatasetDiscoveryTests(unittest.TestCase):
 
 
 class RequestPlanTests(unittest.TestCase):
+    def test_input_preview_needs_no_output_or_response_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "body.grim").touch()
+            (root / "body.stl").touch()
+            (root / "points.csv").write_text(
+                POINT_HEADER
+                + "p1,fastener,1,2,3,0,0,1,1,0,0\n",
+                encoding="utf-8",
+            )
+            (root / "lines.csv").write_text(
+                LINE_HEADER
+                + "gap_1,panel_gap,1,0,0,0,1,0,0,0,0,1,0,0,1\n"
+                + "gap_1,panel_gap,2,1,0,0,1,1,0,0,0,1,0,0,1\n",
+                encoding="utf-8",
+            )
+            triangles = np.asarray([[[0, 0, 0], [2, 0, 0], [0, 2, 0]]], dtype=float)
+            with (
+                mock.patch.object(
+                    feature_workflow,
+                    "load_body_requested_radar_grid",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "read_surface_mesh",
+                    return_value=triangles,
+                ),
+            ):
+                preview = feature_workflow.prepare_feature_input_preview(
+                    base_grim="body.grim",
+                    surface_mesh="body.stl",
+                    coordinate_units="millimeters",
+                    surface_units="millimeters",
+                    point_locations_csv="points.csv",
+                    line_locations_csv="lines.csv",
+                    base_dir=root,
+                )
+
+            self.assertEqual(preview.preview_stage, "input")
+            self.assertEqual(preview.body_source, "surface_mesh")
+            self.assertEqual(
+                preview.dataset_requirements.point_dataset_ids, ("fastener",)
+            )
+            self.assertEqual(
+                preview.dataset_requirements.line_dataset_ids, ("panel_gap",)
+            )
+            np.testing.assert_allclose(
+                preview.surface_triangles_cad_m, triangles * 1.0e-3
+            )
+            np.testing.assert_allclose(
+                preview.point_locations_cad_m["fastener"],
+                [[1.0e-3, 2.0e-3, 3.0e-3]],
+            )
+            np.testing.assert_allclose(
+                preview.line_paths_cad_m["panel_gap"]["gap_1"],
+                [[0, 0, 0], [1.0e-3, 0, 0], [1.0e-3, 1.0e-3, 0]],
+            )
+
+    def test_input_preview_uses_embedded_bor_profile_without_mesh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "body.grim").touch()
+            profile = np.asarray([[0.0, 1.0], [0.5, 0.0], [0.0, -1.0]])
+            with (
+                mock.patch.object(
+                    feature_workflow,
+                    "load_body_requested_radar_grid",
+                    return_value={"frequencies_ghz": [1.0]},
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "load_body_profile_grim",
+                    return_value=profile,
+                ),
+            ):
+                preview = feature_workflow.prepare_feature_input_preview(
+                    base_grim="body.grim", base_dir=root
+                )
+
+            self.assertEqual(preview.body_source, "embedded_bor_profile")
+            self.assertIsNone(preview.surface_triangles_cad_m)
+            np.testing.assert_allclose(preview.body_profile_rho_z_m, profile)
+
     def test_output_must_not_overwrite_clean_base(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -60,9 +60,10 @@ On macOS, each tool folder contains a matching `.command` launcher.
   five-column material CSV for use by GHOST.
 - Use **GHOST** to create and solve 2-D or axisymmetric BoR geometries. Solver
   `.grim` exports are loaded directly into GRIM.
-- Use **Assembly** to map point or line-feature dataset IDs to OPN-FRD GRIM
-  files, validate placement CSVs, preview the body and feature locations in
-  3-D, and assemble the output.
+- Use **Assembly → Place Features** to load the same strict placement CSV used
+  by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
+  preview an STL/facet or embedded BoR body with point/line locations before
+  assembling. Exact headers, examples, and blank-template buttons are built in.
 - Use **Plotting** and **ISAR** to inspect and process compatible RCS datasets.
 
 FREDDY does not calculate finite-object RCS or produce `.grim` datasets.

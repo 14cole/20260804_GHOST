@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -9,11 +11,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from feature_assembly_panel import (  # noqa: E402
     GUI_AVAILABLE,
+    LINE_PLACEMENT_COLUMNS,
+    POINT_PLACEMENT_COLUMNS,
     FeatureAssemblyFormModel,
     FeatureAssemblyPanel,
     FeatureAssemblyValues,
     FeatureBuildDispatch,
     FeatureWorkflowAdapter,
+    placement_csv_template_text,
+    write_placement_csv_template,
 )
 
 
@@ -39,6 +45,10 @@ class _FakeWorkflow:
     def prepare_feature_assembly(self, request):
         self.calls.append(("prepare", request))
         return SimpleNamespace(request=request, preview_geometry="preview")
+
+    def prepare_feature_input_preview(self, **kwargs):
+        self.calls.append(("input_preview", dict(kwargs)))
+        return SimpleNamespace(preview_stage="inputs", **kwargs)
 
     def execute_feature_assembly(self, plan):
         self.calls.append(("execute", plan))
@@ -69,6 +79,107 @@ def _ready_point_model() -> FeatureAssemblyFormModel:
 
 
 class FeatureAssemblyModelTests(unittest.TestCase):
+    def test_displayed_templates_are_the_strict_shared_placement_contracts(self):
+        self.assertEqual(
+            POINT_PLACEMENT_COLUMNS,
+            (
+                "placement_id", "dataset_id", "x", "y", "z", "nx", "ny",
+                "nz", "roll_x", "roll_y", "roll_z",
+            ),
+        )
+        self.assertEqual(
+            LINE_PLACEMENT_COLUMNS,
+            (
+                "line_id", "dataset_id", "segment_index", "x1", "y1", "z1",
+                "x2", "y2", "z2", "n1x", "n1y", "n1z", "n2x", "n2y",
+                "n2z",
+            ),
+        )
+        self.assertEqual(
+            placement_csv_template_text("point"),
+            ",".join(POINT_PLACEMENT_COLUMNS) + "\n",
+        )
+        self.assertEqual(
+            placement_csv_template_text("line"),
+            ",".join(LINE_PLACEMENT_COLUMNS) + "\n",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = write_placement_csv_template(
+                "point", Path(directory) / "placements"
+            )
+            self.assertEqual(target.suffix, ".csv")
+            self.assertEqual(
+                target.read_text(encoding="utf-8"),
+                placement_csv_template_text("point"),
+            )
+
+    def test_adapter_rejects_backend_csv_contract_drift(self):
+        workflow = _FakeWorkflow()
+        workflow.POINT_CSV_COLUMNS = ("different",)
+
+        with self.assertRaisesRegex(RuntimeError, "no longer matches"):
+            FeatureWorkflowAdapter.from_module(workflow)
+
+    def test_input_preview_does_not_require_output_or_response_mapping(self):
+        workflow = _FakeWorkflow()
+        model = FeatureAssemblyFormModel(
+            FeatureAssemblyValues(
+                base_grim="body.grim",
+                surface_mesh="body.stl",
+                coordinate_units="millimeters",
+                surface_units="meters",
+                point_locations_csv="points.csv",
+                line_locations_csv="lines.csv",
+            )
+        )
+
+        preview = model.prepare_input_preview(workflow)
+
+        self.assertEqual(preview.preview_stage, "inputs")
+        self.assertEqual(
+            workflow.calls,
+            [
+                (
+                    "input_preview",
+                    {
+                        "base_grim": "body.grim",
+                        "surface_mesh": "body.stl",
+                        "coordinate_units": "millimeters",
+                        "surface_units": "meters",
+                        "point_locations_csv": "points.csv",
+                        "line_locations_csv": "lines.csv",
+                        "base_dir": None,
+                    },
+                )
+            ],
+        )
+
+    def test_invalidating_one_csv_discards_only_its_mapping_rows(self):
+        model = FeatureAssemblyFormModel(
+            FeatureAssemblyValues(
+                point_datasets={"fastener": "fastener.grim"},
+                line_datasets={"gap": "gap.grim"},
+            )
+        )
+        model.update_dataset_requirements(
+            {"point_dataset_ids": ("fastener",), "line_dataset_ids": ("gap",)}
+        )
+
+        model.invalidate_dataset_requirements("point")
+
+        self.assertEqual(model.point_dataset_ids, ())
+        self.assertEqual(model.values.point_datasets, {})
+        self.assertEqual(model.line_dataset_ids, ("gap",))
+        self.assertEqual(model.values.line_datasets, {"gap": "gap.grim"})
+
+    def test_changed_csv_path_cannot_reuse_previous_discovery(self):
+        model = _ready_point_model()
+        model.values.point_locations_csv = "replacement_points.csv"
+
+        with self.assertRaisesRegex(ValueError, "changed after its last"):
+            model.validate()
+
     def test_request_construction_uses_exact_mapping_and_controls(self):
         workflow = _FakeWorkflow()
         model = _ready_point_model()
@@ -195,6 +306,25 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
         self.assertFalse(panel.is_busy())
         self.assertTrue(panel.can_close())
+        self.assertIn("locally and on HPC", panel.point_help_label.text())
+        self.assertIn(",".join(POINT_PLACEMENT_COLUMNS), panel.point_schema_label.text())
+        self.assertIn(",".join(LINE_PLACEMENT_COLUMNS), panel.line_schema_label.text())
+        self.assertEqual(panel.input_preview_button.text(), "Preview Inputs in 3-D")
+        self.assertIn("Ready", panel.status_label.text())
+        panel.close()
+
+    def test_input_change_marks_a_current_preview_stale(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        messages = []
+        panel.preview_stale.connect(messages.append)
+        panel._preview_is_current = True
+
+        panel.set_surface_mesh("body.stl")
+
+        self.assertFalse(panel._preview_is_current)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("out of date", messages[0])
+        self.assertIn("out of date", panel.status_label.text())
         panel.close()
 
 

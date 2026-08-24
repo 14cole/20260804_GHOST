@@ -31,18 +31,29 @@ The normal interactive path is GRIM's **Assembly** tab in the unified
 **Plotting | ISAR | Assembly | GHOST** application. It contains the one
 canonical Assembly tree and the 3-D placement preview:
 
-1. Select the clean base monostatic GRIM and the output path.
-2. For an external 3-D base, select its matching STL or indexed ASCII `.facet`
+1. Open **Place Features**. The neighboring **Combine Datasets / Visibility**
+   tab is for arithmetic on complete GRIM responses, not spatial placement.
+2. Select the clean base monostatic GRIM. For an external 3-D base, select its
+   matching STL or indexed ASCII `.facet`
    surface and its units. A self-contained GHOST BoR result may preview the
    revolved profile embedded in its GRIM without a separate surface.
-3. Select the exact point-placement and/or line-placement CSV. The form reads
+3. Select the point-placement and/or line-placement CSV. The form shows the
+   exact shared local/HPC header and example and can write a blank template.
+   Put data immediately after the header; do not add a units or comments row.
+   Coordinate units come from the form. The form reads
    the `dataset_id` values and creates the dataset mapping rows automatically;
    choose one canonical OPN-FRD response for every row.
-4. Select **Validate & Preview**. Check the body, feature locations, line
-   ordering, units, normals, and CAD orientation (`+x` right, `+y` nose,
-   `+z` up).
-5. Select **Assemble & Save** only after the preview and validation report are
-   correct. The saved result is automatically available to GRIM as a dataset.
+4. Select **Preview Inputs in 3-D** at any time to see the STL/facet or embedded
+   BoR body together with CSV point locations and line paths. This staged view
+   needs neither an output path nor mapped response files and is not a physics
+   validation.
+5. Map every discovered ID, choose the output, then select **Validate
+   Placements & Preview**. Check the body, feature locations, line ordering,
+   units, and CAD orientation (`+x` right, `+y` nose, `+z` up). Supplied
+   normal/roll vectors are checked numerically but are not drawn in this view.
+6. Select **Assemble Coherently & Save** only after the placement report is
+   correct. Full response compatibility is enforced while assembling. The
+   saved result is automatically available to GRIM as a dataset.
 
 Per-node **Show** checkboxes and the global **Show All** checkbox are preview
 controls only. They never include or exclude a feature from the calculation,
@@ -203,7 +214,8 @@ changes the delta by 180 degrees and changes its interference with the platform.
 ## One point-placement CSV
 
 All fasteners, antennas, compact cavities, and other point features share one
-CSV. Select it in the Assembly form. The GUI validates the header, discovers
+CSV. Select it in the Assembly form or use **Save blank point CSV template**.
+The GUI validates the header, discovers
 `fastener`, `antenna`, and any other `dataset_id` values actually present, and
 creates one response-file selector for each ID. The user supplies the correct
 OPN-FRD point dataset; the software does not infer a feature type from a file
@@ -237,7 +249,8 @@ and phase.
 ## One line-placement CSV
 
 All doors, seams, panel gaps, coating edges, and other locally two-dimensional
-features share one CSV. Select it in the Assembly form. The GUI validates the
+features share one CSV. Select it in the Assembly form or use **Save blank line
+CSV template**. The GUI validates the
 header, discovers `door_seam`, `panel_gap`, and any other `dataset_id` values
 actually present, and creates one response-file selector for each ID. Select
 the correct OPN-FRD TE/TM dataset for each mapping.
@@ -265,8 +278,8 @@ normalized after validation) and must point outward. They are checked against th
 skin and interpolated along the segment. No roll vector is needed: the ordered
 segment tangent and skin normal define the local seam frame. Dimensions or
 feature variants that alter the electromagnetic response belong in
-`dataset_id`, not in an amplitude or geometric scale column. The repository
-includes `line_features_template.csv` with the exact header.
+`dataset_id`, not in an amplitude or geometric scale column. The form can save
+a blank line template with the exact header.
 
 ## Building a door or seam delta
 

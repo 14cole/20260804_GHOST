@@ -15,10 +15,33 @@ grim
 
 ## Assembly
 
-Assembly has one canonical tree and one 3-D preview. Point and line feature
-CSV files are selected in the form; each discovered `dataset_id` receives one
-explicit OPN-FRD `.grim` mapping. The preview uses the vehicle CAD frame:
+Assembly keeps spatial feature placement under **Place Features** and
+whole-response arithmetic under **Combine Datasets / Visibility**, so a point
+or line coupon cannot be confused with a complete platform response. The 3-D
+view remains visible beside both workflows and uses the vehicle CAD frame:
 `+x` right, `+y` nose, and `+z` up.
+
+The feature form uses the exact strict CSV contracts used by GHOST's local and
+unattended/HPC feature workflow; the GUI does not translate another format.
+The header is followed directly by data rows—do not add a units row or comment
+row. Choose the coordinate units in the form. The form displays an example and
+can save either blank template:
+
+```csv
+placement_id,dataset_id,x,y,z,nx,ny,nz,roll_x,roll_y,roll_z
+```
+
+```csv
+line_id,dataset_id,segment_index,x1,y1,z1,x2,y2,z2,n1x,n1y,n1z,n2x,n2y,n2z
+```
+
+Selecting **Preview Inputs in 3-D** parses those same CSVs and displays their
+locations with the selected STL/facet surface or embedded BoR profile before
+an output path or response mapping is required. It is visual QA only.
+**Validate Placements & Preview** then checks the body skin, supplied normals,
+and mapping completeness. **Assemble Coherently & Save** performs the full
+response evaluation and writes the result. The preview draws locations and
+paths; normal and roll vectors are checked numerically but are not yet drawn.
 
 The tree's **Show** controls and global **Show All** affect preview artists
 only. They do not include or exclude a feature from the electromagnetic
