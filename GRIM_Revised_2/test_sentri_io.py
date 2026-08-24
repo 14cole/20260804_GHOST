@@ -58,19 +58,24 @@ class SentriReaderTest(unittest.TestCase):
         grid = RcsGrid.read_SENTRi(path)
 
         np.testing.assert_allclose(grid.frequencies, [1.0])
-        np.testing.assert_allclose(grid.elevations, [-10.0])
+        np.testing.assert_allclose(grid.elevations, [80.0])
         np.testing.assert_allclose(grid.azimuths, [-170.0])
         self.assertEqual(grid.polarizations.tolist(), ["VV", "HV", "VH", "HH"])
 
         expected_power = np.asarray([0.01, 0.25, 4.0, 1.0])
         np.testing.assert_allclose(grid.rcs_power[0, 0, 0, :], expected_power)
-        expected_phase = np.deg2rad([45.0, -180.0, 0.0, -90.0])
+        expected_phase = np.deg2rad([-45.0, 180.0, 0.0, 90.0])
         np.testing.assert_allclose(grid.rcs_phase[0, 0, 0, :], expected_phase)
         np.testing.assert_allclose(
             grid.rcs[0, 0, 0, :],
             np.sqrt(expected_power) * np.exp(1j * expected_phase),
         )
-        self.assertIn("stored phase=-reported", grid.history)
+        self.assertIn("stored phase=reported", grid.history)
+        self.assertEqual(
+            grid.extra["sentri_coordinate_mapping"],
+            "elevation=theta; azimuth=wrapped phi",
+        )
+        self.assertIn("exp(+j*deg2rad", grid.extra["sentri_phase_mapping"])
         self.assertTrue(grid.extra["sentri_units_row_present"])
 
     def test_descriptive_schema_and_tab_delimited_dispatch(self) -> None:
@@ -81,13 +86,13 @@ class SentriReaderTest(unittest.TestCase):
 
         direct = read_SENTRi(path)
         dropped = load_dataset(path)
-        np.testing.assert_allclose(direct.elevations, [10.0])
+        np.testing.assert_allclose(direct.elevations, [100.0])
         np.testing.assert_allclose(direct.frequencies, [1.0])
         np.testing.assert_allclose(direct.rcs_power, dropped.rcs_power)
         np.testing.assert_allclose(direct.rcs_phase, dropped.rcs_phase)
         np.testing.assert_allclose(
             direct.rcs_phase[0, 0, 0, :],
-            np.deg2rad([-20.0, -30.0, -40.0, -10.0]),
+            np.deg2rad([20.0, 30.0, 40.0, 10.0]),
         )
         np.testing.assert_allclose(
             direct.rcs_power[0, 0, 0, :],
@@ -150,6 +155,15 @@ class SentriReaderTest(unittest.TestCase):
         grid = load_dataset(path)
         self.assertTrue(str(grid.extra["source_format"]).startswith("SENTRi"))
         np.testing.assert_allclose(grid.frequencies, [2.0])
+
+    def test_positive_azimuth_is_not_negated(self) -> None:
+        path = self._write(
+            ".csv",
+            COMPACT_HEADER
+            + "\n1000,90,90,0,0,0,0,0,0,0,0\n",
+        )
+        grid = load_dataset(path)
+        np.testing.assert_allclose(grid.azimuths, [90.0])
 
     def test_equivalent_seam_rows_merge_and_conflicts_fail(self) -> None:
         row = "1000,90,{phi},0,0,0,0,0,0,0,0"

@@ -3306,12 +3306,11 @@ class RcsGrid:
         * descriptive ``Frequency`` / ``Theta`` /
           ``RCSPhiScat_PhiInc`` columns.
 
-        SENTRi's reported spherical angle is converted with
-        ``elevation = theta - 90``.  Its reported E-field phase uses the
-        opposite sign from GRIM's stored complex field, so each sample is
-        reconstructed as
-        ``10**(dBsm/20) * exp(-1j*deg2rad(phase_deg))``.  These
-        format-specific rules are deliberately separate from :meth:`read_CST`.
+        SENTRi's reported ``Theta`` is stored directly as GRIM elevation.
+        Its reported E-field phase is stored with its original sign, so each
+        sample is reconstructed as
+        ``10**(dBsm/20) * exp(+1j*deg2rad(phase_deg))``.  These format-specific
+        rules are deliberately separate from :meth:`read_CST`.
         """
 
         rows = _read_cst_delimited_rows(path)
@@ -3505,7 +3504,7 @@ class RcsGrid:
                 raise ValueError(
                     f"line {row_idx}: SENTRi theta must be in [0, 180] deg"
                 )
-            elevation_deg = float(theta_deg - 90.0)
+            elevation_deg = float(theta_deg)
             azimuth_deg = _wrap_cst_azimuth_deg(
                 _number(row, "phi", row_idx)
             )
@@ -3519,7 +3518,7 @@ class RcsGrid:
                     magnitude_dbsm,
                     context=f"line {row_idx} {magnitude_key}",
                 )
-                phase = float(-np.deg2rad(reported_phase_deg))
+                phase = float(np.deg2rad(reported_phase_deg))
                 key = (azimuth_deg, elevation_deg, frequency_ghz, polarization)
                 if key in seen:
                     prior_line, prior_power, prior_phase = seen[key]
@@ -3564,10 +3563,10 @@ class RcsGrid:
             phase[index] = sample_phase
 
         mapping = (
-            "elevation=theta-90; phi wrapped to [-180, 180); "
+            "elevation=theta; phi wrapped to [-180, 180); "
             "VV=tt/theta-theta, HV=pt/phi-theta, "
             "VH=tp/theta-phi, HH=pp/phi-phi; "
-            "stored phase=-reported E-field phase"
+            "stored phase=reported E-field phase"
         )
         return cls(
             azimuths,
@@ -3589,14 +3588,14 @@ class RcsGrid:
             },
             extra={
                 "source_format": f"SENTRi {schema_name} RCS table",
-                "sentri_coordinate_mapping": "elevation=theta-90; azimuth=wrapped phi",
+                "sentri_coordinate_mapping": "elevation=theta; azimuth=wrapped phi",
                 "sentri_polarization_mapping": (
                     "VV=tt/theta-theta; HV=pt/phi-theta; "
                     "VH=tp/theta-phi; HH=pp/phi-phi"
                 ),
                 "sentri_phase_mapping": (
                     "GRIM complex amplitude = 10^(dBsm/20) "
-                    "* exp(-j*deg2rad(reported_phase_deg))"
+                    "* exp(+j*deg2rad(reported_phase_deg))"
                 ),
                 "sentri_units_row_present": bool(has_units_row),
             },

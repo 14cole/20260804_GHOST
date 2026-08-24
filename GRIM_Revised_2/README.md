@@ -59,9 +59,9 @@ extension registry.
 `RcsGrid.read_SENTRi()` (also exposed as `grim_headless.read_SENTRi()`) is the
 named CREATE-RF SENTRi entry point. It strictly recognizes the two schemas in
 the team's `READ_SENTRi.m`: compact MHz `pp/tt/pt/tp` columns and descriptive
-Hz `PhiScat/ThetaScat` columns. SENTRi is not treated as CST. Its vendor mapping
-is `elevation=Theta-90`, and GRIM stores the coherent phase with the negative
-of the reported E-field phase. The four channels map to `VV=tt`, `HV=pt`,
+Hz `PhiScat/ThetaScat` columns. SENTRi is not treated as CST. Its mapping is
+`elevation=Theta`, and GRIM stores the reported coherent phase with its
+original sign. The four channels map to `VV=tt`, `HV=pt`,
 `VH=tp`, and `HH=pp`. Generic unitless theta/phi tables are not guessed to be
 SENTRi. The normal two-row export—parameter names followed by an explicit
 `Hz`/`MHz`, `deg`, `dBsm`, `deg` units row—is validated and the units row is
