@@ -13,6 +13,8 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from assembly_workspace import (  # noqa: E402
+    BODY_RENDER_MODES,
+    DISPLAY_UNIT_SPECS,
     AssemblySceneCanvas,
     AssemblySceneModel,
     AssemblyWorkspace,
@@ -20,12 +22,33 @@ from assembly_workspace import (  # noqa: E402
     FeatureBuildResult,
     GUI_AVAILABLE,
     decimate_triangles_for_display,
+    display_unit_spec,
     feature_preview_group_id,
+    format_length_tick,
+    normalize_body_render_mode,
     revolve_bor_profile_cad,
+    triangle_detail_cap,
 )
 
 
 class AssemblyGeometryTests(unittest.TestCase):
+    def test_display_unit_helpers_convert_ticks_without_geometry_conversion(self):
+        self.assertEqual(tuple(DISPLAY_UNIT_SPECS), ("Metres", "Inches", "Feet"))
+        self.assertEqual(display_unit_spec("metres"), ("m", 1.0))
+        self.assertAlmostEqual(float(format_length_tick(0.0254, "Inches")), 1.0)
+        self.assertAlmostEqual(float(format_length_tick(0.3048, "Feet")), 1.0)
+        with self.assertRaisesRegex(ValueError, "Metres"):
+            display_unit_spec("yards")
+
+    def test_named_render_and_detail_choices_are_bounded(self):
+        self.assertEqual(BODY_RENDER_MODES, ("Solid", "Solid + edges", "Wireframe"))
+        self.assertEqual(normalize_body_render_mode("wireFRAME"), "Wireframe")
+        self.assertEqual(triangle_detail_cap("Fast"), 4_000)
+        self.assertEqual(triangle_detail_cap("Balanced"), 12_000)
+        self.assertEqual(triangle_detail_cap("High"), 30_000)
+        with self.assertRaisesRegex(ValueError, "Fast"):
+            triangle_detail_cap("Full")
+
     def test_bor_profile_revolves_about_cad_nose_axis(self):
         profile = np.asarray(
             [
@@ -166,6 +189,67 @@ class AssemblySceneModelTests(unittest.TestCase):
             [[0.0, 0.0, 0.0], [99.0, 1.0, 1.0]],
         )
 
+    def test_surface_detail_and_style_preserve_source_contract_and_visibility(self):
+        source = np.asarray(
+            [
+                [[float(i), 0.0, 0.0], [float(i), 1.0, 0.0], [float(i), 0.0, 1.0]]
+                for i in range(200)
+            ]
+        )
+        group = self.model.add_body_triangles(
+            "body:detail", source, max_triangles=13, visible=False
+        )
+        original_bounds = np.array(group.bounds_m, copy=True)
+        proxy_13 = group.geometry
+
+        self.model.set_surface_detail("body:detail", 7)
+        self.assertEqual(group.display_count, 7)
+        self.assertEqual(group.source_count, 200)
+        self.assertFalse(group.visible)
+        np.testing.assert_array_equal(group.bounds_m, original_bounds)
+
+        self.model.set_surface_detail("body:detail", 13)
+        self.assertIs(group.geometry, proxy_13)
+        geometry_before_style = group.geometry
+        self.model.set_surface_rendering("body:detail", "Wireframe", 0.4)
+        self.assertIs(group.geometry, geometry_before_style)
+        self.assertEqual(group.style["render_mode"], "Wireframe")
+        self.assertEqual(group.style["alpha"], 0.4)
+        self.assertFalse(group.visible)
+
+    def test_large_surface_retains_only_bounded_master_but_full_counts_and_bounds(self):
+        count = 30_101
+        source = np.zeros((count, 3, 3), dtype=float)
+        source[:, :, 0] = np.arange(count, dtype=float)[:, None]
+        source[:, 1, 1] = 1.0
+        source[:, 2, 2] = 1.0
+
+        group = self.model.add_body_triangles(
+            "body:large", source, max_triangles=12_000
+        )
+        proxy_12k = group.geometry
+
+        self.assertEqual(group.source_count, count)
+        self.assertEqual(len(group.master_geometry), 30_000)
+        self.assertEqual(group.display_count, 12_000)
+        self.assertFalse(group.master_geometry.flags.writeable)
+        self.assertFalse(np.shares_memory(group.master_geometry, source))
+        np.testing.assert_array_equal(
+            group.bounds_m,
+            [[0.0, 0.0, 0.0], [float(count - 1), 1.0, 1.0]],
+        )
+
+        self.model.set_surface_detail("body:large", 4_000)
+        self.assertEqual(group.display_count, 4_000)
+        proxy_4k = group.geometry
+        self.model.set_surface_detail("body:large", 30_000)
+        self.assertEqual(group.display_count, 30_000)
+        self.assertIs(group.geometry, group.master_geometry)
+        self.model.set_surface_detail("body:large", 12_000)
+        self.assertIs(group.geometry, proxy_12k)
+        self.model.set_surface_detail("body:large", 4_000)
+        self.assertIs(group.geometry, proxy_4k)
+
     def test_clear_and_replace_keep_string_identity(self):
         self.model.add_points("points:a", [[0.0, 0.0, 0.0]])
         self.model.add_points("points:a", [[1.0, 2.0, 3.0]])
@@ -196,6 +280,20 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertEqual(canvas.axes.xaxis.label.get_color(), "#dbeafe")
         canvas.add_points("points:a", [[1.0, 2.0, 3.0]])
         canvas.add_lines("lines:a", [[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
+        original_points = np.array(canvas.model.group("points:a").geometry, copy=True)
+        original_limits = np.asarray(
+            [canvas.axes.get_xlim(), canvas.axes.get_ylim(), canvas.axes.get_zlim()]
+        )
+        canvas.set_display_units("Inches")
+        self.assertEqual(canvas.axes.xaxis.label.get_text(), "X right (in)")
+        self.assertEqual(canvas.axes.xaxis.get_major_formatter()(0.0254), "1")
+        np.testing.assert_array_equal(
+            canvas.model.group("points:a").geometry, original_points
+        )
+        np.testing.assert_allclose(
+            [canvas.axes.get_xlim(), canvas.axes.get_ylim(), canvas.axes.get_zlim()],
+            original_limits,
+        )
         canvas.set_group_visible("points:a", False)
         self.assertFalse(canvas.model.group("points:a").visible)
         self.assertFalse(canvas._artists["points:a"].get_visible())
@@ -209,6 +307,27 @@ class AssemblyGuiTests(unittest.TestCase):
         canvas._detach_model_listener()
         canvas.model.add_points("points:detached", [[0.0, 0.0, 0.0]])
         self.assertNotIn("points:detached", canvas._artists)
+
+    def test_drag_lod_restores_selected_surface_proxy(self):
+        source = np.zeros((4_100, 3, 3), dtype=float)
+        source[:, :, 0] = np.arange(4_100, dtype=float)[:, None]
+        source[:, 1, 1] = 1.0
+        source[:, 2, 2] = 1.0
+        model = AssemblySceneModel()
+        group = model.add_body_triangles(
+            "body:interactive", source, max_triangles=30_000
+        )
+        canvas = AssemblySceneCanvas(model=model)
+
+        canvas._begin_interaction_lod(SimpleNamespace(inaxes=canvas.axes))
+        self.assertEqual(group.display_count, 4_000)
+        self.assertTrue(canvas._lod_artist.get_visible())
+        self.assertEqual(group.detail_cap, 30_000)
+
+        canvas._end_interaction_lod(None)
+        self.assertEqual(group.display_count, 4_100)
+        self.assertFalse(canvas._lod_artist.get_visible())
+        self.assertEqual(group.detail_cap, 30_000)
 
     def test_prepopulated_scene_is_drawn_and_fitted_on_canvas_creation(self):
         model = AssemblySceneModel()
@@ -265,6 +384,11 @@ class AssemblyGuiTests(unittest.TestCase):
             workspace.left_tabs.tabText(1), "Combine Datasets / Visibility"
         )
         self.assertIs(panel.parentWidget(), workspace.combine_visibility_tab)
+        self.assertTrue(workspace.cmb_display_units.isEnabled())
+        self.assertFalse(workspace.cmb_body_render.isEnabled())
+        self.assertFalse(workspace.sld_body_opacity.isEnabled())
+        self.assertFalse(workspace.cmb_triangle_detail.isEnabled())
+        self.assertFalse(workspace.chk_interaction_lod.isEnabled())
 
         controls = QLabel("feature controls")
         workspace.set_feature_controls(controls)
@@ -380,6 +504,34 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertIn("1 point placement", workspace.lbl_status.text())
         self.assertIn("1 line path", workspace.lbl_status.text())
         self.assertIn("never the assembled RCS", workspace.lbl_status.text())
+        self.assertTrue(workspace.cmb_body_render.isEnabled())
+        self.assertEqual(
+            workspace.cmb_triangle_detail.currentData(), "Balanced"
+        )
+        self.assertIn(" body triangles shown", workspace.lbl_body_detail.text())
+
+        body_id = feature_preview_group_id("body")
+        body = workspace.scene_model.group(body_id)
+        original_geometry = body.geometry
+        original_visibility = body.visible
+        workspace.cmb_display_units.setCurrentIndex(1)
+        self.assertEqual(workspace.scene_canvas.display_units, "Inches")
+        self.assertIs(body.geometry, original_geometry)
+        workspace.cmb_body_render.setCurrentText("Wireframe")
+        workspace.sld_body_opacity.setValue(40)
+        workspace._apply_body_rendering()
+        self.assertEqual(body.style["render_mode"], "Wireframe")
+        self.assertEqual(body.style["alpha"], 0.4)
+        self.assertEqual(body.visible, original_visibility)
+        workspace.scene_canvas.draw()
+        artist = workspace.scene_canvas._artists[body_id]
+        facecolors = np.asarray(artist.get_facecolor())
+        edgecolors = np.asarray(artist.get_edgecolor())
+        self.assertTrue(len(facecolors) == 0 or np.all(facecolors[:, 3] == 0.0))
+        self.assertGreater(len(edgecolors), 0)
+        self.assertTrue(np.allclose(edgecolors[:, 3], 0.4))
+        self.assertIn("inches", workspace.lbl_body_detail.text())
+        self.assertIn("Original geometry is unchanged", workspace.lbl_body_detail.text())
 
     def test_input_preview_and_stale_state_are_unmistakable_but_nonmutating(self):
         from assembly_tree import AssemblyTreePanel

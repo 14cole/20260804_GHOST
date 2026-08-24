@@ -27,14 +27,19 @@ import numpy as np
 _GUI_IMPORT_ERROR: Exception | None = None
 try:  # Keep the pure scene model importable in headless/minimal environments.
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.colors import to_rgba
     from matplotlib.figure import Figure
+    from matplotlib.ticker import FuncFormatter
     from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import Qt, QTimer, Signal
     from PySide6.QtWidgets import (
+        QCheckBox,
+        QComboBox,
         QHBoxLayout,
         QLabel,
         QPushButton,
         QSizePolicy,
+        QSlider,
         QSplitter,
         QTabWidget,
         QVBoxLayout,
@@ -47,6 +52,69 @@ except (ImportError, RuntimeError) as exc:  # pragma: no cover - environment-spe
 GUI_AVAILABLE = _GUI_IMPORT_ERROR is None
 
 FEATURE_PREVIEW_ROOT_KEY = "feature-assembly"
+
+DISPLAY_UNIT_SPECS = {
+    "Metres": ("m", 1.0),
+    "Inches": ("in", 1.0 / 0.0254),
+    "Feet": ("ft", 1.0 / 0.3048),
+}
+
+TRIANGLE_DETAIL_CAPS = {
+    "Fast": 4_000,
+    "Balanced": 12_000,
+    "High": 30_000,
+}
+MAX_DISPLAY_TRIANGLES = max(TRIANGLE_DETAIL_CAPS.values())
+
+BODY_RENDER_MODES = ("Solid", "Solid + edges", "Wireframe")
+
+
+def display_unit_spec(name: str) -> tuple[str, float]:
+    """Return the axis suffix and metres-to-display scale for one UI choice."""
+
+    key = str(name).strip().casefold()
+    for label, spec in DISPLAY_UNIT_SPECS.items():
+        if label.casefold() == key:
+            return spec
+    raise ValueError(
+        "display units must be Metres, Inches, or Feet"
+    )
+
+
+def format_length_tick(value_m: float, units: str) -> str:
+    """Format a metre-valued axis coordinate without changing scene data."""
+
+    _suffix, scale = display_unit_spec(units)
+    value = float(value_m) * scale
+    if not np.isfinite(value):
+        return ""
+    if abs(value) < 5.0e-13:
+        value = 0.0
+    return f"{value:.6g}"
+
+
+def triangle_detail_cap(name: str) -> int | None:
+    """Resolve a named visualization-only triangle detail level."""
+
+    key = str(name).strip().casefold()
+    for label, cap in TRIANGLE_DETAIL_CAPS.items():
+        if label.casefold() == key:
+            return cap
+    raise ValueError(
+        "triangle detail must be Fast, Balanced, or High"
+    )
+
+
+def normalize_body_render_mode(name: str) -> str:
+    """Return the canonical body rendering label used by the GUI/model."""
+
+    key = str(name).strip().casefold()
+    for label in BODY_RENDER_MODES:
+        if label.casefold() == key:
+            return label
+    raise ValueError(
+        "body rendering must be Solid, Solid + edges, or Wireframe"
+    )
 
 
 def feature_preview_group_id(kind: str, dataset_id: str | None = None) -> str:
@@ -133,9 +201,12 @@ def decimate_triangles_for_display(
     needed = cap - len(selected)
     # needed <= len(candidates), so a linspace with step >= 1 yields unique
     # monotonically increasing sample locations.
-    locations = np.rint(
-        np.linspace(0, len(candidates) - 1, needed, endpoint=True)
-    ).astype(int)
+    if needed == 1:
+        locations = np.asarray([len(candidates) // 2], dtype=int)
+    else:
+        locations = np.rint(
+            np.linspace(0, len(candidates) - 1, needed, endpoint=True)
+        ).astype(int)
     selected.extend(int(value) for value in candidates[locations])
     selected = sorted(selected)
     return np.array(source[np.asarray(selected, dtype=int)], copy=True)
@@ -243,6 +314,11 @@ class AssemblySceneGroup:
     source_count: int = 0
     display_count: int = 0
     display_only: bool = True
+    master_geometry: Any | None = field(default=None, repr=False)
+    display_cache: dict[int | None, np.ndarray] = field(
+        default_factory=dict, repr=False
+    )
+    detail_cap: int | None = None
 
 
 class AssemblySceneModel:
@@ -281,6 +357,35 @@ class AssemblySceneModel:
         self._notify(event, group.group_id)
         return group
 
+    @staticmethod
+    def _normalize_surface_cap(max_triangles: int | None) -> int | None:
+        if max_triangles is None:
+            return MAX_DISPLAY_TRIANGLES
+        cap = int(max_triangles)
+        if cap < 1:
+            raise ValueError("max_triangles must be at least 1 or None")
+        return cap
+
+    @staticmethod
+    def _cached_surface_proxy(
+        group: AssemblySceneGroup,
+        max_triangles: int | None,
+    ) -> np.ndarray:
+        source = group.master_geometry
+        if source is None:
+            raise ValueError("surface group does not retain a display master")
+        cap = AssemblySceneModel._normalize_surface_cap(max_triangles)
+        cached = group.display_cache.get(cap)
+        if cached is not None:
+            return cached
+        if len(source) <= cap:
+            proxy = source
+        else:
+            proxy = decimate_triangles_for_display(source, cap)
+            proxy.setflags(write=False)
+        group.display_cache[cap] = proxy
+        return proxy
+
     def clear(self) -> None:
         if not self._groups:
             return
@@ -303,29 +408,48 @@ class AssemblySceneModel:
         visible: bool = True,
         label: str = "Body surface",
         color: str = "#78909c",
-        alpha: float = 0.32,
+        alpha: float = 0.75,
         edgecolor: str = "none",
+        render_mode: str = "Solid",
     ) -> AssemblySceneGroup:
-        """Add a decimated render proxy while retaining full-source bounds."""
+        """Add a bounded display master while retaining full counts/bounds."""
 
         key = _group_id(group_id)
         source = _finite_triangles(triangles_m, label="body triangles")
+        source_count = len(source)
         full_bounds = _bounds_from_points(source.reshape(-1, 3))
-        proxy = decimate_triangles_for_display(source, max_triangles)
-        return self._store(
-            AssemblySceneGroup(
-                key,
-                "surface",
-                proxy,
-                full_bounds,
-                bool(visible),
-                str(label),
-                {"color": color, "alpha": float(alpha), "edgecolor": edgecolor},
-                source_count=len(source),
-                display_count=len(proxy),
-                display_only=True,
-            )
+        # Cache only a deterministic, bounded master. Retaining the entire
+        # prepared STL here can double peak memory; the backend remains the
+        # authoritative owner of full physics geometry.
+        master = decimate_triangles_for_display(
+            source, MAX_DISPLAY_TRIANGLES
         )
+        master.setflags(write=False)
+        cap = self._normalize_surface_cap(max_triangles)
+        group = AssemblySceneGroup(
+            key,
+            "surface",
+            master,
+            full_bounds,
+            bool(visible),
+            str(label),
+            {
+                "color": color,
+                "alpha": float(alpha),
+                "edgecolor": edgecolor,
+                "render_mode": normalize_body_render_mode(render_mode),
+            },
+            source_count=source_count,
+            display_count=len(master),
+            display_only=True,
+            master_geometry=master,
+            display_cache={MAX_DISPLAY_TRIANGLES: master},
+            detail_cap=cap,
+        )
+        proxy = self._cached_surface_proxy(group, cap)
+        group.geometry = proxy
+        group.display_count = len(proxy)
+        return self._store(group)
 
     def add_bor_profile(
         self,
@@ -337,8 +461,9 @@ class AssemblySceneModel:
         visible: bool = True,
         label: str = "BoR body",
         color: str = "#78909c",
-        alpha: float = 0.32,
+        alpha: float = 0.75,
         edgecolor: str = "none",
+        render_mode: str = "Solid",
     ) -> AssemblySceneGroup:
         key = _group_id(group_id)
         profile = np.asarray(profile_rho_z_m, dtype=float)
@@ -353,21 +478,86 @@ class AssemblySceneModel:
             ],
             dtype=float,
         )
-        proxy = decimate_triangles_for_display(surface, max_triangles)
-        return self._store(
-            AssemblySceneGroup(
-                key,
-                "surface",
-                proxy,
-                full_bounds,
-                bool(visible),
-                str(label),
-                {"color": color, "alpha": float(alpha), "edgecolor": edgecolor},
-                source_count=len(surface),
-                display_count=len(proxy),
-                display_only=True,
-            )
+        source_count = len(surface)
+        master = decimate_triangles_for_display(
+            surface, MAX_DISPLAY_TRIANGLES
         )
+        master.setflags(write=False)
+        cap = self._normalize_surface_cap(max_triangles)
+        group = AssemblySceneGroup(
+            key,
+            "surface",
+            master,
+            full_bounds,
+            bool(visible),
+            str(label),
+            {
+                "color": color,
+                "alpha": float(alpha),
+                "edgecolor": edgecolor,
+                "render_mode": normalize_body_render_mode(render_mode),
+            },
+            source_count=source_count,
+            display_count=len(master),
+            display_only=True,
+            master_geometry=master,
+            display_cache={MAX_DISPLAY_TRIANGLES: master},
+            detail_cap=cap,
+        )
+        proxy = self._cached_surface_proxy(group, cap)
+        group.geometry = proxy
+        group.display_count = len(proxy)
+        return self._store(group)
+
+    def set_surface_detail(
+        self,
+        group_id: str,
+        max_triangles: int | None,
+        *,
+        remember: bool = True,
+    ) -> None:
+        """Rebuild one proxy from its deterministic 30k display master.
+
+        ``remember=False`` is reserved for temporary interaction LOD. Neither
+        path changes source geometry, bounds, visibility, or physics state.
+        """
+
+        group = self.group(group_id)
+        if group.kind != "surface":
+            raise ValueError("triangle detail applies only to surface groups")
+        cap = self._normalize_surface_cap(max_triangles)
+        proxy = self._cached_surface_proxy(group, cap)
+        if remember:
+            group.detail_cap = cap
+        if group.geometry is proxy:
+            return
+        group.geometry = proxy
+        group.display_count = len(proxy)
+        self._notify("replaced", group.group_id)
+
+    def set_surface_rendering(
+        self,
+        group_id: str,
+        mode: str,
+        opacity: float,
+    ) -> None:
+        """Update surface appearance without touching its geometry or visibility."""
+
+        group = self.group(group_id)
+        if group.kind != "surface":
+            raise ValueError("body rendering applies only to surface groups")
+        alpha = float(opacity)
+        if not np.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError("body opacity must be finite and between 0 and 1")
+        normalized_mode = normalize_body_render_mode(mode)
+        if (
+            group.style.get("render_mode") == normalized_mode
+            and group.style.get("alpha") == alpha
+        ):
+            return
+        group.style["render_mode"] = normalized_mode
+        group.style["alpha"] = alpha
+        self._notify("replaced", group.group_id)
 
     def add_points(
         self,
@@ -503,13 +693,21 @@ if GUI_AVAILABLE:
             *,
             model: AssemblySceneModel | None = None,
         ) -> None:
-            self.figure = Figure(figsize=(8.0, 6.0), dpi=100, tight_layout=True)
+            # Fixed margins avoid Matplotlib's expensive tight-layout pass on
+            # every interactive 3-D redraw.
+            self.figure = Figure(figsize=(8.0, 6.0), dpi=100)
+            self.figure.subplots_adjust(
+                left=0.04, right=0.94, bottom=0.07, top=0.91
+            )
             self.axes = self.figure.add_subplot(111, projection="3d")
             super().__init__(self.figure)
             self.setParent(parent)
             self.setMinimumSize(360, 280)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.model = model if model is not None else AssemblySceneModel()
+            self._display_units = "Metres"
+            self._interaction_lod_enabled = True
+            self._interaction_detail_caps: dict[str, int | None] = {}
             self.model.add_listener(self._on_model_change)
             self._model_listener_attached = True
             self.destroyed.connect(self._detach_model_listener)
@@ -551,12 +749,34 @@ if GUI_AVAILABLE:
                 },
                 zorder=21,
             )
+            self._lod_artist = self.axes.text2D(
+                0.02,
+                0.02,
+                "FAST ROTATION PROXY \u2022 DISPLAY ONLY",
+                transform=self.axes.transAxes,
+                ha="left",
+                va="bottom",
+                color="#fde68a",
+                fontsize=8,
+                fontweight="bold",
+                bbox={
+                    "boxstyle": "round,pad=0.4",
+                    "facecolor": "#172554",
+                    "edgecolor": "#f59e0b",
+                    "alpha": 0.92,
+                },
+                visible=False,
+                zorder=21,
+            )
             self._preview_state = "empty"
             self._preview_stage = "none"
             self.set_preview_stage("none")
             for group_id in self.model.group_ids:
                 self._add_artist(self.model.group(group_id))
             self.refresh_scene_feedback()
+            self.set_display_units("Metres")
+            self.mpl_connect("button_press_event", self._begin_interaction_lod)
+            self.mpl_connect("button_release_event", self._end_interaction_lod)
             self.fit_visible()
 
         @property
@@ -570,7 +790,9 @@ if GUI_AVAILABLE:
             axis_color = "#64748b"
             self.figure.patch.set_facecolor(background)
             self.axes.set_facecolor(background)
-            self.axes.set_title("3-D placement preview", color=foreground)
+            self.axes.set_title(
+                "3-D placement preview (display only)", color=foreground
+            )
             self.axes.set_xlabel("X right (m)", color=foreground)
             self.axes.set_ylabel("Y nose (m)", color=foreground)
             self.axes.set_zlabel("Z up (m)", color=foreground)
@@ -602,13 +824,42 @@ if GUI_AVAILABLE:
             self._remove_artist(group.group_id)
             style = group.style
             if group.kind == "surface":
-                artist = Poly3DCollection(
-                    group.geometry,
-                    facecolors=style.get("color", "#78909c"),
-                    edgecolors=style.get("edgecolor", "none"),
-                    alpha=style.get("alpha", 0.32),
-                    label=group.label,
+                mode = normalize_body_render_mode(
+                    style.get("render_mode", "Solid")
                 )
+                color = style.get("color", "#78909c")
+                if mode == "Wireframe":
+                    facecolor = (0.0, 0.0, 0.0, 0.0)
+                    edgecolor = color
+                    linewidth = 0.45
+                elif mode == "Solid + edges":
+                    facecolor = color
+                    edgecolor = style.get("edgecolor", "#bfdbfe")
+                    if edgecolor == "none":
+                        edgecolor = "#bfdbfe"
+                    linewidth = 0.22
+                else:
+                    facecolor = color
+                    edgecolor = "none"
+                    linewidth = 0.0
+                alpha = float(style.get("alpha", 0.75))
+                if mode == "Wireframe":
+                    artist = Poly3DCollection(
+                        group.geometry,
+                        facecolors="none",
+                        edgecolors=to_rgba(edgecolor, alpha),
+                        linewidths=linewidth,
+                        label=group.label,
+                    )
+                else:
+                    artist = Poly3DCollection(
+                        group.geometry,
+                        facecolors=facecolor,
+                        edgecolors=edgecolor,
+                        linewidths=linewidth,
+                        alpha=alpha,
+                        label=group.label,
+                    )
                 self.axes.add_collection3d(artist)
             elif group.kind == "points":
                 points = group.geometry
@@ -634,6 +885,79 @@ if GUI_AVAILABLE:
                 raise ValueError(f"unsupported assembly scene kind {group.kind!r}")
             artist.set_visible(group.visible)
             self._artists[group.group_id] = artist
+
+        @property
+        def display_units(self) -> str:
+            return self._display_units
+
+        def set_display_units(self, units: str) -> None:
+            """Change axis labels/ticks while keeping all limits/data in metres."""
+
+            suffix, _scale = display_unit_spec(units)
+            for label in DISPLAY_UNIT_SPECS:
+                if label.casefold() == str(units).strip().casefold():
+                    self._display_units = label
+                    break
+            for axis in (self.axes.xaxis, self.axes.yaxis, self.axes.zaxis):
+                axis.set_major_formatter(
+                    FuncFormatter(
+                        lambda value, _position: format_length_tick(
+                            value, self._display_units
+                        )
+                    )
+                )
+            self.axes.set_xlabel(f"X right ({suffix})")
+            self.axes.set_ylabel(f"Y nose ({suffix})")
+            self.axes.set_zlabel(f"Z up ({suffix})")
+            self.setToolTip(
+                f"Drag to rotate and use the mouse wheel to zoom. Axis ticks are "
+                f"shown in {self._display_units.lower()}; underlying CAD and "
+                "physics geometry remains in metres."
+            )
+            self.draw_idle()
+
+        def set_interaction_lod_enabled(self, enabled: bool) -> None:
+            self._interaction_lod_enabled = bool(enabled)
+            if not self._interaction_lod_enabled:
+                self._end_interaction_lod(None)
+
+        def _begin_interaction_lod(self, event: Any) -> None:
+            """Temporarily switch large surfaces to the cached Fast proxy."""
+
+            if (
+                not self._interaction_lod_enabled
+                or getattr(event, "inaxes", None) is not self.axes
+                or self._interaction_detail_caps
+            ):
+                return
+            fast_cap = int(TRIANGLE_DETAIL_CAPS["Fast"])
+            for group_id in self.model.group_ids:
+                group = self.model.group(group_id)
+                if (
+                    group.kind != "surface"
+                    or not group.visible
+                    or group.display_count <= fast_cap
+                ):
+                    continue
+                self._interaction_detail_caps[group_id] = group.detail_cap
+                self.model.set_surface_detail(
+                    group_id, fast_cap, remember=False
+                )
+            self._lod_artist.set_visible(bool(self._interaction_detail_caps))
+            self.draw_idle()
+
+        def _end_interaction_lod(self, _event: Any) -> None:
+            """Restore the selected detail after a rotate/zoom drag."""
+
+            saved = self._interaction_detail_caps
+            self._interaction_detail_caps = {}
+            for group_id, cap in saved.items():
+                if group_id in self.model.group_ids:
+                    self.model.set_surface_detail(
+                        group_id, cap, remember=False
+                    )
+            self._lod_artist.set_visible(False)
+            self.draw_idle()
 
         @property
         def preview_state(self) -> str:
@@ -728,8 +1052,13 @@ if GUI_AVAILABLE:
             if event == "cleared":
                 for key in tuple(self._artists):
                     self._remove_artist(key)
+                self._interaction_detail_caps.clear()
+                self._lod_artist.set_visible(False)
             elif event == "removed" and group_id is not None:
                 self._remove_artist(group_id)
+                self._interaction_detail_caps.pop(group_id, None)
+                if not self._interaction_detail_caps:
+                    self._lod_artist.set_visible(False)
             elif event == "visibility" and group_id is not None:
                 artist = self._artists.get(group_id)
                 if artist is not None:
@@ -828,10 +1157,6 @@ if GUI_AVAILABLE:
                 assembly_tree_panel = AssemblyTreePanel(self)
             self.assembly_tree_panel = assembly_tree_panel
             self.scene_canvas = AssemblySceneCanvas(self, model=scene_model)
-            self.scene_canvas.setToolTip(
-                "Drag to rotate the 3-D view and use the mouse wheel to zoom. "
-                "X is right, Y is nose, Z is up; coordinates are metres."
-            )
             self.scene_model = self.scene_canvas.model
             self._feature_service: FeatureBuildService | Callable[[object], Any] | None = None
             self._pending_visibility: dict[str, bool] = {}
@@ -839,6 +1164,9 @@ if GUI_AVAILABLE:
             self._tree_clearing_signal = None
             self._tree_preview_removing_signal = None
             self._feature_preview_group_ids: set[str] = set()
+            self._triangle_detail_name = "Balanced"
+            self._body_render_mode = "Solid"
+            self._body_opacity = 0.75
 
             outer = QVBoxLayout(self)
             outer.setContentsMargins(10, 10, 10, 10)
@@ -868,6 +1196,88 @@ if GUI_AVAILABLE:
             toolbar.addWidget(self.lbl_legend)
             toolbar.addWidget(self.btn_fit_visible)
             outer.addLayout(toolbar)
+
+            display_heading = QLabel(
+                "3-D display only \u2014 does not affect RCS"
+            )
+            display_heading.setStyleSheet("font-weight: 600;")
+            outer.addWidget(display_heading)
+
+            display_row = QHBoxLayout()
+            display_row.setSpacing(6)
+            display_row.addWidget(QLabel("Display units"))
+            self.cmb_display_units = QComboBox(self)
+            for unit_name, (suffix, _scale) in DISPLAY_UNIT_SPECS.items():
+                self.cmb_display_units.addItem(
+                    f"{unit_name} ({suffix})", unit_name
+                )
+            self.cmb_display_units.setToolTip(
+                "Changes 3-D axis labels and tick values only. CAD and physics "
+                "coordinates always remain metres."
+            )
+            display_row.addWidget(self.cmb_display_units)
+
+            display_row.addWidget(QLabel("Body view"))
+            self.cmb_body_render = QComboBox(self)
+            self.cmb_body_render.addItems(BODY_RENDER_MODES)
+            self.cmb_body_render.setToolTip(
+                "Choose a solid, edged, or wireframe display. Rendering never "
+                "changes the body used for validation or shadowing."
+            )
+            display_row.addWidget(self.cmb_body_render)
+
+            display_row.addWidget(QLabel("Body opacity"))
+            self.sld_body_opacity = QSlider(Qt.Horizontal, self)
+            self.sld_body_opacity.setRange(5, 100)
+            self.sld_body_opacity.setValue(round(100.0 * self._body_opacity))
+            self.sld_body_opacity.setFixedWidth(110)
+            self.sld_body_opacity.setToolTip(
+                "Visualization-only body opacity (minimum 5%). To hide the body, "
+                "uncheck its Show box in the Assembly tree."
+            )
+            self.lbl_body_opacity = QLabel("75%")
+            display_row.addWidget(self.sld_body_opacity)
+            display_row.addWidget(self.lbl_body_opacity)
+            display_row.addStretch(1)
+            outer.addLayout(display_row)
+
+            detail_row = QHBoxLayout()
+            detail_row.setSpacing(6)
+            detail_row.addWidget(QLabel("Preview facet detail"))
+            self.cmb_triangle_detail = QComboBox(self)
+            for detail_name, cap in TRIANGLE_DETAIL_CAPS.items():
+                self.cmb_triangle_detail.addItem(
+                    f"{detail_name} ({cap:,} max)", detail_name
+                )
+            self.cmb_triangle_detail.setCurrentIndex(
+                tuple(TRIANGLE_DETAIL_CAPS).index(self._triangle_detail_name)
+            )
+            self.cmb_triangle_detail.setToolTip(
+                "Display-only facet caps: Fast 4k, Balanced 12k, or High 30k. "
+                "The unbounded full mesh is intentionally not rendered because "
+                "large STL files can freeze Matplotlib. Backend validation and "
+                "shadowing are never rebuilt from this view."
+            )
+            detail_row.addWidget(self.cmb_triangle_detail)
+
+            self.chk_interaction_lod = QCheckBox(
+                "Faster rotation (display only)", self
+            )
+            self.chk_interaction_lod.setChecked(True)
+            self.chk_interaction_lod.setToolTip(
+                "Temporarily uses at most 4,000 cached body facets while dragging, "
+                "then restores the selected detail on release."
+            )
+            detail_row.addWidget(self.chk_interaction_lod)
+            detail_row.addStretch(1)
+            outer.addLayout(detail_row)
+
+            self.lbl_body_detail = QLabel(
+                "Display units: metres. No body preview loaded. Original geometry "
+                "is unchanged for validation, shadowing, and assembly."
+            )
+            self.lbl_body_detail.setWordWrap(True)
+            outer.addWidget(self.lbl_body_detail)
 
             splitter = QSplitter(Qt.Horizontal)
             left_host = QWidget(self)
@@ -927,12 +1337,109 @@ if GUI_AVAILABLE:
             self.splitter = splitter
             self.left_host = left_host
 
+            self._opacity_timer = QTimer(self)
+            self._opacity_timer.setSingleShot(True)
+            self._opacity_timer.setInterval(120)
+            self._opacity_timer.timeout.connect(self._apply_body_rendering)
             self.btn_fit_visible.clicked.connect(self.scene_canvas.fit_visible)
+            self.cmb_display_units.currentIndexChanged.connect(
+                self._apply_display_units
+            )
+            self.cmb_body_render.currentTextChanged.connect(
+                self._apply_body_rendering
+            )
+            self.sld_body_opacity.valueChanged.connect(
+                self._queue_body_opacity
+            )
+            self.sld_body_opacity.sliderReleased.connect(
+                self._apply_body_rendering
+            )
+            self.cmb_triangle_detail.currentIndexChanged.connect(
+                self._apply_triangle_detail
+            )
+            self.chk_interaction_lod.toggled.connect(
+                self.scene_canvas.set_interaction_lod_enabled
+            )
             self._connect_tree_panel_signals()
+            self._update_body_detail_label()
 
         @property
         def group_ids(self) -> tuple[str, ...]:
             return self.scene_model.group_ids
+
+        def _surface_group_ids(self) -> tuple[str, ...]:
+            return tuple(
+                group_id
+                for group_id in self.scene_model.group_ids
+                if self.scene_model.group(group_id).kind == "surface"
+            )
+
+        def _apply_display_units(self, index: int) -> None:
+            units = self.cmb_display_units.itemData(int(index))
+            self.scene_canvas.set_display_units(str(units))
+            self._update_body_detail_label()
+
+        def _queue_body_opacity(self, value: int) -> None:
+            self.lbl_body_opacity.setText(f"{int(value)}%")
+            self._opacity_timer.start()
+
+        def _apply_body_rendering(self, *_args: Any) -> None:
+            self._opacity_timer.stop()
+            self._body_render_mode = normalize_body_render_mode(
+                self.cmb_body_render.currentText()
+            )
+            self._body_opacity = self.sld_body_opacity.value() / 100.0
+            self.lbl_body_opacity.setText(
+                f"{self.sld_body_opacity.value()}%"
+            )
+            for group_id in self._surface_group_ids():
+                self.scene_model.set_surface_rendering(
+                    group_id,
+                    self._body_render_mode,
+                    self._body_opacity,
+                )
+            self._update_body_detail_label()
+
+        def _apply_triangle_detail(self, index: int) -> None:
+            name = str(self.cmb_triangle_detail.itemData(int(index)))
+            cap = triangle_detail_cap(name)
+            for label in TRIANGLE_DETAIL_CAPS:
+                if label.casefold() == str(name).strip().casefold():
+                    self._triangle_detail_name = label
+                    break
+            for group_id in self._surface_group_ids():
+                self.scene_model.set_surface_detail(group_id, cap)
+            self._update_body_detail_label()
+
+        def _update_body_detail_label(self) -> None:
+            surfaces = [
+                self.scene_model.group(group_id)
+                for group_id in self._surface_group_ids()
+            ]
+            has_body = bool(surfaces)
+            for control in (
+                self.cmb_body_render,
+                self.sld_body_opacity,
+                self.cmb_triangle_detail,
+                self.chk_interaction_lod,
+            ):
+                control.setEnabled(has_body)
+            unit_text = self.scene_canvas.display_units.lower()
+            if not surfaces:
+                self.lbl_body_detail.setText(
+                    f"Display units: {unit_text}. No body preview loaded. Original "
+                    "geometry is unchanged for validation, shadowing, and assembly."
+                )
+                return
+            displayed = sum(group.display_count for group in surfaces)
+            source = sum(group.source_count for group in surfaces)
+            self.lbl_body_detail.setText(
+                f"Display: {unit_text}; {self._body_render_mode} at "
+                f"{round(100.0 * self._body_opacity)}% opacity; {displayed:,} of "
+                f"{source:,} body triangles shown ({self._triangle_detail_name}). "
+                "Original geometry is unchanged for validation, shadowing, and "
+                "assembly."
+            )
 
         def _connect_tree_panel_signals(self) -> None:
             panel = self.assembly_tree_panel
@@ -1025,6 +1532,7 @@ if GUI_AVAILABLE:
                     self.scene_model.remove_group(identifier)
                 self._pending_visibility.pop(identifier, None)
                 self._feature_preview_group_ids.discard(identifier)
+            self._update_body_detail_label()
 
         def connect_tree_visibility(self) -> bool:
             """Connect a future tree ``visibility_changed(id, bool)`` signal.
@@ -1127,6 +1635,7 @@ if GUI_AVAILABLE:
                 self._pending_visibility.pop(group_id, None)
             self._feature_preview_group_ids.clear()
             self.scene_canvas.set_preview_stage("none")
+            self._update_body_detail_label()
 
         @staticmethod
         def _feature_plan_geometry(plan: object):
@@ -1153,7 +1662,7 @@ if GUI_AVAILABLE:
             self.scene_canvas.set_feedback("error", message)
             self.scene_canvas.set_preview_stage("none")
             self.lbl_status.setText(
-                f"{message}. Correct the highlighted body or placement input; "
+                f"{message}. Correct the reported body or placement input; "
                 "no assembly result was changed."
             )
 
@@ -1343,14 +1852,16 @@ if GUI_AVAILABLE:
                             f"Input preview (not physics-validated) \u2014 "
                             f"{body_description}; {point_summary}; {line_summary}. "
                             "Check the locations, then "
-                            "validate before building. Coordinates are CAD metres; "
-                            "tree Show boxes change only this display."
+                            "validate before building. Axes use the selected display "
+                            "units; backend CAD geometry remains metres. Tree Show "
+                            "boxes change only this display."
                         )
                     else:
                         self.lbl_status.setText(
                             f"Validated preview ready \u2014 {body_description}; "
-                            f"{point_summary}; {line_summary}. Coordinates are CAD "
-                            "metres. Drag to rotate and "
+                            f"{point_summary}; {line_summary}. Axes use the selected "
+                            "display units; backend CAD geometry remains metres. "
+                            "Drag to rotate and "
                             "scroll to zoom. Tree Show boxes change only this preview, "
                             "never the assembled RCS."
                         )
@@ -1391,13 +1902,31 @@ if GUI_AVAILABLE:
             kwargs["visible"] = self._visibility_for_new_group(
                 group_id, kwargs.get("visible", True)
             )
-            return self.scene_canvas.add_body_triangles(group_id, triangles_m, **kwargs)
+            kwargs["max_triangles"] = triangle_detail_cap(
+                self._triangle_detail_name
+            )
+            kwargs["render_mode"] = self._body_render_mode
+            kwargs["alpha"] = self._body_opacity
+            group = self.scene_canvas.add_body_triangles(
+                group_id, triangles_m, **kwargs
+            )
+            self._update_body_detail_label()
+            return group
 
         def add_bor_profile(self, group_id: str, profile_rho_z_m: Any, **kwargs):
             kwargs["visible"] = self._visibility_for_new_group(
                 group_id, kwargs.get("visible", True)
             )
-            return self.scene_canvas.add_bor_profile(group_id, profile_rho_z_m, **kwargs)
+            kwargs["max_triangles"] = triangle_detail_cap(
+                self._triangle_detail_name
+            )
+            kwargs["render_mode"] = self._body_render_mode
+            kwargs["alpha"] = self._body_opacity
+            group = self.scene_canvas.add_bor_profile(
+                group_id, profile_rho_z_m, **kwargs
+            )
+            self._update_body_detail_label()
+            return group
 
         def add_points(self, group_id: str, points_m: Any, **kwargs):
             kwargs["visible"] = self._visibility_for_new_group(
@@ -1523,6 +2052,9 @@ else:
 
 
 __all__ = [
+    "BODY_RENDER_MODES",
+    "DISPLAY_UNIT_SPECS",
+    "TRIANGLE_DETAIL_CAPS",
     "AssemblySceneCanvas",
     "AssemblySceneGroup",
     "AssemblySceneModel",
@@ -1532,6 +2064,10 @@ __all__ = [
     "FeatureBuildService",
     "GUI_AVAILABLE",
     "decimate_triangles_for_display",
+    "display_unit_spec",
     "feature_preview_group_id",
+    "format_length_tick",
+    "normalize_body_render_mode",
     "revolve_bor_profile_cad",
+    "triangle_detail_cap",
 ]

@@ -46,7 +46,11 @@ canonical Assembly tree and the 3-D placement preview:
 4. Select **Preview Inputs in 3-D** at any time to see the STL/facet or embedded
    BoR body together with CSV point locations and line paths. This staged view
    needs neither an output path nor mapped response files and is not a physics
-   validation.
+   validation. Use the **3-D display only** controls to select metre, inch, or
+   foot axis labels; solid, edged, or wireframe body rendering; body opacity;
+   and Fast/Balanced/High sampled-facet detail. **Faster rotation** temporarily
+   uses the Fast display proxy while dragging. These settings do not change
+   coordinate input units or any electromagnetic calculation.
 5. Map every discovered ID, choose the output, then select **Validate
    Placements & Preview**. Check the body, feature locations, line ordering,
    units, and CAD orientation (`+x` right, `+y` nose, `+z` up). Supplied
@@ -58,7 +62,10 @@ canonical Assembly tree and the 3-D placement preview:
 Per-node **Show** checkboxes and the global **Show All** checkbox are preview
 controls only. They never include or exclude a feature from the calculation,
 change coherent/incoherent response membership, or alter the saved field. Do
-not use visual hiding as a physics-selection mechanism.
+not use visual hiding as a physics-selection mechanism. The same rule applies
+to display units, style, opacity, and facet detail: the full source body remains
+authoritative for skin checks, normals, shadowing, and assembly even when the
+Matplotlib preview shows a bounded sampled proxy.
 
 The coherent/incoherent branches of the mathematical Assembly tree accept
 commensurate response datasets, not unexpanded feature coupons. In particular,

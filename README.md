@@ -64,6 +64,8 @@ On macOS, each tool folder contains a matching `.command` launcher.
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
   assembling. Exact headers, examples, and blank-template buttons are built in.
+  The display-only viewer supports metre/inch/foot axes, solid/wireframe body
+  styles, opacity, and bounded/adaptive facet detail for responsive rotation.
 - Use **Plotting** and **ISAR** to inspect and process compatible RCS datasets.
 
 FREDDY does not calculate finite-object RCS or produce `.grim` datasets.

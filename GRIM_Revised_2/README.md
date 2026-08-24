@@ -43,10 +43,21 @@ and mapping completeness. **Assemble Coherently & Save** performs the full
 response evaluation and writes the result. The preview draws locations and
 paths; normal and roll vectors are checked numerically but are not yet drawn.
 
+The viewer's **3-D display only** controls can show axis ticks in metres,
+inches, or feet without changing the metre-valued CAD data. The body can be
+drawn as **Solid**, **Solid + edges**, or **Wireframe**, with adjustable
+opacity. **Preview facet detail** limits Matplotlib to 4,000 (Fast), 12,000
+(Balanced), or 30,000 (High) sampled display facets. With **Faster rotation**
+enabled, a body temporarily uses the Fast proxy while it is dragged and then
+returns to the selected detail. The status line reports displayed versus
+source facet counts.
+
 The tree's **Show** controls and global **Show All** affect preview artists
 only. They do not include or exclude a feature from the electromagnetic
 assembly. A body mesh used for shadowing is likewise kept at full physics
-resolution even if its display is decimated.
+resolution even if its display is sampled or decimated. Display units, body
+style, opacity, facet detail, and faster rotation never reinterpret an input
+CSV/STL or modify placement validation, shadowing, or the assembled RCS.
 
 Point datasets require compatible 3-D delta channels (VV, HH, and reciprocal
 cross-polarization where used). Line datasets require the TE and TM 2-D delta
