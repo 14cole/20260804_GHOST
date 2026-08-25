@@ -35,11 +35,29 @@ py -3 impedance_gui.py
 On macOS, use `Launch_FREDDY_GUI.command`, or run the same two commands with
 `python3` instead of `py -3`. `FREDDY_ROOT_PATH` is an optional GRIM
 development override that can point the embedded tab at another FREDDY root.
+The Windows and macOS launchers first use the repository-root `.venv`, then an
+active `VIRTUAL_ENV`, then a system Python; FREDDY does not require a separate
+environment under `tools/FREDDY`.
 
 FREDDY output is CSV, not `.grim`: save a three-column IBC impedance file or a
-five-column material file beside the active GHOST `.geo`, then select it for
-the applicable boundary or material in GHOST. GRIM deliberately does not load
-these files into its RCS dataset table.
+five-column material file for GHOST. In integrated GRIM, **Export and attach to
+current GHOST geometry** accepts only a nominal PEC-backed IBC or nominal
+material export. GHOST must already have an active saved/loaded `.geo`; the
+handoff validates and copies the file beside that geometry, then you press
+**Save Geometry** to persist its reference. Off-angle, thickness, uncertainty,
+and other analysis CSVs cannot be attached through this action. GRIM
+deliberately does not load any FREDDY CSV into its RCS dataset table.
+
+## Portable project files
+
+FREDDY JSON projects store layer materials, Material Mix files, and output
+locations relative to the project JSON when they are in its directory tree or
+one neighboring directory. Moving that folder structure to another machine
+therefore keeps those links intact. More distant or cross-volume absolute paths
+remain absolute, are listed in the JSON's `path_portability` metadata, and
+produce a warning when loaded because the external file must be copied or
+reselected separately. Project and nominal solver-facing CSV writes are
+same-directory atomic, so a failed write does not truncate an existing file.
 
 ## Material CSV format
 
@@ -69,6 +87,22 @@ Uncertainty bounds are written to a separate `_uncertainty.csv` analysis file
 so the nominal file remains directly readable by GHOST. Phase uncertainty
 bounds are unwrapped about the nominal phase and can therefore lie outside
 `[-180, 180]`; this avoids false 360-degree spans at the phase branch cut.
+
+## Thickness-batch IBC export
+
+Use **IBC Batch** to write one nominal solver-compatible IBC CSV for each
+requested thickness of one material layer. Choose the layer, thickness
+start/stop/step, and `mil`, `in`, or `mm`; the default 15-to-30 mil sweep writes
+`ibc_15mil.csv` through `ibc_30mil.csv`. The Impedance frequency sweep is shared
+with this mode. Every batch output is broadside and PEC-backed, and all other
+layers, material tables, and stack ordering remain unchanged.
+
+The preflight line shows the exact file count and endpoint names before the
+run. Existing destinations require one confirmation for the complete set.
+FREDDY computes and stages the complete set before publishing it, and restores
+prior files if publication fails, so a partial batch is not left behind. A
+multi-file batch is deliberately not auto-selected for GHOST; attach the CSV
+for the desired thickness explicitly.
 
 ## Numerical scope
 

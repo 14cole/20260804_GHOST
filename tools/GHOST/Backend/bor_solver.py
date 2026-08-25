@@ -42,11 +42,13 @@ from scipy.linalg import get_lapack_funcs
 from scipy.spatial import cKDTree
 
 from bor_kernels import (
-    C0, ETA0, Generatrix, cached_leggauss, gauss_on_generatrix,
+    C0, ETA0, FFT_BUILD_BUDGET, Generatrix, cached_leggauss,
+    gauss_on_generatrix,
     modal_kernels_fft, modal_kernels_near, kernels_for_mode,
     mfie_kernels_fft, mfie_kernels_near, mfie_for_mode,
     ibc_kernels_fft, ibc_kernels_near, n_xi_for_pairs,
 )
+from rcs_solver import _memory_gate_message, _solve_memory_limit_gb
 
 # ``||A x - b||_2 / ||b||_2`` remains useful telemetry, but it is not a
 # scale-invariant acceptance test: cancellation in ``A x`` can make it much
@@ -57,6 +59,124 @@ from bor_kernels import (
 BOR_LINEAR_RESIDUAL_MAX = 1.0e-8
 BOR_LINEAR_BACKWARD_ERROR_MAX = 1.0e-12
 BOR_CONDITION_EST_MAX = 1.0e12
+
+# Conservative complex128-equivalent storage held by one concurrently solved
+# azimuthal mode.  The matrix allowance covers the assembled/full and reduced
+# systems, the retained solve matrix, LU storage/copies, dense projection or
+# condition-norm scratch, and one additional BLAS/LAPACK work copy.  The RHS
+# allowance covers B, X, residual/refinement candidates, and the bounded
+# full-solution reconstruction used by batch far-field evaluation.  These are
+# deliberately upper bounds: the gate must reject a solve before the kernel
+# tables are prepared rather than discover the peak through paging or an OOM.
+BOR_DENSE_MATRIX_EQUIVALENTS = 8.0
+BOR_DENSE_RHS_EQUIVALENTS = 12.0
+_COMPLEX128_BYTES = np.dtype(np.complex128).itemsize
+
+
+def estimate_bor_dense_peak_gb(
+    n_dofs: 'int',
+    n_rhs: 'int',
+    workers: 'int' = 1,
+    mode_tasks: 'Optional[int]' = None,
+) -> 'float':
+    """Conservative peak GB for the concurrent dense BoR linear systems.
+
+    ``mode_tasks`` is the number of independent absolute-mode tasks that can
+    actually be scheduled (normally ``m_max + 1``).  Capping the requested
+    worker count by it accounts for real concurrency without charging for
+    idle executor threads.
+    """
+
+    try:
+        dofs = int(n_dofs)
+        rhs_count = int(n_rhs)
+        worker_count = max(1, int(workers))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "BoR memory estimates require integer DOFs, RHS count, and workers."
+        ) from exc
+    if dofs != n_dofs or dofs <= 0:
+        raise ValueError("BoR dense-system DOFs must be a positive integer.")
+    if rhs_count != n_rhs or rhs_count <= 0:
+        raise ValueError("BoR dense-system RHS count must be a positive integer.")
+    if mode_tasks is None:
+        active_workers = worker_count
+    else:
+        try:
+            task_count = int(mode_tasks)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "BoR mode-task count must be a positive integer."
+            ) from exc
+        if task_count != mode_tasks or task_count <= 0:
+            raise ValueError("BoR mode-task count must be a positive integer.")
+        active_workers = min(worker_count, task_count)
+
+    matrix_bytes = (
+        BOR_DENSE_MATRIX_EQUIVALENTS
+        * dofs
+        * dofs
+        * _COMPLEX128_BYTES
+    )
+    rhs_bytes = (
+        BOR_DENSE_RHS_EQUIVALENTS
+        * dofs
+        * rhs_count
+        * _COMPLEX128_BYTES
+    )
+    # Pivot arrays, per-RHS norms, modal increments, and allocator alignment
+    # are lower order, but include an explicit 5% margin rather than silently
+    # treating them as free.
+    per_worker_bytes = 1.05 * (matrix_bytes + rhs_bytes)
+    return active_workers * per_worker_bytes / 1.0e9
+
+
+def _guard_bor_dense_memory(
+    n_dofs: 'int',
+    n_rhs: 'int',
+    workers: 'int',
+    mode_tasks: 'int',
+    resident_memory_gb: 'float' = 0.0,
+    context: 'str' = "The BoR solve",
+) -> 'float':
+    """Gate a BoR solve before operator preparation and return required GB."""
+
+    resident = float(resident_memory_gb)
+    if not math.isfinite(resident) or resident < 0.0:
+        raise ValueError(
+            "Resident BoR assembly memory must be finite and non-negative."
+        )
+    dense = estimate_bor_dense_peak_gb(
+        n_dofs,
+        n_rhs,
+        workers=workers,
+        mode_tasks=mode_tasks,
+    )
+    required = resident + dense
+    memory_limit_gb = _solve_memory_limit_gb()
+    if required > memory_limit_gb:
+        active_workers = min(max(1, int(workers)), int(mode_tasks))
+        raise MemoryError(
+            _memory_gate_message(
+                required,
+                memory_limit_gb,
+                context,
+                (
+                    f"Planned dense system: {int(n_dofs)} complex128 DOFs, "
+                    f"{int(n_rhs)} simultaneous RHS columns, "
+                    f"{active_workers} concurrent mode worker"
+                    f"{'s' if active_workers != 1 else ''}; estimated dense "
+                    f"peak {dense:.2f} GB plus {resident:.2f} GB of resident "
+                    "operator/table storage."
+                ),
+                (
+                    "Reduce the mesh, aspect count, or worker count; for the "
+                    "direct PEC/IBC solver, streaming or a lower stream "
+                    "budget can also reduce resident assembly memory."
+                ),
+            )
+        )
+    return required
 
 
 # -----------------------------------------------------------------------------
@@ -1500,7 +1620,9 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 monitor_cond: 'bool' = False,
                 rhs_batch: 'Optional[Callable]' = None,
                 farfield_batch: 'Optional[Callable]' = None,
-                min_mode_before_tail: 'int' = 0):
+                min_mode_before_tail: 'int' = 0,
+                resident_memory_gb: 'float' = 0.0,
+                memory_context: 'str' = "The BoR solve"):
     """
     Shared adaptive azimuthal-mode loop for every BoR formulation.
 
@@ -1528,9 +1650,17 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
     thetas = np.atleast_1d(np.asarray(thetas, dtype=float))
     pols = list(pols)
     F = np.zeros((len(pols), len(thetas)), dtype=np.complex128)
+    workers = max(1, int(workers))
+    _guard_bor_dense_memory(
+        n_dofs,
+        len(thetas) * len(pols),
+        workers,
+        max(1, int(m_max) + 1),
+        resident_memory_gb=resident_memory_gb,
+        context=memory_context,
+    )
     if prepare is not None:
         prepare(m_max)
-    workers = max(1, int(workers))
     min_mode_before_tail = max(0, int(min_mode_before_tail))
 
     def linear_error_metrics(A, X, B):
@@ -2071,6 +2201,183 @@ def estimate_bor_table_gb(n_elems: 'int', m_max: 'int', formulation: 'str' = "cf
     return total / 1e9
 
 
+def estimate_bor_operator_storage_gb(
+    m_max: 'int',
+    solver_requirements,
+    cross_operators=(),
+    constraint_dofs: 'int' = 0,
+) -> 'float':
+    """Estimate retained non-streaming operator storage and build workspace.
+
+    ``solver_requirements`` contains ``(solver, efie, mfie, ibc)`` tuples.
+    Repeated solver instances are merged so their dense basis matrices and
+    tables are counted once.  Cross-surface tables are rectangular and are
+    counted independently.  ``constraint_dofs`` adds the at-most-three dense
+    junction projection matrices retained by the partial/multiregion paths.
+    """
+
+    try:
+        modes = int(m_max)
+        constraint_size = int(constraint_dofs)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "BoR operator estimates require integer mode and constraint sizes."
+        ) from exc
+    if modes != m_max or modes < 0:
+        raise ValueError("BoR operator mode cap must be a non-negative integer.")
+    if constraint_size != constraint_dofs or constraint_size < 0:
+        raise ValueError("BoR constraint DOFs must be a non-negative integer.")
+
+    merged = {}
+    for requirement in solver_requirements:
+        if len(requirement) != 4:
+            raise ValueError(
+                "Each BoR solver requirement must be (solver, efie, mfie, ibc)."
+            )
+        solver, efie, mfie, ibc = requirement
+        key = id(solver)
+        if key in merged:
+            previous = merged[key]
+            merged[key] = (
+                solver,
+                previous[1] or bool(efie),
+                previous[2] or bool(mfie),
+                previous[3] or bool(ibc),
+            )
+        else:
+            merged[key] = (solver, bool(efie), bool(mfie), bool(ibc))
+
+    retained = 0.0
+    build_workspace = 0.0
+    signed_modes = 2 * modes + 1
+    index_bytes = np.dtype(np.intp).itemsize
+    for solver, efie, mfie, ibc in merged.values():
+        point_count = int(solver.P)
+        node_count = int(solver.Nn)
+        elem_count = int(solver.gen.n_elems)
+        table_bytes = np.dtype(solver._table_dtype).itemsize
+        if efie or mfie or ibc:
+            # The non-streaming contractions realize two real Nn-by-P basis
+            # matrices before any far table is built.
+            retained += 2.0 * node_count * point_count * np.dtype(float).itemsize
+        if efie:
+            retained += point_count ** 2 * (modes + 2) * table_bytes
+        if mfie:
+            retained += 4.0 * point_count ** 2 * signed_modes * table_bytes
+        if ibc:
+            retained += 4.0 * point_count ** 2 * signed_modes * table_bytes
+
+        pair_count = sum(
+            min(elem_count, elem + int(solver.near_span) + 1)
+            - max(0, elem - int(solver.near_span))
+            for elem in range(elem_count)
+        )
+        enabled_kinds = int(efie) + int(mfie) + int(ibc)
+        # Each prepared kind retains four block families, every signed mode,
+        # and four nodal entries per directed near pair, plus three index maps.
+        retained += (
+            enabled_kinds
+            * 4.0
+            * signed_modes
+            * (4 * pair_count)
+            * _COMPLEX128_BYTES
+        )
+        retained += enabled_kinds * 3.0 * (4 * pair_count) * index_bytes
+
+        if efie or mfie or ibc:
+            rho_max = float(np.max(solver.gen.nodes[:, 0]))
+            far_gap = float(solver._far_gap())
+            if efie:
+                n_xi = n_xi_for_pairs(
+                    solver.k, rho_max, modes, far_gap, bracket=False
+                )
+                build_workspace = max(
+                    build_workspace,
+                    min(
+                        float(FFT_BUILD_BUDGET),
+                        point_count ** 2 * n_xi * 4.0 * _COMPLEX128_BYTES,
+                    ),
+                )
+            if mfie or ibc:
+                n_xi = n_xi_for_pairs(
+                    solver.k, rho_max, modes, far_gap, bracket=True
+                )
+                bracket_arrays = 14.0 if ibc else 12.0
+                build_workspace = max(
+                    build_workspace,
+                    min(
+                        float(FFT_BUILD_BUDGET),
+                        point_count ** 2
+                        * n_xi
+                        * bracket_arrays
+                        * _COMPLEX128_BYTES,
+                    ),
+                )
+
+    seen_crosses = set()
+    for cross in cross_operators:
+        if id(cross) in seen_crosses:
+            continue
+        seen_crosses.add(id(cross))
+        point_count_p = int(cross.sp.P)
+        point_count_q = int(cross.sq.P)
+        pair_points = point_count_p * point_count_q
+        retained += pair_points * (modes + 2) * _COMPLEX128_BYTES
+        retained += 4.0 * pair_points * signed_modes * _COMPLEX128_BYTES
+
+        for pair in cross.near_pairs:
+            kind = cross.pair_kind.get(pair)
+            if kind is None:
+                quadrature_points = int(cross.near_order) ** 2
+            else:
+                quadrature_points = (
+                    len(_graded_cells(kind)) * 4 * 5
+                )
+            pair_complex = (
+                quadrature_points
+                * ((modes + 2) + 4 * signed_modes)
+                * _COMPLEX128_BYTES
+            )
+            retained += pair_complex + 16.0 * quadrature_points * 8.0
+            build_workspace = max(build_workspace, 4.0 * pair_complex)
+
+        rho_max = max(
+            float(np.max(cross.sp.gen.nodes[:, 0])),
+            float(np.max(cross.sq.gen.nodes[:, 0])),
+        )
+        n_xi_g = n_xi_for_pairs(
+            cross.k, rho_max, modes, float(cross._far_gap), bracket=False
+        )
+        n_xi_b = n_xi_for_pairs(
+            cross.k, rho_max, modes, float(cross._far_gap), bracket=True
+        )
+        build_workspace = max(
+            build_workspace,
+            min(
+                float(FFT_BUILD_BUDGET),
+                pair_points * n_xi_g * 4.0 * _COMPLEX128_BYTES,
+            ),
+            min(
+                float(FFT_BUILD_BUDGET),
+                pair_points * n_xi_b * 14.0 * _COMPLEX128_BYTES,
+            ),
+        )
+
+    if constraint_size:
+        category_count = 1 if modes == 0 else (2 if modes == 1 else 3)
+        retained += (
+            category_count
+            * constraint_size
+            * constraint_size
+            * _COMPLEX128_BYTES
+        )
+
+    # Account for container metadata, alignment, and the small real-valued
+    # geometry arrays.  Build scratch is bounded inside the kernel routines
+    # and occurs on top of the tables retained earlier in preparation.
+    return (1.10 * retained + build_workspace) / 1.0e9
+
+
 def _validated_bor_aspects(thetas_deg) -> 'np.ndarray':
     """Validate the direct-solver monostatic aspect grid."""
 
@@ -2206,15 +2513,6 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
         per_mode = est / (m_max + 1)
         mode_block = max(1, int(float(stream_budget_gb) / per_mode))
         est_held = est * mode_block / (m_max + 1)
-    if est_held > 32.0:
-        raise MemoryError(
-            f"Estimated far-assembly memory {est_held:.1f} GB "
-            f"({solver.gen.n_elems} elements, {m_max} modes, "
-            f"{'streaming' if use_streaming else 'tables'}, "
-            f"{'single' if use_single else 'double'} precision) exceeds the "
-            "32 GB gate. Reduce the mesh/mode count"
-            + ("" if use_streaming else
-               ", or use assembly='streaming' (phase 7b)") + ".")
     table_note = (f"{'Streamed far blocks' if use_streaming else 'Far kernel tables'} "
                   f"stored in single precision ({est:.1f} GB; double would "
                   f"need {est_full:.1f} GB)."
@@ -2312,7 +2610,9 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                                        monitor_cond=True,
                                        rhs_batch=rhs_batch,
                                        farfield_batch=farfield_batch,
-                                       min_mode_before_tail=mode_tail_start)
+                                       min_mode_before_tail=mode_tail_start,
+                                       resident_memory_gb=est_held,
+                                       memory_context="The PEC/IBC BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -2372,6 +2672,13 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
     )
     Nn = se.Nn
     eta_ratio2 = (ETA0 / si.eta) ** 2
+    operator_storage_gb = estimate_bor_operator_storage_gb(
+        m_max,
+        (
+            (se, True, False, True),
+            (si, True, False, True),
+        ),
+    )
 
     def prepare(mm):
         se.prepare_operators(mm, efie=True, ibc=True, workers=workers)
@@ -2426,7 +2733,9 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
                                        monitor_cond=True,
                                        rhs_batch=rhs_batch,
                                        farfield_batch=farfield_batch,
-                                       min_mode_before_tail=mode_tail_start)
+                                       min_mode_before_tail=mode_tail_start,
+                                       resident_memory_gb=operator_storage_gb,
+                                       memory_context="The dielectric BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -2697,6 +3006,15 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
     No, Nc = se.Nn, sLc.Nn
     eta_ratio2 = (ETA0 / sLo.eta) ** 2
     ntot = 4 * No + 2 * Nc
+    operator_storage_gb = estimate_bor_operator_storage_gb(
+        m_max,
+        (
+            (se, True, False, True),
+            (sLo, True, False, True),
+            (sLc, True, False, False),
+        ),
+        (Xoc, Xco),
+    )
 
     iJ = slice(0, 2 * No); iM = slice(2 * No, 4 * No); iC = slice(4 * No, ntot)
 
@@ -2763,7 +3081,9 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
                                        monitor_cond=True,
                                        rhs_batch=rhs_batch,
                                        farfield_batch=farfield_batch,
-                                       min_mode_before_tail=mode_tail_start)
+                                       min_mode_before_tail=mode_tail_start,
+                                       resident_memory_gb=operator_storage_gb,
+                                       memory_context="The coated-PEC BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -3007,12 +3327,18 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                                 workers=workers)
         for X in [X_d2, X_2d] + X_d1 + X_1d + list(X_11.values()):
             X.prepare(mm)
+        # Only the m=0, |m|=1, and |m|>=2 basis categories are distinct.
+        # Warm them serially so mode workers never allocate duplicate dense
+        # projection matrices concurrently.
+        for representative in range(min(int(mm), 2) + 1):
+            build_Q(representative)
 
     # -- junction-aware constraint matrix Q(m) --
     _Q_cache: 'Dict[int, np.ndarray]' = {}
 
     def build_Q(m):
-        Q = _Q_cache.get(m)
+        category = 0 if m == 0 else (1 if abs(m) == 1 else 2)
+        Q = _Q_cache.get(category)
         if Q is not None:
             return Q
         d_jn_nodes = {jn["d_node"] for jn in junctions}
@@ -3095,7 +3421,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             if master_f >= 0:
                 Q[off_J2 + N2 + cn, master_f] = -1.0
                 Q[off_J1[bi] + N1[bi] + bn, master_f] = 1.0
-        _Q_cache[m] = Q
+        _Q_cache[category] = Q
         return Q
 
     def assemble(m):
@@ -3165,13 +3491,30 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
             fth += ft; fph += fp
         return fth if pol == "VV" else fph
 
+    operator_storage_gb = estimate_bor_operator_storage_gb(
+        m_max,
+        (
+            (sd_e, True, False, True),
+            (sd_L, True, False, True),
+            (s2_L, True, False, False),
+            *(
+                (bare, True, False, zs_elems[index] is not None)
+                for index, bare in enumerate(bares)
+            ),
+        ),
+        (X_d2, X_2d, *X_d1, *X_1d, *X_11.values()),
+        constraint_dofs=n_full,
+    )
+
     F, modes_used, stats = _mode_sweep(n_full, thetas, ("VV", "HH"), m_max,
                                        mode_tol, assemble, rhs, farfield,
                                        prepare=prepare, workers=workers,
                                        progress=progress,
                                        check_abort=check_abort,
                                        monitor_cond=True,
-                                       min_mode_before_tail=mode_tail_start)
+                                       min_mode_before_tail=mode_tail_start,
+                                       resident_memory_gb=operator_storage_gb,
+                                       memory_context="The partial-coating BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
         "theta_deg": thetas.tolist(),
@@ -3319,13 +3662,18 @@ class _MultiRegionBor:
                                 workers=workers)
         for X in self.X.values():
             X.prepare(m_max)
+        # Q depends on mode category, not the signed mode number.  Build each
+        # possible category once before parallel mode assembly.
+        for representative in range(min(int(m_max), 2) + 1):
+            self.build_Q(representative)
 
     def _dir(self, si: 'int', node: 'int') -> 'int':
         """+1 if the drawn tangent points INTO the junction node (chain end)."""
         return +1 if node != 0 else -1
 
     def build_Q(self, m: 'int') -> 'np.ndarray':
-        Q = self._Q_cache.get(m)
+        category = 0 if m == 0 else (1 if abs(m) == 1 else 2)
+        Q = self._Q_cache.get(category)
         if Q is not None:
             return Q
         jn_nodes = {(si, node) for jn in self.junctions for (si, node) in jn}
@@ -3401,7 +3749,7 @@ class _MultiRegionBor:
                         Q[self.off_M[ss] + ns, mmt] = ct
                     if mmf >= 0:
                         Q[self.off_M[ss] + self.Nn[ss] + ns, mmf] = cf
-        self._Q_cache[m] = Q
+        self._Q_cache[category] = Q
         return Q
 
     def assemble(self, m: 'int', m_max: 'int'):
@@ -3468,12 +3816,23 @@ def _solve_multiregion(sys_: '_MultiRegionBor', freq_hz, thetas_deg, n_modes,
     m_max, mode_tail_start = _bor_mode_limits(
         k, sys_.rho_max(), thetas, n_modes
     )
+    operator_storage_gb = estimate_bor_operator_storage_gb(
+        m_max,
+        tuple(
+            (solver, True, False, not sys_.is_cond[surface_index])
+            for (surface_index, _region_index), solver in sys_.solv.items()
+        ),
+        tuple(sys_.X.values()),
+        constraint_dofs=sys_.n_full,
+    )
     F, modes_used, stats = _mode_sweep(
         sys_.n_full, thetas, ("VV", "HH"), m_max, mode_tol,
         lambda m: sys_.assemble(m, m_max), sys_.rhs, sys_.farfield,
         prepare=lambda mm: sys_.prepare(mm, workers=workers),
         workers=workers, progress=progress, check_abort=check_abort,
-        monitor_cond=True, min_mode_before_tail=mode_tail_start)
+        monitor_cond=True, min_mode_before_tail=mode_tail_start,
+        resident_memory_gb=operator_storage_gb,
+        memory_context=f"The {formulation} BoR solve")
     _require_mode_convergence(stats, mode_tol)
     extra = {**extra, **stats}
     warnings = list(extra.get("warnings", []) or [])

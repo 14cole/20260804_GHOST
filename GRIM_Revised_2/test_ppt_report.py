@@ -166,6 +166,18 @@ class RecordingWriter:
         Path(output_path).write_bytes(b"fake pptx")
 
 
+class PreflightRecordingWriter(RecordingWriter):
+    def __init__(self, *, fail_preflight: bool = False):
+        super().__init__()
+        self.preflight_called = False
+        self.fail_preflight = fail_preflight
+
+    def preflight(self):
+        self.preflight_called = True
+        if self.fail_preflight:
+            raise RuntimeError("PowerPoint is unavailable")
+
+
 def tiny_renderer(_plot, output_path, **_kwargs):
     path = Path(output_path)
     path.write_bytes(b"png")
@@ -173,6 +185,28 @@ def tiny_renderer(_plot, output_path, **_kwargs):
 
 
 class SafeExportTests(unittest.TestCase):
+    def test_powerpoint_preflight_runs_before_any_plot_rendering(self):
+        plan = plan_azimuth_slides([make_plot("a")])
+        writer = PreflightRecordingWriter(fail_preflight=True)
+        render_called = False
+
+        def renderer(*_args, **_kwargs):
+            nonlocal render_called
+            render_called = True
+            raise AssertionError("renderer must not run after failed preflight")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.pptx"
+            with self.assertRaisesRegex(RuntimeError, "PowerPoint is unavailable"):
+                export_powerpoint_report(
+                    plan,
+                    output,
+                    writer=writer,
+                    renderer=renderer,
+                )
+        self.assertTrue(writer.preflight_called)
+        self.assertFalse(render_called)
+
     def test_success_uses_template_staging_and_cleans_plot_images(self):
         plan = plan_azimuth_slides([make_plot("a")])
         writer = RecordingWriter()

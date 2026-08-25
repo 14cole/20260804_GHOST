@@ -53,6 +53,18 @@ class GhostWorkspace(QTabWidget):
         thread = getattr(self.solver_tab, "_solve_thread", None)
         return bool(thread is not None and thread.isRunning())
 
+    def attach_material_artifact(
+        self, artifact_kind: str, csv_path: str
+    ) -> bool:
+        """Attach a typed nominal FREDDY CSV to the current Geometry tab."""
+
+        attached = self.geometry_tab.attach_material_artifact(
+            artifact_kind, csv_path
+        )
+        if attached:
+            self.setCurrentWidget(self.geometry_tab)
+        return bool(attached)
+
 
 class GhostMainWindow(QMainWindow):
     """Host the existing geometry editor and solver as one application."""

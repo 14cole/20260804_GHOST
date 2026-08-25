@@ -21,6 +21,7 @@ powerpoint = ["pywin32>=306; sys_platform == 'win32'"]
 
 [project.scripts]
 grim = "grim_cut_gui:main"
+grim-diagnose = "grim_diagnostics:main"
 grim-headless = "grim_headless:main"
 ppt-image-imprinter = "ppt_image_imprinter:main"
 
@@ -35,7 +36,9 @@ py-modules = [
   "grim_cut_gui",
   "grim_cut_plot_mixin",
   "grim_dataset",
+  "grim_diagnostics",
   "grim_headless",
+  "grim_python",
   "ghost_integration",
   "ppt_image_imprinter",
   "ppt_plot_data",

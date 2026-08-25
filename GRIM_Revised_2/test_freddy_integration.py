@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import sys
+import tempfile
 from types import ModuleType
 import unittest
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 import freddy_integration
@@ -26,6 +29,8 @@ class _FocusProbe(QWidget):
 
 
 class _FakeImpedanceGui(QMainWindow):
+    nominal_artifact_exported = Signal(str, str)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.running = False
@@ -108,11 +113,50 @@ class FreddyIntegrationTest(unittest.TestCase):
             self.assertIsInstance(workspace, _FakeImpedanceGui)
             self.assertFalse(workspace.isWindow())
             self.assertFalse(widget.job_is_running())
+            self.assertFalse(widget.attach_to_ghost_button.isEnabled())
 
             workspace.running = True
             self.assertTrue(widget.job_is_running())
             widget.focus_workspace()
             self.assertTrue(workspace.focus_probe.called)
+        finally:
+            widget.deleteLater()
+            self.app.processEvents()
+
+    def test_widget_forwards_only_existing_typed_nominal_artifacts(self) -> None:
+        with mock.patch.object(
+            freddy_integration,
+            "_load_impedance_gui_class",
+            return_value=_FakeImpedanceGui,
+        ):
+            widget = freddy_integration.FreddyIntegrationWidget()
+
+        received = []
+        widget.attach_to_ghost_requested.connect(
+            lambda kind, path: received.append((kind, path))
+        )
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                artifact = Path(folder) / "nominal.csv"
+                artifact.write_text(
+                    "frequency_hz,resistance_ohm,reactance_ohm\n"
+                    "1000000000,50,0\n",
+                    encoding="utf-8",
+                )
+                widget.workspace.nominal_artifact_exported.emit(
+                    "analysis", str(artifact)
+                )
+                self.assertFalse(widget.attach_to_ghost_button.isEnabled())
+
+                widget.workspace.nominal_artifact_exported.emit(
+                    "ibc", str(artifact)
+                )
+                self.assertTrue(widget.attach_to_ghost_button.isEnabled())
+                widget.attach_to_ghost_button.click()
+
+                self.assertEqual(
+                    received, [("ibc", str(artifact.resolve()))]
+                )
         finally:
             widget.deleteLater()
             self.app.processEvents()

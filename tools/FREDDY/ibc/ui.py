@@ -248,6 +248,18 @@ class _MessageBox:
     def showerror(title: str = "", message: str = "", **kw: object) -> None:
         QMessageBox.critical(kw.get("parent"), str(title), str(message))
 
+    @staticmethod
+    def askyesno(title: str = "", message: str = "", **kw: object) -> bool:
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        answer = QMessageBox.question(
+            kw.get("parent"),
+            str(title),
+            str(message),
+            buttons.Yes | buttons.No,
+            buttons.No,
+        )
+        return answer == buttons.Yes
+
 
 class _FileDialog:
     """tkinter ``filedialog`` work-alike backed by QFileDialog."""
@@ -269,10 +281,21 @@ class _FileDialog:
             path = path + ext
         return path
 
+    @staticmethod
+    def askdirectory(**kw: object) -> str:
+        return QFileDialog.getExistingDirectory(
+            kw.get("parent"), str(kw.get("title", "")), str(kw.get("initialdir", ""))
+        )
+
 
 messagebox = _MessageBox()
 filedialog = _FileDialog()
 
+from .batch import (
+    IbcBatchItem,
+    export_pec_ibc_thickness_batch,
+    plan_ibc_thickness_batch,
+)
 from .compute import (
     INCH_TO_M,
     MIX_RULE_LABELS,
@@ -316,15 +339,15 @@ from .compute import (
 )
 from .io import (
     HZ_PER_GHZ,
+    _atomic_text_file,
     layer_config_from_dict,
     layer_config_to_dict,
     load_project_file,
     read_material_table,
     save_project_file,
     uncertainty_report_path,
-    write_impedance_uncertainty_report,
+    write_impedance_bundle,
     write_material_table,
-    write_output,
 )
 from .plot import nearest_index, style_axis, style_colorbar
 
@@ -1122,6 +1145,13 @@ class MixComponentDialog(QDialog):
 
 
 class ImpedanceGui(QMainWindow):
+    # Host integrations may consume this deliberately narrow artifact stream.
+    # It is never emitted for off-angle/thickness analysis, uncertainty, or a
+    # multi-file IBC batch with no unambiguous current file. ``kind`` is exactly
+    # ``ibc`` or ``material`` and the second value is the absolute path of one
+    # solver-compatible nominal CSV.
+    nominal_artifact_exported = Signal(str, str)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         """Build the FREDDY workspace as a window or an embedded child widget."""
         super().__init__(parent)
@@ -1138,6 +1168,16 @@ class ImpedanceGui(QMainWindow):
         # collapsing a coating onto a Type 2 RCS body.
         self.backing_var = StringVar("pec")
         self.output_var = StringVar("impedance_out.csv")
+        # Nominal IBC batch: one PEC-backed broadside solver CSV per selected-
+        # layer thickness. The frequency grid is deliberately shared with the
+        # single Impedance mode above.
+        self.ibc_batch_layer_var = StringVar("")
+        self.ibc_batch_start_var = StringVar("15")
+        self.ibc_batch_stop_var = StringVar("30")
+        self.ibc_batch_step_var = StringVar("1")
+        self.ibc_batch_unit_var = StringVar("mil")
+        self.ibc_batch_output_dir_var = StringVar(".")
+        self.ibc_batch_prefix_var = StringVar("ibc")
         self.uncertainty_var = BooleanVar(False)
         self.unc_t_pct_var = StringVar("5.0")
         self.unc_eps_pct_var = StringVar("5.0")
@@ -1263,6 +1303,9 @@ class ImpedanceGui(QMainWindow):
         self.angle_tab = None
         self.thickness_tab = None
         self.thk_layer_combo = None
+        self.ibc_batch_layer_combo = None
+        self.ibc_batch_preview_label = None
+        self.ibc_batch_export_btn = None
         self.thk_unc_details_frame = None
         self.thk_unc_t_entry = None
         self.thk_unc_eps_entry = None
@@ -1352,9 +1395,67 @@ class ImpedanceGui(QMainWindow):
         """Return whether FREDDY currently owns an active background job."""
         return bool(self._task_running)
 
+    def _publish_nominal_artifact(self, kind: str, path: Path | str) -> None:
+        """Publish one validated, solver-facing CSV to an embedding host.
+
+        Keeping this whitelist at FREDDY's authoritative export boundary makes
+        it impossible for analysis-only CSVs to enter a GHOST material table
+        merely because their filenames also end in ``.csv``.
+        """
+
+        artifact_kind = str(kind).strip().lower()
+        if artifact_kind not in {"ibc", "material"}:
+            raise ValueError(
+                "Attachable FREDDY artifacts must be nominal IBC or material CSVs."
+            )
+        artifact_path = Path(path).expanduser().resolve()
+        if artifact_path.suffix.lower() != ".csv" or not artifact_path.is_file():
+            raise ValueError(
+                f"Attachable FREDDY artifact is not a readable CSV: {artifact_path}"
+            )
+        self.nominal_artifact_exported.emit(
+            artifact_kind, str(artifact_path)
+        )
+
     def can_close(self) -> bool:
         """Return whether a host may safely remove or close this workspace."""
         return not self.job_is_running()
+
+    def _confirm_output_replacements(
+        self, paths: list[Path], *, operation: str
+    ) -> bool:
+        """Preflight every output on the GUI thread before starting a worker."""
+
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for raw_path in paths:
+            path = Path(raw_path).expanduser()
+            key = os.path.normcase(os.path.abspath(path)).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(path)
+
+        invalid = [path for path in unique if path.exists() and not path.is_file()]
+        if invalid:
+            messagebox.showerror(
+                f"{operation} Output",
+                "An output path is not a file:\n" + "\n".join(str(p) for p in invalid),
+                parent=self,
+            )
+            return False
+        existing = [path for path in unique if path.is_file()]
+        if not existing:
+            return True
+        shown = "\n".join(str(path.resolve()) for path in existing[:10])
+        if len(existing) > 10:
+            shown += f"\n…and {len(existing) - 10} more"
+        return messagebox.askyesno(
+            f"Replace Existing {operation} Output?",
+            f"{len(existing)} output file(s) already exist:\n\n{shown}\n\n"
+            "Replace all listed files?",
+            parent=self,
+        )
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt callback name
         """Keep standalone FREDDY alive until its background write finishes."""
@@ -1534,6 +1635,106 @@ class ImpedanceGui(QMainWindow):
         imp_btn_row.addStretch(1)
         imp_layout.addLayout(imp_btn_row)
         imp_layout.addStretch(1)
+
+        # --- IBC Batch: one nominal PEC-backed IBC per layer thickness ---
+        ibc_batch_tab = QWidget()
+        ibc_batch_layout = QVBoxLayout(ibc_batch_tab)
+        _add_mode("IBC Batch", ibc_batch_tab)
+
+        ibc_batch_intro = QLabel(
+            "Create one solver-compatible three-column IBC CSV per thickness. "
+            "Only the selected material layer changes; the stack order, other "
+            "layers, and material data stay fixed. Every file is broadside and "
+            "PEC-backed."
+        )
+        ibc_batch_intro.setWordWrap(True)
+        ibc_batch_layout.addWidget(ibc_batch_intro)
+
+        ibc_batch_freq_group = QGroupBox("Frequency sweep (shared with Impedance)")
+        ibc_batch_freq_grid = QGridLayout(ibc_batch_freq_group)
+        ibc_batch_freq_grid.addWidget(QLabel("Start (GHz)"), 0, 0, Qt.AlignLeft)
+        ibc_batch_freq_grid.addWidget(_entry(self.f_start_var, 10), 0, 1, Qt.AlignLeft)
+        ibc_batch_freq_grid.addWidget(QLabel("Stop"), 0, 2, Qt.AlignLeft)
+        ibc_batch_freq_grid.addWidget(_entry(self.f_stop_var, 10), 0, 3, Qt.AlignLeft)
+        ibc_batch_freq_grid.addWidget(QLabel("Step"), 0, 4, Qt.AlignLeft)
+        ibc_batch_freq_grid.addWidget(_entry(self.f_step_var, 10), 0, 5, Qt.AlignLeft)
+        ibc_batch_freq_grid.setColumnStretch(5, 1)
+        ibc_batch_layout.addWidget(ibc_batch_freq_group)
+
+        ibc_batch_sweep_group = QGroupBox("Selected-layer thickness sweep")
+        ibc_batch_sweep_grid = QGridLayout(ibc_batch_sweep_group)
+        ibc_batch_sweep_grid.addWidget(QLabel("Layer"), 0, 0, Qt.AlignLeft)
+        self.ibc_batch_layer_combo = make_combo(
+            (), self.ibc_batch_layer_var, width=260
+        )
+        ibc_batch_sweep_grid.addWidget(
+            self.ibc_batch_layer_combo, 0, 1, 1, 5, Qt.AlignLeft
+        )
+        ibc_batch_sweep_grid.addWidget(QLabel("Start"), 1, 0, Qt.AlignLeft)
+        ibc_batch_sweep_grid.addWidget(
+            _entry(self.ibc_batch_start_var, 10), 1, 1, Qt.AlignLeft
+        )
+        ibc_batch_sweep_grid.addWidget(QLabel("Stop"), 1, 2, Qt.AlignLeft)
+        ibc_batch_sweep_grid.addWidget(
+            _entry(self.ibc_batch_stop_var, 10), 1, 3, Qt.AlignLeft
+        )
+        ibc_batch_sweep_grid.addWidget(QLabel("Step"), 1, 4, Qt.AlignLeft)
+        ibc_batch_sweep_grid.addWidget(
+            _entry(self.ibc_batch_step_var, 10), 1, 5, Qt.AlignLeft
+        )
+        ibc_batch_sweep_grid.addWidget(QLabel("Units"), 2, 0, Qt.AlignLeft)
+        ibc_batch_sweep_grid.addWidget(
+            make_combo(("mil", "in", "mm"), self.ibc_batch_unit_var, width=80),
+            2,
+            1,
+            Qt.AlignLeft,
+        )
+        ibc_batch_sweep_grid.setColumnStretch(5, 1)
+        ibc_batch_layout.addWidget(ibc_batch_sweep_group)
+
+        ibc_batch_output_group = QGroupBox("Output naming")
+        ibc_batch_output_grid = QGridLayout(ibc_batch_output_group)
+        ibc_batch_output_grid.addWidget(QLabel("Folder"), 0, 0, Qt.AlignLeft)
+        ibc_batch_output_grid.addWidget(
+            _entry(self.ibc_batch_output_dir_var), 0, 1, 1, 4
+        )
+        ibc_batch_browse = QPushButton("Browse")
+        ibc_batch_browse.clicked.connect(self._browse_ibc_batch_output_dir)
+        ibc_batch_output_grid.addWidget(ibc_batch_browse, 0, 5)
+        ibc_batch_output_grid.addWidget(QLabel("File prefix"), 1, 0, Qt.AlignLeft)
+        ibc_batch_output_grid.addWidget(
+            _entry(self.ibc_batch_prefix_var), 1, 1, 1, 2
+        )
+        ibc_batch_output_grid.addWidget(
+            QLabel("Pattern: <prefix>_<thickness><unit>.csv"),
+            1,
+            3,
+            1,
+            3,
+            Qt.AlignLeft,
+        )
+        ibc_batch_layout.addWidget(ibc_batch_output_group)
+
+        self.ibc_batch_preview_label = QLabel("")
+        self.ibc_batch_preview_label.setWordWrap(True)
+        ibc_batch_layout.addWidget(self.ibc_batch_preview_label)
+        self.ibc_batch_export_btn = QPushButton("Export IBC batch")
+        self.ibc_batch_export_btn.clicked.connect(self._export_ibc_batch)
+        ibc_batch_layout.addWidget(self.ibc_batch_export_btn, 0, Qt.AlignLeft)
+        ibc_batch_layout.addStretch(1)
+
+        for batch_var in (
+            self.ibc_batch_layer_var,
+            self.ibc_batch_start_var,
+            self.ibc_batch_stop_var,
+            self.ibc_batch_step_var,
+            self.ibc_batch_unit_var,
+            self.ibc_batch_output_dir_var,
+            self.ibc_batch_prefix_var,
+        ):
+            batch_var.valueChanged.connect(
+                lambda _value: self._refresh_ibc_batch_preview()
+            )
 
         # --- Off Angle tab: frequency x angle heatmap ---
         angle_tab = QWidget()
@@ -2364,6 +2565,16 @@ class ImpedanceGui(QMainWindow):
         if p:
             self.output_var.set(p)
 
+    def _browse_ibc_batch_output_dir(self) -> None:
+        current = self.ibc_batch_output_dir_var.get().strip()
+        p = filedialog.askdirectory(
+            parent=self,
+            title="Select IBC batch output folder",
+            initialdir=current if current and Path(current).is_dir() else "",
+        )
+        if p:
+            self.ibc_batch_output_dir_var.set(p)
+
     def _browse_angle_output(self) -> None:
         p = filedialog.asksaveasfilename(
             title="Select output file",
@@ -2398,6 +2609,13 @@ class ImpedanceGui(QMainWindow):
             "f_step": self.f_step_var.get(),
             "backing": self.backing_var.get(),
             "output": self.output_var.get(),
+            "ibc_batch_layer": self.ibc_batch_layer_var.get(),
+            "ibc_batch_start": self.ibc_batch_start_var.get(),
+            "ibc_batch_stop": self.ibc_batch_stop_var.get(),
+            "ibc_batch_step": self.ibc_batch_step_var.get(),
+            "ibc_batch_unit": self.ibc_batch_unit_var.get(),
+            "ibc_batch_output_dir": self.ibc_batch_output_dir_var.get(),
+            "ibc_batch_prefix": self.ibc_batch_prefix_var.get(),
             "uncertainty": self.uncertainty_var.get(),
             "unc_t_pct": self.unc_t_pct_var.get(),
             "unc_eps_pct": self.unc_eps_pct_var.get(),
@@ -2515,6 +2733,12 @@ class ImpedanceGui(QMainWindow):
             "f_step": self.f_step_var,
             "backing": self.backing_var,
             "output": self.output_var,
+            "ibc_batch_start": self.ibc_batch_start_var,
+            "ibc_batch_stop": self.ibc_batch_stop_var,
+            "ibc_batch_step": self.ibc_batch_step_var,
+            "ibc_batch_unit": self.ibc_batch_unit_var,
+            "ibc_batch_output_dir": self.ibc_batch_output_dir_var,
+            "ibc_batch_prefix": self.ibc_batch_prefix_var,
             "unc_t_pct": self.unc_t_pct_var,
             "unc_eps_pct": self.unc_eps_pct_var,
             "unc_mu_pct": self.unc_mu_pct_var,
@@ -2662,6 +2886,11 @@ class ImpedanceGui(QMainWindow):
             saved_layer = str(controls["thk_layer"])
             if saved_layer in [label for _idx, label in self._thickness_layer_choices()]:
                 self.thk_layer_var.set(saved_layer)
+        if "ibc_batch_layer" in controls:
+            saved_layer = str(controls["ibc_batch_layer"])
+            if saved_layer in [label for _idx, label in self._thickness_layer_choices()]:
+                self.ibc_batch_layer_var.set(saved_layer)
+        self._refresh_ibc_batch_preview()
         self._sync_uncertainty_state()
         self._sync_angle_uncertainty_state()
         self._sync_thickness_uncertainty_state()
@@ -3281,20 +3510,23 @@ class ImpedanceGui(QMainWindow):
         ]
 
     def _refresh_thickness_layers(self) -> None:
-        if self.thk_layer_combo is None:
-            return
         labels = [label for _idx, label in self._thickness_layer_choices()]
-        previous = self.thk_layer_var.get()
-        self.thk_layer_combo.blockSignals(True)
-        self.thk_layer_combo.clear()
-        self.thk_layer_combo.addItems(labels)
-        self.thk_layer_combo.blockSignals(False)
-        if previous in labels:
-            self.thk_layer_var.set(previous)
-        elif labels:
-            self.thk_layer_var.set(labels[0])
-        else:
-            self.thk_layer_var.set("")
+        for combo, var in (
+            (self.thk_layer_combo, self.thk_layer_var),
+            (self.ibc_batch_layer_combo, self.ibc_batch_layer_var),
+        ):
+            if combo is None:
+                continue
+            previous = var.get()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(labels)
+            selected = previous if previous in labels else (labels[0] if labels else "")
+            if selected:
+                combo.setCurrentIndex(labels.index(selected))
+            combo.blockSignals(False)
+            var.set(selected)
+        self._refresh_ibc_batch_preview()
 
     def _selected_thickness_layer_index(self) -> int:
         choices = self._thickness_layer_choices()
@@ -3307,6 +3539,51 @@ class ImpedanceGui(QMainWindow):
             if label == wanted:
                 return idx
         return choices[0][0]
+
+    def _selected_ibc_batch_layer_index(self) -> int:
+        choices = self._thickness_layer_choices()
+        if not choices:
+            raise ValueError(
+                "Add at least one material layer; sheet layers have no thickness."
+            )
+        wanted = self.ibc_batch_layer_var.get().strip()
+        for idx, label in choices:
+            if label == wanted:
+                return idx
+        raise ValueError("Select a valid material layer for the IBC batch.")
+
+    def _plan_ibc_batch(self) -> list[IbcBatchItem]:
+        return plan_ibc_thickness_batch(
+            self.ibc_batch_output_dir_var.get(),
+            self.ibc_batch_prefix_var.get(),
+            self.ibc_batch_start_var.get(),
+            self.ibc_batch_stop_var.get(),
+            self.ibc_batch_step_var.get(),
+            self.ibc_batch_unit_var.get(),
+        )
+
+    def _refresh_ibc_batch_preview(self) -> None:
+        if self.ibc_batch_preview_label is None:
+            return
+        try:
+            self._selected_ibc_batch_layer_index()
+            plan = self._plan_ibc_batch()
+            first = plan[0].path.name
+            last = plan[-1].path.name
+            filenames = first if len(plan) == 1 else f"{first} … {last}"
+            self.ibc_batch_preview_label.setText(
+                f"Preflight: {len(plan)} nominal PEC-backed IBC file(s) — {filenames}"
+            )
+            if self.ibc_batch_export_btn is not None:
+                self.ibc_batch_export_btn.setText(
+                    f"Export {len(plan)} IBC file(s)"
+                )
+                self.ibc_batch_export_btn.setEnabled(not self._task_running)
+        except Exception as exc:
+            self.ibc_batch_preview_label.setText(f"Preflight: {exc}")
+            if self.ibc_batch_export_btn is not None:
+                self.ibc_batch_export_btn.setText("Export IBC batch")
+                self.ibc_batch_export_btn.setEnabled(False)
 
     def _add_layer(self) -> None:
         dlg = LayerDialog(self, presets=BUILTIN_MATERIAL_PRESETS)
@@ -3432,6 +3709,7 @@ class ImpedanceGui(QMainWindow):
         self._task_running = running
         for btn in (
             self.compute_btn,
+            self.ibc_batch_export_btn,
             self.angle_compute_btn,
             self.thk_compute_btn,
             self.inv_run_btn,
@@ -3452,6 +3730,7 @@ class ImpedanceGui(QMainWindow):
         ):
             if btn is not None:
                 btn.setEnabled(not running)
+        self._refresh_ibc_batch_preview()
         self.status_var.set(text)
         if self.status_progress is not None:
             self.status_progress.setVisible(running)
@@ -4216,9 +4495,8 @@ class ImpedanceGui(QMainWindow):
         nominal_rows = [
             (f_ghz, z.real, z.imag) for f_ghz, z in zip(sweep, z_nom)
         ]
-        write_output(output_path, nominal_rows, include_header)
-
         uncertainty_path: Path | None = None
+        uncertainty_rows = None
         if envelope_enabled:
             zr_nom = [z.real for z in z_nom]
             zi_nom = [z.imag for z in z_nom]
@@ -4258,9 +4536,13 @@ class ImpedanceGui(QMainWindow):
                 )
                 for i, f_ghz in enumerate(sweep)
             ]
-            write_impedance_uncertainty_report(
-                uncertainty_path, uncertainty_rows
-            )
+        write_impedance_bundle(
+            output_path,
+            nominal_rows,
+            include_header,
+            uncertainty_path,
+            uncertainty_rows,
+        )
 
         summary = self._summarize_frequency_run(
             sweep,
@@ -4369,7 +4651,7 @@ class ImpedanceGui(QMainWindow):
         insertion_loss = out["insertion_loss_db"]
         insertion_phase = out["insertion_phase_deg"]
 
-        with output_path.open("w", encoding="utf-8") as f:
+        with _atomic_text_file(output_path) as f:
             if include_header:
                 if envelope_enabled:
                     f.write(
@@ -4485,7 +4767,7 @@ class ImpedanceGui(QMainWindow):
                             if val > envelope_max[key][i][j]:
                                 envelope_max[key][i][j] = val
 
-        with output_path.open("w", encoding="utf-8") as f:
+        with _atomic_text_file(output_path) as f:
             if include_header:
                 cols = ["frequency_hz", "thickness_in"]
                 for key in HEATMAP_METRIC_KEYS:
@@ -6133,6 +6415,7 @@ class ImpedanceGui(QMainWindow):
             return
         try:
             write_material_table(Path(path_str), table)
+            self._publish_nominal_artifact("material", Path(path_str))
         except Exception as exc:
             messagebox.showerror("Material Mix", str(exc))
             return
@@ -6153,6 +6436,7 @@ class ImpedanceGui(QMainWindow):
             return
         try:
             write_material_table(Path(path_str), table)
+            self._publish_nominal_artifact("material", Path(path_str))
             if thickness_in <= 0:
                 thickness_in = 0.125
             self.layers.append(
@@ -6499,6 +6783,72 @@ class ImpedanceGui(QMainWindow):
 
         self.canvas.draw_idle()
 
+    def _export_ibc_batch(self) -> None:
+        try:
+            if not self.layers:
+                raise ValueError("Add at least one layer.")
+            layer_index = self._selected_ibc_batch_layer_index()
+            plan = self._plan_ibc_batch()
+            layer_snapshot = self._snapshot_layers()
+            # The selected layer is overwritten for every output. Seed only
+            # the frozen worker snapshot so loading does not depend on its
+            # current nominal thickness, while the live stack stays unchanged.
+            layer_snapshot[layer_index].thickness_in = plan[0].thickness_in
+            frequencies = make_frequency_sweep(
+                float(self.f_start_var.get().strip()),
+                float(self.f_stop_var.get().strip()),
+                float(self.f_step_var.get().strip()),
+            )
+        except Exception as exc:
+            messagebox.showerror("IBC Batch", str(exc), parent=self)
+            return
+
+        if not self._confirm_output_replacements(
+            [item.path for item in plan], operation="IBC Batch"
+        ):
+            return
+
+        def worker() -> dict[str, object]:
+            loaded_layers = self._load_layers(0, layer_snapshot)
+            count = export_pec_ibc_thickness_batch(
+                plan, loaded_layers, layer_index, frequencies
+            )
+            return {"count": count, "frequency_count": len(frequencies)}
+
+        def on_success(result: dict[str, object]) -> None:
+            # A multi-file batch has no single honest "current" artifact for
+            # GHOST. Only a one-file batch is unambiguous enough to publish via
+            # the host's singular nominal-artifact signal.
+            if len(plan) == 1:
+                try:
+                    self._publish_nominal_artifact("ibc", plan[0].path)
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Attachable IBC Export",
+                        "The IBC CSV was written but could not be made available "
+                        f"to GHOST:\n{exc}",
+                        parent=self,
+                    )
+            folder = plan[0].path.parent.resolve()
+            first = plan[0].path.name
+            last = plan[-1].path.name
+            detail = first if len(plan) == 1 else f"{first}\nthrough\n{last}"
+            message = (
+                f"Wrote {int(result['count'])} nominal PEC-backed IBC CSV(s), "
+                f"each with {int(result['frequency_count'])} frequency points, to:\n"
+                f"{folder}\n\n{detail}"
+            )
+            if len(plan) > 1:
+                message += (
+                    "\n\nNo one batch file was auto-selected for GHOST; choose "
+                    "the thickness-specific CSV you want to attach."
+                )
+            messagebox.showinfo("IBC Batch Complete", message, parent=self)
+
+        self._run_background_task(
+            "IBC Batch", worker, on_success, "IBC Batch Error"
+        )
+
     def _compute_impedance(self) -> None:
         try:
             if not self.layers:
@@ -6529,6 +6879,14 @@ class ImpedanceGui(QMainWindow):
             messagebox.showerror("Error", str(exc))
             return
 
+        planned_outputs = [output_path]
+        if uncertainty_has_bounds:
+            planned_outputs.append(uncertainty_report_path(output_path))
+        if not self._confirm_output_replacements(
+            planned_outputs, operation="Impedance"
+        ):
+            return
+
         # Impedance is a broadside (normal-incidence) solve; polarization is unused.
         wave_pol = normalize_wave_polarization("TE")
 
@@ -6552,6 +6910,18 @@ class ImpedanceGui(QMainWindow):
             self.selected_x_idx = None
             self.selected_freq_idx = None
             self._update_plot()
+            # Only the PEC-backed broadside result is a physically suitable
+            # one-sided IBC for a closed Type 2 GHOST body. Air-backed and all
+            # other analysis products intentionally never enter the handoff.
+            if backing == "pec":
+                try:
+                    self._publish_nominal_artifact("ibc", output_path)
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Attachable IBC Export",
+                        "The nominal CSV was written but could not be made "
+                        f"available to GHOST:\n{exc}",
+                    )
             message = (
                 f"Wrote {int(result['count'])} nominal solver-compatible "
                 f"frequency points to:\n{output_path}"
@@ -6609,6 +6979,11 @@ class ImpedanceGui(QMainWindow):
                 angles = make_sweep(a_start, a_stop, a_step)
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
+            return
+
+        if not self._confirm_output_replacements(
+            [output_path], operation="Off-Angle"
+        ):
             return
 
         def worker() -> dict[str, object]:
@@ -6680,6 +7055,11 @@ class ImpedanceGui(QMainWindow):
             layer_snapshot[layer_idx].thickness_in = t_start
         except Exception as exc:
             messagebox.showerror("Error", str(exc))
+            return
+
+        if not self._confirm_output_replacements(
+            [output_path], operation="Thickness"
+        ):
             return
 
         def worker() -> dict[str, object]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -15,6 +16,7 @@ import numpy as np
 from PySide6.QtCore import QMimeData, QUrl, Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDialog,
     QDialogButtonBox,
@@ -49,6 +51,7 @@ class _FakeGhostIntegration(QWidget):
         self.backend_path = None
         self.running = False
         self.focus_called = False
+        self.attached_artifacts: list[tuple[str, str]] = []
         self.setLayout(QVBoxLayout())
 
     def solve_is_running(self) -> bool:
@@ -57,11 +60,15 @@ class _FakeGhostIntegration(QWidget):
     def focus_solver(self) -> None:
         self.focus_called = True
 
+    def attach_material_artifact(self, kind: str, path: str) -> None:
+        self.attached_artifacts.append((kind, path))
+
 
 class _FakeFreddyIntegration(QWidget):
     # Deliberately expose a GHOST-shaped signal: the shell must not connect
     # FREDDY material/IBC CSV exports to GRIM's RCS dataset loader.
     files_exported = Signal(list, str)
+    attach_to_ghost_requested = Signal(str, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -158,7 +165,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         ]
         self.assertEqual(
             labels,
-            ["Plotting", "ISAR", "PPT", "Assembly", "GHOST", "FREDDY"],
+            ["Plotting", "ISAR", "PPT", "Assembly", "GHOST", "FREDDY", "Python"],
         )
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.ppt_workspace), 2
@@ -414,6 +421,267 @@ class UnifiedGuiShellTest(unittest.TestCase):
             ["impedance.csv"], "ibc"
         )
         self.assertEqual(self.window.loaded_path_batches, [])
+
+    def test_freddy_material_handoff_is_typed_directly_to_ghost(self) -> None:
+        self.window.freddy_integration.attach_to_ghost_requested.emit(
+            "ibc", "nominal_ibc.csv"
+        )
+        self.assertEqual(
+            self.window.ghost_integration.attached_artifacts,
+            [("ibc", "nominal_ibc.csv")],
+        )
+        self.assertEqual(self.window.loaded_path_batches, [])
+
+    def test_busy_imports_queue_fifo_and_deduplicate_casefolded_paths(self) -> None:
+        # _RecordingWindow overrides the public hook so ordinary shell-routing
+        # tests stay synchronous. Exercise the mixin implementation directly.
+        with mock.patch.object(
+            self.window, "_background_job_active", return_value=True
+        ):
+            grim_cut_dataset_mixin.DatasetOpsMixin._handle_files_dropped(
+                self.window, ["first.grim", "FIRST.GRIM", "second.grim"]
+            )
+            grim_cut_dataset_mixin.DatasetOpsMixin._handle_files_dropped(
+                self.window, ["SECOND.grim", "third.grim"]
+            )
+
+        self.assertEqual(
+            [batch[0] for batch in self.window._pending_import_batches],
+            [("first.grim", "second.grim"), ("third.grim",)],
+        )
+        with mock.patch.object(
+            self.window, "_start_dataset_import_batch", return_value=True
+        ) as start:
+            self.window._on_background_thread_finished()
+            self.window._on_background_thread_finished()
+        self.assertEqual(
+            [call.args[0] for call in start.call_args_list],
+            [["first.grim", "second.grim"], ["third.grim"]],
+        )
+
+    def test_loaded_catalog_prefers_container_over_solver_source_path(self) -> None:
+        dataset = _grid()
+        dataset.source_path = os.path.abspath("source_geometry.geo")
+        container = os.path.abspath("solver_output.grim")
+        self.window._ensure_background_worker_state()
+        self.window._on_load_worker_finished(
+            {
+                "loaded": [
+                    {
+                        "index": 0,
+                        "path": container,
+                        "file_name": "solver_output.grim",
+                        "name": "solver_output",
+                        "history": "GHOST solve",
+                        "dataset": dataset,
+                    }
+                ],
+                "failed": [],
+                "ignored": 0,
+                "total_supported": 1,
+            }
+        )
+
+        self.assertEqual(self.window._dataset_catalog()[0].source, container)
+        self.assertEqual(
+            self.window.table.item(0, 1).toolTip(), container
+        )
+
+    def test_parameter_headers_follow_units_and_axes_are_read_only(self) -> None:
+        dataset = _grid()
+        dataset.units.update(
+            {
+                "frequency": "Hz",
+                "azimuth": "rad",
+                "elevation": "rad",
+                "angular_coordinate_system": "great_circle",
+            }
+        )
+        self.window._add_dataset_row(dataset, "GC", "Loaded", "gc.grim")
+        self.window.table.selectRow(0)
+        self.app.processEvents()
+
+        self.assertEqual(self.window.lbl_freq.text(), "Frequency (Hz)")
+        self.assertEqual(self.window.lbl_elev.text(), "Pitch (rad)")
+        self.assertEqual(self.window.lbl_az.text(), "Aspect (rad)")
+        for widget in (
+            self.window.list_pol,
+            self.window.list_freq,
+            self.window.list_elev,
+            self.window.list_az,
+        ):
+            self.assertEqual(
+                widget.editTriggers(), QAbstractItemView.NoEditTriggers
+            )
+            self.assertFalse(widget.item(0).flags() & Qt.ItemIsEditable)
+
+    def test_batch_save_preserves_per_row_provenance_for_shared_grid(self) -> None:
+        shared = _grid()
+        shared.source_path = os.path.abspath("original_source.grim")
+        self.window._add_dataset_row(shared, "First branch", "First operation")
+        self.window._add_dataset_row(shared, "Second branch", "Second operation")
+        first_history = self.window.table.item(0, 2).text()
+        second_history = self.window.table.item(1, 2).text()
+        self.assertEqual(first_history, "First operation")
+        self.assertEqual(second_history, "Second operation")
+        self.assertIsNot(
+            self.window.table.item(0, 0).data(Qt.UserRole),
+            self.window.table.item(1, 0).data(Qt.UserRole),
+        )
+        self.assertEqual(
+            [entry.source for entry in self.window._dataset_catalog()], ["", ""]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(
+                self.window._save_rows_to_directory(
+                    [0, 1], tmp, dialog_title="Test Save"
+                )
+            )
+            first_saved = RcsGrid.load(os.path.join(tmp, "First branch.grim"))
+            second_saved = RcsGrid.load(os.path.join(tmp, "Second branch.grim"))
+            self.assertEqual(
+                [entry.source for entry in self.window._dataset_catalog()],
+                [
+                    os.path.join(tmp, "First branch.grim"),
+                    os.path.join(tmp, "Second branch.grim"),
+                ],
+            )
+
+        self.assertEqual(first_saved.history, first_history)
+        self.assertEqual(second_saved.history, second_history)
+        self.assertEqual(self.window.table.item(0, 2).text(), first_history)
+        self.assertEqual(self.window.table.item(1, 2).text(), second_history)
+        self.assertFalse(self.window._dataset_row_is_dirty(0))
+        self.assertFalse(self.window._dataset_row_is_dirty(1))
+
+    def test_dataset_loader_always_finishes_after_pool_setup_failure(self) -> None:
+        worker = grim_cut_dataset_mixin._DatasetLoadWorker(
+            [(0, "first.grim"), (1, "second.grim")]
+        )
+        payloads = []
+        worker.finished.connect(payloads.append)
+        with mock.patch.object(
+            grim_cut_dataset_mixin,
+            "_recommended_loader_workers",
+            side_effect=RuntimeError("pool unavailable"),
+        ):
+            worker.run()
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["loaded"], [])
+        self.assertIn("pool unavailable", payloads[0]["failed"][0])
+
+    def test_batch_save_rejects_sanitized_casefold_collision_before_write(self) -> None:
+        self.window._add_dataset_row(_grid(), "Body/A", "first")
+        self.window._add_dataset_row(_grid(), "body:a", "second")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                grim_cut_dataset_mixin.QMessageBox, "critical"
+            ) as critical:
+                result = self.window._save_rows_to_directory(
+                    [0, 1], tmp, dialog_title="Test Save"
+                )
+            self.assertFalse(result)
+            self.assertEqual(os.listdir(tmp), [])
+        critical.assert_called_once()
+
+    def test_delete_requires_confirmation_for_unsaved_derived_rows(self) -> None:
+        start_count = self.window.table.rowCount()
+        self.window._add_dataset_row(_grid(), "Unsaved branch", "Derived")
+        row = self.window.table.rowCount() - 1
+        self.window.table.clearSelection()
+        self.window.table.selectRow(row)
+        buttons = getattr(
+            grim_cut_dataset_mixin.QMessageBox,
+            "StandardButton",
+            grim_cut_dataset_mixin.QMessageBox,
+        )
+        with mock.patch.object(
+            grim_cut_dataset_mixin.QMessageBox,
+            "question",
+            return_value=buttons.No,
+        ) as question:
+            self.window._delete_selected_datasets()
+        self.assertEqual(self.window.table.rowCount(), start_count + 1)
+        self.assertIn("Unsaved branch", question.call_args.args[2])
+
+        with mock.patch.object(
+            grim_cut_dataset_mixin.QMessageBox,
+            "question",
+            return_value=buttons.Yes,
+        ):
+            self.window._delete_selected_datasets()
+        self.assertEqual(self.window.table.rowCount(), start_count)
+
+    def test_batch_save_confirms_all_existing_replacements_once(self) -> None:
+        self.window._add_dataset_row(_grid(1.0), "First", "first")
+        self.window._add_dataset_row(_grid(2.0), "Second", "second")
+        buttons = getattr(
+            grim_cut_dataset_mixin.QMessageBox,
+            "StandardButton",
+            grim_cut_dataset_mixin.QMessageBox,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for filename in ("First.grim", "Second.grim"):
+                with open(os.path.join(tmp, filename), "wb") as stream:
+                    stream.write(b"old")
+            with mock.patch.object(
+                grim_cut_dataset_mixin.QMessageBox,
+                "question",
+                return_value=buttons.Yes,
+            ) as question:
+                result = self.window._save_rows_to_directory(
+                    [0, 1], tmp, dialog_title="Test Save"
+                )
+
+            self.assertTrue(result)
+            question.assert_called_once()
+            self.assertEqual(float(RcsGrid.load(os.path.join(tmp, "First.grim")).rcs_power.item()), 1.0)
+            self.assertEqual(float(RcsGrid.load(os.path.join(tmp, "Second.grim")).rcs_power.item()), 4.0)
+
+    def test_batch_save_retains_prior_backup_when_restore_itself_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "First.grim"
+            second = Path(tmp) / "Second.grim"
+            first.write_bytes(b"old first")
+            second.write_bytes(b"old second")
+            original_replace = grim_cut_dataset_mixin.os.replace
+
+            def fail_publish_then_restore(source, destination):
+                source_path = Path(source)
+                destination_path = Path(destination)
+                if (
+                    destination_path == second
+                    and source_path.name.endswith(".staging.grim")
+                ):
+                    raise OSError("second publication failed")
+                if (
+                    destination_path == first
+                    and source_path.name.endswith(".backup")
+                ):
+                    raise OSError("first restoration failed")
+                return original_replace(source, destination)
+
+            with mock.patch.object(
+                grim_cut_dataset_mixin.os,
+                "replace",
+                side_effect=fail_publish_then_restore,
+            ):
+                with self.assertRaisesRegex(
+                    grim_cut_dataset_mixin._GrimBatchRollbackError,
+                    "Retained .grim-backup file",
+                ):
+                    grim_cut_dataset_mixin._stage_and_publish_grim_batch(
+                        [
+                            (_grid(1.0), str(first), "first"),
+                            (_grid(2.0), str(second), "second"),
+                        ]
+                    )
+
+            retained = list(Path(tmp).glob(".grim-backup-*.backup"))
+            self.assertEqual(len(retained), 1)
+            self.assertEqual(retained[0].read_bytes(), b"old first")
+            self.assertEqual(second.read_bytes(), b"old second")
 
     def test_ptm_and_cst_data_are_accepted_by_main_drop_filter(self) -> None:
         mime = QMimeData()
@@ -711,6 +979,39 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertFalse(event.isAccepted())
         warning.assert_called_once()
         self.assertIn("Range Cal", warning.call_args.args[2])
+
+    def test_isar_worker_is_cancelled_and_blocks_close_until_done(self) -> None:
+        current_cancel = threading.Event()
+        pending_cancel = threading.Event()
+        self.window._isar_busy = True
+        self.window._isar_cancel_event = current_cancel
+        self.window._isar_pending = {"_cancel_event": pending_cancel}
+        event = QCloseEvent()
+        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        self.assertTrue(current_cancel.is_set())
+        self.assertTrue(pending_cancel.is_set())
+        self.assertIsNone(self.window._isar_pending)
+        self.assertIs(self.window.main_tabs.currentWidget(), self.window.tab_isar)
+        warning.assert_called_once()
+
+    def test_unsaved_derived_dataset_blocks_close_when_cancelled(self) -> None:
+        self.window._add_dataset_row(_grid(), "Unsaved result", "Derived")
+        buttons = getattr(
+            grim_cut_gui.QMessageBox,
+            "StandardButton",
+            grim_cut_gui.QMessageBox,
+        )
+        event = QCloseEvent()
+        with mock.patch.object(
+            grim_cut_gui.QMessageBox, "warning", return_value=buttons.Cancel
+        ) as warning:
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        self.assertIn("Unsaved result", warning.call_args.args[2])
 
     def test_running_feature_job_blocks_close_on_assembly_tab(self) -> None:
         event = QCloseEvent()

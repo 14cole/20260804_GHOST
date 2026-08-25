@@ -67,6 +67,24 @@ def _grid(
 
 
 class PptPlotDataTests(unittest.TestCase):
+    def test_dense_tolerant_axis_intersection_preserves_unique_sorted_values(self):
+        axis = np.arange(36_000, dtype=float) * 0.01
+        first = _grid(
+            azimuths=axis,
+            frequencies=(1.0,),
+        )
+        second = _grid(
+            azimuths=axis + 5.0e-7,
+            frequencies=(1.0,),
+        )
+        availability = get_plot_availability(
+            [("First", first), ("Second", second)],
+            evaluate_phase=False,
+        )
+        self.assertEqual(len(availability.azimuths), axis.size)
+        self.assertEqual(availability.azimuths[0], 0.0)
+        self.assertAlmostEqual(availability.azimuths[-1], float(axis[-1]))
+
     def test_azimuth_dbsm_overlays_sort_each_swept_axis_and_match_fixed_axes(self):
         first = _grid(
             azimuths=(90.0, -90.0, 0.0),

@@ -9,26 +9,51 @@ if not exist "impedance_gui.py" (
     exit /b 1
 )
 
+for %%I in ("%~dp0..\..") do set "GRIM_REPO_ROOT=%%~fI"
+set "FREDDY_LAUNCH_LOG=%TEMP%\freddy-gui-launch.log"
+type nul >"%FREDDY_LAUNCH_LOG%"
+
+if exist "%GRIM_REPO_ROOT%\.venv\Scripts\python.exe" (
+    call :try_python "%GRIM_REPO_ROOT%\.venv\Scripts\python.exe"
+    if not errorlevel 1 goto launch_python
+)
+
+if defined VIRTUAL_ENV if exist "%VIRTUAL_ENV%\Scripts\python.exe" (
+    call :try_python "%VIRTUAL_ENV%\Scripts\python.exe"
+    if not errorlevel 1 goto launch_python
+)
+
 where py.exe >nul 2>&1
-if errorlevel 1 goto check_python
-py -3 -V >nul 2>&1
-if not errorlevel 1 goto use_py_launcher
+if not errorlevel 1 (
+    echo --- py.exe -3 --- >>"%FREDDY_LAUNCH_LOG%"
+    py.exe -3 -c "import numpy, scipy; from ibc.ui import QT_AVAILABLE, MPL_AVAILABLE; assert QT_AVAILABLE, 'PySide6 is not available'; assert MPL_AVAILABLE, 'The Matplotlib Qt backend is not available'" >>"%FREDDY_LAUNCH_LOG%" 2>&1
+    if not errorlevel 1 goto launch_py
+)
 
-:check_python
 where python.exe >nul 2>&1
-if errorlevel 1 goto no_python
-python -V >nul 2>&1
-if not errorlevel 1 goto use_python
+if not errorlevel 1 (
+    call :try_python "python.exe"
+    if not errorlevel 1 goto launch_python
+)
 
-:no_python
-echo ERROR: Python 3 was not found.
-echo Install Python 3.10 or newer, then run this launcher again.
-pause
-exit /b 1
+goto missing_dependencies
 
-:use_py_launcher
-py -3 -c "import numpy, scipy; from ibc.ui import QT_AVAILABLE, MPL_AVAILABLE; assert QT_AVAILABLE, 'PySide6 is not available'; assert MPL_AVAILABLE, 'The Matplotlib Qt backend is not available'" >"%TEMP%\freddy-gui-launch.log" 2>&1
-if errorlevel 1 goto missing_dependencies
+:try_python
+set "FREDDY_PYTHON=%~1"
+echo --- %FREDDY_PYTHON% --- >>"%FREDDY_LAUNCH_LOG%"
+"%FREDDY_PYTHON%" -c "import numpy, scipy; from ibc.ui import QT_AVAILABLE, MPL_AVAILABLE; assert QT_AVAILABLE, 'PySide6 is not available'; assert MPL_AVAILABLE, 'The Matplotlib Qt backend is not available'" >>"%FREDDY_LAUNCH_LOG%" 2>&1
+exit /b %ERRORLEVEL%
+
+:launch_python
+for %%I in ("%FREDDY_PYTHON%") do set "FREDDY_PYTHONW=%%~dpIpythonw.exe"
+if exist "%FREDDY_PYTHONW%" (
+    start "" "%FREDDY_PYTHONW%" "%~dp0impedance_gui.py"
+) else (
+    start "" "%FREDDY_PYTHON%" "%~dp0impedance_gui.py"
+)
+exit /b 0
+
+:launch_py
 where pyw.exe >nul 2>&1
 if errorlevel 1 (
     start "" py.exe -3 "%~dp0impedance_gui.py"
@@ -37,25 +62,14 @@ if errorlevel 1 (
 )
 exit /b 0
 
-:use_python
-python -c "import numpy, scipy; from ibc.ui import QT_AVAILABLE, MPL_AVAILABLE; assert QT_AVAILABLE, 'PySide6 is not available'; assert MPL_AVAILABLE, 'The Matplotlib Qt backend is not available'" >"%TEMP%\freddy-gui-launch.log" 2>&1
-if errorlevel 1 goto missing_dependencies
-where pythonw.exe >nul 2>&1
-if errorlevel 1 (
-    start "" python.exe "%~dp0impedance_gui.py"
-) else (
-    start "" pythonw.exe "%~dp0impedance_gui.py"
-)
-exit /b 0
-
 :missing_dependencies
-echo ERROR: The selected Python interpreter could not import the FREDDY GUI.
+echo ERROR: No preferred Python interpreter could import the FREDDY GUI.
 echo.
-if exist "%TEMP%\freddy-gui-launch.log" type "%TEMP%\freddy-gui-launch.log"
+if exist "%FREDDY_LAUNCH_LOG%" type "%FREDDY_LAUNCH_LOG%"
 echo.
-echo From this folder, install FREDDY's dependencies with:
-echo     py -3 -m pip install -r requirements.txt
+echo From the repository root, create the shared environment and install with:
+echo     py.exe -3 -m venv .venv
+echo     .venv\Scripts\python.exe -m pip install -e .
 echo.
-echo Then run this launcher again.
 pause
 exit /b 1

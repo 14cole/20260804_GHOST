@@ -23,6 +23,8 @@ import ctypes
 import ctypes.util
 import math
 import os
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -5595,52 +5597,226 @@ def _assert_supported_te_type2_contours(
             "TYPE 1 sheet model for an open impedance card."
         )
 
-def _detect_available_gb() -> 'float':
-    """Memory this process may actually use, in GB.
+_BYTES_PER_GIB = 1024.0 ** 3
 
-    Checked in the order that reflects reality on a cluster: a SLURM
-    allocation binds before a cgroup limit, and both bind before what
-    /proc/meminfo says the machine has.
-    """
 
-    raw = os.environ.get("SLURM_MEM_PER_NODE", "").strip()
-    if raw.isdigit() and int(raw) > 0:
-        return float(int(raw)) / 1024.0
-    raw = os.environ.get("SLURM_MEM_PER_CPU", "").strip()
-    cpus = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
-    if raw.isdigit() and int(raw) > 0 and cpus.isdigit() and int(cpus) > 0:
-        return float(int(raw)) * float(int(cpus)) / 1024.0
-    for path in (
-        "/sys/fs/cgroup/memory.max",
-        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-    ):
-        try:
-            with open(path) as stream:
-                text = stream.read().strip()
-        except OSError:
-            continue
-        if text.isdigit():
-            limit = float(text) / (1024.0 ** 3)
-            if 0.5 < limit < 1.0e6:
-                return limit
+def _psutil_available_bytes() -> 'Optional[int]':
+    """Host-available bytes from psutil, without making it mandatory."""
+
+    try:
+        import psutil
+
+        value = int(psutil.virtual_memory().available)
+    except Exception:
+        return None
+    return value if value >= 0 else None
+
+
+def _windows_available_bytes() -> 'Optional[int]':
+    """Windows ``ullAvailPhys`` fallback when psutil is unavailable."""
+
+    if os.name != "nt":
+        return None
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = _MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(status)
+    try:
+        success = ctypes.windll.kernel32.GlobalMemoryStatusEx(  # type: ignore[attr-defined]
+            ctypes.byref(status)
+        )
+    except Exception:
+        return None
+    if not success:
+        return None
+    return int(status.ullAvailPhys)
+
+
+def _macos_available_bytes() -> 'Optional[int]':
+    """Conservative macOS ``vm_stat`` fallback when psutil is unavailable."""
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/vm_stat"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        lines = completed.stdout.splitlines()
+        page_size = int(
+            lines[0].split("page size of", 1)[1].split("bytes", 1)[0].strip()
+        )
+        pages = {}
+        for line in lines[1:]:
+            if ":" not in line:
+                continue
+            key, raw_value = line.split(":", 1)
+            pages[key.strip()] = int(raw_value.strip().rstrip("."))
+        # Free and inactive pages are the two reusable categories shared by
+        # both older and current vm_stat output.  Omitting less portable
+        # purgeable/speculative categories intentionally underestimates.
+        count = pages.get("Pages free", 0) + pages.get("Pages inactive", 0)
+        return max(0, count * page_size)
+    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+        return None
+
+
+def _posix_available_bytes() -> 'Optional[int]':
+    """Linux/proc and POSIX sysconf availability fallbacks."""
+
     try:
         with open("/proc/meminfo") as stream:
             for line in stream:
-                if line.startswith("MemTotal:"):
-                    return float(line.split()[1]) / (1024.0 ** 2)
+                if line.startswith("MemAvailable:"):
+                    return max(0, int(line.split()[1]) * 1024)
     except (OSError, ValueError, IndexError):
         pass
-    return 0.0
+    try:
+        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    value = pages * page_size
+    return value if value >= 0 else None
+
+
+def _process_rss_bytes() -> 'int':
+    """Best-effort resident memory used inside a scheduler allocation."""
+
+    try:
+        import psutil
+
+        return max(0, int(psutil.Process(os.getpid()).memory_info().rss))
+    except Exception:
+        pass
+    try:
+        with open("/proc/self/statm") as stream:
+            resident_pages = int(stream.read().split()[1])
+        return max(0, resident_pages * int(os.sysconf("SC_PAGE_SIZE")))
+    except (AttributeError, OSError, TypeError, ValueError, IndexError):
+        return 0
+
+
+def _slurm_available_bytes() -> 'Optional[int]':
+    """Remaining bytes in the active SLURM task allocation, if declared."""
+
+    capacity_mb = None
+    raw = os.environ.get("SLURM_MEM_PER_NODE", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        capacity_mb = int(raw)
+    else:
+        raw = os.environ.get("SLURM_MEM_PER_CPU", "").strip()
+        cpus_text = os.environ.get("SLURM_CPUS_PER_TASK", "").strip()
+        # Slurm's documented default is one CPU per task when
+        # SLURM_CPUS_PER_TASK is not exported.  Ignoring MEM_PER_CPU in that
+        # common case would let a desktop/HPC solve use host memory beyond its
+        # allocation.  An explicitly malformed/non-positive CPU count remains
+        # untrusted and is not guessed.
+        if raw.isdigit() and int(raw) > 0:
+            if not cpus_text:
+                cpus = 1
+            elif cpus_text.isdigit() and int(cpus_text) > 0:
+                cpus = int(cpus_text)
+            else:
+                cpus = None
+            if cpus is not None:
+                capacity_mb = int(raw) * cpus
+    if capacity_mb is None:
+        return None
+    capacity = capacity_mb * 1024 * 1024
+    return max(0, capacity - _process_rss_bytes())
+
+
+def _read_cgroup_int(path: 'str') -> 'Optional[int]':
+    try:
+        with open(path) as stream:
+            text = stream.read().strip()
+    except OSError:
+        return None
+    if not text.isdigit():
+        return None
+    value = int(text)
+    # cgroup v1 represents "unlimited" with a huge integer near LONG_MAX.
+    if value < 0 or value >= 2 ** 60:
+        return None
+    return value
+
+
+def _cgroup_available_bytes() -> 'Optional[int]':
+    """Remaining bytes under a cgroup v2 or v1 memory limit."""
+
+    for limit_path, usage_path in (
+        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+        (
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+            "/sys/fs/cgroup/memory/memory.usage_in_bytes",
+        ),
+    ):
+        limit = _read_cgroup_int(limit_path)
+        if limit is None:
+            continue
+        usage = _read_cgroup_int(usage_path)
+        if usage is None:
+            # A capacity without current usage is not actionable headroom.
+            # Treat an unreadable constrained cgroup as exhausted instead of
+            # silently permitting the full limit as one new allocation.
+            return 0
+        return max(0, limit - usage)
+    return None
+
+
+def _detect_available_gb() -> 'float':
+    """Memory this process may safely allocate now, in GiB.
+
+    ``psutil`` is preferred on desktops.  Native Windows/macOS/POSIX
+    fallbacks keep the GUI safe without the optional dependency.  Scheduler
+    and cgroup headroom are additional bounds, so the tightest known limit
+    wins instead of a machine-total or historical fixed allowance.
+    """
+
+    host_available = _psutil_available_bytes()
+    if host_available is None:
+        host_available = _windows_available_bytes()
+    if host_available is None:
+        host_available = _posix_available_bytes()
+    if host_available is None:
+        host_available = _macos_available_bytes()
+
+    bounds = []
+    if host_available is not None:
+        bounds.append(max(0, host_available))
+    slurm_available = _slurm_available_bytes()
+    if slurm_available is not None:
+        bounds.append(max(0, slurm_available))
+    cgroup_available = _cgroup_available_bytes()
+    if cgroup_available is not None:
+        bounds.append(max(0, cgroup_available))
+    if not bounds:
+        return 0.0
+    return float(min(bounds)) / _BYTES_PER_GIB
 
 
 # Hard ceiling on one solve's estimated dense footprint.
 #
-# This used to be a flat 32 GB, which is the wrong constant in both directions:
-# it refuses a perfectly feasible 40 GB solve on a 750 GB node, and it permits
-# a 32 GB one on a 16 GB laptop. It is now derived from what the process can
-# actually use, floored at the old value so nothing that ran before stops
-# running, and overridable outright with GHOST_MAX_SOLVE_GB.
-_MEMORY_LIMIT_FLOOR_GB = 32.0
+# A solve may use only a fraction of currently available memory so the GUI,
+# plotting stack, and operating system retain headroom.  If detection fails,
+# the limit is zero and dense allocation fails closed; an informed user or
+# scheduler may provide an explicit GHOST_MAX_SOLVE_GB reservation.
 _MEMORY_LIMIT_FRACTION = 0.9
 
 
@@ -5651,10 +5827,33 @@ def _solve_memory_limit_gb() -> 'float':
             value = float(override)
         except ValueError:
             value = 0.0
-        if value > 0.0:
+        if math.isfinite(value) and value > 0.0:
             return value
     detected = _detect_available_gb()
-    return max(_MEMORY_LIMIT_FLOOR_GB, _MEMORY_LIMIT_FRACTION * detected)
+    return _MEMORY_LIMIT_FRACTION * detected if detected > 0.0 else 0.0
+
+
+def _memory_gate_message(
+    required_gb: 'float',
+    limit_gb: 'float',
+    context: 'str',
+    details: 'str' = "",
+    remedies: 'str' = "Reduce the mesh size, frequency, or solve scope.",
+) -> 'str':
+    """Build a required-versus-available, actionable allocation error."""
+
+    available_gb = _detect_available_gb()
+    if available_gb > 0.0:
+        availability = f"{available_gb:.2f} GB is currently available"
+    else:
+        availability = "available memory could not be detected"
+    detail_text = f" {details.strip()}" if details.strip() else ""
+    return (
+        f"{context} requires an estimated {required_gb:.2f} GB, but "
+        f"{availability}; the safe allocation limit is {limit_gb:.2f} GB."
+        f"{detail_text} {remedies.strip()} If a larger allocation is confirmed, "
+        "set GHOST_MAX_SOLVE_GB to that explicit per-process limit and retry."
+    )
 
 
 def _estimate_memory_gb(
@@ -7834,15 +8033,21 @@ def solve_monostatic_rcs_2d_single_polarization(
         memory_limit_gb = _solve_memory_limit_gb()
         if est_gb > memory_limit_gb and dense_gate_active:
             raise MemoryError(
-                f"Estimated peak memory {est_gb:.1f} GB exceeds the "
-                f"{memory_limit_gb:.1f} GB limit for this process "
-                f"({resources['system_dofs']} system DOFs, "
-                f"{resources['n_regions']} region(s), "
-                f"{resources['formulation']}; "
-                f"{_detect_available_gb():.1f} GB detected). "
-                f"Reduce panel count, frequency, use mesh_reference_ghz, "
-                f"raise GHOST_MAX_SOLVE_GB if the memory really is there, or "
-                f"solver_method='fmm' for TE all-Robin / multi-region problems."
+                _memory_gate_message(
+                    est_gb,
+                    memory_limit_gb,
+                    f"The {resources['formulation']} 2-D solve",
+                    (
+                        f"Planned system: {resources['system_dofs']} DOFs "
+                        f"across {resources['n_regions']} region(s)."
+                    ),
+                    (
+                        "Reduce panel count or frequency, set an appropriate "
+                        "mesh_reference_ghz, reduce the angle batch, or use "
+                        "solver_method='fmm' for supported TE all-Robin and "
+                        "multi-region problems."
+                    ),
+                )
             )
         if est_gb > 8.0 and dense_gate_active:
             materials.warn_once(
@@ -8797,12 +9002,20 @@ def solve_bistatic_rcs_2d_single_polarization(
         memory_limit_gb = _solve_memory_limit_gb()
         if est_gb > memory_limit_gb:
             raise MemoryError(
-                f"Estimated peak memory {est_gb:.1f} GB exceeds the "
-                f"{memory_limit_gb:.1f} GB limit for this bistatic process "
-                f"({resources['system_dofs']} system DOFs, "
-                f"{resources['n_regions']} region(s), "
-                f"{resources['formulation']}; "
-                f"{_detect_available_gb():.1f} GB detected)."
+                _memory_gate_message(
+                    est_gb,
+                    memory_limit_gb,
+                    f"The {resources['formulation']} bistatic 2-D solve",
+                    (
+                        f"Planned system: {resources['system_dofs']} DOFs "
+                        f"across {resources['n_regions']} region(s)."
+                    ),
+                    (
+                        "Reduce panel count or frequency, set an appropriate "
+                        "mesh_reference_ghz, or reduce the observation-angle "
+                        "batch."
+                    ),
+                )
             )
         if est_gb > 8.0:
             materials.warn_once(
@@ -9729,10 +9942,16 @@ def compute_boundary_densities(
     memory_limit_gb = _solve_memory_limit_gb()
     if est_gb > memory_limit_gb:
         raise MemoryError(
-            f"Estimated peak memory {est_gb:.1f} GB exceeds the "
-            f"{memory_limit_gb:.1f} GB limit for boundary-density diagnostics "
-            f"({resources['system_dofs']} system DOFs, "
-            f"{resources['formulation']})."
+            _memory_gate_message(
+                est_gb,
+                memory_limit_gb,
+                "Boundary-density diagnostics",
+                (
+                    f"Planned {resources['formulation']} system: "
+                    f"{resources['system_dofs']} DOFs."
+                ),
+                "Reduce panel count or frequency before opening the density view.",
+            )
         )
 
     if use_multi:

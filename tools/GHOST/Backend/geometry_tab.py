@@ -1,5 +1,8 @@
 import math
 import os
+from pathlib import Path
+import shutil
+import tempfile
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
@@ -546,6 +549,209 @@ class GeometryTab(QWidget):
             )
             return ""
         return os.path.basename(filename)
+
+    def attach_material_artifact(
+        self, artifact_kind: 'str', csv_path: 'str'
+    ) -> 'bool':
+        """Copy a typed FREDDY artifact beside the active ``.geo`` and add it.
+
+        This is intentionally a material-table handoff, not a generic CSV
+        import. The exact production solver reader validates the source before
+        a file is copied or a geometry row is changed.
+        """
+
+        kind = str(artifact_kind).strip().lower()
+        if kind not in {"ibc", "material"}:
+            QMessageBox.warning(
+                self,
+                "Unsupported FREDDY Artifact",
+                "GHOST accepts only nominal IBC or material artifacts from "
+                "FREDDY. Analysis CSVs cannot be attached.",
+            )
+            return False
+
+        geometry_path = Path(self.loaded_path).expanduser().resolve() \
+            if self.loaded_path else None
+        if (
+            geometry_path is None
+            or geometry_path.suffix.lower() != ".geo"
+            or not geometry_path.is_file()
+        ):
+            QMessageBox.warning(
+                self,
+                "No Active Saved Geometry",
+                "Load or save the current GHOST geometry as a .geo file before "
+                "attaching a FREDDY artifact. The CSV must live beside that "
+                "saved geometry.",
+            )
+            return False
+
+        source = Path(csv_path).expanduser().resolve()
+        if source.suffix.lower() != ".csv" or not source.is_file():
+            QMessageBox.warning(
+                self,
+                "FREDDY Artifact Missing",
+                f"The selected nominal artifact is not a readable CSV:\n{source}",
+            )
+            return False
+
+        # Validate with the same reader used by production solves. A renamed
+        # off-angle, thickness, uncertainty, or other analysis CSV therefore
+        # still cannot enter an IBC/dielectric table.
+        try:
+            from rcs_solver import MaterialLibrary
+
+            if kind == "ibc":
+                MaterialLibrary.from_entries(
+                    [["1", source.name]], [], str(source.parent)
+                )
+            else:
+                MaterialLibrary.from_entries(
+                    [], [["1", source.name]], str(source.parent)
+                )
+        except Exception as exc:
+            label = "IBC" if kind == "ibc" else "material"
+            QMessageBox.critical(
+                self,
+                "Invalid FREDDY Artifact",
+                f"The nominal {label} CSV is not compatible with GHOST:\n{exc}",
+            )
+            return False
+
+        destination = geometry_path.parent / source.name
+        opposite_table = self.table_diel if kind == "ibc" else self.table_ibc
+        opposite_kind = "dielectric material" if kind == "ibc" else "IBC"
+        opposite_reference = next(
+            (
+                row
+                for row in self._read_small_table(opposite_table)
+                if len(row) == 2
+                and str(row[1]).strip().casefold()
+                == destination.name.casefold()
+            ),
+            None,
+        )
+        if opposite_reference is not None:
+            QMessageBox.warning(
+                self,
+                "Geometry Sidecar Type Conflict",
+                f"'{destination.name}' is already referenced by this geometry "
+                f"as {opposite_kind} flag {opposite_reference[0]}. One CSV "
+                "cannot use both material schemas. Export the FREDDY artifact "
+                "under a different filename and try again.",
+            )
+            return False
+
+        same_file = os.path.normcase(str(source)) == os.path.normcase(
+            str(destination.resolve())
+        )
+        if destination.exists() and not same_file:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            answer = QMessageBox.question(
+                self,
+                "Replace Existing Geometry Sidecar?",
+                f"A file named '{destination.name}' already exists beside:\n"
+                f"{geometry_path.name}\n\n"
+                "Replace it with the selected nominal FREDDY artifact? "
+                "This can affect any geometry that references the same file.",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                return False
+
+        temporary_path: Path | None = None
+        if not same_file:
+            try:
+                fd, temporary_name = tempfile.mkstemp(
+                    prefix=f".{destination.name}.",
+                    suffix=".tmp",
+                    dir=str(destination.parent),
+                )
+                os.close(fd)
+                temporary_path = Path(temporary_name)
+                shutil.copy2(source, temporary_path)
+                os.replace(temporary_path, destination)
+                temporary_path = None
+            except Exception as exc:
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                QMessageBox.critical(
+                    self,
+                    "FREDDY Artifact Copy Failed",
+                    f"Could not copy the nominal CSV beside the geometry:\n{exc}",
+                )
+                return False
+
+        if kind == "ibc":
+            table = self.table_ibc
+            current = self._read_small_table(table)
+            label = self.lbl_ibc
+            title_prefix = "IBCS/Resistances"
+            friendly_kind = "IBC"
+        else:
+            table = self.table_diel
+            current = self._read_small_table(table)
+            label = self.lbl_diel
+            title_prefix = "Dielectrics"
+            friendly_kind = "dielectric material"
+
+        existing_row = next(
+            (
+                index
+                for index, row in enumerate(current)
+                if len(row) == 2
+                and str(row[1]).strip().casefold()
+                == destination.name.casefold()
+            ),
+            None,
+        )
+        if existing_row is None:
+            used = {
+                self._parse_int_token(row[0], 0)
+                for row in current
+                if row
+            }
+            flag = 1
+            while flag in used:
+                flag += 1
+            current.append([str(flag), destination.name])
+            selected_row = len(current) - 1
+        else:
+            selected_row = existing_row
+            flag = self._parse_int_token(current[existing_row][0], 0)
+            # Matching is intentionally case-insensitive so a geometry cannot
+            # carry duplicate logical sidecars.  Preserve the exact filename
+            # that was just copied, though: on a case-sensitive filesystem an
+            # unchanged ``Foo.csv`` row would otherwise keep reading the old
+            # file after GRIM attached a new ``foo.csv`` artifact.
+            current[existing_row][1] = destination.name
+
+        if kind == "ibc":
+            self.ibcs_entries = current
+        else:
+            self.dielectric_entries = current
+        self._populate_small_table(
+            table, current, label=label, title_prefix=title_prefix
+        )
+        table.selectRow(selected_row)
+        self._refresh_segment_dropdowns()
+        if kind == "ibc":
+            self._render_impedance_overlay()
+            self.canvas.draw_idle()
+
+        QMessageBox.information(
+            self,
+            "FREDDY Artifact Attached",
+            f"Copied '{destination.name}' beside '{geometry_path.name}' and "
+            f"attached it as {friendly_kind} flag {flag}.\n\n"
+            "Use Save in the Geometry tab to persist this new reference in "
+            "the .geo file.",
+        )
+        return True
 
     def _ibc_add_csv_row(self) -> 'None':
         filename = self._choose_material_csv("Choose IBC Material CSV")
@@ -1688,14 +1894,43 @@ class GeometryTab(QWidget):
             QMessageBox.warning(self, "Warning", str(e))
             return
 
+        target = Path(fname).expanduser().resolve(strict=False)
+        temporary_path: Path | None = None
+        temporary_fd: int | None = None
         try:
-            with open(fname, "w") as f:
-                f.write(text)
+            if target.exists() and not target.is_file():
+                raise OSError(f"save target is not a regular file: {target}")
+            temporary_fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                dir=str(target.parent),
+            )
+            temporary_path = Path(temporary_name)
+            stream = os.fdopen(
+                temporary_fd, "w", encoding="utf-8", newline="\n"
+            )
+            temporary_fd = None
+            with stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, target)
+            temporary_path = None
         except Exception as e:
+            if temporary_fd is not None:
+                try:
+                    os.close(temporary_fd)
+                except OSError:
+                    pass
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             QMessageBox.critical(self, "Error", f"Failed to save file: {e}")
             return
-        self.loaded_path = os.path.abspath(fname)
-        QMessageBox.information(self, "Saved", f"Geometry saved to {fname}")
+        self.loaded_path = str(target)
+        QMessageBox.information(self, "Saved", f"Geometry saved to {target}")
 
     def _read_small_table(self, table: 'QTableWidget') -> 'List[List[str]]':
         rows: 'List[List[str]]' = []

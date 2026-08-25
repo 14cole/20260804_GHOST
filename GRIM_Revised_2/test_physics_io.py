@@ -5,10 +5,12 @@ import csv
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from assembly_tree import _b64_to_grid, _combine_children, _grid_to_b64
+import grim_dataset
 from grim_dataset import C0, RcsGrid
 from grim_headless import load_dataset, load_folder
 
@@ -105,6 +107,25 @@ class TestPhysicsAndIo(unittest.TestCase):
             np.testing.assert_array_equal(reloaded.extra["rcs_amp_imag"], raw.imag)
             self.assertEqual(reloaded.linear_quantity(), "sigma_2d")
             self.assertEqual(reloaded._phase_reference(), "origin=(0,0), convention=exp(+jwt)")
+
+    def test_grim_save_failure_preserves_existing_artifact(self):
+        grid = self._grid()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "protected.grim")
+            with open(path, "wb") as stream:
+                stream.write(b"existing artifact")
+
+            with mock.patch.object(
+                grim_dataset.np,
+                "savez",
+                side_effect=RuntimeError("simulated write failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated write failure"):
+                    grid.save(path)
+
+            with open(path, "rb") as stream:
+                self.assertEqual(stream.read(), b"existing artifact")
+            self.assertEqual(os.listdir(tmp), ["protected.grim"])
 
     def test_db_difference_is_a_dimensionless_ratio(self):
         a = self._grid(np.sqrt(1000.0) + 0.0j)

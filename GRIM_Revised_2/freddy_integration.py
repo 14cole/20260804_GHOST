@@ -15,8 +15,8 @@ from pathlib import Path
 import sys
 from types import ModuleType
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 
 FREDDY_ROOT_ENV = "FREDDY_ROOT_PATH"
@@ -148,6 +148,10 @@ def _load_impedance_gui_class(root: Path | None):
 class FreddyIntegrationWidget(QWidget):
     """Host the authoritative FREDDY workspace inside GRIM."""
 
+    # Deliberately bypasses GRIM's RCS loader. The combined shell connects this
+    # typed artifact request directly to the embedded GHOST workspace.
+    attach_to_ghost_requested = Signal(str, str)
+
     def __init__(
         self,
         parent: QWidget | None = None,
@@ -158,9 +162,24 @@ class FreddyIntegrationWidget(QWidget):
         self.root_path = discover_freddy_root(root_path)
         self.workspace = None
         self.load_error = ""
+        self._attachable_kind = ""
+        self._attachable_path: Path | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        self.attach_to_ghost_button = QPushButton(
+            "Export and attach to current GHOST geometry"
+        )
+        self.attach_to_ghost_button.setEnabled(False)
+        self.attach_to_ghost_button.setToolTip(
+            "First compute a nominal PEC-backed IBC or export a nominal mixed "
+            "material CSV. This action copies that exact solver artifact beside "
+            "the active saved .geo file and adds the appropriate GHOST row."
+        )
+        self.attach_to_ghost_button.clicked.connect(
+            self._request_attach_to_ghost
+        )
+        layout.addWidget(self.attach_to_ghost_button)
         try:
             gui_class = _load_impedance_gui_class(self.root_path)
             # ImpedanceGui is also FREDDY's standalone QMainWindow. Its parent
@@ -180,7 +199,70 @@ class FreddyIntegrationWidget(QWidget):
             message.setWordWrap(True)
             layout.addWidget(message)
         else:
+            artifact_signal = getattr(
+                self.workspace, "nominal_artifact_exported", None
+            )
+            connector = getattr(artifact_signal, "connect", None)
+            if callable(connector):
+                connector(self._remember_nominal_artifact)
             layout.addWidget(self.workspace)
+
+    def _remember_nominal_artifact(self, kind: str, path: str) -> None:
+        """Remember only FREDDY's two solver-facing artifact types."""
+
+        artifact_kind = str(kind).strip().lower()
+        if artifact_kind not in {"ibc", "material"}:
+            return
+        artifact_path = Path(path).expanduser().resolve()
+        if artifact_path.suffix.lower() != ".csv" or not artifact_path.is_file():
+            return
+        self._attachable_kind = artifact_kind
+        self._attachable_path = artifact_path
+        friendly_kind = "IBC" if artifact_kind == "ibc" else "material"
+        self.attach_to_ghost_button.setEnabled(True)
+        self.attach_to_ghost_button.setToolTip(
+            f"Copy nominal {friendly_kind} CSV '{artifact_path.name}' beside "
+            "the active saved GHOST .geo file and add its reference."
+        )
+
+    def _clear_attachable_artifact(self) -> None:
+        self._attachable_kind = ""
+        self._attachable_path = None
+        self.attach_to_ghost_button.setEnabled(False)
+        self.attach_to_ghost_button.setToolTip(
+            "First compute a nominal PEC-backed IBC or export a nominal mixed "
+            "material CSV."
+        )
+
+    def _request_attach_to_ghost(self) -> None:
+        """Forward an explicit typed handoff request to embedded GHOST."""
+
+        if self.job_is_running():
+            QMessageBox.warning(
+                self,
+                "FREDDY Task Still Running",
+                "Wait for the current FREDDY task to finish before attaching "
+                "an artifact to GHOST.",
+            )
+            return
+        path = self._attachable_path
+        if (
+            self._attachable_kind not in {"ibc", "material"}
+            or path is None
+            or path.suffix.lower() != ".csv"
+            or not path.is_file()
+        ):
+            self._clear_attachable_artifact()
+            QMessageBox.warning(
+                self,
+                "No Nominal FREDDY Export",
+                "Compute a nominal PEC-backed IBC or export a nominal mixed "
+                "material CSV first. Analysis CSVs cannot be attached to GHOST.",
+            )
+            return
+        self.attach_to_ghost_requested.emit(
+            self._attachable_kind, str(path)
+        )
 
     def job_is_running(self) -> bool:
         """Delegate background-job state to the authoritative workspace."""

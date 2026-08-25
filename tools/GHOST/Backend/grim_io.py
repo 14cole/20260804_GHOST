@@ -2,6 +2,7 @@ import json
 import cmath
 import math
 import os
+import tempfile
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -639,68 +640,202 @@ def _validate_grim_payload(payload: 'Dict[str, Any]') -> 'None':
 def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
     _validate_grim_payload(payload)
     out = _ensure_grim_ext(path)
-    with open(out, 'wb') as f:
-        save_payload = dict(
-            azimuths=payload['azimuths'],
-            elevations=payload['elevations'],
-            frequencies=payload['frequencies'],
-            polarizations=payload['polarizations'],
-            polarization_alias_primary=payload.get('polarization_alias_primary', ''),
-            polarization_aliases_json=payload.get('polarization_aliases_json', ''),
-            rcs_power=payload['rcs_power'],
-            rcs_phase=payload['rcs_phase'],
-            rcs_domain=payload['rcs_domain'],
-            power_domain=payload['power_domain'],
-            source_path=payload['source_path'],
-            history=payload['history'],
-            units=payload['units'],
-            phase_reference=payload['phase_reference'],
-            amplitude_convention=payload.get('amplitude_convention', ''),
-            raw_complex_amplitude_preserved=payload.get('raw_complex_amplitude_preserved', False),
-        )
-        if 'rcs_amp_real' in payload and 'rcs_amp_imag' in payload:
-            # Coherent subtraction and feature placement can expose deltas far
-            # below the full-object field. Never let a caller's float32 array
-            # silently quantize the authoritative complex amplitude on disk.
-            save_payload['rcs_amp_real'] = np.asarray(
-                payload['rcs_amp_real'], dtype=np.float64
+    destination_dir = os.path.dirname(os.path.abspath(out))
+    temporary_fd, temporary_path = tempfile.mkstemp(
+        prefix=f'.{os.path.basename(out)}.',
+        suffix='.tmp',
+        dir=destination_dir,
+    )
+    os.close(temporary_fd)
+    try:
+        with open(temporary_path, 'wb') as f:
+            save_payload = dict(
+                azimuths=payload['azimuths'],
+                elevations=payload['elevations'],
+                frequencies=payload['frequencies'],
+                polarizations=payload['polarizations'],
+                polarization_alias_primary=payload.get('polarization_alias_primary', ''),
+                polarization_aliases_json=payload.get('polarization_aliases_json', ''),
+                rcs_power=payload['rcs_power'],
+                rcs_phase=payload['rcs_phase'],
+                rcs_domain=payload['rcs_domain'],
+                power_domain=payload['power_domain'],
+                source_path=payload['source_path'],
+                history=payload['history'],
+                units=payload['units'],
+                phase_reference=payload['phase_reference'],
+                amplitude_convention=payload.get('amplitude_convention', ''),
+                raw_complex_amplitude_preserved=payload.get('raw_complex_amplitude_preserved', False),
             )
-            save_payload['rcs_amp_imag'] = np.asarray(
-                payload['rcs_amp_imag'], dtype=np.float64
-            )
-            save_payload['complex_field_domain'] = payload.get('complex_field_domain', 'solver_raw_far_field_amplitude')
-        # Optional statistical/engineering estimates stay separate from the
-        # physical rcs_power/complex-amplitude pair.
-        for key in ('combination_estimate_power',
-                    'combination_estimate_mode',
-                    'combination_estimate_semantics',
-                    'solver_metadata_json',
-                    'combine_role',
-                    'combine_role_note',
-                    'component_provenance_json',
-                    'production_mesh_certification_json',
-                    'source_body_mesh_certification_json',
-                    'source_body_sha256',
-                    'pattern_frame_convention',
-                    'geometry_input_sha256',
-                    'solver_source_sha256',
-                    'runtime_environment_sha256',
-                    'run_solve_spec_sha256',
-                    'collection_source_sha256',
-                    'requested_radar_grid_json',
-                    'body_profile_rho_m',
-                    'body_profile_z_m',
-                    'body_model_metadata_json',
-                    'body_model_aspects_deg',
-                    'body_model_amp_vv_real',
-                    'body_model_amp_vv_imag',
-                    'body_model_amp_hh_real',
-                    'body_model_amp_hh_imag',
-                    'feature_provenance_json'):
-            if key in payload:
-                save_payload[key] = payload[key]
-        np.savez_compressed(f, **save_payload)
+            if 'rcs_amp_real' in payload and 'rcs_amp_imag' in payload:
+                # Coherent subtraction and feature placement can expose deltas far
+                # below the full-object field. Never let a caller's float32 array
+                # silently quantize the authoritative complex amplitude on disk.
+                save_payload['rcs_amp_real'] = np.asarray(
+                    payload['rcs_amp_real'], dtype=np.float64
+                )
+                save_payload['rcs_amp_imag'] = np.asarray(
+                    payload['rcs_amp_imag'], dtype=np.float64
+                )
+                save_payload['complex_field_domain'] = payload.get(
+                    'complex_field_domain',
+                    'solver_raw_far_field_amplitude',
+                )
+            # Optional statistical/engineering estimates stay separate from the
+            # physical rcs_power/complex-amplitude pair.
+            for key in ('combination_estimate_power',
+                        'combination_estimate_mode',
+                        'combination_estimate_semantics',
+                        'solver_metadata_json',
+                        'combine_role',
+                        'combine_role_note',
+                        'component_provenance_json',
+                        'production_mesh_certification_json',
+                        'source_body_mesh_certification_json',
+                        'source_body_sha256',
+                        'pattern_frame_convention',
+                        'geometry_input_sha256',
+                        'solver_source_sha256',
+                        'runtime_environment_sha256',
+                        'run_solve_spec_sha256',
+                        'collection_source_sha256',
+                        'requested_radar_grid_json',
+                        'body_profile_rho_m',
+                        'body_profile_z_m',
+                        'body_model_metadata_json',
+                        'body_model_aspects_deg',
+                        'body_model_amp_vv_real',
+                        'body_model_amp_vv_imag',
+                        'body_model_amp_hh_real',
+                        'body_model_amp_hh_imag',
+                        'feature_provenance_json'):
+                if key in payload:
+                    save_payload[key] = payload[key]
+            np.savez_compressed(f, **save_payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, out)
+    except BaseException:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        raise
     return out
+
+
+def _save_grim_npz_batch(
+    entries: 'List[tuple[Dict[str, Any], str]]',
+) -> 'List[str]':
+    """Publish a related GRIM collection as one rollback-safe batch.
+
+    Bistatic incidence files are one logical solver result.  Every payload is
+    validated and staged beside its destination before any existing output is
+    touched.  Publication then uses same-directory backups so a later failure
+    restores the complete previous collection instead of leaving a mixture of
+    old and new incidences.
+    """
+
+    if not entries:
+        return []
+    normalized: 'set[str]' = set()
+    planned: 'List[tuple[Dict[str, Any], str]]' = []
+    for payload, path in entries:
+        target = os.path.abspath(_ensure_grim_ext(path))
+        identity = os.path.normcase(target)
+        if identity in normalized:
+            raise ValueError(
+                f"A GRIM output batch contains the duplicate target {target!r}."
+            )
+        if os.path.exists(target) and not os.path.isfile(target):
+            raise ValueError(
+                f"GRIM output target {target!r} exists but is not a regular file."
+            )
+        normalized.add(identity)
+        planned.append((payload, target))
+
+    staged: 'List[tuple[str, str]]' = []
+    backups: 'Dict[str, Optional[str]]' = {}
+    publication_complete = False
+    try:
+        # Reserve deterministic same-volume staging paths, then let the normal
+        # atomic writer validate and populate each one.
+        for payload, target in planned:
+            stage_fd, stage = tempfile.mkstemp(
+                prefix=f'.{os.path.basename(target)}.',
+                suffix='.stage.grim',
+                dir=os.path.dirname(target),
+            )
+            os.close(stage_fd)
+            try:
+                _save_grim_npz(payload, stage)
+            except BaseException:
+                try:
+                    os.unlink(stage)
+                except FileNotFoundError:
+                    pass
+                raise
+            staged.append((stage, target))
+
+        for stage, target in staged:
+            backup = None
+            if os.path.exists(target):
+                backup_fd, backup = tempfile.mkstemp(
+                    prefix=f'.{os.path.basename(target)}.',
+                    suffix='.backup',
+                    dir=os.path.dirname(target),
+                )
+                os.close(backup_fd)
+                try:
+                    os.replace(target, backup)
+                except BaseException:
+                    try:
+                        os.unlink(backup)
+                    except OSError:
+                        pass
+                    raise
+            backups[target] = backup
+            os.replace(stage, target)
+        publication_complete = True
+        return [target for _payload, target in planned]
+    except BaseException as original_error:
+        # Only targets present in ``backups`` were reached by publication.
+        # Restore backups directly over any new version.  A backup that cannot
+        # be restored is deliberately retained beside the destination; never
+        # delete the user's only remaining copy during cleanup.
+        rollback_errors = []
+        for target, backup in reversed(list(backups.items())):
+            try:
+                if backup is None:
+                    try:
+                        os.unlink(target)
+                    except FileNotFoundError:
+                        pass
+                elif os.path.exists(backup):
+                    os.replace(backup, target)
+                    backups[target] = None
+            except OSError as exc:
+                rollback_errors.append(f"{target}: {exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                "GRIM batch publication failed and rollback could not restore "
+                "every prior artifact. Retained .backup file(s): "
+                + "; ".join(rollback_errors)
+            ) from original_error
+        raise
+    finally:
+        for stage, _target in staged:
+            try:
+                os.unlink(stage)
+            except FileNotFoundError:
+                pass
+        if publication_complete:
+            for backup in backups.values():
+                if backup is not None:
+                    try:
+                        os.unlink(backup)
+                    except OSError:
+                        pass
 
 def export_result_to_grim(
     result: 'Dict[str, Any]',
@@ -790,7 +925,7 @@ def export_result_to_grim(
 
         rootspec = _ensure_grim_ext(output_path)
         root_no_ext = rootspec[:-5]
-        written = []
+        batch = []
         for inc in sorted(incidence_sets[0]):
             payload = _build_grid_for_co_solved_samples(
                 {
@@ -805,8 +940,8 @@ def export_result_to_grim(
             )
             payload['solver_metadata_json'] = _solver_metadata_json(result)
             out = f'{root_no_ext}_{_suffix_for_incidence(inc)}.grim'
-            written.append(os.path.abspath(_save_grim_npz(payload, out)))
-        return written
+            batch.append((payload, out))
+        return _save_grim_npz_batch(batch)
 
     by_inc: 'Dict[float, List[Dict[str, Any]]]' = {}
     for row_index, row in enumerate(samples):
@@ -820,7 +955,7 @@ def export_result_to_grim(
 
     rootspec = _ensure_grim_ext(output_path)
     root_no_ext = rootspec[:-5]
-    written: 'List[str]' = []
+    batch = []
     for inc in sorted(by_inc.keys()):
         payload = _build_grid_for_samples(
             by_inc[inc],
@@ -832,8 +967,8 @@ def export_result_to_grim(
         )
         payload['solver_metadata_json'] = _solver_metadata_json(result)
         out = f'{root_no_ext}_{_suffix_for_incidence(inc)}.grim'
-        written.append(os.path.abspath(_save_grim_npz(payload, out)))
-    return written
+        batch.append((payload, out))
+    return _save_grim_npz_batch(batch)
 
 def _ensure_csv_ext(path: 'str') -> 'str':
     return path if path.lower().endswith('.csv') else f'{path}.csv'

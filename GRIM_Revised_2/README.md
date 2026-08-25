@@ -1,7 +1,7 @@
 # GRIM application
 
 GRIM is the host application for this distribution. Its desktop tabs are
-**Plotting | ISAR | PPT | Assembly | GHOST | FREDDY**. GHOST and FREDDY remain
+**Plotting | ISAR | PPT | Assembly | GHOST | FREDDY | Python**. GHOST and FREDDY remain
 self-contained tools under `tools/`; GRIM embeds their authoritative user
 interfaces instead of copying their numerical implementations into the
 plotting code.
@@ -124,6 +124,15 @@ files. Its CSV outputs therefore are not routed into GRIM's RCS dataset table.
 FREDDY background calculations are not cancellable. GRIM blocks application
 close while one is running so the shared process cannot be torn down partway
 through a calculation.
+
+## Python recorder
+
+The Python tab shows a readable script for successful dataset manipulations,
+dataset saves, and supported rectangular/polar azimuth, frequency, and
+elevation-sweep plot creation/export. PBP, Hold overlays, and other plot modes
+are noted in a comment rather than emitted as falsely equivalent code. Use **Copy** or
+**Save As…** to run the same work headlessly. The recorder ignores selection
+gestures, tab changes, zoom/pan, and non-dataset tool workflows.
 
 ## Dataset files
 

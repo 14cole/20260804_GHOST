@@ -5,6 +5,7 @@ import json
 import csv
 import os
 import re
+import tempfile
 import warnings
 import numpy as np
 
@@ -2719,6 +2720,9 @@ class RcsGrid:
         Passthrough metadata from ``extra`` is written first (so the grid's own
         axes and samples always win on a name clash), which is what lets a file
         carrying a raw complex amplitude survive a load/save round-trip.
+        The archive is fully written and flushed to a same-directory staging
+        file before ``os.replace`` publishes it, so a failed save leaves an
+        existing artifact intact.
 
         Args:
             path: Output path, with or without .grim.
@@ -2726,31 +2730,51 @@ class RcsGrid:
         Returns:
             The actual path written (always ends with .grim).
         """
-        if not path.endswith(".grim"):
+        path = os.fspath(path)
+        if not path.casefold().endswith(".grim"):
             path = f"{path}.grim"
-        with open(path, "wb") as f:
-            units_payload = json.dumps(self.units) if self.units else ""
-            payload = dict(self._extra_to_write())          # passthrough first
-            payload.update(
-                azimuths=self.azimuths,
-                elevations=self.elevations,
-                frequencies=self.frequencies,
-                polarizations=self.polarizations,
-                rcs_power=self.rcs_power,
-                rcs_phase=self.rcs_phase,
-                rcs_domain="power_phase",
-                power_domain=self.power_domain,
-                source_path=self.source_path if self.source_path is not None else "",
-                history=self.history if self.history is not None else "",
-                units=units_payload,
-            )
-            # a source domain tag we could not represent wins back its own slot:
-            # cropping or joining does not change what the samples MEAN, and a
-            # consumer may route on it (see _RESERVED_KEYS)
-            for tag in ("rcs_domain", "power_domain"):
-                if tag in self.extra:
-                    payload[tag] = self.extra[tag]
-            np.savez(f, **payload)
+        directory = os.path.dirname(os.path.abspath(path)) or os.curdir
+        fd, stage_path = tempfile.mkstemp(
+            prefix=".grim-write-",
+            suffix=".staging",
+            dir=directory,
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                fd = -1
+                units_payload = json.dumps(self.units) if self.units else ""
+                payload = dict(self._extra_to_write())          # passthrough first
+                payload.update(
+                    azimuths=self.azimuths,
+                    elevations=self.elevations,
+                    frequencies=self.frequencies,
+                    polarizations=self.polarizations,
+                    rcs_power=self.rcs_power,
+                    rcs_phase=self.rcs_phase,
+                    rcs_domain="power_phase",
+                    power_domain=self.power_domain,
+                    source_path=self.source_path if self.source_path is not None else "",
+                    history=self.history if self.history is not None else "",
+                    units=units_payload,
+                )
+                # a source domain tag we could not represent wins back its own slot:
+                # cropping or joining does not change what the samples MEAN, and a
+                # consumer may route on it (see _RESERVED_KEYS)
+                for tag in ("rcs_domain", "power_domain"):
+                    if tag in self.extra:
+                        payload[tag] = self.extra[tag]
+                np.savez(f, **payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(stage_path, path)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if os.path.exists(stage_path):
+                try:
+                    os.unlink(stage_path)
+                except OSError:
+                    pass
         return path
 
     @classmethod
@@ -2773,7 +2797,8 @@ class RcsGrid:
         Returns:
             RcsGrid instance loaded from disk.
         """
-        if not path.endswith(".grim"):
+        path = os.fspath(path)
+        if not path.casefold().endswith(".grim"):
             path = f"{path}.grim"
         if mmap_mode is not None:
             warnings.warn(

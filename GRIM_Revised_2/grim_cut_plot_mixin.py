@@ -485,6 +485,10 @@ class PlotOpsMixin:
         self.plot_axes = None
         self._style_plot_axes()
         self._apply_plot_limits()
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None:
+            recorder.invalidate_current_plot()
+        self._python_last_successful_plot_spec = None
 
     def _single_selection_index(self, widget: QListWidget, label: str) -> int | None:
         selected = sorted(self._selected_indices(widget))
@@ -1004,9 +1008,20 @@ class PlotOpsMixin:
         else:
             band_results, elapsed = result
             isar_mode.display_results(self, params, band_results, elapsed)
+            # ISAR is intentionally unsupported by the MVP recorder. Freeze
+            # that fact after every async render, but add a comment only when
+            # the user explicitly requested the plot; automatic updates stay
+            # out of the script.
+            self._record_python_plot(
+                "isar_image",
+                emit=bool(getattr(self, "_python_record_pending_isar", False)),
+            )
+            self._python_record_pending_isar = False
         if pending is not None:
             self._isar_submit(pending)
             return
+        if not ok:
+            self._python_record_pending_isar = False
         # Cine mode: keep stepping while Play stays toggled and renders succeed.
         play_btn = getattr(self, "btn_isar_ap_play", None)
         if ok and play_btn is not None and play_btn.isChecked():
@@ -1569,20 +1584,173 @@ class PlotOpsMixin:
         # Qt event queue is busy loading or replotting a large dataset.
         self.plot_canvas.draw()
 
+    def _on_explicit_plot_clicked(self, mode: str) -> None:
+        """Track the one async plot; synchronous renders capture themselves."""
+
+        if mode == "isar_image":
+            # ISAR finishes on the GUI thread after a worker result arrives.
+            # A validation failure never starts that worker and is not recorded.
+            self._python_record_pending_isar = bool(
+                getattr(self, "_isar_busy", False)
+            )
+            return
+        if "updated" in str(self.status.currentMessage()).lower():
+            self._emit_last_successful_python_plot()
+
+    def _capture_successful_python_plot(self, mode: str) -> None:
+        """Freeze the semantic spec without recording automatic re-plots."""
+
+        if "updated" in str(self.status.currentMessage()).lower():
+            self._record_python_plot(mode, emit=False)
+
+    def _record_python_plot(
+        self,
+        mode: str,
+        *,
+        resolved: dict[str, object] | None = None,
+        datasets_override=None,
+        emit: bool = True,
+    ) -> None:
+        recorder = getattr(self, "python_recorder", None)
+        reference_getter = getattr(self, "_python_reference_for_dataset", None)
+        if recorder is None or not callable(reference_getter):
+            return
+
+        supported_modes = {
+            "azimuth_rect",
+            "azimuth_polar",
+            "frequency",
+            "elevation_sweep",
+        }
+        if mode not in supported_modes:
+            spec = (
+                "unsupported",
+                mode,
+                "this MVP records rectangular/polar azimuth, frequency, and "
+                "elevation-sweep plots only",
+            )
+            self._python_last_successful_plot_spec = spec
+            if emit:
+                recorder.record_unsupported_plot(spec[1], spec[2])
+            return
+        if self._button_checked(getattr(self, "btn_pbp", None)):
+            spec = (
+                "unsupported",
+                mode,
+                "PBP rendering does not yet have a matching headless implementation",
+            )
+            self._python_last_successful_plot_spec = spec
+            if emit:
+                recorder.record_unsupported_plot(spec[1], spec[2])
+            return
+        if self._button_checked(getattr(self, "btn_hold", None)):
+            spec = (
+                "unsupported",
+                mode,
+                "Hold overlays depend on prior plot state and are intentionally "
+                "outside this simple headless recorder",
+            )
+            self._python_last_successful_plot_spec = spec
+            if emit:
+                recorder.record_unsupported_plot(spec[1], spec[2])
+            return
+
+        datasets = (
+            list(datasets_override)
+            if datasets_override is not None
+            else self._selected_datasets()
+        )
+        references = []
+        names = []
+        for name, dataset in datasets:
+            reference = reference_getter(dataset)
+            if reference is None:
+                return
+            references.append(reference)
+            names.append(name)
+        if not references:
+            return
+
+        override = dict(resolved or {})
+        azimuths = override.pop("azimuths", self._selected_values(self.list_az))
+        elevations = override.pop("elevations", self._selected_values(self.list_elev))
+        frequencies = override.pop(
+            "frequencies", self._selected_values(self.list_freq)
+        )
+        polarization = override.pop("polarization", None)
+        if polarization is None:
+            selected_pol = self._selected_values(self.list_pol)
+            if len(selected_pol) != 1:
+                return
+            polarization = selected_pol[0]
+
+        parameters: dict[str, object] = {
+            "azimuths": list(azimuths),
+            "elevations": list(elevations),
+            "frequencies": list(frequencies),
+            "polarization": polarization,
+            "phase": self._button_checked(getattr(self, "btn_phase", None)),
+            "scale": self._plot_scale_mode(),
+            "colormap": self._effective_colormap(),
+            "show_grid": self._plot_grid_enabled(),
+            "show_legend": bool(self.chk_plot_legend.isChecked()),
+            "polar_zero": self._polar_zero_location(),
+        }
+        parameters.update(override)
+        spec = (
+            "supported",
+            tuple(references),
+            tuple(names),
+            mode,
+            parameters,
+        )
+        self._python_last_successful_plot_spec = spec
+        if emit:
+            recorder.record_plot(
+                spec[1],
+                names=spec[2],
+                mode=spec[3],
+                parameters=spec[4],
+            )
+
+    def _emit_last_successful_python_plot(self) -> bool:
+        """Emit the frozen spec corresponding to the visible plot canvas."""
+
+        recorder = getattr(self, "python_recorder", None)
+        spec = getattr(self, "_python_last_successful_plot_spec", None)
+        if recorder is None or not spec:
+            if recorder is not None:
+                recorder.invalidate_current_plot()
+            return False
+        if spec[0] == "unsupported":
+            recorder.record_unsupported_plot(spec[1], spec[2])
+            return False
+        recorder.record_plot(
+            spec[1],
+            names=spec[2],
+            mode=spec[3],
+            parameters=spec[4],
+        )
+        return True
+
     def _plot_azimuth_rect(self) -> None:
         azimuth_rect_mode.render(self)
+        self._capture_successful_python_plot("azimuth_rect")
         self._maybe_autoscale()
 
     def _plot_azimuth_polar(self) -> None:
         azimuth_polar_mode.render(self)
+        self._capture_successful_python_plot("azimuth_polar")
         self._maybe_autoscale()
 
     def _plot_frequency(self) -> None:
         frequency_mode.render(self)
+        self._capture_successful_python_plot("frequency")
         self._maybe_autoscale()
 
     def _plot_elevation_sweep(self) -> None:
         elevation_sweep_mode.render(self)
+        self._capture_successful_python_plot("elevation_sweep")
         self._maybe_autoscale()
 
     def _plot_isar_image(self) -> None:
@@ -1591,14 +1759,17 @@ class PlotOpsMixin:
 
     def _plot_az_vs_range(self) -> None:
         az_vs_range_mode.render(self)
+        self._capture_successful_python_plot("az_vs_range")
         self._maybe_autoscale()
 
     def _plot_waterfall(self) -> None:
         waterfall_mode.render(self)
+        self._capture_successful_python_plot("waterfall")
         self._maybe_autoscale()
 
     def _plot_compare(self) -> None:
         compare_mode.render(self)
+        self._capture_successful_python_plot("compare")
         self._maybe_autoscale()
 
     def _ensure_compare_axes(self):

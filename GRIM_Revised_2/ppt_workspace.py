@@ -302,26 +302,19 @@ if GUI_AVAILABLE:
                 family="Arial",
             )
             output_directory.mkdir(parents=True, exist_ok=True)
-            # The image arrays are loaded into Matplotlib immediately. Keep
-            # only the current page's temporary PNGs so repeated preview
-            # builds/navigation cannot accumulate assets during a long session.
-            for old_image in output_directory.glob("preview_*.png"):
-                try:
-                    old_image.unlink()
-                except OSError:
-                    pass
             for placement_index, placement in enumerate(slide_plan.plots):
                 image_path = output_directory / (
                     f"preview_{generation:04d}_slide_{slide_index + 1:03d}_"
                     f"slot_{placement.slot_index + 1}.png"
                 )
-                render_plot_png(
-                    placement.plot,
-                    image_path,
-                    width_points=placement.frame.width,
-                    height_points=placement.frame.height,
-                    dpi=120,
-                )
+                if not image_path.is_file():
+                    render_plot_png(
+                        placement.plot,
+                        image_path,
+                        width_points=placement.frame.width,
+                        height_points=placement.frame.height,
+                        dpi=120,
+                    )
                 frame = placement.frame
                 axes = self.figure.add_axes(
                     (
@@ -883,7 +876,10 @@ if GUI_AVAILABLE:
                 self._set_frequency_choices((), "")
                 return
             try:
-                availability = get_plot_availability(self._named_grids())
+                availability = get_plot_availability(
+                    self._named_grids(),
+                    evaluate_phase=False,
+                )
             except Exception as exc:
                 self._availability = None
                 self.azimuth_label.setText("Azimuth cut")
@@ -1054,7 +1050,10 @@ if GUI_AVAILABLE:
                 )
             # Re-run compatibility here so preview always validates the current
             # catalog even if a grid object was replaced in place.
-            availability = get_plot_availability(datasets)
+            availability = get_plot_availability(
+                datasets,
+                evaluate_phase=False,
+            )
             kind = str(self.plot_type_combo.currentData())
             elevation = self.elevation_combo.currentData()
             polarization = self.polarization_combo.currentData()
@@ -1131,6 +1130,13 @@ if GUI_AVAILABLE:
         # ------------------------------------------------------------------
         # Preview and export
         # ------------------------------------------------------------------
+        def _clear_preview_assets(self) -> None:
+            for image_path in Path(self._preview_temp.name).glob("preview_*.png"):
+                try:
+                    image_path.unlink()
+                except OSError:
+                    pass
+
         @Slot()
         def build_preview(self) -> bool:
             if self.job_is_running():
@@ -1140,6 +1146,7 @@ if GUI_AVAILABLE:
                 plan = self._build_plan()
                 self._preview_plan = plan
                 self._preview_is_current = True
+                self._clear_preview_assets()
                 self._preview_generation += 1
                 self._current_slide_index = 0
                 self._render_current_slide()

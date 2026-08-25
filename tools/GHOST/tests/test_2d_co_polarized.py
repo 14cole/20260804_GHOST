@@ -259,6 +259,27 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
 
 
 class CoPolarizedGrimTests(unittest.TestCase):
+    def test_failed_atomic_write_preserves_existing_grim(self):
+        result = rcs._merge_co_polarized_2d_results({
+            "VV": _single_result("TE"),
+            "HH": _single_result("TM"),
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "existing.grim"
+            output.write_bytes(b"previous artifact")
+            with mock.patch.object(
+                grim_io.np,
+                "savez_compressed",
+                side_effect=RuntimeError("simulated disk failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated disk failure"):
+                    grim_io.export_result_to_grim(result, str(output))
+            self.assertEqual(output.read_bytes(), b"previous artifact")
+            self.assertEqual(
+                [path for path in Path(tmp).iterdir() if path != output],
+                [],
+            )
+
     def test_incomplete_declared_dual_result_is_rejected(self):
         result = rcs._merge_co_polarized_2d_results({
             "VV": _single_result("TE"),
@@ -328,6 +349,122 @@ class CoPolarizedGrimTests(unittest.TestCase):
                     payload["polarizations"], ["VV", "HH"]
                 )
                 self.assertEqual(payload["rcs_power"].shape, (2, 1, 1, 2))
+
+    def test_bistatic_collection_stage_failure_preserves_every_old_incidence(self):
+        result = rcs._merge_co_polarized_2d_results({
+            "VV": _single_result("TE", bistatic=True),
+            "HH": _single_result("TM", bistatic=True),
+        })
+        for channel in ("VV", "HH"):
+            second_incidence = [dict(row) for row in result["co_solved_samples"][channel]]
+            for row in second_incidence:
+                row["theta_inc_deg"] = 20.0
+            result["co_solved_samples"][channel].extend(second_incidence)
+
+        original_save = grim_io._save_grim_npz
+        calls = 0
+
+        def fail_second_stage(payload, path):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated second-incidence disk failure")
+            return original_save(payload, path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "bistatic_dual"
+            old_outputs = {
+                Path(tmp) / "bistatic_dual_inc_10.grim": b"old incidence 10",
+                Path(tmp) / "bistatic_dual_inc_20.grim": b"old incidence 20",
+            }
+            for path, content in old_outputs.items():
+                path.write_bytes(content)
+
+            with mock.patch.object(
+                grim_io, "_save_grim_npz", side_effect=fail_second_stage
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "second-incidence disk failure"
+                ):
+                    grim_io.export_result_to_grim(result, str(root))
+
+            for path, content in old_outputs.items():
+                self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(set(Path(tmp).iterdir()), set(old_outputs))
+
+    def test_bistatic_collection_rejects_directory_target_before_publication(self):
+        result = rcs._merge_co_polarized_2d_results({
+            "VV": _single_result("TE", bistatic=True),
+            "HH": _single_result("TM", bistatic=True),
+        })
+        for channel in ("VV", "HH"):
+            rows = [dict(row) for row in result["co_solved_samples"][channel]]
+            for row in rows:
+                row["theta_inc_deg"] = 20.0
+            result["co_solved_samples"][channel].extend(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked = Path(tmp) / "bistatic_dual_inc_10.grim"
+            blocked.mkdir()
+            untouched = Path(tmp) / "bistatic_dual_inc_20.grim"
+            untouched.write_bytes(b"old incidence 20")
+            with self.assertRaisesRegex(ValueError, "not a regular file"):
+                grim_io.export_result_to_grim(
+                    result, str(Path(tmp) / "bistatic_dual")
+                )
+            self.assertTrue(blocked.is_dir())
+            self.assertEqual(untouched.read_bytes(), b"old incidence 20")
+            self.assertEqual(set(Path(tmp).iterdir()), {blocked, untouched})
+
+    def test_failed_batch_rollback_retains_unrestored_prior_backup(self):
+        result = rcs._merge_co_polarized_2d_results({
+            "VV": _single_result("TE", bistatic=True),
+            "HH": _single_result("TM", bistatic=True),
+        })
+        for channel in ("VV", "HH"):
+            rows = [dict(row) for row in result["co_solved_samples"][channel]]
+            for row in rows:
+                row["theta_inc_deg"] = 20.0
+            result["co_solved_samples"][channel].extend(rows)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "bistatic_dual_inc_10.grim"
+            second = Path(tmp) / "bistatic_dual_inc_20.grim"
+            first.write_bytes(b"old incidence 10")
+            second.write_bytes(b"old incidence 20")
+            original_replace = grim_io.os.replace
+
+            def fail_publication_then_one_restore(source, destination):
+                source_path = Path(source)
+                destination_path = Path(destination)
+                if (
+                    destination_path == second
+                    and source_path.name.endswith(".stage.grim")
+                ):
+                    raise OSError("second publication failed")
+                if (
+                    destination_path == first
+                    and source_path.name.endswith(".backup")
+                ):
+                    raise OSError("first rollback failed")
+                return original_replace(source, destination)
+
+            with mock.patch.object(
+                grim_io.os,
+                "replace",
+                side_effect=fail_publication_then_one_restore,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "Retained .backup file"
+                ):
+                    grim_io.export_result_to_grim(
+                        result, str(Path(tmp) / "bistatic_dual")
+                    )
+
+            retained = list(Path(tmp).glob(".*inc_10.grim.*.backup"))
+            self.assertEqual(len(retained), 1)
+            self.assertEqual(retained[0].read_bytes(), b"old incidence 10")
+            self.assertEqual(second.read_bytes(), b"old incidence 20")
 
 
 if __name__ == "__main__":

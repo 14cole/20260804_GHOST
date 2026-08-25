@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import math
-from pathlib import Path
-from typing import Any
+import os
+import tempfile
+import warnings
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Callable, Iterator, TextIO
 
 from .compute import LayerConfig, MaterialTable
 
@@ -18,11 +23,184 @@ IMPEDANCE_UNCERTAINTY_HEADER = (
 MATERIAL_SINGULAR_TOL = 1e-12
 
 PROJECT_SCHEMA_VERSION = 1
+PROJECT_PATH_POLICY_VERSION = 1
+PROJECT_PATH_PARENT_HOPS = 1
+
+_PROJECT_CONTROL_PATH_KEYS = (
+    "output",
+    "ibc_batch_output_dir",
+    "angle_output",
+    "thk_output",
+    "mix_prop_file",
+)
 
 # Property and result files are CSV with frequency in Hz. Frequencies are
 # converted to GHz on read and back to Hz on write, since every computation and
 # UI field in this project works in GHz.
 HZ_PER_GHZ = 1e9
+
+
+@contextmanager
+def _atomic_text_file(path: Path) -> Iterator[TextIO]:
+    """Yield a same-directory temporary text file and atomically publish it.
+
+    Keeping the temporary file beside the destination makes ``os.replace`` an
+    atomic same-filesystem operation.  A failed write or replace removes only
+    the temporary file and leaves an existing destination untouched.
+    """
+
+    destination = Path(path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=str(destination.parent),
+        text=True,
+    )
+    temporary_path = Path(temporary_name)
+    fd_needs_close = True
+    try:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd_needs_close = False
+        with stream:
+            yield stream
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, destination)
+    except BaseException:
+        if fd_needs_close:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _stage_text_file(
+    path: Path, writer: Callable[[TextIO], None]
+) -> Path:
+    """Write and fsync one same-directory text stage without publishing it."""
+
+    destination = Path(path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".stage",
+        dir=str(destination.parent),
+        text=True,
+    )
+    temporary_path = Path(temporary_name)
+    fd_needs_close = True
+    try:
+        stream = os.fdopen(fd, "w", encoding="utf-8")
+        fd_needs_close = False
+        with stream:
+            writer(stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return temporary_path
+    except BaseException:
+        if fd_needs_close:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_text_batch(
+    entries: list[tuple[Path, Callable[[TextIO], None]]],
+) -> None:
+    """Publish related text artifacts together, restoring all on failure."""
+
+    normalized: set[str] = set()
+    planned: list[tuple[Path, Callable[[TextIO], None]]] = []
+    for raw_path, writer in entries:
+        destination = Path(raw_path)
+        # Treat case-only path differences as collisions even when this batch
+        # is prepared on a case-sensitive filesystem for later Windows use.
+        identity = os.path.normcase(
+            str(destination.resolve(strict=False))
+        ).casefold()
+        if identity in normalized:
+            raise ValueError(
+                f"Output batch contains duplicate path {destination}."
+            )
+        if destination.exists() and not destination.is_file():
+            raise ValueError(
+                f"Output target {destination} exists but is not a regular file."
+            )
+        normalized.add(identity)
+        planned.append((destination, writer))
+
+    staged: list[tuple[Path, Path]] = []
+    backups: dict[Path, Path | None] = {}
+    publication_complete = False
+    try:
+        for destination, writer in planned:
+            staged.append((_stage_text_file(destination, writer), destination))
+
+        for stage, destination in staged:
+            backup: Path | None = None
+            if destination.exists():
+                backup_fd, backup_name = tempfile.mkstemp(
+                    prefix=f".{destination.name}.",
+                    suffix=".backup",
+                    dir=str(destination.parent),
+                )
+                os.close(backup_fd)
+                backup = Path(backup_name)
+                try:
+                    os.replace(destination, backup)
+                except BaseException:
+                    try:
+                        backup.unlink()
+                    except OSError:
+                        pass
+                    raise
+            backups[destination] = backup
+            os.replace(stage, destination)
+        publication_complete = True
+    except BaseException as original_error:
+        rollback_errors: list[str] = []
+        for destination, backup in reversed(list(backups.items())):
+            try:
+                if backup is None:
+                    try:
+                        destination.unlink()
+                    except FileNotFoundError:
+                        pass
+                elif backup.exists():
+                    os.replace(backup, destination)
+                    backups[destination] = None
+            except OSError as exc:
+                rollback_errors.append(f"{destination}: {exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Output publication failed and rollback could not restore every "
+                "prior artifact. Retained .backup file(s): "
+                + "; ".join(rollback_errors)
+            ) from original_error
+        raise
+    finally:
+        for stage, _destination in staged:
+            try:
+                stage.unlink()
+            except FileNotFoundError:
+                pass
+        if publication_complete:
+            for backup in backups.values():
+                if backup is not None:
+                    try:
+                        backup.unlink()
+                    except OSError:
+                        pass
 
 
 def _passivity_tolerance(value: complex) -> float:
@@ -157,18 +335,54 @@ def write_output(
     """Write a solver-compatible frequency/impedance CSV in Hz and ohms.
 
     ``rows`` carries frequency in GHz (the internal unit)."""
+    _validate_impedance_rows(rows)
+    with _atomic_text_file(path) as f:
+        _write_impedance_rows(f, rows, include_header)
+
+
+def _validate_impedance_rows(
+    rows: list[tuple[float, float, float]],
+    context: str = "Impedance export",
+) -> None:
     frequencies = [float(row[0]) for row in rows]
-    _validate_frequency_rows(frequencies, "Impedance export")
+    _validate_frequency_rows(frequencies, context)
     for index, (_freq_ghz, zr, zi) in enumerate(rows, start=1):
-        _validate_surface_impedance(
-            complex(zr, zi), f"Impedance export row {index}"
+        _validate_surface_impedance(complex(zr, zi), f"{context} row {index}")
+
+
+def _write_impedance_rows(
+    stream: TextIO,
+    rows: list[tuple[float, float, float]],
+    include_header: bool,
+) -> None:
+    if include_header:
+        stream.write(IMPEDANCE_HEADER + "\n")
+    for freq_ghz, zr, zi in rows:
+        stream.write(
+            f"{freq_ghz * HZ_PER_GHZ:.12g},{zr:.12g},{zi:.12g}\n"
         )
-    with path.open("w", encoding="utf-8") as f:
-        if include_header:
-            f.write(IMPEDANCE_HEADER + "\n")
-        for freq_ghz, zr, zi in rows:
-            freq_hz = freq_ghz * HZ_PER_GHZ
-            f.write(f"{freq_hz:.12g},{zr:.12g},{zi:.12g}\n")
+
+
+def write_impedance_batch(
+    outputs: list[tuple[Path, list[tuple[float, float, float]]]],
+    include_header: bool = True,
+) -> None:
+    """Atomically publish a set of nominal solver-compatible IBC CSVs."""
+
+    if not outputs:
+        raise ValueError("Impedance output batch is empty.")
+    entries: list[tuple[Path, Callable[[TextIO], None]]] = []
+    for output_index, (path, rows) in enumerate(outputs, start=1):
+        _validate_impedance_rows(rows, f"Impedance export {output_index}")
+
+        def write_nominal(
+            stream: TextIO,
+            batch_rows: list[tuple[float, float, float]] = rows,
+        ) -> None:
+            _write_impedance_rows(stream, batch_rows, include_header)
+
+        entries.append((Path(path), write_nominal))
+    _atomic_text_batch(entries)
 
 
 def uncertainty_report_path(nominal_path: Path) -> Path:
@@ -204,12 +418,78 @@ def write_impedance_uncertainty_report(
                 f"Impedance uncertainty report row {index} contains negative "
                 f"minimum resistance {zr_min:g} ohm."
             )
-    with path.open("w", encoding="utf-8") as f:
+    with _atomic_text_file(path) as f:
         f.write(IMPEDANCE_UNCERTAINTY_HEADER + "\n")
         for row in rows:
             freq_hz = row[0] * HZ_PER_GHZ
             values = (freq_hz, *row[1:])
             f.write(",".join(f"{value:.12g}" for value in values) + "\n")
+
+
+def write_impedance_bundle(
+    nominal_path: Path,
+    nominal_rows: list[tuple[float, float, float]],
+    include_header: bool,
+    uncertainty_path: Path | None = None,
+    uncertainty_rows: (
+        list[tuple[float, float, float, float, float, float, float]] | None
+    ) = None,
+) -> None:
+    """Atomically publish a nominal IBC and its optional uncertainty sidecar."""
+
+    _validate_impedance_rows(nominal_rows)
+    frequencies = [float(row[0]) for row in nominal_rows]
+
+    if (uncertainty_path is None) != (uncertainty_rows is None):
+        raise ValueError(
+            "Uncertainty output path and rows must either both be supplied or both omitted."
+        )
+    if uncertainty_rows is not None:
+        uncertainty_frequencies = [float(row[0]) for row in uncertainty_rows]
+        _validate_frequency_rows(
+            uncertainty_frequencies, "Impedance uncertainty report"
+        )
+        if uncertainty_frequencies != frequencies:
+            raise ValueError(
+                "Nominal and uncertainty impedance outputs must use the same frequency rows."
+            )
+        for index, row in enumerate(uncertainty_rows, start=1):
+            _, zr, zi, zr_min, zr_max, zi_min, zi_max = row
+            values = (zr, zi, zr_min, zr_max, zi_min, zi_max)
+            if not all(math.isfinite(float(value)) for value in values):
+                raise ValueError(
+                    f"Impedance uncertainty report row {index} contains a non-finite value."
+                )
+            _validate_surface_impedance(
+                complex(zr, zi), f"Impedance uncertainty report row {index}"
+            )
+            if zr_min > zr_max or zi_min > zi_max:
+                raise ValueError(
+                    f"Impedance uncertainty report row {index} has inverted bounds."
+                )
+            if zr_min < -_passivity_tolerance(complex(zr_min, zi)):
+                raise ValueError(
+                    f"Impedance uncertainty report row {index} contains negative "
+                    f"minimum resistance {zr_min:g} ohm."
+                )
+
+    def write_nominal(stream: TextIO) -> None:
+        _write_impedance_rows(stream, nominal_rows, include_header)
+
+    entries: list[tuple[Path, Callable[[TextIO], None]]] = [
+        (Path(nominal_path), write_nominal)
+    ]
+    if uncertainty_path is not None and uncertainty_rows is not None:
+        def write_uncertainty(stream: TextIO) -> None:
+            stream.write(IMPEDANCE_UNCERTAINTY_HEADER + "\n")
+            for row in uncertainty_rows:
+                values = (row[0] * HZ_PER_GHZ, *row[1:])
+                stream.write(
+                    ",".join(f"{value:.12g}" for value in values) + "\n"
+                )
+
+        entries.append((Path(uncertainty_path), write_uncertainty))
+    _atomic_text_batch(entries)
 
 
 def write_material_table(path: Path, table: MaterialTable, include_header: bool = True) -> None:
@@ -226,7 +506,7 @@ def write_material_table(path: Path, table: MaterialTable, include_header: bool 
         zip(table.eps_r, table.mu_r), start=1
     ):
         _validate_medium(eps, mu, f"Material export row {index}")
-    with path.open("w", encoding="utf-8") as f:
+    with _atomic_text_file(path) as f:
         if include_header:
             f.write(MATERIAL_HEADER + "\n")
         for freq_ghz, eps, mu in zip(table.freq_ghz, table.eps_r, table.mu_r):
@@ -377,12 +657,165 @@ def _parse_optional_float(value: Any, label: str, field: str) -> float | None:
     return parsed
 
 
+def _project_path_slots(
+    state: dict[str, Any],
+) -> Iterator[tuple[str, dict[str, Any], str]]:
+    """Yield the known FREDDY file-path fields without guessing by suffix."""
+
+    layers = state.get("layers", [])
+    if isinstance(layers, list):
+        for index, layer in enumerate(layers):
+            if not isinstance(layer, dict):
+                continue
+            for key in ("file_0deg", "file_90deg"):
+                if key in layer:
+                    yield f"layers[{index}].{key}", layer, key
+
+    controls = state.get("controls", {})
+    if isinstance(controls, dict):
+        for key in _PROJECT_CONTROL_PATH_KEYS:
+            if key in controls:
+                yield f"controls.{key}", controls, key
+
+    mixes = state.get("mixes", {})
+    if isinstance(mixes, dict):
+        components = mixes.get("components", [])
+        if isinstance(components, list):
+            for index, component in enumerate(components):
+                if isinstance(component, dict) and "file" in component:
+                    yield f"mixes.components[{index}].file", component, "file"
+
+
+def _is_absolute_on_any_platform(value: str) -> bool:
+    """Recognize native paths plus absolute Windows/POSIX paths in moved JSON."""
+
+    return (
+        Path(value).is_absolute()
+        or PureWindowsPath(value).is_absolute()
+        or PurePosixPath(value).is_absolute()
+    )
+
+
+def _native_project_path(value: str, project_directory: Path) -> Path | None:
+    """Return a native absolute candidate, or ``None`` for a foreign absolute."""
+
+    native = Path(value).expanduser()
+    if native.is_absolute():
+        return native.resolve(strict=False)
+    if _is_absolute_on_any_platform(value):
+        return None
+
+    # New project files always use forward slashes for relative paths.  Accept
+    # backslashes as separators too so an older Windows project can move to a
+    # Mac without treating the complete relative path as one filename.
+    relative_value = value.replace("\\", "/")
+    return (project_directory / Path(relative_value)).resolve(strict=False)
+
+
+def _leading_parent_hops(path: Path) -> int:
+    hops = 0
+    for part in path.parts:
+        if part != "..":
+            break
+        hops += 1
+    return hops
+
+
+def _portable_project_path(
+    value: object,
+    project_directory: Path,
+) -> tuple[str, bool]:
+    """Encode one path relative to a project when it stays within/near it.
+
+    One leading ``..`` is allowed so a project directory and a neighboring
+    ``materials`` or ``outputs`` directory can move together.  More distant or
+    cross-volume paths remain absolute and are identified in project metadata.
+    """
+
+    text = str(value).strip()
+    if not text:
+        return "", False
+
+    native = Path(text).expanduser()
+    if native.is_absolute():
+        candidate = native.resolve(strict=False)
+    elif _is_absolute_on_any_platform(text):
+        return text, True
+    else:
+        # Live FREDDY controls historically interpret relative paths against
+        # the process working directory.  Resolve that exact runtime meaning
+        # before encoding it relative to the project; interpreting the same
+        # spelling against the new project folder can silently select a
+        # different same-named material and change the physics.
+        candidate = (
+            Path.cwd() / Path(text.replace("\\", "/"))
+        ).resolve(strict=False)
+
+    try:
+        relative = Path(os.path.relpath(candidate, project_directory))
+    except ValueError:
+        return str(candidate), True
+
+    if _leading_parent_hops(relative) <= PROJECT_PATH_PARENT_HOPS:
+        return relative.as_posix(), False
+    return str(candidate), True
+
+
+def _portable_project_state(
+    state: dict[str, Any], project_directory: Path
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    portable_state = copy.deepcopy(state)
+    external_paths: list[dict[str, str]] = []
+    for field, container, key in _project_path_slots(portable_state):
+        encoded, external = _portable_project_path(
+            container.get(key, ""), project_directory
+        )
+        container[key] = encoded
+        if external:
+            external_paths.append({"field": field, "path": encoded})
+    return portable_state, external_paths
+
+
+def _resolved_project_state(
+    state: dict[str, Any], project_directory: Path
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    resolved_state = copy.deepcopy(state)
+    external_paths: list[dict[str, str]] = []
+    for field, container, key in _project_path_slots(resolved_state):
+        value = str(container.get(key, "")).strip()
+        if not value:
+            container[key] = ""
+            continue
+        if _is_absolute_on_any_platform(value):
+            # Preserve external absolute paths verbatim, including paths from a
+            # different operating system.  The user can repair one explicitly
+            # without the loader silently rebasing it to an unrelated file.
+            container[key] = value
+            external_paths.append({"field": field, "path": value})
+            continue
+        candidate = _native_project_path(value, project_directory)
+        assert candidate is not None
+        container[key] = str(candidate)
+    return resolved_state, external_paths
+
+
 def save_project_file(path: Path, state: dict[str, Any]) -> None:
+    destination = Path(path)
+    project_directory = destination.expanduser().resolve(strict=False).parent
+    portable_state, external_paths = _portable_project_state(
+        state, project_directory
+    )
     payload = {
         "schema_version": PROJECT_SCHEMA_VERSION,
-        "state": state,
+        "path_portability": {
+            "version": PROJECT_PATH_POLICY_VERSION,
+            "base": "project_file_directory",
+            "nearby_parent_hops": PROJECT_PATH_PARENT_HOPS,
+            "external_absolute_paths": external_paths,
+        },
+        "state": portable_state,
     }
-    with path.open("w", encoding="utf-8") as f:
+    with _atomic_text_file(destination) as f:
         json.dump(payload, f, indent=2, sort_keys=True)
         f.write("\n")
 
@@ -404,4 +837,35 @@ def load_project_file(path: Path) -> dict[str, Any]:
     state = payload.get("state")
     if not isinstance(state, dict):
         raise ValueError("Project file is missing a valid 'state' object.")
-    return state
+
+    portability = payload.get("path_portability")
+    if not isinstance(portability, dict):
+        warnings.warn(
+            "Legacy FREDDY project has no path-portability metadata; relative "
+            "paths retain their historical working-directory meaning. Save "
+            "the project again to migrate them explicitly.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return copy.deepcopy(state)
+    if (
+        portability.get("version") != PROJECT_PATH_POLICY_VERSION
+        or portability.get("base") != "project_file_directory"
+    ):
+        raise ValueError(
+            "Unsupported FREDDY project path-portability policy."
+        )
+
+    project_directory = Path(path).expanduser().resolve(strict=False).parent
+    resolved_state, external_paths = _resolved_project_state(
+        state, project_directory
+    )
+    if external_paths:
+        fields = ", ".join(item["field"] for item in external_paths)
+        warnings.warn(
+            "FREDDY project contains external absolute path(s) that cannot "
+            f"move with the project folder: {fields}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return resolved_state

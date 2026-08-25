@@ -18,6 +18,7 @@ from feature_assembly_panel import (  # noqa: E402
     FeatureAssemblyValues,
     FeatureBuildDispatch,
     FeatureWorkflowAdapter,
+    LoadedDatasetEntry,
     placement_csv_template_text,
     write_placement_csv_template,
 )
@@ -79,6 +80,26 @@ def _ready_point_model() -> FeatureAssemblyFormModel:
 
 
 class FeatureAssemblyModelTests(unittest.TestCase):
+    def test_loaded_dataset_entry_requires_a_clean_existing_grim_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            saved = Path(folder) / "saved.grim"
+            saved.write_bytes(b"artifact")
+
+            self.assertEqual(
+                LoadedDatasetEntry("saved-id", "Saved", str(saved)).usable_path,
+                str(saved),
+            )
+            dirty = LoadedDatasetEntry(
+                "dirty-id", "Derived", str(saved), dirty=True
+            )
+            self.assertEqual(dirty.usable_path, "")
+            self.assertIn("save unsaved derived", dirty.unavailable_reason)
+            missing = LoadedDatasetEntry(
+                "missing-id", "Missing", str(Path(folder) / "missing.grim")
+            )
+            self.assertEqual(missing.usable_path, "")
+            self.assertIn("missing", missing.unavailable_reason)
+
     def test_displayed_templates_are_the_strict_shared_placement_contracts(self):
         self.assertEqual(
             POINT_PLACEMENT_COLUMNS,
@@ -325,6 +346,118 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("out of date", messages[0])
         self.assertIn("out of date", panel.status_label.text())
+        panel.close()
+
+    def test_loaded_catalog_selects_only_saved_grim_artifacts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            saved = Path(folder) / "clean body.grim"
+            saved.write_bytes(b"artifact")
+            dirty_path = Path(folder) / "old source.grim"
+            dirty_path.write_bytes(b"old artifact")
+            wrong_type = Path(folder) / "response.csv"
+            wrong_type.write_text("not a grim", encoding="utf-8")
+
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            panel.set_loaded_dataset_catalog(
+                [
+                    {
+                        "stable_id": "clean-id",
+                        "display_name": "Clean body",
+                        "file_path": str(saved),
+                    },
+                    {
+                        "id": "dirty-id",
+                        "name": "Derived result",
+                        "source_path": str(dirty_path),
+                        "is_dirty": True,
+                    },
+                    ("wrong-id", "Wrong type", str(wrong_type), False),
+                    SimpleNamespace(
+                        dataset_id="missing-id",
+                        name="Missing artifact",
+                        source=str(Path(folder) / "missing.grim"),
+                    ),
+                ]
+            )
+
+            self.assertEqual(
+                [entry.dataset_id for entry in panel.loaded_dataset_catalog()],
+                ["clean-id", "dirty-id", "wrong-id", "missing-id"],
+            )
+            chooser = panel.base_picker.loaded_button
+            self.assertIsNotNone(chooser)
+            actions = chooser.catalog_menu().actions()
+            selectable = [
+                action
+                for action in actions
+                if action.isEnabled() and not action.isSeparator()
+            ]
+            self.assertEqual(len(selectable), 1)
+            self.assertEqual(selectable[0].data(), "clean-id")
+            self.assertTrue(
+                any(
+                    "Save unsaved derived datasets first" in action.text()
+                    for action in actions
+                )
+            )
+
+            selectable[0].trigger()
+            self.assertEqual(panel.base_picker.path(), str(saved))
+            self.assertEqual(
+                panel.output_picker.path(),
+                str(saved.with_name("clean body_features.grim")),
+            )
+
+            panel.point_mapping.set_dataset_ids(("fastener",))
+            response_chooser = panel.point_mapping.loaded_dataset_button(
+                "fastener"
+            )
+            response_action = next(
+                action
+                for action in response_chooser.catalog_menu().actions()
+                if action.data() == "clean-id"
+            )
+            response_action.trigger()
+            self.assertEqual(
+                panel.point_mapping.mapping()["fastener"], str(saved)
+            )
+            panel.line_mapping.set_dataset_ids(("panel_gap",))
+            line_action = next(
+                action
+                for action in panel.line_mapping.loaded_dataset_button(
+                    "panel_gap"
+                ).catalog_menu().actions()
+                if action.data() == "clean-id"
+            )
+            line_action.trigger()
+            self.assertEqual(
+                panel.line_mapping.mapping()["panel_gap"], str(saved)
+            )
+
+            chooser.catalog_menu().aboutToShow.emit()
+            self.assertIn(
+                "Save unsaved derived datasets first", panel.status_label.text()
+            )
+            panel.close()
+
+    def test_loaded_catalog_rejects_duplicate_stable_ids_atomically(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        panel.set_loaded_dataset_catalog(
+            [{"id": "one", "name": "First", "path": ""}]
+        )
+
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            panel.set_loaded_dataset_catalog(
+                [
+                    {"id": "same", "name": "First", "path": ""},
+                    {"id": "same", "name": "Second", "path": ""},
+                ]
+            )
+
+        self.assertEqual(
+            [entry.dataset_id for entry in panel.loaded_dataset_catalog()],
+            ["one"],
+        )
         panel.close()
 
 

@@ -11,14 +11,19 @@ explicitly for survey work. Survey results retain the algebraic quality gate
 but are marked as uncertified base-mesh fields in their metadata.
 """
 
+import ctypes
+from importlib import machinery
 import math
 import os
+import platform
 import re
 import threading
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtCore import QObject, QStandardPaths, QThread, Qt, Signal, Slot
     from PySide6.QtWidgets import (
         QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
         QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidget,
@@ -26,7 +31,9 @@ try:
         QProgressBar, QSizePolicy, QToolButton,
     )
 except ImportError:
-    from PySide2.QtCore import QObject, QThread, Qt, Signal, Slot  # type: ignore
+    from PySide2.QtCore import (  # type: ignore
+        QObject, QStandardPaths, QThread, Qt, Signal, Slot,
+    )
     from PySide2.QtWidgets import (  # type: ignore
         QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
         QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidget,
@@ -43,7 +50,12 @@ except ImportError:
 from matplotlib.figure import Figure
 
 from geometry_io import build_geometry_snapshot, parse_geometry
-from grim_io import compute_dbke_from_linear, export_result_to_grim
+from grim_io import (
+    _ensure_grim_ext,
+    _suffix_for_incidence,
+    compute_dbke_from_linear,
+    export_result_to_grim,
+)
 from rcs_solver import (
     solve_monostatic_rcs_2d_certified,
     solve_monostatic_rcs_2d_survey,
@@ -70,6 +82,94 @@ def _result_kind(result: 'Dict[str, Any]') -> 'str':
     if str(result.get("scattering_mode", "")).strip().lower() == "bistatic":
         return "2d_bistatic"
     return "2d_monostatic"
+
+
+def _planned_export_paths(
+    result: 'Dict[str, Any]',
+    output_path: 'str',
+) -> 'List[str]':
+    """Return every path a solver result will publish before writing it."""
+
+    root = os.path.abspath(_ensure_grim_ext(output_path))
+    mode = str(result.get("scattering_mode", "monostatic")).strip().lower()
+    if mode != "bistatic":
+        return [root]
+    incidence_set = set()
+    for row in _result_rows(result):
+        try:
+            value = float(row.get("theta_inc_deg", math.nan))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            incidence_set.add(value)
+    incidence_values = sorted(incidence_set)
+    if not incidence_values:
+        raise ValueError("The bistatic result has no finite incidence angles.")
+    root_no_ext = root[:-5]
+    return [
+        f"{root_no_ext}_{_suffix_for_incidence(value)}.grim"
+        for value in incidence_values
+    ]
+
+
+def _native_library_available(
+    candidates: 'List[Path]', required_symbols: 'Tuple[str, ...]'
+) -> 'bool':
+    """Return whether one candidate loads and exposes the solver ABI."""
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            library = ctypes.CDLL(str(candidate))
+        except OSError:
+            continue
+        if all(hasattr(library, symbol) for symbol in required_symbols):
+            return True
+    return False
+
+
+def _native_acceleration_status(
+    backend: 'Path | None' = None,
+) -> 'Tuple[bool, bool, str]':
+    """Return visible FMM/BoR acceleration readiness for the desktop UI."""
+
+    root = Path(backend or Path(__file__).resolve().parent)
+    system_name = platform.system().lower()
+    machine_name = platform.machine().lower()
+    extensions = (".so", ".dylib", ".dll")
+
+    cython_near = any(
+        (root / f"fmm_near_cy{suffix}").is_file()
+        for suffix in machinery.EXTENSION_SUFFIXES
+    )
+    fmm_candidates = [
+        root / f"{base}{extension}"
+        for base in (
+            f"fmm_near.{system_name}-{machine_name}",
+            "fmm_near",
+        )
+        for extension in extensions
+    ]
+    fmm_ready = cython_near or _native_library_available(
+        fmm_candidates, ("compute_sk_blocks_batch_q",)
+    )
+
+    bor_candidates = [
+        root / f"{base}{extension}"
+        for base in (
+            f"bor_stream_kernel.{system_name}-{machine_name}",
+            "bor_stream_kernel",
+        )
+        for extension in extensions
+    ]
+    bor_ready = _native_library_available(
+        bor_candidates, ("sample_g", "sample_mfie", "sample_ibc")
+    )
+    fmm_text = "native" if fmm_ready else "Python fallback (~100× slower near field)"
+    bor_text = "native" if bor_ready else "NumPy fallback (~2–8× slower assembly)"
+    summary = f"2-D FMM: {fmm_text}.  BoR streaming: {bor_text}."
+    return fmm_ready, bor_ready, summary
 
 
 def _finite_unique_count(
@@ -585,9 +685,27 @@ class SolverTab(QWidget):
         options_form.addRow(self.lbl_obs_angles, self.edit_obs_angles)
         layout.addWidget(options_group)
 
+        performance_group = QGroupBox("Desktop Performance")
+        performance_layout = QVBoxLayout(performance_group)
+        _fmm_ready, _bor_ready, acceleration_summary = (
+            _native_acceleration_status()
+        )
+        self.lbl_acceleration = QLabel(acceleration_summary)
+        self.lbl_acceleration.setWordWrap(True)
+        self.lbl_acceleration.setToolTip(
+            "The numerical result is the same on the fallback paths, but a "
+            "large solve can take much longer. Run Launch_GRIM_Diagnostics.bat "
+            "from the combined folder for paths and platform details."
+        )
+        performance_layout.addWidget(self.lbl_acceleration)
+        layout.addWidget(performance_group)
+
         output_group = QGroupBox("Output")
         output_grid = QGridLayout(output_group)
-        self.edit_output = QLineEdit("rcs_output.grim")
+        self.edit_output = QLineEdit()
+        self.edit_output.setPlaceholderText(
+            "Automatic unique .grim beside the geometry (or in Documents/GRIM Outputs)"
+        )
         self.btn_browse_output = QPushButton("Browse...")
         self.chk_export_after_solve = QCheckBox("Export .grim automatically after solve")
         self.chk_export_after_solve.setChecked(True)
@@ -677,12 +795,69 @@ class SolverTab(QWidget):
         self.lbl_geo.setText(f"Using Geometry tab: {title} ({segment_count} segment(s)).")
 
     def _browse_output(self):
+        suggested = self.edit_output.text().strip()
+        if not suggested:
+            suggested = self._resolve_output_path("", self.last_source_path)
         fname, _ = QFileDialog.getSaveFileName(
-            self, "Select Output .grim", "rcs_output.grim", "GRIM Files (*.grim);;All Files (*)"
+            self, "Select Output .grim", suggested, "GRIM Files (*.grim);;All Files (*)"
         )
         if not fname:
             return
         self.edit_output.setText(fname)
+
+    @staticmethod
+    def _documents_output_dir() -> 'Path':
+        locations = getattr(QStandardPaths, "StandardLocation", QStandardPaths)
+        documents = str(
+            QStandardPaths.writableLocation(locations.DocumentsLocation) or ""
+        ).strip()
+        base = Path(documents).expanduser() if documents else Path.home() / "Documents"
+        return base / "GRIM Outputs"
+
+    def _resolve_output_path(self, requested: 'str', source_path: 'str') -> 'str':
+        """Resolve an explicit path or create a collision-free desktop default."""
+
+        source = Path(str(source_path or "")).expanduser()
+        default_dir = (
+            source.resolve().parent
+            if str(source_path or "").strip()
+            else self._documents_output_dir()
+        )
+        text = str(requested or "").strip()
+        if text:
+            candidate = Path(text).expanduser()
+            if not candidate.is_absolute():
+                candidate = default_dir / candidate
+            return os.path.abspath(_ensure_grim_ext(str(candidate)))
+
+        default_dir.mkdir(parents=True, exist_ok=True)
+        stem = source.stem if str(source_path or "").strip() else "rcs"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        candidate = default_dir / f"{stem}_rcs_{timestamp}.grim"
+        suffix = 2
+        while candidate.exists():
+            candidate = default_dir / f"{stem}_rcs_{timestamp}_{suffix}.grim"
+            suffix += 1
+        return str(candidate.resolve())
+
+    def _confirm_export_replacements(self, paths: 'List[str]') -> 'bool':
+        existing = [path for path in paths if os.path.exists(path)]
+        if not existing:
+            return True
+        shown = "\n".join(f"  {path}" for path in existing[:8])
+        if len(existing) > 8:
+            shown += f"\n  ... and {len(existing) - 8} more"
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        answer = QMessageBox.question(
+            self,
+            "Replace Existing GRIM Output?",
+            "The following output already exists:\n\n"
+            + shown
+            + "\n\nReplace it? The previous file cannot be recovered from GRIM.",
+            buttons.Yes | buttons.No,
+            buttons.No,
+        )
+        return answer == buttons.Yes
 
     def _toggle_advanced_settings(self, checked: 'bool'):
         self.advanced_settings_widget.setVisible(bool(checked))
@@ -973,7 +1148,24 @@ class SolverTab(QWidget):
 
         if self.chk_export_after_solve.isChecked():
             try:
-                out_text = self.edit_output.text().strip() or "rcs_output.grim"
+                requested_output = self.edit_output.text()
+                out_text = self._resolve_output_path(
+                    requested_output,
+                    source_path,
+                )
+                if requested_output.strip():
+                    self.edit_output.setText(out_text)
+                if not self._confirm_export_replacements(
+                    _planned_export_paths(result, out_text)
+                ):
+                    self.lbl_status.setText(
+                        write_summary
+                        + quality_suffix
+                        + mesh_suffix
+                        + " Automatic export was canceled; the result remains available."
+                    )
+                    self._set_solving_state(False)
+                    return
                 files = self._export_result_files(
                     result,
                     out_text,
@@ -1170,9 +1362,20 @@ class SolverTab(QWidget):
         if not self.last_result:
             QMessageBox.information(self, "Export", "No solver result exists yet. Run the solver first.")
             return
-        out_text = self.edit_output.text().strip()
-        if not out_text:
-            QMessageBox.warning(self, "Export", "Please provide an output path.")
+        out_text = self._resolve_output_path(
+            self.edit_output.text(),
+            self.last_source_path,
+        )
+        self.edit_output.setText(out_text)
+        try:
+            planned = _planned_export_paths(self.last_result, out_text)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Error", str(exc))
+            return
+        if not self._confirm_export_replacements(planned):
+            self.lbl_status.setText(
+                "Export canceled; the solver result remains available."
+            )
             return
         try:
             files = self._export_result_files(

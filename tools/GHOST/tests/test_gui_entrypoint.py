@@ -7,6 +7,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -58,6 +59,26 @@ class TestGuiEntrypoint(unittest.TestCase):
             )
             self.assertEqual(received, [(["example.grim"], "2d")])
             self.assertFalse(workspace.solve_is_running())
+        finally:
+            workspace.close()
+
+    def test_workspace_forwards_typed_freddy_artifact_to_geometry(self):
+        workspace = GhostWorkspace()
+        try:
+            with mock.patch.object(
+                workspace.geometry_tab,
+                "attach_material_artifact",
+                return_value=True,
+            ) as attach:
+                self.assertTrue(
+                    workspace.attach_material_artifact(
+                        "ibc", "C:/exports/nominal.csv"
+                    )
+                )
+            attach.assert_called_once_with(
+                "ibc", "C:/exports/nominal.csv"
+            )
+            self.assertIs(workspace.currentWidget(), workspace.geometry_tab)
         finally:
             workspace.close()
 

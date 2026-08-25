@@ -51,24 +51,30 @@ def _load_native():
     machine = platform.machine().lower()
     here = os.path.dirname(os.path.abspath(__file__))
     for base in (f"bor_stream_kernel.{sysname}-{machine}", "bor_stream_kernel"):
-        path = os.path.join(here, base + ".so")
-        if not os.path.exists(path):
-            continue
-        try:
-            lib = ctypes.CDLL(path)
-        except OSError:
-            continue
-        dp = ctypes.POINTER(ctypes.c_double)
-        ci = ctypes.c_int
-        cd = ctypes.c_double
-        lib.sample_g.argtypes = [ci, ci, ci, dp, dp, dp, dp, cd, dp, dp]
-        lib.sample_g.restype = None
-        bracket_args = [ci, ci, ci] + [dp] * 8 + [cd, dp, dp] + [dp] * 4
-        lib.sample_mfie.argtypes = bracket_args
-        lib.sample_mfie.restype = None
-        lib.sample_ibc.argtypes = bracket_args
-        lib.sample_ibc.restype = None
-        return lib
+        for extension in (".so", ".dylib", ".dll"):
+            path = os.path.join(here, base + extension)
+            if not os.path.exists(path):
+                continue
+            try:
+                lib = ctypes.CDLL(path)
+            except OSError:
+                continue
+            if not all(
+                hasattr(lib, symbol)
+                for symbol in ("sample_g", "sample_mfie", "sample_ibc")
+            ):
+                continue
+            dp = ctypes.POINTER(ctypes.c_double)
+            ci = ctypes.c_int
+            cd = ctypes.c_double
+            lib.sample_g.argtypes = [ci, ci, ci, dp, dp, dp, dp, cd, dp, dp]
+            lib.sample_g.restype = None
+            bracket_args = [ci, ci, ci] + [dp] * 8 + [cd, dp, dp] + [dp] * 4
+            lib.sample_mfie.argtypes = bracket_args
+            lib.sample_mfie.restype = None
+            lib.sample_ibc.argtypes = bracket_args
+            lib.sample_ibc.restype = None
+            return lib
     return None
 
 
@@ -88,7 +94,8 @@ def _notice_numpy_fallback():
     here = os.path.dirname(os.path.abspath(__file__))
     tag = f"{platform.system().lower()}-{platform.machine().lower()}"
     others = [f for f in sorted(os.listdir(here))
-              if f.startswith("bor_stream_kernel.") and f.endswith(".so")
+              if f.startswith("bor_stream_kernel.")
+              and os.path.splitext(f)[1].lower() in {".so", ".dylib", ".dll"}
               and tag not in f]
     hint = (f" (found {', '.join(others)} -- built for a DIFFERENT platform, "
             "so it was correctly skipped)" if others else "")

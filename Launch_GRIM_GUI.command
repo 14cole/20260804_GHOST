@@ -3,7 +3,6 @@
 set -u
 
 launcher_dir="${0:A:h}"
-repo_root="${launcher_dir:h:h}"
 cd "$launcher_dir" || exit 1
 check_only=0
 if [[ "${1:-}" == "--check" ]]; then
@@ -16,19 +15,20 @@ pause_before_exit() {
     fi
 }
 
-if [[ ! -f "Backend/ghost_gui.py" ]]; then
-    echo "ERROR: Backend/ghost_gui.py was not found."
+if [[ ! -f "GRIM_Revised_2/grim_cut_gui.py" ]]; then
+    echo "ERROR: GRIM_Revised_2/grim_cut_gui.py was not found."
+    echo "Keep the complete combined GRIM folder together."
     pause_before_exit
     exit 1
 fi
 
-matplotlib_dir="${TMPDIR:-/tmp}/ghost-matplotlib"
+matplotlib_dir="${TMPDIR:-/tmp}/grim-matplotlib"
 mkdir -p "$matplotlib_dir"
 export MPLCONFIGDIR="$matplotlib_dir"
 
 typeset -a python_candidates
 python_candidates=(
-    "$repo_root/.venv/bin/python3"
+    "$launcher_dir/.venv/bin/python3"
 )
 if [[ -n "${VIRTUAL_ENV:-}" ]]; then
     python_candidates+=("$VIRTUAL_ENV/bin/python3")
@@ -44,7 +44,7 @@ if [[ -n "$path_python" ]]; then
     python_candidates+=("$path_python")
 fi
 
-diagnostic_file="${TMPDIR:-/tmp}/ghost-gui-launch-$$.log"
+diagnostic_file="${TMPDIR:-/tmp}/grim-gui-launch-$$.log"
 : > "$diagnostic_file"
 selected_python=""
 typeset -A tried_python
@@ -54,28 +54,31 @@ for candidate in "${python_candidates[@]}"; do
     [[ -n "${tried_python[$resolved_candidate]:-}" ]] && continue
     tried_python[$resolved_candidate]=1
     echo "--- $candidate ---" >> "$diagnostic_file"
-    if "$candidate" "Backend/ghost_gui.py" --check >> "$diagnostic_file" 2>&1; then
+    if GRIM_MODULE_DIR="$launcher_dir/GRIM_Revised_2" "$candidate" -c \
+        'import os, sys; sys.path.insert(0, os.environ["GRIM_MODULE_DIR"]); import grim_cut_gui' \
+        >> "$diagnostic_file" 2>&1; then
         selected_python="$candidate"
         break
     fi
 done
 
 if [[ -z "$selected_python" ]]; then
-    echo "ERROR: No installed Python interpreter could import the GHOST GUI."
+    echo "ERROR: No preferred Python interpreter could import GRIM."
     echo
     echo "Interpreter diagnostics:"
     cat "$diagnostic_file"
     echo
-    echo "Install into the Python you want to use with:"
-    echo "    /path/to/python3 -m pip install numpy scipy matplotlib PySide6"
+    echo "From this folder, create the shared environment and install with:"
+    echo "    python3 -m venv .venv"
+    echo "    .venv/bin/python3 -m pip install -e ."
     echo
     pause_before_exit
     exit 1
 fi
 
 if (( check_only )); then
-    echo "GHOST GUI will use: $selected_python"
+    echo "GRIM GUI will use: $selected_python"
     exit 0
 fi
 
-exec "$selected_python" "Backend/ghost_gui.py"
+exec "$selected_python" "$launcher_dir/GRIM_Revised_2/grim_cut_gui.py"

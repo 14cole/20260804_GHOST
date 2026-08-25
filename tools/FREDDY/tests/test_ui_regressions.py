@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
-from ibc.compute import MaterialTable, MixComponent
+from ibc.compute import LayerConfig, MaterialTable, MixComponent
 
 try:
     from ibc.ui import DARK_THEME, LIGHT_THEME, ImpedanceGui
@@ -99,6 +101,77 @@ class MaterialMixUiTests(unittest.TestCase):
         state._task_running = True
         self.assertTrue(state.job_is_running())
         self.assertFalse(state.can_close())
+
+    def test_existing_outputs_require_one_explicit_replacement_confirmation(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                first = Path(folder) / "nominal.csv"
+                second = Path(folder) / "uncertainty.csv"
+                first.write_text("old nominal", encoding="utf-8")
+                second.write_text("old uncertainty", encoding="utf-8")
+                buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+                with mock.patch.object(
+                    QMessageBox, "question", return_value=buttons.No
+                ) as question:
+                    allowed = workspace._confirm_output_replacements(
+                        [first, second, first], operation="Impedance"
+                    )
+                self.assertFalse(allowed)
+                question.assert_called_once()
+                self.assertIn("2 output file(s)", question.call_args.args[2])
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_ibc_batch_preflight_shows_count_and_canonical_names(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                workspace.layers = [
+                    LayerConfig(
+                        thickness_in=0.020,
+                        anisotropic=False,
+                        file_0deg="coating.csv",
+                        file_90deg="",
+                        polarization_deg=0.0,
+                    )
+                ]
+                workspace.ibc_batch_output_dir_var.set(folder)
+                workspace.ibc_batch_prefix_var.set("skin")
+                workspace._refresh_layers()
+
+                preview = workspace.ibc_batch_preview_label.text()
+                self.assertIn("16 nominal PEC-backed IBC file(s)", preview)
+                self.assertIn("skin_15mil.csv", preview)
+                self.assertIn("skin_30mil.csv", preview)
+                self.assertTrue(workspace.ibc_batch_export_btn.isEnabled())
+                self.assertIn("IBC Batch", workspace._mode_labels)
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_ibc_batch_existing_files_use_one_overwrite_prompt(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                workspace.ibc_batch_output_dir_var.set(folder)
+                plan = workspace._plan_ibc_batch()
+                plan[0].path.write_text("old", encoding="utf-8")
+                plan[-1].path.write_text("old", encoding="utf-8")
+                buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+                with mock.patch.object(
+                    QMessageBox, "question", return_value=buttons.Yes
+                ) as question:
+                    allowed = workspace._confirm_output_replacements(
+                        [item.path for item in plan], operation="IBC Batch"
+                    )
+                self.assertTrue(allowed)
+                question.assert_called_once()
+                self.assertIn("2 output file(s)", question.call_args.args[2])
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
 
     def test_standalone_close_is_blocked_while_background_job_runs(self) -> None:
         workspace = ImpedanceGui()

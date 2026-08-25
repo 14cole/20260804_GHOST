@@ -3,6 +3,7 @@
 set -u
 
 launcher_dir="${0:A:h}"
+repo_root="${launcher_dir:h:h}"
 cd "$launcher_dir" || exit 1
 check_only=0
 if [[ "${1:-}" == "--check" ]]; then
@@ -28,7 +29,7 @@ export MPLCONFIGDIR="$matplotlib_dir"
 
 typeset -a python_candidates
 python_candidates=(
-    "$launcher_dir/.venv/bin/python3"
+    "$repo_root/.venv/bin/python3"
 )
 if [[ -n "${VIRTUAL_ENV:-}" ]]; then
     python_candidates+=("$VIRTUAL_ENV/bin/python3")

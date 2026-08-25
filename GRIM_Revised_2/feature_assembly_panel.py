@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, Iterable, Mapping, Protocol, runtime_checkable
 
 
 UNIT_CHOICES = (
@@ -237,6 +237,147 @@ class FeatureBuildDispatch:
 
     plan: Any
     output_path: str
+
+
+@dataclass(frozen=True)
+class LoadedDatasetEntry:
+    """Small, file-oriented dataset reference accepted by the Assembly UI.
+
+    Feature assembly is intentionally a file-backed workflow: the GHOST
+    backend consumes response paths rather than live ``RcsGrid`` objects.
+    ``dirty`` therefore prevents an inherited source path from being offered
+    as though it represented the current in-memory data.
+    """
+
+    dataset_id: str
+    name: str
+    path: str = ""
+    dirty: bool = False
+    _usable_path: str = field(init=False, repr=False)
+    _unavailable_reason: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        dataset_id = str(self.dataset_id).strip()
+        name = str(self.name).strip()
+        path = str(self.path or "").strip()
+        dirty = bool(self.dirty)
+        if not dataset_id:
+            raise ValueError(
+                "An Assembly loaded-dataset entry requires a stable dataset_id."
+            )
+        if not name:
+            raise ValueError(
+                "An Assembly loaded-dataset entry requires a display name."
+            )
+        if dirty or not path:
+            usable_path = ""
+            reason = "save unsaved derived dataset first"
+        else:
+            candidate = Path(path)
+            if candidate.suffix.casefold() != ".grim":
+                usable_path = ""
+                reason = "not a .grim file"
+            elif not candidate.is_file():
+                usable_path = ""
+                reason = "saved file is missing"
+            else:
+                usable_path = str(candidate)
+                reason = ""
+        object.__setattr__(self, "dataset_id", dataset_id)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "dirty", dirty)
+        object.__setattr__(self, "_usable_path", usable_path)
+        object.__setattr__(self, "_unavailable_reason", reason)
+
+    @property
+    def usable_path(self) -> str:
+        """Return the backend-safe path, or an empty string when unavailable."""
+
+        return self._usable_path
+
+    @property
+    def unavailable_reason(self) -> str:
+        return self._unavailable_reason
+
+
+def _entry_value(value: Any, *names: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        for name in names:
+            if name in value:
+                return value[name]
+        return default
+    for name in names:
+        if hasattr(value, name):
+            return getattr(value, name)
+    return default
+
+
+def _coerce_loaded_dataset_entry(value: Any) -> LoadedDatasetEntry:
+    """Accept shell-facing mappings, tuples, or objects with familiar names."""
+
+    if isinstance(value, LoadedDatasetEntry):
+        return value
+    if isinstance(value, (tuple, list)):
+        if len(value) == 3:
+            dataset_id, name, path = value
+            return LoadedDatasetEntry(
+                str(dataset_id or ""), str(name or ""), _clean_path(path)
+            )
+        if len(value) == 4:
+            dataset_id, name, path, dirty = value
+            return LoadedDatasetEntry(
+                str(dataset_id or ""),
+                str(name or ""),
+                _clean_path(path),
+                bool(dirty),
+            )
+        raise TypeError(
+            "Assembly loaded-dataset tuples must contain "
+            "(dataset_id, name, path[, dirty])."
+        )
+
+    dataset_id = _entry_value(value, "dataset_id", "stable_id", "id", "key")
+    name = _entry_value(value, "name", "display_name", "label")
+    path = _entry_value(
+        value,
+        "path",
+        "source",
+        "source_path",
+        "file_path",
+        "output_path",
+        default="",
+    )
+    dirty = _entry_value(
+        value,
+        "dirty",
+        "is_dirty",
+        "unsaved",
+        "is_unsaved",
+        default=False,
+    )
+    if dataset_id is None and name is None and path is None:
+        raise TypeError(
+            "Assembly loaded-dataset entries must be mappings, "
+            "(dataset_id, name, path[, dirty]) tuples, or objects with "
+            "matching attributes."
+        )
+    return LoadedDatasetEntry(
+        str(dataset_id or ""),
+        str(name or ""),
+        _clean_path(path),
+        bool(dirty),
+    )
+
+
+def _coerce_loaded_dataset_catalog(
+    entries: Iterable[Any],
+) -> tuple[LoadedDatasetEntry, ...]:
+    catalog = tuple(_coerce_loaded_dataset_entry(entry) for entry in entries)
+    identifiers = [entry.dataset_id for entry in catalog]
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("Assembly loaded dataset_id values must be unique.")
+    return catalog
 
 
 def _clean_path(value: Any) -> str:
@@ -523,6 +664,7 @@ try:  # Keep the model importable on headless/minimal installations.
         QHeaderView,
         QLabel,
         QLineEdit,
+        QMenu,
         QPushButton,
         QScrollArea,
         QTabWidget,
@@ -558,8 +700,101 @@ if GUI_AVAILABLE:
                 self.succeeded.emit(result)
 
 
+    class _LoadedDatasetButton(QPushButton):
+        """Menu button that exposes only backend-usable loaded artifacts."""
+
+        path_selected = Signal(str)
+        notice = Signal(str)
+
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__("Use loaded…", parent)
+            self.setAutoDefault(False)
+            self._catalog: tuple[LoadedDatasetEntry, ...] = ()
+            self._menu = QMenu(self)
+            self.setMenu(self._menu)
+            self._menu.aboutToShow.connect(self._announce_constraints)
+            self.set_catalog(())
+
+        def catalog_menu(self) -> QMenu:
+            """Return the owned menu for focused UI tests and shell tooling."""
+
+            return self._menu
+
+        def set_catalog(
+            self, entries: tuple[LoadedDatasetEntry, ...]
+        ) -> None:
+            self._catalog = tuple(entries)
+            self._menu.clear()
+            usable = [entry for entry in self._catalog if entry.usable_path]
+            unavailable = [entry for entry in self._catalog if not entry.usable_path]
+
+            if usable:
+                for entry in usable:
+                    file_name = Path(entry.usable_path).name
+                    action = self._menu.addAction(f"{entry.name} — {file_name}")
+                    action.setData(entry.dataset_id)
+                    action.setToolTip(entry.usable_path)
+                    action.setStatusTip(entry.usable_path)
+                    action.triggered.connect(
+                        lambda _checked=False, path=entry.usable_path: (
+                            self.path_selected.emit(path)
+                        )
+                    )
+            else:
+                action = self._menu.addAction("No saved .grim datasets available")
+                action.setEnabled(False)
+
+            if unavailable:
+                self._menu.addSeparator()
+                heading = self._menu.addAction(
+                    "Save unsaved derived datasets first"
+                )
+                heading.setEnabled(False)
+                for entry in unavailable:
+                    reason = entry.unavailable_reason
+                    action = self._menu.addAction(f"{entry.name} — {reason}")
+                    action.setData(entry.dataset_id)
+                    action.setToolTip(_clean_path(entry.path) or reason)
+                    action.setEnabled(False)
+
+            usable_count = len(usable)
+            unavailable_count = len(unavailable)
+            if usable_count:
+                tooltip = (
+                    f"Choose one of {usable_count} loaded, saved .grim "
+                    "dataset(s)."
+                )
+                if unavailable_count:
+                    tooltip += (
+                        f" {unavailable_count} unsaved or unavailable "
+                        "dataset(s) are disabled; save unsaved derived "
+                        "datasets first."
+                    )
+            else:
+                tooltip = (
+                    "No usable saved .grim dataset is loaded. Save unsaved "
+                    "derived datasets first, or use Browse…."
+                )
+            self.setToolTip(tooltip)
+
+        def _announce_constraints(self) -> None:
+            usable_count = sum(bool(entry.usable_path) for entry in self._catalog)
+            unavailable_count = len(self._catalog) - usable_count
+            if unavailable_count:
+                self.notice.emit(
+                    "Assembly requires an existing .grim file. Save unsaved "
+                    "derived datasets first; unavailable entries are disabled."
+                )
+            elif not usable_count:
+                self.notice.emit(
+                    "No saved .grim dataset is currently loaded. Save the "
+                    "required dataset first, or use Browse…."
+                )
+
+
     class _PathPicker(QWidget):
         editing_finished = Signal()
+        catalog_notice = Signal(str)
 
         def __init__(
             self,
@@ -567,6 +802,7 @@ if GUI_AVAILABLE:
             caption: str,
             file_filter: str,
             save: bool = False,
+            allow_loaded_dataset: bool = False,
             parent: QWidget | None = None,
         ) -> None:
             super().__init__(parent)
@@ -574,11 +810,17 @@ if GUI_AVAILABLE:
             self.file_filter = file_filter
             self.save = bool(save)
             self.edit = QLineEdit(self)
+            self.loaded_button: _LoadedDatasetButton | None = None
             self.button = QPushButton("Browse…", self)
             self.button.setAutoDefault(False)
             layout = QHBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(self.edit, 1)
+            if allow_loaded_dataset:
+                self.loaded_button = _LoadedDatasetButton(self)
+                self.loaded_button.path_selected.connect(self._use_loaded_path)
+                self.loaded_button.notice.connect(self.catalog_notice.emit)
+                layout.addWidget(self.loaded_button)
             layout.addWidget(self.button)
             self.button.clicked.connect(self._browse)
             self.edit.editingFinished.connect(self.editing_finished.emit)
@@ -588,6 +830,17 @@ if GUI_AVAILABLE:
 
         def set_path(self, path: str) -> None:
             self.edit.setText(_clean_path(path))
+
+        def set_loaded_dataset_catalog(
+            self, entries: tuple[LoadedDatasetEntry, ...]
+        ) -> None:
+            if self.loaded_button is not None:
+                self.loaded_button.set_catalog(entries)
+
+        @Slot(str)
+        def _use_loaded_path(self, path: str) -> None:
+            self.set_path(path)
+            self.editing_finished.emit()
 
         def _browse(self) -> None:
             start = self.path()
@@ -609,14 +862,22 @@ if GUI_AVAILABLE:
 
     class _DatasetMappingEditor(QWidget):
         mapping_changed = Signal()
+        catalog_notice = Signal(str)
 
         def __init__(self, empty_text: str, parent: QWidget | None = None) -> None:
             super().__init__(parent)
             self._empty_text = empty_text
             self._ids: tuple[str, ...] = ()
-            self.table = QTableWidget(0, 3, self)
+            self._catalog: tuple[LoadedDatasetEntry, ...] = ()
+            self._loaded_buttons: dict[str, _LoadedDatasetButton] = {}
+            self.table = QTableWidget(0, 4, self)
             self.table.setHorizontalHeaderLabels(
-                ["CSV dataset_id", "Required OPN-FRD response (.grim)", ""]
+                [
+                    "CSV dataset_id",
+                    "Required OPN-FRD response (.grim)",
+                    "Use loaded",
+                    "",
+                ]
             )
             self.table.setToolTip(
                 "Every dataset_id used by the placement CSV must map to the "
@@ -629,6 +890,7 @@ if GUI_AVAILABLE:
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
             self.empty_label = QLabel(empty_text, self)
             self.empty_label.setWordWrap(True)
             self.completeness_label = QLabel(self)
@@ -691,6 +953,7 @@ if GUI_AVAILABLE:
             if mapping is not None:
                 existing.update({str(key): _clean_path(value) for key, value in mapping.items()})
             self._ids = tuple(str(value) for value in dataset_ids)
+            self._loaded_buttons = {}
             self.table.blockSignals(True)
             self.table.setRowCount(len(self._ids))
             for row, dataset_id in enumerate(self._ids):
@@ -702,17 +965,42 @@ if GUI_AVAILABLE:
                 self.table.setItem(
                     row, 1, QTableWidgetItem(existing.get(dataset_id, ""))
                 )
+                loaded_button = _LoadedDatasetButton(self.table)
+                loaded_button.set_catalog(self._catalog)
+                loaded_button.path_selected.connect(
+                    lambda path, key=dataset_id: self.set_path(key, path)
+                )
+                loaded_button.notice.connect(self.catalog_notice.emit)
+                self._loaded_buttons[dataset_id] = loaded_button
+                self.table.setCellWidget(row, 2, loaded_button)
                 button = QPushButton("Browse…", self.table)
                 button.clicked.connect(
                     lambda _checked=False, key=dataset_id: self._browse(key)
                 )
-                self.table.setCellWidget(row, 2, button)
+                self.table.setCellWidget(row, 3, button)
             self.table.blockSignals(False)
             has_rows = bool(self._ids)
             self.empty_label.setVisible(not has_rows)
             self.table.setVisible(has_rows)
             self.table.setMinimumHeight(112 if has_rows else 0)
             self._update_completeness()
+
+        def set_loaded_dataset_catalog(
+            self, entries: tuple[LoadedDatasetEntry, ...]
+        ) -> None:
+            self._catalog = tuple(entries)
+            for button in self._loaded_buttons.values():
+                button.set_catalog(self._catalog)
+
+        def loaded_dataset_button(
+            self, dataset_id: str
+        ) -> _LoadedDatasetButton:
+            """Return the row's chooser without exposing table-column details."""
+
+            try:
+                return self._loaded_buttons[str(dataset_id)]
+            except KeyError as exc:
+                raise KeyError(f"Unknown dataset_id {dataset_id!r}.") from exc
 
         def set_path(self, dataset_id: str, path: str) -> None:
             try:
@@ -756,6 +1044,7 @@ if GUI_AVAILABLE:
             self._active_kind = ""
             self._discovery_paths: tuple[str, str] | None = None
             self._preview_is_current = False
+            self._loaded_dataset_catalog: tuple[LoadedDatasetEntry, ...] = ()
             self._build_ui()
 
         def _build_ui(self) -> None:
@@ -804,6 +1093,7 @@ if GUI_AVAILABLE:
             self.base_picker = _PathPicker(
                 caption="Choose clean-body/base GRIM",
                 file_filter="GRIM response (*.grim);;All files (*)",
+                allow_loaded_dataset=True,
             )
             self.surface_picker = _PathPicker(
                 caption="Choose body surface mesh",
@@ -1110,6 +1400,15 @@ if GUI_AVAILABLE:
             self.shadow_bias.editingFinished.connect(self._mark_preview_stale)
             self.point_mapping.mapping_changed.connect(self._mapping_changed)
             self.line_mapping.mapping_changed.connect(self._mapping_changed)
+            self.base_picker.catalog_notice.connect(
+                self._loaded_dataset_notice
+            )
+            self.point_mapping.catalog_notice.connect(
+                self._loaded_dataset_notice
+            )
+            self.line_mapping.catalog_notice.connect(
+                self._loaded_dataset_notice
+            )
             self.point_format_button.toggled.connect(
                 lambda checked: self._toggle_schema_help("point", checked)
             )
@@ -1133,6 +1432,27 @@ if GUI_AVAILABLE:
 
         def service(self) -> Any:
             return self._service
+
+        def set_loaded_dataset_catalog(self, entries: Iterable[Any]) -> None:
+            """Offer saved, file-backed GRIM rows without replacing Browse.
+
+            The combined shell may pass its existing stable dataset catalog.
+            Entries can be :class:`LoadedDatasetEntry` instances, mappings,
+            ``(dataset_id, name, path[, dirty])`` tuples, or objects exposing
+            equivalent attributes. Dirty/in-memory/missing entries remain
+            visible as disabled explanations so users know to save first.
+            """
+
+            catalog = _coerce_loaded_dataset_catalog(entries)
+            self._loaded_dataset_catalog = catalog
+            self.base_picker.set_loaded_dataset_catalog(catalog)
+            self.point_mapping.set_loaded_dataset_catalog(catalog)
+            self.line_mapping.set_loaded_dataset_catalog(catalog)
+
+        def loaded_dataset_catalog(self) -> tuple[LoadedDatasetEntry, ...]:
+            """Return the last normalized catalog snapshot."""
+
+            return self._loaded_dataset_catalog
 
         def set_base_grim(self, path: str) -> None:
             self.base_picker.set_path(path)
@@ -1162,6 +1482,10 @@ if GUI_AVAILABLE:
 
         def set_output_grim(self, path: str) -> None:
             self.output_picker.set_path(path)
+
+        @Slot(str)
+        def _loaded_dataset_notice(self, message: str) -> None:
+            self.status_changed.emit(message)
 
         def job_is_running(self) -> bool:
             return bool(self._thread is not None and self._thread.isRunning())
@@ -1552,6 +1876,7 @@ __all__ = [
     "FeatureAssemblyValues",
     "FeatureBuildDispatch",
     "FeatureWorkflowAdapter",
+    "LoadedDatasetEntry",
     "coerce_feature_workflow",
     "placement_csv_template_text",
     "write_placement_csv_template",

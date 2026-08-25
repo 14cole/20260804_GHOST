@@ -691,6 +691,30 @@ class PowerPointComBridge:
             raise
         return application, True
 
+    def preflight(self) -> None:
+        """Fail before plot rendering when desktop PowerPoint is unavailable."""
+
+        application = None
+        com_initialized = False
+        try:
+            application, com_initialized = self._new_application()
+            try:
+                application.Visible = MSO_FALSE
+            except Exception:
+                pass
+        except Exception as exc:
+            raise RuntimeError(
+                f"PowerPoint export is unavailable: {exc}"
+            ) from exc
+        finally:
+            if application is not None:
+                try:
+                    application.Quit()
+                except Exception:
+                    pass
+            if com_initialized and pythoncom is not None:
+                pythoncom.CoUninitialize()
+
     @staticmethod
     def _open_presentation(application: Any, template_path: Path | None) -> Any:
         if template_path is None:
@@ -906,6 +930,9 @@ def export_powerpoint_report(
 
     output, template = _validate_export_paths(destination, template_path)
     bridge: PresentationWriter = writer or PowerPointComBridge()
+    preflight = getattr(bridge, "preflight", None)
+    if callable(preflight):
+        preflight()
     temp_parent_path = (
         Path(temporary_parent).expanduser().resolve()
         if temporary_parent is not None

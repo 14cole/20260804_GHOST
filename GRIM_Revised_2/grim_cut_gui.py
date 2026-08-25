@@ -24,11 +24,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QListWidgetItem,
     QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -48,7 +49,13 @@ from freddy_integration import FreddyIntegrationWidget
 from ghost_integration import GhostIntegrationWidget, load_ghost_module
 from grim_dataset import RcsGrid
 from grim_headless import is_supported_path
-from grim_cut_dataset_mixin import DATASET_ID_ROLE, DatasetOpsMixin
+from grim_python import PythonScriptRecorder
+from grim_cut_dataset_mixin import (
+    DATASET_DIRTY_ROLE,
+    DATASET_ID_ROLE,
+    DATASET_PATH_ROLE,
+    DatasetOpsMixin,
+)
 from grim_cut_plot_mixin import PlotOpsMixin
 from ppt_workspace import DatasetCatalogEntry, PptWorkspace
 from plot_models import PlotContext
@@ -512,7 +519,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         sec_datasets.addLayout(dataset_actions)
 
         self.table = DatasetTable(0, 3)
-        self.table.setHorizontalHeaderLabels(["Name", "File", "History"])
+        self.table.setHorizontalHeaderLabels(["Name", "Source / Output", "History"])
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(
@@ -538,12 +545,19 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.list_az = QListWidget()
         for widget in (self.list_pol, self.list_freq, self.list_elev, self.list_az):
             widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-            widget.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+            # Axis values are physical coordinates, not free-form labels.  In-
+            # place edits used to mutate the source grid without validating
+            # ordering or uniqueness, so selectors are intentionally read-only.
+            widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
             widget.setMinimumHeight(96)
-        lbl_pol = ClickableLabel("Pol")
-        lbl_freq = ClickableLabel("Freq (GHz)")
-        lbl_elev = ClickableLabel("El (deg)")
-        lbl_az = ClickableLabel("Az (deg)")
+        self.lbl_pol = ClickableLabel("Polarization")
+        self.lbl_freq = ClickableLabel("Frequency")
+        self.lbl_elev = ClickableLabel("Elevation")
+        self.lbl_az = ClickableLabel("Azimuth")
+        lbl_pol = self.lbl_pol
+        lbl_freq = self.lbl_freq
+        lbl_elev = self.lbl_elev
+        lbl_az = self.lbl_az
         for lbl in (lbl_pol, lbl_freq, lbl_elev, lbl_az):
             lbl.setObjectName("paramHeader")
         # One row of headers, one row of lists, four columns across.
@@ -702,6 +716,47 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.freddy_integration = FreddyIntegrationWidget(self)
         self.main_tabs.addTab(self.freddy_integration, "FREDDY")
 
+        # A deliberately small, read-only view of the semantic dataset/plot
+        # operations performed in this session.  The recorder ignores UI
+        # navigation, selection gestures, zooming, and solver/tool tabs.
+        self.tab_python = QWidget()
+        python_layout = QVBoxLayout(self.tab_python)
+        python_layout.setContentsMargins(14, 14, 14, 14)
+        python_layout.setSpacing(8)
+
+        python_header = QHBoxLayout()
+        python_title = QLabel("Headless dataset and plot script")
+        python_title.setObjectName("plotTitle")
+        python_header.addWidget(python_title)
+        python_header.addStretch(1)
+        self.btn_python_clear = QPushButton("Clear")
+        self.btn_python_copy = QPushButton("Copy")
+        self.btn_python_save = QPushButton("Save As…")
+        python_header.addWidget(self.btn_python_clear)
+        python_header.addWidget(self.btn_python_copy)
+        python_header.addWidget(self.btn_python_save)
+        python_layout.addLayout(python_header)
+
+        python_hint = QLabel(
+            "Successful dataset operations and supported rectangular/polar azimuth, "
+            "frequency, and elevation-sweep plots appear here. PBP and other plot "
+            "modes are noted but not emitted as runnable code. Tab changes, zoom, "
+            "pan, and selection gestures are not recorded."
+        )
+        python_hint.setWordWrap(True)
+        python_layout.addWidget(python_hint)
+        self.python_script_view = QPlainTextEdit()
+        self.python_script_view.setReadOnly(True)
+        self.python_script_view.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.NoWrap
+        )
+        python_layout.addWidget(self.python_script_view, 1)
+
+        self.python_recorder = PythonScriptRecorder(
+            self.python_script_view.setPlainText
+        )
+        self.main_tabs.addTab(self.tab_python, "Python")
+
         try:
             feature_service = load_ghost_module(
                 "feature_workflow", self.ghost_integration.backend_path
@@ -714,6 +769,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
         self.status = self.statusBar()
         self.status.showMessage("Ready")
+
+        self.btn_python_clear.clicked.connect(self._clear_python_script)
+        self.btn_python_copy.clicked.connect(self._copy_python_script)
+        self.btn_python_save.clicked.connect(self._save_python_script)
 
         self.active_dataset: RcsGrid | None = None
         self._dataset_selection_order: list[int] = []
@@ -762,6 +821,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.ghost_integration.files_exported.connect(
             self._on_ghost_files_exported
         )
+        freddy_attach = getattr(
+            self.freddy_integration, "attach_to_ghost_requested", None
+        )
+        ghost_attach = getattr(
+            self.ghost_integration, "attach_material_artifact", None
+        )
+        if callable(getattr(freddy_attach, "connect", None)) and callable(
+            ghost_attach
+        ):
+            freddy_attach.connect(ghost_attach)
         self.table.itemSelectionChanged.connect(self._on_dataset_selection_changed)
         self.table.itemChanged.connect(self._on_dataset_table_item_changed)
         self.table.customContextMenuRequested.connect(self._on_dataset_context_menu)
@@ -777,10 +846,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.list_freq.itemSelectionChanged.connect(self._on_param_selection_changed)
         self.list_elev.itemSelectionChanged.connect(self._on_param_selection_changed)
         self.list_az.itemSelectionChanged.connect(self._on_param_selection_changed)
-        self._connect_param_list(self.list_pol, "polarization")
-        self._connect_param_list(self.list_freq, "frequency")
-        self._connect_param_list(self.list_elev, "elevation")
-        self._connect_param_list(self.list_az, "azimuth")
         lbl_pol.doubleClicked.connect(lambda: self.list_pol.selectAll())
         lbl_freq.doubleClicked.connect(lambda: self.list_freq.selectAll())
         lbl_elev.doubleClicked.connect(lambda: self.list_elev.selectAll())
@@ -821,6 +886,23 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 controls["pan"].toggled.connect(self._on_pan_toggled)
             if "auto_scale" in controls:
                 controls["auto_scale"].toggled.connect(self._on_auto_scale_toggled)
+            for recorded_mode in (
+                "azimuth_rect",
+                "azimuth_polar",
+                "frequency",
+                "elevation_sweep",
+                "waterfall",
+                "compare",
+                "isar_image",
+                "az_vs_range",
+            ):
+                button = controls.get(recorded_mode)
+                if button is not None:
+                    button.clicked.connect(
+                        lambda _checked=False, mode=recorded_mode: (
+                            self._on_explicit_plot_clicked(mode)
+                        )
+                    )
 
         self.btn_coherent_add.clicked.connect(self._coherent_add_selected)
         self.btn_coherent_sub.clicked.connect(self._coherent_sub_selected)
@@ -941,6 +1023,34 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
         self._notify_dataset_catalog_changed()
         self._update_plot_color_buttons()
+
+    def _clear_python_script(self) -> None:
+        self.python_recorder.clear()
+        self.status.showMessage("Python script cleared.")
+
+    def _copy_python_script(self) -> None:
+        QApplication.clipboard().setText(self.python_recorder.script)
+        self.status.showMessage("Python script copied to the clipboard.")
+
+    def _save_python_script(self) -> None:
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Python Script",
+            "grim_workflow.py",
+            "Python Files (*.py);;All Files (*)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".py"):
+            path = f"{path}.py"
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(self.python_recorder.script)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save Python Script Failed", str(exc))
+            self.status.showMessage(f"Python script save failed: {exc}")
+            return
+        self.status.showMessage(f"Python script saved: {os.path.abspath(path)}")
 
     def dragEnterEvent(self, event) -> None:
         if _extract_supported_drop_paths(event.mimeData()):
@@ -1547,9 +1657,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 dataset_id = uuid.uuid4().hex
                 name_item.setData(DATASET_ID_ROLE, dataset_id)
             file_item = self.table.item(row, 1)
-            source = str(getattr(dataset, "source_path", "") or "")
-            if not source and file_item is not None:
-                source = file_item.text().strip()
+            source = ""
+            is_dirty = bool(name_item.data(DATASET_DIRTY_ROLE))
+            if not is_dirty and file_item is not None:
+                source = str(file_item.data(DATASET_PATH_ROLE) or "").strip()
+            if not is_dirty and not source:
+                source = str(getattr(dataset, "source_path", "") or "")
+            if not is_dirty and not source and file_item is not None:
+                displayed = file_item.text().strip()
+                if displayed.casefold() != "unsaved":
+                    source = displayed
             entries.append(
                 DatasetCatalogEntry(
                     str(dataset_id),
@@ -1576,18 +1693,20 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         return tuple(ids)
 
     def _notify_dataset_catalog_changed(self) -> None:
+        catalog = self._dataset_catalog()
         workspace = getattr(self, "ppt_workspace", None)
         if workspace is not None:
-            workspace.set_dataset_catalog(self._dataset_catalog())
+            workspace.set_dataset_catalog(catalog)
+        feature_panel = getattr(self, "feature_assembly_panel", None)
+        set_feature_catalog = getattr(
+            feature_panel, "set_loaded_dataset_catalog", None
+        )
+        if callable(set_feature_catalog):
+            set_feature_catalog(catalog)
 
     def _on_dataset_table_item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() == 0:
             self._notify_dataset_catalog_changed()
-
-    def _connect_param_list(self, widget: QListWidget, axis_name: str) -> None:
-        widget.itemChanged.connect(
-            lambda item, axis=axis_name, lw=widget: self._on_param_item_changed(item, axis, lw)
-        )
 
     def _on_assembly_branch_dropped(self, branch_name: str, leaf_data: list) -> None:
         """Build the dragged subtree honouring per-node add modes.
@@ -1729,7 +1848,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         """Keep the unified app alive while background physics work runs."""
-        if self._background_job_active():
+        if self._background_job_active() or bool(
+            getattr(self, "_pending_import_batches", ())
+        ):
             active_name = self._background_worker_name or "A dataset task"
             QMessageBox.warning(
                 self,
@@ -1738,6 +1859,28 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "closing GRIM.",
             )
             self.main_tabs.setCurrentIndex(0)
+            event.ignore()
+            return
+        if bool(getattr(self, "_isar_busy", False)):
+            play_button = getattr(self, "btn_isar_ap_play", None)
+            if play_button is not None:
+                play_button.setChecked(False)
+            current_cancel = getattr(self, "_isar_cancel_event", None)
+            if current_cancel is not None:
+                current_cancel.set()
+            pending = getattr(self, "_isar_pending", None)
+            if pending is not None:
+                pending_cancel = pending.get("_cancel_event")
+                if pending_cancel is not None:
+                    pending_cancel.set()
+                self._isar_pending = None
+            QMessageBox.warning(
+                self,
+                "ISAR Calculation Still Running",
+                "The current ISAR calculation was cancelled. Wait for its "
+                "worker to finish, then close GRIM again.",
+            )
+            self.main_tabs.setCurrentWidget(self.tab_isar)
             event.ignore()
             return
         if self.ppt_workspace.job_is_running():
@@ -1787,6 +1930,39 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             self.freddy_integration.focus_workspace()
             event.ignore()
             return
+
+        dirty_rows = self._dirty_dataset_rows()
+        if dirty_rows:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            names = []
+            for row in dirty_rows[:10]:
+                item = self.table.item(row, 0)
+                names.append(item.text() if item is not None else f"Dataset {row + 1}")
+            details = "\n".join(f"• {name}" for name in names)
+            if len(dirty_rows) > len(names):
+                details += f"\n• …and {len(dirty_rows) - len(names)} more"
+            answer = QMessageBox.warning(
+                self,
+                "Unsaved Datasets",
+                f"{len(dirty_rows)} derived dataset(s) have not been saved:\n\n"
+                f"{details}\n\nSave them before closing?",
+                buttons.Save | buttons.Discard | buttons.Cancel,
+                buttons.Save,
+            )
+            if answer == buttons.Cancel:
+                event.ignore()
+                return
+            if answer == buttons.Save:
+                directory = QFileDialog.getExistingDirectory(
+                    self, "Save Unsaved Datasets Before Closing"
+                )
+                if not directory or not self._save_rows_to_directory(
+                    dirty_rows,
+                    directory,
+                    dialog_title="Save Unsaved Datasets",
+                ):
+                    event.ignore()
+                    return
         super().closeEvent(event)
 
 

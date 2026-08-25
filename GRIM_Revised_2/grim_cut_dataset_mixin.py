@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QTableWidgetItem,
@@ -43,6 +44,7 @@ from grim_headless import (
     is_supported_path,
     load_dataset as load_dataset_headless,
 )
+from grim_python import DatasetReference
 
 # Characters forbidden in filenames on Windows (and `/` on POSIX). Replaced
 # with `_` so dataset names with op symbols like `|`, `÷`, etc. still save.
@@ -52,6 +54,171 @@ _BAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 # numbers and display names can both change, while one dataset can also appear
 # in more than one row, so neither is a safe persistent selection key.
 DATASET_ID_ROLE = Qt.UserRole + 32
+DATASET_DIRTY_ROLE = Qt.UserRole + 33
+DATASET_PATH_ROLE = Qt.UserRole + 34
+
+
+def _target_path_key(path: str | os.PathLike) -> str:
+    """Return a platform-independent collision key for an output path.
+
+    GRIM release folders are commonly prepared on Windows and then copied to
+    another machine.  Always case-fold here rather than relying on the host
+    filesystem so names such as ``Body`` and ``body`` cannot silently replace
+    one another in a batch on a case-insensitive destination.
+    """
+
+    return os.path.abspath(os.path.normpath(os.fspath(path))).casefold()
+
+
+def _duplicate_target_groups(paths: list[str]) -> list[list[str]]:
+    """Return case-insensitive duplicate output groups, in plan order."""
+
+    grouped: dict[str, list[str]] = {}
+    order: list[str] = []
+    for raw_path in paths:
+        path = os.fspath(raw_path)
+        key = _target_path_key(path)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(path)
+    return [grouped[key] for key in order if len(grouped[key]) > 1]
+
+
+def _append_provenance(existing: object, event: object) -> str:
+    """Append one operation to durable history without duplicating it."""
+
+    previous = str(existing or "").strip()
+    addition = str(event or "").strip()
+    if not addition:
+        return previous
+    if not previous:
+        return addition
+    if previous == addition or previous.endswith("\n" + addition):
+        return previous
+    return previous + "\n" + addition
+
+
+def _ensure_grim_output_path(path: str | os.PathLike) -> str:
+    output = os.fspath(path)
+    return output if output.casefold().endswith(".grim") else output + ".grim"
+
+
+class _GrimBatchRollbackError(RuntimeError):
+    """A batch failed and at least one prior artifact could not be restored."""
+
+
+def _stage_and_publish_grim_batch(
+    entries: list[tuple[RcsGrid, str, str]],
+) -> list[str]:
+    """Write every grid first, then atomically publish each completed file.
+
+    Existing targets are moved to same-directory backups during publication so
+    a late failure can restore the entire batch.  Callers must still obtain one
+    explicit overwrite confirmation before invoking this helper.
+    """
+
+    targets = [
+        _ensure_grim_output_path(path) for _dataset, path, _history in entries
+    ]
+    duplicates = _duplicate_target_groups(targets)
+    if duplicates:
+        names = ", ".join(os.path.basename(group[0]) for group in duplicates)
+        raise ValueError(f"multiple datasets resolve to the same output: {names}")
+
+    staged: list[tuple[str, str]] = []
+    backups: dict[str, str | None] = {}
+    publication_complete = False
+    try:
+        for (dataset, _raw_target, row_history), target in zip(entries, targets):
+            directory = os.path.dirname(os.path.abspath(target)) or os.curdir
+            if os.path.lexists(target) and not os.path.isfile(target):
+                raise OSError(
+                    f"output target exists but is not a regular file: {target}"
+                )
+            fd, stage_path = tempfile.mkstemp(
+                prefix=".grim-stage-",
+                suffix=".staging.grim",
+                dir=directory,
+            )
+            os.close(fd)
+            prior_history = dataset.history
+            try:
+                # A single RcsGrid may intentionally appear in multiple rows.
+                # Serialize the provenance belonging to this row, then restore
+                # the shared in-memory object before moving to the next entry.
+                dataset.history = str(row_history or "").strip()
+                dataset.save(stage_path)
+            except Exception:
+                try:
+                    os.unlink(stage_path)
+                except OSError:
+                    pass
+                raise
+            finally:
+                dataset.history = prior_history
+            staged.append((stage_path, target))
+
+        for stage_path, target in staged:
+            backup_path: str | None = None
+            if os.path.lexists(target):
+                directory = os.path.dirname(os.path.abspath(target)) or os.curdir
+                fd, backup_path = tempfile.mkstemp(
+                    prefix=".grim-backup-",
+                    suffix=".backup",
+                    dir=directory,
+                )
+                os.close(fd)
+                try:
+                    os.replace(target, backup_path)
+                except BaseException:
+                    try:
+                        os.unlink(backup_path)
+                    except OSError:
+                        pass
+                    raise
+            backups[target] = backup_path
+            os.replace(stage_path, target)
+        publication_complete = True
+
+    except Exception as original_error:
+        # Restore every target whose original was moved, including the target
+        # whose publication itself failed.  A backup that cannot be restored
+        # remains beside the target and is reported instead of being deleted.
+        rollback_errors: list[str] = []
+        for target in reversed(list(backups)):
+            backup_path = backups[target]
+            try:
+                if backup_path and os.path.lexists(backup_path):
+                    os.replace(backup_path, target)
+                    backups[target] = None
+                elif backup_path is None and os.path.lexists(target):
+                    os.unlink(target)
+            except OSError as exc:
+                rollback_errors.append(f"{target}: {exc}")
+        if rollback_errors:
+            raise _GrimBatchRollbackError(
+                "Save publication failed and rollback could not restore every "
+                "prior dataset. Retained .grim-backup file(s): "
+                + "; ".join(rollback_errors)
+            ) from original_error
+        raise
+    finally:
+        for stage_path, _target in staged:
+            if os.path.lexists(stage_path):
+                try:
+                    os.unlink(stage_path)
+                except OSError:
+                    pass
+
+    if publication_complete:
+        for backup_path in backups.values():
+            if backup_path and os.path.lexists(backup_path):
+                try:
+                    os.unlink(backup_path)
+                except OSError:
+                    pass
+    return targets
 
 
 def _sanitize_filename(name: str | None) -> str:
@@ -1463,7 +1630,28 @@ class _DatasetLoadWorker(QObject):
             failed.append(f"{file_name} ({error_text})")
             self.progress.emit(done_count, total, f"Failed {file_name}")
 
-        if total == 0:
+        try:
+            if total == 1:
+                _consume(_load_dataset_path_task(self._tasks[0]), 1)
+            elif total > 1:
+                worker_count = _recommended_loader_workers(self._tasks)
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    futures = {
+                        pool.submit(_load_dataset_path_task, task): task
+                        for task in self._tasks
+                    }
+                    done_count = 0
+                    for future in as_completed(futures):
+                        result = future.result()
+                        done_count += 1
+                        _consume(result, done_count)
+                used_parallel = True
+        except Exception as exc:
+            # Individual parse failures normally arrive as result mappings.
+            # This catches pool setup/submission/future faults so the owning
+            # QThread still receives exactly one terminal signal and can quit.
+            failed.append(f"Dataset loader ({type(exc).__name__}: {exc})")
+        finally:
             self.finished.emit(
                 {
                     "loaded": loaded,
@@ -1473,33 +1661,6 @@ class _DatasetLoadWorker(QObject):
                     "total_supported": total,
                 }
             )
-            return
-
-        if total == 1:
-            _consume(_load_dataset_path_task(self._tasks[0]), 1)
-        else:
-            worker_count = _recommended_loader_workers(self._tasks)
-            with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                futures = {
-                    pool.submit(_load_dataset_path_task, task): task
-                    for task in self._tasks
-                }
-                done_count = 0
-                for future in as_completed(futures):
-                    result = future.result()
-                    done_count += 1
-                    _consume(result, done_count)
-            used_parallel = True
-
-        self.finished.emit(
-            {
-                "loaded": loaded,
-                "failed": failed,
-                "ignored": self._ignored_count,
-                "used_parallel": used_parallel,
-                "total_supported": total,
-            }
-        )
 
 
 class _JoinDatasetsWorker(QObject):
@@ -1589,6 +1750,7 @@ class _RangeCalibrationWorker(QObject):
             results.append(
                 {
                     "dataset": calibrated,
+                    "source_dataset": target,
                     "name": (
                         f"{target_name} [Range Cal: {exact_display}; "
                         f"ΔR {offset_m:+.6g} m]"
@@ -1619,6 +1781,13 @@ class DatasetOpsMixin:
         self._background_worker: QObject | None = None
         self._background_worker_name = ""
         self._pending_join_names: list[str] | None = None
+        self._pending_join_references: list[DatasetReference] | None = None
+        self._pending_range_record: dict[str, object] | None = None
+        self._pending_import_batches: list[tuple[tuple[str, ...], int]] = []
+        self._queued_import_keys: set[str] = set()
+        self._active_import_keys: set[str] = set()
+        self._import_cycle_results: list[tuple[str, bool]] = []
+        self._last_import_summary = ""
 
     def _background_job_active(self) -> bool:
         self._ensure_background_worker_state()
@@ -1647,9 +1816,31 @@ class DatasetOpsMixin:
         return True
 
     def _on_background_thread_finished(self) -> None:
+        completed_import = bool(self._active_import_keys)
         self._background_worker_thread = None
         self._background_worker = None
         self._background_worker_name = ""
+        self._active_import_keys.clear()
+
+        if self._pending_import_batches:
+            paths, ignored = self._pending_import_batches.pop(0)
+            for path in paths:
+                self._queued_import_keys.discard(_target_path_key(path))
+            self._start_dataset_import_batch(list(paths), ignored_count=ignored)
+            return
+
+        if completed_import and self._import_cycle_results:
+            details = " ".join(message for message, _failed in self._import_cycle_results)
+            prefix = (
+                "Dataset imports completed with errors."
+                if any(failed for _message, failed in self._import_cycle_results)
+                else "Dataset imports completed."
+            )
+            summary = f"{prefix} {details}".strip()
+            self._last_import_summary = summary
+            self.status.setToolTip(summary)
+            self.status.showMessage(summary)
+            self._import_cycle_results.clear()
 
     def _on_load_worker_progress(self, done_count: int, total_count: int, detail: str) -> None:
         detail_text = str(detail).strip()
@@ -1661,6 +1852,7 @@ class DatasetOpsMixin:
         self.status.showMessage(f"Loading datasets... {done_count}/{total_count}")
 
     def _on_load_worker_finished(self, summary: dict[str, object]) -> None:
+        self._ensure_background_worker_state()
         loaded_entries_raw = summary.get("loaded", [])
         failed_entries_raw = summary.get("failed", [])
         ignored = int(summary.get("ignored", 0) or 0)
@@ -1681,8 +1873,25 @@ class DatasetOpsMixin:
             name = str(entry.get("name", "dataset"))
             history = str(entry.get("history", ""))
             file_name = str(entry.get("file_name", ""))
-            self._add_dataset_row(dataset, name, history, file_name=file_name)
+            container_path = str(entry.get("path", "") or file_name)
+            dataset_id = self._add_dataset_row(
+                dataset,
+                name,
+                history,
+                file_name=container_path,
+                notify=False,
+            )
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None:
+                recorder.bind_loaded(
+                    DatasetReference(dataset_id, name, container_path)
+                )
             loaded += 1
+
+        if loaded:
+            notify = getattr(self, "_notify_dataset_catalog_changed", None)
+            if callable(notify):
+                notify()
 
         if failed:
             msg = f"Loaded {loaded} dataset(s)." if loaded else "No datasets loaded."
@@ -1696,6 +1905,9 @@ class DatasetOpsMixin:
             msg += f" Ignored {ignored} unsupported file(s)."
         if used_parallel and total_supported > 1:
             msg += " Loaded in parallel."
+        self._import_cycle_results.append((msg, bool(failed)))
+        self._last_import_summary = msg
+        self.status.setToolTip(msg)
         self.status.showMessage(msg)
 
     def _on_join_worker_progress(self, done_count: int, total_count: int, _: str) -> None:
@@ -1704,6 +1916,8 @@ class DatasetOpsMixin:
     def _on_join_worker_finished(self, payload: dict[str, object]) -> None:
         names = self._pending_join_names or []
         self._pending_join_names = None
+        input_refs = self._pending_join_references
+        self._pending_join_references = None
 
         ok = bool(payload.get("ok", False))
         if not ok:
@@ -1719,7 +1933,17 @@ class DatasetOpsMixin:
             names = ["Dataset"]
         new_name = " | ".join(names)
         history = f"Join (last selected wins overlap): {new_name}"
-        self._add_dataset_row(merged, f"Join[{new_name}]", history, file_name="")
+        output_name = f"Join[{new_name}]"
+        output_id = self._add_dataset_row(merged, output_name, history, file_name="")
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None and input_refs:
+            recorder.record_function(
+                self._python_output_reference(output_id, output_name),
+                "join_datasets",
+                input_refs,
+                kwargs={"tol": 1.0e-6},
+                comment="Join datasets on their union axes",
+            )
         self.status.showMessage(f"Join created. Overlap winner: {names[-1]}.")
 
     def _on_range_cal_worker_progress(
@@ -1732,6 +1956,8 @@ class DatasetOpsMixin:
         )
 
     def _on_range_cal_worker_finished(self, payload: dict[str, object]) -> None:
+        record_spec = self._pending_range_record
+        self._pending_range_record = None
         raw_results = payload.get("results", [])
         failed = [str(value) for value in payload.get("failed", [])]
         produced = 0
@@ -1743,12 +1969,57 @@ class DatasetOpsMixin:
             if not isinstance(dataset, RcsGrid):
                 failed.append("worker returned an invalid calibrated dataset")
                 continue
-            self._add_dataset_row(
+            output_name = str(entry.get("name", "Range Cal result"))
+            output_id = self._add_dataset_row(
                 dataset,
-                str(entry.get("name", "Range Cal result")),
+                output_name,
                 str(entry.get("history", "Range Cal")),
                 file_name="",
             )
+            recorder = getattr(self, "python_recorder", None)
+            source_dataset = entry.get("source_dataset")
+            if recorder is not None and record_spec is not None:
+                targets_by_identity = record_spec.get("targets", {})
+                target_ref = (
+                    targets_by_identity.get(id(source_dataset))
+                    if isinstance(targets_by_identity, dict)
+                    else None
+                )
+                measured_ref = record_spec.get("measured")
+                exact_ref = record_spec.get("exact")
+                if all(
+                    isinstance(value, DatasetReference)
+                    for value in (target_ref, measured_ref, exact_ref)
+                ):
+                    offset_m = float(record_spec["range_offset_m"])
+                    allow_broadcast = bool(
+                        record_spec.get("allow_singleton_angular_broadcast", False)
+                    )
+                    gain_limit = record_spec.get("maximum_correction_gain_db", 60.0)
+                    measured_label = str(record_spec.get("measured_label", ""))
+                    exact_label = str(record_spec.get("exact_label", ""))
+                    recorder.record_expression(
+                        self._python_output_reference(output_id, output_name),
+                        [target_ref, measured_ref, exact_ref],
+                        lambda variables,
+                        offset_m=offset_m,
+                        allow_broadcast=allow_broadcast,
+                        gain_limit=gain_limit,
+                        measured_label=measured_label,
+                        exact_label=exact_label: (
+                            f"{variables[0]}.range_calibrate(\n"
+                            f"    {variables[1]},\n"
+                            f"    {variables[2]},\n"
+                            f"    {offset_m!r},\n"
+                            f"    allow_singleton_angular_broadcast={allow_broadcast!r},\n"
+                            f"    convention_attested=True,\n"
+                            f"    measured_label={measured_label!r},\n"
+                            f"    exact_label={exact_label!r},\n"
+                            f"    maximum_correction_gain_db={gain_limit!r},\n"
+                            f")"
+                        ),
+                        comment="Complex range calibration with resolved references",
+                    )
             produced += 1
 
         message = f"Range Cal created {produced} dataset(s)."
@@ -1756,30 +2027,82 @@ class DatasetOpsMixin:
             message += f" Skipped: {', '.join(failed)}"
         self.status.showMessage(message)
 
+    def _start_dataset_import_batch(
+        self, paths: list[str], *, ignored_count: int = 0
+    ) -> bool:
+        """Start one already-filtered import batch.
+
+        This is deliberately separate from ``_handle_files_dropped`` so a
+        batch queued behind a join or calibration can be resumed verbatim.
+        """
+
+        tasks = [(index, path) for index, path in enumerate(paths)]
+        if not tasks:
+            return False
+        worker = _DatasetLoadWorker(tasks, ignored_count=ignored_count)
+        worker.progress.connect(self._on_load_worker_progress)
+        worker.finished.connect(self._on_load_worker_finished)
+        self._active_import_keys = {_target_path_key(path) for path in paths}
+        if not self._try_start_background_job("Dataset loading", worker):
+            self._active_import_keys.clear()
+            return False
+        self.status.showMessage(f"Loading datasets... 0/{len(tasks)}")
+        return True
+
     def _handle_files_dropped(self, paths: list[str]) -> None:
-        tasks: list[tuple[int, str]] = []
+        self._ensure_background_worker_state()
+        accepted: list[str] = []
         ignored = 0
-        for index, raw_path in enumerate(paths):
-            path = str(raw_path)
+        already_pending = set(self._active_import_keys) | set(self._queued_import_keys)
+        batch_keys: set[str] = set()
+        duplicate_count = 0
+        for raw_path in paths:
+            path = os.fspath(raw_path)
             if _is_supported_dataset_path(path):
-                tasks.append((index, path))
+                key = _target_path_key(path)
+                if key in already_pending or key in batch_keys:
+                    duplicate_count += 1
+                    continue
+                batch_keys.add(key)
+                accepted.append(path)
             else:
                 ignored += 1
 
-        if not tasks:
+        if not accepted:
             if ignored:
                 self.status.showMessage(
                     "No supported dropped files. Supported: "
                     + ", ".join(SUPPORTED_EXTENSIONS)
                 )
+            elif duplicate_count:
+                self.status.showMessage(
+                    f"Skipped {duplicate_count} dataset import(s) already loading or queued."
+                )
             return
 
-        worker = _DatasetLoadWorker(tasks, ignored_count=ignored)
-        worker.progress.connect(self._on_load_worker_progress)
-        worker.finished.connect(self._on_load_worker_finished)
-        if not self._try_start_background_job("Dataset loading", worker):
+        if self._background_job_active() or self._pending_import_batches:
+            batch = tuple(accepted)
+            self._pending_import_batches.append((batch, ignored))
+            self._queued_import_keys.update(batch_keys)
+            message = (
+                f"Queued {len(batch)} dataset import(s) as batch "
+                f"{len(self._pending_import_batches)}; they will load automatically."
+            )
+            if duplicate_count:
+                message += f" Skipped {duplicate_count} duplicate(s)."
+            self.status.showMessage(message)
             return
-        self.status.showMessage(f"Loading datasets... 0/{len(tasks)}")
+
+        self._import_cycle_results.clear()
+        if not self._start_dataset_import_batch(accepted, ignored_count=ignored):
+            # A job can begin between the active check and thread startup. Keep
+            # the user's files instead of losing that race.
+            batch = tuple(accepted)
+            self._pending_import_batches.insert(0, (batch, ignored))
+            self._queued_import_keys.update(batch_keys)
+            self.status.showMessage(
+                f"Queued {len(batch)} dataset import(s); they will load automatically."
+            )
 
     def _load_dataset_files(self) -> None:
         """Choose dataset files and route them through the drop/headless loader."""
@@ -1794,21 +2117,143 @@ class DatasetOpsMixin:
         if paths:
             self._handle_files_dropped([str(path) for path in paths])
 
-    def _add_dataset_row(self, dataset: RcsGrid, name: str, history: str, file_name: str | None = None) -> None:
+    def _add_dataset_row(
+        self,
+        dataset: RcsGrid,
+        name: str,
+        history: str,
+        file_name: str | None = None,
+        *,
+        dirty: bool | None = None,
+        notify: bool = True,
+    ) -> str:
+        """Add a dataset and keep its artifact history authoritative.
+
+        ``file_name`` is non-empty only for an artifact that already exists on
+        disk.  Derived rows therefore begin dirty even when their RcsGrid
+        inherited the source dataset's ``source_path`` metadata.
+        """
+
+        durable_history = _append_provenance(dataset.history, history)
+        # A single in-memory RcsGrid may be published into more than one row
+        # (for example, two Assembly branches).  Row provenance must not leak
+        # from the first row into the second merely because both callers hand
+        # us the same Python object.  A shallow grid copy keeps the large,
+        # effectively read-only sample arrays shared while giving each row its
+        # own scalar history and metadata dictionaries.
+        row_dataset = copy.copy(dataset)
+        row_dataset.units = dict(dataset.units or {})
+        row_dataset.extra = dict(dataset.extra or {})
+        row_dataset.history = durable_history
+        is_dirty = not bool(file_name) if dirty is None else bool(dirty)
         row = self.table.rowCount()
         signals_were_blocked = self.table.blockSignals(True)
         try:
             self.table.insertRow(row)
             name_item = QTableWidgetItem(name)
-            name_item.setData(Qt.UserRole, dataset)
-            name_item.setData(DATASET_ID_ROLE, uuid.uuid4().hex)
-            file_text = file_name or ""
+            name_item.setData(Qt.UserRole, row_dataset)
+            dataset_id = uuid.uuid4().hex
+            name_item.setData(DATASET_ID_ROLE, dataset_id)
+            name_item.setData(DATASET_DIRTY_ROLE, is_dirty)
+            name_font = name_item.font()
+            name_font.setBold(is_dirty)
+            name_item.setFont(name_font)
+            name_item.setToolTip(
+                "Unsaved derived dataset" if is_dirty else "Saved or loaded dataset"
+            )
+
+            source_path = ""
+            if not is_dirty:
+                # file_name is the container GRIM/PTM/CSV path selected by the
+                # user. Solver metadata may instead name its originating .geo,
+                # so it is only a fallback for legacy callers without a path.
+                source_path = str(file_name or dataset.source_path or "")
+            file_text = "Unsaved" if is_dirty else os.path.basename(file_name or source_path)
             file_item = QTableWidgetItem(file_text)
             file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
-            history_item = QTableWidgetItem(history)
+            file_item.setData(DATASET_PATH_ROLE, source_path)
+            file_item.setToolTip(source_path or "Not saved yet")
+            history_item = QTableWidgetItem(durable_history)
+            history_item.setFlags(history_item.flags() & ~Qt.ItemIsEditable)
             self.table.setItem(row, 0, name_item)
             self.table.setItem(row, 1, file_item)
             self.table.setItem(row, 2, history_item)
+        finally:
+            self.table.blockSignals(signals_were_blocked)
+        if notify:
+            catalog_notify = getattr(self, "_notify_dataset_catalog_changed", None)
+            if callable(catalog_notify):
+                catalog_notify()
+        return dataset_id
+
+    def _python_reference_for_dataset(
+        self, dataset: RcsGrid
+    ) -> DatasetReference | None:
+        """Resolve an in-memory row through its stable UUID for script output."""
+
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if name_item is None or name_item.data(Qt.UserRole) is not dataset:
+                continue
+            path_item = self.table.item(row, 1)
+            return DatasetReference(
+                dataset_id=str(name_item.data(DATASET_ID_ROLE) or ""),
+                name=name_item.text(),
+                path=(
+                    str(path_item.data(DATASET_PATH_ROLE) or "")
+                    if path_item is not None
+                    else ""
+                ),
+            )
+        return None
+
+    @staticmethod
+    def _python_output_reference(dataset_id: str, name: str) -> DatasetReference:
+        return DatasetReference(dataset_id=str(dataset_id), name=str(name), path="")
+
+    def _python_input_references(
+        self, datasets: list[tuple[str, RcsGrid]]
+    ) -> list[DatasetReference] | None:
+        references = [
+            self._python_reference_for_dataset(dataset) for _name, dataset in datasets
+        ]
+        if any(reference is None for reference in references):
+            return None
+        return [reference for reference in references if reference is not None]
+
+    def _dataset_row_is_dirty(self, row: int) -> bool:
+        item = self.table.item(int(row), 0)
+        return bool(item is not None and item.data(DATASET_DIRTY_ROLE))
+
+    def _dirty_dataset_rows(self) -> list[int]:
+        return [
+            row
+            for row in range(self.table.rowCount())
+            if self._dataset_row_is_dirty(row)
+        ]
+
+    def _set_dataset_row_saved(self, row: int, output_path: str) -> None:
+        """Mark one successfully published artifact clean without touching history."""
+
+        name_item = self.table.item(row, 0)
+        if name_item is None:
+            return
+        signals_were_blocked = self.table.blockSignals(True)
+        try:
+            name_item.setData(DATASET_DIRTY_ROLE, False)
+            font = name_item.font()
+            font.setBold(False)
+            name_item.setFont(font)
+            name_item.setToolTip("Saved dataset")
+
+            file_item = self.table.item(row, 1)
+            if file_item is None:
+                file_item = QTableWidgetItem()
+                file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(row, 1, file_item)
+            file_item.setText(os.path.basename(output_path))
+            file_item.setData(DATASET_PATH_ROLE, output_path)
+            file_item.setToolTip(output_path)
         finally:
             self.table.blockSignals(signals_were_blocked)
         notify = getattr(self, "_notify_dataset_catalog_changed", None)
@@ -1858,11 +2303,45 @@ class DatasetOpsMixin:
             notify()
 
     def _populate_params(self, dataset: RcsGrid) -> None:
+        self._update_parameter_headers(dataset)
         self._fill_list(self.list_pol, dataset.polarizations)
         self._fill_list(self.list_freq, dataset.frequencies)
         self._fill_list(self.list_elev, dataset.elevations)
         self._fill_list(self.list_az, dataset.azimuths)
         self._apply_default_param_selection()
+
+    def _update_parameter_headers(self, dataset: RcsGrid | None) -> None:
+        """Label selectors from the active grid's actual coordinate metadata."""
+
+        if dataset is None:
+            labels = ("Polarization", "Frequency", "Elevation", "Azimuth")
+        else:
+            units = dataset.units or {}
+
+            def _unit(key: str, default: str) -> str:
+                value = str(units.get(key, default) or default).strip()
+                return value or default
+
+            frequency_unit = _unit("frequency", "GHz")
+            elevation_unit = _unit("elevation", "deg")
+            azimuth_unit = _unit("azimuth", "deg")
+            if dataset.angular_coordinate_system() == "great_circle":
+                elevation_name, azimuth_name = "Pitch", "Aspect"
+            else:
+                elevation_name, azimuth_name = "Elevation", "Azimuth"
+            labels = (
+                "Polarization",
+                f"Frequency ({frequency_unit})",
+                f"{elevation_name} ({elevation_unit})",
+                f"{azimuth_name} ({azimuth_unit})",
+            )
+
+        for attribute, text in zip(
+            ("lbl_pol", "lbl_freq", "lbl_elev", "lbl_az"), labels
+        ):
+            label = getattr(self, attribute, None)
+            if label is not None:
+                label.setText(text)
 
     @staticmethod
     def _select_first_item(widget: QListWidget) -> None:
@@ -1906,7 +2385,7 @@ class DatasetOpsMixin:
             for idx in indices:
                 value = values[idx]
                 item = QListWidgetItem(str(value))
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 item.setData(Qt.UserRole, value)
                 item.setData(Qt.UserRole + 1, int(idx))
                 widget.addItem(item)
@@ -1917,8 +2396,11 @@ class DatasetOpsMixin:
     def _clear_param_lists(self) -> None:
         for widget in (self.list_pol, self.list_freq, self.list_elev, self.list_az):
             widget.clear()
+        self._update_parameter_headers(None)
 
     def _on_param_item_changed(self, item: QListWidgetItem, axis_name: str, widget: QListWidget) -> None:
+        """Reject legacy programmatic inline edits without mutating the grid."""
+
         if self.active_dataset is None:
             return
         axis_arr = self.active_dataset.get_axis(axis_name)
@@ -1928,22 +2410,16 @@ class DatasetOpsMixin:
         if idx < 0 or idx >= len(axis_arr):
             return
         old_value = axis_arr[idx]
-        new_text = item.text()
-        if axis_name == "polarization":
-            new_value = new_text
-        else:
-            try:
-                new_value = float(new_text)
-            except ValueError:
-                widget.blockSignals(True)
-                item.setText(str(old_value))
-                widget.blockSignals(False)
-                return
-        axis_arr[idx] = new_value
-        item.setData(Qt.UserRole, new_value)
-        notify = getattr(self, "_notify_dataset_catalog_changed", None)
-        if callable(notify):
-            notify()
+        widget.blockSignals(True)
+        try:
+            item.setText(str(old_value))
+            item.setData(Qt.UserRole, old_value)
+        finally:
+            widget.blockSignals(False)
+        self.status.showMessage(
+            "Parameter axes are read-only. Use a validated dataset operation "
+            "to transform coordinates."
+        )
 
     def _selected_indices(self, widget: QListWidget) -> set[int]:
         indices = set()
@@ -2049,7 +2525,19 @@ class DatasetOpsMixin:
 
         new_name = f" {op_symbol} ".join(names)
         history = f"{op_label}: {new_name}"
-        self._add_dataset_row(result, new_name, history, file_name="")
+        output_id = self._add_dataset_row(result, new_name, history, file_name="")
+        input_refs = self._python_input_references(datasets)
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None and input_refs is not None:
+            method = func_add if len(datasets) == 2 else func_add_many
+            recorder.record_expression(
+                self._python_output_reference(output_id, new_name),
+                input_refs,
+                lambda variables, method=method: (
+                    f"{variables[0]}.{method}({', '.join(variables[1:])})"
+                ),
+                comment=op_label,
+            )
         self.status.showMessage(f"{op_label} created: {new_name}")
 
     def _combine_datasets_sub(self, op_label: str, op_symbol: str, func_sub: str) -> None:
@@ -2070,7 +2558,21 @@ class DatasetOpsMixin:
 
         new_name = f" {op_symbol} ".join(names)
         history = f"{op_label}: {new_name}"
-        self._add_dataset_row(result, new_name, history, file_name="")
+        output_id = self._add_dataset_row(result, new_name, history, file_name="")
+        input_refs = self._python_input_references(datasets)
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None and input_refs is not None:
+            recorder.record_expression(
+                self._python_output_reference(output_id, new_name),
+                input_refs,
+                lambda variables, method=func_sub: (
+                    ".".join(
+                        [variables[0]]
+                        + [f"{method}({variable})" for variable in variables[1:]]
+                    )
+                ),
+                comment=op_label,
+            )
         self.status.showMessage(f"{op_label} created: {new_name}")
 
     def _coherent_add_selected(self) -> None:
@@ -2107,6 +2609,7 @@ class DatasetOpsMixin:
         if not self._try_start_background_job("Dataset join", worker):
             return
         self._pending_join_names = names
+        self._pending_join_references = self._python_input_references(datasets)
         self.status.showMessage(f"Joining datasets... 0/{len(grids)}")
 
     def _overlap_selected_datasets(self) -> None:
@@ -2125,9 +2628,16 @@ class DatasetOpsMixin:
         try:
             overlap_grids = RcsGrid.overlap_many(*grids, tol=1e-6)
             produced = 0
+            output_refs: list[DatasetReference] = []
             for (name, _), overlap_grid in zip(datasets, overlap_grids):
                 history = f"Overlap with [{', '.join(names)}]: {name}"
-                self._add_dataset_row(overlap_grid, f"{name} [Overlap]", history, file_name="")
+                output_name = f"{name} [Overlap]"
+                output_id = self._add_dataset_row(
+                    overlap_grid, output_name, history, file_name=""
+                )
+                output_refs.append(
+                    self._python_output_reference(output_id, output_name)
+                )
                 produced += 1
         except (ValueError, TypeError) as exc:
             self.status.showMessage(str(exc))
@@ -2136,6 +2646,16 @@ class DatasetOpsMixin:
         if produced == 0:
             self.status.showMessage("No overlap outputs were created.")
             return
+        input_refs = self._python_input_references(datasets)
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None and input_refs is not None:
+            recorder.record_multi_function(
+                output_refs,
+                "RcsGrid.overlap_many",
+                input_refs,
+                kwargs={"tol": 1.0e-6},
+                comment="Crop datasets to their common finite overlap",
+            )
         self.status.showMessage(f"Overlap created {produced} dataset(s).")
 
     def _prompt_choice(self, title: str, label: str, choices: list[str], default_idx: int = 0) -> str | None:
@@ -2183,7 +2703,20 @@ class DatasetOpsMixin:
                 f"{name} | az={len(sliced.azimuths)}, el={len(sliced.elevations)}, "
                 f"freq={len(sliced.frequencies)}, pol={len(sliced.polarizations)}"
             )
-            self._add_dataset_row(sliced, f"{name} [Slice]", history, file_name="")
+            output_name = f"{name} [Slice]"
+            output_id = self._add_dataset_row(
+                sliced, output_name, history, file_name=""
+            )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "axis_crop",
+                    kwargs=crop_params,
+                    comment=f"Slice {name} by selected physical values",
+                )
             produced += 1
 
         if produced == 0:
@@ -2233,7 +2766,26 @@ class DatasetOpsMixin:
             else:
                 stat_label = statistic
             history = f"Statistics ({stat_label}, axes={axes}): {name}"
-            self._add_dataset_row(stat_grid, f"{name} [{stat_label}]", history, file_name="")
+            output_name = f"{name} [{stat_label}]"
+            output_id = self._add_dataset_row(
+                stat_grid, output_name, history, file_name=""
+            )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "statistics_dataset",
+                    kwargs={
+                        "statistic": statistic,
+                        "axes": axes,
+                        "domain": "magnitude",
+                        "percentile": percentile,
+                        "broadcast_reduced": True,
+                    },
+                    comment=f"Reduce {name} to {stat_label} statistics",
+                )
             produced += 1
 
         if produced == 0:
@@ -2252,6 +2804,27 @@ class DatasetOpsMixin:
             self.status.showMessage("Select one or more datasets to delete.")
             return
         rows = sorted((idx.row() for idx in selected), reverse=True)
+        dirty_rows = [row for row in rows if self._dataset_row_is_dirty(row)]
+        if dirty_rows:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            names = []
+            for row in dirty_rows[:10]:
+                item = self.table.item(row, 0)
+                names.append(item.text() if item is not None else f"Dataset {row + 1}")
+            details = "\n".join(f"• {name}" for name in names)
+            if len(dirty_rows) > len(names):
+                details += f"\n• …and {len(dirty_rows) - len(names)} more"
+            answer = QMessageBox.question(
+                self,
+                "Delete Unsaved Datasets?",
+                f"{len(dirty_rows)} selected dataset(s) have never been saved:\n\n"
+                f"{details}\n\nDelete them permanently?",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                self.status.showMessage("Delete cancelled; unsaved datasets were kept.")
+                return
         for row in rows:
             self.table.removeRow(row)
         self.active_dataset = None
@@ -2268,9 +2841,7 @@ class DatasetOpsMixin:
             return
 
         rows = sorted(idx.row() for idx in selected)
-
         if len(rows) == 1:
-            # Single dataset — let the user pick the exact file path.
             row = rows[0]
             item = self.table.item(row, 0)
             if item is None:
@@ -2279,9 +2850,6 @@ class DatasetOpsMixin:
             if not isinstance(dataset, RcsGrid):
                 return
             name = item.text().strip() or "dataset"
-            file_item = self.table.item(row, 1)
-            prev_file = file_item.text() if file_item else ""
-            prev_stem = os.path.splitext(prev_file)[0] if prev_file else ""
             path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Save Dataset",
@@ -2290,58 +2858,19 @@ class DatasetOpsMixin:
             )
             if not path:
                 return
-            saved_path = dataset.save(path)
-            file_name = os.path.basename(saved_path)
-            if file_item is None:
-                file_item = QTableWidgetItem(file_name)
-                file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(row, 1, file_item)
-            else:
-                file_item.setText(file_name)
-            history_item = self.table.item(row, 2)
-            if history_item is None:
-                history_item = QTableWidgetItem(saved_path)
-                self.table.setItem(row, 2, history_item)
-            else:
-                history_item.setText(saved_path)
-            new_stem = os.path.splitext(file_name)[0]
-            if prev_stem and item.text().strip() == prev_stem:
-                item.setText(new_stem)
-            elif not item.text().strip():
-                item.setText(new_stem)
-            self.status.showMessage("Save completed.")
-        else:
-            # Multiple datasets — pick a folder once, save each using its table name.
-            directory = QFileDialog.getExistingDirectory(self, "Save Selected Datasets")
-            if not directory:
-                return
-            saved = 0
-            for row in rows:
-                item = self.table.item(row, 0)
-                if item is None:
-                    continue
-                dataset = item.data(Qt.UserRole)
-                if not isinstance(dataset, RcsGrid):
-                    continue
-                name = item.text().strip() or f"dataset_{row + 1}"
-                path = os.path.join(directory, f"{_sanitize_filename(name)}.grim")
-                saved_path = dataset.save(path)
-                file_name = os.path.basename(saved_path)
-                file_item = self.table.item(row, 1)
-                if file_item is None:
-                    file_item = QTableWidgetItem(file_name)
-                    file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
-                    self.table.setItem(row, 1, file_item)
-                else:
-                    file_item.setText(file_name)
-                history_item = self.table.item(row, 2)
-                if history_item is None:
-                    history_item = QTableWidgetItem(saved_path)
-                    self.table.setItem(row, 2, history_item)
-                else:
-                    history_item.setText(saved_path)
-                saved += 1
-            self.status.showMessage(f"Saved {saved} dataset(s) to {directory}.")
+            self._save_dataset_plan(
+                [(row, dataset, _ensure_grim_output_path(path))],
+                dialog_title="Save Dataset",
+            )
+            return
+
+        directory = QFileDialog.getExistingDirectory(
+            self, "Save Selected Datasets"
+        )
+        if directory:
+            self._save_rows_to_directory(
+                rows, directory, dialog_title="Save Selected Datasets"
+            )
 
     def _save_all_datasets(self) -> None:
         if self.table.rowCount() == 0:
@@ -2350,7 +2879,17 @@ class DatasetOpsMixin:
         directory = QFileDialog.getExistingDirectory(self, "Save All Datasets")
         if not directory:
             return
-        for row in range(self.table.rowCount()):
+        self._save_rows_to_directory(
+            list(range(self.table.rowCount())),
+            directory,
+            dialog_title="Save All Datasets",
+        )
+
+    def _save_rows_to_directory(
+        self, rows: list[int], directory: str, *, dialog_title: str
+    ) -> bool:
+        plan: list[tuple[int, RcsGrid, str]] = []
+        for row in rows:
             item = self.table.item(row, 0)
             if item is None:
                 continue
@@ -2359,23 +2898,120 @@ class DatasetOpsMixin:
                 continue
             name = item.text().strip() or f"dataset_{row + 1}"
             filename = f"{_sanitize_filename(name)}.grim"
-            path = os.path.join(directory, filename)
-            saved_path = dataset.save(path)
-            file_name = os.path.basename(saved_path)
-            file_item = self.table.item(row, 1)
-            if file_item is None:
-                file_item = QTableWidgetItem(file_name)
-                file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
-                self.table.setItem(row, 1, file_item)
+            plan.append((row, dataset, os.path.join(directory, filename)))
+        return self._save_dataset_plan(plan, dialog_title=dialog_title)
+
+    def _save_dataset_plan(
+        self,
+        plan: list[tuple[int, RcsGrid, str]],
+        *,
+        dialog_title: str,
+    ) -> bool:
+        """Preflight, stage, and publish one save plan without silent replacement."""
+
+        if not plan:
+            self.status.showMessage("No valid datasets to save.")
+            return False
+
+        targets = [_ensure_grim_output_path(path) for _row, _dataset, path in plan]
+        duplicate_groups = _duplicate_target_groups(targets)
+        if duplicate_groups:
+            details = "\n".join(
+                f"• {os.path.basename(group[0])} ({len(group)} datasets)"
+                for group in duplicate_groups
+            )
+            QMessageBox.critical(
+                self,
+                "Duplicate Output Names",
+                "Multiple dataset names resolve to the same output after "
+                "filename sanitizing and case-folding. Rename them before saving:\n\n"
+                + details,
+            )
+            self.status.showMessage("Save cancelled: duplicate output names.")
+            return False
+
+        directory_targets = [path for path in targets if os.path.isdir(path)]
+        if directory_targets:
+            QMessageBox.critical(
+                self,
+                "Invalid Output Target",
+                "A planned dataset output is an existing directory:\n\n"
+                + "\n".join(directory_targets),
+            )
+            self.status.showMessage("Save cancelled: an output target is a directory.")
+            return False
+
+        existing = [path for path in targets if os.path.lexists(path)]
+        if existing:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            shown = "\n".join(f"• {os.path.basename(path)}" for path in existing[:12])
+            if len(existing) > 12:
+                shown += f"\n• …and {len(existing) - 12} more"
+            answer = QMessageBox.question(
+                self,
+                "Replace Existing Dataset Files?",
+                f"{len(existing)} existing file(s) will be replaced:\n\n{shown}\n\n"
+                "Replace all listed files?",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                self.status.showMessage("Save cancelled; no files were changed.")
+                return False
+
+        try:
+            published = _stage_and_publish_grim_batch(
+                [
+                    (
+                        dataset,
+                        target,
+                        (
+                            self.table.item(row, 2).text()
+                            if self.table.item(row, 2) is not None
+                            else str(dataset.history or "")
+                        ),
+                    )
+                    for row, dataset, target in plan
+                ]
+            )
+        except Exception as exc:
+            if isinstance(exc, _GrimBatchRollbackError):
+                failure_text = str(exc)
             else:
-                file_item.setText(file_name)
-            history_item = self.table.item(row, 2)
-            if history_item is None:
-                history_item = QTableWidgetItem(saved_path)
-                self.table.setItem(row, 2, history_item)
-            else:
-                history_item.setText(saved_path)
-        self.status.showMessage("Save all completed.")
+                failure_text = "No partial batch was kept. " + str(exc)
+            QMessageBox.critical(
+                self,
+                f"{dialog_title} Failed",
+                failure_text,
+            )
+            self.status.showMessage(f"Save failed: {exc}")
+            return False
+
+        recorded_saves: list[tuple[DatasetReference, str]] = []
+        for (row, _dataset, _target), output_path in zip(plan, published):
+            self._set_dataset_row_saved(row, output_path)
+            name_item = self.table.item(row, 0)
+            if name_item is not None:
+                recorded_saves.append(
+                    (
+                        DatasetReference(
+                            str(name_item.data(DATASET_ID_ROLE) or ""),
+                            name_item.text(),
+                            output_path,
+                        ),
+                        output_path,
+                    )
+                )
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None and len(recorded_saves) == 1:
+            recorder.record_save(*recorded_saves[0])
+        elif recorder is not None and recorded_saves:
+            recorder.record_save_batch(recorded_saves)
+        self.status.showMessage(
+            f"Saved {len(published)} dataset(s) to "
+            f"{os.path.dirname(os.path.abspath(published[0]))}."
+        )
+        return True
 
     def _export_plot(self) -> None:
         path, selected_filter = QFileDialog.getSaveFileName(
@@ -2393,6 +3029,15 @@ class DatasetOpsMixin:
             else:
                 path = f"{path}.png"
         self.plot_figure.savefig(path, dpi=200, bbox_inches="tight")
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None:
+            emit_plot = getattr(self, "_emit_last_successful_python_plot", None)
+            if callable(emit_plot):
+                emit_plot()
+            # Plot wrappers freeze their resolved semantic spec only after a
+            # successful render. Selector edits that fail validation therefore
+            # cannot replace the export target with an invalid or stale spec.
+            recorder.record_plot_save(path, dpi=200)
         self.status.showMessage(f"Plot exported: {os.path.basename(path)}")
 
     def _on_plot_context_menu(self, pos) -> None:
@@ -2529,7 +3174,26 @@ class DatasetOpsMixin:
                 skipped.append(f"{name} ({exc})")
                 continue
             history = f"Align ({mode}) to {ref_name}: {name}"
-            self._add_dataset_row(aligned, f"{name} [Aligned]", history, file_name="")
+            output_name = f"{name} [Aligned]"
+            output_id = self._add_dataset_row(
+                aligned, output_name, history, file_name=""
+            )
+            source_ref = self._python_reference_for_dataset(dataset)
+            reference_ref = self._python_reference_for_dataset(ref_grid)
+            recorder = getattr(self, "python_recorder", None)
+            if (
+                recorder is not None
+                and source_ref is not None
+                and reference_ref is not None
+            ):
+                recorder.record_expression(
+                    self._python_output_reference(output_id, output_name),
+                    [source_ref, reference_ref],
+                    lambda variables, mode=mode: (
+                        f"{variables[0]}.align_to({variables[1]}, mode={mode!r})"
+                    ),
+                    comment=f"Align {name} to {ref_name}",
+                )
             produced += 1
 
         if produced == 0:
@@ -2585,9 +3249,20 @@ class DatasetOpsMixin:
             history = (
                 f"Interpolate azimuth [{start:g}°..{stop:g}° step {step:g}°]: {name}"
             )
-            self._add_dataset_row(
-                interpolated, f"{name} [Interp]", history, file_name=""
+            output_name = f"{name} [Interp]"
+            output_id = self._add_dataset_row(
+                interpolated, output_name, history, file_name=""
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "interpolate_axis",
+                    args=("azimuth", new_az.tolist()),
+                    comment=f"Interpolate {name} on a resolved azimuth grid",
+                )
             produced += 1
 
         if produced == 0:
@@ -2639,12 +3314,23 @@ class DatasetOpsMixin:
                 skipped.append(f"{name} ({exc})")
                 continue
             history = f"Mirror about az={about:.6g} deg: {name}"
-            self._add_dataset_row(
+            output_name = f"{name} [Mirror {about:.6g}°]"
+            output_id = self._add_dataset_row(
                 mirrored,
-                f"{name} [Mirror {about:.6g}°]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "mirror_about_azimuth",
+                    args=(float(about),),
+                    comment=f"Mirror {name} about azimuth {about:g} degrees",
+                )
             produced += 1
 
         if produced == 0:
@@ -2682,12 +3368,23 @@ class DatasetOpsMixin:
             dropped_total += dropped
             drop_note = f" (dropped {dropped} duplicate az)" if dropped else ""
             history = f"Wrap az to {suffix}{drop_note}: {name}"
-            self._add_dataset_row(
+            output_name = f"{name} [Wrap {suffix}]"
+            output_id = self._add_dataset_row(
                 wrapped,
-                f"{name} [Wrap {suffix}]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "wrap_azimuth",
+                    args=(mode,),
+                    comment=f"Wrap {name} to {suffix}",
+                )
             produced += 1
 
         if produced == 0:
@@ -2755,12 +3452,27 @@ class DatasetOpsMixin:
                 skipped.append(f"{name} ({exc})")
                 continue
             history = f"Shift ({history_axes}): {name}"
-            self._add_dataset_row(
+            output_name = f"{name} [Shift {suffix}]"
+            output_id = self._add_dataset_row(
                 shifted,
-                f"{name} [Shift {suffix}]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "shift_dataset",
+                    [source_ref],
+                    kwargs={
+                        "azimuth_degrees": float(az_delta) if az_on else None,
+                        "elevation_degrees": float(el_delta) if el_on else None,
+                        "phase_degrees": float(ph_delta) if ph_on else None,
+                    },
+                    comment=f"Shift {name}: {history_axes}",
+                )
             produced += 1
 
         if produced == 0:
@@ -2809,12 +3521,34 @@ class DatasetOpsMixin:
             history = (
                 f"Round {axes_label} to {decimals} dp: {name}"
             )
-            self._add_dataset_row(
+            output_name = f"{name} [Round {decimals}dp]"
+            output_id = self._add_dataset_row(
                 rounded,
-                f"{name} [Round {decimals}dp]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                enabled_methods = [
+                    method
+                    for enabled, method in (
+                        (params["azimuths"], "round_azimuths"),
+                        (params["elevations"], "round_elevations"),
+                        (params["frequencies"], "round_frequencies"),
+                    )
+                    if enabled
+                ]
+                recorder.record_expression(
+                    self._python_output_reference(output_id, output_name),
+                    [source_ref],
+                    lambda variables, methods=tuple(enabled_methods), decimals=decimals: (
+                        variables[0]
+                        + "".join(f".{method}({int(decimals)})" for method in methods)
+                    ),
+                    comment=f"Round {name} axes {axes_label} to {decimals} decimals",
+                )
             produced += 1
 
         if produced == 0:
@@ -2842,12 +3576,22 @@ class DatasetOpsMixin:
                 skipped.append(f"{name} ({exc})")
                 continue
             history = f"Swap El/Az: {name}"
-            self._add_dataset_row(
+            output_name = f"{name} [Swap El/Az]"
+            output_id = self._add_dataset_row(
                 swapped,
-                f"{name} [Swap El/Az]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "swap_elevation_azimuth",
+                    comment=f"Swap elevation and azimuth for {name}",
+                )
             produced += 1
 
         if produced == 0:
@@ -2894,12 +3638,25 @@ class DatasetOpsMixin:
                 continue
 
             history = f"El->Az360 (shift +180 deg, pair={pair_text}): {name}"
-            self._add_dataset_row(
+            output_name = f"{name} [El->Az360]"
+            output_id = self._add_dataset_row(
                 result,
-                f"{name} [El->Az360]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                args = selected_pair or ()
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "combine_elevation_pair_to_azimuth_360",
+                    args=args,
+                    kwargs={"azimuth_shift_deg": 180.0},
+                    comment=f"Convert {name} elevation pair to 360-degree azimuth",
+                )
             produced += 1
 
         if produced == 0:
@@ -2972,7 +3729,28 @@ class DatasetOpsMixin:
         worker.progress.connect(self._on_range_cal_worker_progress)
         worker.finished.connect(self._on_range_cal_worker_finished)
         self.status.showMessage(f"Range Cal... 0/{len(targets)}")
-        self._try_start_background_job("Range Cal", worker)
+        if self._try_start_background_job("Range Cal", worker):
+            target_refs = self._python_input_references(targets) or []
+            measured_ref = self._python_reference_for_dataset(measured)
+            exact_ref = self._python_reference_for_dataset(exact)
+            if measured_ref is not None and exact_ref is not None:
+                self._pending_range_record = {
+                    "targets": {
+                        id(dataset): reference
+                        for (_name, dataset), reference in zip(targets, target_refs)
+                    },
+                    "measured": measured_ref,
+                    "exact": exact_ref,
+                    "range_offset_m": float(params["range_offset_m"]),
+                    "allow_singleton_angular_broadcast": bool(
+                        params.get("allow_singleton_angular_broadcast", False)
+                    ),
+                    "maximum_correction_gain_db": params.get(
+                        "maximum_correction_gain_db", 60.0
+                    ),
+                    "measured_label": measured_name,
+                    "exact_label": exact_name,
+                }
 
     def _offset_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -3008,7 +3786,20 @@ class DatasetOpsMixin:
                 skipped.append(f"{name} ({exc})")
                 continue
             history = f"Offset ({value:+.6g}): {name}"
-            self._add_dataset_row(result, f"{name} [Offset {value:+.6g}]", history, file_name="")
+            output_name = f"{name} [Offset {value:+.6g}]"
+            output_id = self._add_dataset_row(
+                result, output_name, history, file_name=""
+            )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "offset_db",
+                    [source_ref],
+                    args=(float(value),),
+                    comment=f"Offset {name} by {value:+g} dB",
+                )
             produced += 1
 
         if produced == 0:
@@ -3090,12 +3881,23 @@ class DatasetOpsMixin:
                 skipped.append(f"{name} ({exc})")
                 continue
             history = f"Convert to dBke (extruded L={length_label}, {length_m:.6g} m): {name}"
-            self._add_dataset_row(
+            output_name = f"{name} [→ dBke L={length_label}]"
+            output_id = self._add_dataset_row(
                 result,
-                f"{name} [→ dBke L={length_label}]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "convert_extrusion",
+                    [source_ref],
+                    kwargs={"to": "dbke", "length_m": float(length_m)},
+                    comment=f"Convert {name} from dBsm to dBke",
+                )
             produced += 1
 
         if produced == 0:
@@ -3189,12 +3991,23 @@ class DatasetOpsMixin:
                 skipped.append(f"{name} ({exc})")
                 continue
             history = f"Convert to dBsm (extruded L={length_label}, {length_m:.6g} m): {name}"
-            self._add_dataset_row(
+            output_name = f"{name} [→ dBsm L={length_label}]"
+            output_id = self._add_dataset_row(
                 result,
-                f"{name} [→ dBsm L={length_label}]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "convert_extrusion",
+                    [source_ref],
+                    kwargs={"to": "dbsm", "length_m": float(length_m)},
+                    comment=f"Convert {name} from dBke to dBsm",
+                )
             produced += 1
 
         if produced == 0:
@@ -3256,12 +4069,24 @@ class DatasetOpsMixin:
 
             arrow = "Conic→GC" if direction == "conic_to_gc" else "GC→Conic"
             history = f"{arrow} {mode}: {name}{hist_extra}"
-            self._add_dataset_row(
+            output_name = f"{name} [{arrow} {suffix}]"
+            output_id = self._add_dataset_row(
                 result,
-                f"{name} [{arrow} {suffix}]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "convert_equatorial_conic_gc",
+                    args=(direction,),
+                    kwargs={"attest_legacy_ptm_convention": attest_legacy},
+                    comment=f"{arrow} exact zero-plane relabel for {name}",
+                )
             produced += 1
 
         if produced == 0:
@@ -3327,12 +4152,23 @@ class DatasetOpsMixin:
                 continue
 
             history = f"Wedge→Conic {mode}: {name}{hist_extra}"
-            self._add_dataset_row(
+            output_name = f"{name} [Wedge→Conic {suffix}]"
+            output_id = self._add_dataset_row(
                 result,
-                f"{name} [Wedge→Conic {suffix}]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "wedge_to_conic",
+                    [source_ref],
+                    kwargs={"mode": mode},
+                    comment=f"Wedge-to-Conic {mode} for {name}",
+                )
             produced += 1
 
         if produced == 0:
@@ -3557,12 +4393,26 @@ class DatasetOpsMixin:
             history = (
                 f"Medianize (window={window_deg:g}°, slide={slide_deg:g}°): {name}"
             )
-            self._add_dataset_row(
+            output_name = f"{name} [Median w={window_deg:g}° s={slide_deg:g}°]"
+            output_id = self._add_dataset_row(
                 result,
-                f"{name} [Median w={window_deg:g}° s={slide_deg:g}°]",
+                output_name,
                 history,
                 file_name="",
             )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "medianize_azimuth",
+                    [source_ref],
+                    kwargs={
+                        "window_degrees": float(window_deg),
+                        "slide_degrees": float(slide_deg),
+                    },
+                    comment=f"Medianize {name} over azimuth",
+                )
             produced += 1
 
         if produced == 0:
@@ -3598,7 +4448,19 @@ class DatasetOpsMixin:
                 units=copy.deepcopy(dataset.units or {}),
                 extra=copy.deepcopy(dataset.extra or {}),
             )
-            self._add_dataset_row(dup, f"{name} [Copy]", f"Duplicate of: {name}", file_name="")
+            output_name = f"{name} [Copy]"
+            output_id = self._add_dataset_row(
+                dup, output_name, f"Duplicate of: {name}", file_name=""
+            )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "duplicate_dataset",
+                    [source_ref],
+                    comment=f"Duplicate {name}",
+                )
         self.status.showMessage(f"Duplicated {len(datasets)} dataset(s).")
 
     def _iter_pio_slices(self, dataset: RcsGrid, base_name: str):
@@ -3868,5 +4730,16 @@ class DatasetOpsMixin:
             units=ratio_units,
         )
         out_name = f"{name_a} ÷ {name_b}"
-        self._add_dataset_row(result, out_name, f"Coherent ÷: {name_a} / {name_b}", file_name="")
+        output_id = self._add_dataset_row(
+            result, out_name, f"Coherent ÷: {name_a} / {name_b}", file_name=""
+        )
+        input_refs = self._python_input_references(datasets)
+        recorder = getattr(self, "python_recorder", None)
+        if recorder is not None and input_refs is not None:
+            recorder.record_function(
+                self._python_output_reference(output_id, out_name),
+                "coherent_divide",
+                input_refs,
+                comment=f"Coherently divide {name_a} by {name_b}",
+            )
         self.status.showMessage(f"Coherent ÷ produced: {out_name}")

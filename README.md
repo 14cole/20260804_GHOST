@@ -2,7 +2,7 @@
 
 This branch is the single-folder distribution of GRIM, GHOST, and FREDDY.
 GRIM is the main desktop application. Its tabs are **Plotting | ISAR | PPT |
-Assembly | GHOST | FREDDY**. GHOST supplies the 2-D and body-of-revolution RCS
+Assembly | GHOST | FREDDY | Python**. GHOST supplies the 2-D and body-of-revolution RCS
 solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.
@@ -23,14 +23,45 @@ Keep this tree together when copying it to another machine. Do not copy only
 `GRIM_Revised_2`; the embedded tabs discover their authoritative tools under
 `tools/GHOST` and `tools/FREDDY`.
 
+## Build a copy-ready release
+
+On Windows, double-click `Build_GRIM_Release.bat`. From any operating system,
+run `python -m build_release` at the top level (`python3 -m build_release` when
+Python 3 uses that command name). The standard-library-only builder reads the
+version from `pyproject.toml` and creates these items under `dist/`:
+
+```text
+GRIM-<version>/
+GRIM-<version>.zip
+GRIM-<version>-SHA256SUMS.txt
+```
+
+The ZIP keeps the complete GRIM, GHOST, and FREDDY source layout, assets, and
+launchers, while omitting Git data, virtual environments, Python/test caches,
+and temporary files. `SHA256SUMS.txt` is also inside the release folder and
+ZIP. The external manifest verifies both the ZIP and every extracted payload
+file. Existing release artifacts are never overwritten, and an incomplete
+source tree fails before output is created.
+
+Copy only the ZIP (and preferably its adjacent checksum manifest) to the other
+machine, extract it, then follow **Install and run** below. Git is not needed on
+the destination machine.
+
 ## Install and run
 
 From the top-level folder:
 
 ```powershell
-py -m pip install -e .
-grim
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+.venv\Scripts\python.exe -m grim_cut_gui
 ```
+
+All Windows and macOS launchers prefer this one repository-root `.venv`, then
+an active `VIRTUAL_ENV`, then a system Python. This keeps the integrated and
+standalone windows on the same dependency set. On macOS, use
+`Launch_GRIM_GUI.command` (and run `chmod +x Launch_GRIM_GUI.command` once if a
+manual file copy did not preserve executable permission).
 
 To export `.pptx` files on Windows, install the optional PowerPoint bridge and
 have desktop Microsoft PowerPoint available:
@@ -48,7 +79,16 @@ their tools, validation data, launchers, and workflows from `tools/`. A wheel
 containing only the GRIM Python modules is not the single-folder distribution.
 
 On Windows, `Launch_GRIM_GUI.bat` provides the same source-checkout launch and
-prints the installation command if the selected Python is missing a dependency.
+prints the installation command if none of the preferred Python interpreters
+has the required dependencies.
+
+After copying the folder to a machine, run `Launch_GRIM_Diagnostics.bat` for a
+read-only installation check. After an editable install, the equivalent text
+commands are `grim-diagnose` or `py -3 -m grim_diagnostics`. The report checks
+the authoritative GRIM, GHOST, and FREDDY paths and the required GUI/solver
+dependencies. It labels PowerPoint export and platform-native GHOST
+acceleration as optional. It starts neither a solver nor PowerPoint, changes no
+files, and returns a nonzero exit code only for a required startup blocker.
 
 Standalone tool windows remain available. On Windows, use
 `tools\GHOST\Launch_GHOST_GUI.bat` or
@@ -62,13 +102,17 @@ cd ..\FREDDY
 py impedance_gui.py
 ```
 
-On macOS, each tool folder contains a matching `.command` launcher.
+On macOS, each tool folder contains a matching standalone `.command` launcher.
 
 ## Primary workflows
 
 - Use **FREDDY** to analyze infinite planar material stacks or design a mixed
-  material. Save either a nominal three-column IBC impedance CSV or a
-  five-column material CSV for use by GHOST.
+  material. After exporting a nominal PEC-backed three-column IBC CSV or a
+  nominal five-column material CSV, choose **Export and attach to current GHOST
+  geometry**. The active GHOST geometry must already be loaded or saved as a
+  `.geo`; GRIM validates and copies the CSV beside it. Press **Save Geometry**
+  in GHOST to persist the new reference. Off-angle, thickness, uncertainty,
+  and other analysis CSVs are deliberately excluded from this handoff.
 - Use **GHOST** to create and solve 2-D or axisymmetric BoR geometries. Solver
   `.grim` exports are loaded directly into GRIM.
 - Use **Assembly → Place Features** to load the same strict placement CSV used
@@ -78,6 +122,12 @@ On macOS, each tool folder contains a matching `.command` launcher.
   The display-only viewer supports meter/inch/foot axes, solid/wireframe body
   styles, opacity, and bounded/adaptive facet detail for responsive rotation.
 - Use **Plotting** and **ISAR** to inspect and process compatible RCS datasets.
+- Use **Python** to copy or save the readable headless script assembled from
+  successful dataset operations and supported rectangular/polar azimuth,
+  frequency, and elevation-sweep plot creation/export actions. PBP, Hold
+  overlays, and other plot modes are identified in comments instead of being represented as
+  falsely equivalent runnable code. Navigation, selection gestures, zoom/pan,
+  and the PPT, Assembly, GHOST, and FREDDY tool workflows are not recorded.
 - Use **PPT** to check loaded datasets independently of the Plotting selection,
   choose rectangular/polar azimuth plots or a frequency sweep, and review the
   actual 16:9 slide layout before export. Optional templates must also be blank
@@ -88,10 +138,16 @@ On macOS, each tool folder contains a matching `.command` launcher.
   analysts. The first six common frequencies are selected initially; one report
   is capped at 60 frequencies (10 azimuth slides) to keep the preview responsive.
 
+The separately shipped **PowerPoint Image Imprinter** is a legacy/manual deck
+formatting helper, not another report generator. It copies the position, size,
+and optional crop of pictures selected in an already-open desktop PowerPoint
+deck. New GRIM dataset reports should use the integrated **PPT** tab; keep the
+imprinter only for aligning images in an existing custom presentation.
+
 FREDDY does not calculate finite-object RCS or produce `.grim` datasets.
-Therefore its CSV outputs are not sent to GRIM's RCS dataset loader. Save an
-IBC or material CSV beside the applicable GHOST `.geo` file, then select it
-from the GHOST Geometry tab.
+Therefore its CSV outputs are not sent to GRIM's RCS dataset loader. The
+explicit nominal-artifact handoff above attaches only validated GHOST material
+inputs; it never treats a FREDDY analysis CSV as an RCS dataset.
 
 GRIM embeds the authoritative FREDDY implementation from `tools/FREDDY`.
 `FREDDY_ROOT_PATH` is an optional development override for a different FREDDY

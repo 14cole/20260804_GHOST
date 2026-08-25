@@ -227,21 +227,39 @@ def _exact_index(
 def _numeric_intersection(axis_values: Sequence[np.ndarray], tol: float) -> tuple[float, ...]:
     if not axis_values:
         return ()
-    first = np.asarray(axis_values[0], dtype=float).reshape(-1)
+    sorted_axes = [
+        np.sort(np.asarray(axis, dtype=float).reshape(-1))
+        for axis in axis_values
+    ]
+    if any(np.any(~np.isfinite(axis)) for axis in sorted_axes):
+        raise ValueError("PowerPoint selector axes must contain only finite values.")
+
     common: list[float] = []
-    for candidate in first:
+    previous_candidate: float | None = None
+    for candidate in sorted_axes[0]:
         candidate = float(candidate)
-        if any(math.isclose(candidate, old, rel_tol=0.0, abs_tol=tol) for old in common):
-            continue
-        if all(
-            np.count_nonzero(
-                np.isclose(np.asarray(axis, dtype=float), candidate, atol=tol, rtol=0.0)
+        if (
+            previous_candidate is not None
+            and math.isclose(
+                candidate,
+                previous_candidate,
+                rel_tol=0.0,
+                abs_tol=tol,
             )
+        ):
+            continue
+        previous_candidate = candidate
+        # Every fixed-axis selector must resolve to exactly one value in every
+        # overlay. searchsorted keeps this O(N log N) rather than repeatedly
+        # scanning each dense axis for every candidate.
+        if all(
+            int(np.searchsorted(axis, candidate + tol, side="right"))
+            - int(np.searchsorted(axis, candidate - tol, side="left"))
             == 1
-            for axis in axis_values[1:]
+            for axis in sorted_axes
         ):
             common.append(candidate)
-    return tuple(sorted(common))
+    return tuple(common)
 
 
 def _text_intersection(axis_values: Sequence[np.ndarray]) -> tuple[str, ...]:
@@ -304,6 +322,7 @@ def get_plot_availability(
     datasets: Sequence[NamedGrid | tuple[str, RcsGrid]],
     *,
     tol: float = 1.0e-6,
+    evaluate_phase: bool = True,
 ) -> PlotAvailability:
     """Return exact common fixed-axis selectors for the selected overlays."""
 
@@ -312,7 +331,14 @@ def get_plot_availability(
     selected = _coerce_named_grids(datasets)
     _assert_metadata_compatible(selected)
     reference = selected[0].grid
-    phase_available, phase_reference, phase_reason = _phase_capability(selected)
+    if evaluate_phase:
+        phase_available, phase_reference, phase_reason = _phase_capability(selected)
+    else:
+        phase_available, phase_reference, phase_reason = (
+            False,
+            "",
+            "Phase capability was not evaluated for this magnitude-only report.",
+        )
     polar_available, polar_reason = _polar_capability(selected)
     return PlotAvailability(
         azimuths=_numeric_intersection([item.grid.azimuths for item in selected], tol),
@@ -397,7 +423,11 @@ def build_azimuth_specs(
     """Build one exact azimuth panel per selected common frequency."""
 
     selected = _coerce_named_grids(datasets)
-    availability = get_plot_availability(selected, tol=tol)
+    availability = get_plot_availability(
+        selected,
+        tol=tol,
+        evaluate_phase=str(quantity).strip().lower() == "phase",
+    )
     plot_kind = str(kind).strip().lower()
     if plot_kind not in {"azimuth_rect", "azimuth_polar"}:
         raise ValueError("Azimuth plot kind must be 'azimuth_rect' or 'azimuth_polar'.")
@@ -576,7 +606,11 @@ def build_frequency_spec(
     """Build one exact frequency cut at a common azimuth/elevation/polarization."""
 
     selected = _coerce_named_grids(datasets)
-    availability = get_plot_availability(selected, tol=tol)
+    availability = get_plot_availability(
+        selected,
+        tol=tol,
+        evaluate_phase=str(quantity).strip().lower() == "phase",
+    )
     plot_quantity = _validate_quantity(quantity, availability)
     angle_unit = _display_angle_unit(angle_display_unit)
     frequency_unit = _display_frequency_unit(frequency_display_unit)
