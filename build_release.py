@@ -45,6 +45,7 @@ REQUIRED_FILES = (
     "pyproject.toml",
     "README.md",
     "build_release.py",
+    "clean_utf8.py",
     "Build_GRIM_Release.bat",
     "Launch_GRIM_GUI.bat",
     "Launch_GRIM_GUI.command",

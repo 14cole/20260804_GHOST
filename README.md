@@ -15,6 +15,7 @@ GRIM/
   tools/
     GHOST/              GHOST solver, workflows, tests, and documentation
     FREDDY/             FREDDY planar material and impedance tool
+  clean_utf8.py         In-place recovery for text-mode copy damage
   pyproject.toml
   README.md
 ```
@@ -46,6 +47,36 @@ source tree fails before output is created.
 Copy only the ZIP (and preferably its adjacent checksum manifest) to the other
 machine, extract it, then follow **Install and run** below. Git is not needed on
 the destination machine.
+
+## Repair a damaged manual copy
+
+If a text-mode copy changed source or data bytes and Python reports
+`'utf-8' codec can't decode byte ...`, copy only `clean_utf8.py` into the
+top-level folder on the destination machine. Preview the affected files first:
+
+```powershell
+# Windows PowerShell
+py -3 .\clean_utf8.py .
+```
+
+```bash
+# Linux
+python3 ./clean_utf8.py .
+```
+
+Then repeat the applicable command with `--apply`. The cleaner strictly
+converts recognized Windows-1252 and UTF-16 text to UTF-8, preserves line
+endings and executable permissions, verifies each replacement, and writes a
+recovery ZIP beside the scanned folder before changing anything. It leaves
+already-valid UTF-8 byte-for-byte unchanged and skips symlinks, environments,
+caches, build output, and binary or mixed formats such as `.grim`, `.ptm`,
+`.ss`, `.pio`, `.cmplx_di`, and `.stl`. Use `--include-extension EXT` only for
+an additional format that is known to be text.
+
+If the copied folder contains `SHA256SUMS.txt`, repaired files will no longer
+match that original release manifest; the cleaner reports this after applying
+changes. Future transfers should use the release ZIP, `scp`, `rsync`, or
+WinSCP binary mode so bytes are not re-encoded in transit.
 
 ## Install and run
 
@@ -183,6 +214,8 @@ enable or disable a feature in the electromagnetic assembly.
 ## Development checks
 
 ```powershell
+py -W error -m unittest -v test_clean_utf8.py
+
 py -m unittest discover -s GRIM_Revised_2 -p "test*.py" -v
 
 cd tools\GHOST
