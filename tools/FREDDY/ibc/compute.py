@@ -1166,6 +1166,33 @@ def ambient_wave_impedance(theta_deg: float, wave_pol: str) -> complex:
     raise ValueError(f"Unsupported wave polarization: {wave_pol}")
 
 
+def _stable_complex_tan(value: complex) -> complex:
+    """Evaluate complex tangent without overflowing for very lossy layers.
+
+    ``tan(x + jy)`` approaches ``j*sign(y)`` exponentially quickly.  Direct
+    implementations form large hyperbolic intermediates, so a thick passive
+    layer can emit an overflow warning even though the limiting result is
+    finite.  At ``|y| > 20`` the discarded correction is below roughly
+    2e-17, already at double-precision resolution.
+    """
+    value = complex(value)
+    if abs(value.imag) > 20.0:
+        return complex(0.0, math.copysign(1.0, value.imag))
+    return cmath.tan(value)
+
+
+def _stable_complex_tan_many(values: "np.ndarray") -> "np.ndarray":
+    """Vectorized counterpart of :func:`_stable_complex_tan`."""
+    values = np.asarray(values, dtype=complex)
+    result = np.empty_like(values, dtype=complex)
+    regular = np.abs(values.imag) <= 20.0
+    if np.any(regular):
+        result[regular] = np.tan(values[regular])
+    if np.any(~regular):
+        result[~regular] = 1j * np.sign(values.imag[~regular])
+    return result
+
+
 def cascade_input_impedance(
     f_ghz: float,
     theta_deg: float,
@@ -1187,7 +1214,7 @@ def cascade_input_impedance(
         eps_r *= eps_scale
         mu_r *= mu_scale
         zc, kz = layer_wave_params(f_hz, theta_deg, eps_r, mu_r, wave_pol)
-        t = cmath.tan(kz * layer.thickness_m * thickness_scale)
+        t = _stable_complex_tan(kz * layer.thickness_m * thickness_scale)
         z_next = zc * (z_next + 1j * zc * t) / (zc + 1j * z_next * t)
     return z_next
 
@@ -1521,7 +1548,7 @@ def compute_angle_metrics_many(
         layer_sheet_rs.append(0.0)
         zc, kz = wave_term
         p = kz * layer.thickness_m * thickness_scale
-        layer_terms.append((zc, np.tan(p), p))
+        layer_terms.append((zc, _stable_complex_tan_many(p), p))
 
     def _cascade(z_load: complex) -> np.ndarray:
         z_next = np.full_like(f_hz, z_load, dtype=complex)

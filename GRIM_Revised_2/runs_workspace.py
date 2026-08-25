@@ -759,7 +759,13 @@ class RunsWorkspace(QWidget):
                         "corrupt registry entr" + ("y." if skipped == 1 else "ies.")
                     )
 
-    def save_settings(self) -> None:
+    def save_settings(self) -> bool:
+        """Persist non-secret preferences and the recovery registry.
+
+        A tracked run is useful only if it survives a process interruption, so
+        callers that are about to begin remote work can require a durable local
+        journal before uploading or submitting anything.
+        """
         values = self._connection_values()
         for name, value in (
             ("transport", values.transport),
@@ -804,6 +810,14 @@ class RunsWorkspace(QWidget):
         sync = getattr(self._settings, "sync", None)
         if callable(sync):
             sync()
+        status = getattr(self._settings, "status", None)
+        if callable(status) and status() != QSettings.Status.NoError:
+            self._append_log(
+                "ERROR: Runs settings could not be written; the recovery registry "
+                "is not durable."
+            )
+            return False
+        return True
 
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API name
         if self.job_is_running():
@@ -1131,7 +1145,14 @@ class RunsWorkspace(QWidget):
         )
         self._tracked_runs[tracked.run_id] = tracked
         self._render_runs(select_run_id=tracked.run_id)
-        self.save_settings()
+        if not self.save_settings():
+            self._tracked_runs.pop(tracked.run_id, None)
+            self._render_runs()
+            self._show_error(
+                "The local run recovery record could not be saved, so no remote "
+                "upload or submission was started. Check settings-file permissions."
+            )
+            return False
 
         def operation() -> Any:
             service = self._bundle_service()
@@ -1629,31 +1650,57 @@ class RunsWorkspace(QWidget):
         statuses = value.get("statuses", ())
         if isinstance(statuses, Mapping):
             statuses = tuple(statuses.values())
-        pairs: list[tuple[str, str]] = []
+        reported_pairs: list[tuple[str, str]] = []
         for status in statuses or ():
-            job_id = str(_read_member(status, "job_id", ""))
+            job_id = str(_read_member(status, "job_id", "")).strip()
             state = _normalize_slurm_state(
                 _read_member(status, "state", "UNKNOWN")
             )
-            pairs.append((job_id, state))
+            reported_pairs.append((job_id, state))
+
+        # Aggregate only across the authoritative IDs recorded for this run.
+        # Slurm may return extra step rows (for example ``123.batch``), and an
+        # absent row must remain UNKNOWN rather than allowing one completed or
+        # failed row to terminalize the whole multi-job run.
+        reported_by_id = {
+            job_id: state for job_id, state in reported_pairs if job_id
+        }
+        expected_ids = set(run.job_ids)
+        pairs = [
+            (job_id, reported_by_id.get(job_id, "UNKNOWN"))
+            for job_id in run.job_ids
+        ]
+        extra_pairs = [
+            pair for pair in reported_pairs if pair[0] not in expected_ids
+        ]
         states = [state for _job_id, state in pairs]
         if states:
-            if all(state == "COMPLETED" for state in states):
-                run.state = "COMPLETED"
-            elif any(state in _TERMINAL_STATES - {"COMPLETED"} for state in states):
-                run.state = next(
-                    state
-                    for state in states
-                    if state in _TERMINAL_STATES - {"COMPLETED"}
-                )
+            all_terminal = all(state in _TERMINAL_STATES for state in states)
+            if all_terminal:
+                if all(state == "COMPLETED" for state in states):
+                    run.state = "COMPLETED"
+                else:
+                    run.state = next(
+                        state
+                        for state in states
+                        if state in _TERMINAL_STATES - {"COMPLETED"}
+                    )
             elif any(state == "RUNNING" for state in states):
                 run.state = "RUNNING"
             elif any(state == "PENDING" for state in states):
                 run.state = "PENDING"
             else:
-                run.state = states[0]
+                active_states = [
+                    state
+                    for state in states
+                    if state != "UNKNOWN" and state not in _TERMINAL_STATES
+                ]
+                run.state = (
+                    active_states[0] if active_states else "STATUS INCOMPLETE"
+                )
             run.progress = ", ".join(
-                f"{job_id}: {state}" if job_id else state for job_id, state in pairs
+                f"{job_id}: {state}" if job_id else state
+                for job_id, state in (*pairs, *extra_pairs)
             )
         elif stage_object is None:
             run.progress = "No scheduler record returned"

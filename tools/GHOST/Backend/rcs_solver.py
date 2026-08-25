@@ -1207,7 +1207,10 @@ def _reverse_point_pairs(point_pairs: 'List[Dict[str, Any]]') -> 'List[Dict[str,
     return reversed_pairs
 
 
-def _check_segment_orientation_or_raise(segments: 'List[Dict[str, Any]]') -> 'None':
+def _check_segment_orientation_or_raise(
+    segments: 'List[Dict[str, Any]]',
+    meters_scale: 'float' = 1.0,
+) -> 'None':
     """
     Run the shared winding / air-side consistency checks (geometry_io) and
     raise on any ERROR finding.
@@ -1221,7 +1224,25 @@ def _check_segment_orientation_or_raise(segments: 'List[Dict[str, Any]]') -> 'No
 
     from geometry_io import chains_from_snapshot_segments, check_orientation_consistency
 
-    findings = check_orientation_consistency(chains_from_snapshot_segments(segments))
+    meters_scale = float(meters_scale)
+    if not math.isfinite(meters_scale) or meters_scale <= 0.0:
+        raise ValueError("meters_scale must be positive and finite.")
+    chains = chains_from_snapshot_segments(segments)
+    coordinates = [point for chain in chains for point in chain.points]
+    if coordinates:
+        xs = [point[0] for point in coordinates]
+        ys = [point[1] for point in coordinates]
+        diagonal_m = math.hypot(max(xs) - min(xs), max(ys) - min(ys)) * meters_scale
+    else:
+        diagonal_m = 0.0
+    # geometry_io's default tolerance is expressed in the coordinate unit and
+    # floors the span at one coordinate unit.  Derive that same policy in
+    # meters, then convert it back for the raw snapshot so meter and inch
+    # representations receive identical winding decisions.
+    tolerance_m = max(1.0e-12, 1.0e-9 * max(diagonal_m, 1.0))
+    findings = check_orientation_consistency(
+        chains, tol=tolerance_m / meters_scale
+    )
     errors = [msg for severity, _idx, msg in findings if severity == "ERROR"]
     if errors:
         raise ValueError(
@@ -1372,6 +1393,10 @@ def validate_geometry_snapshot_for_solver(
     mesh a closed body as an open contour.
     """
 
+    meters_scale = float(meters_scale)
+    if not math.isfinite(meters_scale) or meters_scale <= 0.0:
+        raise ValueError("meters_scale must be positive and finite.")
+
     segments = _snapshot_segments(geometry_snapshot)
     if not segments:
         raise ValueError('Geometry snapshot contains no segments.')
@@ -1512,10 +1537,10 @@ def validate_geometry_snapshot_for_solver(
             vals = [x1, y1, x2, y2]
             if not all(math.isfinite(v) for v in vals):
                 raise ValueError(f"Segment '{seg_name}' primitive {prim_idx + 1} contains non-finite coordinates.")
-            if ((x2 - x1) ** 2 + (y2 - y1) ** 2) <= EPS * EPS:
+            p1 = (x1 * meters_scale, y1 * meters_scale)
+            p2 = (x2 * meters_scale, y2 * meters_scale)
+            if _points_close(p1, p2, EPS):
                 raise ValueError(f"Segment '{seg_name}' primitive {prim_idx + 1} has near-zero length.")
-            p1 = (x1, y1)
-            p2 = (x2, y2)
             primitives.append((seg_idx, prim_idx, seg_name, p1, p2))
             all_points.extend([p1, p2])
             if prev_end is not None and not _points_close(prev_end, p1, 1e-9):
@@ -1553,6 +1578,9 @@ def validate_geometry_snapshot_for_solver(
 
     xs = [p[0] for p in all_points] if all_points else [0.0]
     ys = [p[1] for p in all_points] if all_points else [0.0]
+    # From this point onward every geometric predicate operates in meters.
+    # Keeping the coordinates, span floor, and absolute tolerances in one unit
+    # makes preflight decisions invariant to the input's declared unit system.
     diag = max(math.hypot(max(xs) - min(xs), max(ys) - min(ys)), 1.0)
     tol = max(1e-8, 1e-6 * diag)
 
@@ -1576,8 +1604,8 @@ def validate_geometry_snapshot_for_solver(
     # (1e-9 m absolute) will NOT be merged during meshing: a visually closed
     # body silently meshes as an open contour, with wrong physics and tiny
     # residuals.  That gap window is a fatal error, not a warning.
-    snap_tol_raw = 1.0e-9 / max(float(meters_scale), EPS)   # mesh snap tol in snapshot units
-    crack_floor_raw = 1.0e-12 / max(float(meters_scale), EPS)  # below this: exact-coincidence float noise
+    snap_tol_m = 1.0e-9
+    crack_floor_m = 1.0e-12
     endpoint_list = sorted(set(all_points))
     for i in range(len(endpoint_list)):
         px, py = endpoint_list[i]
@@ -1586,12 +1614,12 @@ def validate_geometry_snapshot_for_solver(
             qx, qy = endpoint_list[j]
             j += 1
             gap = math.hypot(qx - px, qy - py)
-            if gap > tol or gap <= crack_floor_raw:
+            if gap > tol or gap <= crack_floor_m:
                 continue
-            if gap > snap_tol_raw:
+            if gap > snap_tol_m:
                 raise ValueError(
-                    f"Geometry crack: endpoints ({px:.9g}, {py:.9g}) and ({qx:.9g}, {qy:.9g}) "
-                    f"are {gap * meters_scale:.3g} m apart -- close enough to look connected, but "
+                    f"Geometry crack: endpoints ({px:.9g}, {py:.9g}) m and ({qx:.9g}, {qy:.9g}) m "
+                    f"are {gap:.3g} m apart -- close enough to look connected, but "
                     "beyond the 1e-9 m mesh node-snap tolerance, so they would mesh as an OPEN "
                     "gap. Make the endpoints exactly coincident (or separate them intentionally)."
                 )
@@ -1680,7 +1708,7 @@ def validate_geometry_snapshot_for_solver(
                     raise ValueError(
                         f"Collinear overlapping primitives: '{name_i}' primitive {prim_i + 1} and "
                         f"'{name_j}' primitive {prim_j + 1} run along the same line from a shared "
-                        f"endpoint, overlapping for {min(lu, lv) * meters_scale:.3g} m. "
+                        f"endpoint, overlapping for {min(lu, lv):.3g} m. "
                         "Split or remove the overlapping span."
                     )
             continue
@@ -1703,7 +1731,7 @@ def validate_geometry_snapshot_for_solver(
 
     # Winding / air-side consistency: wrong orientation silently corrupts TE
     # results, so it is a fatal preflight error (never auto-corrected).
-    _check_segment_orientation_or_raise(segments)
+    _check_segment_orientation_or_raise(segments, meters_scale)
 
     return {
         'segment_count': int(len(segments)),

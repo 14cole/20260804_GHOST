@@ -65,6 +65,12 @@ _ANGLE_UNITS = {
     "radians": "rad",
 }
 
+# Dense joins use a bounded advanced-index block and then transfer ownership of
+# their already-sanitized output into RcsGrid. The singleton prevents callers
+# from bypassing constructor sanitation with a public-looking boolean switch.
+_JOIN_MERGE_BLOCK_CELLS = 262_144
+_ADOPT_CLEAN_ARRAYS_TOKEN = object()
+
 
 def canonical_angular_coordinate_system(value):
     """Normalize scalar angular-coordinate metadata without guessing."""
@@ -235,6 +241,7 @@ class RcsGrid:
         history: str | None = None,
         units: dict | None = None,
         extra: dict | None = None,
+        _adopt_clean_arrays=None,
     ):
         """Build a grid from axis arrays and power/phase-backed RCS samples.
 
@@ -315,9 +322,22 @@ class RcsGrid:
         else:
             phase_arr = np.full(expected, np.nan, dtype=real_dtype)
 
-        power_clean = self._clean_power(power_arr)
-        phase_clean = self._clean_phase(phase_arr)
-        phase_clean[~np.isfinite(power_clean)] = np.nan
+        if (
+            _adopt_clean_arrays is not None
+            and _adopt_clean_arrays is not False
+            and _adopt_clean_arrays is not _ADOPT_CLEAN_ARRAYS_TOKEN
+        ):
+            raise ValueError("_adopt_clean_arrays is reserved for internal operations")
+        if _adopt_clean_arrays is _ADOPT_CLEAN_ARRAYS_TOKEN:
+            # Internal ownership-transfer path for dense operations that
+            # allocated and sanitised fresh arrays themselves. Re-copying a
+            # multi-gigabyte result here can double the operation's peak RSS.
+            power_clean = power_arr
+            phase_clean = phase_arr
+        else:
+            power_clean = self._clean_power(power_arr)
+            phase_clean = self._clean_phase(phase_arr)
+            phase_clean[~np.isfinite(power_clean)] = np.nan
 
         self.rcs_power = power_clean
         self.rcs_phase = phase_clean
@@ -2280,7 +2300,7 @@ class RcsGrid:
 
         ``overlap`` may be ``"error"`` (default), ``"first"``, or ``"last"``.
         Equal finite samples are accepted in all modes. ``max_output_bytes`` can
-        cap the dense union allocation for memory-aware folder workflows.
+        cap the estimated peak allocation for memory-aware folder workflows.
         """
         grids = cls._ensure_grids(grids)
         if overlap not in {"error", "first", "last"}:
@@ -2293,28 +2313,35 @@ class RcsGrid:
             if left_ref != right_ref and (left_ref or right_ref):
                 raise ValueError("cannot join grids with different phase references")
         if len(grids) == 1:
-            grid = grids[0]
-            return grid._new_grid(
-                np.array(grid.azimuths, copy=True),
-                np.array(grid.elevations, copy=True),
-                np.array(grid.frequencies, copy=True),
-                np.array(grid.polarizations, copy=True),
-                rcs_power=np.array(grid.rcs_power, copy=True),
-                rcs_phase=np.array(grid.rcs_phase, copy=True),
-                rcs_domain="power_phase",
-            )
-
-        az_union = cls._axis_union([grid.azimuths for grid in grids], tol=tol)
-        el_union = cls._axis_union([grid.elevations for grid in grids], tol=tol)
-        f_union = cls._axis_union([grid.frequencies for grid in grids], tol=tol)
-        p_union = cls._axis_union([grid.polarizations for grid in grids], tol=0.0)
+            # Preserve clone semantics, including original axis order, while
+            # still using the bounded allocation/ownership-transfer path.
+            az_union = np.array(ref.azimuths, copy=True)
+            el_union = np.array(ref.elevations, copy=True)
+            f_union = np.array(ref.frequencies, copy=True)
+            p_union = np.array(ref.polarizations, copy=True)
+        else:
+            az_union = cls._axis_union([grid.azimuths for grid in grids], tol=tol)
+            el_union = cls._axis_union([grid.elevations for grid in grids], tol=tol)
+            f_union = cls._axis_union([grid.frequencies for grid in grids], tol=tol)
+            p_union = cls._axis_union([grid.polarizations for grid in grids], tol=0.0)
 
         shape = (len(az_union), len(el_union), len(f_union), len(p_union))
         out_dtype = np.result_type(*[g.rcs_power.dtype for g in grids])
-        estimated_bytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(out_dtype).itemsize * 2
-        if max_output_bytes is not None and estimated_bytes > int(max_output_bytes):
+        cell_count = 1
+        for dimension in shape:
+            cell_count *= int(dimension)
+        itemsize = np.dtype(out_dtype).itemsize
+        output_bytes = cell_count * itemsize * 2
+        # The bounded merge below avoids full input-sized advanced-index
+        # copies. Count the two retained arrays, one union-sized sanitation
+        # mask, and a conservative allowance for a bounded merge block.
+        merge_block_cells = min(cell_count, _JOIN_MERGE_BLOCK_CELLS)
+        merge_scratch_bytes = merge_block_cells * (8 * itemsize + 32)
+        estimated_peak_bytes = output_bytes + cell_count + merge_scratch_bytes
+        if max_output_bytes is not None and estimated_peak_bytes > int(max_output_bytes):
             raise MemoryError(
-                f"dense joined grid needs about {estimated_bytes / (1024**3):.2f} GiB, "
+                f"dense joined grid needs about {estimated_peak_bytes / (1024**3):.2f} GiB peak "
+                f"({output_bytes / (1024**3):.2f} GiB retained), "
                 f"above the configured limit of {int(max_output_bytes) / (1024**3):.2f} GiB"
             )
         joined_power = np.full(shape, np.nan, dtype=out_dtype)
@@ -2327,28 +2354,110 @@ class RcsGrid:
             p_idx = cls._indices_for_axis_values(p_union, grid.polarizations, tol=0.0)
             if az_idx is None or el_idx is None or f_idx is None or p_idx is None:
                 raise ValueError("failed to align a dataset during join")
-            target = np.ix_(az_idx, el_idx, f_idx, p_idx)
-            existing_power = joined_power[target]
-            existing_phase = joined_phase[target]
-            incoming_power = np.asarray(grid.rcs_power, dtype=out_dtype)
-            incoming_phase = np.asarray(grid.rcs_phase, dtype=out_dtype)
-            both = np.isfinite(existing_power) & np.isfinite(incoming_power)
-            power_conflict = both & ~np.isclose(
-                existing_power, incoming_power, rtol=1e-6, atol=1e-12
+            # Keep source dtypes as views. NumPy promotes only the bounded block
+            # expressions below; casting an entire lower-precision grid here
+            # would reintroduce two input-sized peak allocations.
+            incoming_power = np.asarray(grid.rcs_power)
+            incoming_phase = np.asarray(grid.rcs_phase)
+            # np.ix_ over all four complete axes materialises full input-sized
+            # copies. Tile every axis so each advanced-index block stays
+            # bounded without degenerating into a Python loop per scalar cell.
+            pol_block = max(1, min(len(p_idx), _JOIN_MERGE_BLOCK_CELLS))
+            freq_block = max(
+                1,
+                min(len(f_idx), _JOIN_MERGE_BLOCK_CELLS // pol_block),
             )
-            both_phase = both & np.isfinite(existing_phase) & np.isfinite(incoming_phase)
-            phase_delta = np.abs(np.angle(np.exp(1j * (existing_phase - incoming_phase))))
-            phase_conflict = both_phase & (phase_delta > 1e-5)
-            if overlap == "error" and (np.any(power_conflict) or np.any(phase_conflict)):
-                raise ValueError("conflicting finite samples overlap during join")
-            if overlap == "last":
-                take = np.isfinite(incoming_power)
-            else:
-                take = ~np.isfinite(existing_power) & np.isfinite(incoming_power)
-            existing_power[take] = incoming_power[take]
-            existing_phase[take] = incoming_phase[take]
-            joined_power[target] = existing_power
-            joined_phase[target] = existing_phase
+            remaining = max(
+                1,
+                _JOIN_MERGE_BLOCK_CELLS // (pol_block * freq_block),
+            )
+            elev_block = max(1, min(len(el_idx), remaining))
+            remaining = max(
+                1,
+                _JOIN_MERGE_BLOCK_CELLS
+                // (pol_block * freq_block * elev_block),
+            )
+            az_block = max(1, min(len(az_idx), remaining))
+            for a_start in range(0, len(az_idx), az_block):
+                a_stop = min(a_start + az_block, len(az_idx))
+                union_a = az_idx[a_start:a_stop]
+                for e_start in range(0, len(el_idx), elev_block):
+                    e_stop = min(e_start + elev_block, len(el_idx))
+                    union_e = el_idx[e_start:e_stop]
+                    for f_start in range(0, len(f_idx), freq_block):
+                        f_stop = min(f_start + freq_block, len(f_idx))
+                        union_f = f_idx[f_start:f_stop]
+                        for p_start in range(0, len(p_idx), pol_block):
+                            p_stop = min(p_start + pol_block, len(p_idx))
+                            union_p = p_idx[p_start:p_stop]
+                            target = np.ix_(union_a, union_e, union_f, union_p)
+                            existing_power = joined_power[target]
+                            existing_phase = joined_phase[target]
+                            block_selection = (
+                                slice(a_start, a_stop),
+                                slice(e_start, e_stop),
+                                slice(f_start, f_stop),
+                                slice(p_start, p_stop),
+                            )
+                            block_power = incoming_power[block_selection]
+                            block_phase = incoming_phase[block_selection]
+
+                            both = np.isfinite(existing_power) & np.isfinite(block_power)
+                            power_conflict = both & ~np.isclose(
+                                existing_power, block_power, rtol=1e-6, atol=1e-12
+                            )
+                            both_phase = (
+                                both
+                                & np.isfinite(existing_phase)
+                                & np.isfinite(block_phase)
+                            )
+                            phase_delta = np.abs(
+                                np.angle(np.exp(1j * (existing_phase - block_phase)))
+                            )
+                            phase_conflict = both_phase & (phase_delta > 1e-5)
+                            if overlap == "error" and (
+                                np.any(power_conflict) or np.any(phase_conflict)
+                            ):
+                                raise ValueError(
+                                    "conflicting finite samples overlap during join"
+                                )
+
+                            if overlap == "last":
+                                take_power = np.isfinite(block_power)
+                                take_phase = take_power
+                            else:
+                                take_power = (
+                                    ~np.isfinite(existing_power)
+                                    & np.isfinite(block_power)
+                                )
+                                # Equal finite power with a missing earlier
+                                # phase is complementary data, not a replacement.
+                                fill_phase = (
+                                    both
+                                    & ~np.isfinite(existing_phase)
+                                    & np.isfinite(block_phase)
+                                )
+                                take_phase = take_power | fill_phase
+                            existing_power[take_power] = block_power[take_power]
+                            existing_phase[take_phase] = block_phase[take_phase]
+                            joined_power[target] = existing_power
+                            joined_phase[target] = existing_phase
+
+        # Inputs are normally already clean, but RcsGrid arrays are public and
+        # may have been mutated. Preserve constructor sanitation in place, then
+        # transfer ownership of these newly allocated arrays without copying.
+        finite = np.empty(shape, dtype=bool)
+        np.isfinite(joined_power, out=finite)
+        np.maximum(joined_power, 0.0, out=joined_power, where=finite)
+        np.logical_not(finite, out=finite)
+        joined_power[finite] = np.nan
+        np.isfinite(joined_phase, out=finite)
+        np.logical_not(finite, out=finite)
+        joined_phase[finite] = np.nan
+        np.isfinite(joined_power, out=finite)
+        np.logical_not(finite, out=finite)
+        joined_phase[finite] = np.nan
+        del finite
 
         return cls(
             az_union,
@@ -2366,6 +2475,7 @@ class RcsGrid:
                 for _ in (0,)
                 if "phase_reference" in ref.extra
             },
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
 
     @classmethod
@@ -2503,7 +2613,9 @@ class RcsGrid:
         elif domain in ("db", "dbsm"):
             values = self.linear_to_dbsm(self.rcs_power)
         elif domain == "dbke":
-            freq_grid = self._frequency_value_to_hz(self.frequencies).reshape(1, 1, -1, 1)
+            # Conversion helpers accept values in the dataset's declared unit.
+            # Passing preconverted Hz here caused a second unit conversion.
+            freq_grid = np.asarray(self.frequencies, dtype=float).reshape(1, 1, -1, 1)
             values = self.linear_to_dbke(self.rcs_power, freq_grid)
         else:
             raise ValueError("domain must be 'complex', 'magnitude', 'dbsm', or 'dbke'")
@@ -2574,7 +2686,7 @@ class RcsGrid:
             )
         # db domain: compute in a log domain, then store as linear so future conversion reproduces the reduced values.
         if domain == "dbke":
-            freq_grid = self._frequency_value_to_hz(axis_values[2]).reshape(1, 1, -1, 1)
+            freq_grid = np.asarray(axis_values[2], dtype=float).reshape(1, 1, -1, 1)
             reduced_linear = np.asarray(
                 self.dbke_to_linear(np.asarray(reduced, dtype=float), freq_grid),
                 dtype=self.rcs_power.dtype,
@@ -2988,6 +3100,10 @@ class RcsGrid:
 
         n_sig = int(az.size)
         n_freq = int(freq.size)
+        if el.size != n_sig:
+            raise ValueError(
+                f"SS elevation axis has {el.size} signal values; expected {n_sig}"
+            )
         data_nf = int(np.asarray(data["vv"]).shape[1]) if n_sig else 0
         if not data.get("freq_axis_ok", True):
             raise ValueError(
@@ -3004,7 +3120,29 @@ class RcsGrid:
         az_axis = np.asarray(sorted(set(az.tolist())), dtype=float)
         el_axis = np.asarray(sorted(set(el.tolist())), dtype=float)
         pols = np.asarray(["VV", "VH", "HV", "HH"], dtype=object)
-        pol_data = [data["vv"], data["vh"], data["hv"], data["hh"]]
+        pol_data = [
+            np.asarray(data[name]) for name in ("vv", "vh", "hv", "hh")
+        ]
+        expected_signal_shape = (n_sig, n_freq)
+        for name, samples in zip(("VV", "VH", "HV", "HH"), pol_data):
+            if samples.shape != expected_signal_shape:
+                raise ValueError(
+                    f"SS {name} samples have shape {samples.shape}; expected "
+                    f"{expected_signal_shape} from record framing"
+                )
+
+        coordinate_owner = {}
+        for signal_index, (azimuth, elevation) in enumerate(zip(az, el)):
+            key = (float(azimuth), float(elevation))
+            previous = coordinate_owner.get(key)
+            if previous is not None:
+                raise ValueError(
+                    "SS angular coordinate collision: signals "
+                    f"{previous + 1} and {signal_index + 1} both map to "
+                    f"azimuth={key[0]:g}, elevation={key[1]:g} after the "
+                    "format's four-decimal coordinate normalization"
+                )
+            coordinate_owner[key] = signal_index
 
         az_index = {v: i for i, v in enumerate(az_axis.tolist())}
         el_index = {v: i for i, v in enumerate(el_axis.tolist())}
@@ -4569,10 +4707,12 @@ class RcsGrid:
             - Optional ASCII footer of `key=value` lines (e.g. polarity, log).
 
         Axis convention (this loader):
-            - X axis (xname=azimuth/position) -> azimuth
-            - Y axis (yname=frequency)        -> frequency, scaled to GHz from
-              yunits in {Hz, kHz, MHz, GHz}
-            - elevation axis is a single 0.0
+            - X axis (xname=azimuth/position) -> azimuth in degrees, converted
+              exactly from xunits in {deg, rad}
+            - Y axis (yname=frequency)        -> frequency in GHz, converted
+              exactly from yunits in {Hz, kHz, MHz, GHz}
+            - elevation is restored from the optional Elevation field and
+              ElevationUnits (defaulting to the X angular unit for legacy files)
             - polarization is taken from the `polarity` header/footer field, or
               inferred from HH/VV/VH/HV in the filename.
         """
@@ -4703,7 +4843,6 @@ class RcsGrid:
 
         xname = (header.get("xname") or "").strip().lower()
         yname = (header.get("yname") or "").strip().lower()
-        yunits = (header.get("yunits") or "").strip().lower()
 
         if data_type == "complex":
             complex_arr = rawdata[0::2].astype(np.float64) + 1j * rawdata[1::2].astype(np.float64)
@@ -4722,16 +4861,55 @@ class RcsGrid:
                 "expected azimuth/position vs frequency"
             )
 
-        if yunits == "ghz" or yunits == "":
-            freqs_ghz = np.asarray(yvals, dtype=float)
-        elif yunits == "mhz":
-            freqs_ghz = np.asarray(yvals, dtype=float) * 1.0e-3
-        elif yunits == "khz":
-            freqs_ghz = np.asarray(yvals, dtype=float) * 1.0e-6
-        elif yunits == "hz":
-            freqs_ghz = np.asarray(yvals, dtype=float) * 1.0e-9
+        xunit = cls._canonical_unit(header.get("xunits"), _ANGLE_UNITS, "deg")
+        if xunit not in {"deg", "rad"}:
+            raise ValueError(
+                f"Unsupported PIO azimuth unit: {header.get('xunits')!r}; "
+                "expected degrees or radians"
+            )
+        yunit = cls._canonical_unit(header.get("yunits"), _FREQUENCY_UNITS, "GHz")
+        frequency_to_ghz = {
+            "Hz": 1.0e-9,
+            "kHz": 1.0e-6,
+            "MHz": 1.0e-3,
+            "GHz": 1.0,
+        }
+        if yunit not in frequency_to_ghz:
+            raise ValueError(
+                f"Unsupported PIO frequency unit: {header.get('yunits')!r}; "
+                "expected Hz, kHz, MHz, or GHz"
+            )
+        freqs_ghz = np.asarray(yvals, dtype=float) * frequency_to_ghz[yunit]
+
+        elevation_raw = header.get("elevation") or footer.get("elevation")
+        if elevation_raw is None or str(elevation_raw).strip() == "":
+            elevation_native = 0.0
         else:
-            freqs_ghz = np.asarray(yvals, dtype=float)
+            try:
+                elevation_native = float(elevation_raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"PIO elevation is not numeric: {elevation_raw!r}"
+                ) from exc
+        elevation_unit_raw = (
+            header.get("elevationunits")
+            or header.get("elevation_units")
+            or footer.get("elevationunits")
+            or footer.get("elevation_units")
+        )
+        elevation_unit = cls._canonical_unit(
+            elevation_unit_raw, _ANGLE_UNITS, xunit
+        )
+        if elevation_unit not in {"deg", "rad"}:
+            raise ValueError(
+                f"Unsupported PIO elevation unit: {elevation_unit_raw!r}; "
+                "expected degrees or radians"
+            )
+        elevation_deg = (
+            float(np.rad2deg(elevation_native))
+            if elevation_unit == "rad"
+            else elevation_native
+        )
 
         pol = (header.get("polarity") or footer.get("polarity") or "").strip().upper()
         if not pol:
@@ -4744,7 +4922,9 @@ class RcsGrid:
             pol = "NA"
 
         azimuths = np.asarray(xvals, dtype=float)
-        elevations = np.asarray([0.0], dtype=float)
+        if xunit == "rad":
+            azimuths = np.rad2deg(azimuths)
+        elevations = np.asarray([elevation_deg], dtype=float)
         polarizations = np.asarray([pol], dtype=object)
 
         rcs_arr = data_2d[:, np.newaxis, :, np.newaxis]
@@ -4847,8 +5027,30 @@ class RcsGrid:
                 f"save_pio: slice shape {complex_slice.shape} != ({xsize}, {ysize})"
             )
 
-        xunits = (self.units or {}).get("azimuth", "deg")
-        yunits = (self.units or {}).get("frequency", "GHz")
+        xunits = self._canonical_unit(
+            (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
+        )
+        if xunits not in {"deg", "rad"}:
+            raise ValueError(
+                "save_pio: azimuth unit must be degrees or radians; got "
+                f"{(self.units or {}).get('azimuth')!r}"
+            )
+        elevation_units = self._canonical_unit(
+            (self.units or {}).get("elevation"), _ANGLE_UNITS, "deg"
+        )
+        if elevation_units not in {"deg", "rad"}:
+            raise ValueError(
+                "save_pio: elevation unit must be degrees or radians; got "
+                f"{(self.units or {}).get('elevation')!r}"
+            )
+        yunits = self._canonical_unit(
+            (self.units or {}).get("frequency"), _FREQUENCY_UNITS, "GHz"
+        )
+        if yunits not in set(_FREQUENCY_UNITS.values()):
+            raise ValueError(
+                "save_pio: frequency unit must be Hz, kHz, MHz, or GHz; got "
+                f"{(self.units or {}).get('frequency')!r}"
+            )
         pol_label = str(self.polarizations[pol_idx]) if len(self.polarizations) else ""
         elevation_value = float(self.elevations[el_idx]) if len(self.elevations) else 0.0
 
@@ -4863,8 +5065,13 @@ class RcsGrid:
         xstart, xstop, xstep = _axis_summary(azimuths)
         ystart, ystop, ystep = _axis_summary(frequencies)
 
+        def _pio_number(value):
+            # Preserve a float64 axis through text and any subsequent unit
+            # conversion (notably radians -> degrees on import).
+            return format(float(value), ".17g")
+
         def _vals(arr):
-            return ":".join(format(float(v), "g") for v in arr)
+            return ":".join(_pio_number(v) for v in arr)
 
         name_field = os.path.splitext(os.path.basename(path))[0]
         info_field = self.history or ""
@@ -4874,16 +5081,16 @@ class RcsGrid:
         header_lines = [
             f"Name={name_field}",
             f"Info={info_field}",
-            f"XStart={format(xstart, 'g')}",
-            f"XStop={format(xstop, 'g')}",
-            f"XStep={format(xstep, 'g')}",
+            f"XStart={_pio_number(xstart)}",
+            f"XStop={_pio_number(xstop)}",
+            f"XStep={_pio_number(xstep)}",
             f"XSize={xsize}",
             "XName=azimuth",
             f"XUnits={xunits}",
             f"XVals={_vals(azimuths)}",
-            f"YStart={format(ystart, 'g')}",
-            f"YStop={format(ystop, 'g')}",
-            f"YStep={format(ystep, 'g')}",
+            f"YStart={_pio_number(ystart)}",
+            f"YStop={_pio_number(ystop)}",
+            f"YStep={_pio_number(ystep)}",
             f"YSize={ysize}",
             "YName=frequency",
             f"YUnits={yunits}",
@@ -4895,7 +5102,8 @@ class RcsGrid:
         ]
         if pol_label:
             header_lines.append(f"Polarity={pol_label}")
-        header_lines.append(f"Elevation={format(elevation_value, 'g')}")
+        header_lines.append(f"Elevation={_pio_number(elevation_value)}")
+        header_lines.append(f"ElevationUnits={elevation_units}")
 
         header_blob = ("\n".join(header_lines) + "\n").encode("ascii")
         # Reserve a fixed-width Offset line so the offset value can be filled
@@ -4916,9 +5124,26 @@ class RcsGrid:
         interleaved[0::2] = flat.real.astype(dtype, copy=False)
         interleaved[1::2] = flat.imag.astype(dtype, copy=False)
 
-        with open(path, "wb") as f:
-            f.write(header_blob)
-            f.write(offset_line)
-            f.write(interleaved.tobytes(order="C"))
+        directory = os.path.dirname(os.path.abspath(path)) or os.curdir
+        fd, stage_path = tempfile.mkstemp(
+            prefix=".pio-write-", suffix=".staging", dir=directory
+        )
+        try:
+            with os.fdopen(fd, "wb") as f:
+                fd = -1
+                f.write(header_blob)
+                f.write(offset_line)
+                f.write(interleaved.tobytes(order="C"))
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(stage_path, path)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if os.path.exists(stage_path):
+                try:
+                    os.unlink(stage_path)
+                except OSError:
+                    pass
 
         return path

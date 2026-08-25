@@ -21,7 +21,9 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 import time
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -191,6 +193,19 @@ _ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _JOB_ID_RE = re.compile(r"^[0-9][0-9A-Za-z_.+\-\[\]%]*$")
 _REMOTE_PATH_RE = re.compile(r"^/[A-Za-z0-9._+@%=/, \-]+$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_TERMINAL_SLURM_STATES = frozenset(
+    {
+        "BOOT_FAIL",
+        "CANCELLED",
+        "COMPLETED",
+        "DEADLINE",
+        "FAILED",
+        "NODE_FAIL",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "TIMEOUT",
+    }
+)
 
 
 def _normalize_slurm_state(value: str) -> str:
@@ -266,6 +281,53 @@ def _validate_job_ids(job_ids: Sequence[str | int]) -> tuple[str, ...]:
     if not normalized:
         raise ConfigurationError("at least one Slurm job ID is required")
     return tuple(normalized)
+
+
+def _job_row_belongs_to(requested_id: str, returned_id: str) -> bool:
+    """Match a Slurm array task/step row to its submitted parent job ID."""
+
+    return returned_id == requested_id or any(
+        returned_id.startswith(requested_id + separator)
+        for separator in ("_", ".", "+")
+    )
+
+
+def _aggregate_job_rows(job_id: str, rows: Sequence["JobStatus"]) -> "JobStatus":
+    """Collapse Slurm array-task and step rows into one authoritative job row."""
+
+    if len(rows) == 1 and rows[0].job_id == job_id:
+        return rows[0]
+    states = [_normalize_slurm_state(row.state) for row in rows]
+    active = [state for state in states if state not in _TERMINAL_SLURM_STATES]
+    if active:
+        if "RUNNING" in active:
+            state = "RUNNING"
+        elif "PENDING" in active:
+            state = "PENDING"
+        else:
+            state = active[0]
+    elif states and all(value == "COMPLETED" for value in states):
+        state = "COMPLETED"
+    else:
+        state = next(
+            (value for value in states if value != "COMPLETED"),
+            "UNKNOWN",
+        )
+    counts: dict[str, int] = {}
+    for value in states:
+        counts[value] = counts.get(value, 0) + 1
+    summary = ", ".join(
+        f"{count} {value}" for value, count in sorted(counts.items())
+    )
+    exact = next((row for row in rows if row.job_id == job_id), rows[0])
+    return JobStatus(
+        job_id=job_id,
+        state=state,
+        job_name=exact.job_name,
+        elapsed=exact.elapsed,
+        detail=f"Aggregated {len(rows)} Slurm row(s): {summary}",
+        source=exact.source,
+    )
 
 
 @dataclass(frozen=True)
@@ -721,15 +783,40 @@ class HpcRemoteClient:
 
         normalized = _validate_job_ids(job_ids)
         active = self.query_squeue(normalized, timeout=timeout)
-        active_by_id = {row.job_id: row for row in active}
-        missing = tuple(job_id for job_id in normalized if job_id not in active_by_id)
-        historical = self.query_sacct(missing, timeout=timeout) if missing else ()
-        historical_by_id = {row.job_id: row for row in historical}
-        ordered = [
-            active_by_id.get(job_id) or historical_by_id.get(job_id)
+        active_by_id = {
+            job_id: tuple(
+                row
+                for row in active
+                if _job_row_belongs_to(job_id, row.job_id)
+            )
             for job_id in normalized
-        ]
-        statuses = [row for row in ordered if row is not None]
+        }
+        missing = tuple(job_id for job_id in normalized if not active_by_id[job_id])
+        historical = self.query_sacct(missing, timeout=timeout) if missing else ()
+        historical_by_id = {
+            job_id: tuple(
+                row
+                for row in historical
+                if _job_row_belongs_to(job_id, row.job_id)
+            )
+            for job_id in missing
+        }
+        ordered = []
+        for job_id in normalized:
+            matching_rows = active_by_id.get(job_id) or historical_by_id.get(job_id, ())
+            if matching_rows:
+                row = _aggregate_job_rows(job_id, matching_rows)
+            else:
+                row = JobStatus(
+                    job_id=job_id,
+                    state="UNKNOWN",
+                    job_name="",
+                    elapsed="",
+                    detail="No squeue or sacct record returned",
+                    source="unavailable",
+                )
+            ordered.append(row)
+        statuses = list(ordered)
         known = {row.job_id for row in statuses}
         statuses.extend(
             row for row in (*active, *historical) if row.job_id not in known
@@ -888,17 +975,35 @@ class HpcRemoteClient:
                 "local result target already exists; choose another parent folder: "
                 f"{local_path}"
             )
-        argv = self._copy_argv(
-            local_operand=str(local_directory.resolve()),
-            remote_operand=remote_path,
-            upload=False,
-            recursive=recursive,
+        staging_directory = Path(
+            tempfile.mkdtemp(
+                prefix=f".{local_path.name}.grim-download-",
+                dir=str(local_directory.resolve()),
+            )
         )
-        result = self._execute(
-            argv,
-            timeout=self._operation_timeout(timeout, self.config.transfer_timeout),
-            operation="download HPC results",
-        )
+        try:
+            argv = self._copy_argv(
+                local_operand=str(staging_directory),
+                remote_operand=remote_path,
+                upload=False,
+                recursive=recursive,
+            )
+            result = self._execute(
+                argv,
+                timeout=self._operation_timeout(timeout, self.config.transfer_timeout),
+                operation="download HPC results",
+            )
+            staged_path = staging_directory / local_path.name
+            if not staged_path.exists():
+                raise ProtocolError(
+                    "download command succeeded but the expected result was not "
+                    f"created: {staged_path.name}"
+                )
+            # The staging directory is a private sibling of the final target, so
+            # this publication is an atomic same-filesystem rename.
+            staged_path.replace(local_path)
+        finally:
+            shutil.rmtree(staging_directory, ignore_errors=True)
         return TransferResult("download", local_path, remote_path, result)
 
     def _operation_timeout(self, value: float | None, default: float) -> float:

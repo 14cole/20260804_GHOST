@@ -523,6 +523,7 @@ class SolverTab(QWidget):
         self._solve_worker: 'Optional[_SolveWorker]' = None
         self._is_solving: 'bool' = False
         self._abort_event: 'Optional[threading.Event]' = None
+        self._plot_theme: 'Optional[Dict[str, str]]' = None
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._build_left_panel())
@@ -533,6 +534,42 @@ class SolverTab(QWidget):
         root.addWidget(splitter)
 
         self._update_mode_enables()
+
+    def apply_plot_theme(
+        self, *, background: 'str', text: 'str', grid: 'str'
+    ) -> 'None':
+        """Apply embedding-shell colors while preserving standalone defaults."""
+
+        self._plot_theme = {
+            "background": str(background),
+            "text": str(text),
+            "grid": str(grid),
+        }
+        self._apply_plot_theme_to_axes()
+        self.canvas.draw_idle()
+
+    def _apply_plot_theme_to_axes(self) -> 'None':
+        if self._plot_theme is None:
+            return
+        background = self._plot_theme["background"]
+        text = self._plot_theme["text"]
+        grid = self._plot_theme["grid"]
+        self.canvas.fig.patch.set_facecolor(background)
+        ax = self.canvas.ax
+        ax.set_facecolor(background)
+        ax.title.set_color(text)
+        ax.xaxis.label.set_color(text)
+        ax.yaxis.label.set_color(text)
+        ax.tick_params(axis="both", colors=text)
+        for spine in ax.spines.values():
+            spine.set_color(grid)
+        ax.grid(True, color=grid, alpha=0.45)
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.get_frame().set_facecolor(background)
+            legend.get_frame().set_edgecolor(grid)
+            for legend_text in legend.get_texts():
+                legend_text.set_color(text)
 
     def _build_left_panel(self) -> 'QWidget':
         panel = QWidget()
@@ -1532,4 +1569,5 @@ class SolverTab(QWidget):
         ax.grid(True, alpha=0.3)
         if len(plot_groups) <= 12:
             ax.legend(loc="best")
+        self._apply_plot_theme_to_axes()
         self.canvas.draw_idle()

@@ -51,6 +51,7 @@ Internal worker invocation (called by SLURM, not by the user):
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -464,6 +465,31 @@ def _solve_and_export_star(args):
 
 # --- submit mode (user-invoked) --------------------------------------------
 
+def _durably_publish_submitted_jobs(path, document):
+    # type: (Path, Dict[str, Any]) -> None
+    """Atomically publish a submission journal after its bytes reach disk."""
+
+    temporary_path = path.with_suffix(".json.tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(document, indent=2) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(str(temporary_path), str(path))
+
+    # A file fsync makes the journal contents durable; on POSIX, also ask the
+    # filesystem to persist the rename itself.  Some network filesystems do
+    # not support directory fsync, so that second barrier is best effort.
+    if os.name == "posix":
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            parent_fd = os.open(str(path.parent), flags)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except OSError:
+            pass
+
 def _plan_schedule(units, n_slots, fine_factor, n_angles):
     # type: (List[Dict[str, Any]], int, float, int) -> Dict[str, Any]
     """Cost every unit, size its memory, and deal the units out to slots.
@@ -853,11 +879,7 @@ def submit():
             "job_ids": submitted_job_ids,
             "updated_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         }
-        temporary_path = submitted_path.with_suffix(".json.tmp")
-        temporary_path.write_text(
-            json.dumps(submitted_document, indent=2) + "\n", encoding="utf-8"
-        )
-        temporary_path.replace(submitted_path)
+        _durably_publish_submitted_jobs(submitted_path, submitted_document)
 
     print(f"\nMonitor with:  squeue -u $USER")
     print(f"Outputs in:    {run_dir}/results/")

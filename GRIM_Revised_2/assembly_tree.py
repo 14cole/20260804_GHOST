@@ -4,6 +4,8 @@ import base64
 import io
 import json
 import os
+from pathlib import Path
+import tempfile
 import uuid
 
 import numpy as np
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QRadioButton,
     QToolButton,
     QTreeWidget,
@@ -337,8 +340,11 @@ def _item_to_dict(item: QTreeWidgetItem) -> dict | None:
         if grid is not None:
             try:
                 d["data"] = _grid_to_b64(grid)
-            except Exception:
-                pass
+            except Exception as exc:
+                raise ValueError(
+                    "Could not serialize the embedded dataset for response "
+                    f"leaf {item.text(0)!r}: {exc}"
+                ) from exc
     return d
 
 
@@ -362,8 +368,11 @@ def _dict_to_item(d: dict) -> QTreeWidgetItem:
         if "data" in d:
             try:
                 grid = _b64_to_grid(d["data"])
-            except Exception:
-                grid = None
+            except Exception as exc:
+                raise ValueError(
+                    "Could not decode the embedded dataset for response "
+                    f"leaf {item.text(0)!r}: {exc}"
+                ) from exc
         item.setData(0, _ROLE_GRID, grid)
         _apply_leaf_style(item, grid is not None)
         item.setIcon(0, _node_icon(_TYPE_LEAF, has_data=(grid is not None)))
@@ -453,6 +462,9 @@ class AssemblyTree(QTreeWidget):
     # refresh their lightweight scene from the tree; assembly physics is not
     # affected by this signal or by the checkbox states.
     visibility_changed = Signal(object, bool)
+    # Response-tree mutations only. Runtime feature-preview nodes are excluded
+    # because they are rebuilt by the feature workflow and never serialized.
+    content_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -652,6 +664,8 @@ class AssemblyTree(QTreeWidget):
     # ── preview visibility --------------------------------------------------
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if not self._updating_visibility and not _is_preview_item(item):
+            self.content_changed.emit()
         if self._updating_visibility or column != _COLUMN_VISIBILITY:
             return
         state = _visibility_state(item)
@@ -696,6 +710,8 @@ class AssemblyTree(QTreeWidget):
             self.visibility_changed.emit(
                 changed_item, _item_preview_visible(changed_item)
             )
+        if any(not _is_preview_item(changed_item) for changed_item in changed_items):
+            self.content_changed.emit()
 
     @staticmethod
     def item_visible(item: QTreeWidgetItem) -> bool:
@@ -829,6 +845,7 @@ class AssemblyTree(QTreeWidget):
             self._refresh_visibility_after_structure_change(old_parent)
             if new_parent is not old_parent:
                 self._refresh_visibility_after_structure_change(new_parent)
+            self.content_changed.emit()
             event.acceptProposedAction()
             return
 
@@ -868,6 +885,8 @@ class AssemblyTree(QTreeWidget):
                 return
 
         super().dropEvent(event)
+        if event.isAccepted():
+            self.content_changed.emit()
 
     # ── node factories ───────────────────────────────────────────────────────
 
@@ -915,10 +934,12 @@ class AssemblyTree(QTreeWidget):
         if edit:
             self.scrollToItem(item)
             self.editItem(item, 0)
+        self.content_changed.emit()
         return item
 
     def _remove_item(self, item: QTreeWidgetItem) -> None:
         parent = item.parent()
+        response_item = not _is_preview_item(item)
         if _is_preview_item(item):
             self.preview_removing.emit(item)
         (parent or self.invisibleRootItem()).removeChild(item)
@@ -928,6 +949,8 @@ class AssemblyTree(QTreeWidget):
         self.visibility_changed.emit(item, False)
         if parent is not None:
             self._refresh_visibility_after_structure_change(parent)
+        if response_item:
+            self.content_changed.emit()
 
     # ── expand / collapse icon updates ───────────────────────────────────────
 
@@ -1034,6 +1057,9 @@ def _attach(
             tree.visibility_changed.emit(item, _item_preview_visible(item))
         else:
             refresh(attached_parent)
+    changed = getattr(tree, "content_changed", None)
+    if changed is not None:
+        changed.emit()
 
 
 def _is_ancestor(candidate: QTreeWidgetItem | None, item: QTreeWidgetItem) -> bool:
@@ -1055,6 +1081,7 @@ class AssemblyTreePanel(QWidget):
     files_to_load = Signal(list)
     # (platform_name, combined_RcsGrid, history_string)
     platform_built = Signal(str, object, str)
+    dirty_changed = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1121,6 +1148,9 @@ class AssemblyTreePanel(QWidget):
         self.tree = AssemblyTree()
         layout.addWidget(self.tree, 1)
         self._syncing_show_all = False
+        self._suppress_dirty = False
+        self._dirty = False
+        self._assembly_path: Path | None = None
 
         self.btn_add_root.clicked.connect(
             lambda: self.tree._make_node("New Root", _TYPE_ROOT)
@@ -1129,12 +1159,67 @@ class AssemblyTreePanel(QWidget):
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_expand.clicked.connect(self._expand_selected)
         self.btn_collapse.clicked.connect(self._collapse_selected)
-        self.btn_save.clicked.connect(self._save)
+        self.btn_save.clicked.connect(lambda: self._save())
         self.btn_load.clicked.connect(self._load)
         self.btn_build.clicked.connect(self._build)
         self.tree.files_to_load.connect(self.files_to_load)
         self.tree.visibility_changed.connect(self._sync_show_all_checkbox)
+        self.tree.content_changed.connect(self._mark_dirty)
         self.chk_show_all.stateChanged.connect(self._set_show_all)
+
+    @property
+    def assembly_path(self) -> Path | None:
+        return self._assembly_path
+
+    def is_dirty(self) -> bool:
+        return bool(self._dirty)
+
+    def _set_dirty(self, dirty: bool) -> None:
+        value = bool(dirty)
+        if value == self._dirty:
+            return
+        self._dirty = value
+        self.dirty_changed.emit(value)
+
+    def _mark_dirty(self, *_args) -> None:
+        if not self._suppress_dirty:
+            self._set_dirty(True)
+
+    def _document(self) -> dict:
+        root = self.tree.invisibleRootItem()
+        nodes = []
+        for index in range(root.childCount()):
+            serialized = _item_to_dict(root.child(index))
+            if serialized is not None:
+                nodes.append(serialized)
+        return {"version": 3, "tree": nodes}
+
+    def _confirm_unsaved_changes(
+        self,
+        *,
+        action: str,
+        parent: QWidget | None = None,
+    ) -> bool:
+        if not self.is_dirty():
+            return True
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        shown_name = self._assembly_path.name if self._assembly_path else "Untitled assembly"
+        answer = QMessageBox.warning(
+            parent or self,
+            "Unsaved Assembly",
+            f"'{shown_name}' has unsaved response-tree changes. "
+            f"Save them before {action}?",
+            buttons.Save | buttons.Discard | buttons.Cancel,
+            buttons.Save,
+        )
+        if answer == buttons.Cancel:
+            return False
+        if answer == buttons.Save:
+            return self._save(path=self._assembly_path)
+        return True
+
+    def request_close(self, parent: QWidget | None = None) -> bool:
+        return self._confirm_unsaved_changes(action="closing GRIM", parent=parent)
 
     def _set_show_all(self, raw_state: int) -> None:
         """Apply the global preview toggle to every top-level subtree."""
@@ -1204,22 +1289,59 @@ class AssemblyTreePanel(QWidget):
         if item is not None:
             self.tree.collapseItem(item)
 
-    def _save(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Assembly Tree", "assembly.asy", "Assembly Files (*.asy)"
-        )
-        if not path:
-            return
-        if not path.lower().endswith(".asy"):
-            path += ".asy"
-        root  = self.tree.invisibleRootItem()
-        nodes = []
-        for index in range(root.childCount()):
-            serialized = _item_to_dict(root.child(index))
-            if serialized is not None:
-                nodes.append(serialized)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"version": 3, "tree": nodes}, f, indent=2)
+    def _save(self, path: str | os.PathLike[str] | None = None) -> bool:
+        target = Path(path).expanduser() if path is not None else None
+        if target is None:
+            default_path = str(self._assembly_path or Path("assembly.asy"))
+            selected, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Assembly Tree",
+                default_path,
+                "Assembly Files (*.asy)",
+            )
+            if not selected:
+                return False
+            target = Path(selected).expanduser()
+        if target.suffix.lower() != ".asy":
+            target = target.with_suffix(".asy")
+        target = target.resolve(strict=False)
+
+        temporary_path: Path | None = None
+        try:
+            if not target.parent.is_dir():
+                raise FileNotFoundError(
+                    f"Save directory does not exist: {target.parent}"
+                )
+            if target.exists() and not target.is_file():
+                raise OSError(f"Save target is not a regular file: {target}")
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+            )
+            temporary_path = Path(temporary_name)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                json.dump(self._document(), stream, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, target)
+            temporary_path = None
+        except Exception as exc:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            QMessageBox.critical(
+                self,
+                "Assembly Save Failed",
+                f"Could not save the assembly tree:\n{exc}",
+            )
+            return False
+
+        self._assembly_path = target
+        self._set_dirty(False)
+        self._notify(f"Assembly tree saved: {target}")
+        return True
 
     def _build(self) -> None:
         item = self.tree.currentItem()
@@ -1267,25 +1389,55 @@ class AssemblyTreePanel(QWidget):
         except Exception:
             print(text)
 
-    def _load(self) -> None:
+    def _load(self) -> bool:
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Assembly Tree", "", "Assembly Files (*.asy)"
         )
         if not path:
-            return
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Decode and validate every response node while the current tree and
-        # runtime preview are still intact. A malformed .asy must not destroy
-        # the user's live workspace before reporting its error.
-        loaded_items = [
-            _dict_to_item(node_dict) for node_dict in data.get("tree", [])
-        ]
-        self.tree.clear()
-        for item in loaded_items:
-            self.tree.invisibleRootItem().addChild(item)
-        self.tree.expandAll()
-        self._sync_show_all_checkbox()
+            return False
+        if not self._confirm_unsaved_changes(
+            action="loading another assembly", parent=self
+        ):
+            return False
+
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                data = json.load(stream)
+            if not isinstance(data, dict):
+                raise ValueError("Assembly file root must be a JSON object.")
+            version = data.get("version", 1)
+            if type(version) is not int or not 1 <= version <= 3:
+                raise ValueError(
+                    "Assembly file 'version' must be an integer from 1 through 3."
+                )
+            raw_nodes = data.get("tree")
+            if not isinstance(raw_nodes, list):
+                raise ValueError("Assembly file 'tree' must be a JSON list.")
+            # Decode and validate every response node while the current tree and
+            # runtime preview are still intact. A malformed .asy must not destroy
+            # the user's live workspace before reporting its error.
+            loaded_items = [_dict_to_item(node_dict) for node_dict in raw_nodes]
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Assembly Load Failed",
+                f"Could not load the assembly tree. The current tree was kept.\n\n{exc}",
+            )
+            return False
+
+        self._suppress_dirty = True
+        try:
+            self.tree.clear()
+            for item in loaded_items:
+                self.tree.invisibleRootItem().addChild(item)
+            self.tree.expandAll()
+            self._sync_show_all_checkbox()
+        finally:
+            self._suppress_dirty = False
+        self._assembly_path = Path(path).expanduser().resolve(strict=False)
+        self._set_dirty(False)
+        self._notify(f"Assembly tree loaded: {self._assembly_path}")
+        return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

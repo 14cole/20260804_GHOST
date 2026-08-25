@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import os
 import queue
@@ -1283,6 +1284,7 @@ class ImpedanceGui(QMainWindow):
         self.mix_unc_mu_pct_var = StringVar("5.0")
         self.dark_mode_var = BooleanVar(True)
         self.project_path: Path | None = None
+        self._clean_project_state: dict[str, object] | None = None
         self.inverse_candidates: list[InverseCandidate] = []
         self._colors = DARK_THEME
 
@@ -1384,17 +1386,10 @@ class ImpedanceGui(QMainWindow):
 
         self._build_ui()
         self._apply_theme()
-        if Path("material.csv").exists():
-            self.layers.append(
-                LayerConfig(
-                    thickness_in=0.125,
-                    anisotropic=False,
-                    file_0deg="material.csv",
-                    file_90deg="",
-                    polarization_deg=0.0,
-                )
-            )
-            self._refresh_layers()
+        # A material layer must come from an explicit user action or project.
+        # Auto-loading ``material.csv`` from the process working directory made
+        # the physics stack depend silently on how GRIM/FREDDY was launched.
+        self._mark_project_clean()
 
     def job_is_running(self) -> bool:
         """Return whether FREDDY currently owns an active background job."""
@@ -1425,6 +1420,34 @@ class ImpedanceGui(QMainWindow):
     def can_close(self) -> bool:
         """Return whether a host may safely remove or close this workspace."""
         return not self.job_is_running()
+
+    def _mark_project_clean(self) -> None:
+        self._clean_project_state = copy.deepcopy(self._collect_project_state())
+
+    def is_dirty(self) -> bool:
+        clean = self._clean_project_state
+        return clean is not None and self._collect_project_state() != clean
+
+    def request_close(self, parent: QWidget | None = None) -> bool:
+        """Resolve unsaved native project state before a host closes."""
+
+        if not self.is_dirty():
+            return True
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        shown_name = self.project_path.name if self.project_path else "Untitled FREDDY project"
+        answer = QMessageBox.warning(
+            parent or self,
+            "Unsaved FREDDY Project",
+            f"'{shown_name}' has unsaved material-stack or project changes. "
+            "Save them before closing?",
+            buttons.Save | buttons.Discard | buttons.Cancel,
+            buttons.Save,
+        )
+        if answer == buttons.Cancel:
+            return False
+        if answer == buttons.Save:
+            return self._save_project()
+        return True
 
     def _confirm_output_replacements(
         self, paths: list[Path], *, operation: str
@@ -1471,6 +1494,9 @@ class ImpedanceGui(QMainWindow):
                 "A FREDDY material or IBC task is still running. Wait for it "
                 "to finish before closing FREDDY.",
             )
+            event.ignore()
+            return
+        if not self.request_close(self):
             event.ignore()
             return
         super().closeEvent(event)
@@ -2929,30 +2955,49 @@ class ImpedanceGui(QMainWindow):
         self._refresh_mix_results_list()
         self._update_plot()
 
-    def _save_project(self) -> None:
+    def _save_project(self) -> bool:
         try:
-            if self.project_path is None:
+            target = self.project_path
+            if target is None:
                 path_str = filedialog.asksaveasfilename(
                     title="Save project",
                     defaultextension=".json",
                     filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
                 )
                 if not path_str:
-                    return
-                self.project_path = Path(path_str)
-            save_project_file(self.project_path, self._collect_project_state())
-            messagebox.showinfo("Project", f"Saved project to:\n{self.project_path}")
+                    return False
+                target = Path(path_str)
+            save_project_file(target, self._collect_project_state())
         except Exception as exc:
             messagebox.showerror("Project Save Error", str(exc))
+            return False
+        self.project_path = target
+        self._mark_project_clean()
+        messagebox.showinfo("Project", f"Saved project to:\n{self.project_path}")
+        return True
 
-    def _load_project(self) -> None:
+    def _load_project(self) -> bool:
         try:
             path_str = filedialog.askopenfilename(
                 title="Load project",
                 filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
             )
             if not path_str:
-                return
+                return False
+            if self.is_dirty():
+                buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+                answer = QMessageBox.warning(
+                    self,
+                    "Unsaved FREDDY Project",
+                    "The current FREDDY project has unsaved changes. Save them "
+                    "before loading another project?",
+                    buttons.Save | buttons.Discard | buttons.Cancel,
+                    buttons.Save,
+                )
+                if answer == buttons.Cancel:
+                    return False
+                if answer == buttons.Save and not self._save_project():
+                    return False
             path = Path(path_str)
             portability_warnings: list[str] = []
             state = load_project_file(
@@ -2961,6 +3006,7 @@ class ImpedanceGui(QMainWindow):
             )
             self._apply_project_state(state)
             self.project_path = path
+            self._mark_project_clean()
             if portability_warnings:
                 messagebox.showwarning(
                     "Project Portability",
@@ -2968,8 +3014,10 @@ class ImpedanceGui(QMainWindow):
                     parent=self,
                 )
             messagebox.showinfo("Project", f"Loaded project from:\n{path}")
+            return True
         except Exception as exc:
             messagebox.showerror("Project Load Error", str(exc))
+            return False
 
     def _sync_cbar_state(self) -> None:
         enabled = not self.cbar_auto_var.get()

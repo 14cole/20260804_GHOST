@@ -38,10 +38,22 @@ import json
 import math
 import os
 import socket
+import stat
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
+
+try:  # Linux/POSIX cluster coordination.
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover - exercised by Windows installations
+    fcntl = None
+
+try:  # Keep local Windows tests and planning tools functional.
+    import msvcrt  # type: ignore
+except ImportError:  # pragma: no cover - exercised on POSIX
+    msvcrt = None
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 # -----------------------------------------------------------------------------
@@ -781,54 +793,235 @@ class ClaimBroker:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.stale_seconds = float(stale_seconds)
         self.heartbeat_seconds = float(heartbeat_seconds)
-        self._held: 'Dict[str, Path]' = {}
+        if not math.isfinite(self.stale_seconds) or self.stale_seconds <= 0.0:
+            raise ValueError("stale_seconds must be positive and finite.")
+        if not math.isfinite(self.heartbeat_seconds) or self.heartbeat_seconds <= 0.0:
+            raise ValueError("heartbeat_seconds must be positive and finite.")
+        self.owner_token = uuid.uuid4().hex
+        self._held: 'Dict[str, Tuple[Path, str, int]]' = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: 'Optional[threading.Thread]' = None
 
     def _path(self, key: 'str') -> 'Path':
-        return self.dir / f"{key}.claim"
+        value = str(key)
+        if (
+            not value
+            or value in {".", ".."}
+            or Path(value).name != value
+            or "/" in value
+            or "\\" in value
+            or "\x00" in value
+        ):
+            raise ValueError("claim key must be one nonempty filename component.")
+        return self.dir / f"{value}.claim"
 
-    def try_claim(self, key: 'str') -> 'bool':
-        """Take ``key`` if it is unclaimed or its holder has gone quiet."""
+    def _operation_path(self, key: 'str') -> 'Path':
+        self._path(key)  # validate before deriving any coordination filename
+        return self.dir / f".{key}.claim-operation"
 
-        path = self._path(key)
-        payload = json.dumps({
+    @staticmethod
+    def _try_lock_file(path: 'Path', *, blocking: 'bool' = False) -> 'Optional[int]':
+        """Open and exclusively lock a stable one-byte coordination file.
+
+        Kernel-owned locks are released when a process exits and, unlike an
+        mtime-expired ``O_EXCL`` sentinel, cannot be stolen from a process that
+        is merely paused.  That property is the fencing guarantee needed
+        around claim replacement.
+        """
+
+        if path.is_symlink():
+            raise RuntimeError(f"Claim operation path is a symbolic link: {path}")
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(str(path), flags, 0o600)
+        except OSError as exc:
+            if exc.errno in {getattr(errno, "ELOOP", -1), getattr(errno, "EMLINK", -1)}:
+                raise RuntimeError(f"Claim operation path is a symbolic link: {path}") from exc
+            raise
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RuntimeError(f"Claim operation path is not a regular file: {path}")
+            if fcntl is not None:
+                operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+                try:
+                    fcntl.flock(fd, operation)
+                except OSError as exc:
+                    if not blocking and exc.errno in {errno.EACCES, errno.EAGAIN}:
+                        os.close(fd)
+                        return None
+                    raise
+            elif msvcrt is not None:  # pragma: no cover - Windows-only branch
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                    os.fsync(fd)
+                os.lseek(fd, 0, os.SEEK_SET)
+                mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+                try:
+                    msvcrt.locking(fd, mode, 1)
+                except OSError as exc:
+                    if not blocking and exc.errno in {
+                        errno.EACCES, errno.EAGAIN, getattr(errno, "EDEADLK", -1)
+                    }:
+                        os.close(fd)
+                        return None
+                    raise
+            else:  # pragma: no cover - every supported platform has one API
+                raise RuntimeError("No supported advisory file-lock API is available.")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def _unlock_file(fd: 'int') -> 'None':
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - Windows-only branch
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _write_fd(fd: 'int', payload: 'bytes') -> 'None':
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    @staticmethod
+    def _read_document(path: 'Path') -> 'Optional[Dict[str, Any]]':
+        try:
+            if path.is_symlink() or path.stat().st_size > 64 * 1024:
+                return None
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return document if isinstance(document, dict) else None
+
+    @staticmethod
+    def _identity(document: 'Optional[Dict[str, Any]]') -> 'Tuple[str, int]':
+        if not document:
+            return "", 0
+        token = str(document.get("owner_token") or "")
+        generation = document.get("generation", 0)
+        if isinstance(generation, bool):
+            generation = 0
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError, OverflowError):
+            generation = 0
+        return token, max(generation, 0)
+
+    def _payload(self, generation: 'int') -> 'bytes':
+        return json.dumps({
+            "schema": "ghost.hpc.claim.v2",
+            "owner_token": self.owner_token,
+            "generation": int(generation),
             "host": socket.gethostname(),
             "pid": os.getpid(),
             "job": os.environ.get("SLURM_JOB_ID", ""),
             "array_task": os.environ.get("SLURM_ARRAY_TASK_ID", ""),
             "claimed_at": time.time(),
-        }).encode("utf-8")
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _matches(self, path: 'Path', token: 'str', generation: 'int') -> 'bool':
+        return self._identity(self._read_document(path)) == (token, generation)
+
+    def _acquire_operation(
+        self, key: 'str', *, blocking: 'bool' = False
+    ) -> 'Optional[Tuple[int, str]]':
+        """Serialize one short claim mutation.
+
+        The operation file is not the long-lived work claim.  It closes the
+        read/replace window between competing stale takers and between takeover
+        and an old owner's heartbeat/abandon.  The kernel releases this lock
+        on process exit; it is never stolen from a merely paused owner.
+        """
+
+        path = self._operation_path(key)
+        token = uuid.uuid4().hex
+        fd = self._try_lock_file(path, blocking=blocking)
+        if fd is None:
+            return None
+        payload = json.dumps({
+            "schema": "ghost.hpc.claim-operation.v2",
+            "owner_token": token,
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "created_at": time.time(),
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")
         try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except OSError as exc:
-            if exc.errno != errno.EEXIST:
-                raise
-            if not self._is_stale(path):
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, payload)
+            os.fsync(fd)
+            return fd, token
+        except BaseException:
+            self._unlock_file(fd)
+            raise
+
+    def _release_operation(self, operation: 'Optional[Tuple[int, str]]') -> 'None':
+        if operation is None:
+            return
+        fd, _token = operation
+        try:
+            self._unlock_file(fd)
+        except OSError:
+            pass
+
+    def try_claim(self, key: 'str') -> 'bool':
+        """Take ``key`` if it is unclaimed or its holder has gone quiet."""
+
+        path = self._path(key)
+        operation = self._acquire_operation(key)
+        if operation is None:
+            return False
+        temporary: 'Optional[Path]' = None
+        try:
+            existing = self._read_document(path)
+            if path.exists() and not self._is_stale(path):
                 return False
-            # Steal: re-create under a private name, then swap it in.  Two
-            # stealers race on the rename and one of them wins; the loser's
-            # temporary is removed.  The result file still gates the work.
-            temporary = self.dir / f".steal.{os.getpid()}.{key}"
-            try:
-                with open(temporary, "wb") as stream:
-                    stream.write(payload)
+            _old_token, old_generation = self._identity(existing)
+            generation = old_generation + 1 if path.exists() else 1
+            payload = self._payload(generation)
+            if path.exists():
+                temporary = self.dir / f".claim-write.{uuid.uuid4().hex}.tmp"
+                fd = os.open(
+                    str(temporary), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
+                self._write_fd(fd, payload)
                 os.replace(str(temporary), str(path))
-            except OSError:
+                temporary = None
+            else:
+                try:
+                    fd = os.open(
+                        str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                    )
+                except OSError as exc:
+                    if exc.errno == errno.EEXIST:
+                        return False
+                    raise
+                self._write_fd(fd, payload)
+            if not self._matches(path, self.owner_token, generation):
+                return False
+            held = (path, self.owner_token, generation)
+            with self._lock:
+                self._held[key] = held
+            return True
+        finally:
+            if temporary is not None:
                 try:
                     temporary.unlink()
                 except OSError:
                     pass
-                return False
-            with self._lock:
-                self._held[key] = path
-            return True
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-        with self._lock:
-            self._held[key] = path
-        return True
+            self._release_operation(operation)
 
     def _is_stale(self, path: 'Path') -> 'bool':
         try:
@@ -848,13 +1041,70 @@ class ClaimBroker:
         """Give a unit back after a failure, so another task can retry it."""
 
         with self._lock:
-            path = self._held.pop(key, None)
-        if path is None:
-            path = self._path(key)
+            held = self._held.get(key)
+        if held is None:
+            return
+        path, token, generation = held
         try:
-            path.unlink()
+            operation = self._acquire_operation(key, blocking=True)
         except OSError:
-            pass
+            # Preserve ownership/heartbeat tracking so a transient shared-FS
+            # failure cannot strand an untracked live claim.
+            return
+        if operation is None:
+            return
+        forget = False
+        try:
+            try:
+                still_owned = self._matches(path, token, generation)
+            except OSError:
+                # Keep the in-memory handle so the heartbeat can retry after a
+                # transient shared-filesystem read failure.
+                return
+            if still_owned:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    forget = True
+                except OSError:
+                    return
+                else:
+                    forget = True
+            else:
+                # A successor already owns the on-disk claim; this broker no
+                # longer has anything safe to heartbeat or abandon.
+                forget = True
+        finally:
+            self._release_operation(operation)
+        if forget:
+            with self._lock:
+                if self._held.get(key) == held:
+                    self._held.pop(key, None)
+
+    def _heartbeat_once(self) -> 'None':
+        now = time.time()
+        with self._lock:
+            held_items = list(self._held.items())
+        for key, held in held_items:
+            path, token, generation = held
+            try:
+                operation = self._acquire_operation(key)
+            except OSError:
+                continue
+            if operation is None:
+                continue
+            try:
+                if self._matches(path, token, generation):
+                    try:
+                        os.utime(str(path), (now, now))
+                    except OSError:
+                        pass
+                else:
+                    with self._lock:
+                        if self._held.get(key) == held:
+                            self._held.pop(key, None)
+            finally:
+                self._release_operation(operation)
 
     def start_heartbeat(self) -> 'None':
         if self._thread is not None:
@@ -862,15 +1112,15 @@ class ClaimBroker:
 
         def _beat() -> 'None':
             while not self._stop.wait(self.heartbeat_seconds):
-                now = time.time()
-                with self._lock:
-                    paths = list(self._held.values())
-                for path in paths:
-                    try:
-                        os.utime(str(path), (now, now))
-                    except OSError:
-                        pass
+                try:
+                    self._heartbeat_once()
+                except OSError:
+                    # Parallel filesystems can report transient metadata I/O
+                    # errors.  A single miss must not permanently kill the
+                    # heartbeat thread and age every live claim into takeover.
+                    continue
 
+        self._stop.clear()
         self._thread = threading.Thread(target=_beat, name="claim-heartbeat", daemon=True)
         self._thread.start()
 

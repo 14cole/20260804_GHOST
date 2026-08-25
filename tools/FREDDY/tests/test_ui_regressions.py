@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -101,6 +102,69 @@ class MaterialMixUiTests(unittest.TestCase):
         state._task_running = True
         self.assertTrue(state.job_is_running())
         self.assertFalse(state.can_close())
+
+    def test_cwd_material_csv_is_not_silently_added_to_stack(self) -> None:
+        original_cwd = Path.cwd()
+        workspace = None
+        with tempfile.TemporaryDirectory() as folder:
+            try:
+                os.chdir(folder)
+                Path("material.csv").write_text(
+                    "Frequency_GHz,Eps_real,Eps_imag,Mu_real,Mu_imag\n",
+                    encoding="utf-8",
+                )
+                workspace = ImpedanceGui()
+                self.assertEqual(workspace.layers, [])
+                self.assertFalse(workspace.is_dirty())
+            finally:
+                os.chdir(original_cwd)
+                if workspace is not None:
+                    workspace.deleteLater()
+                    self.app.processEvents()
+
+    def test_unsaved_project_close_can_cancel_or_discard(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            workspace.f_start_var.set("2.0")
+            self.assertTrue(workspace.is_dirty())
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+
+            cancelled = QCloseEvent()
+            with mock.patch.object(
+                QMessageBox, "warning", return_value=buttons.Cancel
+            ):
+                workspace.closeEvent(cancelled)
+            self.assertFalse(cancelled.isAccepted())
+
+            discarded = QCloseEvent()
+            with mock.patch.object(
+                QMessageBox, "warning", return_value=buttons.Discard
+            ):
+                workspace.closeEvent(discarded)
+            self.assertTrue(discarded.isAccepted())
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_failed_project_save_keeps_path_and_dirty_state(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            workspace.f_stop_var.set("12.0")
+            self.assertTrue(workspace.is_dirty())
+            with tempfile.TemporaryDirectory() as folder, mock.patch(
+                "ibc.ui.filedialog.asksaveasfilename",
+                return_value=str(Path(folder) / "coating.json"),
+            ), mock.patch(
+                "ibc.ui.save_project_file", side_effect=OSError("disk full")
+            ), mock.patch("ibc.ui.messagebox.showerror"):
+                self.assertFalse(workspace._save_project())
+
+            self.assertIsNone(workspace.project_path)
+            self.assertTrue(workspace.is_dirty())
+        finally:
+            workspace._mark_project_clean()
+            workspace.deleteLater()
+            self.app.processEvents()
 
     def test_existing_outputs_require_one_explicit_replacement_confirmation(self) -> None:
         workspace = ImpedanceGui()

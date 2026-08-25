@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 from ibc.compute import (
@@ -283,8 +284,10 @@ class PhysicsTests(unittest.TestCase):
 
     def test_thick_lossy_stack_has_finite_scaled_transmission(self) -> None:
         layers = [_bulk(2.0, 10.0 - 10.0j)]
-        scalar = compute_angle_metrics(18.0, 0.0, layers, "te")
-        vector = compute_angle_metrics_many([18.0, 18.1], 0.0, layers, "te")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            scalar = compute_angle_metrics(18.0, 0.0, layers, "te")
+            vector = compute_angle_metrics_many([18.0, 18.1], 0.0, layers, "te")
         self.assertTrue(all(math.isfinite(value) for value in scalar.values()))
         self.assertAlmostEqual(scalar["insertion_loss_db"], -300.0, places=10)
         self.assertAlmostEqual(

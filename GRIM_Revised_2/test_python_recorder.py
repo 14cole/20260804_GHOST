@@ -39,7 +39,25 @@ class PythonRecorderTests(unittest.TestCase):
     @staticmethod
     def _run_script(script_path: Path, cwd: Path) -> subprocess.CompletedProcess:
         environment = dict(os.environ)
-        environment.pop("PYTHONPATH", None)
+        # Do not let the generated recipe inherit GRIM itself through
+        # PYTHONPATH; it must use the embedded GRIM_MODULE_DIR bootstrap.
+        # Preserve unrelated dependency locations so this test also works in
+        # isolated/disposable Python environments.
+        project_dir = Path(__file__).resolve().parent
+        python_paths = []
+        for entry in environment.get("PYTHONPATH", "").split(os.pathsep):
+            if not entry:
+                continue
+            try:
+                if Path(entry).resolve() == project_dir:
+                    continue
+            except OSError:
+                pass
+            python_paths.append(entry)
+        if python_paths:
+            environment["PYTHONPATH"] = os.pathsep.join(python_paths)
+        else:
+            environment.pop("PYTHONPATH", None)
         environment["MPLBACKEND"] = "Agg"
         return subprocess.run(
             [sys.executable, str(script_path)],

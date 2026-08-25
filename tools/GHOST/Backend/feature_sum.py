@@ -2665,7 +2665,10 @@ def export_signature_grim(out_path: 'str', *,
     VH), using the same physical field normalization as the radar exporter.
 
     Axes are BODY-FRAME: ``azimuth`` = roll about the body axis, ``elevation``
-    = aspect from +axis (0 = nose-on).  This is NOT a radar az/el frame -- no
+    = aspect from the canonical +z axis (0 = nose-on).  The legacy ``axis``
+    keyword accepts only a positive multiple of +z because the body field,
+    surface-normal callable, feature coordinates, and polarization basis all
+    share that frame.  This is NOT a radar az/el frame -- no
     earth-vertical rotation is applied, so the VV/HH labels are the body's
     meridian pols and avoid the radar-frame V/H swap trap. Use
     ``export_radar_grim`` when a true radar-frame product is needed.
@@ -2677,13 +2680,36 @@ def export_signature_grim(out_path: 'str', *,
     """
     from grim_io import _save_grim_npz         # same NPZ writer as the solvers
 
+    # ``np.asarray`` aliases an existing float ndarray.  Normalization is an
+    # implementation detail and must neither mutate the caller's body axis nor
+    # reject an otherwise valid read-only array.
+    body_axis = np.array(axis, dtype=float, copy=True)
+    if (
+        body_axis.shape != (3,)
+        or not np.all(np.isfinite(body_axis))
+        or float(np.linalg.norm(body_axis)) <= 1.0e-12
+    ):
+        raise ValueError("axis must be one finite nonzero 3-vector.")
+    body_axis /= np.linalg.norm(body_axis)
+    if not np.allclose(
+        body_axis, np.asarray([0.0, 0.0, 1.0]), rtol=0.0, atol=1.0e-12
+    ):
+        raise ValueError(
+            "export_signature_grim supports only the canonical +z BoR axis. "
+            "Its body interpolation, surface normals, feature coordinates, "
+            "and polarization basis all share that frame; use "
+            "export_radar_grim for a rotated radar-frame product."
+        )
+
     normal_fn = surface_of_revolution_normal(np.asarray(generatrix, dtype=float))
     freqs = np.asarray([float(f) for f in frequencies_ghz], dtype=float)
     asp = np.asarray([float(a) for a in aspects_deg], dtype=float)
     rol = np.asarray([float(r) for r in rolls_deg], dtype=float)
     n_a, n_r, n_f = len(asp), len(rol), len(freqs)
 
-    dirs, asp_flat, _ = directions_from_aspect_roll(asp, rol, axis)   # aspect-major
+    dirs, asp_flat, _ = directions_from_aspect_roll(
+        asp, rol, body_axis
+    )   # aspect-major
     chans = ("vv", "hh", "vh")
     # [roll, aspect, freq] per channel
     amp = {c: np.zeros((n_r, n_a, n_f), dtype=complex) for c in chans}
@@ -2736,7 +2762,7 @@ def export_signature_grim(out_path: 'str', *,
                         "rcs_power_is_4pi_amp2=True "
                         "estimate_key=combination_estimate_power "
                         f"axis_frame=body(az=roll,el=aspect) "
-                        f"axis={tuple(float(x) for x in axis)}").strip(" |"),
+                        f"axis={tuple(float(x) for x in body_axis)}").strip(" |"),
             "units": units,
             "phase_reference": "origin=(0,0,0) vehicle frame, convention=exp(+jwt), "
                                "coherent total far-field amplitude (body+features)",

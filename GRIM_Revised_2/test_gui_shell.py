@@ -248,6 +248,80 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.assembly_workspace.place_features_tab,
         )
 
+    def test_dark_theme_explicitly_styles_logs_and_workspace_scroll_surfaces(self) -> None:
+        qss = self.window.styleSheet().lower()
+        self.assertIn("qplaintextedit", qss)
+        self.assertIn("background: #0b1222", qss)
+        self.assertIn("color: #dbeafe", qss)
+        self.assertIn("qscrollarea#runscontrolsscroll", qss)
+        self.assertIn("qscrollarea#pptcontrolsscroll", qss)
+        self.assertEqual(
+            self.window.ppt_workspace.controls_content.objectName(),
+            "pptControlsContent",
+        )
+
+    def test_python_clear_confirms_and_resets_dirty_state(self) -> None:
+        self.window.python_recorder._lines.extend(["answer = 42", ""])
+        self.window.python_recorder._notify()
+        script = self.window.python_recorder.script
+        self.assertTrue(self.window._python_script_is_dirty())
+        self.assertEqual(
+            self.window.main_tabs.tabText(
+                self.window.main_tabs.indexOf(self.window.tab_python)
+            ),
+            "Python*",
+        )
+        buttons = getattr(
+            grim_cut_gui.QMessageBox,
+            "StandardButton",
+            grim_cut_gui.QMessageBox,
+        )
+        with mock.patch.object(
+            grim_cut_gui.QMessageBox, "question", return_value=buttons.No
+        ):
+            self.window._clear_python_script()
+        self.assertEqual(self.window.python_recorder.script, script)
+
+        with mock.patch.object(
+            grim_cut_gui.QMessageBox, "question", return_value=buttons.Yes
+        ):
+            self.window._clear_python_script()
+        self.assertEqual(
+            self.window.python_recorder.script, self.window._python_empty_script
+        )
+        self.assertFalse(self.window._python_script_is_dirty())
+        self.assertEqual(
+            self.window.main_tabs.tabText(
+                self.window.main_tabs.indexOf(self.window.tab_python)
+            ),
+            "Python",
+        )
+
+    def test_python_save_failure_preserves_existing_script(self) -> None:
+        self.window.python_recorder._lines.extend(["answer = 42", ""])
+        self.window.python_recorder._notify()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "workflow.py"
+            target.write_text("original\n", encoding="utf-8")
+            with (
+                mock.patch.object(
+                    grim_cut_gui.QFileDialog,
+                    "getSaveFileName",
+                    return_value=(str(target), "Python Files (*.py)"),
+                ),
+                mock.patch.object(
+                    grim_cut_gui.os,
+                    "replace",
+                    side_effect=OSError("publication failed"),
+                ),
+                mock.patch.object(grim_cut_gui.QMessageBox, "critical"),
+            ):
+                self.assertFalse(self.window._save_python_script())
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "original\n")
+            self.assertEqual(list(Path(temp_dir).glob(".workflow.py.*.tmp")), [])
+            self.assertTrue(self.window._python_script_is_dirty())
+
     def test_ppt_catalog_tracks_stable_dataset_ids_and_main_selection(self) -> None:
         first = _grid(1.0)
         second = _grid(2.0)
@@ -1037,6 +1111,47 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.main_tabs.currentWidget(), self.window.ghost_integration
         )
         self.assertTrue(self.window.ghost_integration.focus_called)
+
+    def test_native_workspace_cancel_blocks_unified_close(self) -> None:
+        request_close = mock.Mock(return_value=False)
+        self.window.ghost_integration.workspace = SimpleNamespace(
+            request_close=request_close
+        )
+        event = QCloseEvent()
+        self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        request_close.assert_called_once_with(self.window)
+        self.assertIs(
+            self.window.main_tabs.currentWidget(), self.window.ghost_integration
+        )
+
+    def test_unsaved_python_script_can_cancel_unified_close(self) -> None:
+        self.window.python_recorder._lines.extend(["value = 1", ""])
+        self.window.python_recorder._notify()
+        buttons = getattr(
+            grim_cut_gui.QMessageBox,
+            "StandardButton",
+            grim_cut_gui.QMessageBox,
+        )
+        event = QCloseEvent()
+        with mock.patch.object(
+            grim_cut_gui.QMessageBox, "warning", return_value=buttons.Cancel
+        ) as warning:
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        self.assertIn("Python recorder", warning.call_args.args[2])
+        self.assertIs(self.window.main_tabs.currentWidget(), self.window.tab_python)
+
+    def test_accepted_unified_close_disposes_ppt_preview_directory(self) -> None:
+        preview_directory = Path(self.window.ppt_workspace._preview_temp.name)
+        (preview_directory / "marker.png").write_bytes(b"preview")
+        event = QCloseEvent()
+        self.window.closeEvent(event)
+
+        self.assertTrue(event.isAccepted())
+        self.assertFalse(preview_directory.exists())
 
     def test_running_ppt_export_blocks_close_and_focuses_workspace(self) -> None:
         event = QCloseEvent()

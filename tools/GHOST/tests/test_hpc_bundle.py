@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -217,6 +220,34 @@ class PortableBundleTests(unittest.TestCase):
         )
         self.assertTrue(staged_geometry.is_file())
 
+    def test_interrupted_initial_copy_never_publishes_partial_stage(self) -> None:
+        target, request = self._create_2d()
+        workspace = self.temporary / "workspace_atomic_stage"
+
+        def interrupted_copy(_bundle_root, private_stage, _bundle_request):
+            (private_stage / "partial-copy-marker").write_text(
+                "interrupted", encoding="utf-8"
+            )
+            raise OSError("simulated copy interruption")
+
+        with (
+            mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True),
+            mock.patch.object(hpc_bundle, "_copy_verified_files", side_effect=interrupted_copy),
+        ):
+            with self.assertRaisesRegex(OSError, "simulated copy interruption"):
+                hpc_bundle.stage_portable_bundle(target, workspace)
+
+        final_stage = workspace / f"grim_{request['bundle_id']}"
+        self.assertFalse(final_stage.exists())
+        self.assertEqual(
+            list(workspace.glob(f".{final_stage.name}.*.stage-tmp")), []
+        )
+
+        with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
+            staged = hpc_bundle.stage_portable_bundle(target, workspace)
+        self.assertEqual(Path(staged["stage_dir"]), final_stage)
+        self.assertTrue((final_stage / "stage_metadata.json").is_file())
+
     def test_bor_stage_derives_only_bor_geometry_root(self) -> None:
         source = _write_geometry(self.temporary / "bor_source", "axisymmetric.geo")
         target = self.temporary / "bor_request"
@@ -278,6 +309,300 @@ class PortableBundleTests(unittest.TestCase):
             json.loads(Path(first["stage_dir"], "stage_result.json").read_text()),
             first,
         )
+
+    def test_concurrent_stage_submit_has_one_driver_invocation(self) -> None:
+        target, _request = self._create_2d()
+        workspace = self.temporary / "workspace_concurrent"
+        started = threading.Event()
+        finish = threading.Event()
+        calls = []
+        first_result = []
+        first_error = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            started.set()
+            if not finish.wait(5.0):
+                raise RuntimeError("test did not release the staged driver")
+            return SimpleNamespace(returncode=0, stdout="planning complete\n")
+
+        def first_stage():
+            try:
+                first_result.append(
+                    hpc_bundle.stage_portable_bundle(
+                        target, workspace, run_driver=True, submit=True
+                    )
+                )
+            except BaseException as exc:  # surfaced in the test thread below
+                first_error.append(exc)
+
+        with (
+            mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True),
+            mock.patch.object(hpc_bundle.subprocess, "run", side_effect=fake_run),
+        ):
+            thread = threading.Thread(target=first_stage)
+            thread.start()
+            self.assertTrue(started.wait(5.0))
+            try:
+                with self.assertRaisesRegex(hpc_bundle.BundleError, "active stage/submit lease"):
+                    hpc_bundle.stage_portable_bundle(
+                        target, workspace, run_driver=True, submit=True
+                    )
+            finally:
+                finish.set()
+                thread.join(timeout=5.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(first_error, [])
+        self.assertEqual(len(first_result), 1)
+        self.assertEqual(len(calls), 1)
+
+    def test_stage_lease_stale_takeover_advances_generation(self) -> None:
+        lease_path = self.temporary / "workspace_lease" / ".stage-lease.json"
+        lease_path.parent.mkdir()
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.stage-lease.v1",
+                    "owner_token": "former-owner",
+                    "generation": 7,
+                    "host": "dead-login",
+                    "pid": 123,
+                }
+            ),
+            encoding="utf-8",
+        )
+        old = time.time() - 120.0
+        os.utime(lease_path, (old, old))
+
+        with hpc_bundle._StageLease(
+            lease_path, stale_seconds=1.0, heartbeat_seconds=0.05
+        ) as lease:
+            current = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertTrue(lease.recovered_stale)
+            self.assertEqual(lease.generation, 8)
+            self.assertEqual(current["owner_token"], lease.owner_token)
+            self.assertEqual(current["generation"], 8)
+            hpc_bundle._StageLease._release_owned_file(
+                lease_path, "former-owner", 7
+            )
+            self.assertTrue(lease_path.is_file())
+        self.assertFalse(lease_path.exists())
+
+    def test_stage_lease_heartbeat_prevents_false_stale_takeover(self) -> None:
+        lease_path = self.temporary / "workspace_heartbeat" / ".stage-lease.json"
+        with hpc_bundle._StageLease(
+            lease_path, stale_seconds=0.08, heartbeat_seconds=0.01
+        ):
+            time.sleep(0.16)
+            with self.assertRaisesRegex(
+                hpc_bundle.BundleError,
+                "(?:active stage/submit lease|acquiring this bundle's stage lease)",
+            ):
+                with hpc_bundle._StageLease(
+                    lease_path, stale_seconds=0.08, heartbeat_seconds=0.01
+                ):
+                    self.fail("a live heartbeat lease must not be stolen")
+
+    def test_old_looking_live_stage_guard_cannot_be_stolen(self) -> None:
+        lease_path = self.temporary / "workspace_guard" / ".stage-lease.json"
+        lease_path.parent.mkdir()
+        holder = hpc_bundle._StageLease(lease_path)
+        contender = hpc_bundle._StageLease(lease_path)
+        guard = holder._acquire_guard()
+        try:
+            old = time.time() - 3600.0
+            os.utime(holder.guard_path, (old, old))
+            with self.assertRaisesRegex(hpc_bundle.BundleError, "Another process is acquiring"):
+                contender._acquire_guard()
+        finally:
+            holder._release_guard(guard)
+
+    def test_stage_heartbeat_retries_transient_filesystem_error(self) -> None:
+        lease_path = self.temporary / "workspace_heartbeat_io" / ".stage-lease.json"
+        lease = hpc_bundle._StageLease(
+            lease_path, stale_seconds=1.0, heartbeat_seconds=0.01
+        )
+        lease.__enter__()
+        original_acquire = lease._acquire_guard
+        recovered = threading.Event()
+        calls = [0]
+
+        def flaky_acquire():
+            calls[0] += 1
+            if calls[0] == 1:
+                raise OSError("transient shared-filesystem error")
+            guard = original_acquire()
+            recovered.set()
+            return guard
+
+        try:
+            with mock.patch.object(lease, "_acquire_guard", side_effect=flaky_acquire):
+                self.assertTrue(recovered.wait(1.0))
+                self.assertIsNotNone(lease._thread)
+                self.assertTrue(lease._thread.is_alive())
+        finally:
+            lease.__exit__(None, None, None)
+
+    def test_displaced_stage_owner_cannot_remove_successor_lease(self) -> None:
+        lease_path = self.temporary / "workspace_displaced" / ".stage-lease.json"
+        former = hpc_bundle._StageLease(
+            lease_path, stale_seconds=1.0, heartbeat_seconds=60.0
+        )
+        successor = hpc_bundle._StageLease(
+            lease_path, stale_seconds=1.0, heartbeat_seconds=60.0
+        )
+        former.__enter__()
+        old = time.time() - 120.0
+        os.utime(lease_path, (old, old))
+        successor.__enter__()
+        try:
+            with self.assertRaisesRegex(hpc_bundle.BundleError, "no longer owns"):
+                former.require_current()
+            former.__exit__(None, None, None)
+            current = json.loads(lease_path.read_text(encoding="utf-8"))
+            self.assertEqual(current["owner_token"], successor.owner_token)
+            self.assertEqual(current["generation"], 2)
+        finally:
+            successor.__exit__(None, None, None)
+
+    def test_interrupted_submit_without_job_id_fails_closed(self) -> None:
+        target, _request = self._create_2d()
+        workspace = self.temporary / "workspace_stale_state"
+        with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
+            staged = hpc_bundle.stage_portable_bundle(target, workspace)
+        stage_dir = Path(staged["stage_dir"])
+        (stage_dir / "stage_state.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.stage-state.v1",
+                    "status": "running",
+                    "submission_requested": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True),
+            mock.patch.object(hpc_bundle.subprocess, "run") as runner,
+        ):
+            with self.assertRaisesRegex(
+                hpc_bundle.BundleError, "may have accepted.*automatic resubmission"
+            ):
+                hpc_bundle.stage_portable_bundle(
+                    target, workspace, run_driver=True, submit=True
+                )
+
+        runner.assert_not_called()
+        state = json.loads((stage_dir / "stage_state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["status"], "running")
+
+    def test_terminal_state_without_result_is_recovered_not_resubmitted(self) -> None:
+        target, _request = self._create_2d()
+        workspace = self.temporary / "workspace_terminal_recovery"
+        with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
+            staged = hpc_bundle.stage_portable_bundle(target, workspace)
+        stage_dir = Path(staged["stage_dir"])
+        (stage_dir / "stage_result.json").unlink()
+        (stage_dir / "stage_state.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.stage-state.v1",
+                    "status": "complete",
+                    "submission_requested": True,
+                    "returncode": 0,
+                    "job_ids": ["92345"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True),
+            mock.patch.object(hpc_bundle.subprocess, "run") as runner,
+        ):
+            recovered = hpc_bundle.stage_portable_bundle(
+                target, workspace, run_driver=True, submit=True
+            )
+
+        runner.assert_not_called()
+        self.assertTrue(recovered["ok"])
+        self.assertTrue(recovered["recovered"])
+        self.assertEqual(recovered["job_ids"], ["92345"])
+
+    def test_interrupted_non_submitting_driver_can_retry(self) -> None:
+        target, _request = self._create_2d()
+        workspace = self.temporary / "workspace_stale_planning"
+        with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
+            staged = hpc_bundle.stage_portable_bundle(target, workspace)
+        stage_dir = Path(staged["stage_dir"])
+        (stage_dir / "stage_state.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.stage-state.v1",
+                    "status": "running",
+                    "submission_requested": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True),
+            mock.patch.object(
+                hpc_bundle.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="planning complete\n"),
+            ) as runner,
+        ):
+            result = hpc_bundle.stage_portable_bundle(
+                target, workspace, run_driver=True, submit=False
+            )
+
+        self.assertTrue(result["ok"])
+        runner.assert_called_once()
+        state = json.loads((stage_dir / "stage_state.json").read_text(encoding="utf-8"))
+        self.assertTrue(state["recovered_prior_running_state"])
+        self.assertEqual(state["status"], "complete")
+
+    def test_stale_running_state_with_job_journal_refuses_resubmit(self) -> None:
+        target, _request = self._create_2d()
+        workspace = self.temporary / "workspace_stale_submitted"
+        with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
+            staged = hpc_bundle.stage_portable_bundle(target, workspace)
+        stage_dir = Path(staged["stage_dir"])
+        (stage_dir / "stage_state.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.stage-state.v1",
+                    "status": "running",
+                    "submission_requested": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        run_dir = stage_dir / "runs" / "run_interrupted"
+        run_dir.mkdir()
+        (run_dir / "submitted_jobs.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.submitted-jobs.v1",
+                    "job_ids": ["81234"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True),
+            mock.patch.object(hpc_bundle.subprocess, "run") as runner,
+        ):
+            with self.assertRaisesRegex(hpc_bundle.BundleError, "81234"):
+                hpc_bundle.stage_portable_bundle(
+                    target, workspace, run_driver=True, submit=True
+                )
+        runner.assert_not_called()
 
     def test_staged_payload_rejects_extra_files_before_driver_execution(self) -> None:
         target, _request = self._create_2d()
@@ -367,6 +692,71 @@ class PortableBundleTests(unittest.TestCase):
         self.assertEqual(recovered["run_id"], "run_interrupted")
         self.assertEqual(recovered["job_ids"], ["81234"])
         self.assertEqual(recovered["stage_state"], "running")
+
+    def test_recovery_running_state_and_journal_override_stale_result(self) -> None:
+        target, request = self._create_2d()
+        workspace = self.temporary / "workspace_stale_result"
+        with mock.patch.object(hpc_bundle, "_linux_staging_available", return_value=True):
+            staged = hpc_bundle.stage_portable_bundle(target, workspace)
+        stage_dir = Path(staged["stage_dir"])
+        (stage_dir / "stage_state.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.stage-state.v1",
+                    "status": "running",
+                    "submission_requested": True,
+                    "lease_owner_token": "newer-attempt",
+                    "lease_generation": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+        run_dir = stage_dir / "runs" / "run_newer"
+        run_dir.mkdir()
+        (run_dir / "submitted_jobs.json").write_text(
+            json.dumps(
+                {
+                    "schema": "ghost.hpc.submitted-jobs.v1",
+                    "job_ids": ["91234"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        recovered = hpc_bundle.recover_staged_bundle(stage_dir)
+
+        self.assertFalse(recovered["ok"])
+        self.assertTrue(recovered["recovered"])
+        self.assertEqual(recovered["bundle_id"], request["bundle_id"])
+        self.assertEqual(recovered["stage_state"], "running")
+        self.assertEqual(recovered["run_id"], "run_newer")
+        self.assertEqual(recovered["job_ids"], ["91234"])
+        self.assertTrue(recovered["submission_requested"])
+
+    def test_stage_json_is_synced_before_atomic_replace(self) -> None:
+        destination = self.temporary / "durable" / "state.json"
+        events = []
+        real_fsync = hpc_bundle.os.fsync
+        real_replace = hpc_bundle.os.replace
+
+        def recording_fsync(fd):
+            events.append("fsync")
+            return real_fsync(fd)
+
+        def recording_replace(source, target):
+            events.append("replace")
+            return real_replace(source, target)
+
+        with (
+            mock.patch.object(hpc_bundle.os, "fsync", side_effect=recording_fsync),
+            mock.patch.object(hpc_bundle.os, "replace", side_effect=recording_replace),
+        ):
+            hpc_bundle._write_json_atomic(destination, {"ok": True})
+
+        self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"ok": True})
+        self.assertIn("replace", events)
+        self.assertIn("fsync", events)
+        self.assertLess(events.index("fsync"), events.index("replace"))
 
     def test_cli_emits_one_json_object(self) -> None:
         target, request = self._create_2d()

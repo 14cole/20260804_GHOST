@@ -4,14 +4,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, Signal
     from PySide6.QtWidgets import (
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,
         QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
     )
 except ImportError:
-    from PySide2.QtCore import Qt  # type: ignore
+    from PySide2.QtCore import Qt, Signal  # type: ignore
     from PySide2.QtWidgets import (  # type: ignore
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,
@@ -82,6 +82,8 @@ class MplCanvas(FigureCanvas):
 
 
 class GeometryTab(QWidget):
+    dirty_changed = Signal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         splitter = QSplitter(Qt.Horizontal)
@@ -94,8 +96,11 @@ class GeometryTab(QWidget):
         plot_layout.addWidget(self.toolbar)
         plot_layout.addWidget(self.canvas)
         self.lbl_status = QLabel("")
+        self.lbl_status.setObjectName("geometryStatus")
         self.lbl_status.setWordWrap(True)
-        self.lbl_status.setStyleSheet("color: #333; padding: 4px; font-family: monospace;")
+        # Inherit the host palette's foreground color. A hardcoded near-black
+        # foreground made this feedback unreadable in GRIM's dark shell.
+        self.lbl_status.setStyleSheet("padding: 4px; font-family: monospace;")
         plot_layout.addWidget(self.lbl_status)
         splitter.addWidget(plot_container)
 
@@ -214,6 +219,8 @@ class GeometryTab(QWidget):
         self._selected_row: 'Optional[int]' = None
         self._last_ext: 'str' = ".geo"
         self.loaded_path: 'str' = ""
+        self._dirty: 'bool' = False
+        self._plot_theme: 'Optional[Dict[str, str]]' = None
         self.issue_rows: 'Set[int]' = set()
         self.normal_artists: 'List[Any]' = []
         # Impedance overlay artists: gradient fills, endpoint markers, labels.
@@ -234,23 +241,93 @@ class GeometryTab(QWidget):
         self._set_equal_column_widths(self.table_ibc, enabled=True)
         self._set_equal_column_widths(self.table_diel, enabled=True)
 
+    def is_dirty(self) -> 'bool':
+        return bool(self._dirty)
+
+    def _set_dirty(self, dirty: 'bool') -> 'None':
+        value = bool(dirty)
+        if value == self._dirty:
+            return
+        self._dirty = value
+        self.dirty_changed.emit(value)
+
+    def _confirm_unsaved_changes(
+        self, *, action: 'str', parent: 'Optional[QWidget]' = None
+    ) -> 'bool':
+        if not self.is_dirty():
+            return True
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        shown_name = Path(self.loaded_path).name if self.loaded_path else "Untitled geometry"
+        answer = QMessageBox.warning(
+            parent or self,
+            "Unsaved GHOST Geometry",
+            f"'{shown_name}' has unsaved geometry or material changes. "
+            f"Save them before {action}?",
+            buttons.Save | buttons.Discard | buttons.Cancel,
+            buttons.Save,
+        )
+        if answer == buttons.Cancel:
+            return False
+        if answer == buttons.Save:
+            return bool(self.save_geo())
+        return True
+
+    def request_close(self, parent: 'Optional[QWidget]' = None) -> 'bool':
+        return self._confirm_unsaved_changes(action="closing GHOST", parent=parent)
+
+    def apply_plot_theme(
+        self, *, background: 'str', text: 'str', grid: 'str'
+    ) -> 'None':
+        """Apply the embedding shell's colors without changing standalone defaults."""
+
+        self._plot_theme = {
+            "background": str(background),
+            "text": str(text),
+            "grid": str(grid),
+        }
+        self._apply_plot_theme_to_axes()
+        self.canvas.draw_idle()
+
+    def _apply_plot_theme_to_axes(self) -> 'None':
+        if self._plot_theme is None:
+            return
+        background = self._plot_theme["background"]
+        text = self._plot_theme["text"]
+        grid = self._plot_theme["grid"]
+        self.canvas.fig.patch.set_facecolor(background)
+        ax = self.canvas.ax
+        ax.set_facecolor(background)
+        ax.title.set_color(text)
+        ax.xaxis.label.set_color(text)
+        ax.yaxis.label.set_color(text)
+        ax.tick_params(axis="both", colors=text)
+        for spine in ax.spines.values():
+            spine.set_color(grid)
+        ax.grid(True, color=grid, alpha=0.45)
+
+    def _segment_plot_colors(self) -> 'List[str]':
+        dark_text = self._plot_theme["text"] if self._plot_theme else "black"
+        return ["orange", "green", "#60a5fa", "gray", dark_text, "red", "#c084fc", "cyan"]
+
     def load_geo(self):
         fname, _ = QFileDialog.getOpenFileName(
             self, "Open Geometry File", "", "Geometry Files (*.geo);;All Files (*)"
         )
         if not fname:
-            return
+            return False
+        if not self._confirm_unsaved_changes(action="loading another geometry"):
+            return False
         try:
             with open(fname, "r") as f:
                 text = f.read()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to read file: {e}")
-            return
+            return False
         try:
             title, segments, ibcs_entries, dielectric_entries = parse_geometry(text)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to parse geometry: {e}")
-            return
+            return False
 
         self.title = title
         self.segments = segments
@@ -282,7 +359,7 @@ class GeometryTab(QWidget):
         self.issue_rows.clear()
         self._clear_normals()
 
-        plot_colors = ["orange", "green", "blue", "gray", "black", "red", "purple", "cyan"]
+        plot_colors = self._segment_plot_colors()
 
         for row, seg in enumerate(self.segments):
             props = seg.properties
@@ -304,6 +381,7 @@ class GeometryTab(QWidget):
         ax.set_ylabel("Y")
         ax.set_aspect("equal", adjustable="datalim")
         ax.grid(True, alpha=0.3)
+        self._apply_plot_theme_to_axes()
 
         self._populate_small_table(self.table_ibc, self.ibcs_entries, label=self.lbl_ibc, title_prefix="IBCS/Resistances")
         self._populate_small_table(
@@ -321,6 +399,7 @@ class GeometryTab(QWidget):
         self._render_fills()
         self._update_status_label(-1)
         self.canvas.draw()
+        self._set_dirty(False)
         QMessageBox.information(
             self,
             "Loaded",
@@ -328,6 +407,7 @@ class GeometryTab(QWidget):
             f"{len(self.ibcs_entries)} IBCS/Resistances entry(ies),"
             f"and {len(self.dielectric_entries)} dielectric entry(ies).",
         )
+        return True
 
     def _populate_small_table(self, table: 'QTableWidget', rows: 'List[List[str]]', label: 'QLabel', title_prefix: 'str'):
         if title_prefix == "IBCS/Resistances":
@@ -482,10 +562,11 @@ class GeometryTab(QWidget):
         seg = self.segments[row]
         props = self._ensure_prop_len(seg.properties, 5)
         props[prop_index] = new_value
+        self._set_dirty(True)
 
         if prop_index == 0:
             seg.seg_type = new_value or None
-            plot_colors = ["orange", "green", "blue", "gray", "black", "red", "purple", "cyan"]
+            plot_colors = self._segment_plot_colors()
             try:
                 color_index = (int(new_value) - 1) % len(plot_colors)
                 base_color = plot_colors[color_index]
@@ -523,6 +604,7 @@ class GeometryTab(QWidget):
         self.ibcs_entries = current
         self._populate_small_table(self.table_ibc, current, label=self.lbl_ibc, title_prefix="IBCS/Resistances")
         self._refresh_segment_dropdowns()
+        self._set_dirty(True)
 
     def _choose_material_csv(self, title: 'str') -> 'str':
         if not self.loaded_path:
@@ -802,6 +884,7 @@ class GeometryTab(QWidget):
             return False
 
         transaction.commit()
+        self._set_dirty(True)
 
         QMessageBox.information(
             self,
@@ -831,6 +914,7 @@ class GeometryTab(QWidget):
             title_prefix="IBCS/Resistances"
         )
         self._refresh_segment_dropdowns()
+        self._set_dirty(True)
 
     def _ibc_remove_row(self) -> 'None':
         sel = sorted({i.row() for i in self.table_ibc.selectedIndexes()}, reverse=True)
@@ -845,6 +929,7 @@ class GeometryTab(QWidget):
         self.ibcs_entries = current
         self._populate_small_table(self.table_ibc, current, label=self.lbl_ibc, title_prefix="IBCS/Resistances")
         self._refresh_segment_dropdowns()
+        self._set_dirty(True)
 
     def _diel_add_row(self) -> 'None':
         current = self._read_small_table(self.table_diel) if self.table_diel.rowCount() > 0 else []
@@ -862,6 +947,7 @@ class GeometryTab(QWidget):
         self.dielectric_entries = current
         self._populate_small_table(self.table_diel, current, label=self.lbl_diel, title_prefix="Dielectrics")
         self._refresh_segment_dropdowns()
+        self._set_dirty(True)
 
     def _diel_add_csv_row(self) -> 'None':
         filename = self._choose_material_csv("Choose Dielectric Material CSV")
@@ -881,6 +967,7 @@ class GeometryTab(QWidget):
             title_prefix="Dielectrics"
         )
         self._refresh_segment_dropdowns()
+        self._set_dirty(True)
 
     def _diel_remove_row(self) -> 'None':
         sel = sorted({i.row() for i in self.table_diel.selectedIndexes()}, reverse=True)
@@ -895,6 +982,7 @@ class GeometryTab(QWidget):
         self.dielectric_entries = current
         self._populate_small_table(self.table_diel, current, label=self.lbl_diel, title_prefix="Dielectrics")
         self._refresh_segment_dropdowns()
+        self._set_dirty(True)
 
     def _on_small_table_changed(self, *_args) -> 'None':
         if self._populating:
@@ -903,6 +991,7 @@ class GeometryTab(QWidget):
         # segment dropdowns now need to mirror the new labels. Accepts any
         # signal payload (QTableWidgetItem from itemChanged, int from
         # currentIndexChanged) since we don't use it.
+        self._set_dirty(True)
         self._refresh_segment_dropdowns()
 
     def _apply_neg_mat_editability(self, row: 'int', seg_type: 'str') -> 'None':
@@ -930,6 +1019,7 @@ class GeometryTab(QWidget):
         elif col == 2:
             props = self._ensure_prop_len(seg.properties, 5)
             props[1] = text
+        self._set_dirty(True)
 
         if row == self._selected_row:
             self._update_status_label(row)
@@ -1943,7 +2033,7 @@ class GeometryTab(QWidget):
             self, "Save Geometry File", default_name, "Geometry Files (*.geo);;All Files (*)"
         )
         if not fname:
-            return
+            return False
         fname = self._ensure_extension(fname, selected_filter)
         self._last_ext = os.path.splitext(fname)[1].lower()
         ibcs_rows = self._read_small_table(self.table_ibc)
@@ -1952,7 +2042,7 @@ class GeometryTab(QWidget):
             text = build_geometry_text(self.title, self.segments, ibcs_rows, dielectric_rows)
         except ValueError as e:
             QMessageBox.warning(self, "Warning", str(e))
-            return
+            return False
 
         target = Path(fname).expanduser().resolve(strict=False)
         source_geometry = (
@@ -2025,7 +2115,7 @@ class GeometryTab(QWidget):
                 "Geometry Save Blocked",
                 f"Could not preserve the geometry's material sidecars:\n{e}",
             )
-            return
+            return False
 
         replacements = [
             destination
@@ -2048,7 +2138,7 @@ class GeometryTab(QWidget):
                 buttons.No,
             )
             if answer != buttons.Yes:
-                return
+                return False
 
         transaction = AtomicFileTransaction()
         try:
@@ -2070,12 +2160,14 @@ class GeometryTab(QWidget):
                     f"Failed to save file: {e}\n\n"
                     f"Rollback also reported: {rollback_error}",
                 )
-                return
+                return False
             QMessageBox.critical(self, "Error", f"Failed to save file: {e}")
-            return
+            return False
         transaction.commit()
         self.loaded_path = str(target)
+        self._set_dirty(False)
         QMessageBox.information(self, "Saved", f"Geometry saved to {target}")
+        return True
 
     def _read_small_table(self, table: 'QTableWidget') -> 'List[List[str]]':
         rows: 'List[List[str]]' = []

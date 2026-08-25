@@ -4,6 +4,7 @@ import base64
 import os
 from pathlib import Path
 import sys
+import tempfile
 import uuid
 
 import numpy as np
@@ -151,6 +152,12 @@ def build_qss(palette: dict[str, str]) -> str:
         background: {palette['panel_bg']}; color: {palette['text']};
         border: 1px solid {palette['border']}; gridline-color: {palette['grid']};
     }}
+    QPlainTextEdit {{
+        background: {palette['panel_bg']}; color: {palette['text']};
+        border: 1px solid {palette['border']}; border-radius: 6px;
+        selection-background-color: {palette['checked_bg']};
+        selection-color: white;
+    }}
     QHeaderView::section {{ background: {palette['head_bg']}; color: {palette['text']}; border: none; padding: 6px; }}
     QTabWidget::pane {{ border: 1px solid {palette['border']}; background: {palette['panel_bg']}; }}
     QTabBar::tab {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; border-bottom: 0; padding: 6px 12px; margin-right: 2px; border-top-left-radius: 6px; border-top-right-radius: 6px; }}
@@ -198,6 +205,13 @@ def build_qss(palette: dict[str, str]) -> str:
     QScrollArea#controlDock {{ background: {palette['win_bg']}; border: none; }}
     QScrollArea#featureAssemblyScroll {{ background: {palette['panel_bg']}; border: none; }}
     QScrollArea#plotSettingsScroll {{ background: {palette['panel_bg']}; border: none; }}
+    QScrollArea#runsControlsScroll, QScrollArea#pptControlsScroll {{
+        background: {palette['panel_bg']}; border: none;
+    }}
+    QScrollArea#runsControlsScroll > QWidget,
+    QScrollArea#pptControlsScroll > QWidget,
+    QWidget#runsControlsContent,
+    QWidget#pptControlsContent {{ background: {palette['panel_bg']}; }}
     QWidget#featureAssemblyContent {{ background: {palette['panel_bg']}; }}
     QWidget#plotSettingsContent {{ background: {palette['panel_bg']}; }}
     QLabel#settingsNoMatches {{ color: {palette['grid']}; padding: 4px 2px; }}
@@ -821,6 +835,18 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             self.feature_assembly_panel
         )
         self.main_tabs.addTab(self.assembly_workspace, "Assembly")
+        assembly_tree_panel = getattr(
+            self.assembly_workspace, "assembly_tree_panel", None
+        )
+        assembly_dirty_changed = getattr(
+            assembly_tree_panel, "dirty_changed", None
+        )
+        if callable(getattr(assembly_dirty_changed, "connect", None)):
+            assembly_dirty_changed.connect(
+                lambda dirty: self._set_main_tab_dirty(
+                    self.assembly_workspace, "Assembly", dirty
+                )
+            )
 
         # GHOST remains optional at runtime. The integration widget shows an
         # actionable unavailable message when its backend is not installed.
@@ -841,6 +867,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             self,
             backend_path=self.ghost_integration.backend_path,
         )
+        runs_controls_content = getattr(
+            self.runs_workspace, "controls_content", None
+        )
+        if runs_controls_content is not None:
+            runs_controls_content.setObjectName("runsControlsContent")
         self.main_tabs.addTab(self.runs_workspace, "Runs")
 
         # A deliberately small, read-only view of the semantic dataset/plot
@@ -879,10 +910,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         python_layout.addWidget(self.python_script_view, 1)
 
+        self._python_clean_script: str | None = None
+        self._python_empty_script = ""
         self.python_recorder = PythonScriptRecorder(
-            self.python_script_view.setPlainText
+            self._on_python_script_changed
         )
+        self._python_empty_script = self.python_recorder.script
+        self._python_clean_script = self.python_recorder.script
         self.main_tabs.addTab(self.tab_python, "Python")
+        self._sync_python_tab_title()
 
         try:
             feature_service = load_ghost_module(
@@ -913,6 +949,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.pbp_heatmap_samples = 80
 
         self.setStyleSheet(build_qss(BLUE_PALETTE))
+        ghost_workspace = getattr(self.ghost_integration, "workspace", None)
+        for ghost_plot_tab_name in ("geometry_tab", "solver_tab"):
+            ghost_plot_tab = getattr(ghost_workspace, ghost_plot_tab_name, None)
+            apply_ghost_theme = getattr(ghost_plot_tab, "apply_plot_theme", None)
+            if callable(apply_ghost_theme):
+                apply_ghost_theme(
+                    background=BLUE_PALETTE["panel_bg"],
+                    text=BLUE_PALETTE["text"],
+                    grid=BLUE_PALETTE["grid"],
+                )
         self.table.files_dropped.connect(self._handle_files_dropped)
         self.table.assembly_branch_dropped.connect(self._on_assembly_branch_dropped)
         self.table.rows_reordered.connect(self._on_dataset_rows_reordered)
@@ -1137,15 +1183,58 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self._notify_dataset_catalog_changed()
         self._update_plot_color_buttons()
 
+    def _on_python_script_changed(self, script: str) -> None:
+        self.python_script_view.setPlainText(script)
+        self._sync_python_tab_title(script)
+
+    def _python_script_is_dirty(self) -> bool:
+        clean = self._python_clean_script
+        return clean is not None and self.python_recorder.script != clean
+
+    def _sync_python_tab_title(self, script: str | None = None) -> None:
+        if not hasattr(self, "main_tabs") or not hasattr(self, "tab_python"):
+            return
+        index = self.main_tabs.indexOf(self.tab_python)
+        if index < 0:
+            return
+        current = self.python_recorder.script if script is None else script
+        dirty = self._python_clean_script is not None and current != self._python_clean_script
+        self.main_tabs.setTabText(index, "Python*" if dirty else "Python")
+
+    def _set_main_tab_dirty(
+        self, widget: QWidget, clean_title: str, dirty: bool
+    ) -> None:
+        index = self.main_tabs.indexOf(widget)
+        if index >= 0:
+            self.main_tabs.setTabText(
+                index, f"{clean_title}*" if dirty else clean_title
+            )
+
     def _clear_python_script(self) -> None:
+        if self.python_recorder.script != self._python_empty_script:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            answer = QMessageBox.question(
+                self,
+                "Clear Recorded Python Script?",
+                "Clear every recorded dataset operation and plot command? "
+                "This cannot be undone.",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                return
         self.python_recorder.clear()
+        # Clear is an explicit, confirmed destructive action. Treat the empty
+        # recorder as the new clean state so closing does not prompt again.
+        self._python_clean_script = self.python_recorder.script
+        self._sync_python_tab_title()
         self.status.showMessage("Python script cleared.")
 
     def _copy_python_script(self) -> None:
         QApplication.clipboard().setText(self.python_recorder.script)
         self.status.showMessage("Python script copied to the clipboard.")
 
-    def _save_python_script(self) -> None:
+    def _save_python_script(self) -> bool:
         path, _selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save Python Script",
@@ -1153,17 +1242,57 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "Python Files (*.py);;All Files (*)",
         )
         if not path:
-            return
+            return False
         if not path.lower().endswith(".py"):
             path = f"{path}.py"
+        target = Path(path).expanduser().resolve(strict=False)
+        temporary_path: Path | None = None
+        fd = -1
         try:
-            with open(path, "w", encoding="utf-8", newline="\n") as stream:
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+            )
+            temporary_path = Path(temporary_name)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                fd = -1
                 stream.write(self.python_recorder.script)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, target)
+            temporary_path = None
         except OSError as exc:
+            if fd >= 0:
+                os.close(fd)
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             QMessageBox.critical(self, "Save Python Script Failed", str(exc))
             self.status.showMessage(f"Python script save failed: {exc}")
-            return
-        self.status.showMessage(f"Python script saved: {os.path.abspath(path)}")
+            return False
+        self._python_clean_script = self.python_recorder.script
+        self._sync_python_tab_title()
+        self.status.showMessage(f"Python script saved: {target}")
+        return True
+
+    def _confirm_python_script_close(self) -> bool:
+        if not self._python_script_is_dirty():
+            return True
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        answer = QMessageBox.warning(
+            self,
+            "Unsaved Python Recorder Script",
+            "The Python recorder contains changes that have not been saved. "
+            "Save the script before closing GRIM?",
+            buttons.Save | buttons.Discard | buttons.Cancel,
+            buttons.Save,
+        )
+        if answer == buttons.Cancel:
+            return False
+        if answer == buttons.Save:
+            return self._save_python_script()
+        return True
 
     def dragEnterEvent(self, event) -> None:
         if _extract_supported_drop_paths(event.mimeData()):
@@ -2151,6 +2280,35 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             event.ignore()
             return
 
+        ghost_workspace = getattr(self.ghost_integration, "workspace", None)
+        ghost_request_close = getattr(ghost_workspace, "request_close", None)
+        if callable(ghost_request_close) and not ghost_request_close(self):
+            self.main_tabs.setCurrentWidget(self.ghost_integration)
+            event.ignore()
+            return
+
+        assembly_panel = getattr(
+            self.assembly_workspace, "assembly_tree_panel", None
+        )
+        assembly_request_close = getattr(assembly_panel, "request_close", None)
+        if callable(assembly_request_close) and not assembly_request_close(self):
+            self.main_tabs.setCurrentWidget(self.assembly_workspace)
+            event.ignore()
+            return
+
+        freddy_workspace = getattr(self.freddy_integration, "workspace", None)
+        freddy_request_close = getattr(freddy_workspace, "request_close", None)
+        if callable(freddy_request_close) and not freddy_request_close(self):
+            self.main_tabs.setCurrentWidget(self.freddy_integration)
+            self.freddy_integration.focus_workspace()
+            event.ignore()
+            return
+
+        if not self._confirm_python_script_close():
+            self.main_tabs.setCurrentWidget(self.tab_python)
+            event.ignore()
+            return
+
         dirty_rows = self._dirty_dataset_rows()
         if dirty_rows:
             buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
@@ -2184,6 +2342,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                     event.ignore()
                     return
         self.runs_workspace.save_settings()
+        dispose_ppt = getattr(self.ppt_workspace, "dispose", None)
+        if callable(dispose_ppt):
+            dispose_ppt()
         super().closeEvent(event)
 
 

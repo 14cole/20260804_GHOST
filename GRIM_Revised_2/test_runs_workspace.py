@@ -14,6 +14,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from runs_workspace import (
@@ -28,6 +29,7 @@ class _MemorySettings:
     def __init__(self) -> None:
         self.values: dict[str, object] = {}
         self.sync_count = 0
+        self.status_value = QSettings.Status.NoError
 
     def value(self, key: str, default=None):
         return self.values.get(key, default)
@@ -37,6 +39,9 @@ class _MemorySettings:
 
     def sync(self) -> None:
         self.sync_count += 1
+
+    def status(self):
+        return self.status_value
 
 
 class _FakeBundleService:
@@ -295,6 +300,18 @@ class RunsWorkspaceTests(unittest.TestCase):
             ["openssh", "putty"],
         )
 
+    def test_submission_does_not_start_without_a_durable_recovery_record(self) -> None:
+        self._configure_2d_request()
+        self._configure_connection()
+        self.workspace.run_name_edit.setText("survey_no_journal")
+        self.settings.status_value = QSettings.Status.AccessError
+
+        self.assertFalse(self.workspace.upload_and_submit())
+
+        self.assertEqual(self.workspace.tracked_runs, ())
+        self.assertEqual(self.remote_client.calls, [])
+        self.assertIn("recovery record", self.workspace.last_error)
+
     def test_2d_and_bor_forms_emit_the_authoritative_settings(self) -> None:
         self._configure_2d_request()
         bundle = self.root / "manual_bundle"
@@ -540,6 +557,46 @@ class RunsWorkspaceTests(unittest.TestCase):
         self.assertIn("frequency complete", self.workspace.log_view.toPlainText())
         self.assertFalse(self.workspace.job_is_running())
         self.assertIsNone(self.workspace.busy_operation())
+
+    def test_refresh_does_not_terminalize_mixed_failed_and_running_jobs(self) -> None:
+        self._configure_2d_request()
+        self._configure_connection()
+        self.workspace.run_name_edit.setText("survey_mixed")
+        self.assertTrue(self.workspace.upload_and_submit())
+        _wait_for_idle(self.app, self.workspace)
+        self.workspace.jobs_table.selectRow(0)
+        self.remote_client.statuses = (
+            SimpleNamespace(job_id="321", state="FAILED"),
+            SimpleNamespace(job_id="654", state="RUNNING"),
+        )
+
+        self.assertTrue(self.workspace.refresh_selected_run())
+        _wait_for_idle(self.app, self.workspace)
+
+        run = self.workspace.tracked_runs[0]
+        self.assertEqual(run.state, "RUNNING")
+        self.assertIn("321: FAILED", run.progress)
+        self.assertFalse(self.workspace.btn_download.isEnabled())
+        self.assertTrue(self.workspace.btn_cancel.isEnabled())
+
+    def test_refresh_keeps_missing_job_status_nonterminal(self) -> None:
+        self._configure_2d_request()
+        self._configure_connection()
+        self.workspace.run_name_edit.setText("survey_missing")
+        self.assertTrue(self.workspace.upload_and_submit())
+        _wait_for_idle(self.app, self.workspace)
+        self.workspace.jobs_table.selectRow(0)
+        self.remote_client.statuses = (
+            SimpleNamespace(job_id="321", state="COMPLETED"),
+        )
+
+        self.assertTrue(self.workspace.refresh_selected_run())
+        _wait_for_idle(self.app, self.workspace)
+
+        run = self.workspace.tracked_runs[0]
+        self.assertEqual(run.state, "STATUS INCOMPLETE")
+        self.assertIn("654: UNKNOWN", run.progress)
+        self.assertFalse(self.workspace.btn_download.isEnabled())
 
     def test_cancel_uses_only_recorded_job_ids(self) -> None:
         self._configure_2d_request()

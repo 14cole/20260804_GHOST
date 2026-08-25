@@ -17,6 +17,7 @@ import tempfile
 import unittest
 import numpy as np
 import read_ss as R
+from grim_dataset import RcsGrid
 
 
 def _be_i4(v):
@@ -27,7 +28,18 @@ def _be_f4(v):
     return struct.pack(">f", float(v))
 
 
-def build_ss(path, nsig, nfreq, ifreq, freq1, freq2, flags, mode):
+def build_ss(
+    path,
+    nsig,
+    nfreq,
+    ifreq,
+    freq1,
+    freq2,
+    flags,
+    mode,
+    sweep_values=None,
+    pre_frequency_padding=0,
+):
     """Write a synthetic .ss. `flags` -> header-B size; `mode` in {incident, observation}."""
     size_a = R._table_bytes(R.HDRA)            # 648
     size_c = R._table_bytes(R.HDRC)
@@ -35,12 +47,21 @@ def build_ss(path, nsig, nfreq, ifreq, freq1, freq2, flags, mode):
                       + int(bool(flags["iqmatrix"]))
                       + int(flags["ibspsave"] > 1))
     freqblock = 4 * nfreq if ifreq == 2 else 0
-    nbytesb = size_a + hdrbsize + size_c + freqblock
+    nbytesb = (
+        size_a + hdrbsize + size_c + int(pre_frequency_padding) + freqblock
+    )
     nbytesd = 408 + nfreq * 32
     rec = nbytesb + nbytesd
 
     coff = lambda n: R._field_offset(R.HDRC, n)
-    sweep = [0.0] * nsig if nsig == 1 else [360.0 * i / (nsig - 1) for i in range(nsig)]
+    if sweep_values is None:
+        sweep = [0.0] * nsig if nsig == 1 else [
+            360.0 * i / (nsig - 1) for i in range(nsig)
+        ]
+    else:
+        sweep = [float(value) for value in sweep_values]
+        if len(sweep) != nsig:
+            raise ValueError("sweep_values length must equal nsig")
     expl_freq = [freq1] if nfreq == 1 else \
         [freq1 + (freq2 - freq1) * i / (nfreq - 1) for i in range(nfreq)]
 
@@ -63,7 +84,7 @@ def build_ss(path, nsig, nfreq, ifreq, freq1, freq2, flags, mode):
         ci("maxaspects", nsig); ci("maxang", nsig); ci("maxfreqang", nfreq * nsig)
         # --- explicit freq block (ifreq==2), right before header-D ---
         if ifreq == 2:
-            fb = cb + size_c
+            fb = nbytesb - freqblock
             for i, fv in enumerate(expl_freq):
                 b[fb + 4 * i:fb + 4 * i + 4] = _be_f4(fv)
         # --- header D at nbytesb ---
@@ -154,6 +175,92 @@ class TestSsParsing(unittest.TestCase):
             "bistatic/uniform/hdrb=512", 13, 4, 1, 9.0, 10.0,
             dict(edge_diff=True, iqmatrix=False, ibspsave=2), "observation",
         ))
+
+    def test_rejects_nonintegral_record_framing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bad-frame.ss")
+            meta = build_ss(
+                path, 2, 4, 1, 9.0, 10.0,
+                dict(edge_diff=False, iqmatrix=False, ibspsave=1), "incident",
+            )
+            with open(path, "r+b") as stream:
+                stream.seek(4)
+                stream.write(_be_i4(meta["nbytesd"] + 1))
+            with self.assertRaisesRegex(ValueError, r"exactly nbytesd=408\+32\*N"):
+                R.read_ss(path, verbose=False)
+
+    def test_rejects_truncated_final_record_instead_of_returning_partial_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "truncated.ss")
+            build_ss(
+                path, 3, 4, 1, 9.0, 10.0,
+                dict(edge_diff=False, iqmatrix=True, ibspsave=1), "incident",
+            )
+            with open(path, "r+b") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.truncate(stream.tell() - 1)
+            with self.assertRaisesRegex(ValueError, "truncated EOF"):
+                R.read_ss(path, verbose=False)
+
+    def test_rejects_header_c_count_mismatch_instead_of_scanning_a_collision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bad-header.ss")
+            meta = build_ss(
+                path, 2, 4, 1, 9.0, 10.0,
+                dict(edge_diff=True, iqmatrix=False, ibspsave=1), "incident",
+            )
+            header_c = R._table_bytes(R.HDRA) + meta["hdrbsize"]
+            nfreq_offset = R._field_offset(R.HDRC, "nfreq")
+            with open(path, "r+b") as stream:
+                stream.seek(header_c + nfreq_offset)
+                stream.write(_be_i4(99))
+            with self.assertRaisesRegex(ValueError, "header-C validation failed"):
+                R.read_ss(path, verbose=False)
+
+    def test_accepts_variable_blocks_between_header_c_and_frequency_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "variable-blocks.ss")
+            build_ss(
+                path, 2, 4, 2, 9.0, 10.0,
+                dict(edge_diff=False, iqmatrix=False, ibspsave=1),
+                "incident",
+                pre_frequency_padding=173,
+            )
+            parsed = R.read_ss(path, verbose=False)
+            np.testing.assert_allclose(parsed["freq"], np.linspace(9.0, 10.0, 4))
+
+    def test_rejects_valid_looking_header_c_at_an_illegal_byte_offset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "header-c-collision.ss")
+            size_c = R._table_bytes(R.HDRC)
+            meta = build_ss(
+                path, 1, 4, 1, 9.0, 10.0,
+                dict(edge_diff=False, iqmatrix=False, ibspsave=1),
+                "incident",
+                pre_frequency_padding=size_c + 32,
+            )
+            header_c = R._table_bytes(R.HDRA) + meta["hdrbsize"]
+            with open(path, "r+b") as stream:
+                stream.seek(header_c)
+                valid_header = stream.read(size_c)
+                stream.seek(header_c + size_c + 8)
+                stream.write(valid_header)
+                stream.seek(header_c + R._field_offset(R.HDRC, "nfreq"))
+                stream.write(_be_i4(99))
+            with self.assertRaisesRegex(ValueError, "header-C validation failed"):
+                R.read_ss(path, verbose=False)
+
+    def test_grid_loader_rejects_duplicate_angular_cells(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "collision.ss")
+            build_ss(
+                path, 2, 4, 1, 9.0e9, 10.0e9,
+                dict(edge_diff=False, iqmatrix=False, ibspsave=1),
+                "incident",
+                sweep_values=[15.0, 15.0],
+            )
+            with self.assertRaisesRegex(ValueError, "angular coordinate collision"):
+                RcsGrid.load_ss(path)
 
 
 if __name__ == "__main__":

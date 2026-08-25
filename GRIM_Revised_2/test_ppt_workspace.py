@@ -95,6 +95,19 @@ class PptWorkspaceTests(unittest.TestCase):
             DatasetCatalogEntry("b", "Modified", _grid(scale=1.4), "b.grim"),
         )
 
+    def test_controls_surface_is_theme_addressable_and_dispose_is_idempotent(self):
+        widget = self.workspace()
+        self.assertEqual(widget.controls_scroll.objectName(), "pptControlsScroll")
+        self.assertEqual(widget.controls_content.objectName(), "pptControlsContent")
+
+        preview_directory = Path(widget._preview_temp.name)
+        marker = preview_directory / "preview_marker.png"
+        marker.write_bytes(b"preview")
+        self.assertTrue(preview_directory.is_dir())
+        widget.dispose()
+        self.assertFalse(preview_directory.exists())
+        widget.dispose()
+
     def test_catalog_preserves_check_state_and_user_order_by_stable_id(self):
         widget = self.workspace()
         first = self.entries()

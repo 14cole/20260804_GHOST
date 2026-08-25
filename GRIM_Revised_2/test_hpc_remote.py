@@ -43,6 +43,23 @@ class FakeRunner:
         return response
 
 
+class MaterializingDownloadRunner(FakeRunner):
+    """Fake SCP runner that creates the downloaded basename in its target."""
+
+    def __init__(self, name: str, *responses: object) -> None:
+        super().__init__(*responses)
+        self.name = name
+
+    def __call__(
+        self, argv: tuple[str, ...], *, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        result = super().__call__(argv, timeout=timeout)
+        destination = Path(argv[-1])
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / self.name).mkdir()
+        return result
+
+
 def completed(
     stdout: str = "", stderr: str = "", returncode: int = 0
 ) -> tuple[int, str, str]:
@@ -280,7 +297,7 @@ class TransferTests(unittest.TestCase):
 
     def test_putty_download_uses_pscp_saved_session_without_password(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            runner = FakeRunner(completed())
+            runner = MaterializingDownloadRunner("results", completed())
             client = HpcRemoteClient(
                 ConnectionConfig.putty_saved_session(
                     "HPC Profile", host_key="ssh-rsa 2048 SHA256:pinned"
@@ -290,6 +307,11 @@ class TransferTests(unittest.TestCase):
 
             transfer = client.download_results(
                 "/scratch/me/run 17/results", directory
+            )
+
+            self.assertTrue(transfer.local_path.is_dir())
+            self.assertFalse(
+                any(Path(directory).glob(".results.grim-download-*"))
             )
 
         argv, timeout = runner.calls[0]
@@ -311,6 +333,19 @@ class TransferTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigurationError, "already exists"):
                 client.download_results("/scratch/run/results", directory)
         self.assertEqual(runner.calls, [])
+
+    def test_failed_download_removes_private_staging_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner(completed(stderr="transfer failed", returncode=1))
+            client = HpcRemoteClient(
+                ConnectionConfig.openssh_alias("cluster"), runner
+            )
+            with self.assertRaises(CommandFailedError):
+                client.download_results("/scratch/run/results", directory)
+            self.assertFalse((Path(directory) / "results").exists())
+            self.assertFalse(
+                any(Path(directory).glob(".results.grim-download-*"))
+            )
 
 
 class HpcBundleTests(unittest.TestCase):
@@ -542,6 +577,53 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual([row.source for row in statuses], ["squeue", "sacct"])
         self.assertIn("11", shlex.split(runner.calls[1][0][-1]))
         self.assertNotIn("10", shlex.split(runner.calls[1][0][-1]))
+
+    def test_query_jobs_preserves_unknown_rows_for_every_requested_id(self) -> None:
+        runner = FakeRunner(
+            completed("10|COMPLETED|first|00:01|0:0\n"),
+            completed(""),
+        )
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        statuses = client.query_jobs(["10", "11"])
+
+        self.assertEqual([row.job_id for row in statuses], ["10", "11"])
+        self.assertEqual([row.state for row in statuses], ["COMPLETED", "UNKNOWN"])
+        self.assertEqual(statuses[1].source, "unavailable")
+
+    def test_query_jobs_aggregates_slurm_array_tasks_under_parent_id(self) -> None:
+        runner = FakeRunner(
+            completed(
+                "10_0|COMPLETED|grim|00:02|node1\n"
+                "10_1|RUNNING|grim|00:01|node2\n"
+                "11_[0-3]|PENDING|grim|00:00|(Resources)\n"
+            )
+        )
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        statuses = client.query_jobs(["10", "11"])
+
+        parents = {row.job_id: row for row in statuses if row.job_id in {"10", "11"}}
+        self.assertEqual(parents["10"].state, "RUNNING")
+        self.assertEqual(parents["11"].state, "PENDING")
+        self.assertIn("1 COMPLETED", parents["10"].detail)
+        self.assertIn("1 RUNNING", parents["10"].detail)
+        self.assertEqual(len(runner.calls), 1, "active array parents must not query sacct")
+
+    def test_query_jobs_aggregates_completed_array_history_and_failure(self) -> None:
+        runner = FakeRunner(
+            completed(""),
+            completed(
+                "12_0|COMPLETED|grim|00:02|0:0\n"
+                "12_1|FAILED|grim|00:01|1:0\n"
+            ),
+        )
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        statuses = client.query_jobs(["12"])
+
+        self.assertEqual(statuses[0].job_id, "12")
+        self.assertEqual(statuses[0].state, "FAILED")
 
     def test_cancel_validates_ids_and_passes_each_as_a_quoted_token(self) -> None:
         runner = FakeRunner(completed())

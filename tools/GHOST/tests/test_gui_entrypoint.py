@@ -19,9 +19,11 @@ if str(BACKEND) not in sys.path:
 from ghost_gui import GhostMainWindow, GhostWorkspace, main  # noqa: E402
 
 try:  # noqa: E402
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtWidgets import QApplication, QMessageBox
 except ImportError:  # noqa: E402
-    from PySide2.QtWidgets import QApplication  # type: ignore
+    from PySide2.QtGui import QCloseEvent  # type: ignore
+    from PySide2.QtWidgets import QApplication, QMessageBox  # type: ignore
 
 
 class TestGuiEntrypoint(unittest.TestCase):
@@ -79,6 +81,65 @@ class TestGuiEntrypoint(unittest.TestCase):
                 "ibc", "C:/exports/nominal.csv"
             )
             self.assertIs(workspace.currentWidget(), workspace.geometry_tab)
+        finally:
+            workspace.close()
+
+    def test_geometry_dirty_state_marks_tab_and_can_block_standalone_close(self):
+        window = GhostMainWindow()
+        try:
+            self.assertFalse(window.geometry_tab.is_dirty())
+            window.geometry_tab._ibc_add_row()
+            self.assertTrue(window.geometry_tab.is_dirty())
+            self.assertEqual(window.tabs.tabText(0), "Geometry*")
+
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            event = QCloseEvent()
+            with mock.patch.object(
+                QMessageBox, "warning", return_value=buttons.Cancel
+            ):
+                window.closeEvent(event)
+            self.assertFalse(event.isAccepted())
+            self.assertIs(window.tabs.currentWidget(), window.geometry_tab)
+        finally:
+            window.geometry_tab._set_dirty(False)
+            window.close()
+
+    def test_geometry_status_and_embedded_plot_follow_dark_host_colors(self):
+        from matplotlib.colors import to_hex
+
+        workspace = GhostWorkspace()
+        try:
+            self.assertNotIn("#333", workspace.geometry_tab.lbl_status.styleSheet())
+            workspace.geometry_tab.apply_plot_theme(
+                background="#0b1222", text="#dbeafe", grid="#475569"
+            )
+            self.assertEqual(
+                to_hex(workspace.geometry_tab.canvas.fig.get_facecolor()),
+                "#0b1222",
+            )
+            self.assertEqual(
+                to_hex(workspace.geometry_tab.canvas.ax.get_facecolor()),
+                "#0b1222",
+            )
+            self.assertEqual(
+                workspace.geometry_tab.canvas.ax.xaxis.label.get_color(),
+                "#dbeafe",
+            )
+            workspace.solver_tab.apply_plot_theme(
+                background="#0b1222", text="#dbeafe", grid="#475569"
+            )
+            self.assertEqual(
+                to_hex(workspace.solver_tab.canvas.fig.get_facecolor()),
+                "#0b1222",
+            )
+            self.assertEqual(
+                to_hex(workspace.solver_tab.canvas.ax.get_facecolor()),
+                "#0b1222",
+            )
+            self.assertEqual(
+                workspace.solver_tab.canvas.ax.xaxis.label.get_color(),
+                "#dbeafe",
+            )
         finally:
             workspace.close()
 

@@ -47,7 +47,13 @@ class GhostWorkspace(QTabWidget):
         self.setTabToolTip(
             1, "Solve the current Geometry tab or an explicitly selected .geo file."
         )
+        self.geometry_tab.dirty_changed.connect(self._sync_geometry_tab_title)
         self.solver_tab.files_exported.connect(self.files_exported.emit)
+
+    def _sync_geometry_tab_title(self, dirty: bool) -> None:
+        index = self.indexOf(self.geometry_tab)
+        if index >= 0:
+            self.setTabText(index, "Geometry*" if dirty else "Geometry")
 
     def solve_is_running(self) -> bool:
         thread = getattr(self.solver_tab, "_solve_thread", None)
@@ -64,6 +70,11 @@ class GhostWorkspace(QTabWidget):
         if attached:
             self.setCurrentWidget(self.geometry_tab)
         return bool(attached)
+
+    def request_close(self, parent=None) -> bool:
+        """Resolve unsaved native geometry before a host closes."""
+
+        return bool(self.geometry_tab.request_close(parent or self))
 
 
 class GhostMainWindow(QMainWindow):
@@ -96,6 +107,10 @@ class GhostMainWindow(QMainWindow):
                 "wait for cancellation to finish, and then close GHOST.",
             )
             self.tabs.setCurrentWidget(self.solver_tab)
+            event.ignore()
+            return
+        if not self.workspace.request_close(self):
+            self.tabs.setCurrentWidget(self.geometry_tab)
             event.ignore()
             return
         super().closeEvent(event)

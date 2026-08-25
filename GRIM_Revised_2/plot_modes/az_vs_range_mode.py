@@ -16,6 +16,17 @@ import numpy as np
 from .isar_mode import _resample_complex_uniform, _length_unit, _unit_to_hz_scale
 
 
+def _range_display_values(dataset, magnitude: np.ndarray, *, linear: bool) -> np.ndarray:
+    """Convert range-image amplitude to the selected display domain."""
+
+    magnitude = np.asarray(magnitude)
+    if linear:
+        return magnitude
+    # The IFFT result is a coherent amplitude. rcs_to_dbsm treats real input as
+    # power, so square the magnitude to retain the required 20*log10 scaling.
+    return dataset.rcs_to_dbsm(magnitude ** 2)
+
+
 def render(self) -> None:
     self.last_plot_mode = "az_vs_range"
     if self.active_dataset is None:
@@ -106,10 +117,11 @@ def render(self) -> None:
         if peak > 0.0:
             magnitude = magnitude / peak
 
-    if self._plot_scale_is_linear():
-        display = magnitude
-    else:
-        display = self.active_dataset.rcs_to_dbsm(magnitude)
+    display = _range_display_values(
+        self.active_dataset,
+        magnitude,
+        linear=self._plot_scale_is_linear(),
+    )
 
     # Build the figure.
     self._remove_colorbar()

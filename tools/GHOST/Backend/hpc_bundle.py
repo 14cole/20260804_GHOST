@@ -15,19 +15,34 @@ describes the solver that runs under SLURM.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+try:  # Linux/POSIX login-node coordination.
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover - exercised by Windows bundle creation
+    fcntl = None
+
+try:  # Keep direct lease tests functional on Windows.
+    import msvcrt  # type: ignore
+except ImportError:  # pragma: no cover - exercised on POSIX
+    msvcrt = None
 
 from geometry_io import material_sidecar_paths
 from hpc_common import BOR_DRIVER, TWOD_DRIVER, configure_driver
@@ -42,6 +57,8 @@ _BUNDLE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SLURM_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@,+-]*$")
 _JOB_ID_RE = re.compile(r"\bSubmitted\s+batch\s+job\s+([0-9]+)\b", re.I)
+_STAGE_LEASE_STALE_SECONDS = 300.0
+_STAGE_LEASE_HEARTBEAT_SECONDS = 10.0
 
 _COMMON_SETTINGS = {
     "FREQUENCIES_GHZ",
@@ -146,13 +163,356 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     except BaseException:
         try:
             os.unlink(temporary)
         except OSError:
             pass
         raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Best-effort persistence barrier for a completed directory update."""
+
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(str(directory), flags)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+class _StageLease:
+    """Exclusive, heartbeat-backed lease for one bundle stage operation.
+
+    The lease lives in the workspace rather than inside the staged payload, so
+    it also serializes first-time creation and never alters the verified file
+    inventory.  A kernel-owned acquisition guard closes the stale
+    check/replace race without permitting time-based theft from a paused
+    process; owner token and generation checks prevent an old process from
+    heartbeating or deleting a successor's lease after takeover.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        stale_seconds: float = _STAGE_LEASE_STALE_SECONDS,
+        heartbeat_seconds: float = _STAGE_LEASE_HEARTBEAT_SECONDS,
+    ) -> None:
+        self.path = Path(path)
+        self.guard_path = self.path.with_name(self.path.name + ".guard")
+        self.stale_seconds = float(stale_seconds)
+        self.heartbeat_seconds = float(heartbeat_seconds)
+        if not math.isfinite(self.stale_seconds) or self.stale_seconds <= 0.0:
+            raise ValueError("Stage lease stale_seconds must be positive and finite.")
+        if not math.isfinite(self.heartbeat_seconds) or self.heartbeat_seconds <= 0.0:
+            raise ValueError("Stage lease heartbeat_seconds must be positive and finite.")
+        self.owner_token = uuid.uuid4().hex
+        self.generation = 0
+        self.recovered_stale = False
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _read_document(path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            if path.is_symlink() or path.stat().st_size > 64 * 1024:
+                return None
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return document if isinstance(document, dict) else None
+
+    @staticmethod
+    def _identity(document: Optional[Mapping[str, Any]]) -> Tuple[str, int]:
+        if not document:
+            return "", 0
+        token = str(document.get("owner_token") or "")
+        generation = document.get("generation", 0)
+        if isinstance(generation, bool):
+            generation = 0
+        try:
+            generation = int(generation)
+        except (TypeError, ValueError, OverflowError):
+            generation = 0
+        return token, max(generation, 0)
+
+    @staticmethod
+    def _write_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
+        encoded = (
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+            + "\n"
+        ).encode("utf-8")
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _matches(self) -> bool:
+        return self._identity(self._read_document(self.path)) == (
+            self.owner_token,
+            self.generation,
+        )
+
+    def require_current(self) -> None:
+        try:
+            current = self._matches()
+        except OSError as exc:
+            raise BundleError(
+                "Could not verify ownership of the bundle stage lease; no new "
+                "external action was started."
+            ) from exc
+        if not current:
+            raise BundleError(
+                "This stage process no longer owns the bundle lease; a newer "
+                "generation may have recovered it. No stage journals were changed."
+            )
+
+    def _guard_payload(self, token: str) -> Dict[str, Any]:
+        return {
+            "schema": "ghost.hpc.stage-lease-guard.v1",
+            "owner_token": token,
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "created_utc": _utc_now(),
+        }
+
+    @staticmethod
+    def _try_lock_file(path: Path) -> Optional[int]:
+        if path.is_symlink():
+            raise BundleError(f"Stage lease guard cannot be a symbolic link: {path}")
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(str(path), flags, 0o600)
+        except OSError as exc:
+            if exc.errno in {
+                getattr(errno, "ELOOP", -1), getattr(errno, "EMLINK", -1)
+            }:
+                raise BundleError(
+                    f"Stage lease guard cannot be a symbolic link: {path}"
+                ) from exc
+            raise
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise BundleError(
+                    f"Stage lease guard is not a regular file: {path}"
+                )
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                        os.close(fd)
+                        return None
+                    raise
+            elif msvcrt is not None:  # pragma: no cover - Windows-only branch
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                    os.fsync(fd)
+                os.lseek(fd, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
+                    if exc.errno in {
+                        errno.EACCES,
+                        errno.EAGAIN,
+                        getattr(errno, "EDEADLK", -1),
+                    }:
+                        os.close(fd)
+                        return None
+                    raise
+            else:  # pragma: no cover - every supported platform has one API
+                raise BundleError("No supported advisory file-lock API is available.")
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @staticmethod
+    def _unlock_file(fd: int) -> None:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover - Windows-only branch
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        finally:
+            os.close(fd)
+
+    def _acquire_guard(self) -> Tuple[int, str]:
+        token = uuid.uuid4().hex
+        fd = self._try_lock_file(self.guard_path)
+        if fd is None:
+            raise BundleError(
+                "Another process is acquiring this bundle's stage lease; retry "
+                "after that stage command finishes."
+            )
+        payload = (
+            json.dumps(
+                self._guard_payload(token),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        try:
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, payload)
+            os.fsync(fd)
+            return fd, token
+        except BaseException:
+            self._unlock_file(fd)
+            raise
+
+    def _release_guard(self, guard: Tuple[int, str]) -> None:
+        try:
+            self._unlock_file(guard[0])
+        except OSError:
+            pass
+
+    @classmethod
+    def _release_owned_file(cls, path: Path, token: str, generation: Optional[int] = None) -> None:
+        try:
+            document = cls._read_document(path)
+        except OSError:
+            return
+        if document is None or str(document.get("owner_token") or "") != token:
+            return
+        if generation is not None and cls._identity(document) != (token, generation):
+            return
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+    def _lease_payload(self, generation: int) -> Dict[str, Any]:
+        return {
+            "schema": "ghost.hpc.stage-lease.v1",
+            "owner_token": self.owner_token,
+            "generation": int(generation),
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "acquired_utc": _utc_now(),
+        }
+
+    def __enter__(self) -> "_StageLease":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.is_symlink():
+            raise BundleError(f"Stage lease cannot be a symbolic link: {self.path}")
+        guard = self._acquire_guard()
+        temporary: Optional[Path] = None
+        try:
+            prior = self._read_document(self.path)
+            if self.path.exists():
+                try:
+                    age = time.time() - self.path.stat().st_mtime
+                except OSError as exc:
+                    raise BundleError("Could not inspect the existing stage lease.") from exc
+                if age <= self.stale_seconds:
+                    owner = prior or {}
+                    raise BundleError(
+                        "This bundle already has an active stage/submit lease "
+                        f"(host={owner.get('host', 'unknown')}, "
+                        f"pid={owner.get('pid', 'unknown')}); retry after it finishes."
+                    )
+                self.generation = self._identity(prior)[1] + 1
+                self.recovered_stale = True
+                temporary = self.path.with_name(
+                    f".{self.path.name}.{self.owner_token}.tmp"
+                )
+                self._write_exclusive(
+                    temporary, self._lease_payload(self.generation)
+                )
+                # The guard tells the old owner's heartbeat to stop.  Recheck
+                # immediately before replacement so a heartbeat already in
+                # flight cannot be mistaken for a dead stage process.
+                if time.time() - self.path.stat().st_mtime <= self.stale_seconds:
+                    raise BundleError(
+                        "The prior stage lease resumed heartbeating during stale recovery; "
+                        "the running stage command was left untouched."
+                    )
+                os.replace(str(temporary), str(self.path))
+                temporary = None
+            else:
+                self.generation = 1
+                self._write_exclusive(
+                    self.path, self._lease_payload(self.generation)
+                )
+            if not self._matches():
+                raise BundleError("Stage lease ownership could not be verified.")
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+            self._release_guard(guard)
+
+        self._stop.clear()
+
+        def _beat() -> None:
+            while not self._stop.wait(self.heartbeat_seconds):
+                try:
+                    heartbeat_guard = self._acquire_guard()
+                except (BundleError, OSError):
+                    continue
+                try:
+                    try:
+                        current = self._matches()
+                    except OSError:
+                        continue
+                    if not current:
+                        return
+                    try:
+                        now = time.time()
+                        os.utime(str(self.path), (now, now))
+                    except OSError:
+                        continue
+                finally:
+                    self._release_guard(heartbeat_guard)
+
+        self._thread = threading.Thread(
+            target=_beat, name="stage-lease-heartbeat", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(5.0, self.heartbeat_seconds * 2.0))
+            self._thread = None
+        # Use the same acquisition guard as stale takeover so the token check
+        # and unlink cannot straddle a successor's atomic replacement.
+        try:
+            release_guard = self._acquire_guard()
+        except (BundleError, OSError):
+            return
+        try:
+            self._release_owned_file(
+                self.path, self.owner_token, self.generation
+            )
+        finally:
+            self._release_guard(release_guard)
 
 
 def _safe_relative_path(raw_value: Any, *, label: str) -> str:
@@ -759,12 +1119,27 @@ def _read_submitted_job_ids(run_dir: Optional[str]) -> List[str]:
     return [str(value) for value in values if str(value).isdigit()]
 
 
+def _read_all_submitted_job_ids(output_root: Path) -> List[str]:
+    """Return every journaled job ID under a stage, in deterministic order."""
+
+    found: List[str] = []
+    if not output_root.is_dir() or output_root.is_symlink():
+        return found
+    for run_path in sorted(output_root.glob("run_*"), key=lambda path: path.name):
+        if not run_path.is_dir() or run_path.is_symlink():
+            continue
+        for job_id in _read_submitted_job_ids(str(run_path)):
+            if job_id not in found:
+                found.append(job_id)
+    return found
+
+
 def recover_staged_bundle(stage_directory: os.PathLike[str] | str) -> Dict[str, Any]:
     """Reconstruct stage state without submitting or executing anything.
 
-    This is the reconnect path for a lost SSH session.  The normal finalized
-    ``stage_result.json`` wins when present.  Otherwise, job IDs are recovered
-    from the run driver's atomic ``submitted_jobs.json`` journal.
+    This is the reconnect path for a lost SSH session.  A running state and
+    durable job journals take precedence over an older stage-only result.
+    Otherwise a matching finalized ``stage_result.json`` is returned.
     """
 
     stage_input = Path(stage_directory).expanduser()
@@ -794,20 +1169,6 @@ def recover_staged_bundle(stage_directory: os.PathLike[str] | str) -> Dict[str, 
     ):
         raise BundleError("Recovery stage metadata does not match its directory.")
 
-    result_path = stage_dir / "stage_result.json"
-    if result_path.is_file():
-        try:
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise BundleError("Recovery stage result is unreadable.") from exc
-        if (
-            not isinstance(result, dict)
-            or result.get("schema") != STAGE_RESULT_SCHEMA
-            or result.get("bundle_id") != bundle_id
-        ):
-            raise BundleError("Recovery stage result does not match its directory.")
-        return result
-
     state: Dict[str, Any] = {}
     state_path = stage_dir / "stage_state.json"
     if state_path.is_file():
@@ -827,11 +1188,61 @@ def recover_staged_bundle(stage_directory: os.PathLike[str] | str) -> Dict[str, 
     candidates.sort(key=lambda path: (path.stat().st_mtime_ns, path.name))
     run_path = candidates[-1] if candidates else None
     run_dir = str(run_path) if run_path is not None else None
-    job_ids = _read_submitted_job_ids(run_dir)
+    job_ids = _read_all_submitted_job_ids(output_root)
     status = str(state.get("status") or "unknown")
     returncode = state.get("returncode")
+    state_job_ids = state.get("job_ids", ())
+    if isinstance(state_job_ids, (list, tuple)):
+        for value in state_job_ids:
+            job_id = str(value)
+            if job_id.isdigit() and job_id not in job_ids:
+                job_ids.append(job_id)
     complete = status == "complete" and returncode == 0
     log_path = stage_dir / "driver_submit.log"
+    if log_path.is_file() and not log_path.is_symlink():
+        try:
+            for job_id in _parse_job_ids(
+                log_path.read_text(encoding="utf-8", errors="replace")
+            ):
+                if job_id not in job_ids:
+                    job_ids.append(job_id)
+        except OSError:
+            pass
+
+    result_path = stage_dir / "stage_result.json"
+    if result_path.is_file():
+        try:
+            finalized = json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise BundleError("Recovery stage result is unreadable.") from exc
+        if (
+            not isinstance(finalized, dict)
+            or finalized.get("schema") != STAGE_RESULT_SCHEMA
+            or finalized.get("bundle_id") != bundle_id
+        ):
+            raise BundleError("Recovery stage result does not match its directory.")
+        finalized_ids_value = finalized.get("job_ids", ())
+        finalized_ids = (
+            {str(value) for value in finalized_ids_value if str(value).isdigit()}
+            if isinstance(finalized_ids_value, (list, tuple))
+            else set()
+        )
+        # A running state was durably published before the prior result was
+        # invalidated.  It therefore always outranks that result.  Journals are
+        # likewise monotonic evidence that a nominally terminal result is old.
+        terminal_state_matches = (
+            status in {"complete", "failed"}
+            and bool(finalized.get("driver_ran"))
+            and finalized.get("returncode") == returncode
+            and bool(finalized.get("submission_requested"))
+            == bool(state.get("submission_requested"))
+        )
+        if (
+            status not in {"running", "complete", "failed"}
+            or (terminal_state_matches and set(job_ids).issubset(finalized_ids))
+        ):
+            return finalized
+
     result = {
         "schema": STAGE_RESULT_SCHEMA,
         "ok": complete,
@@ -898,9 +1309,37 @@ def stage_portable_bundle(
         raise BundleError(
             "The derived stage directory and uploaded bundle directory may not overlap."
         )
+    lease_path = workspace / f".grim_{request['bundle_id']}.stage-lease.json"
+    with _StageLease(lease_path) as stage_lease:
+        return _stage_portable_bundle_with_lease(
+            bundle_root=bundle_root,
+            workspace=workspace,
+            request=request,
+            bundle_hash=bundle_hash,
+            run_driver=run_driver,
+            submit=submit,
+            stage_lease=stage_lease,
+        )
+
+
+def _stage_portable_bundle_with_lease(
+    *,
+    bundle_root: Path,
+    workspace: Path,
+    request: Mapping[str, Any],
+    bundle_hash: str,
+    run_driver: bool,
+    submit: bool,
+    stage_lease: _StageLease,
+) -> Dict[str, Any]:
+    """Complete one verified stage operation while its workspace lease is held."""
+
+    stage_lease.require_current()
+    stage_dir = workspace / f"grim_{request['bundle_id']}"
     metadata_path = stage_dir / "stage_metadata.json"
     result_path = stage_dir / "stage_result.json"
     state_path = stage_dir / "stage_state.json"
+    prior_result: Optional[Dict[str, Any]] = None
 
     if stage_dir.exists():
         if not metadata_path.is_file():
@@ -914,27 +1353,36 @@ def stage_portable_bundle(
             )
         _verify_staged_files(stage_dir, request)
         if result_path.is_file():
-            prior = json.loads(result_path.read_text(encoding="utf-8"))
-            if prior.get("driver_ran"):
-                if bool(prior.get("submission_requested")) == bool(submit):
-                    return prior
-                raise BundleError(
-                    "This bundle already built a run with a different submission mode; "
-                    "use a new exported bundle rather than creating a duplicate run."
-                )
+            parsed_prior = json.loads(result_path.read_text(encoding="utf-8"))
+            if not isinstance(parsed_prior, dict):
+                raise BundleError("The existing stage result is not a JSON object.")
+            prior_result = parsed_prior
     else:
-        stage_dir.mkdir(parents=False, exist_ok=False)
-        _copy_verified_files(bundle_root, stage_dir, request)
-        _write_json_atomic(
-            metadata_path,
-            {
-                "schema": "ghost.hpc.stage-metadata.v1",
-                "bundle_id": request["bundle_id"],
-                "bundle_sha256": bundle_hash,
-                "solver": request["solver"],
-                "staged_utc": _utc_now(),
-            },
+        private_stage = workspace / (
+            f".{stage_dir.name}.{stage_lease.owner_token}.stage-tmp"
         )
+        private_stage.mkdir(parents=False, exist_ok=False)
+        try:
+            _copy_verified_files(bundle_root, private_stage, request)
+            _write_json_atomic(
+                private_stage / metadata_path.name,
+                {
+                    "schema": "ghost.hpc.stage-metadata.v1",
+                    "bundle_id": request["bundle_id"],
+                    "bundle_sha256": bundle_hash,
+                    "solver": request["solver"],
+                    "staged_utc": _utc_now(),
+                },
+            )
+            stage_lease.require_current()
+            os.replace(str(private_stage), str(stage_dir))
+            _fsync_directory(workspace)
+        except BaseException:
+            # Only this lease's unobservable private sibling is removed.  The
+            # final grim_<id> path is published by one atomic rename and can
+            # therefore never expose an interrupted partial copy.
+            shutil.rmtree(private_stage, ignore_errors=True)
+            raise
 
     payload_root = stage_dir / "payload"
     output_root = stage_dir / "runs"
@@ -981,20 +1429,109 @@ def stage_portable_bundle(
         "log_path": None,
         "returncode": None,
     }
+    state: Dict[str, Any] = {}
+    if state_path.is_file():
+        parsed_state = json.loads(state_path.read_text(encoding="utf-8"))
+        if isinstance(parsed_state, dict):
+            state = parsed_state
+
+    recovered_job_ids = _read_all_submitted_job_ids(output_root)
+    state_ids_value = state.get("job_ids", ())
+    if isinstance(state_ids_value, (list, tuple)):
+        for value in state_ids_value:
+            job_id = str(value)
+            if job_id.isdigit() and job_id not in recovered_job_ids:
+                recovered_job_ids.append(job_id)
+    prior_log = stage_dir / "driver_submit.log"
+    if prior_log.is_file() and not prior_log.is_symlink():
+        try:
+            for job_id in _parse_job_ids(
+                prior_log.read_text(encoding="utf-8", errors="replace")
+            ):
+                if job_id not in recovered_job_ids:
+                    recovered_job_ids.append(job_id)
+        except OSError:
+            pass
+
+    state_is_running = state.get("status") == "running"
+    state_status = str(state.get("status") or "")
+    if prior_result is not None and prior_result.get("driver_ran"):
+        prior_ids_value = prior_result.get("job_ids", ())
+        prior_ids = (
+            {str(value) for value in prior_ids_value if str(value).isdigit()}
+            if isinstance(prior_ids_value, (list, tuple))
+            else set()
+        )
+        if not state:
+            prior_is_current = set(recovered_job_ids).issubset(prior_ids)
+        elif state_status in {"complete", "failed"}:
+            prior_is_current = (
+                prior_result.get("returncode") == state.get("returncode")
+                and bool(prior_result.get("submission_requested"))
+                == bool(state.get("submission_requested"))
+                and set(recovered_job_ids).issubset(prior_ids)
+            )
+        else:
+            prior_is_current = False
+        if prior_is_current:
+            if bool(prior_result.get("submission_requested")) == bool(submit):
+                return prior_result
+            raise BundleError(
+                "This bundle already built a run with a different submission mode; "
+                "use a new exported bundle rather than creating a duplicate run."
+            )
+
+    recovered_running_state = bool(state_is_running)
+    if state_is_running and bool(state.get("submission_requested")):
+        evidence = (
+            " Recorded SLURM job ID(s): " + ", ".join(recovered_job_ids) + "."
+            if recovered_job_ids
+            else " SLURM may have accepted a job before its ID could be journaled."
+        )
+        raise BundleError(
+            "A prior submit-requested stage invocation did not finalize."
+            + evidence
+            + " Recover and reconcile that attempt with the scheduler; automatic "
+            "resubmission is disabled to prevent duplicate jobs."
+        )
+
+    if state and not state_is_running:
+        if bool(state.get("submission_requested")) != bool(submit):
+            raise BundleError(
+                "This bundle already ran with a different submission mode; use a "
+                "new exported bundle rather than creating another run."
+            )
+        if state_status == "complete" and state.get("returncode") == 0:
+            # A terminal state is itself a durable completion record. If the
+            # companion result was lost after publication, reconstruct it
+            # rather than rerunning a driver that may already have submitted.
+            return recover_staged_bundle(stage_dir)
+        if bool(state.get("submission_requested")):
+            evidence = (
+                " Recorded SLURM job ID(s): " + ", ".join(recovered_job_ids) + "."
+                if recovered_job_ids
+                else " The scheduler outcome cannot be proven from local journals."
+            )
+            raise BundleError(
+                "A prior submit-requested stage attempt has no trustworthy final "
+                "result."
+                + evidence
+                + " Recover and reconcile it with Slurm; automatic resubmission "
+                "is disabled to prevent duplicate jobs."
+            )
+
     if not run_driver:
+        if state_is_running:
+            raise BundleError(
+                "A prior non-submitting driver invocation did not finalize; rerun with "
+                "--run-driver to recover it rather than masking its running state."
+            )
         _write_json_atomic(result_path, base_result)
         return base_result
-
-    if state_path.is_file():
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        if state.get("status") == "running":
-            raise BundleError(
-                "This staged bundle already has a driver invocation marked running; "
-                "inspect stage_state.json and the login-node process before retrying."
-            )
     # Recheck exact staged bytes and inventory immediately before allowing the
     # configured driver to execute them.
     _verify_staged_files(stage_dir, request)
+    stage_lease.require_current()
     _write_json_atomic(
         state_path,
         {
@@ -1002,8 +1539,20 @@ def stage_portable_bundle(
             "status": "running",
             "started_utc": _utc_now(),
             "submission_requested": bool(submit),
+            "lease_owner_token": stage_lease.owner_token,
+            "lease_generation": stage_lease.generation,
+            "recovered_prior_running_state": recovered_running_state,
         },
     )
+    # Publishing running state first makes it authoritative to reconnecting
+    # readers; removing the older result then prevents it from being mistaken
+    # for this attempt if the login session dies before the driver returns.
+    try:
+        result_path.unlink()
+    except FileNotFoundError:
+        pass
+    else:
+        _fsync_directory(result_path.parent)
     before_runs = {path.resolve() for path in output_root.glob("run_*") if path.is_dir()}
     inherited_pythonpath = os.environ.get("PYTHONPATH", "").strip()
     backend_dir = str(Path(__file__).resolve().parent)
@@ -1026,6 +1575,7 @@ def stage_portable_bundle(
             errors="replace",
         )
     except OSError as exc:
+        stage_lease.require_current()
         message = f"Could not start the configured Linux HPC driver: {exc}"
         log_path.write_text(message + "\n", encoding="utf-8", newline="\n")
         failed_result = dict(base_result)
@@ -1047,9 +1597,13 @@ def stage_portable_bundle(
                 "returncode": None,
                 "run_dir": None,
                 "job_ids": [],
+                "lease_owner_token": stage_lease.owner_token,
+                "lease_generation": stage_lease.generation,
+                "recovered_prior_running_state": recovered_running_state,
             },
         )
         return failed_result
+    stage_lease.require_current()
     log_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
     after_runs = {path.resolve() for path in output_root.glob("run_*") if path.is_dir()}
     new_runs = sorted(after_runs - before_runs, key=lambda path: path.name)
@@ -1085,6 +1639,9 @@ def stage_portable_bundle(
             "returncode": int(completed.returncode),
             "run_dir": run_dir,
             "job_ids": job_ids,
+            "lease_owner_token": stage_lease.owner_token,
+            "lease_generation": stage_lease.generation,
+            "recovered_prior_running_state": recovered_running_state,
         },
     )
     return result

@@ -14,6 +14,8 @@ C0 = 299_792_458.0
 
 class TestIsarPhysics(unittest.TestCase):
     def setUp(self):
+        isar_mode._PREPROCESS_CACHE.clear()
+        isar_mode._PREPROCESS_CACHE_BYTES = 0
         self.theta = np.deg2rad(np.linspace(-10.0, 10.0, 401))
         self.frequency = np.linspace(8.0e9, 12.0e9, 401)
 
@@ -99,6 +101,43 @@ class TestIsarPhysics(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 0.0)
         self.assertEqual(bands[0]["magnitude"].shape, (256, 256))
         self.assertAlmostEqual(float(bands[0]["magnitude"].max()), 1.0, places=5)
+
+    def test_preprocess_cache_invalidates_after_in_place_data_change(self):
+        azimuth = np.asarray([-15.0, -5.0, 5.0, 15.0])
+        frequency_ghz = np.asarray([9.0, 9.1, 9.2, 9.3])
+        power = np.ones((4, 1, 4, 1), dtype=np.float32)
+        grid = RcsGrid(
+            azimuth,
+            [0.0],
+            frequency_ghz,
+            ["VV"],
+            rcs_power=power,
+            rcs_phase=np.zeros_like(power),
+            units={"frequency": "GHz"},
+        )
+        args = (
+            grid,
+            "Hanning",
+            list(range(4)),
+            list(range(4)),
+            0,
+            0,
+            frequency_ghz * 1.0e9,
+            1.0e8,
+            1.0,
+        )
+        first = isar_mode._compute_band(*args)
+        cached = isar_mode._compute_band(*args)
+        self.assertFalse(first["preprocess_cache_hit"])
+        self.assertTrue(cached["preprocess_cache_hit"])
+
+        grid.rcs_phase[:] = np.asarray([0.0, 0.3, 1.1, 2.7]).reshape(1, 1, 4, 1)
+        changed = isar_mode._compute_band(*args)
+        self.assertFalse(changed["preprocess_cache_hit"])
+        self.assertGreater(
+            float(np.max(np.abs(first["magnitude"] - changed["magnitude"]))),
+            0.1,
+        )
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import os
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -854,7 +855,7 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertEqual(panel.tree.topLevelItem(0).text(0), "Loaded Response")
 
     def test_malformed_asy_does_not_replace_live_tree_or_preview(self):
-        from assembly_tree import AssemblyTreePanel, QFileDialog, _TYPE_ROOT
+        from assembly_tree import AssemblyTreePanel, QFileDialog, QMessageBox, _TYPE_ROOT
 
         panel = AssemblyTreePanel()
         response_root = panel.tree._make_node("Live Response", _TYPE_ROOT, edit=False)
@@ -877,8 +878,13 @@ class AssemblyGuiTests(unittest.TestCase):
                 "getOpenFileName",
                 return_value=(path, "Assembly Files (*.asy)"),
             ):
-                with self.assertRaisesRegex(ValueError, "unsupported"):
-                    panel._load()
+                buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+                with patch.object(
+                    QMessageBox, "warning", return_value=buttons.Discard
+                ), patch.object(QMessageBox, "critical") as critical:
+                    self.assertFalse(panel._load())
+                critical.assert_called_once()
+                self.assertIn("current tree was kept", critical.call_args.args[2])
 
         self.assertEqual(workspace.group_ids, original_group_ids)
         self.assertIs(
@@ -887,6 +893,129 @@ class AssemblyGuiTests(unittest.TestCase):
         )
         self.assertEqual(panel.tree.topLevelItemCount(), 2)
         self.assertIs(panel.tree.topLevelItem(0), response_root)
+
+    def test_asy_load_rejects_invalid_versions_before_replacing_tree(self):
+        from assembly_tree import AssemblyTreePanel, QFileDialog, QMessageBox, _TYPE_ROOT
+
+        panel = AssemblyTreePanel()
+        live_root = panel.tree._make_node("Live Response", _TYPE_ROOT, edit=False)
+        panel._set_dirty(False)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for index, version in enumerate(("3", 0, 4, True)):
+                with self.subTest(version=version):
+                    path = os.path.join(temp_dir, f"version-{index}.asy")
+                    with open(path, "w", encoding="utf-8") as stream:
+                        json.dump({"version": version, "tree": []}, stream)
+                    with patch.object(
+                        QFileDialog,
+                        "getOpenFileName",
+                        return_value=(path, "Assembly Files (*.asy)"),
+                    ), patch.object(QMessageBox, "critical") as critical:
+                        self.assertFalse(panel._load())
+
+                    critical.assert_called_once()
+                    self.assertIn("integer from 1 through 3", critical.call_args.args[2])
+                    self.assertEqual(panel.tree.topLevelItemCount(), 1)
+                    self.assertIs(panel.tree.topLevelItem(0), live_root)
+                    self.assertIsNone(panel.assembly_path)
+
+    def test_corrupt_embedded_grid_does_not_replace_live_tree(self):
+        from assembly_tree import AssemblyTreePanel, QFileDialog, QMessageBox, _TYPE_ROOT
+
+        panel = AssemblyTreePanel()
+        live_root = panel.tree._make_node("Live Response", _TYPE_ROOT, edit=False)
+        panel._set_dirty(False)
+        payload = {
+            "version": 3,
+            "tree": [
+                {
+                    "name": "Imported Response",
+                    "type": "root",
+                    "children": [
+                        {
+                            "name": "Damaged Measurement",
+                            "type": "leaf",
+                            "dataset": "damaged",
+                            "data": "bm90IGFuIG5weiBhcmNoaXZl",
+                            "children": [],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "corrupt-grid.asy")
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream)
+            with patch.object(
+                QFileDialog,
+                "getOpenFileName",
+                return_value=(path, "Assembly Files (*.asy)"),
+            ), patch.object(QMessageBox, "critical") as critical:
+                self.assertFalse(panel._load())
+
+        critical.assert_called_once()
+        self.assertIn("Damaged Measurement", critical.call_args.args[2])
+        self.assertEqual(panel.tree.topLevelItemCount(), 1)
+        self.assertIs(panel.tree.topLevelItem(0), live_root)
+        self.assertIsNone(panel.assembly_path)
+
+    def test_embedded_grid_encoding_failure_aborts_atomic_save(self):
+        from assembly_tree import AssemblyTreePanel, QMessageBox, _TYPE_ROOT
+
+        panel = AssemblyTreePanel()
+        root = panel.tree._make_node("Response", _TYPE_ROOT, edit=False)
+        root.addChild(panel.tree._make_leaf("Unsaved Measurement", object()))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "platform.asy"
+            target.write_text("existing assembly\n", encoding="utf-8")
+            with patch(
+                "assembly_tree._grid_to_b64",
+                side_effect=TypeError("unsupported grid"),
+            ), patch.object(QMessageBox, "critical") as critical:
+                self.assertFalse(panel._save(path=target))
+
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), "existing assembly\n"
+            )
+            self.assertTrue(panel.is_dirty())
+            critical.assert_called_once()
+            self.assertIn("Unsaved Measurement", critical.call_args.args[2])
+
+    def test_assembly_dirty_prompt_and_atomic_save_failure(self):
+        from assembly_tree import AssemblyTreePanel, QMessageBox, _TYPE_ROOT
+
+        panel = AssemblyTreePanel()
+        self.assertFalse(panel.is_dirty())
+        panel.tree._make_node("Unsaved Response", _TYPE_ROOT, edit=False)
+        self.assertTrue(panel.is_dirty())
+
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        with patch.object(
+            QMessageBox, "warning", return_value=buttons.Cancel
+        ):
+            self.assertFalse(panel.request_close())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "platform.asy"
+            target.write_text("old assembly\n", encoding="utf-8")
+            with patch("assembly_tree.os.replace", side_effect=OSError("disk full")), patch.object(
+                QMessageBox, "critical"
+            ) as critical:
+                self.assertFalse(panel._save(path=target))
+            self.assertEqual(target.read_text(encoding="utf-8"), "old assembly\n")
+            self.assertTrue(panel.is_dirty())
+            critical.assert_called_once()
+
+            with patch.object(panel, "_notify"):
+                self.assertTrue(panel._save(path=target))
+            self.assertFalse(panel.is_dirty())
+            saved = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(saved["version"], 3)
+            self.assertEqual(saved["tree"][0]["name"], "Unsaved Response")
 
     def test_toolbar_delete_refuses_service_owned_preview(self):
         from assembly_tree import AssemblyTreePanel

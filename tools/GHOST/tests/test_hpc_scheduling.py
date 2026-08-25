@@ -26,8 +26,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "Backend"
@@ -102,6 +104,12 @@ def test_claims():
     print("\nclaim broker")
     with tempfile.TemporaryDirectory() as tmp:
         broker = hpc_scheduler.ClaimBroker(Path(tmp) / "claims", stale_seconds=1.0)
+        try:
+            broker.try_claim("../escape")
+        except ValueError:
+            check(True, "claim keys cannot traverse outside the claims directory")
+        else:
+            check(False, "claim keys cannot traverse outside the claims directory")
         check(broker.try_claim("unit-a"), "first claim succeeds")
         check(not broker.try_claim("unit-a"), "second claim on the same unit fails")
 
@@ -112,11 +120,133 @@ def test_claims():
         old = time.time() - 120.0
         os.utime(stale_path, (old, old))
         check(other.try_claim("unit-a"), "a stale claim is stealable")
+        replacement = json.loads(stale_path.read_text(encoding="utf-8"))
+        check(replacement.get("schema") == "ghost.hpc.claim.v2",
+              "claims carry the versioned ownership schema")
+        check(replacement.get("owner_token") == other.owner_token,
+              "stale takeover installs the new owner's token")
+        check(replacement.get("generation") == 2,
+              "stale takeover advances the claim generation")
+
+        replacement_mtime = stale_path.stat().st_mtime_ns
+        broker._heartbeat_once()
+        check(stale_path.stat().st_mtime_ns == replacement_mtime,
+              "the former owner's heartbeat cannot refresh a replacement claim")
+        broker.abandon("unit-a")
+        check(stale_path.is_file(),
+              "the former owner cannot abandon a replacement claim")
 
         broker.abandon("unit-b")  # must not raise on an unheld key
         check(broker.try_claim("unit-b"), "claim after abandon succeeds")
         broker.abandon("unit-b")
         check(broker.try_claim("unit-b"), "abandon releases the unit again")
+
+        # Two stale takers must not both believe they won.  The short operation
+        # lease serializes their generation check and replacement.
+        check(broker.try_claim("unit-race"), "race fixture claim succeeds")
+        race_path = Path(tmp) / "claims" / "unit-race.claim"
+        os.utime(race_path, (old, old))
+        contenders = [
+            hpc_scheduler.ClaimBroker(Path(tmp) / "claims", stale_seconds=1.0)
+            for _ in range(2)
+        ]
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def contend(candidate):
+            barrier.wait()
+            outcomes.append(candidate.try_claim("unit-race"))
+
+        threads = [threading.Thread(target=contend, args=(candidate,))
+                   for candidate in contenders]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5.0)
+        check(outcomes.count(True) == 1 and outcomes.count(False) == 1,
+              "exactly one concurrent stale taker wins")
+
+        # A paused mutation owner must remain fenced even when its stable lock
+        # file looks arbitrarily old.  Time-based unlinking used to let both
+        # contenders return True in this interleaving.
+        check(broker.try_claim("unit-paused"), "paused-owner fixture claim succeeds")
+        paused_path = Path(tmp) / "claims" / "unit-paused.claim"
+        os.utime(paused_path, (old, old))
+        paused_operation = contenders[0]._acquire_operation("unit-paused")
+        check(paused_operation is not None, "paused contender owns mutation lock")
+        operation_path = contenders[0]._operation_path("unit-paused")
+        os.utime(operation_path, (old, old))
+        check(not contenders[1].try_claim("unit-paused"),
+              "an old-looking live mutation lock cannot be stolen")
+        contenders[0]._release_operation(paused_operation)
+        check(contenders[1].try_claim("unit-paused"),
+              "claim takeover proceeds after the paused owner releases its lock")
+
+        check(broker.try_claim("unit-abandon-busy"),
+              "busy-abandon fixture claim succeeds")
+        abandon_path = Path(tmp) / "claims" / "unit-abandon-busy.claim"
+        with mock.patch.object(broker, "_acquire_operation", return_value=None):
+            broker.abandon("unit-abandon-busy")
+        check(abandon_path.is_file() and "unit-abandon-busy" in broker._held,
+              "a busy abandon retains ownership tracking for retry")
+        broker.abandon("unit-abandon-busy")
+        check(not abandon_path.exists() and "unit-abandon-busy" not in broker._held,
+              "a retried abandon removes the claim and local tracking")
+
+        heartbeat = hpc_scheduler.ClaimBroker(
+            Path(tmp) / "heartbeat-claims",
+            stale_seconds=1.0,
+            heartbeat_seconds=0.01,
+        )
+        check(heartbeat.try_claim("unit-io"), "heartbeat I/O fixture claim succeeds")
+        recovered = threading.Event()
+        heartbeat_calls = [0]
+        original_heartbeat_once = heartbeat._heartbeat_once
+
+        def flaky_heartbeat():
+            heartbeat_calls[0] += 1
+            if heartbeat_calls[0] == 1:
+                raise OSError("transient shared-filesystem error")
+            original_heartbeat_once()
+            recovered.set()
+
+        with mock.patch.object(heartbeat, "_heartbeat_once", side_effect=flaky_heartbeat):
+            heartbeat.start_heartbeat()
+            check(recovered.wait(1.0),
+                  "claim heartbeat retries after a transient filesystem error")
+            check(heartbeat._thread is not None and heartbeat._thread.is_alive(),
+                  "claim heartbeat thread remains alive after transient I/O")
+            heartbeat.stop_heartbeat()
+
+        read_heartbeat = hpc_scheduler.ClaimBroker(
+            Path(tmp) / "heartbeat-read-claims",
+            stale_seconds=1.0,
+            heartbeat_seconds=0.01,
+        )
+        check(read_heartbeat.try_claim("unit-read-io"),
+              "heartbeat read-I/O fixture claim succeeds")
+        original_read = read_heartbeat._read_document
+        read_recovered = threading.Event()
+        read_calls = [0]
+
+        def flaky_read(path):
+            read_calls[0] += 1
+            if read_calls[0] == 1:
+                raise OSError("transient claim read error")
+            document = original_read(path)
+            read_recovered.set()
+            return document
+
+        with mock.patch.object(read_heartbeat, "_read_document", side_effect=flaky_read):
+            read_heartbeat.start_heartbeat()
+            check(read_recovered.wait(1.0),
+                  "claim heartbeat retries after transient claim-file read error")
+            check("unit-read-io" in read_heartbeat._held,
+                  "transient claim-file read error does not drop ownership")
+            check(read_heartbeat._thread is not None
+                  and read_heartbeat._thread.is_alive(),
+                  "claim heartbeat remains alive after claim-file read error")
+            read_heartbeat.stop_heartbeat()
 
 
 class _FakeHandle:

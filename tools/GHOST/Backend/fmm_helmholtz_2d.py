@@ -443,32 +443,60 @@ class FMMOperator:
         missing the symbol is skipped, rather than silently forcing the ~100x
         slower Python near-field path at call time.
         """
-        # Try Cython first (preferred -- no manual compile step)
-        try:
-            import fmm_near_cy
-            return ("cython", fmm_near_cy)
-        except ImportError:
-            pass
+        # Try a Cython extension installed beside this trusted backend first.
+        # A normal top-level ``import fmm_near_cy`` searches the process working
+        # directory and PYTHONPATH before this file's directory.  On a login
+        # node that would turn merely launching GHOST from an untrusted folder
+        # into native-code execution.  Resolve only exact sibling extension
+        # filenames instead.
+        import importlib.machinery
+        import importlib.util
+        from pathlib import Path
+
+        here_path = Path(__file__).resolve().parent
+        for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+            candidate = here_path / ("fmm_near_cy" + suffix)
+            if (
+                candidate.is_symlink()
+                or not candidate.is_file()
+                or candidate.resolve().parent != here_path
+            ):
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "fmm_near_cy", str(candidate)
+                )
+                if spec is None or spec.loader is None:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except (ImportError, OSError):
+                continue
+            return ("cython", module)
 
         # Fall back to ctypes .so/.dll. Prefer a platform/arch-tagged build,
         # then the generic name.
         import ctypes, os, platform
         sysname = platform.system().lower()    # 'darwin', 'linux', 'windows'
         machine = platform.machine().lower()   # 'arm64', 'x86_64', 'amd64', ...
-        here = os.path.dirname(__file__)
+        here = str(here_path)
         bases = [f'fmm_near.{sysname}-{machine}', 'fmm_near']
         exts = ['.so', '.dylib', '.dll']
         for base in bases:
             for ext in exts:
-                for path in (os.path.join(here, base + ext), os.path.join('.', base + ext)):
-                    if not os.path.isfile(path):
-                        continue
-                    try:
-                        lib = ctypes.CDLL(path)
-                    except OSError:
-                        continue
-                    if hasattr(lib, 'compute_sk_blocks_batch_q'):
-                        return ("ctypes", lib)
+                path = os.path.join(here, base + ext)
+                if (
+                    os.path.islink(path)
+                    or not os.path.isfile(path)
+                    or Path(path).resolve().parent != here_path
+                ):
+                    continue
+                try:
+                    lib = ctypes.CDLL(path)
+                except OSError:
+                    continue
+                if hasattr(lib, 'compute_sk_blocks_batch_q'):
+                    return ("ctypes", lib)
         return None
 
     def _batch_near_native(self, native_mod, pairs, q_order):

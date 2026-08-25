@@ -22,9 +22,10 @@ frequency axis). Its offset depends on the *variable-length* header-B, whose
 size we compute from the header-A flags (edge_diff/iqmatrix/ibspsave) exactly as
 ssread.m's readheaderb does -- header-B is 256 bytes per enabled CAD-file slot
 (0/256/512/768 total), NOT a fixed 256. We then cross-check header-C by requiring
-maxfreq == framing num_freqs (and ifreq in {1,2}); if that fails we scan for the
-real offset. az/el/data stay correct regardless because they are pinned by the
-framing ints, not by the field tables.
+maxfreq/nfreq == framing num_freqs and validate the load-bearing flags. If the
+flag-derived location fails, we try only the four structurally legal header-B
+slot offsets and require one exact candidate; arbitrary payload bytes are never
+scanned. az/el/data stay correct because they are pinned by the framing ints.
 
 Az/el: header-D carries incident (azinc/elinc) AND observation (azobs/elobs)
 angles. ssread.m returns incident, which is right for monostatic data but stays
@@ -101,6 +102,12 @@ def _table_bytes(table):
 
 def _parse_table(buf, table):
     """Parse a packed big-endian record `buf` per `table`; return name -> value(s)."""
+    expected = _table_bytes(table)
+    if len(buf) != expected:
+        raise ValueError(
+            f"packed header is truncated or overlong: expected exactly "
+            f"{expected} bytes, got {len(buf)}"
+        )
     out, off = {}, 0
     for typ, name, count in table:
         nbytes = _TYPE_BYTES[typ] * count
@@ -116,7 +123,12 @@ def _parse_table(buf, table):
 
 
 def _i4(buf, off):
-    return int(np.frombuffer(buf[off:off + 4], BE_I4)[0])
+    chunk = buf[off:off + 4]
+    if len(chunk) != 4:
+        raise ValueError(
+            f"truncated int32 at byte offset {off}: expected 4 bytes, got {len(chunk)}"
+        )
+    return int(np.frombuffer(chunk, BE_I4, count=1)[0])
 
 
 def _fmt_field(v):
@@ -172,6 +184,10 @@ def _hdrb_size(raw):
     So the block is 0/256/512/768 bytes. Computing it here (instead of assuming
     256) puts header-C at the correct offset, which is what fixes the freq axis.
     """
+    if len(raw) < _table_bytes(HDRA):
+        raise ValueError(
+            f"truncated header-A: expected {_table_bytes(HDRA)} bytes, got {len(raw)}"
+        )
     edge_diff = int(raw[_field_offset(HDRA, "edge_diff")])      # 1 char byte
     iqmatrix = _i4(raw, _field_offset(HDRA, "iqmatrix"))
     ibspsave = _i4(raw, _field_offset(HDRA, "ibspsave"))
@@ -223,48 +239,94 @@ def scan_hdrc_offset(raw, num_freqs, lo=600, hi=2400):
 def read_ss(path, verbose=True):
     raw = np.fromfile(path, dtype=np.uint8)
     filesize = raw.size
-    if filesize < 8:
+    size_a = _table_bytes(HDRA)        # = 648
+    size_c = _table_bytes(HDRC)
+    if filesize < size_a:
         raise ValueError(f"{path}: too small to be a .ss file ({filesize} bytes)")
 
-    size_a = _table_bytes(HDRA)        # = 648
-
     # frequency count from the first record's framing: nbytesd = n_freqs*32 + 408
+    nbytesb0 = _i4(raw, 0)
     nbytesd0 = _i4(raw, 4)
-    if nbytesd0 <= 408:
-        raise ValueError(f"{path}: first nbytesd={nbytesd0} (<=408); not a .ss file?")
-    num_freqs0 = (nbytesd0 - 408) // 32
+    data_bytes0 = nbytesd0 - 408
+    if nbytesb0 < size_a or data_bytes0 <= 0 or data_bytes0 % 32 != 0:
+        raise ValueError(
+            f"{path}: invalid first-record framing nbytesb={nbytesb0}, "
+            f"nbytesd={nbytesd0}; require nbytesb>={size_a} and exactly "
+            "nbytesd=408+32*N for positive integer N"
+        )
+    if nbytesb0 + nbytesd0 > filesize:
+        raise ValueError(
+            f"{path}: truncated first record: framing requires "
+            f"{nbytesb0 + nbytesd0} bytes, file has {filesize}"
+        )
+    num_freqs0 = data_bytes0 // 32
 
     # header-C starts at size_a + hdrbsize (ssread order A,B,C). header-B is
     # variable-length, so derive its size from the header-A flags rather than
     # guessing -- this is what places header-C (and the freq axis) correctly.
     rel_maxfreq = _field_offset(HDRC, "maxfreq")
+    rel_nfreq = _field_offset(HDRC, "nfreq")
     rel_ifreq = _field_offset(HDRC, "ifreq")
+    rel_imono = _field_offset(HDRC, "imono")
 
     def _hdrc_ok(off):
-        if off < 0 or off + _table_bytes(HDRC) > raw.size:
+        if off < size_a or off + size_c > nbytesb0:
             return False
         if _i4(raw, off + rel_maxfreq) != num_freqs0:   # maxfreq must == framing count
             return False
-        return _i4(raw, off + rel_ifreq) in (1, 2)      # ifreq is a 1/2 spacing flag
+        if _i4(raw, off + rel_nfreq) != num_freqs0:
+            return False
+        ifreq_value = _i4(raw, off + rel_ifreq)
+        if ifreq_value not in (1, 2):
+            return False
+        if _i4(raw, off + rel_imono) not in (1, 2):
+            return False
+        # Advanced, ray-trace, and material blocks may legally sit between C
+        # and the frequency/header-D region. Bounds plus exact load-bearing
+        # fields validate C without assuming those variable blocks are absent.
+        return True
 
     hdrbsize = _hdrb_size(raw)
     hdrc_off = size_a + hdrbsize
     if not _hdrc_ok(hdrc_off):
-        cands = [o for o in scan_hdrc_offset(raw, num_freqs0) if _hdrc_ok(o)] \
-            or scan_hdrc_offset(raw, num_freqs0)
+        # Header-B contains exactly zero to three fixed-width CAD slots. Try
+        # only those structurally legal offsets; never scan arbitrary payload
+        # bytes for coincidental integers that resemble header fields.
+        cands = [
+            off
+            for off in (size_a + slots * HDRB_SLOT for slots in range(4))
+            if _hdrc_ok(off)
+        ]
         if verbose:
             print(f"  note: flag-derived header-C@{hdrc_off} (hdrbsize={hdrbsize}) "
                   f"failed validation; scan candidates={cands[:8]}")
-        if cands:
-            hdrc_off = min(cands, key=lambda o: abs(o - (size_a + hdrbsize)))
+        if len(cands) != 1:
+            detail = "no exact candidate" if not cands else f"ambiguous candidates {cands[:8]}"
+            raise ValueError(
+                f"{path}: header-C validation failed at byte {hdrc_off}; {detail}. "
+                "Refusing a guessed header collision because it would corrupt the frequency axis."
+            )
+        hdrc_off = cands[0]
 
     # --- header C (frequency axis); read once from the first record ----------
     hdrc = _parse_table(raw[hdrc_off:hdrc_off + _table_bytes(HDRC)], HDRC)
     ifreq = int(hdrc["ifreq"][0])
     maxfreq = int(hdrc["maxfreq"][0])
+    nfreq_header = int(hdrc["nfreq"][0])
     freq1 = float(hdrc["freq1"][0])
     freq2 = float(hdrc["freq2"][0])
     imono = int(hdrc["imono"][0])              # 1: mono-static, 2: bistatic
+    if maxfreq != num_freqs0 or nfreq_header != num_freqs0:
+        raise ValueError(
+            f"{path}: header-C frequency counts maxfreq={maxfreq}, "
+            f"nfreq={nfreq_header} do not match framing count {num_freqs0}"
+        )
+    if ifreq not in (1, 2) or imono not in (1, 2):
+        raise ValueError(
+            f"{path}: unsupported header-C flags ifreq={ifreq}, imono={imono}"
+        )
+    if not np.all(np.isfinite([freq1, freq2])):
+        raise ValueError(f"{path}: header-C frequency endpoints are not finite")
 
     # --- walk records by framing --------------------------------------------
     # header-D carries both incident (azinc/elinc) and observation (azobs/elobs)
@@ -272,37 +334,75 @@ def read_ss(path, verbose=True):
     ang = {"azinc": [], "elinc": [], "azobs": [], "elobs": []}
     pol = {"vv": [], "vh": [], "hv": [], "hh": []}
     p, nsig, num_freqs_global = 0, 0, None
-    while p + 8 <= filesize:
+    while p < filesize:
+        if filesize - p < 8:
+            raise ValueError(
+                f"{path}: truncated EOF after record {nsig}: "
+                f"{filesize - p} trailing byte(s), fewer than the 8-byte framing header"
+            )
         nbytesb = _i4(raw, p)
         nbytesd = _i4(raw, p + 4)
-        if nbytesb <= 0 or nbytesd <= 408:
-            if verbose:
-                print(f"  record {nsig}: framing not set (nbytesb={nbytesb}, "
-                      f"nbytesd={nbytesd}); stopping")
-            break
-        num_freqs = (nbytesd - 408) // 32
+        data_bytes = nbytesd - 408
+        if (
+            nbytesb != nbytesb0
+            or data_bytes <= 0
+            or data_bytes % 32 != 0
+        ):
+            raise ValueError(
+                f"{path}: record {nsig + 1} has invalid framing "
+                f"nbytesb={nbytesb}, nbytesd={nbytesd}; expected "
+                f"nbytesb={nbytesb0} and exactly nbytesd=408+32*N"
+            )
+        num_freqs = data_bytes // 32
+        if num_freqs != num_freqs0:
+            raise ValueError(
+                f"{path}: record {nsig + 1} frequency count {num_freqs} "
+                f"does not match first-record count {num_freqs0}"
+            )
         if num_freqs_global is None:
             num_freqs_global = num_freqs
+        record_end = p + nbytesb + nbytesd
+        if record_end > filesize:
+            raise ValueError(
+                f"{path}: truncated EOF in record {nsig + 1}: framing ends at "
+                f"byte {record_end}, file ends at {filesize}"
+            )
+
+        record_hdrc = _parse_table(
+            raw[p + hdrc_off:p + hdrc_off + size_c], HDRC
+        )
+        record_header_values = (
+            int(record_hdrc["maxfreq"][0]),
+            int(record_hdrc["nfreq"][0]),
+            int(record_hdrc["ifreq"][0]),
+            int(record_hdrc["imono"][0]),
+        )
+        if record_header_values != (maxfreq, nfreq_header, ifreq, imono):
+            raise ValueError(
+                f"{path}: record {nsig + 1} header-C fields "
+                f"{record_header_values} differ from first record "
+                f"{(maxfreq, nfreq_header, ifreq, imono)}"
+            )
 
         # header-D (minimal): incident/observation az/el at p + nbytesb
         d = _parse_table(raw[p + nbytesb: p + nbytesb + 408], HDRDMIN)
-        for k in ang:
-            ang[k].append(float(d[k][0]))
 
         # complex data: 32*num_freqs bytes at p + nbytesb + 408
         dstart = p + nbytesb + 408
         nbytes = 32 * num_freqs
-        if dstart + nbytes > filesize:
-            if verbose:
-                print(f"  record {nsig}: data block truncated; stopping")
-            break
+        if dstart + nbytes != record_end:
+            raise ValueError(
+                f"{path}: record {nsig + 1} data extent does not match framing"
+            )
         chunk = np.frombuffer(raw[dstart:dstart + nbytes], BE_F4, 8 * num_freqs)
         c = chunk[0::2] + 1j * chunk[1::2]      # num_freqs*4 complex
+        for k in ang:
+            ang[k].append(float(d[k][0]))
         pol["vv"].append(c[0::4]); pol["vh"].append(c[1::4])
         pol["hv"].append(c[2::4]); pol["hh"].append(c[3::4])
 
         nsig += 1
-        p += nbytesb + nbytesd
+        p = record_end
 
     if nsig == 0:
         raise ValueError(f"{path}: no readable signal records")
@@ -313,11 +413,12 @@ def read_ss(path, verbose=True):
     nfa = num_freqs_global
     if ifreq == 2:
         # explicit freqs: nfa float32 immediately before header-D of record 0
-        nbytesb0 = _i4(raw, 0)
         fstart = nbytesb0 - 4 * nfa
         freqdata = np.frombuffer(raw[fstart:fstart + 4 * nfa], BE_F4, nfa).copy()
     else:
         freqdata = np.linspace(freq1, freq2, nfa)
+    if not np.all(np.isfinite(freqdata)):
+        raise ValueError(f"{path}: frequency axis contains NaN or infinite values")
 
     # --- choose incident vs observation angles ------------------------------
     # Monostatic (imono==1): incident == observation. Bistatic (imono==2): the

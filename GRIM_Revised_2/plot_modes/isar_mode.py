@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import hashlib
 import os
 import time
 
@@ -521,7 +522,51 @@ _PREPROCESS_CACHE_BYTES = 0
 
 def _array_token(values) -> tuple:
     arr = np.ascontiguousarray(values)
-    return (arr.size, hash(arr.view(np.uint8).tobytes()))
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(arr.dtype.str.encode("ascii"))
+    digest.update(repr(arr.shape).encode("ascii"))
+    digest.update(memoryview(arr).cast("B"))
+    return (arr.dtype.str, arr.shape, digest.digest())
+
+
+def _selected_data_token(
+    dataset,
+    azimuth_indices,
+    elevation_index: int,
+    frequency_indices,
+    polarization_index: int,
+) -> bytes:
+    """Exact digest of the selected source power/phase without a full copy.
+
+    RcsGrid arrays are intentionally public and may be changed in place, so an
+    object id or axis-only cache key is not a safe data revision. Hashing one
+    frequency row at a time bounds temporary memory while detecting any selected
+    sample change and also makes reuse across object-id recycling harmless.
+    """
+
+    digest = hashlib.blake2b(digest_size=20)
+    frequency_indices = np.asarray(frequency_indices, dtype=np.intp)
+    for label, values in (
+        (b"power", dataset.rcs_power),
+        (b"phase", dataset.rcs_phase),
+    ):
+        source = np.asarray(values)
+        digest.update(label)
+        digest.update(source.dtype.str.encode("ascii"))
+        digest.update(
+            repr((len(azimuth_indices), len(frequency_indices))).encode("ascii")
+        )
+        for azimuth_index in azimuth_indices:
+            row = np.ascontiguousarray(
+                source[
+                    int(azimuth_index),
+                    int(elevation_index),
+                    frequency_indices,
+                    int(polarization_index),
+                ]
+            )
+            digest.update(memoryview(row).cast("B"))
+    return digest.digest()
 
 
 def _preprocess_cache_get(key: tuple):
@@ -717,10 +762,20 @@ def _compute_band(
     az_values = band_az_values[order].astype(float)
     target_token = None if az_target_deg is None else _array_token(np.asarray(az_target_deg))
     preprocess_mode = "accurate" if recon == "accurate" else "fast"
+    source_token = _selected_data_token(
+        dataset,
+        sorted_band_indices,
+        elev_idx,
+        freq_indices_sorted,
+        pol_idx,
+    )
     cache_key = (
-        id(dataset), _array_token(np.asarray(sorted_band_indices, dtype=np.int64)),
-        _array_token(np.asarray(freq_indices_sorted, dtype=np.int64)), elev_idx, pol_idx,
-        target_token, az_center_deg, preprocess_mode,
+        _array_token(az_values),
+        _array_token(np.asarray(freq_hz, dtype=float)),
+        source_token,
+        target_token,
+        az_center_deg,
+        preprocess_mode,
     )
     prep = _preprocess_cache_get(cache_key)
     cache_hit = prep is not None

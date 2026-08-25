@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import tempfile
+import weakref
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -383,6 +384,14 @@ if GUI_AVAILABLE:
             self._worker: _ExportWorker | None = None
             self._last_error = ""
             self._preview_temp = tempfile.TemporaryDirectory(prefix="grim-ppt-preview-")
+            # Embedded hosts normally call dispose(), but a Python/Qt wrapper
+            # can outlive its native widget during teardown or abnormal
+            # interpreter shutdown. This later finalizer removes preview files
+            # explicitly before TemporaryDirectory needs to warn about them.
+            self._preview_finalizer = weakref.finalize(
+                self, self._preview_temp.cleanup
+            )
+            self._disposed = False
             self._build_ui()
             self._connect_signals()
             self._update_plot_type_controls()
@@ -565,6 +574,7 @@ if GUI_AVAILABLE:
             self.controls_scroll.setMinimumWidth(405)
             self.controls_scroll.setMaximumWidth(485)
             self.controls_content = QWidget(self.controls_scroll)
+            self.controls_content.setObjectName("pptControlsContent")
             controls = QVBoxLayout(self.controls_content)
             controls.setContentsMargins(2, 2, 8, 2)
             controls.setSpacing(8)
@@ -1358,8 +1368,17 @@ if GUI_AVAILABLE:
                 )
                 event.ignore()
                 return
-            self._preview_temp.cleanup()
+            self.dispose()
             super().closeEvent(event)
+
+        def dispose(self) -> None:
+            """Release preview files when an embedded or standalone host closes."""
+
+            if self._disposed:
+                return
+            if self._preview_finalizer.alive:
+                self._preview_finalizer()
+            self._disposed = True
 
 
 else:
