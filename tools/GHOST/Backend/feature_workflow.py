@@ -122,6 +122,16 @@ class FeaturePreviewGeometry:
     body_profile_rho_z_m: Optional[np.ndarray]
     point_locations_cad_m: dict[str, np.ndarray]
     line_paths_cad_m: dict[str, dict[str, np.ndarray]]
+    # Orientation vectors are unitless and remain in the same user-visible
+    # CAD frame as the placement coordinates.  GRIM projects each point roll
+    # reference onto the plane normal to local +z when it draws the frame,
+    # matching the point-scatterer convention without changing placement
+    # validation or solver inputs.
+    point_normals_cad: dict[str, np.ndarray] = field(default_factory=dict)
+    point_roll_references_cad: dict[str, np.ndarray] = field(default_factory=dict)
+    line_endpoint_normals_cad: dict[str, dict[str, np.ndarray]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -154,6 +164,18 @@ class FeatureInputPreview:
     @property
     def line_paths_cad_m(self) -> dict[str, dict[str, np.ndarray]]:
         return self.preview_geometry.line_paths_cad_m
+
+    @property
+    def point_normals_cad(self) -> dict[str, np.ndarray]:
+        return self.preview_geometry.point_normals_cad
+
+    @property
+    def point_roll_references_cad(self) -> dict[str, np.ndarray]:
+        return self.preview_geometry.point_roll_references_cad
+
+    @property
+    def line_endpoint_normals_cad(self) -> dict[str, dict[str, np.ndarray]]:
+        return self.preview_geometry.line_endpoint_normals_cad
 
 
 @dataclass
@@ -194,6 +216,18 @@ class FeatureAssemblyPlan:
     @property
     def line_paths_cad_m(self) -> dict[str, dict[str, np.ndarray]]:
         return self.preview_geometry.line_paths_cad_m
+
+    @property
+    def point_normals_cad(self) -> dict[str, np.ndarray]:
+        return self.preview_geometry.point_normals_cad
+
+    @property
+    def point_roll_references_cad(self) -> dict[str, np.ndarray]:
+        return self.preview_geometry.point_roll_references_cad
+
+    @property
+    def line_endpoint_normals_cad(self) -> dict[str, dict[str, np.ndarray]]:
+        return self.preview_geometry.line_endpoint_normals_cad
 
     @property
     def preview_stage(self) -> str:
@@ -449,6 +483,42 @@ def _input_line_preview_paths(
     return result
 
 
+def _input_line_preview_normals(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, np.ndarray]]:
+    """Collect supplied line endpoint normals without certifying them.
+
+    Input preview is intentionally visual QA only.  The authoritative line
+    placement path still performs every nonzero, interpolation, and surface
+    agreement check in :func:`prepare_line_placements`.
+    """
+
+    result: dict[str, dict[str, np.ndarray]] = {}
+    start = 0
+    while start < len(rows):
+        line_id = str(rows[start]["line_id"])
+        end = start + 1
+        while end < len(rows) and str(rows[end]["line_id"]) == line_id:
+            end += 1
+        group = rows[start:end]
+        dataset_id = str(group[0]["dataset_id"])
+        normals = np.asarray(
+            [
+                [
+                    [row["n1x"], row["n1y"], row["n1z"]],
+                    [row["n2x"], row["n2y"], row["n2z"]],
+                ]
+                for row in group
+            ],
+            dtype=float,
+        )
+        result.setdefault(dataset_id, {})[line_id] = np.array(
+            normals, dtype=float, copy=True
+        )
+        start = end
+    return result
+
+
 def prepare_feature_input_preview(
     *,
     base_grim: Optional[PathValue] = None,
@@ -511,10 +581,21 @@ def prepare_feature_input_preview(
         if line_locations_csv is not None else []
     )
     point_groups: dict[str, list[np.ndarray]] = {}
+    point_normal_groups: dict[str, list[np.ndarray]] = {}
+    point_roll_groups: dict[str, list[np.ndarray]] = {}
     for row in point_rows:
-        point_groups.setdefault(str(row["dataset_id"]), []).append(
+        dataset_id = str(row["dataset_id"])
+        point_groups.setdefault(dataset_id, []).append(
             np.asarray([row["x"], row["y"], row["z"]], dtype=float)
             * coordinate_scale
+        )
+        point_normal_groups.setdefault(dataset_id, []).append(
+            np.asarray([row["nx"], row["ny"], row["nz"]], dtype=float)
+        )
+        point_roll_groups.setdefault(dataset_id, []).append(
+            np.asarray(
+                [row["roll_x"], row["roll_y"], row["roll_z"]], dtype=float
+            )
         )
     point_locations = {
         dataset_id: np.asarray(locations, dtype=float).reshape(-1, 3)
@@ -523,6 +604,7 @@ def prepare_feature_input_preview(
     line_paths = _input_line_preview_paths(
         line_rows, coordinate_scale=coordinate_scale
     )
+    line_normals = _input_line_preview_normals(line_rows)
     requirements = FeatureDatasetRequirements(
         point_dataset_ids=_ordered_dataset_ids(point_rows),
         line_dataset_ids=_ordered_dataset_ids(line_rows),
@@ -536,6 +618,15 @@ def prepare_feature_input_preview(
         body_profile_rho_z_m=profile,
         point_locations_cad_m=point_locations,
         line_paths_cad_m=line_paths,
+        point_normals_cad={
+            dataset_id: np.asarray(vectors, dtype=float).reshape(-1, 3)
+            for dataset_id, vectors in point_normal_groups.items()
+        },
+        point_roll_references_cad={
+            dataset_id: np.asarray(vectors, dtype=float).reshape(-1, 3)
+            for dataset_id, vectors in point_roll_groups.items()
+        },
+        line_endpoint_normals_cad=line_normals,
     )
     return FeatureInputPreview(
         preview_geometry=geometry,
@@ -658,6 +749,9 @@ def prepare_line_placements(
     datasets: Mapping[str, PathValue],
     base_dir: Optional[PathValue] = None,
     preview_paths_cad_m: Optional[dict[str, dict[str, np.ndarray]]] = None,
+    preview_endpoint_normals_cad: Optional[
+        dict[str, dict[str, np.ndarray]]
+    ] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate and prepare line-expanded feature placements."""
 
@@ -853,6 +947,10 @@ def prepare_line_placements(
             preview_paths_cad_m.setdefault(dataset_id, {})[line_id] = np.array(
                 line_path, dtype=float, copy=True
             )
+        if preview_endpoint_normals_cad is not None:
+            preview_endpoint_normals_cad.setdefault(dataset_id, {})[
+                line_id
+            ] = np.array(normal_cad, dtype=float, copy=True)
         start = end
     return placements, records
 
@@ -870,6 +968,10 @@ def prepare_point_placements(
     base_dir: Optional[PathValue] = None,
     pattern_loader: Optional[Callable[..., Any]] = None,
     preview_locations_cad_m: Optional[dict[str, list[np.ndarray]]] = None,
+    preview_normals_cad: Optional[dict[str, list[np.ndarray]]] = None,
+    preview_roll_references_cad: Optional[
+        dict[str, list[np.ndarray]]
+    ] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate and prepare compact 3-D point-feature placements."""
 
@@ -994,6 +1096,17 @@ def prepare_point_placements(
             preview_locations_cad_m.setdefault(dataset_id, []).append(
                 np.array(location_cad_m, dtype=float, copy=True)
             )
+        if preview_normals_cad is not None:
+            preview_normals_cad.setdefault(dataset_id, []).append(
+                np.asarray([row["nx"], row["ny"], row["nz"]], dtype=float)
+            )
+        if preview_roll_references_cad is not None:
+            preview_roll_references_cad.setdefault(dataset_id, []).append(
+                np.asarray(
+                    [row["roll_x"], row["roll_y"], row["roll_z"]],
+                    dtype=float,
+                )
+            )
     return points, records
 
 
@@ -1078,7 +1191,10 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
     )
     normal_tolerance = validate_normal_tolerance(request.normal_tol_deg)
     point_preview_lists: dict[str, list[np.ndarray]] = {}
+    point_preview_normals: dict[str, list[np.ndarray]] = {}
+    point_preview_roll_references: dict[str, list[np.ndarray]] = {}
     line_preview_paths: dict[str, dict[str, np.ndarray]] = {}
+    line_preview_endpoint_normals: dict[str, dict[str, np.ndarray]] = {}
     lines, line_records = prepare_line_placements(
         profile,
         surface,
@@ -1090,6 +1206,7 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         datasets=request.line_datasets,
         base_dir=request.base_dir,
         preview_paths_cad_m=line_preview_paths,
+        preview_endpoint_normals_cad=line_preview_endpoint_normals,
     )
     points, point_records = prepare_point_placements(
         profile,
@@ -1102,6 +1219,8 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         datasets=request.point_datasets,
         base_dir=request.base_dir,
         preview_locations_cad_m=point_preview_lists,
+        preview_normals_cad=point_preview_normals,
+        preview_roll_references_cad=point_preview_roll_references,
     )
 
     normal_fn = (
@@ -1142,6 +1261,21 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
                 for line_id, path in paths.items()
             }
             for dataset_id, paths in line_preview_paths.items()
+        },
+        point_normals_cad={
+            dataset_id: np.asarray(vectors, dtype=float).reshape(-1, 3)
+            for dataset_id, vectors in point_preview_normals.items()
+        },
+        point_roll_references_cad={
+            dataset_id: np.asarray(vectors, dtype=float).reshape(-1, 3)
+            for dataset_id, vectors in point_preview_roll_references.items()
+        },
+        line_endpoint_normals_cad={
+            dataset_id: {
+                line_id: np.array(vectors, dtype=float, copy=True)
+                for line_id, vectors in groups.items()
+            }
+            for dataset_id, groups in line_preview_endpoint_normals.items()
         },
     )
     provenance = {

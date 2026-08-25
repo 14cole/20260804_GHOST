@@ -333,6 +333,17 @@ class CoPolarizedGrimTests(unittest.TestCase):
                     {"HH": "TM", "VV": "TE"},
                 )
 
+    def test_explicit_nested_output_creates_parent_directory(self):
+        result = rcs._merge_co_polarized_2d_results({
+            "VV": _single_result("TE"),
+            "HH": _single_result("TM"),
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "new" / "nested" / "dual.grim"
+            written = grim_io.export_result_to_grim(result, str(output))
+            self.assertEqual(written, [str(output.resolve())])
+            self.assertTrue(output.is_file())
+
     def test_bistatic_collection_keeps_both_channels_per_incidence(self):
         result = rcs._merge_co_polarized_2d_results({
             "VV": _single_result("TE", bistatic=True),
@@ -349,6 +360,18 @@ class CoPolarizedGrimTests(unittest.TestCase):
                     payload["polarizations"], ["VV", "HH"]
                 )
                 self.assertEqual(payload["rcs_power"].shape, (2, 1, 1, 2))
+
+    def test_bistatic_collection_creates_nested_output_directory(self):
+        result = rcs._merge_co_polarized_2d_results({
+            "VV": _single_result("TE", bistatic=True),
+            "HH": _single_result("TM", bistatic=True),
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "new" / "nested" / "bistatic"
+            written = grim_io.export_result_to_grim(result, str(root))
+            self.assertEqual(len(written), 1)
+            self.assertEqual(Path(written[0]).parent, root.parent.resolve())
+            self.assertTrue(Path(written[0]).is_file())
 
     def test_bistatic_collection_stage_failure_preserves_every_old_incidence(self):
         result = rcs._merge_co_polarized_2d_results({

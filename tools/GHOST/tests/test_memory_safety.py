@@ -132,6 +132,12 @@ class AvailableMemoryDetectionTests(unittest.TestCase):
 
 
 class BorMemoryGateTests(unittest.TestCase):
+    def test_total_peak_adds_the_same_scheduler_margin_once(self):
+        self.assertAlmostEqual(
+            bor_solver.estimate_bor_total_peak_gb(7.0, 0.25),
+            9.2,
+        )
+
     def test_dense_peak_estimate_multiplies_actual_worker_concurrency(self):
         serial = bor_solver.estimate_bor_dense_peak_gb(
             1200, 18, workers=1, mode_tasks=8
@@ -159,7 +165,7 @@ class BorMemoryGateTests(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(
-                MemoryError, "requires an estimated 2.00 GB"
+                MemoryError, "requires an estimated 8.90 GB"
             ):
                 bor_solver.solve_bor(
                     points,
@@ -187,7 +193,7 @@ class BorMemoryGateTests(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(
-                MemoryError, "requires an estimated 2.25 GB"
+                MemoryError, "requires an estimated 9.20 GB"
             ):
                 bor_solver.solve_bor(
                     points,
@@ -246,7 +252,7 @@ class BorMemoryGateTests(unittest.TestCase):
             ) as prepare,
         ):
             with self.assertRaisesRegex(
-                MemoryError, "requires an estimated 2.25 GB"
+                MemoryError, "requires an estimated 3.20 GB"
             ):
                 bor_solver.solve_bor_dielectric(
                     points,

@@ -17,24 +17,12 @@ import sys
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
+from grim_diagnostics import GHOST_SENTINELS
+
 
 GHOST_BACKEND_ENV = "GHOST_BACKEND_PATH"
 
-_GHOST_WORKSPACE_FILES = (
-    "ghost_gui.py",
-    "geometry_tab.py",
-    "solver_tab.py",
-    "geometry_io.py",
-    "grim_io.py",
-    "rcs_solver.py",
-    "bor_dispatch.py",
-    "bor_solver.py",
-    "bor_kernels.py",
-    "bor_streaming.py",
-    "solver_quality.py",
-    "feature_sum.py",
-    "fmm_helmholtz_2d.py",
-)
+_GHOST_WORKSPACE_FILES = GHOST_SENTINELS
 
 
 def ghost_backend_candidates(explicit: str | os.PathLike[str] | None = None):

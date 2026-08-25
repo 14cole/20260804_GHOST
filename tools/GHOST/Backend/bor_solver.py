@@ -70,6 +70,9 @@ BOR_CONDITION_EST_MAX = 1.0e12
 # tables are prepared rather than discover the peak through paging or an OOM.
 BOR_DENSE_MATRIX_EQUIVALENTS = 8.0
 BOR_DENSE_RHS_EQUIVALENTS = 12.0
+BOR_TABLE_BUILD_PEAK_FACTOR = 3.5
+BOR_PEAK_SAFETY_FACTOR = 1.20
+BOR_PEAK_FIXED_MARGIN_GB = 0.5
 _COMPLEX128_BYTES = np.dtype(np.complex128).itemsize
 
 
@@ -131,20 +134,51 @@ def estimate_bor_dense_peak_gb(
     return active_workers * per_worker_bytes / 1.0e9
 
 
+def estimate_bor_total_peak_gb(
+    assembly_peak_gb: 'float',
+    dense_peak_gb: 'float',
+) -> 'float':
+    """Return the scheduler/runtime reservation for one BoR solve.
+
+    ``assembly_peak_gb`` is already a *peak*, not persistent storage plus a
+    second workspace allocation.  This distinction prevents double counting
+    the retained tables when a caller has a more detailed build-workspace
+    estimate, while still letting the direct all-mode table path pass its
+    documented 3.5x construction peak.
+    """
+
+    assembly_peak = float(assembly_peak_gb)
+    dense_peak = float(dense_peak_gb)
+    if (
+        not math.isfinite(assembly_peak)
+        or assembly_peak < 0.0
+        or not math.isfinite(dense_peak)
+        or dense_peak < 0.0
+    ):
+        raise ValueError(
+            "BoR peak-memory components must be finite and non-negative."
+        )
+    raw_peak = assembly_peak + dense_peak
+    return max(
+        BOR_PEAK_FIXED_MARGIN_GB,
+        BOR_PEAK_FIXED_MARGIN_GB + BOR_PEAK_SAFETY_FACTOR * raw_peak,
+    )
+
+
 def _guard_bor_dense_memory(
     n_dofs: 'int',
     n_rhs: 'int',
     workers: 'int',
     mode_tasks: 'int',
-    resident_memory_gb: 'float' = 0.0,
+    assembly_peak_gb: 'float' = 0.0,
     context: 'str' = "The BoR solve",
 ) -> 'float':
     """Gate a BoR solve before operator preparation and return required GB."""
 
-    resident = float(resident_memory_gb)
-    if not math.isfinite(resident) or resident < 0.0:
+    assembly_peak = float(assembly_peak_gb)
+    if not math.isfinite(assembly_peak) or assembly_peak < 0.0:
         raise ValueError(
-            "Resident BoR assembly memory must be finite and non-negative."
+            "BoR assembly peak memory must be finite and non-negative."
         )
     dense = estimate_bor_dense_peak_gb(
         n_dofs,
@@ -152,7 +186,7 @@ def _guard_bor_dense_memory(
         workers=workers,
         mode_tasks=mode_tasks,
     )
-    required = resident + dense
+    required = estimate_bor_total_peak_gb(assembly_peak, dense)
     memory_limit_gb = _solve_memory_limit_gb()
     if required > memory_limit_gb:
         active_workers = min(max(1, int(workers)), int(mode_tasks))
@@ -166,8 +200,10 @@ def _guard_bor_dense_memory(
                     f"{int(n_rhs)} simultaneous RHS columns, "
                     f"{active_workers} concurrent mode worker"
                     f"{'s' if active_workers != 1 else ''}; estimated dense "
-                    f"peak {dense:.2f} GB plus {resident:.2f} GB of resident "
-                    "operator/table storage."
+                    f"peak {dense:.2f} GB plus {assembly_peak:.2f} GB for "
+                    "operator/table preparation; the total includes the "
+                    f"{BOR_PEAK_SAFETY_FACTOR:.2f}x safety factor and "
+                    f"{BOR_PEAK_FIXED_MARGIN_GB:.2f} GB fixed margin."
                 ),
                 (
                     "Reduce the mesh, aspect count, or worker count; for the "
@@ -1621,7 +1657,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 rhs_batch: 'Optional[Callable]' = None,
                 farfield_batch: 'Optional[Callable]' = None,
                 min_mode_before_tail: 'int' = 0,
-                resident_memory_gb: 'float' = 0.0,
+                assembly_peak_gb: 'float' = 0.0,
                 memory_context: 'str' = "The BoR solve"):
     """
     Shared adaptive azimuthal-mode loop for every BoR formulation.
@@ -1656,7 +1692,7 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
         len(thetas) * len(pols),
         workers,
         max(1, int(m_max) + 1),
-        resident_memory_gb=resident_memory_gb,
+        assembly_peak_gb=assembly_peak_gb,
         context=memory_context,
     )
     if prepare is not None:
@@ -2513,6 +2549,17 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
         per_mode = est / (m_max + 1)
         mode_block = max(1, int(float(stream_budget_gb) / per_mode))
         est_held = est * mode_block / (m_max + 1)
+    # Non-streaming FFT table builders temporarily retain sampling and
+    # contraction arrays in addition to the published tables.  The scheduler
+    # reserves 3.5x persistent storage for that construction phase, so the
+    # runtime gate must use the same peak before ``prepare`` can allocate.
+    # Streamed blocks and detailed multi-surface estimates already include
+    # bounded build workspace and must not receive this multiplier again.
+    assembly_peak_gb = (
+        est_held
+        if use_streaming
+        else BOR_TABLE_BUILD_PEAK_FACTOR * est_held
+    )
     table_note = (f"{'Streamed far blocks' if use_streaming else 'Far kernel tables'} "
                   f"stored in single precision ({est:.1f} GB; double would "
                   f"need {est_full:.1f} GB)."
@@ -2611,7 +2658,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                                        rhs_batch=rhs_batch,
                                        farfield_batch=farfield_batch,
                                        min_mode_before_tail=mode_tail_start,
-                                       resident_memory_gb=est_held,
+                                       assembly_peak_gb=assembly_peak_gb,
                                        memory_context="The PEC/IBC BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
@@ -2734,7 +2781,7 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
                                        rhs_batch=rhs_batch,
                                        farfield_batch=farfield_batch,
                                        min_mode_before_tail=mode_tail_start,
-                                       resident_memory_gb=operator_storage_gb,
+                                       assembly_peak_gb=operator_storage_gb,
                                        memory_context="The dielectric BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
@@ -3082,7 +3129,7 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
                                        rhs_batch=rhs_batch,
                                        farfield_batch=farfield_batch,
                                        min_mode_before_tail=mode_tail_start,
-                                       resident_memory_gb=operator_storage_gb,
+                                       assembly_peak_gb=operator_storage_gb,
                                        memory_context="The coated-PEC BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
@@ -3513,7 +3560,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                                        check_abort=check_abort,
                                        monitor_cond=True,
                                        min_mode_before_tail=mode_tail_start,
-                                       resident_memory_gb=operator_storage_gb,
+                                       assembly_peak_gb=operator_storage_gb,
                                        memory_context="The partial-coating BoR solve")
     _require_mode_convergence(stats, mode_tol)
     return {
@@ -3831,7 +3878,7 @@ def _solve_multiregion(sys_: '_MultiRegionBor', freq_hz, thetas_deg, n_modes,
         prepare=lambda mm: sys_.prepare(mm, workers=workers),
         workers=workers, progress=progress, check_abort=check_abort,
         monitor_cond=True, min_mode_before_tail=mode_tail_start,
-        resident_memory_gb=operator_storage_gb,
+        assembly_peak_gb=operator_storage_gb,
         memory_context=f"The {formulation} BoR solve")
     _require_mode_convergence(stats, mode_tol)
     extra = {**extra, **stats}

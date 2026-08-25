@@ -294,7 +294,9 @@ filedialog = _FileDialog()
 from .batch import (
     IbcBatchItem,
     export_pec_ibc_thickness_batch,
+    ibc_batch_frequency_count,
     plan_ibc_thickness_batch,
+    validate_ibc_batch_workload,
 )
 from .compute import (
     INCH_TO_M,
@@ -1151,6 +1153,9 @@ class ImpedanceGui(QMainWindow):
     # ``ibc`` or ``material`` and the second value is the absolute path of one
     # solver-compatible nominal CSV.
     nominal_artifact_exported = Signal(str, str)
+    # Emitted when an operation intentionally has no singular attachable
+    # result. Embedding hosts must discard any previously remembered artifact.
+    nominal_artifact_cleared = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """Build the FREDDY workspace as a window or an embedded child widget."""
@@ -1724,6 +1729,9 @@ class ImpedanceGui(QMainWindow):
         ibc_batch_layout.addStretch(1)
 
         for batch_var in (
+            self.f_start_var,
+            self.f_stop_var,
+            self.f_step_var,
             self.ibc_batch_layer_var,
             self.ibc_batch_start_var,
             self.ibc_batch_stop_var,
@@ -2946,9 +2954,19 @@ class ImpedanceGui(QMainWindow):
             if not path_str:
                 return
             path = Path(path_str)
-            state = load_project_file(path)
+            portability_warnings: list[str] = []
+            state = load_project_file(
+                path,
+                warning_handler=portability_warnings.append,
+            )
             self._apply_project_state(state)
             self.project_path = path
+            if portability_warnings:
+                messagebox.showwarning(
+                    "Project Portability",
+                    "\n\n".join(portability_warnings),
+                    parent=self,
+                )
             messagebox.showinfo("Project", f"Loaded project from:\n{path}")
         except Exception as exc:
             messagebox.showerror("Project Load Error", str(exc))
@@ -3568,11 +3586,21 @@ class ImpedanceGui(QMainWindow):
         try:
             self._selected_ibc_batch_layer_index()
             plan = self._plan_ibc_batch()
+            frequency_count = ibc_batch_frequency_count(
+                float(self.f_start_var.get().strip()),
+                float(self.f_stop_var.get().strip()),
+                float(self.f_step_var.get().strip()),
+            )
+            total_points = validate_ibc_batch_workload(
+                len(plan), frequency_count
+            )
             first = plan[0].path.name
             last = plan[-1].path.name
             filenames = first if len(plan) == 1 else f"{first} … {last}"
             self.ibc_batch_preview_label.setText(
-                f"Preflight: {len(plan)} nominal PEC-backed IBC file(s) — {filenames}"
+                f"Preflight: {len(plan)} nominal PEC-backed IBC file(s), "
+                f"{frequency_count:,} frequency points each "
+                f"({total_points:,} total rows) — {filenames}"
             )
             if self.ibc_batch_export_btn is not None:
                 self.ibc_batch_export_btn.setText(
@@ -6794,10 +6822,21 @@ class ImpedanceGui(QMainWindow):
             # the frozen worker snapshot so loading does not depend on its
             # current nominal thickness, while the live stack stays unchanged.
             layer_snapshot[layer_index].thickness_in = plan[0].thickness_in
+            frequency_start = float(self.f_start_var.get().strip())
+            frequency_stop = float(self.f_stop_var.get().strip())
+            frequency_step = float(self.f_step_var.get().strip())
+            frequency_count = ibc_batch_frequency_count(
+                frequency_start,
+                frequency_stop,
+                frequency_step,
+            )
+            # Enforce the combined work bound before make_frequency_sweep
+            # allocates a potentially enormous list.
+            validate_ibc_batch_workload(len(plan), frequency_count)
             frequencies = make_frequency_sweep(
-                float(self.f_start_var.get().strip()),
-                float(self.f_stop_var.get().strip()),
-                float(self.f_step_var.get().strip()),
+                frequency_start,
+                frequency_stop,
+                frequency_step,
             )
         except Exception as exc:
             messagebox.showerror("IBC Batch", str(exc), parent=self)
@@ -6807,6 +6846,12 @@ class ImpedanceGui(QMainWindow):
             [item.path for item in plan], operation="IBC Batch"
         ):
             return
+
+        if len(plan) > 1:
+            # A multi-file export cannot honestly replace the host's singular
+            # attachable artifact. Clear it as soon as this batch starts so a
+            # previous unrelated nominal export cannot be attached afterward.
+            self.nominal_artifact_cleared.emit()
 
         def worker() -> dict[str, object]:
             loaded_layers = self._load_layers(0, layer_snapshot)

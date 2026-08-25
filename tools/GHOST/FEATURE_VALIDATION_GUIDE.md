@@ -54,7 +54,13 @@ canonical Assembly tree and the 3-D placement preview:
 5. Map every discovered ID, choose the output, then select **Validate
    Placements & Preview**. Check the body, feature locations, line ordering,
    units, and CAD orientation (`+x` right, `+y` nose, `+z` up). Supplied
-   normal/roll vectors are checked numerically but are not drawn in this view.
+   outward point and line-endpoint normals are drawn in magenta. The point roll
+   reference is projected perpendicular to its normal and drawn in lavender as
+   the solver-effective local `+x`/azimuth-zero direction. All arrows are
+   normalized and use one display-only length derived from the non-vector scene
+   extent; arrow length does not represent input magnitude or affect validation.
+   The input-only preview omits zero or parallel arrows; the Validate action
+   remains responsible for reporting those physical placement errors.
 6. Select **Assemble Coherently & Save** only after the placement report is
    correct. Full response compatibility is enforced while assembling. The
    saved result is automatically available to GRIM as a dataset.

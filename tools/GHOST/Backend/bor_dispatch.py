@@ -451,18 +451,24 @@ def estimate_bor_resources(
         k0, radius, aspects, n_modes
     )
     active_modes = min(worker_count, mode_cap + 1)
+    from bor_solver import (
+        BOR_TABLE_BUILD_PEAK_FACTOR,
+        estimate_bor_dense_peak_gb,
+        estimate_bor_total_peak_gb,
+    )
 
     unknowns = sum(
         (2 if is_conductor else 4) * (int(elements) + 1)
         for elements, is_conductor in surface_layout
     )
-    # Per active mode: assembled/masked matrix, LU copy, residual products,
-    # LAPACK/RHS workspace. The safety factor covers allocator fragmentation.
-    matrix_work_gb = (
-        4.5 * 16.0 * float(unknowns) * float(unknowns) / 1.0e9
-    )
-    rhs_work_gb = (
-        6.0 * 16.0 * float(unknowns) * 2.0 * float(aspects.size) / 1.0e9
+    # Use the exact same dense-work reservation as the runtime gate. Keeping a
+    # second, smaller approximation here can over-admit concurrent scheduler
+    # jobs that the solver then rejects—or that collectively exhaust memory.
+    dense_peak_gb = estimate_bor_dense_peak_gb(
+        unknowns,
+        2 * int(aspects.size),
+        workers=worker_count,
+        mode_tasks=mode_cap + 1,
     )
 
     persistent_gb = 0.0
@@ -499,7 +505,7 @@ def estimate_bor_resources(
             block = max(1, int(stream_budget / per_mode))
             held_assembly_gb = persistent_gb * block / max(mode_cap + 1, 1)
         elif not use_streaming:
-            held_assembly_gb = 3.5 * persistent_gb
+            held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
         estimated_assembly = "streaming" if use_streaming else "tables"
         estimated_precision = "single" if use_single else "double"
     else:
@@ -511,13 +517,13 @@ def estimate_bor_resources(
         persistent_gb = _estimate_multisurface_operator_gb(
             surface_layout, mode_cap
         )
-        held_assembly_gb = 3.5 * persistent_gb
+        held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
         estimated_assembly = "dense-all-mode-tables"
 
-    raw_peak = held_assembly_gb + active_modes * (
-        matrix_work_gb + rhs_work_gb
+    peak_gb = estimate_bor_total_peak_gb(
+        held_assembly_gb,
+        dense_peak_gb,
     )
-    peak_gb = max(0.5, 0.5 + 1.20 * raw_peak)
     return {
         "frequency_ghz": frequency,
         "geometry_kind": kind,

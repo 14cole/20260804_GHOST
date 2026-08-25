@@ -1,5 +1,8 @@
 import math
 import os
+from pathlib import Path
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -45,10 +48,22 @@ def is_tabulated_row(row: 'List[str]') -> 'bool':
 
 def _validate_material_filename(filename: 'str', context: 'str') -> 'str':
     """Validate a portable same-directory CSV material sidecar name."""
-    name = str(filename).strip()
+    raw_name = str(filename)
+    name = raw_name.strip()
     if not name or not name.lower().endswith(".csv"):
         raise ValueError(
             f"{context} must name a .csv file; got {filename!r}."
+        )
+    # Material rows in the established .geo format are deliberately simple,
+    # unquoted whitespace-delimited fields.  Accepting whitespace here would
+    # let the GUI create ``1 My Material.csv`` even though the parser must read
+    # that as three tokens.  Reject it at the shared boundary so handoffs,
+    # direct table edits, snapshot exports, and solver preflight all agree.
+    if any(character.isspace() for character in raw_name):
+        raise ValueError(
+            f"{context} cannot contain whitespace because .geo material rows "
+            f"use unquoted fields; got {filename!r}. Rename the CSV and try "
+            "again."
         )
     if (
         name in (".", "..")
@@ -62,6 +77,185 @@ def _validate_material_filename(filename: 'str', context: 'str') -> 'str':
             f"geometry file (no directory components); got {filename!r}."
         )
     return name
+
+
+class AtomicFileTransaction:
+    """Stage and publish a small related set of files with rollback support.
+
+    ``os.replace`` is atomic for each file but a geometry and its material
+    sidecars form a set.  This helper stages every replacement first, keeps a
+    same-directory backup of each existing destination, and restores already
+    published destinations if a later publication fails.  Call ``commit``
+    only after any associated in-memory/UI update has also succeeded; callers
+    may call ``rollback`` until then.
+    """
+
+    def __init__(self) -> 'None':
+        self._staged: 'List[Tuple[Path, Path]]' = []
+        self._backups: 'Dict[Path, Optional[Path]]' = {}
+        self._published: 'List[Path]' = []
+        self._committed = False
+
+    @staticmethod
+    def _temporary_path(destination: 'Path', suffix: 'str') -> 'Path':
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=suffix,
+            dir=str(destination.parent),
+        )
+        os.close(fd)
+        return Path(temporary_name)
+
+    def _check_destination(self, destination: 'Path') -> 'Path':
+        target = Path(destination).expanduser().resolve(strict=False)
+        key = os.path.normcase(str(target))
+        if any(os.path.normcase(str(existing)) == key for existing, _ in self._staged):
+            raise ValueError(
+                f"The file transaction contains the destination more than once: {target}"
+            )
+        if target.exists() and not target.is_file():
+            raise OSError(f"save target is not a regular file: {target}")
+        return target
+
+    def stage_copy(self, source: 'Path', destination: 'Path') -> 'None':
+        """Copy ``source`` to a temporary file beside ``destination``."""
+
+        source_path = Path(source).expanduser().resolve()
+        if not source_path.is_file():
+            raise FileNotFoundError(f"source file does not exist: {source_path}")
+        target = self._check_destination(destination)
+        temporary = self._temporary_path(target, ".stage")
+        try:
+            # ``copy2`` propagates the Windows read-only attribute to the
+            # staging file, after which opening it for fsync fails even though
+            # the source itself was perfectly readable.  Transaction stages
+            # are new writable artifacts; copy content without source mode
+            # bits or filesystem flags.
+            shutil.copyfile(source_path, temporary)
+            # Windows requires a writable descriptor for fsync.
+            with temporary.open("r+b") as stream:
+                os.fsync(stream.fileno())
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        self._staged.append((target, temporary))
+
+    def stage_text(self, text: 'str', destination: 'Path') -> 'None':
+        """Write UTF-8 ``text`` to a temporary file beside ``destination``."""
+
+        target = self._check_destination(destination)
+        temporary = self._temporary_path(target, ".stage")
+        try:
+            with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        self._staged.append((target, temporary))
+
+    def publish(self) -> 'None':
+        """Publish all staged files, restoring the old set on any failure."""
+
+        if self._committed:
+            raise RuntimeError("The file transaction has already been committed.")
+        if self._published:
+            raise RuntimeError("The file transaction has already been published.")
+        try:
+            # Back up the complete old set before changing any destination.
+            for destination, _temporary in self._staged:
+                if destination.exists():
+                    backup = self._temporary_path(destination, ".backup")
+                    try:
+                        # Keep the backup writable while it participates in
+                        # publication/rollback; only its bytes are authoritative.
+                        shutil.copyfile(destination, backup)
+                        with backup.open("r+b") as stream:
+                            os.fsync(stream.fileno())
+                    except Exception:
+                        backup.unlink(missing_ok=True)
+                        raise
+                    self._backups[destination] = backup
+                else:
+                    self._backups[destination] = None
+
+            for destination, temporary in self._staged:
+                os.replace(temporary, destination)
+                self._published.append(destination)
+        except Exception as publish_error:
+            try:
+                self.rollback()
+            except Exception as rollback_error:
+                raise OSError(
+                    f"File publication failed ({publish_error}); rollback also "
+                    f"failed ({rollback_error})."
+                ) from publish_error
+            raise
+
+    def rollback(self) -> 'None':
+        """Restore all destinations changed by ``publish`` and remove stages."""
+
+        errors: 'List[str]' = []
+        preserved_backups: 'Set[Path]' = set()
+        for destination in reversed(self._published):
+            backup = self._backups.get(destination)
+            try:
+                if backup is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    os.replace(backup, destination)
+            except Exception as exc:
+                if backup is not None and backup.exists():
+                    preserved_backups.add(backup)
+                errors.append(f"{destination}: {exc}")
+
+        self._published.clear()
+        self._remove_temporary_files(preserved_backups)
+        self._backups.clear()
+        if errors:
+            backup_note = ""
+            if preserved_backups:
+                backup_note = " Recovery backup(s): " + ", ".join(
+                    str(path) for path in sorted(preserved_backups, key=str)
+                )
+            raise OSError("Could not restore " + "; ".join(errors) + backup_note)
+
+    def commit(self) -> 'None':
+        """Accept the published set and remove transaction backups."""
+
+        if self._committed:
+            return
+        self._committed = True
+        self._published.clear()
+        self._remove_temporary_files(set())
+        self._backups.clear()
+
+    def abort(self) -> 'None':
+        """Rollback a published set or discard an unpublished staged set."""
+
+        if self._committed:
+            return
+        if self._published:
+            self.rollback()
+        else:
+            self._remove_temporary_files(set())
+            self._backups.clear()
+
+    def _remove_temporary_files(self, preserve: 'Set[Path]') -> 'None':
+        for _destination, temporary in self._staged:
+            if temporary not in preserve:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self._staged.clear()
+        for backup in self._backups.values():
+            if backup is not None and backup not in preserve:
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def material_filename_from_row(row: 'List[str]') -> 'Optional[str]':
@@ -357,11 +551,19 @@ def build_geometry_text(
             lines.append(f"{float(x1)!r} {float(y1)!r} {float(x2)!r} {float(y2)!r}")
 
     lines.append("IBCS_Resistances:")
-    for row in ibcs_entries:
-        lines.append(" ".join(row))
+    for raw_row in ibcs_entries:
+        raw_tokens = [str(token) for token in raw_row]
+        _validate_ibc_row(raw_tokens, " ".join(raw_tokens))
+        row = [token.strip() for token in raw_tokens]
+        if row:
+            lines.append(" ".join(row))
     lines.append("Dielectrics:")
-    for row in dielectric_entries:
-        lines.append(" ".join(row))
+    for raw_row in dielectric_entries:
+        raw_tokens = [str(token) for token in raw_row]
+        _validate_dielectric_row(raw_tokens, " ".join(raw_tokens))
+        row = [token.strip() for token in raw_tokens]
+        if row:
+            lines.append(" ".join(row))
     return "\n".join(lines) + "\n"
 
 

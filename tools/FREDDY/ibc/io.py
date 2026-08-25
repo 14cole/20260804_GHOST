@@ -9,7 +9,7 @@ import tempfile
 import warnings
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Callable, Iterator, TextIO
+from typing import Any, Callable, Iterable, Iterator, TextIO
 
 from .compute import LayerConfig, MaterialTable
 
@@ -22,7 +22,8 @@ IMPEDANCE_UNCERTAINTY_HEADER = (
 )
 MATERIAL_SINGULAR_TOL = 1e-12
 
-PROJECT_SCHEMA_VERSION = 1
+PROJECT_SCHEMA_VERSION = 2
+LEGACY_PROJECT_SCHEMA_VERSION = 1
 PROJECT_PATH_POLICY_VERSION = 1
 PROJECT_PATH_PARENT_HOPS = 1
 
@@ -115,36 +116,46 @@ def _stage_text_file(
 
 
 def _atomic_text_batch(
-    entries: list[tuple[Path, Callable[[TextIO], None]]],
+    entries: Iterable[tuple[Path, Callable[[TextIO], None]]],
+    *,
+    empty_error: str | None = None,
 ) -> None:
-    """Publish related text artifacts together, restoring all on failure."""
+    """Stage and publish related text artifacts, restoring all on failure.
+
+    ``entries`` may be a generator.  Each writer is staged before requesting
+    the next entry, which lets large computed batches release one result table
+    at a time while retaining all-or-nothing publication semantics.
+    """
 
     normalized: set[str] = set()
-    planned: list[tuple[Path, Callable[[TextIO], None]]] = []
-    for raw_path, writer in entries:
-        destination = Path(raw_path)
-        # Treat case-only path differences as collisions even when this batch
-        # is prepared on a case-sensitive filesystem for later Windows use.
-        identity = os.path.normcase(
-            str(destination.resolve(strict=False))
-        ).casefold()
-        if identity in normalized:
-            raise ValueError(
-                f"Output batch contains duplicate path {destination}."
-            )
-        if destination.exists() and not destination.is_file():
-            raise ValueError(
-                f"Output target {destination} exists but is not a regular file."
-            )
-        normalized.add(identity)
-        planned.append((destination, writer))
-
     staged: list[tuple[Path, Path]] = []
     backups: dict[Path, Path | None] = {}
     publication_complete = False
     try:
-        for destination, writer in planned:
+        for raw_path, writer in entries:
+            destination = Path(raw_path)
+            # Treat case-only path differences as collisions even when this
+            # batch is prepared on a case-sensitive filesystem for later
+            # Windows use.
+            identity = os.path.normcase(
+                str(destination.resolve(strict=False))
+            ).casefold()
+            if identity in normalized:
+                raise ValueError(
+                    f"Output batch contains duplicate path {destination}."
+                )
+            if destination.exists() and not destination.is_file():
+                raise ValueError(
+                    f"Output target {destination} exists but is not a regular file."
+                )
+            normalized.add(identity)
             staged.append((_stage_text_file(destination, writer), destination))
+            # A writer may close over a large computed row table. Drop the
+            # consumer's reference before requesting the next generated entry.
+            del writer
+
+        if not staged and empty_error is not None:
+            raise ValueError(empty_error)
 
         for stage, destination in staged:
             backup: Path | None = None
@@ -364,25 +375,40 @@ def _write_impedance_rows(
 
 
 def write_impedance_batch(
-    outputs: list[tuple[Path, list[tuple[float, float, float]]]],
+    outputs: Iterable[tuple[Path, list[tuple[float, float, float]]]],
     include_header: bool = True,
 ) -> None:
-    """Atomically publish a set of nominal solver-compatible IBC CSVs."""
+    """Atomically publish nominal solver-compatible IBC CSVs.
 
-    if not outputs:
-        raise ValueError("Impedance output batch is empty.")
-    entries: list[tuple[Path, Callable[[TextIO], None]]] = []
-    for output_index, (path, rows) in enumerate(outputs, start=1):
-        _validate_impedance_rows(rows, f"Impedance export {output_index}")
+    A generator is consumed and staged one result at a time so callers do not
+    need to retain a complete multi-file batch in memory.
+    """
 
-        def write_nominal(
-            stream: TextIO,
-            batch_rows: list[tuple[float, float, float]] = rows,
-        ) -> None:
-            _write_impedance_rows(stream, batch_rows, include_header)
+    def entries() -> Iterator[tuple[Path, Callable[[TextIO], None]]]:
+        output_iterator = iter(outputs)
+        output_index = 0
+        while True:
+            try:
+                path, rows = next(output_iterator)
+            except StopIteration:
+                return
+            output_index += 1
+            _validate_impedance_rows(rows, f"Impedance export {output_index}")
 
-        entries.append((Path(path), write_nominal))
-    _atomic_text_batch(entries)
+            def write_nominal(
+                stream: TextIO,
+                batch_rows: list[tuple[float, float, float]] = rows,
+            ) -> None:
+                _write_impedance_rows(stream, batch_rows, include_header)
+
+            yield Path(path), write_nominal
+            # Release generator-side references before computing the next
+            # output. _atomic_text_batch has already staged this writer.
+            del write_nominal, rows, path
+
+    _atomic_text_batch(
+        entries(), empty_error="Impedance output batch is empty."
+    )
 
 
 def uncertainty_report_path(nominal_path: Path) -> Path:
@@ -820,7 +846,34 @@ def save_project_file(path: Path, state: dict[str, Any]) -> None:
         f.write("\n")
 
 
-def load_project_file(path: Path) -> dict[str, Any]:
+def _report_project_warning(
+    message: str,
+    warning_handler: Callable[[str], None] | None,
+) -> None:
+    """Report a portability warning to both API and interactive consumers."""
+
+    if warning_handler is not None:
+        warning_handler(message)
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def load_project_file(
+    path: Path,
+    *,
+    warning_handler: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Load a FREDDY project and resolve paths according to its schema.
+
+    Schema 1 projects predate project-relative paths.  A short-lived schema 1
+    writer also emitted explicit portability metadata; those files are
+    recognized and migrated using that metadata.  Schema 2 is the first schema
+    whose contract defines relative paths against the project directory.
+
+    Portability issues continue to use :mod:`warnings` for non-GUI callers.
+    ``warning_handler`` additionally gives an embedding GUI a reliable way to
+    make the same messages visible even when stderr is unavailable.
+    """
+
     with path.open("r", encoding="utf-8") as f:
         payload = json.load(f)
 
@@ -828,10 +881,14 @@ def load_project_file(path: Path) -> dict[str, Any]:
         raise ValueError("Project file must be a JSON object.")
 
     schema_version = payload.get("schema_version")
-    if schema_version != PROJECT_SCHEMA_VERSION:
+    if schema_version not in {
+        LEGACY_PROJECT_SCHEMA_VERSION,
+        PROJECT_SCHEMA_VERSION,
+    }:
         raise ValueError(
             f"Unsupported project schema version: {schema_version}. "
-            f"Expected {PROJECT_SCHEMA_VERSION}."
+            f"Expected {LEGACY_PROJECT_SCHEMA_VERSION} or "
+            f"{PROJECT_SCHEMA_VERSION}."
         )
 
     state = payload.get("state")
@@ -839,15 +896,20 @@ def load_project_file(path: Path) -> dict[str, Any]:
         raise ValueError("Project file is missing a valid 'state' object.")
 
     portability = payload.get("path_portability")
-    if not isinstance(portability, dict):
-        warnings.warn(
-            "Legacy FREDDY project has no path-portability metadata; relative "
-            "paths retain their historical working-directory meaning. Save "
-            "the project again to migrate them explicitly.",
-            RuntimeWarning,
-            stacklevel=2,
+    if schema_version == LEGACY_PROJECT_SCHEMA_VERSION and portability is None:
+        _report_project_warning(
+            "Legacy FREDDY schema 1 project has no path-portability metadata; "
+            "relative paths retain their historical working-directory meaning. "
+            "Verify its material files, then save the project again to migrate "
+            "them explicitly to schema 2.",
+            warning_handler,
         )
         return copy.deepcopy(state)
+    if not isinstance(portability, dict):
+        raise ValueError(
+            f"FREDDY schema {schema_version} project is missing required "
+            "path-portability metadata."
+        )
     if (
         portability.get("version") != PROJECT_PATH_POLICY_VERSION
         or portability.get("base") != "project_file_directory"
@@ -856,16 +918,23 @@ def load_project_file(path: Path) -> dict[str, Any]:
             "Unsupported FREDDY project path-portability policy."
         )
 
+    if schema_version == LEGACY_PROJECT_SCHEMA_VERSION:
+        _report_project_warning(
+            "This FREDDY schema 1 project contains transitional "
+            "project-relative path metadata. Its paths were migrated using "
+            "that metadata; save it again to record the schema 2 contract.",
+            warning_handler,
+        )
+
     project_directory = Path(path).expanduser().resolve(strict=False).parent
     resolved_state, external_paths = _resolved_project_state(
         state, project_directory
     )
     if external_paths:
         fields = ", ".join(item["field"] for item in external_paths)
-        warnings.warn(
+        _report_project_warning(
             "FREDDY project contains external absolute path(s) that cannot "
             f"move with the project folder: {fields}.",
-            RuntimeWarning,
-            stacklevel=2,
+            warning_handler,
         )
     return resolved_state

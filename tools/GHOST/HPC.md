@@ -26,6 +26,57 @@ submit. `hpc_common.configure_driver` still works the same way: it rewrites
 those top-level constants in a copy of the driver, and submitting that copy is
 what carries the settings to the compute nodes.
 
+### Portable requests from GRIM on Windows
+
+GRIM may export a portable request folder for upload by SFTP, or upload that
+same folder and invoke the Linux stager over SSH. The folder contains only
+relative geometry/material inputs, declarative allowlisted settings, hashes,
+and a human-readable `README.txt`. It is intentionally **not** a completed HPC
+run: final absolute paths, configured driver bytes, and solver/runtime
+provenance must describe the Linux login/compute environment, not Windows.
+
+After uploading the complete folder, the one-command Linux form is:
+
+```bash
+python3 /path/to/GHOST/Backend/hpc_bundle.py stage /path/to/request_folder \
+  --workspace-root /scratch/$USER/grim --run-driver --submit
+```
+
+Use the matching Linux GHOST checkout for `/path/to/GHOST`. Omit `--submit` to
+build the run and SLURM scripts without calling `sbatch`; omit `--run-driver`
+as well to verify and stage the inputs only. The command prints one JSON object
+with the stage directory, run directory, log file, and any detected SLURM job
+IDs so GRIM can reconnect without treating an SSH session as the lifetime of
+the compute job.
+
+Direct GRIM submissions assign the bundle ID before transfer, so the result is
+always expected at `<workspace-root>/grim_<bundle-id>/stage_result.json`. If
+the SSH connection ends after one or more `sbatch` calls, do not press submit
+again: select the tracked run and use **Refresh**. Each successful `sbatch`
+job ID is also written atomically to the run's `submitted_jobs.json`, allowing
+partial multi-script submissions to be recovered even when a later script
+fails. GRIM's **Remote Python** field may be `python3` or an absolute
+virtual-environment interpreter path; that interpreter becomes the configured
+driver's compute-node `PYTHON_EXE`.
+
+The same read-only recovery can be inspected manually:
+
+```bash
+python3 /path/to/GHOST/Backend/hpc_bundle.py recover \
+  /scratch/$USER/grim/grim_<bundle-id>
+```
+
+It returns the finalized stage result when available, or reconstructs a
+non-final result from stage metadata, state, and `submitted_jobs.json`. It
+never invokes the driver or calls `sbatch`.
+
+The stager rejects unlisted settings, absolute or traversal paths, symbolic
+links, changed hashes/sizes, unexpected files, role/solver mismatches, missing
+material sidecars, and arbitrary shell or raw `#SBATCH` content. It derives
+geometry/output paths, the Python interpreter, submission mode, and job
+prologue on Linux, then delegates run creation to the existing configured HPC
+driver.
+
 ### Running without SLURM
 
 The `run_local` drivers in the right-hand column are the same code paths minus

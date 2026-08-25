@@ -175,6 +175,48 @@ class ReleaseBuilderTests(unittest.TestCase):
 
         self.assertFalse(output.exists())
 
+    def test_missing_direct_grim_startup_module_fails_before_output(self) -> None:
+        missing = self.source / "GRIM_Revised_2" / "grim_python.py"
+        missing.unlink()
+        output = self.root / "must-not-exist"
+
+        with self.assertRaisesRegex(
+            build_release.ReleaseBuildError, "grim_python.py"
+        ):
+            build_release.build_release(self.source, output)
+
+        self.assertFalse(output.exists())
+
+    def test_missing_standalone_launcher_module_fails_before_output(self) -> None:
+        missing = self.source / "GRIM_Revised_2" / "ppt_image_imprinter.py"
+        missing.unlink()
+        output = self.root / "must-not-exist"
+
+        with self.assertRaisesRegex(
+            build_release.ReleaseBuildError, "ppt_image_imprinter.py"
+        ):
+            build_release.build_release(self.source, output)
+
+        self.assertFalse(output.exists())
+
+    def test_missing_feature_workflow_module_fails_before_output(self) -> None:
+        missing = (
+            self.source
+            / "tools"
+            / "GHOST"
+            / "Backend"
+            / "feature_workflow.py"
+        )
+        missing.unlink()
+        output = self.root / "must-not-exist"
+
+        with self.assertRaisesRegex(
+            build_release.ReleaseBuildError, "feature_workflow.py"
+        ):
+            build_release.build_release(self.source, output)
+
+        self.assertFalse(output.exists())
+
     def test_existing_release_is_not_overwritten(self) -> None:
         output = self.root / "output"
         output.mkdir()

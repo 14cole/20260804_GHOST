@@ -8,8 +8,11 @@ from pathlib import Path
 from unittest import mock
 
 from ibc.batch import (
+    MAX_IBC_BATCH_TOTAL_POINTS,
     export_pec_ibc_thickness_batch,
+    ibc_batch_frequency_count,
     plan_ibc_thickness_batch,
+    validate_ibc_batch_workload,
 )
 from ibc.compute import (
     INCH_TO_M,
@@ -21,6 +24,16 @@ from ibc.io import IMPEDANCE_HEADER, HZ_PER_GHZ, write_impedance_batch
 
 
 class IbcBatchPlanningTests(unittest.TestCase):
+    def test_workload_is_bounded_without_allocating_frequency_rows(self) -> None:
+        count = ibc_batch_frequency_count(1.0, 18.0, 0.1)
+        self.assertEqual(count, 171)
+        self.assertEqual(validate_ibc_batch_workload(4, count), 684)
+        with self.assertRaisesRegex(ValueError, "safe desktop limit"):
+            validate_ibc_batch_workload(
+                1000,
+                MAX_IBC_BATCH_TOTAL_POINTS // 1000 + 1,
+            )
+
     def test_mil_sweep_has_exact_values_and_canonical_names(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             plan = plan_ibc_thickness_batch(
@@ -181,6 +194,69 @@ class IbcBatchExportTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "second compute failed"):
                     export_pec_ibc_thickness_batch(plan, [layer], 0, [1.0])
             self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_work_cap_fails_before_compute_or_output(self) -> None:
+        layer = LoadedLayer(
+            thickness_m=0.050 * INCH_TO_M,
+            anisotropic=False,
+            polarization_deg=0.0,
+            table_0deg=self._material(2.5 - 0.1j),
+            table_90deg=None,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            plan = plan_ibc_thickness_batch(
+                folder, "ibc", "15", "20", "5", "mil"
+            )
+            with mock.patch(
+                "ibc.batch.compute_stack_impedance_many"
+            ) as compute:
+                with self.assertRaisesRegex(ValueError, "4 total frequency rows"):
+                    export_pec_ibc_thickness_batch(
+                        plan,
+                        [layer],
+                        0,
+                        [1.0, 2.0],
+                        max_total_points=3,
+                    )
+            compute.assert_not_called()
+            self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_each_result_is_staged_before_the_next_is_computed(self) -> None:
+        layer = LoadedLayer(
+            thickness_m=0.050 * INCH_TO_M,
+            anisotropic=False,
+            polarization_deg=0.0,
+            table_0deg=self._material(2.5 - 0.1j),
+            table_90deg=None,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            plan = plan_ibc_thickness_batch(
+                folder, "ibc", "15", "25", "5", "mil"
+            )
+            from ibc import io as freddy_io
+
+            events: list[str] = []
+            original_stage = freddy_io._stage_text_file
+
+            def compute(_frequencies, _stack, _backing):
+                events.append("compute")
+                return [100.0 + 10.0j]
+
+            def stage(path, writer):
+                events.append("stage")
+                return original_stage(path, writer)
+
+            with mock.patch(
+                "ibc.batch.compute_stack_impedance_many", side_effect=compute
+            ), mock.patch.object(
+                freddy_io, "_stage_text_file", side_effect=stage
+            ):
+                export_pec_ibc_thickness_batch(plan, [layer], 0, [1.0])
+
+            self.assertEqual(
+                events,
+                ["compute", "stage", "compute", "stage", "compute", "stage"],
+            )
 
     def test_stage_failure_preserves_every_existing_batch_file(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

@@ -16,12 +16,27 @@ BACKEND = ROOT / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from geometry_tab import GeometryTab  # noqa: E402
+from geometry_io import parse_geometry  # noqa: E402
 
 try:  # noqa: E402
-    from PySide6.QtWidgets import QApplication, QMessageBox
-except ImportError:  # noqa: E402
-    from PySide2.QtWidgets import QApplication, QMessageBox  # type: ignore
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+    except ImportError:
+        from PySide2.QtWidgets import (  # type: ignore
+            QApplication,
+            QMessageBox,
+        )
+    import matplotlib  # noqa: F401
+    GUI_DEPENDENCIES_AVAILABLE = True
+except ImportError:  # pragma: no cover - dependency gate exercised by CI images
+    QApplication = None  # type: ignore[assignment]
+    QMessageBox = None  # type: ignore[assignment]
+    GUI_DEPENDENCIES_AVAILABLE = False
+
+if GUI_DEPENDENCIES_AVAILABLE:  # noqa: E402
+    from geometry_tab import GeometryTab
+else:
+    GeometryTab = None  # type: ignore[assignment]
 
 
 IBC_TEXT = (
@@ -36,6 +51,9 @@ MATERIAL_TEXT = (
 )
 
 
+@unittest.skipUnless(
+    GUI_DEPENDENCIES_AVAILABLE, "GUI dependencies are unavailable"
+)
 class FreddyMaterialHandoffTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -147,6 +165,47 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             self.assertEqual(self.tab.table_ibc.rowCount(), 0)
             self.assertIn("Invalid FREDDY Artifact", critical.call_args.args)
 
+    @mock.patch("geometry_tab.QMessageBox.critical")
+    def test_whitespace_filename_is_rejected_before_copy(
+        self, critical: mock.Mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            geometry_dir = root / "geometry"
+            export_dir = root / "exports"
+            geometry_dir.mkdir()
+            export_dir.mkdir()
+            self._saved_geometry(geometry_dir)
+            source = export_dir / "My IBC.csv"
+            source.write_text(IBC_TEXT, encoding="utf-8")
+
+            self.assertFalse(
+                self.tab.attach_material_artifact("ibc", str(source))
+            )
+
+            self.assertFalse((geometry_dir / source.name).exists())
+            self.assertEqual(self.tab.table_ibc.rowCount(), 0)
+            self.assertIn(
+                "Invalid FREDDY Artifact Filename", critical.call_args.args
+            )
+
+    @mock.patch("geometry_tab.QMessageBox.warning")
+    @mock.patch("geometry_tab.QFileDialog.getOpenFileName")
+    def test_manual_csv_picker_rejects_whitespace_filename(
+        self, open_dialog: mock.Mock, warning: mock.Mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self._saved_geometry(root)
+            source = root / "My Material.csv"
+            source.write_text(MATERIAL_TEXT, encoding="utf-8")
+            open_dialog.return_value = (str(source), "CSV Files (*.csv)")
+
+            self.assertEqual(self.tab._choose_material_csv("Choose CSV"), "")
+            self.assertIn(
+                "Unsupported Material Filename", warning.call_args.args
+            )
+
     @mock.patch("geometry_tab.QMessageBox.information")
     @mock.patch("geometry_tab.QMessageBox.question")
     def test_existing_sidecar_requires_explicit_replace_confirmation(
@@ -214,6 +273,174 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 self.tab._read_small_table(self.tab.table_ibc),
                 [["7", "foo.csv"]],
             )
+
+    @mock.patch("geometry_tab.QMessageBox.critical")
+    @mock.patch("geometry_tab.QMessageBox.question")
+    def test_attachment_ui_failure_restores_file_and_table(
+        self, question: mock.Mock, critical: mock.Mock
+    ) -> None:
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        question.return_value = buttons.Yes
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            geometry_dir = root / "geometry"
+            export_dir = root / "exports"
+            geometry_dir.mkdir()
+            export_dir.mkdir()
+            self._saved_geometry(geometry_dir)
+            source = export_dir / "coating.csv"
+            source.write_text(IBC_TEXT, encoding="utf-8")
+            destination = geometry_dir / source.name
+            destination.write_text("previous sidecar\n", encoding="utf-8")
+
+            with mock.patch.object(
+                self.tab,
+                "_refresh_segment_dropdowns",
+                side_effect=RuntimeError("simulated UI failure"),
+            ):
+                self.assertFalse(
+                    self.tab.attach_material_artifact("ibc", str(source))
+                )
+
+            self.assertEqual(
+                destination.read_text(encoding="utf-8"),
+                "previous sidecar\n",
+            )
+            self.assertEqual(self.tab._read_small_table(self.tab.table_ibc), [])
+            self.assertEqual(self.tab.ibcs_entries, [])
+            self.assertIn(
+                "FREDDY Artifact Attachment Failed", critical.call_args.args
+            )
+
+    @mock.patch("geometry_tab.QMessageBox.information")
+    @mock.patch("geometry_tab.QFileDialog.getSaveFileName")
+    def test_save_as_copies_referenced_sidecars_to_new_directory(
+        self, save_dialog: mock.Mock, _information: mock.Mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            old_dir = root / "old"
+            new_dir = root / "new"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            self._saved_geometry(old_dir)
+            sidecar = old_dir / "coating.csv"
+            sidecar.write_text(IBC_TEXT, encoding="utf-8")
+            rows = [["3", sidecar.name]]
+            self.tab.ibcs_entries = rows
+            self.tab._populate_small_table(
+                self.tab.table_ibc,
+                rows,
+                label=self.tab.lbl_ibc,
+                title_prefix="IBCS/Resistances",
+            )
+            target = new_dir / "body.geo"
+            save_dialog.return_value = (str(target), "Geometry Files (*.geo)")
+
+            self.tab.save_geo()
+
+            self.assertEqual(
+                (new_dir / sidecar.name).read_text(encoding="utf-8"),
+                IBC_TEXT,
+            )
+            _title, _segments, ibcs, _dielectrics = parse_geometry(
+                target.read_text(encoding="utf-8")
+            )
+            self.assertEqual(ibcs, rows)
+            self.assertEqual(self.tab.loaded_path, str(target.resolve()))
+
+    @mock.patch("geometry_tab.QMessageBox.critical")
+    @mock.patch("geometry_tab.QFileDialog.getSaveFileName")
+    def test_save_as_missing_sidecar_is_blocked(
+        self, save_dialog: mock.Mock, critical: mock.Mock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            old_dir = root / "old"
+            new_dir = root / "new"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            self._saved_geometry(old_dir)
+            rows = [["3", "missing.csv"]]
+            self.tab.ibcs_entries = rows
+            self.tab._populate_small_table(
+                self.tab.table_ibc,
+                rows,
+                label=self.tab.lbl_ibc,
+                title_prefix="IBCS/Resistances",
+            )
+            target = new_dir / "body.geo"
+            save_dialog.return_value = (str(target), "Geometry Files (*.geo)")
+
+            self.tab.save_geo()
+
+            self.assertFalse(target.exists())
+            self.assertEqual(self.tab.loaded_path, str((old_dir / "body.geo").resolve()))
+            self.assertIn("Geometry Save Blocked", critical.call_args.args)
+
+    @mock.patch("geometry_tab.QMessageBox.information")
+    @mock.patch("geometry_tab.QMessageBox.critical")
+    @mock.patch("geometry_tab.QMessageBox.question")
+    @mock.patch("geometry_tab.QFileDialog.getSaveFileName")
+    def test_save_as_publish_failure_restores_geometry_and_sidecar(
+        self,
+        save_dialog: mock.Mock,
+        question: mock.Mock,
+        critical: mock.Mock,
+        _information: mock.Mock,
+    ) -> None:
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        question.return_value = buttons.Yes
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            old_dir = root / "old"
+            new_dir = root / "new"
+            old_dir.mkdir()
+            new_dir.mkdir()
+            geometry = self._saved_geometry(old_dir)
+            (old_dir / "coating.csv").write_text(IBC_TEXT, encoding="utf-8")
+            rows = [["3", "coating.csv"]]
+            self.tab.ibcs_entries = rows
+            self.tab._populate_small_table(
+                self.tab.table_ibc,
+                rows,
+                label=self.tab.lbl_ibc,
+                title_prefix="IBCS/Resistances",
+            )
+
+            target = new_dir / "body.geo"
+            target.write_text("previous target geometry\n", encoding="utf-8")
+            target_sidecar = new_dir / "coating.csv"
+            target_sidecar.write_text(
+                "previous target sidecar\n", encoding="utf-8"
+            )
+            save_dialog.return_value = (str(target), "Geometry Files (*.geo)")
+
+            real_replace = os.replace
+            call_count = 0
+
+            def fail_geometry_publish(source: object, destination: object) -> None:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 2:
+                    raise OSError("simulated geometry publication failure")
+                real_replace(source, destination)
+
+            with mock.patch(
+                "geometry_tab.os.replace", side_effect=fail_geometry_publish
+            ):
+                self.tab.save_geo()
+
+            self.assertEqual(
+                target.read_text(encoding="utf-8"),
+                "previous target geometry\n",
+            )
+            self.assertEqual(
+                target_sidecar.read_text(encoding="utf-8"),
+                "previous target sidecar\n",
+            )
+            self.assertEqual(self.tab.loaded_path, str(geometry.resolve()))
+            critical.assert_called_once()
 
     @mock.patch("geometry_tab.QMessageBox.critical")
     @mock.patch("geometry_tab.QFileDialog.getSaveFileName")

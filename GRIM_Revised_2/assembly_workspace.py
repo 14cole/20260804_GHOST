@@ -68,6 +68,11 @@ MAX_DISPLAY_TRIANGLES = max(TRIANGLE_DETAIL_CAPS.values())
 
 BODY_RENDER_MODES = ("Solid", "Solid + edges", "Wireframe")
 
+NORMAL_VECTOR_COLOR = "#f472b6"
+ROLL_VECTOR_COLOR = "#c084fc"
+DEFAULT_ORIENTATION_VECTOR_LENGTH_M = 0.0254
+ORIENTATION_VECTOR_FRACTION = 0.07
+
 
 def display_unit_spec(name: str) -> tuple[str, float]:
     """Return the axis suffix and meters-to-display scale for one UI choice."""
@@ -300,6 +305,187 @@ def _line_paths(values: Any) -> tuple[np.ndarray, ...]:
     if not paths:
         raise ValueError("lines must contain at least one path")
     return tuple(paths)
+
+
+def orientation_vector_length_m(bounds_m: Any) -> float:
+    """Choose a visible, scene-relative arrow length in meters.
+
+    The value is display-only.  A one-inch fallback keeps an isolated point
+    frame visible when there is no body or path extent from which to derive a
+    scale.  No coordinate or orientation value is changed.
+    """
+
+    bounds = np.asarray(bounds_m, dtype=float)
+    if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)):
+        raise ValueError("orientation bounds must be finite with shape (2, 3)")
+    span = bounds[1] - bounds[0]
+    if np.any(span < 0.0):
+        raise ValueError("orientation bounds must be ordered lower than upper")
+    extent = float(np.max(span))
+    if extent <= 1.0e-12:
+        return DEFAULT_ORIENTATION_VECTOR_LENGTH_M
+    return ORIENTATION_VECTOR_FRACTION * extent
+
+
+def _feature_preview_nonvector_bounds(
+    body_bounds_m: Any | None,
+    point_groups: dict[str, Any],
+    line_groups: dict[str, dict[str, Any]],
+) -> np.ndarray:
+    """Bound body/locations/paths before orientation arrows are added."""
+
+    bounds: list[np.ndarray] = []
+    if body_bounds_m is not None:
+        body_bounds = np.asarray(body_bounds_m, dtype=float)
+        if body_bounds.shape != (2, 3) or not np.all(np.isfinite(body_bounds)):
+            raise ValueError("body preview bounds must be finite with shape (2, 3)")
+        bounds.append(body_bounds)
+    for dataset_id, values in point_groups.items():
+        points = _finite_points(values, label=f"point dataset {dataset_id!r}")
+        bounds.append(_bounds_from_points(points))
+    for dataset_id, paths_by_id in line_groups.items():
+        if not isinstance(paths_by_id, dict):
+            raise TypeError(
+                "each prepared line dataset preview must map line_id to a CAD path"
+            )
+        for line_id, values in paths_by_id.items():
+            paths = _line_paths(values)
+            points = np.concatenate(paths, axis=0)
+            bounds.append(_bounds_from_points(points))
+    if not bounds:
+        return np.zeros((2, 3), dtype=float)
+    stacked = np.stack(bounds, axis=0)
+    return np.asarray(
+        [np.min(stacked[:, 0, :], axis=0), np.max(stacked[:, 1, :], axis=0)],
+        dtype=float,
+    )
+
+
+def _vector_rows(values: Any, *, count: int, label: str) -> np.ndarray:
+    vectors = np.asarray(values, dtype=float)
+    if vectors.shape != (count, 3):
+        raise ValueError(f"{label} must have shape ({count}, 3)")
+    if not np.all(np.isfinite(vectors)):
+        raise ValueError(f"{label} must contain only finite vectors")
+    return np.array(vectors, dtype=float, copy=True)
+
+
+def _point_orientation_overlays(
+    points: np.ndarray,
+    normals: Any | None,
+    roll_references: Any | None,
+) -> dict[str, np.ndarray]:
+    """Normalize drawable point-frame arrows without validating placement.
+
+    Zero normals and zero/parallel roll references are omitted from the input
+    preview instead of becoming an early physical-validation gate.  The
+    authoritative GHOST validation reports those errors when the user selects
+    Validate Placements.
+    """
+
+    overlays = {
+        "normal_origins": np.empty((0, 3), dtype=float),
+        "normal_directions": np.empty((0, 3), dtype=float),
+        "roll_origins": np.empty((0, 3), dtype=float),
+        "roll_directions": np.empty((0, 3), dtype=float),
+    }
+    if normals is None:
+        if roll_references is not None:
+            raise ValueError("point roll references require point normals")
+        return overlays
+
+    normal_rows = _vector_rows(normals, count=len(points), label="point normals")
+    normal_magnitudes = np.linalg.norm(normal_rows, axis=1)
+    normal_valid = normal_magnitudes > 1.0e-12
+    normal_units = np.zeros_like(normal_rows)
+    normal_units[normal_valid] = (
+        normal_rows[normal_valid] / normal_magnitudes[normal_valid, None]
+    )
+    overlays["normal_origins"] = np.array(points[normal_valid], copy=True)
+    overlays["normal_directions"] = np.array(
+        normal_units[normal_valid], copy=True
+    )
+
+    if roll_references is None:
+        return overlays
+    roll_rows = _vector_rows(
+        roll_references, count=len(points), label="point roll references"
+    )
+    # The solver defines local +x as this projected direction.  Drawing the
+    # projection, rather than the raw reference, makes the visible frame match
+    # the actual point-scatterer rotation convention.
+    projected = roll_rows - (
+        np.sum(roll_rows * normal_units, axis=1)[:, None] * normal_units
+    )
+    roll_magnitudes = np.linalg.norm(projected, axis=1)
+    roll_valid = normal_valid & (roll_magnitudes > 1.0e-12)
+    projected[roll_valid] /= roll_magnitudes[roll_valid, None]
+    overlays["roll_origins"] = np.array(points[roll_valid], copy=True)
+    overlays["roll_directions"] = np.array(projected[roll_valid], copy=True)
+    return overlays
+
+
+def _line_endpoint_orientation_overlays(
+    paths: tuple[np.ndarray, ...],
+    endpoint_normals: Any | None,
+) -> dict[str, np.ndarray]:
+    """Return every drawable segment-end normal, preserving duplicates."""
+
+    empty = {
+        "normal_origins": np.empty((0, 3), dtype=float),
+        "normal_directions": np.empty((0, 3), dtype=float),
+    }
+    if endpoint_normals is None:
+        return empty
+
+    if len(paths) == 1:
+        array = np.asarray(endpoint_normals, dtype=float)
+        if array.ndim == 3:
+            candidates: tuple[Any, ...] = (array,)
+        else:
+            try:
+                candidates = tuple(endpoint_normals)
+            except TypeError as exc:
+                raise ValueError(
+                    "line endpoint normals must match the preview paths"
+                ) from exc
+    else:
+        try:
+            candidates = tuple(endpoint_normals)
+        except TypeError as exc:
+            raise ValueError(
+                "line endpoint normals must match the preview paths"
+            ) from exc
+    if len(candidates) != len(paths):
+        raise ValueError("line endpoint normals must match the preview paths")
+
+    origins: list[np.ndarray] = []
+    directions: list[np.ndarray] = []
+    for index, (path, values) in enumerate(zip(paths, candidates)):
+        vectors = np.asarray(values, dtype=float)
+        expected = (len(path) - 1, 2, 3)
+        if vectors.shape != expected:
+            raise ValueError(
+                f"line endpoint normals {index} must have shape {expected}"
+            )
+        if not np.all(np.isfinite(vectors)):
+            raise ValueError(
+                f"line endpoint normals {index} contain a nonfinite vector"
+            )
+        segment_origins = np.stack((path[:-1], path[1:]), axis=1)
+        flat_vectors = vectors.reshape(-1, 3)
+        magnitudes = np.linalg.norm(flat_vectors, axis=1)
+        valid = magnitudes > 1.0e-12
+        # Flattening the (segment, endpoint) axes deliberately retains both
+        # copies of a shared vertex. Their supplied normals may differ.
+        origins.append(segment_origins.reshape(-1, 3)[valid])
+        directions.append(flat_vectors[valid] / magnitudes[valid, None])
+    if not origins:
+        return empty
+    return {
+        "normal_origins": np.concatenate(origins, axis=0),
+        "normal_directions": np.concatenate(directions, axis=0),
+    }
 
 
 @dataclass
@@ -571,21 +757,40 @@ class AssemblySceneModel:
         color: str = "#38bdf8",
         size: float = 28.0,
         depthshade: bool = True,
+        normals: Any | None = None,
+        roll_references: Any | None = None,
+        orientation_length_m: float = DEFAULT_ORIENTATION_VECTOR_LENGTH_M,
     ) -> AssemblySceneGroup:
         key = _group_id(group_id)
         points = _finite_points(points_m, label="points")
+        length = float(orientation_length_m)
+        if not np.isfinite(length) or length <= 0.0:
+            raise ValueError("orientation_length_m must be finite and positive")
+        overlays = _point_orientation_overlays(
+            points, normals, roll_references
+        )
+        bounds_points = [points]
+        for prefix in ("normal", "roll"):
+            origins = overlays[f"{prefix}_origins"]
+            directions = overlays[f"{prefix}_directions"]
+            if len(origins):
+                bounds_points.extend((origins, origins + length * directions))
         return self._store(
             AssemblySceneGroup(
                 key,
                 "points",
                 points,
-                _bounds_from_points(points),
+                _bounds_from_points(np.concatenate(bounds_points, axis=0)),
                 bool(visible),
                 str(label),
                 {
                     "color": color,
                     "size": float(size),
                     "depthshade": bool(depthshade),
+                    "orientation_length_m": length,
+                    "normal_color": NORMAL_VECTOR_COLOR,
+                    "roll_color": ROLL_VECTOR_COLOR,
+                    **overlays,
                 },
                 source_count=len(points),
                 display_count=len(points),
@@ -603,22 +808,36 @@ class AssemblySceneModel:
         color: str = "#f59e0b",
         linewidth: float = 2.0,
         alpha: float = 1.0,
+        endpoint_normals: Any | None = None,
+        orientation_length_m: float = DEFAULT_ORIENTATION_VECTOR_LENGTH_M,
     ) -> AssemblySceneGroup:
         key = _group_id(group_id)
         paths = _line_paths(paths_m)
         points = np.concatenate(paths, axis=0)
+        length = float(orientation_length_m)
+        if not np.isfinite(length) or length <= 0.0:
+            raise ValueError("orientation_length_m must be finite and positive")
+        overlays = _line_endpoint_orientation_overlays(paths, endpoint_normals)
+        bounds_points = [points]
+        origins = overlays["normal_origins"]
+        directions = overlays["normal_directions"]
+        if len(origins):
+            bounds_points.extend((origins, origins + length * directions))
         return self._store(
             AssemblySceneGroup(
                 key,
                 "lines",
                 paths,
-                _bounds_from_points(points),
+                _bounds_from_points(np.concatenate(bounds_points, axis=0)),
                 bool(visible),
                 str(label),
                 {
                     "color": color,
                     "linewidth": float(linewidth),
                     "alpha": float(alpha),
+                    "orientation_length_m": length,
+                    "normal_color": NORMAL_VECTOR_COLOR,
+                    **overlays,
                 },
                 source_count=sum(max(0, len(path) - 1) for path in paths),
                 display_count=sum(max(0, len(path) - 1) for path in paths),
@@ -815,16 +1034,55 @@ if GUI_AVAILABLE:
             self.axes.grid(True)
 
         def _remove_artist(self, group_id: str) -> None:
-            artist = self._artists.pop(group_id, None)
-            if artist is not None:
+            stored = self._artists.pop(group_id, None)
+            if stored is None:
+                return
+            artists = stored if isinstance(stored, tuple) else (stored,)
+            for artist in artists:
                 try:
                     artist.remove()
                 except (ValueError, AttributeError):
                     pass
 
+        @staticmethod
+        def _set_artist_visible(stored: Any, visible: bool) -> None:
+            artists = stored if isinstance(stored, tuple) else (stored,)
+            for artist in artists:
+                artist.set_visible(bool(visible))
+
+        def _orientation_quiver(
+            self,
+            origins: np.ndarray,
+            directions: np.ndarray,
+            *,
+            length_m: float,
+            color: str,
+            label: str,
+        ) -> Any | None:
+            """Draw one collection for a complete orientation-vector type."""
+
+            if len(origins) == 0:
+                return None
+            return self.axes.quiver(
+                origins[:, 0],
+                origins[:, 1],
+                origins[:, 2],
+                directions[:, 0],
+                directions[:, 1],
+                directions[:, 2],
+                length=float(length_m),
+                normalize=False,
+                color=color,
+                linewidth=1.15,
+                arrow_length_ratio=0.28,
+                pivot="tail",
+                label=label,
+            )
+
         def _add_artist(self, group: AssemblySceneGroup) -> None:
             self._remove_artist(group.group_id)
             style = group.style
+            artists: list[Any] = []
             if group.kind == "surface":
                 mode = normalize_body_render_mode(
                     style.get("render_mode", "Solid")
@@ -848,7 +1106,11 @@ if GUI_AVAILABLE:
                 if mode == "Wireframe":
                     artist = Poly3DCollection(
                         group.geometry,
-                        facecolors="none",
+                        # Matplotlib 3.10 cannot depth-sort a 3-D polygon
+                        # collection with a truly empty facecolor array. A
+                        # transparent face is visually identical and keeps
+                        # the collection drawable across supported versions.
+                        facecolors=to_rgba(color, 0.0),
                         edgecolors=to_rgba(edgecolor, alpha),
                         linewidths=linewidth,
                         label=group.label,
@@ -863,6 +1125,7 @@ if GUI_AVAILABLE:
                         label=group.label,
                     )
                 self.axes.add_collection3d(artist)
+                artists.append(artist)
             elif group.kind == "points":
                 points = group.geometry
                 artist = self.axes.scatter(
@@ -874,6 +1137,31 @@ if GUI_AVAILABLE:
                     depthshade=style.get("depthshade", True),
                     label=group.label,
                 )
+                artists.append(artist)
+                length = float(
+                    style.get(
+                        "orientation_length_m",
+                        DEFAULT_ORIENTATION_VECTOR_LENGTH_M,
+                    )
+                )
+                normal_artist = self._orientation_quiver(
+                    style.get("normal_origins", np.empty((0, 3))),
+                    style.get("normal_directions", np.empty((0, 3))),
+                    length_m=length,
+                    color=style.get("normal_color", NORMAL_VECTOR_COLOR),
+                    label=f"{group.label} normals",
+                )
+                if normal_artist is not None:
+                    artists.append(normal_artist)
+                roll_artist = self._orientation_quiver(
+                    style.get("roll_origins", np.empty((0, 3))),
+                    style.get("roll_directions", np.empty((0, 3))),
+                    length_m=length,
+                    color=style.get("roll_color", ROLL_VECTOR_COLOR),
+                    label=f"{group.label} projected roll +x",
+                )
+                if roll_artist is not None:
+                    artists.append(roll_artist)
             elif group.kind == "lines":
                 artist = Line3DCollection(
                     group.geometry,
@@ -882,11 +1170,31 @@ if GUI_AVAILABLE:
                     alpha=style.get("alpha", 1.0),
                     label=group.label,
                 )
-                self.axes.add_collection3d(artist)
+                # Variable-length line paths form a ragged segment sequence.
+                # Matplotlib's automatic limits path coerces that sequence to
+                # a rectangular ndarray; GRIM fits from the scene-model bounds
+                # instead, so disable that redundant and fragile conversion.
+                self.axes.add_collection3d(artist, autolim=False)
+                artists.append(artist)
+                normal_artist = self._orientation_quiver(
+                    style.get("normal_origins", np.empty((0, 3))),
+                    style.get("normal_directions", np.empty((0, 3))),
+                    length_m=float(
+                        style.get(
+                            "orientation_length_m",
+                            DEFAULT_ORIENTATION_VECTOR_LENGTH_M,
+                        )
+                    ),
+                    color=style.get("normal_color", NORMAL_VECTOR_COLOR),
+                    label=f"{group.label} endpoint normals",
+                )
+                if normal_artist is not None:
+                    artists.append(normal_artist)
             else:  # Defensive: models should never store an unknown kind.
                 raise ValueError(f"unsupported assembly scene kind {group.kind!r}")
-            artist.set_visible(group.visible)
-            self._artists[group.group_id] = artist
+            stored: Any = artists[0] if len(artists) == 1 else tuple(artists)
+            self._set_artist_visible(stored, group.visible)
+            self._artists[group.group_id] = stored
 
         @property
         def display_units(self) -> str:
@@ -1064,7 +1372,9 @@ if GUI_AVAILABLE:
             elif event == "visibility" and group_id is not None:
                 artist = self._artists.get(group_id)
                 if artist is not None:
-                    artist.set_visible(self.model.group(group_id).visible)
+                    self._set_artist_visible(
+                        artist, self.model.group(group_id).visible
+                    )
             elif group_id is not None:
                 self._add_artist(self.model.group(group_id))
             # Direct scene API users receive the same positive feedback as
@@ -1185,12 +1495,15 @@ if GUI_AVAILABLE:
             self.lbl_legend = QLabel(
                 '<span style="color:#94a3b8">\u25a0 Body</span>&nbsp;&nbsp;'
                 '<span style="color:#38bdf8">\u25cf Points</span>&nbsp;&nbsp;'
-                '<span style="color:#f59e0b">\u2501 Lines</span>'
+                '<span style="color:#f59e0b">\u2501 Lines</span>&nbsp;&nbsp;'
+                '<span style="color:#f472b6">\u2197 Normals</span>&nbsp;&nbsp;'
+                '<span style="color:#c084fc">\u2197 Point +x (roll)</span>'
             )
             self.lbl_status = QLabel(
                 "Preview is empty. Choose an optional STL/facet or BoR body, then "
                 "add point or line placements. The tree Show boxes control only the "
-                "3-D display; they do not change the assembled RCS."
+                "3-D display, including orientation arrows; they do not change "
+                "the assembled RCS."
             )
             self.lbl_status.setWordWrap(True)
             toolbar.addWidget(title)
@@ -1655,7 +1968,59 @@ if GUI_AVAILABLE:
                     "feature preview plan is missing prepared field(s): "
                     + ", ".join(missing)
                 )
-            return tuple(getattr(plan, name) for name in required)
+            base_geometry = tuple(getattr(plan, name) for name in required)
+            orientation = (
+                getattr(plan, "point_normals_cad", {}),
+                getattr(plan, "point_roll_references_cad", {}),
+                getattr(plan, "line_endpoint_normals_cad", {}),
+            )
+            if not all(isinstance(value, dict) for value in orientation):
+                raise TypeError(
+                    "prepared point/line orientation previews must be dicts"
+                )
+            point_groups = base_geometry[2]
+            line_groups = base_geometry[3]
+            if not isinstance(point_groups, dict) or not isinstance(
+                line_groups, dict
+            ):
+                raise TypeError(
+                    "prepared point_locations_cad_m and line_paths_cad_m must "
+                    "be dicts"
+                )
+            point_normals, point_rolls, line_normals = orientation
+            # Empty orientation maps mean a legacy four-field preview object;
+            # it remains displayable with markers/paths only. Once any new
+            # orientation data is supplied, require an exact keyed contract so
+            # vectors can never be silently paired with the wrong placement.
+            if any(bool(value) for value in orientation):
+                point_keys = set(point_groups)
+                if set(point_normals) != point_keys or set(point_rolls) != point_keys:
+                    raise ValueError(
+                        "point orientation dataset IDs must exactly match point "
+                        "location dataset IDs"
+                    )
+                line_keys = set(line_groups)
+                if set(line_normals) != line_keys:
+                    raise ValueError(
+                        "line-normal dataset IDs must exactly match line-path "
+                        "dataset IDs"
+                    )
+                for dataset_id in line_keys:
+                    paths_by_id = line_groups[dataset_id]
+                    normals_by_id = line_normals[dataset_id]
+                    if not isinstance(paths_by_id, dict) or not isinstance(
+                        normals_by_id, dict
+                    ):
+                        raise TypeError(
+                            "line paths and endpoint normals must map line_id "
+                            "to prepared arrays"
+                        )
+                    if set(normals_by_id) != set(paths_by_id):
+                        raise ValueError(
+                            f"line-normal IDs for dataset {dataset_id!r} must "
+                            "exactly match its line-path IDs"
+                        )
+            return (*base_geometry, *orientation)
 
         def _show_preview_error(self, exc: Exception) -> None:
             """Publish one consistent, non-destructive preview failure state."""
@@ -1682,7 +2047,15 @@ if GUI_AVAILABLE:
             """
 
             try:
-                surface, profile, point_groups, line_groups = (
+                (
+                    surface,
+                    profile,
+                    point_groups,
+                    line_groups,
+                    point_normals,
+                    point_rolls,
+                    line_normals,
+                ) = (
                     self._feature_plan_geometry(plan)
                 )
                 preview_stage = str(
@@ -1691,13 +2064,6 @@ if GUI_AVAILABLE:
                 if preview_stage not in {"input", "validated"}:
                     raise ValueError(
                         "prepared preview_stage must be 'input' or 'validated'"
-                    )
-                if not isinstance(point_groups, dict) or not isinstance(
-                    line_groups, dict
-                ):
-                    raise TypeError(
-                        "prepared point_locations_cad_m and line_paths_cad_m must "
-                        "be dicts"
                     )
                 tree = getattr(self.assembly_tree_panel, "tree", None)
                 if tree is None or not all(
@@ -1729,6 +2095,7 @@ if GUI_AVAILABLE:
             body_description = "no body geometry"
             try:
                 body_id = feature_preview_group_id("body")
+                body_group: AssemblySceneGroup | None = None
                 if surface is not None:
                     body_group = self.add_body_triangles(body_id, surface)
                     scene_ids.append(body_id)
@@ -1759,6 +2126,14 @@ if GUI_AVAILABLE:
                         stable_key=f"{FEATURE_PREVIEW_ROOT_KEY}/body-empty",
                     )
 
+                vector_length_m = orientation_vector_length_m(
+                    _feature_preview_nonvector_bounds(
+                        None if body_group is None else body_group.bounds_m,
+                        point_groups,
+                        line_groups,
+                    )
+                )
+
                 point_counts = {
                     dataset_id: len(np.asarray(locations))
                     for dataset_id, locations in point_groups.items()
@@ -1777,7 +2152,19 @@ if GUI_AVAILABLE:
                         )
                     count = point_counts[dataset_id]
                     group_id = feature_preview_group_id("points", dataset_id)
-                    self.add_points(group_id, point_groups[dataset_id])
+                    self.add_points(
+                        group_id,
+                        point_groups[dataset_id],
+                        normals=(
+                            point_normals[dataset_id]
+                            if point_normals
+                            else None
+                        ),
+                        roll_references=(
+                            point_rolls[dataset_id] if point_rolls else None
+                        ),
+                        orientation_length_m=vector_length_m,
+                    )
                     scene_ids.append(group_id)
                     point_word = "point" if count == 1 else "points"
                     item = tree.add_preview_item(
@@ -1811,10 +2198,24 @@ if GUI_AVAILABLE:
                         raise TypeError(
                             "each prepared line dataset preview must map line_id to a CAD path"
                         )
-                    paths = tuple(paths_by_id[key] for key in sorted(paths_by_id))
+                    ordered_line_ids = tuple(sorted(paths_by_id))
+                    paths = tuple(paths_by_id[key] for key in ordered_line_ids)
+                    endpoint_normals = (
+                        tuple(
+                            line_normals[dataset_id][key]
+                            for key in ordered_line_ids
+                        )
+                        if line_normals
+                        else None
+                    )
                     count = line_counts[dataset_id]
                     group_id = feature_preview_group_id("lines", dataset_id)
-                    self.add_lines(group_id, paths)
+                    self.add_lines(
+                        group_id,
+                        paths,
+                        endpoint_normals=endpoint_normals,
+                        orientation_length_m=vector_length_m,
+                    )
                     scene_ids.append(group_id)
                     line_word = "line" if count == 1 else "lines"
                     item = tree.add_preview_item(
@@ -1856,13 +2257,17 @@ if GUI_AVAILABLE:
                             "Check the locations, then "
                             "validate before building. Axes use the selected display "
                             "units; backend CAD geometry remains meters. Tree Show "
-                            "boxes change only this display."
+                            "boxes change points/paths and their orientation arrows "
+                            "together, only in this display. Zero or parallel input "
+                            "vectors are omitted here and reported by Validate."
                         )
                     else:
                         self.lbl_status.setText(
                             f"Validated preview ready \u2014 {body_description}; "
                             f"{point_summary}; {line_summary}. Axes use the selected "
                             "display units; backend CAD geometry remains meters. "
+                            "Magenta arrows show normalized outward normals; lavender "
+                            "point arrows show projected roll/local +x. "
                             "Drag to rotate and "
                             "scroll to zoom. Tree Show boxes change only this preview, "
                             "never the assembled RCS."
@@ -2070,6 +2475,7 @@ __all__ = [
     "feature_preview_group_id",
     "format_length_tick",
     "normalize_body_render_mode",
+    "orientation_vector_length_m",
     "revolve_bor_profile_cad",
     "triangle_detail_cap",
 ]

@@ -1,8 +1,6 @@
 import math
 import os
 from pathlib import Path
-import shutil
-import tempfile
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
@@ -30,6 +28,7 @@ from matplotlib.figure import Figure
 
 from geometry_io import (
     IBC_KINDS,
+    AtomicFileTransaction,
     ChainSpec,
     Segment,
     build_geometry_snapshot,
@@ -548,7 +547,19 @@ class GeometryTab(QWidget):
                 f"{base_dir}",
             )
             return ""
-        return os.path.basename(filename)
+        basename = os.path.basename(filename)
+        try:
+            validated_name = material_filename_from_row(["1", basename])
+            if validated_name is None:
+                raise ValueError(f"Unsupported material filename: {basename!r}")
+        except ValueError as exc:
+            QMessageBox.warning(
+                self,
+                "Unsupported Material Filename",
+                f"This CSV cannot be referenced by a .geo file:\n{exc}",
+            )
+            return ""
+        return validated_name
 
     def attach_material_artifact(
         self, artifact_kind: 'str', csv_path: 'str'
@@ -595,6 +606,24 @@ class GeometryTab(QWidget):
             )
             return False
 
+        # The .geo material grammar is whitespace-delimited and intentionally
+        # has no quoting convention. Validate the basename with the shared
+        # geometry boundary before the production material reader sees it or
+        # any file is copied.
+        try:
+            destination_name = material_filename_from_row(
+                ["1", source.name]
+            )
+            if destination_name is None:
+                raise ValueError(f"Unsupported material filename: {source.name!r}")
+        except ValueError as exc:
+            QMessageBox.critical(
+                self,
+                "Invalid FREDDY Artifact Filename",
+                f"The nominal CSV cannot be referenced by a .geo file:\n{exc}",
+            )
+            return False
+
         # Validate with the same reader used by production solves. A renamed
         # off-angle, thickness, uncertainty, or other analysis CSV therefore
         # still cannot enter an IBC/dielectric table.
@@ -618,7 +647,7 @@ class GeometryTab(QWidget):
             )
             return False
 
-        destination = geometry_path.parent / source.name
+        destination = geometry_path.parent / destination_name
         opposite_table = self.table_diel if kind == "ibc" else self.table_ibc
         opposite_kind = "dielectric material" if kind == "ibc" else "IBC"
         opposite_reference = next(
@@ -660,44 +689,21 @@ class GeometryTab(QWidget):
             if answer != buttons.Yes:
                 return False
 
-        temporary_path: Path | None = None
-        if not same_file:
-            try:
-                fd, temporary_name = tempfile.mkstemp(
-                    prefix=f".{destination.name}.",
-                    suffix=".tmp",
-                    dir=str(destination.parent),
-                )
-                os.close(fd)
-                temporary_path = Path(temporary_name)
-                shutil.copy2(source, temporary_path)
-                os.replace(temporary_path, destination)
-                temporary_path = None
-            except Exception as exc:
-                if temporary_path is not None:
-                    try:
-                        temporary_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                QMessageBox.critical(
-                    self,
-                    "FREDDY Artifact Copy Failed",
-                    f"Could not copy the nominal CSV beside the geometry:\n{exc}",
-                )
-                return False
-
         if kind == "ibc":
             table = self.table_ibc
-            current = self._read_small_table(table)
+            previous_model = [list(row) for row in self.ibcs_entries]
             label = self.lbl_ibc
             title_prefix = "IBCS/Resistances"
             friendly_kind = "IBC"
         else:
             table = self.table_diel
-            current = self._read_small_table(table)
+            previous_model = [list(row) for row in self.dielectric_entries]
             label = self.lbl_diel
             title_prefix = "Dielectrics"
             friendly_kind = "dielectric material"
+
+        previous_rows = [list(row) for row in self._read_small_table(table)]
+        current = [list(row) for row in previous_rows]
 
         existing_row = next(
             (
@@ -730,24 +736,78 @@ class GeometryTab(QWidget):
             # file after GRIM attached a new ``foo.csv`` artifact.
             current[existing_row][1] = destination.name
 
-        if kind == "ibc":
-            self.ibcs_entries = current
-        else:
-            self.dielectric_entries = current
-        self._populate_small_table(
-            table, current, label=label, title_prefix=title_prefix
-        )
-        table.selectRow(selected_row)
-        self._refresh_segment_dropdowns()
-        if kind == "ibc":
-            self._render_impedance_overlay()
-            self.canvas.draw_idle()
+        transaction = AtomicFileTransaction()
+        try:
+            if not same_file:
+                transaction.stage_copy(source, destination)
+            transaction.publish()
+
+            if kind == "ibc":
+                self.ibcs_entries = current
+            else:
+                self.dielectric_entries = current
+            self._populate_small_table(
+                table, current, label=label, title_prefix=title_prefix
+            )
+            table.selectRow(selected_row)
+            self._refresh_segment_dropdowns()
+            if kind == "ibc":
+                self._render_impedance_overlay()
+                self.canvas.draw_idle()
+        except Exception as exc:
+            rollback_errors: 'List[str]' = []
+            # Restore both the backing model and the visible table. Keep each
+            # restoration step independent so one rendering problem cannot
+            # prevent the material file itself from being restored.
+            if kind == "ibc":
+                self.ibcs_entries = previous_model
+            else:
+                self.dielectric_entries = previous_model
+            try:
+                self._populate_small_table(
+                    table,
+                    previous_rows,
+                    label=label,
+                    title_prefix=title_prefix,
+                )
+            except Exception as rollback_exc:
+                rollback_errors.append(f"table restore: {rollback_exc}")
+            try:
+                self._refresh_segment_dropdowns()
+            except Exception as rollback_exc:
+                rollback_errors.append(f"segment controls: {rollback_exc}")
+            if kind == "ibc":
+                try:
+                    self._render_impedance_overlay()
+                    self.canvas.draw_idle()
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"preview restore: {rollback_exc}")
+            try:
+                transaction.abort()
+            except Exception as rollback_exc:
+                rollback_errors.append(f"file restore: {rollback_exc}")
+
+            detail = f"Could not attach the nominal CSV:\n{exc}"
+            if rollback_errors:
+                detail += "\n\nRollback warning(s):\n" + "\n".join(
+                    rollback_errors
+                )
+            else:
+                detail += "\n\nThe previous file and geometry table were restored."
+            QMessageBox.critical(
+                self,
+                "FREDDY Artifact Attachment Failed",
+                detail,
+            )
+            return False
+
+        transaction.commit()
 
         QMessageBox.information(
             self,
             "FREDDY Artifact Attached",
-            f"Copied '{destination.name}' beside '{geometry_path.name}' and "
-            f"attached it as {friendly_kind} flag {flag}.\n\n"
+            f"Attached '{destination.name}' beside '{geometry_path.name}' as "
+            f"{friendly_kind} flag {flag}.\n\n"
             "Use Save in the Geometry tab to persist this new reference in "
             "the .geo file.",
         )
@@ -1895,40 +1955,125 @@ class GeometryTab(QWidget):
             return
 
         target = Path(fname).expanduser().resolve(strict=False)
-        temporary_path: Path | None = None
-        temporary_fd: int | None = None
+        source_geometry = (
+            Path(self.loaded_path).expanduser().resolve(strict=False)
+            if self.loaded_path
+            else None
+        )
+        source_folder = source_geometry.parent if source_geometry else None
+
+        # A .geo stores only sidecar basenames. Collect and validate all of
+        # them before touching the target so Save As cannot create a geometry
+        # whose physical inputs were left in the old directory.
+        material_names: 'Dict[str, str]' = {}
         try:
-            if target.exists() and not target.is_file():
-                raise OSError(f"save target is not a regular file: {target}")
-            temporary_fd, temporary_name = tempfile.mkstemp(
-                prefix=f".{target.name}.",
-                suffix=".tmp",
-                dir=str(target.parent),
+            for row in list(ibcs_rows) + list(dielectric_rows):
+                name = material_filename_from_row(row)
+                if name is None:
+                    continue
+                key = name.casefold()
+                previous_name = material_names.get(key)
+                if previous_name is not None and previous_name != name:
+                    raise ValueError(
+                        "Material filenames that differ only by letter case "
+                        f"are not portable: {previous_name!r} and {name!r}."
+                    )
+                material_names[key] = name
+
+            target_folder_key = os.path.normcase(str(target.parent))
+            source_folder_key = (
+                os.path.normcase(str(source_folder))
+                if source_folder is not None
+                else None
             )
-            temporary_path = Path(temporary_name)
-            stream = os.fdopen(
-                temporary_fd, "w", encoding="utf-8", newline="\n"
-            )
-            temporary_fd = None
-            with stream:
-                stream.write(text)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, target)
-            temporary_path = None
+            sidecar_copies: 'List[Tuple[Path, Path]]' = []
+            for name in sorted(material_names.values(), key=str.casefold):
+                destination = target.parent / name
+                if source_folder_key == target_folder_key:
+                    if not destination.is_file():
+                        raise FileNotFoundError(
+                            f"Referenced material sidecar is missing beside "
+                            f"the geometry: {destination}"
+                        )
+                    continue
+                if source_folder is None:
+                    # For a newly-created, never-saved geometry, an explicitly
+                    # entered sidecar may already be in the chosen target
+                    # directory. There is no old directory to copy from.
+                    if not destination.is_file():
+                        raise FileNotFoundError(
+                            f"Referenced material sidecar is not in the save "
+                            f"directory: {destination}"
+                        )
+                    continue
+
+                source = source_folder / name
+                if not source.is_file():
+                    raise FileNotFoundError(
+                        f"Referenced material sidecar is missing beside the "
+                        f"current geometry: {source}"
+                    )
+                if destination.exists() and not destination.is_file():
+                    raise OSError(
+                        f"Material sidecar target is not a regular file: "
+                        f"{destination}"
+                    )
+                sidecar_copies.append((source, destination))
         except Exception as e:
-            if temporary_fd is not None:
-                try:
-                    os.close(temporary_fd)
-                except OSError:
-                    pass
-            if temporary_path is not None:
-                try:
-                    temporary_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            QMessageBox.critical(
+                self,
+                "Geometry Save Blocked",
+                f"Could not preserve the geometry's material sidecars:\n{e}",
+            )
+            return
+
+        replacements = [
+            destination
+            for _source, destination in sidecar_copies
+            if destination.exists()
+        ]
+        if replacements:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            shown = "\n".join(f"  - {path.name}" for path in replacements[:12])
+            if len(replacements) > 12:
+                shown += f"\n  - ... and {len(replacements) - 12} more"
+            answer = QMessageBox.question(
+                self,
+                "Replace Material Sidecars?",
+                "Saving this geometry in the selected directory also needs "
+                "to replace these material files:\n\n"
+                f"{shown}\n\n"
+                "Replace them with the versions beside the current geometry?",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                return
+
+        transaction = AtomicFileTransaction()
+        try:
+            # Publish sidecars first and the .geo last. Readers therefore keep
+            # seeing the previous geometry until every referenced input is in
+            # place. AtomicFileTransaction restores the complete old set if a
+            # later replacement fails.
+            for source, destination in sidecar_copies:
+                transaction.stage_copy(source, destination)
+            transaction.stage_text(text, target)
+            transaction.publish()
+        except Exception as e:
+            try:
+                transaction.abort()
+            except Exception as rollback_error:
+                QMessageBox.critical(
+                    self,
+                    "Geometry Save Failed",
+                    f"Failed to save file: {e}\n\n"
+                    f"Rollback also reported: {rollback_error}",
+                )
+                return
             QMessageBox.critical(self, "Error", f"Failed to save file: {e}")
             return
+        transaction.commit()
         self.loaded_path = str(target)
         QMessageBox.information(self, "Saved", f"Geometry saved to {target}")
 

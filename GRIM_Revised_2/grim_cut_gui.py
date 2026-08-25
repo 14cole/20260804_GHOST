@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+from pathlib import Path
 import sys
 import uuid
 
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMenu,
@@ -59,6 +61,7 @@ from grim_cut_dataset_mixin import (
 from grim_cut_plot_mixin import PlotOpsMixin
 from ppt_workspace import DatasetCatalogEntry, PptWorkspace
 from plot_models import PlotContext
+from runs_workspace import RunsWorkspace
 
 BLUE_PALETTE = {
     "is_dark": True,
@@ -194,7 +197,10 @@ def build_qss(palette: dict[str, str]) -> str:
     }}
     QScrollArea#controlDock {{ background: {palette['win_bg']}; border: none; }}
     QScrollArea#featureAssemblyScroll {{ background: {palette['panel_bg']}; border: none; }}
+    QScrollArea#plotSettingsScroll {{ background: {palette['panel_bg']}; border: none; }}
     QWidget#featureAssemblyContent {{ background: {palette['panel_bg']}; }}
+    QWidget#plotSettingsContent {{ background: {palette['panel_bg']}; }}
+    QLabel#settingsNoMatches {{ color: {palette['grid']}; padding: 4px 2px; }}
     QWidget#dockBody {{ background: {palette['win_bg']}; }}
     QToolButton#sectionHeader {{
         background: {palette['head_bg']}; color: {palette['text']};
@@ -372,15 +378,126 @@ class ClickableLabel(QLabel):
 
 
 class PlotSettingsPopup(QFrame):
-    """Top-level popup frame for plot settings. Closing it via the title-bar
-    untoggles the bound toggle button so the button state mirrors visibility.
+    """Scrollable, searchable top-level popup for one plot context.
+
+    Closing the window via its title bar untoggles the bound button so the
+    button state mirrors visibility.  ``content_widget`` deliberately remains
+    a plain widget: callers can keep using their existing grid layout while
+    the popup owns the search bar and scroll-area plumbing.
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        title: str = "Plot Settings",
+    ) -> None:
         super().__init__(parent)
         self._toggle_button: QToolButton | None = None
+        self._filter_rows: list[tuple[str, tuple[QWidget, ...], QWidget | None]] = []
         self.setWindowFlag(Qt.Window, True)
-        self.setWindowTitle("Plot Settings")
+        self.setWindowTitle(title)
+        # Keep the popup useful on a compact display.  Larger contents scroll
+        # in either direction instead of forcing the window beyond the screen.
+        self.setMinimumSize(420, 280)
+        self.resize(820, 540)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        filter_row = QHBoxLayout()
+        filter_label = QLabel("Find setting")
+        self.filter_edit = QLineEdit(self)
+        self.filter_edit.setObjectName("plotSettingsFilter")
+        self.filter_edit.setPlaceholderText("Search settings…")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.setToolTip(
+            "Filter settings by label, control name, option, or help text."
+        )
+        filter_row.addWidget(filter_label)
+        filter_row.addWidget(self.filter_edit, 1)
+        outer.addLayout(filter_row)
+
+        self.no_matches_label = QLabel("No settings match this search.")
+        self.no_matches_label.setObjectName("settingsNoMatches")
+        self.no_matches_label.setVisible(False)
+        outer.addWidget(self.no_matches_label)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setObjectName("plotSettingsScroll")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.content_widget = QWidget()
+        self.content_widget.setObjectName("plotSettingsContent")
+        self.scroll_area.setWidget(self.content_widget)
+        outer.addWidget(self.scroll_area, 1)
+
+        self.filter_edit.textChanged.connect(self._apply_filter)
+
+    @staticmethod
+    def _searchable_widget_text(widget: QWidget) -> str:
+        parts: list[str] = []
+        for accessor in ("text", "toolTip", "placeholderText", "windowTitle"):
+            method = getattr(widget, accessor, None)
+            if callable(method):
+                value = method()
+                if value:
+                    parts.append(str(value))
+        if isinstance(widget, QComboBox):
+            parts.extend(widget.itemText(index) for index in range(widget.count()))
+        return " ".join(parts)
+
+    def register_filter_grid(
+        self,
+        grid: QGridLayout,
+        *,
+        search_prefix: str = "",
+        section: QWidget | None = None,
+        excluded_widgets: tuple[QWidget, ...] = (),
+    ) -> None:
+        """Register each grid row as one searchable unit.
+
+        A matching row keeps all of its labels and controls together.  When a
+        nested ``section`` is supplied, the section itself disappears if none
+        of its rows match, avoiding an empty ISAR block during filtering.
+        """
+
+        excluded_ids = {id(widget) for widget in excluded_widgets}
+        for row in range(grid.rowCount()):
+            widgets: list[QWidget] = []
+            seen: set[int] = set()
+            for column in range(grid.columnCount()):
+                item = grid.itemAtPosition(row, column)
+                widget = item.widget() if item is not None else None
+                if widget is None or id(widget) in excluded_ids or id(widget) in seen:
+                    continue
+                seen.add(id(widget))
+                widgets.append(widget)
+            if not widgets:
+                continue
+            haystack = " ".join(
+                [search_prefix]
+                + [self._searchable_widget_text(widget) for widget in widgets]
+            ).casefold()
+            self._filter_rows.append((haystack, tuple(widgets), section))
+
+    def _apply_filter(self, text: str) -> None:
+        tokens = tuple(part.casefold() for part in text.split() if part)
+        section_matches: dict[QWidget, bool] = {}
+        any_match = False
+        for haystack, widgets, section in self._filter_rows:
+            matches = all(token in haystack for token in tokens)
+            any_match = any_match or matches
+            for widget in widgets:
+                widget.setVisible(matches)
+            if section is not None:
+                section_matches[section] = section_matches.get(section, False) or matches
+        for section, matches in section_matches.items():
+            section.setVisible(matches)
+        self.no_matches_label.setVisible(bool(tokens) and not any_match)
 
     def set_toggle_button(self, button: QToolButton) -> None:
         self._toggle_button = button
@@ -716,6 +833,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.freddy_integration = FreddyIntegrationWidget(self)
         self.main_tabs.addTab(self.freddy_integration, "FREDDY")
 
+        # Remote HPC requests are declarative on Windows and become final,
+        # provenance-bound GHOST runs only after staging on the Linux login
+        # node.  The workspace also keeps a manual bundle-export path for
+        # clusters whose VPN/MFA policy blocks non-interactive SSH.
+        self.runs_workspace = RunsWorkspace(
+            self,
+            backend_path=self.ghost_integration.backend_path,
+        )
+        self.main_tabs.addTab(self.runs_workspace, "Runs")
+
         # A deliberately small, read-only view of the semantic dataset/plot
         # operations performed in this session.  The recorder ignores UI
         # navigation, selection gestures, zooming, and solver/tool tabs.
@@ -820,6 +947,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         self.ghost_integration.files_exported.connect(
             self._on_ghost_files_exported
+        )
+        self.runs_workspace.status_changed.connect(self.status.showMessage)
+        self.runs_workspace.results_downloaded.connect(
+            self._on_hpc_results_downloaded
         )
         freddy_attach = getattr(
             self.freddy_integration, "attach_to_ghost_requested", None
@@ -963,21 +1094,21 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 lambda _=False, which="text": self._choose_plot_color(which)
             )
             context.combo_polar_zero.currentIndexChanged.connect(self._on_polar_zero_changed)
-            context.btn_isar_apply.clicked.connect(self._on_isar_window_changed)
             # On the ISAR tab every settings-frame change re-runs the FFT
             # imaging, which is too slow for per-keystroke spinbox updates.
             # Defer everything through the Apply button instead — EXCEPT the
             # color-scale spinboxes, which only retune the existing image's
             # clim (no recompute) and so can stay live.
             # The plotting tab keeps live updates because its plots are cheap.
-            # Aperture scrubbing and peak-scaling stay live on every tab —
+            # Aperture scrubbing and peak-scaling stay live inside ISAR —
             # stepping/playing is the point of the scrub workflow, and the
             # async compute path coalesces bursts of requests.
-            context.btn_isar_ap_prev.clicked.connect(self._on_isar_ap_prev)
-            context.btn_isar_ap_next.clicked.connect(self._on_isar_ap_next)
-            context.btn_isar_ap_play.toggled.connect(self._on_isar_ap_play)
-            context.btn_isar_peak_scale.clicked.connect(self._on_isar_peak_scale)
             if tab_key == "isar":
+                context.btn_isar_apply.clicked.connect(self._on_isar_window_changed)
+                context.btn_isar_ap_prev.clicked.connect(self._on_isar_ap_prev)
+                context.btn_isar_ap_next.clicked.connect(self._on_isar_ap_next)
+                context.btn_isar_ap_play.toggled.connect(self._on_isar_ap_play)
+                context.btn_isar_peak_scale.clicked.connect(self._on_isar_peak_scale)
                 context.spin_plot_zmin.valueChanged.connect(self._on_isar_clim_changed)
                 context.spin_plot_zmax.valueChanged.connect(self._on_isar_clim_changed)
                 context.spin_plot_zstep.valueChanged.connect(self._on_isar_clim_changed)
@@ -1000,24 +1131,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             context.chk_colorbar_shared.toggled.connect(self._on_waterfall_style_changed)
             context.chk_plot_grid_visible.toggled.connect(self._apply_plot_theme)
             context.chk_colormap_invert.toggled.connect(self._on_colormap_changed)
-            context.combo_isar_window.currentIndexChanged.connect(self._on_isar_window_changed)
-            context.combo_isar_units.currentIndexChanged.connect(self._on_isar_window_changed)
-            context.chk_isar_az_interp.toggled.connect(self._on_isar_window_changed)
-            context.spin_isar_az_min.valueChanged.connect(self._on_isar_window_changed)
-            context.spin_isar_az_max.valueChanged.connect(self._on_isar_window_changed)
-            context.spin_isar_az_step.valueChanged.connect(self._on_isar_window_changed)
-            context.chk_isar_freq_band.toggled.connect(self._on_isar_window_changed)
-            context.spin_isar_freq_min.valueChanged.connect(self._on_isar_window_changed)
-            context.spin_isar_freq_max.valueChanged.connect(self._on_isar_window_changed)
-            context.combo_isar_recon.currentIndexChanged.connect(self._on_isar_window_changed)
-            context.spin_isar_l1_strength.valueChanged.connect(self._on_isar_window_changed)
-            context.spin_isar_l1_iters.valueChanged.connect(self._on_isar_window_changed)
-            context.chk_isar_flip_x.toggled.connect(self._on_isar_window_changed)
-            context.chk_isar_flip_y.toggled.connect(self._on_isar_window_changed)
-            context.chk_isar_aperture.toggled.connect(self._on_isar_window_changed)
-            context.spin_isar_ap_center.valueChanged.connect(self._on_isar_window_changed)
-            context.spin_isar_ap_width.valueChanged.connect(self._on_isar_window_changed)
-            context.chk_isar_square.toggled.connect(self._on_isar_window_changed)
 
         self._activate_plot_tab("plotting")
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
@@ -1085,18 +1198,21 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         btn_dataset_ops = QToolButton(text="Dataset Operations")
         btn_dataset_ops.setCheckable(True)
         btn_export_plot = QToolButton(text="Export Plot")
-        btn_settings = QToolButton(text="Plot Settings")
+        settings_title = "ISAR Settings" if tab_key == "isar" else "Plot Settings"
+        btn_settings = QToolButton(text=settings_title)
         btn_settings.setCheckable(True)
         topbar.addWidget(btn_dataset_ops)
         topbar.addWidget(btn_export_plot)
         topbar.addWidget(btn_settings)
         left_layout.addLayout(topbar)
 
-        settings_frame = PlotSettingsPopup(panel)
+        settings_frame = PlotSettingsPopup(panel, title=settings_title)
+        settings_frame.setObjectName(f"{tab_key}SettingsPopup")
         settings_frame.setFrameShape(QFrame.StyledPanel)
         settings_frame.setVisible(False)
         settings_frame.set_toggle_button(btn_settings)
-        settings_layout = QGridLayout(settings_frame)
+        settings_layout = QGridLayout(settings_frame.content_widget)
+        settings_layout.setContentsMargins(8, 8, 8, 8)
         settings_layout.setHorizontalSpacing(8)
         settings_layout.setVerticalSpacing(6)
         settings_layout.setColumnStretch(1, 1)
@@ -1104,6 +1220,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.setColumnStretch(5, 1)
 
         row = 0
+        plotting_only_rows: list[int] = []
+        plotting_only_rows.append(row)
         settings_layout.addWidget(QLabel("Plot X Min"), row, 0)
         spin_plot_xmin = QDoubleSpinBox()
         spin_plot_xmin.setRange(-1e9, 1e9)
@@ -1122,6 +1240,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(spin_plot_xstep, row, 5)
         row += 1
 
+        plotting_only_rows.append(row)
         settings_layout.addWidget(QLabel("Plot Y Min"), row, 0)
         spin_plot_ymin = QDoubleSpinBox()
         spin_plot_ymin.setRange(-1e9, 1e9)
@@ -1140,17 +1259,18 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(spin_plot_ystep, row, 5)
         row += 1
 
-        settings_layout.addWidget(QLabel("Plot Z Min"), row, 0)
+        z_label = "Color" if tab_key == "isar" else "Plot Z"
+        settings_layout.addWidget(QLabel(f"{z_label} Min"), row, 0)
         spin_plot_zmin = QDoubleSpinBox()
         spin_plot_zmin.setRange(-1e9, 1e9)
         spin_plot_zmin.setValue(0.0)
         settings_layout.addWidget(spin_plot_zmin, row, 1)
-        settings_layout.addWidget(QLabel("Plot Z Max"), row, 2)
+        settings_layout.addWidget(QLabel(f"{z_label} Max"), row, 2)
         spin_plot_zmax = QDoubleSpinBox()
         spin_plot_zmax.setRange(-1e9, 1e9)
         spin_plot_zmax.setValue(0.0)
         settings_layout.addWidget(spin_plot_zmax, row, 3)
-        settings_layout.addWidget(QLabel("Plot Z Step"), row, 4)
+        settings_layout.addWidget(QLabel(f"{z_label} Step"), row, 4)
         spin_plot_zstep = QDoubleSpinBox()
         spin_plot_zstep.setRange(0.0, 1e9)
         spin_plot_zstep.setDecimals(6)
@@ -1158,7 +1278,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(spin_plot_zstep, row, 5)
         row += 1
 
-        settings_layout.addWidget(QLabel("Plot Scale"), row, 0)
+        scale_label = "Image Scale" if tab_key == "isar" else "Plot Scale"
+        settings_layout.addWidget(QLabel(scale_label), row, 0)
         combo_plot_scale = QComboBox()
         combo_plot_scale.addItem("dBsm", "dbsm")
         combo_plot_scale.addItem("Linear", "linear")
@@ -1168,6 +1289,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(combo_plot_scale, row, 1, 1, 5)
         row += 1
 
+        plotting_only_rows.append(row)
         settings_layout.addWidget(QLabel("Polar 0° Direction"), row, 0)
         combo_polar_zero = QComboBox()
         polar_zero_options = [
@@ -1201,6 +1323,22 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         chk_colorbar_shared.setChecked(True)
         settings_layout.addWidget(chk_colorbar_shared, row, 3)
         row += 1
+
+        # ISAR formation controls live in their own nested section.  The
+        # section is only inserted into the ISAR popup; the PlotContext still
+        # owns compatible widgets so its public API remains unchanged.
+        common_settings_layout = settings_layout
+        common_row = row
+        isar_settings_section = QWidget(settings_frame.content_widget)
+        isar_settings_section.setObjectName("isarSettingsSection")
+        settings_layout = QGridLayout(isar_settings_section)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setHorizontalSpacing(8)
+        settings_layout.setVerticalSpacing(6)
+        settings_layout.setColumnStretch(1, 1)
+        settings_layout.setColumnStretch(3, 1)
+        settings_layout.setColumnStretch(5, 1)
+        row = 0
 
         settings_layout.addWidget(QLabel("ISAR Window"), row, 0)
         combo_isar_window = QComboBox()
@@ -1403,6 +1541,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(btn_isar_apply, row, 2, 1, 4)
         row += 1
 
+        isar_settings_layout = settings_layout
+        settings_layout = common_settings_layout
+        row = common_row
+        if tab_key == "isar":
+            settings_layout.addWidget(isar_settings_section, row, 0, 1, 6)
+            row += 1
+        else:
+            isar_settings_section.setVisible(False)
+
         chk_plot_grid_visible = QCheckBox("Show Grid")
         chk_plot_grid_visible.setChecked(True)
         settings_layout.addWidget(chk_plot_grid_visible, row, 0)
@@ -1418,6 +1565,35 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(btn_plot_bg, row, 1)
         settings_layout.addWidget(btn_plot_grid, row, 2)
         settings_layout.addWidget(btn_plot_text, row, 3)
+
+        common_filter_exclusions = [isar_settings_section]
+        if tab_key == "isar":
+            # X/Y limits are managed by the ISAR Fit/Zoom/Pan tools and polar-
+            # zero direction does not participate in ISAR formation.  Keep
+            # the backing widgets for PlotContext API compatibility, but do
+            # not present those inert Plotting-only rows.  Image Scale remains
+            # visible because ISAR honors its dBsm/linear selection on Apply.
+            for plotting_only_row in plotting_only_rows:
+                seen: set[int] = set()
+                for column in range(settings_layout.columnCount()):
+                    item = settings_layout.itemAtPosition(plotting_only_row, column)
+                    widget = item.widget() if item is not None else None
+                    if widget is None or id(widget) in seen:
+                        continue
+                    seen.add(id(widget))
+                    widget.setVisible(False)
+                    common_filter_exclusions.append(widget)
+
+        settings_frame.register_filter_grid(
+            settings_layout,
+            excluded_widgets=tuple(common_filter_exclusions),
+        )
+        if tab_key == "isar":
+            settings_frame.register_filter_grid(
+                isar_settings_layout,
+                search_prefix="ISAR",
+                section=isar_settings_section,
+            )
 
         plot_frame = QFrame()
         plot_frame.setFrameShape(QFrame.StyledPanel)
@@ -1598,6 +1774,12 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             for field in PlotContext.__dataclass_fields__:
                 if hasattr(self, field):
                     setattr(previous, field, getattr(self, field))
+            if tab_key != self._active_plot_tab and previous.settings_frame.isVisible():
+                # A settings frame is a top-level popup.  Close the old tab's
+                # popup during a Plotting/ISAR switch so two independently
+                # filtered settings windows never overlap or imply that one
+                # tab controls the other.
+                previous.settings_frame.close()
 
         self._active_plot_tab = tab_key
         self._move_shared_right_panel(tab_key)
@@ -1631,11 +1813,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         ops_btn.blockSignals(False)
 
     def _on_main_tab_changed(self, index: int) -> None:
-        if self.main_tabs.widget(index) is self.ppt_workspace:
-            self._notify_dataset_catalog_changed()
-            return
         tab_key = self._tab_key_for_index.get(index)
         if tab_key is None:
+            active = self._plot_contexts.get(self._active_plot_tab)
+            if active is not None and active.settings_frame.isVisible():
+                active.settings_frame.close()
+            if self.main_tabs.widget(index) is self.ppt_workspace:
+                self._notify_dataset_catalog_changed()
             return
         self._activate_plot_tab(tab_key)
         self._update_plot_color_buttons()
@@ -1846,6 +2030,30 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         self._handle_files_dropped(exported)
 
+    def _on_hpc_results_downloaded(self, directory: str) -> None:
+        """Load supported datasets found beneath a downloaded HPC result tree."""
+
+        root = Path(os.fspath(directory)).expanduser()
+        if not root.is_dir():
+            self.status.showMessage(
+                f"HPC results downloaded, but the local folder was not found: {root}"
+            )
+            return
+        paths = sorted(
+            str(path)
+            for path in root.rglob("*")
+            if path.is_file() and is_supported_path(str(path))
+        )
+        if not paths:
+            self.status.showMessage(
+                f"HPC results downloaded to {root}; no supported datasets were found."
+            )
+            return
+        self.status.showMessage(
+            f"Loading {len(paths)} downloaded HPC dataset(s) from {root}…"
+        )
+        self._handle_files_dropped(paths)
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         """Keep the unified app alive while background physics work runs."""
         if self._background_job_active() or bool(
@@ -1930,6 +2138,18 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             self.freddy_integration.focus_workspace()
             event.ignore()
             return
+        if self.runs_workspace.job_is_running():
+            operation = self.runs_workspace.busy_operation() or "An HPC operation"
+            QMessageBox.warning(
+                self,
+                "HPC Operation Still Running",
+                f"{operation} is still running. Wait for it to finish before "
+                "closing GRIM. Submitted SLURM jobs do not require GRIM to stay open.",
+            )
+            self.main_tabs.setCurrentWidget(self.runs_workspace)
+            self.runs_workspace.focus_workspace()
+            event.ignore()
+            return
 
         dirty_rows = self._dirty_dataset_rows()
         if dirty_rows:
@@ -1963,6 +2183,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 ):
                     event.ignore()
                     return
+        self.runs_workspace.save_settings()
         super().closeEvent(event)
 
 

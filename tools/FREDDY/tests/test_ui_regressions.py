@@ -143,6 +143,8 @@ class MaterialMixUiTests(unittest.TestCase):
 
                 preview = workspace.ibc_batch_preview_label.text()
                 self.assertIn("16 nominal PEC-backed IBC file(s)", preview)
+                self.assertIn("171 frequency points each", preview)
+                self.assertIn("2,736 total rows", preview)
                 self.assertIn("skin_15mil.csv", preview)
                 self.assertIn("skin_30mil.csv", preview)
                 self.assertTrue(workspace.ibc_batch_export_btn.isEnabled())
@@ -169,6 +171,71 @@ class MaterialMixUiTests(unittest.TestCase):
                 self.assertTrue(allowed)
                 question.assert_called_once()
                 self.assertIn("2 output file(s)", question.call_args.args[2])
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_multifile_ibc_batch_clears_prior_host_artifact_at_start(self) -> None:
+        workspace = ImpedanceGui()
+        cleared: list[bool] = []
+        workspace.nominal_artifact_cleared.connect(lambda: cleared.append(True))
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                workspace.layers = [
+                    LayerConfig(
+                        thickness_in=0.020,
+                        anisotropic=False,
+                        file_0deg="coating.csv",
+                        file_90deg="",
+                        polarization_deg=0.0,
+                    )
+                ]
+                workspace.ibc_batch_output_dir_var.set(folder)
+                workspace._refresh_layers()
+                with mock.patch.object(
+                    workspace,
+                    "_confirm_output_replacements",
+                    return_value=True,
+                ), mock.patch.object(workspace, "_run_background_task") as run:
+                    workspace._export_ibc_batch()
+
+                self.assertEqual(cleared, [True])
+                run.assert_called_once()
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_project_portability_warning_is_shown_in_gui(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                project = Path(folder) / "legacy.json"
+                project.write_text("{}", encoding="utf-8")
+
+                def fake_load(_path, *, warning_handler=None):
+                    self.assertIsNotNone(warning_handler)
+                    warning_handler("Legacy project needs path review.")
+                    return {}
+
+                with mock.patch(
+                    "ibc.ui.filedialog.askopenfilename",
+                    return_value=str(project),
+                ), mock.patch(
+                    "ibc.ui.load_project_file", side_effect=fake_load
+                ), mock.patch.object(
+                    workspace, "_apply_project_state"
+                ), mock.patch(
+                    "ibc.ui.messagebox.showwarning"
+                ) as showwarning, mock.patch(
+                    "ibc.ui.messagebox.showinfo"
+                ):
+                    workspace._load_project()
+
+                showwarning.assert_called_once()
+                self.assertIn(
+                    "Legacy project needs path review.",
+                    showwarning.call_args.args[1],
+                )
         finally:
             workspace.deleteLater()
             self.app.processEvents()

@@ -82,7 +82,7 @@ class RequestPlanTests(unittest.TestCase):
             (root / "lines.csv").write_text(
                 LINE_HEADER
                 + "gap_1,panel_gap,1,0,0,0,1,0,0,0,0,1,0,0,1\n"
-                + "gap_1,panel_gap,2,1,0,0,1,1,0,0,0,1,0,0,1\n",
+                + "gap_1,panel_gap,2,1,0,0,1,1,0,0,2,0,0,0,3\n",
                 encoding="utf-8",
             )
             triangles = np.asarray([[[0, 0, 0], [2, 0, 0], [0, 2, 0]]], dtype=float)
@@ -127,6 +127,23 @@ class RequestPlanTests(unittest.TestCase):
                 preview.line_paths_cad_m["panel_gap"]["gap_1"],
                 [[0, 0, 0], [1.0e-3, 0, 0], [1.0e-3, 1.0e-3, 0]],
             )
+            # Orientation vectors remain raw, unitless CAD-frame values. In
+            # particular, both copies of the shared line vertex survive even
+            # when their supplied endpoint normals differ.
+            np.testing.assert_allclose(
+                preview.point_normals_cad["fastener"], [[0.0, 0.0, 1.0]]
+            )
+            np.testing.assert_allclose(
+                preview.point_roll_references_cad["fastener"],
+                [[1.0, 0.0, 0.0]],
+            )
+            line_normals = preview.line_endpoint_normals_cad[
+                "panel_gap"
+            ]["gap_1"]
+            self.assertEqual(line_normals.shape, (2, 2, 3))
+            np.testing.assert_allclose(line_normals[0, 1], [0.0, 0.0, 1.0])
+            np.testing.assert_allclose(line_normals[1, 0], [0.0, 2.0, 0.0])
+            np.testing.assert_allclose(line_normals[1, 1], [0.0, 0.0, 3.0])
 
     def test_input_preview_uses_embedded_bor_profile_without_mesh(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -153,6 +170,38 @@ class RequestPlanTests(unittest.TestCase):
             self.assertIsNone(preview.surface_triangles_cad_m)
             np.testing.assert_allclose(preview.body_profile_rho_z_m, profile)
 
+    def test_input_preview_captures_invalid_vectors_without_validating_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "points.csv").write_text(
+                POINT_HEADER
+                + "p1,fastener,0,0,0,0,0,0,0,0,0\n",
+                encoding="utf-8",
+            )
+            (root / "lines.csv").write_text(
+                LINE_HEADER
+                + "gap_1,gap,1,0,0,0,1,0,0,0,0,0,0,0,0\n",
+                encoding="utf-8",
+            )
+
+            preview = feature_workflow.prepare_feature_input_preview(
+                point_locations_csv="points.csv",
+                line_locations_csv="lines.csv",
+                base_dir=root,
+            )
+
+            np.testing.assert_array_equal(
+                preview.point_normals_cad["fastener"], [[0.0, 0.0, 0.0]]
+            )
+            np.testing.assert_array_equal(
+                preview.point_roll_references_cad["fastener"],
+                [[0.0, 0.0, 0.0]],
+            )
+            np.testing.assert_array_equal(
+                preview.line_endpoint_normals_cad["gap"]["gap_1"],
+                [[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]],
+            )
+
     def test_output_must_not_overwrite_clean_base(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -176,12 +225,12 @@ class RequestPlanTests(unittest.TestCase):
             (root / "antenna.grim").write_bytes(b"point delta")
             (root / "lines.csv").write_text(
                 LINE_HEADER
-                + "gap_1,gap,1,0,0,0,1,0,0,0,0,1,0,0,1\n",
+                + "gap_1,gap,1,0,0,0,1,0,0,0,0,2,0,0,3\n",
                 encoding="utf-8",
             )
             (root / "points.csv").write_text(
                 POINT_HEADER
-                + "p1,antenna,0.25,0.25,0,0,0,1,1,0,0\n",
+                + "p1,antenna,0.25,0.25,0,0,0,2,2,0,1\n",
                 encoding="utf-8",
             )
             surface_in = np.asarray([[
@@ -242,6 +291,17 @@ class RequestPlanTests(unittest.TestCase):
             np.testing.assert_allclose(
                 preview.line_paths_cad_m["gap"]["gap_1"],
                 [[0.0, 0.0, 0.0], [0.0254, 0.0, 0.0]],
+            )
+            np.testing.assert_allclose(
+                preview.point_normals_cad["antenna"], [[0.0, 0.0, 2.0]]
+            )
+            np.testing.assert_allclose(
+                preview.point_roll_references_cad["antenna"],
+                [[2.0, 0.0, 1.0]],
+            )
+            np.testing.assert_allclose(
+                preview.line_endpoint_normals_cad["gap"]["gap_1"],
+                [[[0.0, 0.0, 2.0], [0.0, 0.0, 3.0]]],
             )
 
             # Physics keeps using the rotated BoR axis frame; preview remains

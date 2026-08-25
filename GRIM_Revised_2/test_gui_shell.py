@@ -9,6 +9,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -83,6 +84,30 @@ class _FakeFreddyIntegration(QWidget):
         self.focus_called = True
 
 
+class _FakeRunsWorkspace(QWidget):
+    status_changed = Signal(str)
+    results_downloaded = Signal(str)
+
+    def __init__(self, parent=None, **_kwargs) -> None:
+        super().__init__(parent)
+        self.running = False
+        self.focus_called = False
+        self.save_count = 0
+        self.setLayout(QVBoxLayout())
+
+    def job_is_running(self) -> bool:
+        return self.running
+
+    def busy_operation(self) -> str | None:
+        return "HPC upload and submission" if self.running else None
+
+    def focus_workspace(self) -> None:
+        self.focus_called = True
+
+    def save_settings(self) -> None:
+        self.save_count += 1
+
+
 class _RecordingWindow(grim_cut_gui.GrimCutWindow):
     def __init__(self) -> None:
         self.loaded_path_batches: list[list[str]] = []
@@ -144,16 +169,22 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.freddy_patch = mock.patch.object(
             grim_cut_gui, "FreddyIntegrationWidget", _FakeFreddyIntegration
         )
+        self.runs_patch = mock.patch.object(
+            grim_cut_gui, "RunsWorkspace", _FakeRunsWorkspace
+        )
         self.ghost_patch.start()
         self.feature_patch.start()
         self.freddy_patch.start()
+        self.runs_patch.start()
         self.window = _RecordingWindow()
 
     def tearDown(self) -> None:
         self.window.ghost_integration.running = False
         self.window.freddy_integration.running = False
+        self.window.runs_workspace.running = False
         self.window.deleteLater()
         self.app.processEvents()
+        self.runs_patch.stop()
         self.freddy_patch.stop()
         self.feature_patch.stop()
         self.ghost_patch.stop()
@@ -165,7 +196,16 @@ class UnifiedGuiShellTest(unittest.TestCase):
         ]
         self.assertEqual(
             labels,
-            ["Plotting", "ISAR", "PPT", "Assembly", "GHOST", "FREDDY", "Python"],
+            [
+                "Plotting",
+                "ISAR",
+                "PPT",
+                "Assembly",
+                "GHOST",
+                "FREDDY",
+                "Runs",
+                "Python",
+            ],
         )
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.ppt_workspace), 2
@@ -178,6 +218,9 @@ class UnifiedGuiShellTest(unittest.TestCase):
         )
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.freddy_integration), 5
+        )
+        self.assertEqual(
+            self.window.main_tabs.indexOf(self.window.runs_workspace), 6
         )
         self.assertNotIn("ppt", self.window._plot_contexts)
 
@@ -570,6 +613,61 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertEqual(len(payloads), 1)
         self.assertEqual(payloads[0]["loaded"], [])
         self.assertIn("pool unavailable", payloads[0]["failed"][0])
+
+    def test_grim_archive_expansion_caps_parallel_loader_workers(self) -> None:
+        tasks = [(0, "first.grim"), (1, "second.grim")]
+        expanded = 80 * 1024**2
+        with (
+            mock.patch.object(os.path, "getsize", return_value=1024**2),
+            mock.patch.object(
+                grim_cut_dataset_mixin,
+                "_grim_archive_uncompressed_bytes",
+                return_value=expanded,
+            ),
+            mock.patch.object(
+                grim_cut_dataset_mixin,
+                "_available_memory_bytes",
+                return_value=1024**3,
+            ),
+            mock.patch.object(grim_cut_dataset_mixin.os, "cpu_count", return_value=8),
+        ):
+            workers = grim_cut_dataset_mixin._recommended_loader_workers(tasks)
+
+        self.assertEqual(workers, 1)
+
+    def test_grim_memory_estimate_reads_uncompressed_archive_metadata(self) -> None:
+        payload_size = 2 * 1024**2
+        with tempfile.TemporaryDirectory() as temporary:
+            path = os.path.join(temporary, "compressed.grim")
+            with zipfile.ZipFile(
+                path, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                archive.writestr("rcs_power.npy", b"\0" * payload_size)
+
+            retained, peak = (
+                grim_cut_dataset_mixin._dataset_load_memory_estimate(path)
+            )
+
+        self.assertEqual(retained, payload_size)
+        self.assertGreater(peak, retained)
+
+    def test_unknown_memory_rejects_unsafe_compressed_grim_batch(self) -> None:
+        tasks = [(0, "first.grim"), (1, "second.grim")]
+        with (
+            mock.patch.object(os.path, "getsize", return_value=1024**2),
+            mock.patch.object(
+                grim_cut_dataset_mixin,
+                "_grim_archive_uncompressed_bytes",
+                return_value=300 * 1024**2,
+            ),
+            mock.patch.object(
+                grim_cut_dataset_mixin,
+                "_available_memory_bytes",
+                return_value=None,
+            ),
+        ):
+            with self.assertRaisesRegex(MemoryError, "Load fewer .grim files"):
+                grim_cut_dataset_mixin._recommended_loader_workers(tasks)
 
     def test_batch_save_rejects_sanitized_casefold_collision_before_write(self) -> None:
         self.window._add_dataset_row(_grid(), "Body/A", "first")
@@ -1043,6 +1141,47 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.main_tabs.currentWidget(), self.window.freddy_integration
         )
         self.assertTrue(self.window.freddy_integration.focus_called)
+
+    def test_running_hpc_transfer_blocks_close_but_remote_jobs_do_not(self) -> None:
+        self.window.runs_workspace.running = True
+        event = QCloseEvent()
+        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        warning.assert_called_once()
+        self.assertIn("HPC upload", warning.call_args.args[2])
+        self.assertIs(
+            self.window.main_tabs.currentWidget(), self.window.runs_workspace
+        )
+        self.assertTrue(self.window.runs_workspace.focus_called)
+
+        # A tracked SLURM job is owned by the remote scheduler. Once the
+        # foreground SSH process is done, it must not trap GRIM open.
+        self.window.runs_workspace.running = False
+        event = QCloseEvent()
+        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+            self.window.closeEvent(event)
+        self.assertTrue(event.isAccepted())
+        warning.assert_not_called()
+        self.assertGreater(self.window.runs_workspace.save_count, 0)
+
+    def test_downloaded_hpc_result_tree_reuses_dataset_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "results" / "FRD" / "first.grim"
+            second = root / "results" / "OPN" / "second.ptm"
+            ignored = root / "results" / "solver.log"
+            for path in (first, second, ignored):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"test")
+
+            self.window.runs_workspace.results_downloaded.emit(str(root))
+
+        self.assertEqual(
+            self.window.loaded_path_batches,
+            [[str(first), str(second)]],
+        )
 
     def test_branch_drop_uses_canonical_workspace_tree(self) -> None:
         tree = self.window.assembly_workspace.assembly_tree_panel.tree

@@ -30,6 +30,7 @@ class _FocusProbe(QWidget):
 
 class _FakeImpedanceGui(QMainWindow):
     nominal_artifact_exported = Signal(str, str)
+    nominal_artifact_cleared = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -154,6 +155,13 @@ class FreddyIntegrationTest(unittest.TestCase):
                 self.assertTrue(widget.attach_to_ghost_button.isEnabled())
                 widget.attach_to_ghost_button.click()
 
+                self.assertEqual(
+                    received, [("ibc", str(artifact.resolve()))]
+                )
+
+                widget.workspace.nominal_artifact_cleared.emit()
+                self.assertFalse(widget.attach_to_ghost_button.isEnabled())
+                widget.attach_to_ghost_button.click()
                 self.assertEqual(
                     received, [("ibc", str(artifact.resolve()))]
                 )

@@ -40,6 +40,7 @@ py-modules = [
   "grim_headless",
   "grim_python",
   "ghost_integration",
+  "hpc_remote",
   "ppt_image_imprinter",
   "ppt_plot_data",
   "ppt_report",
@@ -47,6 +48,7 @@ py-modules = [
   "plot_models",
   "ptm_io",
   "read_ss",
+  "runs_workspace",
 ]
 
 [tool.setuptools.packages.find]

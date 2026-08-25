@@ -1,7 +1,7 @@
 # GRIM application
 
 GRIM is the host application for this distribution. Its desktop tabs are
-**Plotting | ISAR | PPT | Assembly | GHOST | FREDDY | Python**. GHOST and FREDDY remain
+**Plotting | ISAR | PPT | Assembly | GHOST | FREDDY | Runs | Python**. GHOST and FREDDY remain
 self-contained tools under `tools/`; GRIM embeds their authoritative user
 interfaces instead of copying their numerical implementations into the
 plotting code.
@@ -41,7 +41,13 @@ an output path or response mapping is required. It is visual QA only.
 **Validate Placements & Preview** then checks the body skin, supplied normals,
 and mapping completeness. **Assemble Coherently & Save** performs the full
 response evaluation and writes the result. The preview draws locations and
-paths; normal and roll vectors are checked numerically but are not yet drawn.
+paths, with magenta arrows for supplied outward point/line-endpoint normals.
+Lavender point arrows show the roll reference projected perpendicular to the
+normal—the solver-effective local `+x`/azimuth-zero direction. Arrow lengths
+are normalized and scaled from the non-vector scene extent for display only;
+they do not encode vector magnitude or alter validation. Input Preview omits
+zero or parallel arrows instead of treating the preview as a validation pass;
+**Validate Placements & Preview** reports those errors precisely.
 
 The viewer's **3-D display only** controls can show axis ticks in meters,
 inches, or feet without changing the meter-valued CAD data. The body can be
@@ -124,6 +130,41 @@ files. Its CSV outputs therefore are not routed into GRIM's RCS dataset table.
 FREDDY background calculations are not cancellable. GRIM blocks application
 close while one is running so the shared process cannot be torn down partway
 through a calculation.
+
+## HPC Runs
+
+The **Runs** tab builds GHOST 2-D or BoR sweep requests from saved `.geo`
+files, their FRD/OPN/BoR roles, frequency and angle grids, geometry units,
+mesh-certification choice, and SLURM resources. **Export Bundle** writes a
+portable, hash-verified folder with relative geometry/material inputs and a
+one-command Linux README. It is a request—not a Windows-created solver run.
+
+**Upload & Submit** builds a fresh temporary copy of the visible request,
+uploads it through Windows OpenSSH or a saved PuTTY/Plink session, and invokes
+the matching `tools/GHOST/Backend/hpc_bundle.py` on the Linux login node. Linux
+then creates the configured driver, absolute paths, runtime/source provenance,
+run manifest, schedule, and SLURM submission. The returned job IDs are tracked
+in the tab; **Refresh**, **Cancel Job**, and **Download Results** reconnect only
+for that operation. Submitted SLURM jobs continue after SSH disconnects and do
+not require GRIM to remain open.
+
+GRIM records the bundle ID and expected remote `stage_result.json` before the
+upload begins. If SSH drops while `sbatch` is running, the run is marked
+**SUBMISSION UNKNOWN** rather than submitted again; use **Refresh** to recover
+the stage result and any job IDs. Refresh also shows recent submission and
+SLURM task logs. Results become downloadable only after SLURM reports a
+terminal state, and GRIM refuses to merge them into an existing local
+`results` folder. The **Remote Python** field defaults to `python3`; point it at
+the cluster virtual-environment interpreter when the default environment does
+not contain GHOST's dependencies.
+
+GRIM stores non-secret connection metadata such as host/profile, username,
+port, remote paths, and identity-file path. It never stores a password,
+passphrase, or private-key contents. Unknown host keys fail closed; verify the
+fingerprint through an approved SSH/PuTTY connection first. Password-only,
+interactive MFA, VPN, jump-host, or site-policy restrictions may require an
+OpenSSH config alias, an approved agent/session, or the manual bundle workflow.
+See `tools/GHOST/HPC.md` for Linux staging and scheduler details.
 
 ## Python recorder
 

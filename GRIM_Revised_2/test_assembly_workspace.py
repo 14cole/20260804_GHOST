@@ -26,6 +26,7 @@ from assembly_workspace import (  # noqa: E402
     feature_preview_group_id,
     format_length_tick,
     normalize_body_render_mode,
+    orientation_vector_length_m,
     revolve_bor_profile_cad,
     triangle_detail_cap,
 )
@@ -48,6 +49,14 @@ class AssemblyGeometryTests(unittest.TestCase):
         self.assertEqual(triangle_detail_cap("High"), 30_000)
         with self.assertRaisesRegex(ValueError, "Fast"):
             triangle_detail_cap("Full")
+
+    def test_orientation_length_uses_nonvector_scene_extent(self):
+        self.assertAlmostEqual(
+            orientation_vector_length_m([[0, 0, 0], [10, 2, 1]]), 0.7
+        )
+        self.assertAlmostEqual(
+            orientation_vector_length_m([[2, 3, 4], [2, 3, 4]]), 0.0254
+        )
 
     def test_bor_profile_revolves_about_cad_nose_axis(self):
         profile = np.asarray(
@@ -260,6 +269,63 @@ class AssemblySceneModelTests(unittest.TestCase):
         self.model.clear()
         self.assertEqual(self.model.group_ids, ())
 
+    def test_point_frames_are_normalized_and_roll_is_projected(self):
+        group = self.model.add_points(
+            "points:frames",
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            normals=[
+                [0.0, 0.0, 2.0],
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 4.0],
+            ],
+            roll_references=[
+                [2.0, 0.0, 5.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 3.0],
+            ],
+            orientation_length_m=0.5,
+        )
+
+        np.testing.assert_allclose(
+            group.style["normal_origins"],
+            [[1.0, 2.0, 3.0], [7.0, 8.0, 9.0]],
+        )
+        np.testing.assert_allclose(
+            group.style["normal_directions"],
+            [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+        )
+        np.testing.assert_allclose(
+            group.style["roll_directions"], [[1.0, 0.0, 0.0]]
+        )
+        # Invalid input-only arrows are omitted here; authoritative placement
+        # validation still reports the zero normal when the user requests it.
+        self.assertEqual(len(group.style["normal_directions"]), 2)
+        self.assertEqual(len(group.style["roll_directions"]), 1)
+
+    def test_line_endpoint_normals_preserve_shared_vertex_duplicates(self):
+        path = np.asarray(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]
+        )
+        group = self.model.add_lines(
+            "lines:frames",
+            path,
+            endpoint_normals=np.asarray(
+                [
+                    [[0.0, 0.0, 2.0], [0.0, 0.0, 3.0]],
+                    [[0.0, 4.0, 0.0], [0.0, 5.0, 0.0]],
+                ]
+            ),
+            orientation_length_m=0.2,
+        )
+
+        origins = group.style["normal_origins"]
+        directions = group.style["normal_directions"]
+        self.assertEqual(origins.shape, (4, 3))
+        np.testing.assert_allclose(origins[1], [1.0, 0.0, 0.0])
+        np.testing.assert_allclose(origins[2], [1.0, 0.0, 0.0])
+        np.testing.assert_allclose(directions[1], [0.0, 0.0, 1.0])
+        np.testing.assert_allclose(directions[2], [0.0, 1.0, 0.0])
+
 
 @unittest.skipUnless(GUI_AVAILABLE, "PySide6/Matplotlib GUI dependencies unavailable")
 class AssemblyGuiTests(unittest.TestCase):
@@ -414,13 +480,45 @@ class AssemblyGuiTests(unittest.TestCase):
                     [[0.1, 0.1, 0.0], [0.9, 0.1, 0.0]]
                 ),
             },
+            point_normals_cad={
+                "antenna": np.asarray([[0.0, 0.0, 2.0]]),
+                "fastener / M4": np.asarray(
+                    [[0.0, 1.0, 0.0], [2.0, 0.0, 0.0]]
+                ),
+            },
+            point_roll_references_cad={
+                "antenna": np.asarray([[2.0, 0.0, 1.0]]),
+                "fastener / M4": np.asarray(
+                    [[1.0, 0.0, 1.0], [0.0, 0.0, 3.0]]
+                ),
+            },
             line_paths_cad_m={
                 "gap main": {
                     "path-b": np.asarray([[0.0, 0.8, 0.0], [1.0, 0.8, 0.0]]),
-                    "path-a": np.asarray([[0.0, 0.2, 0.0], [1.0, 0.2, 0.0]]),
+                    "path-a": np.asarray(
+                        [[0.0, 0.2, 0.0], [0.5, 0.2, 0.0], [1.0, 0.2, 0.0]]
+                    ),
                 },
                 "panel": {
                     "edge": np.asarray([[0.2, 0.0, 0.0], [0.2, 1.0, 0.0]])
+                },
+            },
+            line_endpoint_normals_cad={
+                "gap main": {
+                    "path-b": np.asarray(
+                        [[[0.0, 0.0, 2.0], [0.0, 0.0, 3.0]]]
+                    ),
+                    "path-a": np.asarray(
+                        [
+                            [[0.0, 0.0, 2.0], [0.0, 0.0, 3.0]],
+                            [[0.0, 4.0, 0.0], [0.0, 5.0, 0.0]],
+                        ]
+                    ),
+                },
+                "panel": {
+                    "edge": np.asarray(
+                        [[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]]
+                    )
                 },
             },
         )
@@ -477,11 +575,52 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertIn("2 points", point_branch.child(1).text(0))
         self.assertIn("2 lines", line_branch.child(0).text(0))
 
+        antenna_id = feature_preview_group_id("points", "antenna")
+        antenna = workspace.scene_model.group(antenna_id)
+        np.testing.assert_allclose(
+            antenna.style["normal_directions"], [[0.0, 0.0, 1.0]]
+        )
+        # The raw [2, 0, 1] roll reference is projected into the plane normal
+        # to local +z, exactly as the point solver uses it.
+        np.testing.assert_allclose(
+            antenna.style["roll_directions"], [[1.0, 0.0, 0.0]]
+        )
+        self.assertEqual(len(workspace.scene_canvas._artists[antenna_id]), 3)
+
+        gap_id = feature_preview_group_id("lines", "gap main")
+        gap = workspace.scene_model.group(gap_id)
+        origins = gap.style["normal_origins"]
+        directions = gap.style["normal_directions"]
+        self.assertEqual(origins.shape, (6, 3))
+        np.testing.assert_allclose(origins[1], [0.5, 0.2, 0.0])
+        np.testing.assert_allclose(origins[2], [0.5, 0.2, 0.0])
+        np.testing.assert_allclose(directions[1], [0.0, 0.0, 1.0])
+        np.testing.assert_allclose(directions[2], [0.0, 1.0, 0.0])
+        self.assertEqual(len(workspace.scene_canvas._artists[gap_id]), 2)
+
+        orientation_lengths = {
+            workspace.scene_model.group(group_id).style[
+                "orientation_length_m"
+            ]
+            for group_id in expected_ids[1:]
+        }
+        self.assertEqual(orientation_lengths, {0.07})
+
         panel.tree.set_item_preview_visible(point_branch, False)
         for group_id in expected_ids[1:3]:
             self.assertFalse(workspace.scene_model.group(group_id).visible)
+            stored = workspace.scene_canvas._artists[group_id]
+            artists = stored if isinstance(stored, tuple) else (stored,)
+            self.assertTrue(all(not artist.get_visible() for artist in artists))
         for group_id in (expected_ids[0], *expected_ids[3:]):
             self.assertTrue(workspace.scene_model.group(group_id).visible)
+
+        panel.tree.set_item_preview_visible(line_branch, False)
+        for group_id in expected_ids[3:]:
+            self.assertFalse(workspace.scene_model.group(group_id).visible)
+            stored = workspace.scene_canvas._artists[group_id]
+            artists = stored if isinstance(stored, tuple) else (stored,)
+            self.assertTrue(all(not artist.get_visible() for artist in artists))
 
     def test_bor_body_points_and_lines_are_previewed_together(self):
         from assembly_tree import AssemblyTreePanel
@@ -498,6 +637,17 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertEqual(set(workspace.group_ids), expected)
         self.assertTrue(
             all(workspace.scene_model.group(key).visible for key in expected)
+        )
+        # Four-field preview objects from older integrations remain valid and
+        # render markers/paths without inventing orientation data.
+        legacy_point = workspace.scene_model.group(
+            feature_preview_group_id("points", "antenna")
+        )
+        self.assertEqual(len(legacy_point.style["normal_directions"]), 0)
+        self.assertFalse(
+            isinstance(
+                workspace.scene_canvas._artists[legacy_point.group_id], tuple
+            )
         )
         self.assertEqual(workspace.scene_canvas.preview_state, "ready")
         self.assertIn("BoR body", workspace.lbl_status.text())
@@ -576,6 +726,27 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertEqual(workspace.scene_canvas.preview_state, "error")
         self.assertIn("Preview unavailable", workspace.scene_canvas.feedback_text)
         self.assertIn("no assembly result was changed", workspace.lbl_status.text())
+
+    def test_orientation_key_and_count_mismatches_fail_at_display_boundary(self):
+        from assembly_tree import AssemblyTreePanel
+
+        keyed = self._feature_plan()
+        del keyed.point_normals_cad["antenna"]
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+        with self.assertRaisesRegex(ValueError, "dataset IDs"):
+            workspace.load_feature_preview(keyed)
+        self.assertEqual(workspace.group_ids, ())
+        self.assertEqual(workspace.scene_canvas.preview_state, "error")
+
+        counted = self._feature_plan()
+        counted.point_normals_cad["antenna"] = np.asarray(
+            [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
+        )
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+        with self.assertRaisesRegex(ValueError, r"shape \(1, 3\)"):
+            workspace.load_feature_preview(counted)
+        self.assertEqual(workspace.group_ids, ())
+        self.assertEqual(workspace.scene_canvas.preview_state, "error")
 
     def test_preview_is_excluded_from_response_build_and_serialization(self):
         from assembly_tree import (

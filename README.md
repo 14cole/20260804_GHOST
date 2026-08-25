@@ -2,7 +2,7 @@
 
 This branch is the single-folder distribution of GRIM, GHOST, and FREDDY.
 GRIM is the main desktop application. Its tabs are **Plotting | ISAR | PPT |
-Assembly | GHOST | FREDDY | Python**. GHOST supplies the 2-D and body-of-revolution RCS
+Assembly | GHOST | FREDDY | Runs | Python**. GHOST supplies the 2-D and body-of-revolution RCS
 solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.
@@ -115,19 +115,33 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
   and other analysis CSVs are deliberately excluded from this handoff.
 - Use **GHOST** to create and solve 2-D or axisymmetric BoR geometries. Solver
   `.grim` exports are loaded directly into GRIM.
+- Use **Runs** to export a hash-verified portable HPC request or submit it
+  directly from Windows to a headless Linux SLURM machine over OpenSSH or a
+  saved PuTTY session. Direct mode builds the request from the visible form,
+  uploads it, creates Linux-native provenance, records the returned job IDs,
+  and can refresh status, show the submission log, cancel, or download results.
+  An interrupted submission is recovered from its deterministic remote
+  `stage_result.json` instead of being blindly resubmitted. A configurable
+  remote Python path supports cluster virtual environments, and downloads are
+  terminal-state-only and collision-safe.
+  GRIM stores no SSH password or private-key contents. The exported bundle and
+  its README remain the fallback for VPN, MFA, or site-policy restrictions.
 - Use **Assembly → Place Features** to load the same strict placement CSV used
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
   assembling. Exact headers, examples, and blank-template buttons are built in.
   The display-only viewer supports meter/inch/foot axes, solid/wireframe body
   styles, opacity, and bounded/adaptive facet detail for responsive rotation.
+  It also draws normalized, scene-scaled orientation arrows: magenta for point
+  and line-endpoint normals and lavender for the solver-effective projected
+  point roll/local `+x` direction. These arrows are visual QA only.
 - Use **Plotting** and **ISAR** to inspect and process compatible RCS datasets.
 - Use **Python** to copy or save the readable headless script assembled from
   successful dataset operations and supported rectangular/polar azimuth,
   frequency, and elevation-sweep plot creation/export actions. PBP, Hold
   overlays, and other plot modes are identified in comments instead of being represented as
   falsely equivalent runnable code. Navigation, selection gestures, zoom/pan,
-  and the PPT, Assembly, GHOST, and FREDDY tool workflows are not recorded.
+  and the PPT, Assembly, GHOST, FREDDY, and Runs workflows are not recorded.
 - Use **PPT** to check loaded datasets independently of the Plotting selection,
   choose rectangular/polar azimuth plots or a frequency sweep, and review the
   actual 16:9 slide layout before export. Optional templates must also be blank

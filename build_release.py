@@ -26,6 +26,12 @@ import zipfile
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+from GRIM_Revised_2.grim_diagnostics import (
+    FREDDY_SENTINELS,
+    GHOST_SENTINELS,
+    GRIM_STARTUP_FILES,
+)
+
 
 PRODUCT_NAME = "GRIM"
 MANIFEST_NAME = "SHA256SUMS.txt"
@@ -45,20 +51,26 @@ REQUIRED_FILES = (
     "Launch_GRIM_Diagnostics.bat",
     "Launch_PowerPoint_Image_Imprinter.bat",
     "GRIM_Revised_2/GRIM.png",
-    "GRIM_Revised_2/grim_cut_gui.py",
-    "GRIM_Revised_2/grim_dataset.py",
+    "GRIM_Revised_2/ppt_image_imprinter.py",
+    *(
+        f"GRIM_Revised_2/{Path(relative).as_posix()}"
+        for relative in GRIM_STARTUP_FILES
+    ),
     "tools/GHOST/Launch_GHOST_GUI.bat",
     "tools/GHOST/Launch_GHOST_GUI.command",
-    "tools/GHOST/Backend/ghost_gui.py",
-    "tools/GHOST/Backend/geometry_io.py",
-    "tools/GHOST/Backend/rcs_solver.py",
+    *(
+        f"tools/GHOST/Backend/{Path(relative).as_posix()}"
+        for relative in GHOST_SENTINELS
+    ),
     "tools/GHOST/point_features_template.csv",
     "tools/GHOST/line_features_template.csv",
     "tools/FREDDY/Launch_FREDDY_GUI.bat",
     "tools/FREDDY/Launch_FREDDY_GUI.command",
     "tools/FREDDY/impedance_gui.py",
-    "tools/FREDDY/ibc/compute.py",
-    "tools/FREDDY/ibc/ui.py",
+    *(
+        f"tools/FREDDY/{Path(relative).as_posix()}"
+        for relative in FREDDY_SENTINELS
+    ),
     "tools/FREDDY/materials/air_reference.csv",
 )
 

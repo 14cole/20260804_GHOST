@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 import csv
+import ctypes
+import math
 import os
 import re
 import tempfile
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -1514,7 +1517,91 @@ def _available_memory_bytes() -> int | None:
         import psutil
         return int(psutil.virtual_memory().available)
     except (ImportError, AttributeError, OSError):
+        pass
+
+    # GRIM is commonly copied to a clean workstation where psutil is not yet
+    # installed.  Retain a real memory budget on the two primary deployment
+    # families instead of falling back immediately to CPU-count concurrency.
+    if os.name == "nt":
+        try:
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = (
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                )
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullAvailPhys)
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+    try:
+        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        if pages >= 0 and page_size > 0:
+            return pages * page_size
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+    return None
+
+
+_LOADER_MIN_WORKING_BYTES = 64 * 1024**2
+_LOADER_UNKNOWN_MEMORY_BUDGET_BYTES = 512 * 1024**2
+_GRIM_LOAD_PEAK_FACTOR = 3.5
+
+
+def _grim_archive_uncompressed_bytes(path: str) -> int | None:
+    """Return declared uncompressed NPZ bytes without extracting the archive."""
+
+    if not str(path).casefold().endswith(".grim"):
         return None
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            members = archive.infolist()
+            if not members:
+                return 0
+            return sum(max(0, int(member.file_size)) for member in members)
+    except (OSError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        # The authoritative loader will report a malformed archive.  Keep a
+        # conservative file-size fallback here so planning itself remains
+        # non-destructive and does not mask that parse error.
+        return None
+
+
+def _dataset_load_memory_estimate(path: str) -> tuple[int, int]:
+    """Return conservative ``(retained, per-load peak)`` byte estimates."""
+
+    try:
+        stored_bytes = max(0, int(os.path.getsize(path)))
+    except OSError:
+        stored_bytes = 0
+    expanded_bytes = _grim_archive_uncompressed_bytes(path)
+    if expanded_bytes is not None:
+        retained = max(stored_bytes, int(expanded_bytes))
+        # RcsGrid validates and cleans power/phase into new arrays while the
+        # NPZ members are still live.  Include those transient copies instead
+        # of treating a highly compressed archive as its on-disk byte count.
+        peak = max(
+            _LOADER_MIN_WORKING_BYTES,
+            int(math.ceil(_GRIM_LOAD_PEAK_FACTOR * retained)),
+        )
+        return retained, peak
+
+    # Text/binary importers materialize parser records and final NumPy arrays.
+    # The historical 4x allowance is retained for formats without inspectable
+    # archive metadata, with a minimum workspace for parser/runtime overhead.
+    retained = stored_bytes
+    peak = max(_LOADER_MIN_WORKING_BYTES, 4 * stored_bytes)
+    return retained, peak
 
 
 def _recommended_loader_workers(tasks) -> int:
@@ -1532,19 +1619,47 @@ def _recommended_loader_workers(tasks) -> int:
     target = max(1, min(int(task_count), int(target)))
     if not paths:
         return target
-    # npz parsing and RcsGrid construction can transiently need several times
-    # the archive size. Bound concurrent loads by half of currently available
-    # RAM, and keep very large archives serial even without psutil.
-    largest = max((os.path.getsize(path) for path in paths if os.path.isfile(path)), default=0)
-    per_worker = max(64 * 1024**2, largest * 4)
+    estimates = [_dataset_load_memory_estimate(path) for path in paths]
+    retained_total = sum(retained for retained, _peak in estimates)
+    transient_extras = sorted(
+        (max(0, peak - retained) for retained, peak in estimates),
+        reverse=True,
+    )
     available = _available_memory_bytes()
-    if available is not None:
-        target = min(target, max(1, int((available * 0.5) // per_worker)))
-    elif largest >= 512 * 1024**2:
-        target = 1
-    elif largest >= 128 * 1024**2:
-        target = min(target, 2)
-    return max(1, target)
+    budget = (
+        int(available * 0.5)
+        if available is not None
+        else _LOADER_UNKNOWN_MEMORY_BUDGET_BYTES
+    )
+
+    # Every successfully loaded grid remains in the result batch.  Reserve
+    # that final retained footprint, then admit only as many simultaneous
+    # parse/clean workspaces as fit in the remaining budget.  This prevents a
+    # tiny, highly compressed .grim file from spawning CPU-count workers that
+    # each expand into a large in-memory grid.
+    safe_workers = 0
+    for worker_count in range(1, target + 1):
+        planned_peak = retained_total + sum(transient_extras[:worker_count])
+        if planned_peak <= budget:
+            safe_workers = worker_count
+        else:
+            break
+    if safe_workers < 1:
+        budget_mib = budget / 1024**2
+        required_mib = (
+            retained_total + (transient_extras[0] if transient_extras else 0)
+        ) / 1024**2
+        source = (
+            "available memory"
+            if available is not None
+            else "the conservative fallback budget"
+        )
+        raise MemoryError(
+            f"This dataset batch needs an estimated {required_mib:.0f} MiB "
+            f"but only {budget_mib:.0f} MiB of {source} is reserved for "
+            "loading. Load fewer .grim files at a time."
+        )
+    return safe_workers
 
 
 def _load_dataset_path_task(task: tuple[int, str]) -> dict[str, object]:
@@ -1645,7 +1760,7 @@ class _DatasetLoadWorker(QObject):
                         result = future.result()
                         done_count += 1
                         _consume(result, done_count)
-                used_parallel = True
+                used_parallel = worker_count > 1
         except Exception as exc:
             # Individual parse failures normally arrive as result mappings.
             # This catches pool setup/submission/future faults so the owning
@@ -3720,6 +3835,29 @@ class DatasetOpsMixin:
             )
             return
 
+        target_refs = self._python_input_references(targets) or []
+        measured_ref = self._python_reference_for_dataset(measured)
+        exact_ref = self._python_reference_for_dataset(exact)
+        self._pending_range_record = None
+        if measured_ref is not None and exact_ref is not None:
+            self._pending_range_record = {
+                "targets": {
+                    id(dataset): reference
+                    for (_name, dataset), reference in zip(targets, target_refs)
+                },
+                "measured": measured_ref,
+                "exact": exact_ref,
+                "range_offset_m": float(params["range_offset_m"]),
+                "allow_singleton_angular_broadcast": bool(
+                    params.get("allow_singleton_angular_broadcast", False)
+                ),
+                "maximum_correction_gain_db": params.get(
+                    "maximum_correction_gain_db", 60.0
+                ),
+                "measured_label": measured_name,
+                "exact_label": exact_name,
+            }
+
         worker = _RangeCalibrationWorker(
             targets,
             (measured_name, measured),
@@ -3729,28 +3867,8 @@ class DatasetOpsMixin:
         worker.progress.connect(self._on_range_cal_worker_progress)
         worker.finished.connect(self._on_range_cal_worker_finished)
         self.status.showMessage(f"Range Cal... 0/{len(targets)}")
-        if self._try_start_background_job("Range Cal", worker):
-            target_refs = self._python_input_references(targets) or []
-            measured_ref = self._python_reference_for_dataset(measured)
-            exact_ref = self._python_reference_for_dataset(exact)
-            if measured_ref is not None and exact_ref is not None:
-                self._pending_range_record = {
-                    "targets": {
-                        id(dataset): reference
-                        for (_name, dataset), reference in zip(targets, target_refs)
-                    },
-                    "measured": measured_ref,
-                    "exact": exact_ref,
-                    "range_offset_m": float(params["range_offset_m"]),
-                    "allow_singleton_angular_broadcast": bool(
-                        params.get("allow_singleton_angular_broadcast", False)
-                    ),
-                    "maximum_correction_gain_db": params.get(
-                        "maximum_correction_gain_db", 60.0
-                    ),
-                    "measured_label": measured_name,
-                    "exact_label": exact_name,
-                }
+        if not self._try_start_background_job("Range Cal", worker):
+            self._pending_range_record = None
 
     def _offset_selected(self) -> None:
         datasets = self._selected_datasets_ordered(

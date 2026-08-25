@@ -830,17 +830,34 @@ def submit():
             print(f"    sbatch {sp}")
         return
 
+    submitted_job_ids = []
+    submitted_path = run_dir / "submitted_jobs.json"
     for sp in slurm_paths:
         print(f"\n  Submitting: sbatch {sp.name}")
         res = subprocess.run(
-            [_SBATCH, str(sp)],
+            [_SBATCH, "--parsable", str(sp)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             universal_newlines=True,
         )
         if res.returncode != 0:
             sys.exit(f"sbatch failed (exit {res.returncode}):\n"
                      f"STDOUT: {res.stdout}\nSTDERR: {res.stderr}")
-        print(f"  {res.stdout.strip()}")
+        job_id = res.stdout.strip().split(";", 1)[0].strip()
+        if not job_id.isdigit():
+            sys.exit(f"sbatch returned an invalid job ID: {res.stdout!r}")
+        submitted_job_ids.append(job_id)
+        # Emit immediately as a second recovery channel if journal I/O fails.
+        print(f"  Submitted batch job {job_id}", flush=True)
+        submitted_document = {
+            "schema": "ghost.hpc.submitted-jobs.v1",
+            "job_ids": submitted_job_ids,
+            "updated_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        temporary_path = submitted_path.with_suffix(".json.tmp")
+        temporary_path.write_text(
+            json.dumps(submitted_document, indent=2) + "\n", encoding="utf-8"
+        )
+        temporary_path.replace(submitted_path)
 
     print(f"\nMonitor with:  squeue -u $USER")
     print(f"Outputs in:    {run_dir}/results/")

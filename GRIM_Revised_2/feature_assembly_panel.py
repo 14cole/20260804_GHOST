@@ -1337,9 +1337,12 @@ if GUI_AVAILABLE:
                 "normals, and response mapping completeness. Full response "
                 "compatibility is checked during assembly. Preview visibility "
                 "checkboxes affect only the display, never the coherent build. "
-                "The 3-D view draws point locations and line paths; normal and "
-                "roll vectors are checked numerically during Validate but are "
-                "not drawn yet.",
+                "The 3-D view draws magenta outward normals at point placements "
+                "and every line-segment endpoint. Lavender point arrows show "
+                "the projected roll reference (the solver-effective local +x / "
+                "azimuth-zero direction). Arrow lengths are scaled to the scene "
+                "for display only. Input Preview omits zero or parallel arrows; "
+                "Validate reports those placement errors precisely.",
                 self,
             )
             self.preview_help_label.setWordWrap(True)

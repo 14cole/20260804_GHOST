@@ -17,6 +17,10 @@ from .io import write_impedance_batch
 
 
 MAX_IBC_BATCH_FILES = 1000
+# One million exported frequency rows is roughly tens of megabytes on disk and
+# keeps a desktop batch bounded even when the user combines many thicknesses
+# with an extremely fine frequency increment.
+MAX_IBC_BATCH_TOTAL_POINTS = 1_000_000
 THICKNESS_UNITS = ("mil", "in", "mm")
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -29,6 +33,55 @@ class IbcBatchItem:
     thickness_unit: str
     thickness_in: float
     path: Path
+
+
+def ibc_batch_frequency_count(
+    start_ghz: float,
+    stop_ghz: float,
+    step_ghz: float,
+) -> int:
+    """Return a validated frequency count without allocating the sweep."""
+
+    if not all(
+        math.isfinite(value) for value in (start_ghz, stop_ghz, step_ghz)
+    ):
+        raise ValueError("Frequency start, stop, and step must be finite.")
+    if start_ghz <= 0:
+        raise ValueError("Frequency start must be > 0 GHz.")
+    if step_ghz <= 0:
+        raise ValueError("Frequency step must be > 0 GHz.")
+    if stop_ghz < start_ghz:
+        raise ValueError("Frequency stop must be >= start.")
+    count = int(math.floor((stop_ghz - start_ghz) / step_ghz + 1e-12)) + 1
+    if count <= 0:
+        raise ValueError("Frequency sweep is empty.")
+    return count
+
+
+def validate_ibc_batch_workload(
+    file_count: int,
+    frequency_count: int,
+    *,
+    max_total_points: int = MAX_IBC_BATCH_TOTAL_POINTS,
+) -> int:
+    """Bound total exported rows before allocating or computing a batch."""
+
+    if file_count <= 0:
+        raise ValueError("IBC thickness batch is empty.")
+    if frequency_count <= 0:
+        raise ValueError("IBC batch frequency sweep is empty.")
+    if max_total_points <= 0:
+        raise ValueError("Maximum IBC batch point count must be > 0.")
+    total_points = file_count * frequency_count
+    if total_points > max_total_points:
+        raise ValueError(
+            "IBC batch would export "
+            f"{total_points:,} total frequency rows "
+            f"({file_count:,} files x {frequency_count:,} points); the safe "
+            f"desktop limit is {max_total_points:,}. Use fewer thicknesses or "
+            "a coarser frequency step."
+        )
+    return total_points
 
 
 def _decimal(value: object, label: str) -> Decimal:
@@ -155,11 +208,18 @@ def export_pec_ibc_thickness_batch(
     loaded_layers: list[LoadedLayer],
     layer_index: int,
     frequencies_ghz: list[float],
+    *,
+    max_total_points: int = MAX_IBC_BATCH_TOTAL_POINTS,
 ) -> int:
-    """Compute all rows, then atomically publish every nominal PEC IBC CSV."""
+    """Stage one computed CSV at a time, then atomically publish the batch."""
 
     if not items:
         raise ValueError("IBC thickness batch is empty.")
+    validate_ibc_batch_workload(
+        len(items),
+        len(frequencies_ghz),
+        max_total_points=max_total_points,
+    )
     if layer_index < 0 or layer_index >= len(loaded_layers):
         raise ValueError("Selected IBC batch layer is unavailable.")
     selected = loaded_layers[layer_index]
@@ -183,29 +243,29 @@ def export_pec_ibc_thickness_batch(
                 frequencies_ghz, layer.table_90deg, f"layer {index} 90 deg"
             )
 
-    outputs: list[tuple[Path, list[tuple[float, float, float]]]] = []
-    for item in items:
-        if item.thickness_in <= 0:
-            raise ValueError("Every IBC batch thickness must be > 0 in.")
-        stack = list(loaded_layers)
-        stack[layer_index] = replace(
-            selected, thickness_m=item.thickness_in * INCH_TO_M
-        )
-        impedance = compute_stack_impedance_many(
-            frequencies_ghz, stack, "pec"
-        )
-        outputs.append(
-            (
-                item.path,
-                [
-                    (frequency, value.real, value.imag)
-                    for frequency, value in zip(frequencies_ghz, impedance)
-                ],
+    def outputs():
+        for item in items:
+            if item.thickness_in <= 0:
+                raise ValueError("Every IBC batch thickness must be > 0 in.")
+            stack = list(loaded_layers)
+            stack[layer_index] = replace(
+                selected, thickness_m=item.thickness_in * INCH_TO_M
             )
-        )
+            impedance = compute_stack_impedance_many(
+                frequencies_ghz, stack, "pec"
+            )
+            rows = [
+                (frequency, value.real, value.imag)
+                for frequency, value in zip(frequencies_ghz, impedance)
+            ]
+            yield item.path, rows
+            # The downstream writer has staged this file before resuming the
+            # generator. Release the computed vector and row table before the
+            # next stack solve starts so adjacent outputs never overlap in RAM.
+            del impedance, rows, stack
 
-    # No destination is published until every thickness has computed and every
-    # CSV has staged successfully. The shared writer also rolls the whole set
-    # back if publication fails partway through.
-    write_impedance_batch(outputs, include_header=True)
-    return len(outputs)
+    # The shared writer consumes this generator one file at a time. No
+    # destination is published until every thickness has computed and staged;
+    # a later failure removes all stages or rolls back the complete publication.
+    write_impedance_batch(outputs(), include_header=True)
+    return len(items)

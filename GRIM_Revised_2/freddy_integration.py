@@ -18,6 +18,8 @@ from types import ModuleType
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
+from grim_diagnostics import FREDDY_SENTINELS
+
 
 FREDDY_ROOT_ENV = "FREDDY_ROOT_PATH"
 FREDDY_PACKAGE_NAMESPACE = "_grim_embedded_freddy_ibc"
@@ -57,12 +59,7 @@ def discover_freddy_root(
 ) -> Path | None:
     """Locate a complete FREDDY package without importing it."""
 
-    required = (
-        Path("ibc") / "__init__.py",
-        Path("ibc") / "compute.py",
-        Path("ibc") / "io.py",
-        Path("ibc") / "ui.py",
-    )
+    required = FREDDY_SENTINELS
     for candidate in freddy_root_candidates(explicit):
         if all((candidate / relative).is_file() for relative in required):
             return candidate
@@ -205,6 +202,12 @@ class FreddyIntegrationWidget(QWidget):
             connector = getattr(artifact_signal, "connect", None)
             if callable(connector):
                 connector(self._remember_nominal_artifact)
+            clear_signal = getattr(
+                self.workspace, "nominal_artifact_cleared", None
+            )
+            clear_connector = getattr(clear_signal, "connect", None)
+            if callable(clear_connector):
+                clear_connector(self._clear_attachable_artifact)
             layout.addWidget(self.workspace)
 
     def _remember_nominal_artifact(self, kind: str, path: str) -> None:

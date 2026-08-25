@@ -17,7 +17,9 @@ class GrimDiagnosticsTests(unittest.TestCase):
         for directory in (grim, ghost, freddy / "ibc"):
             directory.mkdir(parents=True, exist_ok=True)
         for relative in diagnostics.GRIM_SENTINELS:
-            (grim / relative).write_text("# sentinel\n", encoding="utf-8")
+            path = grim / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# sentinel\n", encoding="utf-8")
         (grim / "grim_diagnostics.py").write_text("# sentinel\n", encoding="utf-8")
         for relative in diagnostics.GHOST_SENTINELS:
             (ghost / relative).write_text("# sentinel\n", encoding="utf-8")
@@ -95,6 +97,18 @@ class GrimDiagnosticsTests(unittest.TestCase):
             next(result for result in results if result.key == "native_fmm").status,
             "SKIP",
         )
+
+    def test_missing_direct_grim_startup_module_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grim, _ghost, _freddy = self._make_tree(root)
+            os.unlink(grim / "grim_python.py")
+            results = self._collect(root, grim)
+
+        source = next(result for result in results if result.key == "grim_source")
+        self.assertTrue(source.blocks_startup)
+        self.assertIn("grim_python.py", " ".join(source.details))
+        self.assertEqual(diagnostics.startup_exit_code(results), 1)
 
     def test_incomplete_ghost_override_is_authoritative_and_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

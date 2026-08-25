@@ -641,6 +641,11 @@ def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
     _validate_grim_payload(payload)
     out = _ensure_grim_ext(path)
     destination_dir = os.path.dirname(os.path.abspath(out))
+    # Explicit GUI/CLI output paths may include a new subdirectory (for
+    # example ``results/body.grim``).  Create that directory only after the
+    # payload has passed validation, then keep the existing same-directory
+    # staging/replace contract for the file itself.
+    os.makedirs(destination_dir, exist_ok=True)
     temporary_fd, temporary_path = tempfile.mkstemp(
         prefix=f'.{os.path.basename(out)}.',
         suffix='.tmp',
@@ -761,6 +766,7 @@ def _save_grim_npz_batch(
         # Reserve deterministic same-volume staging paths, then let the normal
         # atomic writer validate and populate each one.
         for payload, target in planned:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
             stage_fd, stage = tempfile.mkstemp(
                 prefix=f'.{os.path.basename(target)}.',
                 suffix='.stage.grim',

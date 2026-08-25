@@ -10,6 +10,7 @@ from unittest import mock
 
 from ibc.compute import MaterialTable
 from ibc.io import (
+    PROJECT_SCHEMA_VERSION,
     load_project_file,
     save_project_file,
     write_impedance_bundle,
@@ -65,10 +66,14 @@ class ProjectPathPortabilityTests(unittest.TestCase):
             }
             project.write_text(json.dumps(payload), encoding="utf-8")
 
+            visible_warnings: list[str] = []
             with self.assertWarnsRegex(
                 RuntimeWarning, "historical working-directory meaning"
             ):
-                loaded = load_project_file(project)
+                loaded = load_project_file(
+                    project,
+                    warning_handler=visible_warnings.append,
+                )
 
             self.assertEqual(
                 loaded["layers"][0]["file_0deg"],
@@ -78,6 +83,49 @@ class ProjectPathPortabilityTests(unittest.TestCase):
                 loaded["controls"]["output"],
                 "outputs/legacy.csv",
             )
+            self.assertEqual(len(visible_warnings), 1)
+            self.assertIn("schema 1", visible_warnings[0])
+
+    def test_transitional_schema_one_portable_paths_are_migrated_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "transitional.json"
+            payload = {
+                "schema_version": 1,
+                "path_portability": {
+                    "version": 1,
+                    "base": "project_file_directory",
+                    "nearby_parent_hops": 1,
+                    "external_absolute_paths": [],
+                },
+                "state": {
+                    "layers": [
+                        {
+                            "file_0deg": "materials/portable.csv",
+                            "file_90deg": "",
+                        }
+                    ],
+                    "controls": {"output": "outputs/portable.csv"},
+                },
+            }
+            project.write_text(json.dumps(payload), encoding="utf-8")
+
+            visible_warnings: list[str] = []
+            with self.assertWarnsRegex(RuntimeWarning, "transitional"):
+                loaded = load_project_file(
+                    project,
+                    warning_handler=visible_warnings.append,
+                )
+
+            self.assertEqual(
+                Path(loaded["layers"][0]["file_0deg"]),
+                (root / "materials" / "portable.csv").resolve(),
+            )
+            self.assertEqual(
+                Path(loaded["controls"]["output"]),
+                (root / "outputs" / "portable.csv").resolve(),
+            )
+            self.assertEqual(len(visible_warnings), 1)
 
     def test_relative_live_path_is_resolved_from_runtime_not_project_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,6 +170,9 @@ class ProjectPathPortabilityTests(unittest.TestCase):
 
             self.assertEqual(state, untouched, "saving must not mutate live UI state")
             payload = json.loads(project.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["schema_version"], PROJECT_SCHEMA_VERSION
+            )
             stored = payload["state"]
             self.assertEqual(stored["layers"][0]["file_0deg"], "materials/x.csv")
             self.assertEqual(stored["controls"]["output"], "outputs/nominal.csv")
@@ -197,9 +248,15 @@ class ProjectPathPortabilityTests(unittest.TestCase):
                 {"field": "layers[0].file_0deg", "path": str(external)},
                 metadata,
             )
+            visible_warnings: list[str] = []
             with self.assertWarnsRegex(RuntimeWarning, "external absolute path"):
-                loaded = load_project_file(project)
+                loaded = load_project_file(
+                    project,
+                    warning_handler=visible_warnings.append,
+                )
             self.assertEqual(loaded["layers"][0]["file_0deg"], str(external))
+            self.assertEqual(len(visible_warnings), 1)
+            self.assertIn("layers[0].file_0deg", visible_warnings[0])
 
 
 class AtomicFreddyWriterTests(unittest.TestCase):

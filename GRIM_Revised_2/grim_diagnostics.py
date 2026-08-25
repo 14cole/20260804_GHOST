@@ -24,12 +24,45 @@ from typing import Callable, Iterable, Mapping, Sequence, TextIO
 
 MINIMUM_PYTHON = (3, 10)
 
-GRIM_SENTINELS = (
+# Importing ``grim_cut_gui`` eagerly imports these repository modules before a
+# window can be shown.  Keep this explicit, standard-library-only manifest in
+# the diagnostics module so both the release builder and the diagnostic check
+# validate the same startup contract without importing Qt, Matplotlib, NumPy,
+# or SciPy.  Lazy format readers such as ``ptm_io`` and ``read_ss`` are still
+# packaged, but they are not part of the launch-time gate.
+GRIM_STARTUP_FILES = (
     "grim_cut_gui.py",
-    "grim_dataset.py",
-    "ghost_integration.py",
+    "assembly_tree.py",
+    "assembly_workspace.py",
+    "feature_assembly_panel.py",
     "freddy_integration.py",
+    "ghost_integration.py",
+    "hpc_remote.py",
+    "grim_dataset.py",
+    "grim_diagnostics.py",
+    "grim_headless.py",
+    "grim_python.py",
+    "grim_cut_dataset_mixin.py",
+    "grim_cut_plot_mixin.py",
+    "ppt_workspace.py",
+    "ppt_plot_data.py",
+    "ppt_report.py",
+    "plot_models.py",
+    "runs_workspace.py",
+    Path("plot_modes") / "__init__.py",
+    Path("plot_modes") / "az_vs_range_mode.py",
+    Path("plot_modes") / "azimuth_polar_mode.py",
+    Path("plot_modes") / "azimuth_rect_mode.py",
+    Path("plot_modes") / "compare_mode.py",
+    Path("plot_modes") / "elevation_sweep_mode.py",
+    Path("plot_modes") / "frequency_mode.py",
+    Path("plot_modes") / "isar_mode.py",
+    Path("plot_modes") / "waterfall_mode.py",
 )
+
+# Backwards-compatible name retained for callers and tests that used the
+# original, smaller sentinel tuple.
+GRIM_SENTINELS = GRIM_STARTUP_FILES
 
 # Keep this aligned with the reusable workspace contract in ghost_integration.
 GHOST_SENTINELS = (
@@ -43,15 +76,29 @@ GHOST_SENTINELS = (
     "bor_solver.py",
     "bor_kernels.py",
     "bor_streaming.py",
+    "components.py",
     "solver_quality.py",
     "feature_sum.py",
+    "feature_workflow.py",
+    "hpc_bundle.py",
+    "hpc_common.py",
+    "hpc_scheduler.py",
+    "run_hpc_bor_monostatic.py",
+    "run_hpc_monostatic.py",
     "fmm_helmholtz_2d.py",
+    "frame.py",
+    "line_expand.py",
+    "occluder.py",
+    "surface_mesh.py",
+    "workflow_provenance.py",
 )
 
 FREDDY_SENTINELS = (
     Path("ibc") / "__init__.py",
+    Path("ibc") / "batch.py",
     Path("ibc") / "compute.py",
     Path("ibc") / "io.py",
+    Path("ibc") / "plot.py",
     Path("ibc") / "ui.py",
 )
 
