@@ -1,7 +1,7 @@
 # Body-of-Revolution Solver Conventions
 
 The BoR solver computes true three-dimensional monostatic RCS for an
-axisymmetric body. Its output is `sigma_3d` in square metres and is displayed
+axisymmetric body. Its output is `sigma_3d` in square meters and is displayed
 as dBsm using `10 log10(sigma_3d / 1 m^2)`.
 
 ## Geometry

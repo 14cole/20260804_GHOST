@@ -5,6 +5,7 @@ import csv
 import os
 import re
 import tempfile
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -46,6 +47,11 @@ from grim_headless import (
 # Characters forbidden in filenames on Windows (and `/` on POSIX). Replaced
 # with `_` so dataset names with op symbols like `|`, `÷`, etc. still save.
 _BAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+# Stable identity used by consumers such as the PPT report workspace.  Row
+# numbers and display names can both change, while one dataset can also appear
+# in more than one row, so neither is a safe persistent selection key.
+DATASET_ID_ROLE = Qt.UserRole + 32
 
 
 def _sanitize_filename(name: str | None) -> str:
@@ -1790,16 +1796,24 @@ class DatasetOpsMixin:
 
     def _add_dataset_row(self, dataset: RcsGrid, name: str, history: str, file_name: str | None = None) -> None:
         row = self.table.rowCount()
-        self.table.insertRow(row)
-        name_item = QTableWidgetItem(name)
-        name_item.setData(Qt.UserRole, dataset)
-        file_text = file_name or ""
-        file_item = QTableWidgetItem(file_text)
-        file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
-        history_item = QTableWidgetItem(history)
-        self.table.setItem(row, 0, name_item)
-        self.table.setItem(row, 1, file_item)
-        self.table.setItem(row, 2, history_item)
+        signals_were_blocked = self.table.blockSignals(True)
+        try:
+            self.table.insertRow(row)
+            name_item = QTableWidgetItem(name)
+            name_item.setData(Qt.UserRole, dataset)
+            name_item.setData(DATASET_ID_ROLE, uuid.uuid4().hex)
+            file_text = file_name or ""
+            file_item = QTableWidgetItem(file_text)
+            file_item.setFlags(file_item.flags() & ~Qt.ItemIsEditable)
+            history_item = QTableWidgetItem(history)
+            self.table.setItem(row, 0, name_item)
+            self.table.setItem(row, 1, file_item)
+            self.table.setItem(row, 2, history_item)
+        finally:
+            self.table.blockSignals(signals_were_blocked)
+        notify = getattr(self, "_notify_dataset_catalog_changed", None)
+        if callable(notify):
+            notify()
 
     def _on_dataset_selection_changed(self) -> None:
         selected = self.table.selectionModel().selectedRows()
@@ -1839,6 +1853,9 @@ class DatasetOpsMixin:
         self._update_dataset_selection_order(
             [idx.row() for idx in self.table.selectionModel().selectedRows()]
         )
+        notify = getattr(self, "_notify_dataset_catalog_changed", None)
+        if callable(notify):
+            notify()
 
     def _populate_params(self, dataset: RcsGrid) -> None:
         self._fill_list(self.list_pol, dataset.polarizations)
@@ -1924,6 +1941,9 @@ class DatasetOpsMixin:
                 return
         axis_arr[idx] = new_value
         item.setData(Qt.UserRole, new_value)
+        notify = getattr(self, "_notify_dataset_catalog_changed", None)
+        if callable(notify):
+            notify()
 
     def _selected_indices(self, widget: QListWidget) -> set[int]:
         indices = set()
@@ -2236,6 +2256,9 @@ class DatasetOpsMixin:
             self.table.removeRow(row)
         self.active_dataset = None
         self._clear_param_lists()
+        notify = getattr(self, "_notify_dataset_catalog_changed", None)
+        if callable(notify):
+            notify()
         self.status.showMessage(f"Deleted {len(rows)} dataset(s).")
 
     def _save_selected_datasets(self) -> None:

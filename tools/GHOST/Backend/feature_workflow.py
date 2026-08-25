@@ -112,7 +112,7 @@ class FeatureDatasetRequirements:
 class FeaturePreviewGeometry:
     """Validated full-resolution geometry in the user-visible CAD frame.
 
-    Coordinates are metres.  The body profile remains the frame-free BoR
+    Coordinates are meters.  The body profile remains the frame-free BoR
     ``rho,z`` generatrix.  GRIM may decimate a copy for display, but the full
     surface stored here is the same geometry from which the physics surface
     was constructed.
@@ -396,7 +396,7 @@ def _input_line_preview_paths(
     *,
     coordinate_scale: float,
 ) -> dict[str, dict[str, np.ndarray]]:
-    """Build CAD-metre polylines from already schema-validated line rows."""
+    """Build CAD-meter polylines from already schema-validated line rows."""
 
     result: dict[str, dict[str, np.ndarray]] = {}
     start = 0

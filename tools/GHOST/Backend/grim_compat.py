@@ -16,7 +16,7 @@ There is exactly one thing to know before mixing them:
       2-D         sigma_2d = |A|^2/(4k)    dBke       1/(2 sqrt(k))  <- per freq
       3-D         sigma    = 4 pi |F|^2    dBsm       sqrt(4 pi) = 3.5449
 
-    (2-D "RCS" is a scattering WIDTH in metres, so the length comes from 1/k --
+    (2-D "RCS" is a scattering WIDTH in meters, so the length comes from 1/k --
     which is why that factor moves with frequency; 3-D is a cross-section in m^2
     and the 4 pi is the isotropic reference in the definition of sigma.)
 

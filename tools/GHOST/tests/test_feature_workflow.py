@@ -167,7 +167,7 @@ class RequestPlanTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must differ"):
                 feature_workflow.prepare_feature_assembly(request)
 
-    def test_plan_carries_full_cad_preview_geometry_in_metres(self):
+    def test_plan_carries_full_cad_preview_geometry_in_meters(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "body.grim").touch()

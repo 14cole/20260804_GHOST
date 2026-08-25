@@ -875,9 +875,9 @@ class RcsGrid:
         try:
             offset_m = float(range_offset_m)
         except (TypeError, ValueError) as exc:
-            raise ValueError("range offset must be a finite distance in metres") from exc
+            raise ValueError("range offset must be a finite distance in meters") from exc
         if not np.isfinite(offset_m):
-            raise ValueError("range offset must be a finite distance in metres")
+            raise ValueError("range offset must be a finite distance in meters")
         if not convention_attested:
             raise ValueError(
                 "range calibration requires confirmation that DUT/measured-cal "

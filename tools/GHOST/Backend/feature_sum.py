@@ -573,7 +573,7 @@ def make_delta_grim(clean: 'PathOrList', featured: 'PathOrList', out_path: 'str'
     units = {"azimuth": "deg", "elevation": "deg", "frequency": "GHz",
              "rcs_log_unit": "dBke", "rcs_linear_quantity": "sigma_2d"}
     # A delta is a 2-D quantity, so rcs_power follows the 2-D convention like any
-    # other 2-D cut: sigma_2d = |amp|^2 / (4k), a scattering width in metres (see
+    # other 2-D cut: sigma_2d = |amp|^2 / (4k), a scattering width in meters (see
     # rcs_solver.py's normalization block).  There are only TWO conventions in the
     # toolchain -- 2-D (sigma_2d, dBke) and 3-D (sigma = 4 pi |amp|^2, dBsm) -- and
     # 'delta' is a separate, ORTHOGONAL axis: it says the samples are a
@@ -849,7 +849,7 @@ def _stitch_chains(chains):
 
 
 def outer_generatrix(snapshot, geometry_units: 'str' = "meters") -> 'np.ndarray':
-    """The air-facing surface (rho, z) polyline features sit on, in METRES.
+    """The air-facing surface (rho, z) polyline features sit on, in METERS.
     It is the ordered UNION of TYPE 2 (air|PEC/IBC) and TYPE 3
     (air|dielectric) segments.  A partially coated/banded body contains both;
     preferring TYPE 3 globally would drop every bare exterior span."""
@@ -873,7 +873,7 @@ def outer_generatrix(snapshot, geometry_units: 'str' = "meters") -> 'np.ndarray'
 
 def surface_of_revolution_distance(generatrix: 'np.ndarray',
                                    points: 'np.ndarray') -> 'np.ndarray':
-    """Shortest distance in metres from 3-D points to a revolved profile.
+    """Shortest distance in meters from 3-D points to a revolved profile.
 
     Unlike ``rho(z)`` interpolation, this remains valid on sloped, vertical,
     and re-entrant generatrix segments.
@@ -1029,7 +1029,7 @@ def solve_vehicle_body(geometry, frequencies_ghz, aspects_deg,
     and formulation guards cannot be bypassed.
 
     ``bodies``      {freq_ghz: {"theta_deg", "amp_vv", "amp_hh"}} (both pols).
-    ``generatrix``  the outer air-facing surface (rho, z) in metres, for the
+    ``generatrix``  the outer air-facing surface (rho, z) in meters, for the
                     feature surface normals.
     ``diagnostics`` optional per-frequency solver metadata when
                     ``return_diagnostics=True``.
@@ -1517,7 +1517,7 @@ def save_body_grim(bodies: 'Dict[float, Dict[str, Any]]', out_path: 'str', *,
 
 
 def load_body_profile_grim(path: 'str') -> 'np.ndarray':
-    """Load the embedded metre-valued ``rho,z`` generatrix from a body GRIM."""
+    """Load the embedded meter-valued ``rho,z`` generatrix from a body GRIM."""
     with np.load(path, allow_pickle=False) as payload:
         if (
             "body_profile_rho_m" not in payload.files

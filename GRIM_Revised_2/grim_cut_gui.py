@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import sys
+import uuid
 
 import numpy as np
 
@@ -47,8 +48,9 @@ from freddy_integration import FreddyIntegrationWidget
 from ghost_integration import GhostIntegrationWidget, load_ghost_module
 from grim_dataset import RcsGrid
 from grim_headless import is_supported_path
-from grim_cut_dataset_mixin import DatasetOpsMixin
+from grim_cut_dataset_mixin import DATASET_ID_ROLE, DatasetOpsMixin
 from grim_cut_plot_mixin import PlotOpsMixin
+from ppt_workspace import DatasetCatalogEntry, PptWorkspace
 from plot_models import PlotContext
 
 BLUE_PALETTE = {
@@ -669,6 +671,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.main_tabs.addTab(self.tab_isar, "ISAR")
         self._tab_key_for_index[self.main_tabs.count() - 1] = "isar"
 
+        # PPT owns an independent report selection and a true 16:9 slide
+        # preview. It consumes the same in-memory RcsGrid objects but does not
+        # reparent or alter the Plotting tab's dataset/parameter controls.
+        self.ppt_workspace = PptWorkspace(
+            self,
+            selected_ids_provider=self._selected_dataset_ids_for_ppt,
+        )
+        self.main_tabs.addTab(self.ppt_workspace, "PPT")
+
         # One canonical Assembly workspace replaces the two independent,
         # hidden trees that used to live inside the Plotting and ISAR views.
         self.assembly_workspace = AssemblyWorkspace(self)
@@ -742,10 +753,17 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.feature_assembly_panel.status_changed.connect(
             self.status.showMessage
         )
+        self.ppt_workspace.status_changed.connect(self.status.showMessage)
+        self.ppt_workspace.report_exported.connect(
+            lambda path: self.status.showMessage(
+                f"PowerPoint report saved: {path}"
+            )
+        )
         self.ghost_integration.files_exported.connect(
             self._on_ghost_files_exported
         )
         self.table.itemSelectionChanged.connect(self._on_dataset_selection_changed)
+        self.table.itemChanged.connect(self._on_dataset_table_item_changed)
         self.table.customContextMenuRequested.connect(self._on_dataset_context_menu)
         self.table.horizontalHeader().sectionDoubleClicked.connect(self._on_dataset_header_double_clicked)
         for context in self._plot_contexts.values():
@@ -921,6 +939,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
         self._activate_plot_tab("plotting")
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
+        self._notify_dataset_catalog_changed()
         self._update_plot_color_buttons()
 
     def dragEnterEvent(self, event) -> None:
@@ -1502,12 +1521,68 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         ops_btn.blockSignals(False)
 
     def _on_main_tab_changed(self, index: int) -> None:
+        if self.main_tabs.widget(index) is self.ppt_workspace:
+            self._notify_dataset_catalog_changed()
+            return
         tab_key = self._tab_key_for_index.get(index)
         if tab_key is None:
             return
         self._activate_plot_tab(tab_key)
         self._update_plot_color_buttons()
         self.plot_canvas.draw_idle()
+
+    def _dataset_catalog(self) -> tuple[DatasetCatalogEntry, ...]:
+        """Return stable, ordered dataset references for report consumers."""
+
+        entries: list[DatasetCatalogEntry] = []
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if name_item is None:
+                continue
+            dataset = name_item.data(Qt.UserRole)
+            if not isinstance(dataset, RcsGrid):
+                continue
+            dataset_id = name_item.data(DATASET_ID_ROLE)
+            if not dataset_id:
+                dataset_id = uuid.uuid4().hex
+                name_item.setData(DATASET_ID_ROLE, dataset_id)
+            file_item = self.table.item(row, 1)
+            source = str(getattr(dataset, "source_path", "") or "")
+            if not source and file_item is not None:
+                source = file_item.text().strip()
+            entries.append(
+                DatasetCatalogEntry(
+                    str(dataset_id),
+                    name_item.text().strip() or f"Dataset {row + 1}",
+                    dataset,
+                    source,
+                )
+            )
+        return tuple(entries)
+
+    def _selected_dataset_ids_for_ppt(self) -> tuple[str, ...]:
+        """Snapshot the main table selection without changing either view."""
+
+        ids: list[str] = []
+        for index in sorted(
+            self.table.selectionModel().selectedRows(), key=lambda value: value.row()
+        ):
+            item = self.table.item(index.row(), 0)
+            if item is None:
+                continue
+            dataset_id = item.data(DATASET_ID_ROLE)
+            if dataset_id:
+                ids.append(str(dataset_id))
+        return tuple(ids)
+
+    def _notify_dataset_catalog_changed(self) -> None:
+        workspace = getattr(self, "ppt_workspace", None)
+        if workspace is not None:
+            workspace.set_dataset_catalog(self._dataset_catalog())
+
+    def _on_dataset_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == 0:
+            self._notify_dataset_catalog_changed()
 
     def _connect_param_list(self, widget: QListWidget, axis_name: str) -> None:
         widget.itemChanged.connect(
@@ -1617,7 +1692,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
 
     def _on_feature_preview_ready(self, plan) -> None:
-        """Render only the backend's already-parsed CAD-metre geometry."""
+        """Render only the backend's already-parsed CAD-meter geometry."""
         try:
             self.assembly_workspace.load_feature_preview(plan)
         except Exception as exc:
@@ -1663,6 +1738,18 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "closing GRIM.",
             )
             self.main_tabs.setCurrentIndex(0)
+            event.ignore()
+            return
+        if self.ppt_workspace.job_is_running():
+            operation = self.ppt_workspace.busy_operation() or "PowerPoint report export"
+            QMessageBox.warning(
+                self,
+                "PowerPoint Export Still Running",
+                f"{operation} is still running. Wait for it to finish before "
+                "closing GRIM.",
+            )
+            self.main_tabs.setCurrentWidget(self.ppt_workspace)
+            self.ppt_workspace.focus_workspace()
             event.ignore()
             return
         feature_busy = bool(

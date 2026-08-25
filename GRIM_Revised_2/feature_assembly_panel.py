@@ -23,8 +23,8 @@ from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
 UNIT_CHOICES = (
     ("inches (in)", "inches"),
-    ("millimetres (mm)", "millimeters"),
-    ("metres (m)", "meters"),
+    ("millimeters (mm)", "millimeters"),
+    ("meters (m)", "meters"),
     ("feet (ft)", "feet"),
 )
 
@@ -1283,7 +1283,7 @@ if GUI_AVAILABLE:
             try:
                 values.shadow_bias_m = None if not bias else float(bias)
             except ValueError as exc:
-                raise ValueError("Shadow bias must be a number in metres or blank.") from exc
+                raise ValueError("Shadow bias must be a number in meters or blank.") from exc
             values.point_locations_csv = self.point_csv_picker.path()
             values.line_locations_csv = self.line_csv_picker.path()
             values.point_datasets = self.point_mapping.mapping()

@@ -1,16 +1,17 @@
 # GRIM integrated RCS workbench
 
 This branch is the single-folder distribution of GRIM, GHOST, and FREDDY.
-GRIM is the main desktop application. Its tabs are **Plotting | ISAR |
+GRIM is the main desktop application. Its tabs are **Plotting | ISAR | PPT |
 Assembly | GHOST | FREDDY**. GHOST supplies the 2-D and body-of-revolution RCS
 solvers; FREDDY supplies planar material-stack, impedance, reflection,
-transmission, absorption, and material-mixing analysis.
+transmission, absorption, and material-mixing analysis. PPT builds uniform,
+previewed PowerPoint reports from loaded RCS datasets.
 
 ## Folder layout
 
 ```text
 GRIM/
-  GRIM_Revised_2/       GRIM application, plotting, ISAR, and Assembly
+  GRIM_Revised_2/       GRIM application, plotting, ISAR, PPT, and Assembly
   tools/
     GHOST/              GHOST solver, workflows, tests, and documentation
     FREDDY/             FREDDY planar material and impedance tool
@@ -30,6 +31,16 @@ From the top-level folder:
 py -m pip install -e .
 grim
 ```
+
+To export `.pptx` files on Windows, install the optional PowerPoint bridge and
+have desktop Microsoft PowerPoint available:
+
+```powershell
+py -m pip install -e ".[powerpoint]"
+```
+
+The PPT slide preview works without PowerPoint; only final `.pptx` generation
+uses the desktop application.
 
 The integrated desktop distribution is intentionally run from this complete
 source tree (or an editable install), because the GHOST and FREDDY tabs include
@@ -64,9 +75,18 @@ On macOS, each tool folder contains a matching `.command` launcher.
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
   assembling. Exact headers, examples, and blank-template buttons are built in.
-  The display-only viewer supports metre/inch/foot axes, solid/wireframe body
+  The display-only viewer supports meter/inch/foot axes, solid/wireframe body
   styles, opacity, and bounded/adaptive facet detail for responsive rotation.
 - Use **Plotting** and **ISAR** to inspect and process compatible RCS datasets.
+- Use **PPT** to check loaded datasets independently of the Plotting selection,
+  choose rectangular/polar azimuth plots or a frequency sweep, and review the
+  actual 16:9 slide layout before export. Optional templates must also be blank
+  widescreen 16:9 decks. Azimuth reports always use six fixed
+  positions per slide (3 columns × 2 rows); frequency sweeps use one fixed
+  full-slide plot. A shared vertical scale and fixed image rectangles prevent
+  plots from shifting when slides change or when reports come from different
+  analysts. The first six common frequencies are selected initially; one report
+  is capped at 60 frequencies (10 azimuth slides) to keep the preview responsive.
 
 FREDDY does not calculate finite-object RCS or produce `.grim` datasets.
 Therefore its CSV outputs are not sent to GRIM's RCS dataset loader. Save an

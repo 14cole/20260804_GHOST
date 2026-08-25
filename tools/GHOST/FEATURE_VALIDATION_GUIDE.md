@@ -46,7 +46,7 @@ canonical Assembly tree and the 3-D placement preview:
 4. Select **Preview Inputs in 3-D** at any time to see the STL/facet or embedded
    BoR body together with CSV point locations and line paths. This staged view
    needs neither an output path nor mapped response files and is not a physics
-   validation. Use the **3-D display only** controls to select metre, inch, or
+   validation. Use the **3-D display only** controls to select meter, inch, or
    foot axis labels; solid, edged, or wireframe body rendering; body opacity;
    and Fast/Balanced/High sampled-facet detail. **Faster rotation** temporarily
    uses the Fast display proxy while dragging. These settings do not change
@@ -101,7 +101,7 @@ Use the following without post-solve fitting:
 - Polarization: radar-frame VV and HH plus reciprocal VH. Do not equate a
   solver's spherical theta/phi labels with V/H without transforming the basis.
 - Field normalization: export physical far-field amplitude `F` satisfying
-  `sigma = 4 pi |F|^2` in square metres. RCS is displayed as dBsm.
+  `sigma = 4 pi |F|^2` in square meters. RCS is displayed as dBsm.
 - Preserve signed complex real/imaginary fields. Magnitude-only RCS cannot
   validate or support coherent placement.
 

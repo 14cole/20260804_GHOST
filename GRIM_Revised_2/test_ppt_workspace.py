@@ -1,0 +1,291 @@
+"""Focused regressions for GRIM's PowerPoint workspace."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+_IMPORT_ERROR: Exception | None = None
+try:
+    import numpy as np
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from grim_dataset import RcsGrid
+    from ppt_report import azimuth_3x2_geometry
+    from ppt_workspace import DatasetCatalogEntry, GUI_AVAILABLE, PptWorkspace
+except (ImportError, RuntimeError) as exc:  # pragma: no cover - dependency-specific
+    _IMPORT_ERROR = exc
+    GUI_AVAILABLE = False
+
+
+def _grid(*, frequencies=tuple(range(1, 8)), scale: float = 1.0):
+    azimuths = np.asarray((0.0, 90.0, 180.0, 270.0))
+    elevations = np.asarray((0.0,))
+    frequencies = np.asarray(frequencies, dtype=float)
+    polarizations = np.asarray(("HH", "VV"))
+    shape = (
+        len(azimuths),
+        len(elevations),
+        len(frequencies),
+        len(polarizations),
+    )
+    azimuth_factor = 1.0 + 0.15 * np.arange(shape[0])[:, None, None, None]
+    frequency_factor = 1.0 + 0.08 * np.arange(shape[2])[None, None, :, None]
+    polarization_factor = np.asarray((1.0, 0.7))[None, None, None, :]
+    power = scale * azimuth_factor * frequency_factor * polarization_factor
+    power = np.broadcast_to(power, shape).copy()
+    return RcsGrid(
+        azimuths,
+        elevations,
+        frequencies,
+        polarizations,
+        rcs_power=power,
+        rcs_phase=np.zeros(shape),
+        units={
+            "azimuth": "deg",
+            "elevation": "deg",
+            "frequency": "GHz",
+            "rcs_log_unit": "dBsm",
+            "rcs_linear_quantity": "sigma_3d",
+            "angular_coordinate_system": "conic",
+        },
+        extra={"phase_reference": "common-center"},
+    )
+
+
+@unittest.skipUnless(
+    GUI_AVAILABLE,
+    f"PPT workspace GUI dependencies are unavailable: {_IMPORT_ERROR}",
+)
+class PptWorkspaceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self) -> None:
+        self.widgets: list[PptWorkspace] = []
+
+    def tearDown(self) -> None:
+        for widget in reversed(self.widgets):
+            if widget.job_is_running():
+                deadline = time.monotonic() + 3.0
+                while widget.job_is_running() and time.monotonic() < deadline:
+                    QCoreApplication.processEvents()
+            widget.close()
+            widget.deleteLater()
+        QCoreApplication.processEvents()
+
+    def workspace(self, **kwargs) -> PptWorkspace:
+        widget = PptWorkspace(**kwargs)
+        self.widgets.append(widget)
+        return widget
+
+    @staticmethod
+    def entries():
+        return (
+            DatasetCatalogEntry("a", "Baseline", _grid(scale=1.0), "a.grim"),
+            DatasetCatalogEntry("b", "Modified", _grid(scale=1.4), "b.grim"),
+        )
+
+    def test_catalog_preserves_check_state_and_user_order_by_stable_id(self):
+        widget = self.workspace()
+        first = self.entries()
+        widget.set_dataset_catalog(first)
+        widget.select_dataset_ids(("b",))
+
+        moved = widget.dataset_list.takeItem(1)
+        widget.dataset_list.insertItem(0, moved)
+        self.assertEqual(widget.dataset_ids_in_order(), ("b", "a"))
+
+        widget.set_dataset_catalog(
+            (
+                DatasetCatalogEntry("a", "Baseline renamed", first[0].grid),
+                DatasetCatalogEntry("b", "Modified renamed", first[1].grid),
+                DatasetCatalogEntry("c", "New run", _grid(scale=2.0)),
+            )
+        )
+        self.assertEqual(widget.dataset_ids_in_order(), ("b", "a", "c"))
+        self.assertEqual(widget.selected_dataset_ids(), ("b", "c"))
+        self.assertEqual(widget.dataset_list.item(0).text(), "Modified renamed")
+
+        widget.set_dataset_catalog(
+            (
+                DatasetCatalogEntry("b", "Modified final", first[1].grid),
+                DatasetCatalogEntry("c", "New run", _grid(scale=2.0)),
+            )
+        )
+        self.assertEqual(widget.dataset_ids_in_order(), ("b", "c"))
+        self.assertEqual(widget.selected_dataset_ids(), ("b", "c"))
+
+    def test_seven_frequency_azimuth_preview_pages_six_then_one(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        self.assertEqual(len(widget.selected_frequencies()), 6)
+        widget.select_frequencies(range(1, 8))
+        self.assertEqual(len(widget.selected_frequencies()), 7)
+
+        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+            self.assertTrue(widget.build_preview())
+            render.assert_called_once()
+        plan = widget.preview_plan
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(len(plan.slides), 2)
+        self.assertEqual([len(slide.plots) for slide in plan.slides], [6, 1])
+        geometry = azimuth_3x2_geometry()
+        self.assertEqual(
+            tuple(placement.frame for placement in plan.slides[0].plots),
+            geometry.plot_frames,
+        )
+        self.assertEqual(
+            [placement.slot_index for placement in plan.slides[0].plots],
+            list(range(6)),
+        )
+        self.assertTrue(widget.next_slide_button.isEnabled())
+        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+            widget.next_slide()
+            render.assert_called_once()
+        self.assertEqual(widget.current_slide_index, 1)
+        self.assertTrue(widget.previous_slide_button.isEnabled())
+        self.assertFalse(widget.next_slide_button.isEnabled())
+
+    def test_all_plots_receive_one_shared_or_explicit_fixed_rcs_scale(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        automatic = {
+            placement.plot.y_limits
+            for slide in widget.preview_plan.slides
+            for placement in slide.plots
+        }
+        self.assertEqual(len(automatic), 1)
+        self.assertNotIn(None, automatic)
+
+        widget.scale_mode_combo.setCurrentIndex(
+            widget.scale_mode_combo.findData("fixed")
+        )
+        widget.y_min_spin.setValue(-55.0)
+        widget.y_max_spin.setValue(5.0)
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        fixed = {
+            placement.plot.y_limits
+            for slide in widget.preview_plan.slides
+            for placement in slide.plots
+        }
+        self.assertEqual(fixed, {(-55.0, 5.0)})
+
+    def test_large_frequency_catalog_defaults_to_one_slide_and_limits_one_report(self):
+        widget = self.workspace()
+        entry = DatasetCatalogEntry(
+            "many", "Many frequencies", _grid(frequencies=tuple(range(1, 62)))
+        )
+        widget.set_dataset_catalog((entry,))
+        self.assertEqual(widget.selected_frequencies(), tuple(range(1, 7)))
+        widget.select_frequencies(range(1, 62))
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertFalse(widget.build_preview())
+        self.assertIn("limited to 60", widget.last_error)
+
+    def test_plot_type_switches_between_six_up_and_one_up_controls(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        self.assertFalse(widget.frequency_box.isHidden())
+        self.assertTrue(widget.azimuth_combo.isHidden())
+        self.assertIn("3 columns × 2 rows", widget.layout_value_label.text())
+
+        widget.set_plot_kind("frequency")
+        self.assertTrue(widget.frequency_box.isHidden())
+        self.assertFalse(widget.azimuth_combo.isHidden())
+        self.assertIn("one full-width", widget.layout_value_label.text())
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        self.assertEqual(len(widget.preview_plan.slides), 1)
+        self.assertEqual(widget.preview_plan.slides[0].layout, "frequency_single")
+        self.assertEqual(len(widget.preview_plan.slides[0].plots), 1)
+
+    def test_async_export_uses_frozen_plan_and_exposes_busy_contract(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[tuple[object, str, str | None]] = []
+
+        def fake_export(plan, destination, *, template_path=None):
+            calls.append((plan, str(destination), template_path))
+            started.set()
+            if not release.wait(3.0):
+                raise RuntimeError("test release timed out")
+            Path(destination).write_bytes(b"fake pptx")
+            return Path(destination)
+
+        widget = self.workspace(exporter=fake_export)
+        widget.set_dataset_catalog(self.entries())
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        frozen_plan = widget.preview_plan
+        exported: list[str] = []
+        widget.report_exported.connect(exported.append)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory) / "uniform_report.pptx")
+            widget.output_edit.setText(output)
+            self.assertTrue(widget.export_report())
+            self.assertTrue(started.wait(2.0))
+            self.assertTrue(widget.job_is_running())
+            self.assertEqual(widget.busy_operation(), "PowerPoint report export")
+            self.assertFalse(widget.controls_content.isEnabled())
+            release.set()
+            deadline = time.monotonic() + 4.0
+            while widget.job_is_running() and time.monotonic() < deadline:
+                QCoreApplication.processEvents()
+                time.sleep(0.005)
+            QCoreApplication.processEvents()
+            self.assertFalse(widget.job_is_running())
+            self.assertIsNone(widget.busy_operation())
+            self.assertEqual(len(calls), 1)
+            self.assertIs(calls[0][0], frozen_plan)
+            self.assertEqual(calls[0][1], output)
+            self.assertEqual(exported, [output])
+            self.assertTrue(Path(output).is_file())
+
+    def test_existing_output_requires_explicit_replace_confirmation(self):
+        exporter = mock.Mock()
+        widget = self.workspace(exporter=exporter)
+        widget.set_dataset_catalog(self.entries())
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "existing.pptx"
+            output.write_bytes(b"keep me")
+            widget.output_edit.setText(str(output))
+            with mock.patch(
+                "ppt_workspace.QMessageBox.question",
+                return_value=QMessageBox.StandardButton.No,
+            ) as question:
+                self.assertFalse(widget.export_report())
+            question.assert_called_once()
+            self.assertEqual(output.read_bytes(), b"keep me")
+            exporter.assert_not_called()
+            self.assertIn("existing file was kept", widget.status_label.text())
+
+    def test_empty_catalog_has_actionable_preview_error_and_no_export(self):
+        widget = self.workspace()
+        self.assertFalse(widget.build_preview())
+        self.assertIsNone(widget.preview_plan)
+        self.assertFalse(widget.export_button.isEnabled())
+        self.assertIn("Select at least one loaded dataset", widget.last_error)
+
+
+if __name__ == "__main__":
+    unittest.main()

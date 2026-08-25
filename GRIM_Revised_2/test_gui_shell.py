@@ -27,7 +27,11 @@ import grim_cut_gui
 import grim_cut_dataset_mixin
 import freddy_integration
 import ghost_integration
-from grim_cut_dataset_mixin import ConicGCDialog, RangeCalibrationDialog
+from grim_cut_dataset_mixin import (
+    DATASET_ID_ROLE,
+    ConicGCDialog,
+    RangeCalibrationDialog,
+)
 from assembly_tree import (
     AssemblyTreePanel,
     _TYPE_BRANCH,
@@ -153,17 +157,22 @@ class UnifiedGuiShellTest(unittest.TestCase):
             for index in range(self.window.main_tabs.count())
         ]
         self.assertEqual(
-            labels, ["Plotting", "ISAR", "Assembly", "GHOST", "FREDDY"]
+            labels,
+            ["Plotting", "ISAR", "PPT", "Assembly", "GHOST", "FREDDY"],
         )
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.assembly_workspace), 2
+            self.window.main_tabs.indexOf(self.window.ppt_workspace), 2
         )
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.ghost_integration), 3
+            self.window.main_tabs.indexOf(self.window.assembly_workspace), 3
         )
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.freddy_integration), 4
+            self.window.main_tabs.indexOf(self.window.ghost_integration), 4
         )
+        self.assertEqual(
+            self.window.main_tabs.indexOf(self.window.freddy_integration), 5
+        )
+        self.assertNotIn("ppt", self.window._plot_contexts)
 
         panels = self.window.findChildren(AssemblyTreePanel)
         self.assertEqual(panels, [self.window.assembly_workspace.assembly_tree_panel])
@@ -187,6 +196,47 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertIs(
             left_tabs.currentWidget(),
             self.window.assembly_workspace.place_features_tab,
+        )
+
+    def test_ppt_catalog_tracks_stable_dataset_ids_and_main_selection(self) -> None:
+        first = _grid(1.0)
+        second = _grid(2.0)
+        self.window._add_dataset_row(first, "First", "", "first.grim")
+        self.window._add_dataset_row(second, "Second", "", "second.grim")
+        first_item = self.window.table.item(0, 0)
+        second_item = self.window.table.item(1, 0)
+        first_id = str(first_item.data(DATASET_ID_ROLE))
+        second_id = str(second_item.data(DATASET_ID_ROLE))
+        self.assertTrue(first_id)
+        self.assertTrue(second_id)
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(
+            self.window.ppt_workspace.dataset_ids_in_order(),
+            (first_id, second_id),
+        )
+
+        self.window.ppt_workspace.select_dataset_ids((second_id,))
+        first_item.setText("Renamed first")
+        self.app.processEvents()
+        self.assertEqual(
+            self.window.ppt_workspace.selected_dataset_ids(), (second_id,)
+        )
+        self.assertEqual(
+            self.window.ppt_workspace._catalog[first_id].name, "Renamed first"
+        )
+
+        self.window.table.clearSelection()
+        self.window.table.selectRow(0)
+        self.window.ppt_workspace.use_selected_button.click()
+        self.assertEqual(
+            self.window.ppt_workspace.selected_dataset_ids(), (first_id,)
+        )
+
+        self.window.table.clearSelection()
+        self.window.table.selectRow(1)
+        self.window._delete_selected_datasets()
+        self.assertEqual(
+            self.window.ppt_workspace.dataset_ids_in_order(), (first_id,)
         )
 
     def test_feature_input_preview_becomes_visibly_stale_after_edit(self) -> None:
@@ -621,6 +671,31 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.main_tabs.currentWidget(), self.window.ghost_integration
         )
         self.assertTrue(self.window.ghost_integration.focus_called)
+
+    def test_running_ppt_export_blocks_close_and_focuses_workspace(self) -> None:
+        event = QCloseEvent()
+        with (
+            mock.patch.object(
+                self.window.ppt_workspace, "job_is_running", return_value=True
+            ),
+            mock.patch.object(
+                self.window.ppt_workspace,
+                "busy_operation",
+                return_value="PowerPoint report export",
+            ),
+            mock.patch.object(
+                self.window.ppt_workspace, "focus_workspace"
+            ) as focus_workspace,
+            mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning,
+        ):
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        warning.assert_called_once()
+        focus_workspace.assert_called_once()
+        self.assertIs(
+            self.window.main_tabs.currentWidget(), self.window.ppt_workspace
+        )
 
     def test_running_dataset_job_blocks_close(self) -> None:
         event = QCloseEvent()

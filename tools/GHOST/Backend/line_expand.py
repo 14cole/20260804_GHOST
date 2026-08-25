@@ -539,7 +539,7 @@ def expand_perimeter(segments: 'np.ndarray',
                      ) -> 'Dict[str, np.ndarray]':
     """Expand a seam coefficient along a 3D perimeter.
 
-    ``segments``    (n_seg, 2, 3) vehicle-frame metres, head-to-tail.
+    ``segments``    (n_seg, 2, 3) vehicle-frame meters, head-to-tail.
     ``segment_normals`` optional (n_seg, 2, 3) endpoint outward normals.
                     When supplied these define the local skin frame and
                     ``normal_fn`` must be None.  The endpoint normals are
@@ -680,7 +680,7 @@ def combine(body_amp: 'Dict[str, np.ndarray]',
     mode:
       ``"coherent"`` -- everything summed in amplitude.  The truthful product
         when the relative phase is trustworthy; lobe positions carry
-        millimetre sensitivity (2k*delta) and depend on the calibrated psi.
+        millimeter sensitivity (2k*delta) and depend on the calibrated psi.
       ``"envelope"`` -- powers added.  The angular average of the coherent
         product; immune to phase error, blind to interference.
       ``"hybrid"`` -- features summed coherently WITH EACH OTHER,

@@ -1,7 +1,7 @@
 # GRIM application
 
 GRIM is the host application for this distribution. Its desktop tabs are
-**Plotting | ISAR | Assembly | GHOST | FREDDY**. GHOST and FREDDY remain
+**Plotting | ISAR | PPT | Assembly | GHOST | FREDDY**. GHOST and FREDDY remain
 self-contained tools under `tools/`; GRIM embeds their authoritative user
 interfaces instead of copying their numerical implementations into the
 plotting code.
@@ -43,8 +43,8 @@ and mapping completeness. **Assemble Coherently & Save** performs the full
 response evaluation and writes the result. The preview draws locations and
 paths; normal and roll vectors are checked numerically but are not yet drawn.
 
-The viewer's **3-D display only** controls can show axis ticks in metres,
-inches, or feet without changing the metre-valued CAD data. The body can be
+The viewer's **3-D display only** controls can show axis ticks in meters,
+inches, or feet without changing the meter-valued CAD data. The body can be
 drawn as **Solid**, **Solid + edges**, or **Wireframe**, with adjustable
 opacity. **Preview facet detail** limits Matplotlib to 4,000 (Fast), 12,000
 (Balanced), or 30,000 (High) sampled display facets. With **Faster rotation**
@@ -63,6 +63,49 @@ Point datasets require compatible 3-D delta channels (VV, HH, and reciprocal
 cross-polarization where used). Line datasets require the TE and TM 2-D delta
 responses consumed by line expansion. Shadowing is geometric blockage; it
 does not add diffraction, creeping waves, or body-feature multiple scattering.
+
+## PPT reports
+
+The **PPT** tab turns loaded GRIM datasets into consistent widescreen
+PowerPoint reports. Its dataset check list is independent of the Plotting tab,
+so report overlays can be reordered or changed without changing an active plot
+or dataset-operation selection. **Use main selection** provides an explicit
+one-click handoff when that is desired.
+
+Choose a common polarization and elevation, then one of these fixed layouts:
+
+- **Azimuth — rectangular** or **Azimuth — polar**: one plot for each checked
+  frequency, placed left-to-right in a fixed 3-column × 2-row grid. The seventh
+  frequency begins at the first position of the next slide; unused positions
+  stay empty instead of recentering the plots. GRIM initially checks the first
+  six common frequencies and limits one report to 60 frequencies (10 slides),
+  so very dense solver sweeps do not make the interface appear frozen.
+- **Frequency sweep**: one full-width plot per slide at one exact common
+  azimuth/elevation/polarization cut.
+
+Selected datasets are overlaid within each plot. GRIM uses exact common fixed
+axes and performs no hidden interpolation or extrapolation. Report magnitude
+is taken from stored linear RCS power and converted with the dataset's dBsm or
+dBke convention. **Shared automatic** vertical scaling is the default and is
+calculated once across the complete report; a fixed minimum/maximum can be
+entered when a program uses a prescribed scale. Legends use a fixed position.
+
+**Build Preview** renders the real 16:9 slide geometry used by export. Review
+pages with Previous/Next, choose either a fresh blank deck or an optional blank
+widescreen 16:9 `.pptx`/`.potx` template, and then select **Export PPTX**. Export writes to a
+staging file and replaces the requested output only after PowerPoint succeeds.
+An existing output requires explicit replacement confirmation. The preview
+shows GRIM content on a white page; a custom template's theme and master
+graphics appear only in the exported PPTX, which should be reviewed before use.
+GRIM will not close while an export is running.
+
+The slide preview uses GRIM's normal NumPy/Matplotlib/PySide dependencies.
+Final export currently requires Windows, desktop Microsoft PowerPoint, and the
+optional bridge installed with:
+
+```powershell
+py -m pip install -e ".[powerpoint]"
+```
 
 ## GHOST integration
 

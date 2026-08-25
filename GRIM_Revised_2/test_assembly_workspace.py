@@ -33,11 +33,11 @@ from assembly_workspace import (  # noqa: E402
 
 class AssemblyGeometryTests(unittest.TestCase):
     def test_display_unit_helpers_convert_ticks_without_geometry_conversion(self):
-        self.assertEqual(tuple(DISPLAY_UNIT_SPECS), ("Metres", "Inches", "Feet"))
-        self.assertEqual(display_unit_spec("metres"), ("m", 1.0))
+        self.assertEqual(tuple(DISPLAY_UNIT_SPECS), ("Meters", "Inches", "Feet"))
+        self.assertEqual(display_unit_spec("meters"), ("m", 1.0))
         self.assertAlmostEqual(float(format_length_tick(0.0254, "Inches")), 1.0)
         self.assertAlmostEqual(float(format_length_tick(0.3048, "Feet")), 1.0)
-        with self.assertRaisesRegex(ValueError, "Metres"):
+        with self.assertRaisesRegex(ValueError, "Meters"):
             display_unit_spec("yards")
 
     def test_named_render_and_detail_choices_are_bounded(self):

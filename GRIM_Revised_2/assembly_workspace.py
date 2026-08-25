@@ -7,7 +7,7 @@ decimated before it is handed to Matplotlib.  The caller must retain and pass
 the original surface to the feature-placement service for skin checks and
 shadowing; nothing in this module performs or approximates those calculations.
 
-All scene coordinates are metres in the documented vehicle CAD frame::
+All scene coordinates are meters in the documented vehicle CAD frame::
 
     +x = right, +y = nose, +z = up
 
@@ -54,7 +54,7 @@ GUI_AVAILABLE = _GUI_IMPORT_ERROR is None
 FEATURE_PREVIEW_ROOT_KEY = "feature-assembly"
 
 DISPLAY_UNIT_SPECS = {
-    "Metres": ("m", 1.0),
+    "Meters": ("m", 1.0),
     "Inches": ("in", 1.0 / 0.0254),
     "Feet": ("ft", 1.0 / 0.3048),
 }
@@ -70,19 +70,21 @@ BODY_RENDER_MODES = ("Solid", "Solid + edges", "Wireframe")
 
 
 def display_unit_spec(name: str) -> tuple[str, float]:
-    """Return the axis suffix and metres-to-display scale for one UI choice."""
+    """Return the axis suffix and meters-to-display scale for one UI choice."""
 
     key = str(name).strip().casefold()
+    if key in {"meter", "metre", "metres"}:
+        key = "meters"
     for label, spec in DISPLAY_UNIT_SPECS.items():
         if label.casefold() == key:
             return spec
     raise ValueError(
-        "display units must be Metres, Inches, or Feet"
+        "display units must be Meters, Inches, or Feet"
     )
 
 
 def format_length_tick(value_m: float, units: str) -> str:
-    """Format a metre-valued axis coordinate without changing scene data."""
+    """Format a meter-valued axis coordinate without changing scene data."""
 
     _suffix, scale = display_unit_spec(units)
     value = float(value_m) * scale
@@ -302,7 +304,7 @@ def _line_paths(values: Any) -> tuple[np.ndarray, ...]:
 
 @dataclass
 class AssemblySceneGroup:
-    """One addressable render group in a common CAD/metre scene."""
+    """One addressable render group in a common CAD/meter scene."""
 
     group_id: str
     kind: str
@@ -705,7 +707,7 @@ if GUI_AVAILABLE:
             self.setMinimumSize(360, 280)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.model = model if model is not None else AssemblySceneModel()
-            self._display_units = "Metres"
+            self._display_units = "Meters"
             self._interaction_lod_enabled = True
             self._interaction_detail_caps: dict[str, int | None] = {}
             self.model.add_listener(self._on_model_change)
@@ -774,7 +776,7 @@ if GUI_AVAILABLE:
             for group_id in self.model.group_ids:
                 self._add_artist(self.model.group(group_id))
             self.refresh_scene_feedback()
-            self.set_display_units("Metres")
+            self.set_display_units("Meters")
             self.mpl_connect("button_press_event", self._begin_interaction_lod)
             self.mpl_connect("button_release_event", self._end_interaction_lod)
             self.fit_visible()
@@ -891,7 +893,7 @@ if GUI_AVAILABLE:
             return self._display_units
 
         def set_display_units(self, units: str) -> None:
-            """Change axis labels/ticks while keeping all limits/data in metres."""
+            """Change axis labels/ticks while keeping all limits/data in meters."""
 
             suffix, _scale = display_unit_spec(units)
             for label in DISPLAY_UNIT_SPECS:
@@ -912,7 +914,7 @@ if GUI_AVAILABLE:
             self.setToolTip(
                 f"Drag to rotate and use the mouse wheel to zoom. Axis ticks are "
                 f"shown in {self._display_units.lower()}; underlying CAD and "
-                "physics geometry remains in metres."
+                "physics geometry remains in meters."
             )
             self.draw_idle()
 
@@ -1114,7 +1116,7 @@ if GUI_AVAILABLE:
             minimum_span = 1.0e-6 * reference
             # Keep flat STL facets and isolated point placements visibly
             # rotatable without distorting the data scale. The plot-box aspect
-            # follows these same limits, so one metre remains one metre on all
+            # follows these same limits, so one meter remains one meter on all
             # three axes.
             largest_span = max(float(np.max(span)), minimum_span)
             minimum_span = max(minimum_span, 0.03 * largest_span)
@@ -1213,7 +1215,7 @@ if GUI_AVAILABLE:
                 )
             self.cmb_display_units.setToolTip(
                 "Changes 3-D axis labels and tick values only. CAD and physics "
-                "coordinates always remain metres."
+                "coordinates always remain meters."
             )
             display_row.addWidget(self.cmb_display_units)
 
@@ -1273,7 +1275,7 @@ if GUI_AVAILABLE:
             outer.addLayout(detail_row)
 
             self.lbl_body_detail = QLabel(
-                "Display units: metres. No body preview loaded. Original geometry "
+                "Display units: meters. No body preview loaded. Original geometry "
                 "is unchanged for validation, shadowing, and assembly."
             )
             self.lbl_body_detail.setWordWrap(True)
@@ -1639,7 +1641,7 @@ if GUI_AVAILABLE:
 
         @staticmethod
         def _feature_plan_geometry(plan: object):
-            """Read only the prepared CAD-metre preview contract from a plan."""
+            """Read only the prepared CAD-meter preview contract from a plan."""
 
             required = (
                 "surface_triangles_cad_m",
@@ -1667,7 +1669,7 @@ if GUI_AVAILABLE:
             )
 
         def load_feature_preview(self, plan: object):
-            """Render one already-prepared feature plan in CAD metres.
+            """Render one already-prepared feature plan in CAD meters.
 
             This method never reads a CSV, mesh file, or response dataset. The
             feature workflow owns parsing, units, skin checks, normals, and all
@@ -1853,14 +1855,14 @@ if GUI_AVAILABLE:
                             f"{body_description}; {point_summary}; {line_summary}. "
                             "Check the locations, then "
                             "validate before building. Axes use the selected display "
-                            "units; backend CAD geometry remains metres. Tree Show "
+                            "units; backend CAD geometry remains meters. Tree Show "
                             "boxes change only this display."
                         )
                     else:
                         self.lbl_status.setText(
                             f"Validated preview ready \u2014 {body_description}; "
                             f"{point_summary}; {line_summary}. Axes use the selected "
-                            "display units; backend CAD geometry remains metres. "
+                            "display units; backend CAD geometry remains meters. "
                             "Drag to rotate and "
                             "scroll to zoom. Tree Show boxes change only this preview, "
                             "never the assembled RCS."

@@ -627,7 +627,7 @@ def predict_bor_extent(
     geometry_path: 'str',
     geometry_units: 'str',
 ) -> 'Tuple[float, float]':
-    """(generatrix arc length, maximum radius) of a BoR geometry, in metres.
+    """(generatrix arc length, maximum radius) of a BoR geometry, in meters.
 
     Read straight off the .geo point pairs (x = rho, y = z), so this costs a
     file parse rather than a mesh build.  Returns (0, 0) when the geometry
