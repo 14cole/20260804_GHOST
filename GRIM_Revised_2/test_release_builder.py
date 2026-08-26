@@ -175,6 +175,18 @@ class ReleaseBuilderTests(unittest.TestCase):
 
         self.assertFalse(output.exists())
 
+    def test_missing_material_explorer_dependency_fails_before_output(self) -> None:
+        missing = self.source / "tools" / "FREDDY" / "ibc" / "material_explorer.py"
+        missing.unlink()
+        output = self.root / "must-not-exist"
+
+        with self.assertRaisesRegex(
+            build_release.ReleaseBuildError, "material_explorer.py"
+        ):
+            build_release.build_release(self.source, output)
+
+        self.assertFalse(output.exists())
+
     def test_missing_direct_grim_startup_module_fails_before_output(self) -> None:
         missing = self.source / "GRIM_Revised_2" / "grim_python.py"
         missing.unlink()

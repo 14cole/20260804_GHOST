@@ -46,12 +46,23 @@ from bor_kernels import _mfie_brackets, _ibc_brackets_grid
 
 # -- phase-7c native sampling kernel (ctypes; NumPy fallback if absent) --
 
+def _native_extensions(system_name: 'str') -> 'tuple[str, ...]':
+    """Shared-library suffixes that the current host can safely load."""
+
+    key = str(system_name).strip().lower()
+    if key == "windows":
+        return (".dll",)
+    if key == "darwin":
+        return (".dylib", ".so")
+    return (".so",)
+
+
 def _load_native():
     sysname = platform.system().lower()
     machine = platform.machine().lower()
     here = os.path.dirname(os.path.abspath(__file__))
     for base in (f"bor_stream_kernel.{sysname}-{machine}", "bor_stream_kernel"):
-        for extension in (".so", ".dylib", ".dll"):
+        for extension in _native_extensions(sysname):
             path = os.path.join(here, base + extension)
             if not os.path.exists(path):
                 continue
@@ -92,7 +103,9 @@ def _notice_numpy_fallback():
         return
     _FALLBACK_NOTICE_SHOWN = True
     here = os.path.dirname(os.path.abspath(__file__))
-    tag = f"{platform.system().lower()}-{platform.machine().lower()}"
+    system_name = platform.system().lower()
+    tag = f"{system_name}-{platform.machine().lower()}"
+    output_extension = _native_extensions(system_name)[0]
     others = [f for f in sorted(os.listdir(here))
               if f.startswith("bor_stream_kernel.")
               and os.path.splitext(f)[1].lower() in {".so", ".dylib", ".dll"}
@@ -103,8 +116,11 @@ def _notice_numpy_fallback():
         "bor_streaming: native sampling kernel not available for this "
         f"platform{hint}; using the NumPy fallback (bit-equivalent, ~2-8x "
         "slower assembly). Compile it on THIS machine with:\n"
-        "  cc -O3 -shared -fPIC -o "
-        f"bor_stream_kernel.{tag}.so bor_stream_kernel.c -lm",
+        "  cc -O3 -shared "
+        + ("" if system_name == "windows" else "-fPIC ")
+        + "-o "
+        + f"bor_stream_kernel.{tag}{output_extension} "
+        + "bor_stream_kernel.c -lm",
         file=sys.stderr, flush=True)
 
 

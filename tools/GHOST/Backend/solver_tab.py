@@ -137,7 +137,16 @@ def _native_acceleration_status(
     root = Path(backend or Path(__file__).resolve().parent)
     system_name = platform.system().lower()
     machine_name = platform.machine().lower()
-    extensions = (".so", ".dylib", ".dll")
+    # Never hand a foreign shared-library format to ctypes.  In particular,
+    # loading the checked-in Linux ELF ``fmm_near.so`` with the Windows loader
+    # can block instead of raising OSError promptly.  Generic names remain
+    # supported, but only with extensions the current host can load.
+    if system_name == "windows":
+        extensions = (".dll",)
+    elif system_name == "darwin":
+        extensions = (".dylib", ".so")
+    else:
+        extensions = (".so",)
 
     cython_near = any(
         (root / f"fmm_near_cy{suffix}").is_file()
@@ -166,8 +175,8 @@ def _native_acceleration_status(
     bor_ready = _native_library_available(
         bor_candidates, ("sample_g", "sample_mfie", "sample_ibc")
     )
-    fmm_text = "native" if fmm_ready else "Python fallback (~100× slower near field)"
-    bor_text = "native" if bor_ready else "NumPy fallback (~2–8× slower assembly)"
+    fmm_text = "native" if fmm_ready else "Python fallback (~100x slower near field)"
+    bor_text = "native" if bor_ready else "NumPy fallback (~2-8x slower assembly)"
     summary = f"2-D FMM: {fmm_text}.  BoR streaming: {bor_text}."
     return fmm_ready, bor_ready, summary
 

@@ -1,0 +1,21 @@
+{
+  "schema": "ghost.validation.feature-cases.v1",
+  "gates": {
+    "active_floor_db": -40.0,
+    "max_normalized_rms": 0.25,
+    "max_magnitude_p95_db": 3.5,
+    "max_phase_rms_deg": 25.0,
+    "min_coherence": 0.95
+  },
+  "cases": [
+    {
+      "name": "external full-wave wedge/ramp line and point placement",
+      "body": "closed PEC deck-and-ramp prism",
+      "feature": "sloped and horizontal open gaps plus installed fasteners",
+      "clean_truth": "clean_truth.grim",
+      "clean_prediction": "clean_prediction.grim",
+      "featured_truth": "featured_truth.grim",
+      "featured_prediction": "featured_prediction.grim"
+    }
+  ]
+}

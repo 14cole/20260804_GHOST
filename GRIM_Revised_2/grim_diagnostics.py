@@ -98,6 +98,7 @@ FREDDY_SENTINELS = (
     Path("ibc") / "batch.py",
     Path("ibc") / "compute.py",
     Path("ibc") / "io.py",
+    Path("ibc") / "material_explorer.py",
     Path("ibc") / "plot.py",
     Path("ibc") / "ui.py",
 )
@@ -365,6 +366,17 @@ def _default_library_probe(
     return None, "No matching native binary was found."
 
 
+def _native_library_extensions(system_name: str) -> tuple[str, ...]:
+    """Return only library formats the named host can safely load."""
+
+    key = str(system_name).strip().lower()
+    if key == "windows":
+        return (".dll",)
+    if key == "darwin":
+        return (".dylib", ".so")
+    return (".so",)
+
+
 def _native_results(
     backend: Path,
     *,
@@ -373,6 +385,7 @@ def _native_results(
     library_probe: LibraryProbeFunction,
 ) -> list[DiagnosticResult]:
     tag = f"{system_name.lower()}-{machine_name.lower()}"
+    extensions = _native_library_extensions(system_name)
     results: list[DiagnosticResult] = []
 
     cython_origin = _module_spec_origin("fmm_near_cy", backend)
@@ -390,7 +403,7 @@ def _native_results(
         fmm_candidates = [
             backend / f"{base}{extension}"
             for base in (f"fmm_near.{tag}", "fmm_near")
-            for extension in (".so", ".dylib", ".dll")
+            for extension in extensions
         ]
         loaded, detail = library_probe(fmm_candidates, ("compute_sk_blocks_batch_q",))
         if loaded is not None:
@@ -424,7 +437,7 @@ def _native_results(
     bor_candidates = tuple(
         backend / f"{base}{extension}"
         for base in (f"bor_stream_kernel.{tag}", "bor_stream_kernel")
-        for extension in (".so", ".dylib", ".dll")
+        for extension in extensions
     )
     loaded, detail = library_probe(
         bor_candidates,

@@ -4,6 +4,13 @@ The definitive validation compares the GHOST reduced-order reconstruction with
 an independently solved, directly featured three-dimensional body. Agreement
 must be checked on complex far-field amplitude, not only RCS magnitude.
 
+For a staged non-axisymmetric validation ladder, a four-artifact manifest
+template, and a validator that separately grades the clean baseline, featured
+total, and isolated feature delta, see
+`geometry_tests/non_bor_feature_validation/README.md`. The isolated delta gate
+is required because a dominant clean-body return can conceal a badly phased or
+sign-reversed feature in whole-field metrics.
+
 ## Required comparison set
 
 Create these four whole-body datasets on exactly the same frequencies,
@@ -28,10 +35,10 @@ as a 2-D delta expanded around the same ring.
 ## Assembly tab workflow
 
 The normal interactive path is GRIM's **Assembly** tab in the unified
-**Plotting | ISAR | Assembly | GHOST** application. It contains the one
+application. It contains the one
 canonical Assembly tree and the 3-D placement preview:
 
-1. Open **Place Features**. The neighboring **Combine Datasets / Visibility**
+1. Open **Place Features**. The neighboring **Datasets + Preview Layers**
    tab is for arithmetic on complete GRIM responses, not spatial placement.
 2. Select the clean base monostatic GRIM. For an external 3-D base, select its
    matching STL or indexed ASCII `.facet`
@@ -43,35 +50,44 @@ canonical Assembly tree and the 3-D placement preview:
    Coordinate units come from the form. The form reads
    the `dataset_id` values and creates the dataset mapping rows automatically;
    choose one canonical OPN-FRD response for every row.
-4. Select **Preview Inputs in 3-D** at any time to see the STL/facet or embedded
+4. Select **Preview geometry** at any time to see the STL/facet or embedded
    BoR body together with CSV point locations and line paths. This staged view
    needs neither an output path nor mapped response files and is not a physics
-   validation. Use the **3-D display only** controls to select meter, inch, or
+   validation. If every feature is unchecked, it becomes an explicit clean-body
+   preview. Use the **3-D display only** controls to select meter, inch, or
    foot axis labels; solid, edged, or wireframe body rendering; body opacity;
    and Fast/Balanced/High sampled-facet detail. **Faster rotation** temporarily
    uses the Fast display proxy while dragging. These settings do not change
    coordinate input units or any electromagnetic calculation.
-5. Map every discovered ID, choose the output, then select **Validate
-   Placements & Preview**. Check the body, feature locations, line ordering,
+5. In **Spatial Feature Configuration → Use**, select the point placements and
+   line paths for this variant. Parent checkboxes apply recursively. An
+   unchecked instance is omitted from preview, physical validation, response
+   loading, and assembly; a response used only by disabled instances does not
+   need to be mapped. **Find feature** filters large hierarchies without
+   changing membership, and **Copy full selection** captures the exact mask.
+   Map every response ID that is still active, choose the
+   output, then select **Validate placements**. Check the body, feature
+   locations, line ordering,
    units, and CAD orientation (`+x` right, `+y` nose, `+z` up). Supplied
    outward point and line-endpoint normals are drawn in magenta. The point roll
    reference is projected perpendicular to its normal and drawn in lavender as
    the solver-effective local `+x`/azimuth-zero direction. All arrows are
    normalized and use one display-only length derived from the non-vector scene
    extent; arrow length does not represent input magnitude or affect validation.
-   The input-only preview omits zero or parallel arrows; the Validate action
+   The geometry-only preview omits zero or parallel arrows; validation
    remains responsible for reporting those physical placement errors.
-6. Select **Assemble Coherently & Save** only after the placement report is
+6. Select **Assemble & save** only after the placement report is
    correct. Full response compatibility is enforced while assembling. The
    saved result is automatically available to GRIM as a dataset.
 
-Per-node **Show** checkboxes and the global **Show All** checkbox are preview
-controls only. They never include or exclude a feature from the calculation,
-change coherent/incoherent response membership, or alter the saved field. Do
-not use visual hiding as a physics-selection mechanism. The same rule applies
-to display units, style, opacity, and facet detail: the full source body remains
-authoritative for skin checks, normals, shadowing, and assembly even when the
-Matplotlib preview shows a bounded sampled proxy.
+Per-node **Show** checkboxes and the global **Show All** checkbox under
+**Preview Layers** are preview controls only. They never include or exclude a
+feature from the calculation, change coherent/incoherent response membership,
+or alter the saved field. Use **Spatial Feature Configuration → Use** for that
+purpose. The same rule applies to display units, style, opacity, and facet
+detail: the full source body remains authoritative for skin checks, normals,
+shadowing, and assembly even when the Matplotlib preview shows a bounded
+sampled proxy.
 
 The coherent/incoherent branches of the mathematical Assembly tree accept
 commensurate response datasets, not unexpanded feature coupons. In particular,
@@ -139,7 +155,7 @@ to the reduced-order feature model.
 Use a local 3-D model containing the cavity and enough surrounding body skin to
 capture installation currents.
 
-1. Put the local model origin at the cavity aperture phase centre.
+1. Put the local model origin at the cavity aperture phase center.
 2. Define local `+z` as the outward aperture normal.
 3. Define local azimuth zero with the same clocking vector later supplied as
    `roll_ref`.
@@ -155,7 +171,7 @@ Do not subtract dBsm or linear RCS. Do not use the standalone cavity field.
 The latter would leave the unbroken body skin counted in the BoR solution and
 would omit cavity-to-skin installation coupling.
 
-Place this delta at the same physical aperture phase centre used as the local
+Place this delta at the same physical aperture phase center used as the local
 3-D origin. The direct full-body featured solve then measures the approximation
 left out by placement, principally long-range body/feature mutual coupling and
 multiple scattering.
@@ -216,6 +232,12 @@ model applies when a 2-D GUI subtraction is selected for a line `dataset_id`:
 missing semantic tags are not a blocker. Its stored linear quantity must still
 be sigma_2d, elevation must be the singleton zero cut, and both TE/VV and
 TM/HH must be present.
+
+At elevation `+90` or `-90` degrees, local azimuth is geometrically undefined.
+Use the fixed local `x/y` transverse basis at those poles and store the same
+complex Jones values in every azimuth row. GHOST rejects an azimuth-dependent
+pole instead of allowing roundoff to choose an arbitrary orientation for an
+anisotropic point feature.
 
 Subtraction order changes the coherent answer. The canonical delta is
 `featured - clean`, which is OPN-FRD in the supplied GHOST/CEM workflow. Point
@@ -294,11 +316,30 @@ feature variants that alter the electromagnetic response belong in
 `dataset_id`, not in an amplitude or geometric scale column. The form can save
 a blank line template with the exact header.
 
+At a mesh crease, adjacent segments may use different outward endpoint normals
+at the same shared coordinate. Placement validates one-sided samples within
+each segment and uses the supplied normal only to resolve a true equal-distance
+choice between incident facets; triangle storage order does not own the edge.
+This does not relax the skin, positive-outward-dot, or angular-error gates.
+
+Line order is therefore physical, not cosmetic. Reversing a path reverses the
+coupon's signed across-gap axis; an asymmetric coupon must also be mirrored as
+`A_reversed(phi) = A(180 - phi)`. Use one consistent winding for closed door
+loops and document which side of the 2-D coupon corresponds to the path's
+positive across-gap direction.
+
+Line expansion applies a 10-degree **raised-cosine grazing illumination
+ramp** to complex field amplitude: the weight is zero at grazing, one-half at
+5 degrees above the local tangent plane, and unity at and beyond 10 degrees;
+the back side is zero. This is a look-angle visibility model, not an arclength
+window. It does not taper the ends of an open path, alter a closed-loop seam,
+or add special weights at CSV segment joins.
+
 ## Building a door or seam delta
 
 For the 2-D cross-section pair:
 
-1. Use the same clean host stack and feature-centred origin.
+1. Use the same clean host stack and feature-centered origin.
 2. Run the production 2-D sweep on the required frequency and angular grid;
    every solve automatically stores both VV/TE and HH/TM.
 3. Run `python 1c_build_deltas/subtract_datasets.py OPN FRD Deltas`. This is
@@ -321,13 +362,14 @@ that a locally two-dimensional expansion cannot contain.
 3. Complete the convention checklist above, set
    `ATTEST_GLOBAL_ORIGIN_EXP_PLUS_JWT_RADAR_VH = True`, and run it. The script
    stamps metadata but intentionally performs no fitted correction.
-4. Edit `REFERENCE_PAIRS` in
-   `Backend/validate_feature_reconstruction.py` with a clean baseline pair and
-   a featured pair.
-5. Run:
+4. Copy
+   `geometry_tests/non_bor_feature_validation/feature_cases.template.json`,
+   enter the four paths for each case, and keep them on exactly the same grid.
+5. Run the manifest validator so the clean baseline, featured total, and
+   isolated complex feature delta are all graded:
 
    ```bash
-   python Backend/validate_feature_reconstruction.py
+   python Backend/validate_feature_reconstruction.py --manifest geometry_tests/non_bor_feature_validation/feature_cases.json --report geometry_tests/non_bor_feature_validation/report.json
    ```
 
 The report includes normalized complex RMS error, 95th-percentile magnitude
@@ -340,8 +382,23 @@ large nearly constant phase offset usually indicates a mismatched origin, time
 sign, propagation direction, or far-field definition—not a correction that
 should be fitted away.
 
-The default 3.5 dB and 25-degree gates are uncalibrated initial engineering
-limits; the repository does not contain a reference fixture that establishes
-them. Replace or justify them using your independent comparison, and validate
-representative frequency, aspect, curvature, size, depth, material, and
-placement extremes before distributing a feature library.
+For the deterministic rounded-enclosure, wedge/ramp, swept-wing, and vehicle-
+door handoff, in that execution order, use
+`geometry_tests/non_bor_feature_validation/external_case_plan.json` with
+`prepare_external_cases.py`. It generates 14 case specifications and one
+existing-schema validator manifest without generating any solver result. Its
+preflight checks all four files against the exact 8/10/12 GHz, angle,
+polarization, phase-reference, and complex-amplitude contract. The proposed
+gates are uncalibrated engineering targets until independent converged
+full-wave fields exist.
+
+The always-run all-GHOST circumferential PEC-groove fixture in
+`tests/test_feature_reconstruction_physics.py` now checks the direct BoR delta
+against the placed 2-D delta for one controlled geometry. It is useful evidence
+for coordinate, polarization, normalization, and phase-placement regressions,
+but it is not an independent full-3-D platform reference. The default 3.5 dB
+and 25-degree guide gates therefore remain uncalibrated initial engineering
+limits for other feature families. Replace or justify them using your
+independent comparison, and validate representative frequency, aspect,
+curvature, size, depth, material, and placement extremes before distributing a
+feature library.

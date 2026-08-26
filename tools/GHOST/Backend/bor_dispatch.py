@@ -463,7 +463,7 @@ def estimate_bor_resources(
     )
     # Use the exact same dense-work reservation as the runtime gate. Keeping a
     # second, smaller approximation here can over-admit concurrent scheduler
-    # jobs that the solver then rejects—or that collectively exhaust memory.
+    # jobs that the solver then rejects, or that collectively exhaust memory.
     dense_peak_gb = estimate_bor_dense_peak_gb(
         unknowns,
         2 * int(aspects.size),

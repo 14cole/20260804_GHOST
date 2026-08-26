@@ -352,6 +352,7 @@ from .io import (
     write_impedance_bundle,
     write_material_table,
 )
+from .material_explorer import MaterialExplorerWidget, SourceRequest
 from .plot import nearest_index, style_axis, style_colorbar
 
 APP_ACRONYM = "FREDDY"
@@ -1307,6 +1308,11 @@ class ImpedanceGui(QMainWindow):
         self.nav_group = None
         self.dark_mode_action = None
         self._mode_labels: list[str] = []
+        self.material_explorer: MaterialExplorerWidget | None = None
+        self.layers_group = None
+        self.results_pane = None
+        self.work_split = None
+        self._solver_split_sizes = [320, 380]
         self.angle_tab = None
         self.thickness_tab = None
         self.thk_layer_combo = None
@@ -2278,7 +2284,18 @@ class ImpedanceGui(QMainWindow):
         self._bind_mix_input_invalidation()
         mix_layout.addStretch(1)
 
+        # Material Explorer is informational and session-only. It deliberately
+        # lives inside FREDDY so the same workspace appears in GRIM and in the
+        # standalone launcher, while its file list stays out of project state.
+        self.material_explorer = MaterialExplorerWidget(
+            presets=BUILTIN_MATERIAL_PRESETS,
+            stack_source_provider=self._material_explorer_stack_sources,
+            mix_source_provider=self._material_explorer_mix_sources,
+        )
+        _add_mode("Material Explorer", self.material_explorer)
+
         layers_group = QGroupBox("Layers (top to bottom)")
+        self.layers_group = layers_group
         layers_layout = QHBoxLayout(layers_group)
         self.layer_list = QListWidget()
         self.layer_list.setMinimumHeight(200)
@@ -2318,10 +2335,12 @@ class ImpedanceGui(QMainWindow):
         # Finish the navigation rail and wire mode switching.
         nav_layout.addStretch(1)
         self.nav_group.idClicked.connect(self._select_mode)
+        self.mode_stack.currentChanged.connect(self._on_left_tab_changed)
 
         # Vertical workspace splitter: parameter inputs and the material stack
         # share the top band; the visualization spans the full width below.
         work_split = QSplitter(Qt.Vertical)
+        self.work_split = work_split
         root_layout.addWidget(work_split, 1)
 
         top_pane = QWidget()
@@ -2332,6 +2351,7 @@ class ImpedanceGui(QMainWindow):
         work_split.addWidget(top_pane)
 
         bottom_pane = QWidget()
+        self.results_pane = bottom_pane
         right_layout = QVBoxLayout(bottom_pane)
         right_layout.setContentsMargins(12, 6, 12, 12)
         work_split.addWidget(bottom_pane)
@@ -2442,6 +2462,7 @@ class ImpedanceGui(QMainWindow):
         self._sync_mix_objective_state()
         self._refresh_mix_components_list()
         self._refresh_thickness_layers()
+        self._sync_mode_chrome()
 
     def _on_theme_toggle(self) -> None:
         self._apply_theme()
@@ -2530,6 +2551,23 @@ class ImpedanceGui(QMainWindow):
             background-color: {colors['selection_bg']};
             color: {colors['selection_fg']};
         }}
+        QTableView {{
+            background-color: {colors['field_bg']};
+            alternate-background-color: {colors['panel_bg']};
+            color: {colors['field_fg']};
+            border: 1px solid {colors['preview_border']};
+            gridline-color: {colors['preview_border']};
+            selection-background-color: {colors['selection_bg']};
+            selection-color: {colors['selection_fg']};
+        }}
+        QHeaderView::section {{
+            background-color: {colors['head_bg']};
+            color: {colors['text']};
+            border: 0;
+            border-right: 1px solid {colors['preview_border']};
+            border-bottom: 1px solid {colors['preview_border']};
+            padding: 4px 6px;
+        }}
         QTabWidget::pane {{ border: 1px solid {colors['preview_border']}; }}
         QTabBar::tab {{
             background: {colors['button_bg']};
@@ -2585,6 +2623,8 @@ class ImpedanceGui(QMainWindow):
         """
         self.setStyleSheet(qss)
         self.layer_preview.update()
+        if self.material_explorer is not None:
+            self.material_explorer.apply_theme(colors)
 
         if self.canvas is not None and self.fig is not None:
             self.fig.patch.set_facecolor(colors["plot_bg"])
@@ -3852,9 +3892,53 @@ class ImpedanceGui(QMainWindow):
         timer.start()
 
     def _select_mode(self, index: int) -> None:
-        if self.mode_stack is not None:
+        if self.mode_stack is None:
+            return
+        if self.mode_stack.currentIndex() == index:
+            self._on_left_tab_changed(index)
+        else:
+            # currentChanged owns the refresh so programmatic mode changes and
+            # navigation-button changes follow exactly the same path.
             self.mode_stack.setCurrentIndex(index)
-        self._on_left_tab_changed(None)
+
+    def _material_explorer_stack_sources(self) -> list[SourceRequest]:
+        """Return measured material files referenced by the current stack."""
+
+        requests: list[SourceRequest] = []
+        for index, layer in enumerate(self.layers, start=1):
+            if layer.is_sheet:
+                continue
+            primary = str(layer.file_0deg).strip()
+            if primary:
+                orientation = " 0 deg" if layer.anisotropic else ""
+                requests.append(
+                    (primary, f"Layer {index}{orientation}: {Path(primary).name}")
+                )
+            secondary = str(layer.file_90deg).strip()
+            if layer.anisotropic and secondary:
+                requests.append(
+                    (secondary, f"Layer {index} 90 deg: {Path(secondary).name}")
+                )
+        return requests
+
+    def _material_explorer_mix_sources(self) -> list[SourceRequest]:
+        """Return measured component/target files visible in Material Mix."""
+
+        requests: list[SourceRequest] = []
+        for index, component in enumerate(self.mix_components, start=1):
+            path = str(component.get("file", "")).strip()
+            if path:
+                requests.append(
+                    (path, f"Mix input {index}: {Path(path).name}")
+                )
+        target_is_active = (
+            self._mix_objective_is_property()
+            and self.mix_prop_source_var.get().strip().casefold().startswith("material")
+        )
+        target = self.mix_prop_file_var.get().strip()
+        if target_is_active and target:
+            requests.append((target, f"Mix target: {Path(target).name}"))
+        return requests
 
     def _active_left_tab_label(self) -> str:
         if self.mode_stack is None:
@@ -3873,11 +3957,33 @@ class ImpedanceGui(QMainWindow):
     def _is_mix_tab_active(self) -> bool:
         return self._active_left_tab_label() == "Material Mix"
 
+    def _is_material_explorer_active(self) -> bool:
+        return self._active_left_tab_label() == "Material Explorer"
+
     def _is_thickness_tab_active(self) -> bool:
         return self._active_left_tab_label() == "Thickness"
 
     def _is_heatmap_tab_active(self) -> bool:
         return self._is_angle_tab_active() or self._is_thickness_tab_active()
+
+    def _sync_mode_chrome(self) -> None:
+        """Give informational modes a clean workspace without solver chrome."""
+
+        show_solver_workspace = not self._is_material_explorer_active()
+        if self.layers_group is not None:
+            self.layers_group.setVisible(show_solver_workspace)
+        if self.results_pane is not None:
+            if (
+                not show_solver_workspace
+                and self.work_split is not None
+                and not self.results_pane.isHidden()
+            ):
+                current_sizes = self.work_split.sizes()
+                if len(current_sizes) == 2 and current_sizes[1] > 0:
+                    self._solver_split_sizes = current_sizes
+            self.results_pane.setVisible(show_solver_workspace)
+            if show_solver_workspace and self.work_split is not None:
+                self.work_split.setSizes(self._solver_split_sizes)
 
     def _active_heatmap_view(self) -> HeatmapView | None:
         """The computed heatmap belonging to the active tab, if any. Off Angle
@@ -3906,6 +4012,15 @@ class ImpedanceGui(QMainWindow):
         )
 
     def _on_left_tab_changed(self, _event: object) -> None:
+        if self.mode_stack is not None and self.nav_group is not None:
+            button = self.nav_group.button(self.mode_stack.currentIndex())
+            if button is not None and not button.isChecked():
+                button.setChecked(True)
+        self._sync_mode_chrome()
+        if self._is_material_explorer_active() and self.material_explorer is not None:
+            # This updates changed/missing source markers but does not reread a
+            # file; reload remains an explicit user action.
+            self.material_explorer.refresh_external_state()
         # Slice indices address whichever grid is on screen; drop them so a
         # stale angle index is not reused as a thickness index.
         self.selected_x_idx = None
@@ -4308,6 +4423,8 @@ class ImpedanceGui(QMainWindow):
         self.canvas.draw_idle()
 
     def _update_plot(self) -> None:
+        if self._is_material_explorer_active():
+            return
         if not MPL_AVAILABLE or self.ax_heatmap is None or self.canvas is None:
             return
         if self.plot_frame is not None:

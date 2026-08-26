@@ -75,6 +75,7 @@ BLUE_PALETTE = {
     "checked_bg": "#2563eb",
     "checked_border": "#3b82f6",
     "grid": "#475569",
+    "muted": "#94a3b8",
     "fg": "#dbeafe",
 }
 SPLASH_DURATION_MS = 4000
@@ -213,6 +214,38 @@ def build_qss(palette: dict[str, str]) -> str:
     QWidget#runsControlsContent,
     QWidget#pptControlsContent {{ background: {palette['panel_bg']}; }}
     QWidget#featureAssemblyContent {{ background: {palette['panel_bg']}; }}
+    QLabel#featurePanelIntro {{ font-size: 13px; font-weight: 600; padding: 2px 1px; }}
+    QLabel#featureWorkflowSteps {{
+        background: {palette['head_bg']}; color: {palette['text']};
+        border: 1px solid {palette['border']}; border-radius: 6px;
+        padding: 7px 9px; font-weight: 600;
+    }}
+    QLabel#featureNextStep {{ color: {palette['text']}; padding: 1px 4px 3px 4px; }}
+    QGroupBox#featureStepCard {{
+        border-color: {palette['border']}; background: {palette['panel_bg']};
+        font-weight: 600;
+    }}
+    QGroupBox#featureStepCard QLabel, QGroupBox#featureStepCard QLineEdit,
+    QGroupBox#featureStepCard QComboBox, QGroupBox#featureStepCard QCheckBox,
+    QGroupBox#featureStepCard QPushButton, QGroupBox#featureStepCard QTableWidget {{
+        font-weight: 400;
+    }}
+    QLabel#featureHint, QLabel#featureCsvSummary {{ color: {palette['muted']}; padding: 1px 2px; }}
+    QLabel#featureSummary, QLabel#featureBuildSummary {{
+        background: {palette['head_bg']}; border: 1px solid {palette['border']};
+        border-radius: 5px; padding: 5px 7px;
+    }}
+    QLabel#featureContract {{
+        background: {palette['head_bg']}; border-left: 3px solid {palette['checked_border']};
+        border-radius: 4px; padding: 6px 8px;
+    }}
+    QLabel#featureReadiness {{
+        font-family: "Consolas","Courier New",monospace; padding: 4px 1px;
+    }}
+    QLabel#featureAssemblyStatus {{
+        background: {palette['head_bg']}; border: 1px solid {palette['border']};
+        border-radius: 6px; padding: 6px 8px;
+    }}
     QWidget#plotSettingsContent {{ background: {palette['panel_bg']}; }}
     QLabel#settingsNoMatches {{ color: {palette['grid']}; padding: 4px 2px; }}
     QWidget#dockBody {{ background: {palette['win_bg']}; }}

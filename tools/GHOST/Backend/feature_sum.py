@@ -2125,6 +2125,34 @@ def _load_pattern(pattern, *, declared_coherent_delta=False,
         az = np.concatenate([az, [az[0] + 360.0]])
         amp = np.concatenate([amp, amp[:1]], axis=0)
 
+    # At either spherical pole azimuth is geometrically undefined.  GHOST's
+    # compact-pattern convention resolves that singularity with one fixed
+    # local x/y transverse basis (the same deterministic basis returned by
+    # _pol_unit_vectors).  If a source instead stores an azimuth-rotating
+    # theta/phi basis at the pole, tiny roundoff in a rotated normal can select
+    # an arbitrary azimuth row and change an anisotropic feature's normal-look
+    # Jones matrix.  Fail closed rather than make placement orientation depend
+    # on those meaningless dc_x/dc_y bits.  Match the seam's tight,
+    # serialization-aware complex-field tolerance.
+    pole_indices = np.flatnonzero(np.isclose(
+        np.abs(el), 90.0, rtol=0.0, atol=1.0e-9
+    ))
+    for pole_index in pole_indices:
+        pole = amp[:, pole_index, :, :]
+        if not np.allclose(
+            pole,
+            pole[:1],
+            rtol=2.0e-5,
+            atol=1.0e-10,
+        ):
+            raise ValueError(
+                "point pattern has azimuth-dependent complex amplitudes at "
+                f"elevation {el[pole_index]:g} deg, where azimuth is "
+                "undefined. Canonical compact patterns must use GHOST's "
+                "fixed local x/y pole basis, so every azimuth row at that "
+                "pole must agree."
+            )
+
     idx = {}
     for i, p in enumerate(pols):
         P = p.strip().upper()
@@ -3365,6 +3393,61 @@ def _canonical_3d_channel_indices(polarizations, label, *, require_all=True):
     return channels, [indices[channel] for channel in channels]
 
 
+def _normalize_expected_source_sha256(
+    expected_source_sha256: 'Optional[Dict[str, str]]',
+) -> 'Dict[str, str]':
+    """Validate and canonicalize a prepared execution-source snapshot."""
+
+    if expected_source_sha256 is None:
+        return {}
+    if not hasattr(expected_source_sha256, "items"):
+        raise TypeError(
+            "expected_source_sha256 must be a path-to-SHA256 mapping."
+        )
+    normalized: 'Dict[str, str]' = {}
+    for raw_path, raw_digest in expected_source_sha256.items():
+        path = os.path.abspath(os.fspath(raw_path))
+        digest = str(raw_digest).strip().lower()
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
+        ):
+            raise ValueError(
+                f"Invalid prepared SHA-256 digest for source {path}: "
+                f"{raw_digest!r}."
+            )
+        previous = normalized.get(path)
+        if previous is not None and previous != digest:
+            raise ValueError(
+                f"Conflicting prepared SHA-256 digests for source {path}."
+            )
+        normalized[path] = digest
+    return normalized
+
+
+def _verify_expected_source_sha256(
+    expected_source_sha256: 'Dict[str, str]', *, stage: 'str'
+) -> None:
+    """Fail closed if a prepared source no longer has its prepared bytes."""
+
+    if not expected_source_sha256:
+        return
+    from workflow_provenance import sha256_file
+    for path, expected in expected_source_sha256.items():
+        try:
+            actual = sha256_file(path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"Prepared feature-assembly source is unavailable {stage}: "
+                f"{path}. Output was not published."
+            ) from exc
+        if actual != expected:
+            raise RuntimeError(
+                f"Prepared feature-assembly source changed {stage}: {path}. "
+                "Revalidate the assembly before building; output was not "
+                "published."
+            )
+
+
 def add_features_to_monostatic_grim(
     base_path: 'str',
     out_path: 'str',
@@ -3375,9 +3458,12 @@ def add_features_to_monostatic_grim(
     occluder=None,
     radar_grid: 'Optional[Dict[str, Any]]' = None,
     surface_normal_fn=None,
+    psi_tm_deg: 'float' = PSI_HH_DEG,
+    psi_te_deg: 'float' = PSI_VV_DEG,
     declared_coherent_base: 'bool' = False,
     feature_provenance: 'Optional[Dict[str, Any]]' = None,
     history: 'str' = "",
+    expected_source_sha256: 'Optional[Dict[str, str]]' = None,
 ) -> 'str':
     """Coherently add placed features to one monostatic deliverable.
 
@@ -3385,6 +3471,13 @@ def add_features_to_monostatic_grim(
     field is added sample-by-sample.  Writing is atomic and may target a new
     path or intentionally replace ``base_path``.
     """
+
+    expected_sources = _normalize_expected_source_sha256(
+        expected_source_sha256
+    )
+    _verify_expected_source_sha256(
+        expected_sources, stage="before execution"
+    )
 
     base = os.path.abspath(str(base_path))
     if not os.path.isfile(base):
@@ -3443,6 +3536,8 @@ def add_features_to_monostatic_grim(
             generatrix=profile,
             normal_fn=surface_normal_fn,
             occluder=occluder,
+            psi_tm_deg=psi_tm_deg,
+            psi_te_deg=psi_te_deg,
             frequencies_ghz=grid["frequencies_ghz"],
             azimuths_deg=grid["azimuths_deg"],
             elevations_deg=grid["elevations_deg"],
@@ -3540,6 +3635,22 @@ def add_features_to_monostatic_grim(
             "line_feature_count": int(len(placements)),
             "compact_feature_count": int(len(points)),
             "corner_estimate_count": int(len(corners)),
+            "line_phase_mapping_deg": {
+                "TM": float(psi_tm_deg),
+                "TE": float(psi_te_deg),
+            },
+            "model_scope": {
+                "translation_phase": "exp(+2j*k*d_dot_r)",
+                "body_feature_mutual_coupling": False,
+                "multiple_scattering": False,
+                "line_mapping_evidence": (
+                    "legacy empirical mapping; checked-in validation covers "
+                    "the circumferential PEC groove only"
+                ),
+                "point_pattern_requirement": (
+                    "local installed-feature-minus-clean-skin complex Jones field"
+                ),
+            },
             "details": dict(feature_provenance or {}),
         })
         payload["feature_provenance_json"] = np.asarray(json.dumps(
@@ -3547,6 +3658,13 @@ def add_features_to_monostatic_grim(
         ))
         from grim_io import _save_grim_npz
         _save_grim_npz(payload, output_tmp)
+        # The clean body and line-response GRIMs are opened during execution.
+        # Rechecking after all numerical reads and immediately before the
+        # atomic replace prevents a prepared plan from publishing an artifact
+        # whose bytes no longer match its validation/provenance snapshot.
+        _verify_expected_source_sha256(
+            expected_sources, stage="during execution"
+        )
         os.replace(output_tmp, destination)
     finally:
         for path in (component_tmp, output_tmp):

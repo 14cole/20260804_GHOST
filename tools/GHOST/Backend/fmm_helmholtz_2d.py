@@ -481,7 +481,16 @@ class FMMOperator:
         machine = platform.machine().lower()   # 'arm64', 'x86_64', 'amd64', ...
         here = str(here_path)
         bases = [f'fmm_near.{sysname}-{machine}', 'fmm_near']
-        exts = ['.so', '.dylib', '.dll']
+        # Do not ask ctypes to load a binary format from another operating
+        # system.  Windows may block while probing an ELF .so instead of
+        # rejecting it promptly, which used to freeze GUI construction merely
+        # because the repository also ships a Linux acceleration kernel.
+        if sysname == 'windows':
+            exts = ['.dll']
+        elif sysname == 'darwin':
+            exts = ['.dylib', '.so']
+        else:
+            exts = ['.so']
         for base in bases:
             for ext in exts:
                 path = os.path.join(here, base + ext)

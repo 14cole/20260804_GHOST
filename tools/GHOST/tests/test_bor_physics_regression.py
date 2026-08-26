@@ -940,6 +940,13 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 provenance = json.loads(str(updated["feature_provenance_json"]))
             self.assertEqual(provenance[-1]["line_feature_count"], 0)
             self.assertEqual(provenance[-1]["compact_feature_count"], 0)
+            self.assertEqual(
+                provenance[-1]["line_phase_mapping_deg"],
+                {"TM": feature_sum.PSI_HH_DEG, "TE": feature_sum.PSI_VV_DEG},
+            )
+            self.assertFalse(
+                provenance[-1]["model_scope"]["body_feature_mutual_coupling"]
+            )
 
             pattern = feature_sum.prepare_point_pattern(
                 _constant_compact_pattern()

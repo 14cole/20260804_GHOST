@@ -44,6 +44,14 @@ See:
   phasor, loss, and RCS conventions.
 - [FEATURE_VALIDATION_GUIDE.md](FEATURE_VALIDATION_GUIDE.md) for point and
   line-feature dataset and placement requirements.
+- [geometry_tests/non_bor_feature_validation/README.md](geometry_tests/non_bor_feature_validation/README.md)
+  for the independent four-artifact clean/featured validation ladder and
+  manifest-driven complex-field gates.
+- [geometry_tests/non_bor_line_reconstruction/README.md](geometry_tests/non_bor_line_reconstruction/README.md)
+  for the checked-in finite-plate, door-outline, and folded-panel line tests.
+- [geometry_tests/non_bor_curved_feature_placement/README.md](geometry_tests/non_bor_curved_feature_placement/README.md)
+  for the triaxial-ellipsoid point/line regression and shared-facet normal-tie
+  controls.
 
 ## Feature assembly service
 

@@ -161,6 +161,7 @@ class TriangleSurface:
         )
         magnitude = np.linalg.norm(raw, axis=1)
         extent = _mesh_extent(self.triangles)
+        self.extent = float(extent)
         if np.any(magnitude <= 1e-14 * extent * extent):
             raise ValueError("triangle surface contains a degenerate triangle.")
         sign = -1.0 if bool(flip_normals) else 1.0
@@ -218,11 +219,33 @@ class TriangleSurface:
         closest = np.stack(candidates)[choice, np.arange(len(tris))]
         return distance, closest
 
-    def nearest(self, points) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return distance, closest point, wound face normal, and facet index."""
+    def nearest(
+        self, points, *, normal_hints=None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return distance, closest point, wound face normal, and facet index.
+
+        A point on a shared mesh edge has two or more equally valid incident
+        face normals.  ``normal_hints`` may provide one nonzero vector per
+        query; among faces tied at the exact closest distance, the returned
+        face is the one whose wound normal best aligns with that hint.  This
+        keeps a line or point feature's explicitly supplied outward frame from
+        being rejected merely because triangle storage order owned the tie.
+        The closest-distance result remains unchanged.
+        """
         query = np.atleast_2d(np.asarray(points, dtype=float))
         if query.shape[1] != 3 or not np.all(np.isfinite(query)):
             raise ValueError("surface query points must have shape (n,3) and be finite.")
+        hints = None
+        if normal_hints is not None:
+            hints = np.atleast_2d(np.asarray(normal_hints, dtype=float))
+            if hints.shape != query.shape or not np.all(np.isfinite(hints)):
+                raise ValueError(
+                    "normal_hints must contain one finite 3-vector per point."
+                )
+            hint_magnitude = np.linalg.norm(hints, axis=1)
+            if np.any(hint_magnitude <= 1.0e-12):
+                raise ValueError("normal_hints contains a zero-length vector.")
+            hints = hints / hint_magnitude[:, None]
         best_distance_squared = np.full(len(query), np.inf)
         best_point = np.empty_like(query)
         best_index = np.full(len(query), -1, dtype=int)
@@ -246,6 +269,14 @@ class TriangleSurface:
                 possible = np.asarray(
                     self._centroid_tree.query_ball_point(point, radius), dtype=int
                 )
+            tied = []
+            # A scale-aware roundoff band only groups geometrically coincident
+            # closest points.  It is many ulps wide but far smaller than any
+            # meaningful placement or mesh tolerance.
+            tie_distance = 256.0 * np.finfo(float).eps * max(
+                1.0, self.extent, float(np.linalg.norm(point))
+            )
+            tie_distance_squared = tie_distance * tie_distance
             for start in range(0, len(possible), self.triangle_chunk):
                 indices = possible[start:start + self.triangle_chunk]
                 triangle_distance, closest = self._closest_on_triangles(
@@ -253,10 +284,43 @@ class TriangleSurface:
                 )
                 local_triangle = int(np.argmin(triangle_distance))
                 distance = float(triangle_distance[local_triangle])
+                if hints is None:
+                    if distance < best_distance_squared[point_index]:
+                        best_distance_squared[point_index] = distance
+                        best_index[point_index] = int(indices[local_triangle])
+                        best_point[point_index] = closest[local_triangle]
+                    continue
+
                 if distance < best_distance_squared[point_index]:
                     best_distance_squared[point_index] = distance
-                    best_index[point_index] = int(indices[local_triangle])
-                    best_point[point_index] = closest[local_triangle]
+                tied = [
+                    candidate for candidate in tied
+                    if candidate[0]
+                    <= best_distance_squared[point_index] + tie_distance_squared
+                ]
+                tied_indices = np.flatnonzero(
+                    triangle_distance
+                    <= best_distance_squared[point_index] + tie_distance_squared
+                )
+                for local_index in tied_indices:
+                    facet_index = int(indices[int(local_index)])
+                    tied.append((
+                        float(triangle_distance[int(local_index)]),
+                        facet_index,
+                        closest[int(local_index)],
+                        float(self.face_normals[facet_index] @ hints[point_index]),
+                    ))
+
+            if hints is not None:
+                # Alignment owns a true distance tie; distance and facet index
+                # make the choice deterministic when alignments also tie.
+                _distance, facet_index, closest_point, _alignment = max(
+                    tied, key=lambda candidate: (
+                        candidate[3], -candidate[0], -candidate[1]
+                    )
+                )
+                best_index[point_index] = facet_index
+                best_point[point_index] = closest_point
 
         return (
             np.sqrt(best_distance_squared),

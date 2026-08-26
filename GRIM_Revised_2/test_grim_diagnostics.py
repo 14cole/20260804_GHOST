@@ -98,6 +98,20 @@ class GrimDiagnosticsTests(unittest.TestCase):
             "SKIP",
         )
 
+    def test_missing_material_explorer_dependency_is_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grim, _ghost, freddy = self._make_tree(root)
+            os.unlink(freddy / "ibc" / "material_explorer.py")
+            results = self._collect(root, grim)
+
+        workspace = next(
+            result for result in results if result.key == "freddy_workspace"
+        )
+        self.assertTrue(workspace.blocks_startup)
+        self.assertIn("material_explorer.py", " ".join(workspace.details))
+        self.assertEqual(diagnostics.startup_exit_code(results), 1)
+
     def test_missing_direct_grim_startup_module_is_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -224,6 +238,35 @@ class GrimDiagnosticsTests(unittest.TestCase):
         self.assertEqual(powerpoint.status, "WARN")
         self.assertFalse(powerpoint.blocks_startup)
         self.assertEqual(diagnostics.startup_exit_code(results), 0)
+
+    def test_windows_native_probe_never_offers_foreign_library_formats(self) -> None:
+        offered: list[tuple[Path, ...]] = []
+
+        def library_probe(candidates, _symbols):
+            offered.append(tuple(candidates))
+            return None, "not installed"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            grim, _ghost, _freddy = self._make_tree(root)
+            diagnostics.collect_diagnostics(
+                root,
+                module_directory=grim,
+                environ={},
+                dependency_probe=self._dependencies,
+                system_name="Windows",
+                machine_name="AMD64",
+                library_probe=library_probe,
+                powerpoint_probe=lambda: (False, "not installed"),
+            )
+
+        self.assertEqual(len(offered), 2)
+        for candidates in offered:
+            self.assertTrue(candidates)
+            self.assertTrue(
+                all(candidate.suffix.lower() == ".dll" for candidate in candidates),
+                candidates,
+            )
 
 
 if __name__ == "__main__":

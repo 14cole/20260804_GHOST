@@ -1,0 +1,30 @@
+{
+  "schema": "ghost.validation.feature-cases.v1",
+  "gates": {
+    "active_floor_db": -40.0,
+    "max_normalized_rms": 0.25,
+    "max_magnitude_p95_db": 3.5,
+    "max_phase_rms_deg": 25.0,
+    "min_coherence": 0.95
+  },
+  "cases": [
+    {
+      "name": "flat plate - off-center fastener",
+      "body": "finite rectangular PEC plate",
+      "feature": "installed-minus-clean compact fastener pattern",
+      "clean_truth": "results/plate_clean_3d.grim",
+      "clean_prediction": "results/plate_clean_loaded.grim",
+      "featured_truth": "results/plate_fastener_explicit_3d.grim",
+      "featured_prediction": "results/plate_fastener_assembled.grim"
+    },
+    {
+      "name": "flat plate - straight panel gap",
+      "body": "finite rectangular PEC plate",
+      "feature": "2-D OPN-FRD gap expanded along one straight line",
+      "clean_truth": "results/plate_clean_3d.grim",
+      "clean_prediction": "results/plate_clean_loaded.grim",
+      "featured_truth": "results/plate_gap_explicit_3d.grim",
+      "featured_prediction": "results/plate_gap_assembled.grim"
+    }
+  ]
+}

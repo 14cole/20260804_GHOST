@@ -16,7 +16,7 @@ grim
 ## Assembly
 
 Assembly keeps spatial feature placement under **Place Features** and
-whole-response arithmetic under **Combine Datasets / Visibility**, so a point
+whole-response arithmetic under **Datasets + Preview Layers**, so a point
 or line coupon cannot be confused with a complete platform response. The 3-D
 view remains visible beside both workflows and uses the vehicle CAD frame:
 `+x` right, `+y` nose, and `+z` up.
@@ -24,8 +24,9 @@ view remains visible beside both workflows and uses the vehicle CAD frame:
 The feature form uses the exact strict CSV contracts used by GHOST's local and
 unattended/HPC feature workflow; the GUI does not translate another format.
 The header is followed directly by data rows—do not add a units row or comment
-row. Choose the coordinate units in the form. The form displays an example and
-can save either blank template:
+row. Choose the shared coordinate units in the form. A single point CSV can
+contain all point families and a single line CSV can contain every ordered line
+chain. The form displays an example and can save either blank template:
 
 ```csv
 placement_id,dataset_id,x,y,z,nx,ny,nz,roll_x,roll_y,roll_z
@@ -35,19 +36,36 @@ placement_id,dataset_id,x,y,z,nx,ny,nz,roll_x,roll_y,roll_z
 line_id,dataset_id,segment_index,x1,y1,z1,x2,y2,z2,n1x,n1y,n1z,n2x,n2y,n2z
 ```
 
-Selecting **Preview Inputs in 3-D** parses those same CSVs and displays their
+Selecting **Preview geometry** parses those same CSVs and displays their
 locations with the selected STL/facet surface or embedded BoR profile before
 an output path or response mapping is required. It is visual QA only.
-**Validate Placements & Preview** then checks the body skin, supplied normals,
-and mapping completeness. **Assemble Coherently & Save** performs the full
-response evaluation and writes the result. The preview draws locations and
+After parsing, **Spatial Feature Configuration → Use** presents the clean body,
+point families/placements, and line families/paths as a hierarchy. Unchecking
+a family or instance omits it from preview, physical validation, response
+loading, and build; disabled-only response families do not need a mapping.
+This live selection survives a rescan of the same CSV for IDs that still exist,
+while new IDs default enabled and choosing a different CSV resets the choice.
+Use **Find feature** to filter by instance ID, dataset ID, or mapped response;
+filtering never changes membership. **Copy full selection** records the exact
+enabled/disabled configuration even when the on-screen summary is shortened.
+If every feature is unchecked, **Preview geometry** deliberately shows the
+clean body alone; validation and build still require at least one enabled
+feature.
+**Validate placements** then checks the body skin, supplied normals, and mapping
+completeness. **Assemble & save** performs the full response evaluation and
+writes the result. An unchanged validated plan is reused at assembly time; any
+path, option, or source-file change invalidates it. Prepared base, surface,
+placement CSV, and active response bytes are hash-checked again before the
+atomic output is published. Existing output replacement
+requires confirmation, and output aliases of the clean body or mapped responses
+are rejected. The preview draws locations and
 paths, with magenta arrows for supplied outward point/line-endpoint normals.
 Lavender point arrows show the roll reference projected perpendicular to the
 normal—the solver-effective local `+x`/azimuth-zero direction. Arrow lengths
 are normalized and scaled from the non-vector scene extent for display only;
-they do not encode vector magnitude or alter validation. Input Preview omits
+they do not encode vector magnitude or alter validation. Preview Geometry omits
 zero or parallel arrows instead of treating the preview as a validation pass;
-**Validate Placements & Preview** reports those errors precisely.
+**Validate placements** reports those errors precisely.
 
 The viewer's **3-D display only** controls can show axis ticks in meters,
 inches, or feet without changing the meter-valued CAD data. The body can be
@@ -58,10 +76,12 @@ enabled, a body temporarily uses the Fast proxy while it is dragged and then
 returns to the selected detail. The status line reports displayed versus
 source facet counts.
 
-The tree's **Show** controls and global **Show All** affect preview artists
+Use the always-visible **Preview layers** button to open the tree. Its **Show**
+controls and global **Show All** affect preview artists
 only. They do not include or exclude a feature from the electromagnetic
-assembly. A body mesh used for shadowing is likewise kept at full physics
-resolution even if its display is sampled or decimated. Display units, body
+assembly; that membership is controlled only by **Spatial Feature
+Configuration → Use**. A body mesh used for shadowing is likewise kept at full
+physics resolution even if its display is sampled or decimated. Display units, body
 style, opacity, facet detail, and faster rotation never reinterpret an input
 CSV/STL or modify placement validation, shadowing, or the assembled RCS.
 
@@ -130,6 +150,11 @@ files. Its CSV outputs therefore are not routed into GRIM's RCS dataset table.
 FREDDY background calculations are not cancellable. GRIM blocks application
 close while one is running so the shared process cannot be torn down partway
 through a calculation.
+
+FREDDY's **Material Explorer** is a read-only comparison workspace for measured
+permittivity/permeability CSVs. It is available in both embedded and standalone
+FREDDY, uses native file frequency grids, and does not alter the solver stack,
+project dirty state, or current GHOST attachment.
 
 ## HPC Runs
 

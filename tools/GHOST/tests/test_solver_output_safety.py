@@ -35,8 +35,27 @@ class SolverOutputSafetyTests(unittest.TestCase):
             )
         self.assertFalse(fmm_ready)
         self.assertFalse(bor_ready)
-        self.assertIn("100× slower", text)
-        self.assertIn("2–8× slower", text)
+        self.assertIn("100x slower", text)
+        self.assertIn("2-8x slower", text)
+
+    def test_windows_acceleration_probe_never_offers_foreign_libraries(self) -> None:
+        with (
+            mock.patch.object(solver_tab.platform, "system", return_value="Windows"),
+            mock.patch.object(solver_tab.platform, "machine", return_value="AMD64"),
+            mock.patch.object(
+                solver_tab, "_native_library_available", return_value=False
+            ) as probe,
+        ):
+            solver_tab._native_acceleration_status(Path("missing-backend"))
+
+        self.assertEqual(probe.call_count, 2)
+        for call in probe.call_args_list:
+            candidates = call.args[0]
+            self.assertTrue(candidates)
+            self.assertTrue(
+                all(candidate.suffix.lower() == ".dll" for candidate in candidates),
+                candidates,
+            )
 
     def test_monostatic_and_bistatic_paths_are_known_before_writing(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Acceptance tests for the strict line-feature placement workflow."""
 
+import math
 import sys
 import tempfile
 import unittest
@@ -215,6 +216,118 @@ class LineDatasetMappingTests(unittest.TestCase):
 
 
 class EndpointNormalExpansionTests(unittest.TestCase):
+    @staticmethod
+    def _isotropic_line_fixture():
+        coefficients = SeamCoefficients(
+            1.0,
+            np.asarray([0.0, 90.0, 180.0]),
+            np.ones(3, dtype=complex),
+            np.ones(3, dtype=complex),
+        )
+        length = 0.041
+        segments = np.asarray([
+            [[0.0, 0.0, 0.0], [0.0, 0.0, length]],
+        ])
+        normals = np.asarray([
+            [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+        ])
+        return coefficients, length, segments, normals
+
+    def test_ten_degree_raised_cosine_grazing_illumination_ramp(self):
+        """The production default is an amplitude ramp, not a path window."""
+
+        coefficients, length, segments, normals = self._isotropic_line_fixture()
+        grazing_degrees = np.asarray([-5.0, 0.0, 5.0, 10.0, 90.0])
+        radians = np.radians(grazing_degrees)
+        # The line tangent is +z, the skin normal is +x, and all looks lie in
+        # the xy plane.  Consequently the exact finite-line phase integral and
+        # isotropic polarization dyad are identical at every angle; only the
+        # illumination ramp can change the co-polarized amplitude.
+        directions = np.column_stack((
+            np.sin(radians),
+            np.cos(radians),
+            np.zeros_like(radians),
+        ))
+        result = expand_perimeter(
+            segments,
+            coefficients,
+            None,
+            directions,
+            frequency_ghz=1.0,
+            segment_normals=normals,
+        )
+
+        full_lit_reference = length / (4.0 * math.pi)
+        expected_weights = np.asarray([0.0, 0.0, 0.5, 1.0, 1.0])
+        for channel in ("F_vv", "F_hh"):
+            np.testing.assert_allclose(
+                result[channel] / full_lit_reference,
+                expected_weights,
+                rtol=2.0e-14,
+                atol=2.0e-14,
+            )
+        np.testing.assert_allclose(result["F_vh"], 0.0, atol=2.0e-14)
+
+    def test_open_line_has_no_endpoint_taper_and_is_split_invariant(self):
+        coefficients, length, whole, whole_normals = self._isotropic_line_fixture()
+        split_at = 0.012
+        split = np.asarray([
+            [[0.0, 0.0, 0.0], [0.0, 0.0, split_at]],
+            [[0.0, 0.0, split_at], [0.0, 0.0, length]],
+        ])
+        split_normals = np.tile([1.0, 0.0, 0.0], (2, 2, 1))
+        common = dict(
+            coefficients=coefficients,
+            normal_fn=None,
+            directions=np.asarray([[1.0, 0.0, 0.0]]),
+            frequency_ghz=1.0,
+        )
+        unsplit = expand_perimeter(
+            whole, segment_normals=whole_normals, **common
+        )
+        segmented = expand_perimeter(
+            split, segment_normals=split_normals, **common
+        )
+
+        # With no arclength/end window, a fully lit isotropic open line has its
+        # complete physical length in the amplitude normalization.
+        expected = length / (4.0 * math.pi)
+        for channel in ("F_vv", "F_hh"):
+            np.testing.assert_allclose(
+                unsplit[channel], expected, rtol=2.0e-14, atol=2.0e-14
+            )
+            np.testing.assert_allclose(
+                segmented[channel], unsplit[channel],
+                rtol=2.0e-14, atol=2.0e-14,
+            )
+        np.testing.assert_allclose(unsplit["F_vh"], 0.0, atol=2.0e-14)
+        np.testing.assert_allclose(segmented["F_vh"], 0.0, atol=2.0e-14)
+
+    def test_nonfinite_line_phase_mapping_is_rejected(self):
+        coefficients = SeamCoefficients(
+            1.0,
+            np.asarray([0.0, 90.0, 180.0]),
+            np.asarray([1.0 + 0.2j] * 3),
+            np.asarray([0.7 - 0.1j] * 3),
+        )
+        segments = np.asarray([[[0.0, 0.0, 0.0], [0.0, 0.02, 0.0]]])
+        normals = np.asarray([[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]])
+        directions = np.asarray([[1.0, 0.0, 0.0]])
+        for keyword in ("psi_tm_deg", "psi_te_deg"):
+            with self.subTest(keyword=keyword):
+                with self.assertRaisesRegex(
+                    ValueError, "line phase mappings must be finite"
+                ):
+                    expand_perimeter(
+                        segments,
+                        coefficients,
+                        None,
+                        directions,
+                        frequency_ghz=1.0,
+                        segment_normals=normals,
+                        **{keyword: float("nan")},
+                    )
+
     def test_constant_endpoint_normals_match_callable_normals(self):
         coefficients = SeamCoefficients(
             1.0,

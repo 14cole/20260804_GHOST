@@ -48,6 +48,29 @@ handoff validates and copies the file beside that geometry, then you press
 and other analysis CSVs cannot be attached through this action. GRIM
 deliberately does not load any FREDDY CSV into its RCS dataset table.
 
+## Material Explorer
+
+Use **Material Explorer** to compare any number of validated five-column
+material CSVs without changing the FREDDY layer stack or running a solver. Add
+files directly, drag them onto the explorer, bring in the current stack or
+Material Mix inputs, or add the bundled Air reference. The workspace plots the
+stored real and imaginary relative permittivity and permeability on each
+file's native frequency grid. It also provides a compact range/coverage table
+and a lazy raw-value table that remains responsive with large files. A
+same-frequency view compares every material in one row-oriented table;
+between stored samples it uses component-wise linear interpolation and marks
+out-of-range files instead of extrapolating.
+
+Explorer sources are session-only: adding, removing, or reloading them does not
+dirty a FREDDY project and cannot emit a GHOST attachment. Changed or missing
+source files are marked; **Reload selected** rereads them explicitly and keeps
+the last valid cached data if a reload fails. The two loss tangents shown in
+the tables are clearly labeled derived values and use `-imaginary/real`; no
+other material properties are inferred. Density and conductivity are not in
+the FREDDY material schema and therefore are not guessed by the explorer.
+Curves above 5,000 stored rows use display-only extrema-preserving decimation;
+the complete values remain available in the raw table.
+
 ## Portable project files
 
 FREDDY JSON projects store layer materials, Material Mix files, and output

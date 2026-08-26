@@ -1,0 +1,78 @@
+{
+  "schema": "ghost.validation.external-feature-case-spec.v1",
+  "case_id": "swept_wing_panel",
+  "status": "definition_only_no_solver_results",
+  "global_contract": {
+    "coordinates": "+y nose, +x right, +z up",
+    "origin_m": [0.0, 0.0, 0.0],
+    "time_convention": "exp(+j*omega*t)",
+    "outgoing_wave": "exp(-j*k*r)",
+    "look_direction": "coming-from",
+    "complex_amplitude": "F",
+    "rcs_normalization": "sigma_3d = 4*pi*abs(F)^2",
+    "polarizations": ["VV", "HH", "VH"],
+    "cross_pol_contract": "reciprocal monostatic VH=HV; export VH",
+    "phase_reference": "global origin (0,0,0); no post-export recentering"
+  },
+  "monostatic_grid": {
+    "frequencies_ghz": [8.0, 10.0, 12.0],
+    "azimuths_deg": {"start": 0.0, "stop": 355.0, "step": 5.0},
+    "elevations_deg": [-20.0, 0.0, 20.0],
+    "ordering": "azimuth, elevation, frequency, polarization"
+  },
+  "body": {
+    "name": "faceted PEC swept-wing skin",
+    "units": "meters",
+    "material": "PEC",
+    "construction": "triangulate the nine listed upper-skin stations with straight edges; do not smooth the spanwise break",
+    "station_columns": ["x_span", "y_leading_edge", "chord", "z_skin", "mid_chord_camber"],
+    "stations": [
+      [0.08, 0.43, 0.62, 0.035, 0.025],
+      [0.46, 0.365, 0.49, 0.078, 0.025],
+      [0.83, 0.245, 0.35, 0.145, 0.025]
+    ],
+    "chord_fractions": [0.0, 0.64, 1.0],
+    "surface_rule": "at each station y=y_leading_edge-fraction*chord and z=z_skin+[0,mid_chord_camber,0]",
+    "surface_mesh_requirement": "the Assembly validation mesh must use the identical vertices, triangle diagonals, hard edges, and global coordinates as the clean full-wave model"
+  },
+  "featured_geometry": [
+    {
+      "feature_id": "wing_flap_hinge_001",
+      "kind": "line_expansion_open_gap",
+      "host": "the 0.64-chord polyline through all three span stations",
+      "ordered_centerline_m": [
+        [0.08, 0.0332, 0.060],
+        [0.46, 0.0514, 0.103],
+        [0.83, 0.0210, 0.170]
+      ],
+      "explicit_gap_width_m": 0.002,
+      "normal_rule": "use the outward normal of the specified incident aft-side triangle for each segment; preserve the normal discontinuity at the middle station",
+      "line_delta_requirement": "feature-centered matched clean/featured 2-D coupons; complex OPN-FRD"
+    },
+    {
+      "feature_id": "wing_access_fastener_001",
+      "kind": "compact_installed_fastener",
+      "host": "outboard forward skin triangle, strictly inside its edges",
+      "location_rule": "barycentric weights [0.22,0.33,0.45] on the outboard forward cell's aft triangle",
+      "normal_rule": "exact outward triangle normal",
+      "roll_rule": "project the triangle's first directed edge into the tangent plane",
+      "explicit_geometry": "8 mm diameter, 2 mm high PEC circular cap installed into the skin",
+      "point_delta_requirement": "matching local 3-D installed and clean-skin patches; installed-minus-clean complex Jones field at the stated phase center"
+    }
+  ],
+  "required_artifacts": {
+    "clean_truth": "clean_truth.grim",
+    "clean_prediction": "clean_prediction.grim",
+    "featured_truth": "featured_truth.grim",
+    "featured_prediction": "featured_prediction.grim"
+  },
+  "mandatory_controls": [
+    "confirm all four artifacts have byte-identical coordinate grids and convention metadata",
+    "compare clean baseline, featured total, and isolated complex feature delta",
+    "split each hinge segment in half without moving the path and require numerical invariance",
+    "reverse the hinge path and apply the documented coupon-orientation transformation",
+    "translate the hinge 20 mm chordwise in both explicit and reconstructed models",
+    "rotate the fastener roll 45 degrees in both explicit and reconstructed models",
+    "report mesh-convergence change separately from reconstruction error"
+  ]
+}

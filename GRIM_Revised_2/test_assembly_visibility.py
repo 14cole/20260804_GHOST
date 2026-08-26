@@ -14,7 +14,9 @@ from PySide6.QtWidgets import QApplication
 from assembly_tree import (
     AssemblyTree,
     AssemblyTreePanel,
+    _COLUMN_INCLUDED,
     _COLUMN_VISIBILITY,
+    _ROLE_GRID,
     _TYPE_BRANCH,
     _TYPE_ROOT,
     _attach,
@@ -60,7 +62,8 @@ class AssemblyVisibilityTest(unittest.TestCase):
 
     def test_visibility_column_defaults_checked_and_cascades(self) -> None:
         tree, root, branch, first, second = self._tree_with_two_leaves()
-        self.assertEqual(tree.columnCount(), 3)
+        self.assertEqual(tree.columnCount(), 4)
+        self.assertEqual(tree.headerItem().text(_COLUMN_INCLUDED), "Use")
         self.assertEqual(tree.headerItem().text(_COLUMN_VISIBILITY), "Show")
         self.assertEqual(first.checkState(_COLUMN_VISIBILITY), Qt.Checked)
 
@@ -107,6 +110,105 @@ class AssemblyVisibilityTest(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertAlmostEqual(float(result.rcs_power.item()), 9.0, places=12)
+
+    def test_use_column_controls_build_without_changing_preview(self) -> None:
+        tree, root, branch, first, second = self._tree_with_two_leaves()
+        self.assertEqual(first.checkState(_COLUMN_INCLUDED), Qt.Checked)
+        self.assertTrue(tree.item_included(first))
+
+        tree.set_item_included(first, False)
+
+        self.assertEqual(first.checkState(_COLUMN_INCLUDED), Qt.Unchecked)
+        self.assertEqual(second.checkState(_COLUMN_INCLUDED), Qt.Checked)
+        self.assertEqual(branch.checkState(_COLUMN_INCLUDED), Qt.PartiallyChecked)
+        self.assertEqual(root.checkState(_COLUMN_INCLUDED), Qt.PartiallyChecked)
+        self.assertTrue(tree.item_visible(first))
+        self.assertFalse(tree.item_included(first))
+        self.assertTrue(tree.item_included(second))
+
+        result, history = build_assembly_grid(root, axis_mode="strict")
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(float(result.rcs_power.item()), 4.0, places=12)
+        self.assertNotIn("A", history)
+        self.assertIn("B", history)
+
+        # Show remains preview-only even after solve membership is changed.
+        tree.set_item_preview_visible(second, False)
+        result, _history = build_assembly_grid(root, axis_mode="strict")
+        self.assertAlmostEqual(float(result.rcs_power.item()), 4.0, places=12)
+
+    def test_use_cascades_and_round_trips_with_legacy_default(self) -> None:
+        tree, root, branch, first, second = self._tree_with_two_leaves()
+        branch.setCheckState(_COLUMN_INCLUDED, Qt.Unchecked)
+        self.assertEqual(first.checkState(_COLUMN_INCLUDED), Qt.Unchecked)
+        self.assertEqual(second.checkState(_COLUMN_INCLUDED), Qt.Unchecked)
+
+        added_while_off = tree._make_leaf("C", _grid(3.0))
+        _attach(tree, added_while_off, branch)
+        self.assertEqual(
+            added_while_off.checkState(_COLUMN_INCLUDED), Qt.Unchecked
+        )
+        self.assertIsNone(build_assembly_grid(root, axis_mode="strict")[0])
+
+        payload = _item_to_dict(root)
+        loaded = _dict_to_item(payload)
+        self.assertEqual(
+            loaded.child(0).checkState(_COLUMN_INCLUDED), Qt.Unchecked
+        )
+        self.assertFalse(AssemblyTree.item_included(loaded.child(0).child(0)))
+
+        def strip_inclusion(node):
+            node.pop("included", None)
+            for child in node.get("children", []):
+                strip_inclusion(child)
+
+        strip_inclusion(payload)
+        legacy = _dict_to_item(payload)
+        self.assertEqual(legacy.checkState(_COLUMN_INCLUDED), Qt.Checked)
+        self.assertEqual(
+            legacy.child(0).child(0).checkState(_COLUMN_INCLUDED), Qt.Checked
+        )
+
+        invalid = _item_to_dict(root)
+        invalid["included"] = "false"
+        with self.assertRaisesRegex(ValueError, "non-boolean 'included'"):
+            _dict_to_item(invalid)
+
+    def test_duplicate_subtree_deep_copies_grid_and_trade_state(self) -> None:
+        tree, _root, branch, first, _second = self._tree_with_two_leaves()
+        original_grid = first.data(0, _ROLE_GRID)
+        original_grid.extra["placement"] = {
+            "offset": np.asarray([1.0, 2.0, 3.0])
+        }
+        tree.set_item_included(first, False)
+
+        duplicate = tree.duplicate_response_subtree(branch)
+        duplicate_first = duplicate.child(0)
+        duplicate_grid = duplicate_first.data(0, _ROLE_GRID)
+
+        self.assertEqual(duplicate.text(0), "Fasteners Copy")
+        self.assertIsNot(duplicate_grid, original_grid)
+        self.assertFalse(
+            np.shares_memory(duplicate_grid.rcs_power, original_grid.rcs_power)
+        )
+        self.assertFalse(
+            np.shares_memory(
+                duplicate_grid.extra["placement"]["offset"],
+                original_grid.extra["placement"]["offset"],
+            )
+        )
+        self.assertEqual(
+            duplicate_first.checkState(_COLUMN_INCLUDED), Qt.Unchecked
+        )
+
+        duplicate_grid.rcs_power[...] = 81.0
+        duplicate_grid.extra["placement"]["offset"][0] = 99.0
+        self.assertAlmostEqual(float(original_grid.rcs_power.item()), 1.0)
+        self.assertEqual(original_grid.extra["placement"]["offset"][0], 1.0)
+
+        tree.set_item_included(duplicate, False)
+        self.assertEqual(branch.checkState(_COLUMN_INCLUDED), Qt.PartiallyChecked)
+        self.assertEqual(duplicate.checkState(_COLUMN_INCLUDED), Qt.Unchecked)
 
     def test_show_all_checkbox_controls_every_top_level_subtree(self) -> None:
         panel = AssemblyTreePanel()

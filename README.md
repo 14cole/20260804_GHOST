@@ -138,7 +138,10 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
 ## Primary workflows
 
 - Use **FREDDY** to analyze infinite planar material stacks or design a mixed
-  material. After exporting a nominal PEC-backed three-column IBC CSV or a
+  material. Its read-only **Material Explorer** compares permittivity,
+  permeability, coverage, and loss tangent across five-column material CSVs
+  without changing the active stack. After exporting a nominal PEC-backed
+  three-column IBC CSV or a
   nominal five-column material CSV, choose **Export and attach to current GHOST
   geometry**. The active GHOST geometry must already be loaded or saved as a
   `.geo`; GRIM validates and copies the CSV beside it. Press **Save Geometry**
@@ -161,11 +164,30 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
   assembling. Exact headers, examples, and blank-template buttons are built in.
+  One point CSV may contain every point family and one line CSV may contain all
+  ordered line chains; both files use the shared coordinate-unit selection.
+  Here OPN-FRD always means the coherent installed/featured response minus the
+  clean-skin response—reversing that subtraction reverses the feature delta.
   The display-only viewer supports meter/inch/foot axes, solid/wireframe body
   styles, opacity, and bounded/adaptive facet detail for responsive rotation.
   It also draws normalized, scene-scaled orientation arrows: magenta for point
   and line-endpoint normals and lavender for the solver-effective projected
   point roll/local `+x` direction. These arrows are visual QA only.
+  After either placement CSV is parsed, **Spatial Feature Configuration → Use**
+  exposes the clean body, feature families, response IDs, and individual point
+  or line instances as a hierarchy. A family or instance that is unchecked is
+  omitted consistently from preview, physical validation, response loading,
+  and assembly, making clean/featured and feature-on/feature-off trade studies
+  possible without deleting CSV rows. The hierarchy can be searched by
+  instance, response ID, or response filename; its exact selection can be
+  copied for a trade-study record. With every feature unchecked, **Preview
+  geometry** shows the clean body alone, while validation/build continue to
+  require an enabled feature. **Preview Layers → Show** remains a display-only
+  control and never changes the calculated response.
+  A validated preview is reused by **Assemble & Save** while every path, option,
+  and source-file fingerprint remains unchanged. Existing outputs require
+  confirmation, and the clean body or a mapped response can never be selected
+  as the output target.
 - Use **Plotting** and **ISAR** to inspect and process compatible RCS datasets.
 - Use **Python** to copy or save the readable headless script assembled from
   successful dataset operations and supported rectangular/polar azimuth,
@@ -209,6 +231,10 @@ enable or disable a feature in the electromagnetic assembly.
 - HPC/local solver operation: `tools/GHOST/HPC.md`
 - Geometry input format: `tools/GHOST/GEOMETRY_INPUT_CHEATSHEET.md`
 - Point and line-feature validation: `tools/GHOST/FEATURE_VALIDATION_GUIDE.md`
+- Non-BoR clean/featured validation ladder:
+  `tools/GHOST/geometry_tests/non_bor_feature_validation/README.md`
+- Curved non-BoR and shared-facet placement regression:
+  `tools/GHOST/geometry_tests/non_bor_curved_feature_placement/README.md`
 - FREDDY scope, formats, and validation: `tools/FREDDY/README.md`
 
 ## Development checks

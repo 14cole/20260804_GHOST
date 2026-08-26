@@ -241,7 +241,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         left_tabs = self.window.assembly_workspace.left_tabs
         self.assertEqual(
             [left_tabs.tabText(index) for index in range(left_tabs.count())],
-            ["Place Features", "Combine Datasets / Visibility"],
+            ["Place Features", "Datasets + Preview Layers"],
         )
         self.assertIs(
             left_tabs.currentWidget(),

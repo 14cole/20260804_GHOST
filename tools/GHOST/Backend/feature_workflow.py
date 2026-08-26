@@ -39,6 +39,8 @@ from frame import (
 )
 from line_expand import (
     C0,
+    PSI_HH_DEG,
+    PSI_VV_DEG,
     perimeter_surface_deviation,
     surface_of_revolution_normal,
 )
@@ -63,6 +65,7 @@ LINE_CSV_COLUMNS = (
 LINE_PLACEMENT_SCHEMA = "ghost.line-placement.v1"
 
 FEATURE_ASSEMBLY_REQUEST_SCHEMA = "ghost.feature-assembly-request.v1"
+_OUTWARD_ALIGNMENT_EPS = 1.0e-12
 
 PathValue = str | os.PathLike[str]
 
@@ -98,6 +101,10 @@ class FeatureAssemblyRequest:
 
     base_dir: Optional[PathValue] = None
     history: str = "feature_workflow.py coherent platform line/compact placement"
+    # Appended for positional backward compatibility with v1 script callers.
+    # None means every strictly parsed instance; an empty tuple means none.
+    enabled_point_placement_ids: Optional[tuple[str, ...]] = None
+    enabled_line_ids: Optional[tuple[str, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +113,13 @@ class FeatureDatasetRequirements:
 
     point_dataset_ids: tuple[str, ...] = ()
     line_dataset_ids: tuple[str, ...] = ()
+    point_placement_count: int = 0
+    line_path_count: int = 0
+    line_segment_count: int = 0
+    # Stable spatial-instance descriptors used by GRIM's feature-definition
+    # tree. These are parsed placement identities, never response-grid leaves.
+    point_instances: tuple[tuple[str, str], ...] = ()
+    line_instances: tuple[tuple[str, str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -200,6 +214,10 @@ class FeatureAssemblyPlan:
     skin_limit_m: float
     highest_frequency_wavelength_m: float
     feature_provenance: dict[str, Any]
+    # Exact bytes validated during preparation.  The default preserves
+    # compatibility with callers that constructed plans before this guard was
+    # introduced; plans returned by prepare_feature_assembly always populate it.
+    prepared_source_sha256: dict[str, str] = field(default_factory=dict)
 
     @property
     def surface_triangles_cad_m(self) -> Optional[np.ndarray]:
@@ -244,6 +262,51 @@ def resolve_path(value: PathValue, *, base_dir: Optional[PathValue] = None) -> P
         return path.resolve()
     root = Path.cwd() if base_dir is None else Path(base_dir).expanduser()
     return (root.resolve() / path).resolve()
+
+
+def _canonical_grim_output_path(
+    value: PathValue, *, base_dir: Optional[PathValue] = None
+) -> Path:
+    """Resolve the path exactly as the GRIM writer will publish it."""
+
+    resolved = resolve_path(value, base_dir=base_dir)
+    if str(resolved).lower().endswith(".grim"):
+        return resolved
+    return Path(str(resolved) + ".grim")
+
+
+def _paths_alias(first: Path, second: Path) -> bool:
+    """Return whether two resolved paths name the same filesystem target."""
+
+    if first == second:
+        return True
+    try:
+        return first.samefile(second)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _reject_output_aliases(
+    request: FeatureAssemblyRequest, *, base: Path, output: Path
+) -> None:
+    """Protect the clean body and mapped response-library inputs from overwrite."""
+
+    if _paths_alias(output, base):
+        raise ValueError(
+            "output_grim must differ from base_grim so the clean-body "
+            "response is not overwritten."
+        )
+    for kind, datasets in (
+        ("point", request.point_datasets),
+        ("line", request.line_datasets),
+    ):
+        for dataset_id, value in datasets.items():
+            response = resolve_path(value, base_dir=request.base_dir)
+            if _paths_alias(output, response):
+                raise ValueError(
+                    "output_grim must differ from every mapped response input; "
+                    f"it aliases {kind} dataset_id {str(dataset_id)!r}: {response}"
+                )
 
 
 def _csv_rows(path: Path, *, label: str) -> list[tuple[list[str], int]]:
@@ -403,6 +466,55 @@ def _ordered_dataset_ids(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(str(row["dataset_id"]) for row in rows))
 
 
+def _line_instance_descriptors(
+    rows: Sequence[Mapping[str, Any]],
+) -> tuple[tuple[str, str, int], ...]:
+    """Return one stable descriptor for each already validated line path."""
+    descriptors: list[tuple[str, str, int]] = []
+    start = 0
+    while start < len(rows):
+        line_id = str(rows[start]["line_id"])
+        dataset_id = str(rows[start]["dataset_id"])
+        end = start + 1
+        while end < len(rows) and str(rows[end]["line_id"]) == line_id:
+            end += 1
+        descriptors.append((line_id, dataset_id, end - start))
+        start = end
+    return tuple(descriptors)
+
+
+def _filter_enabled_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    id_key: str,
+    enabled_ids: Optional[Sequence[str]],
+    label: str,
+) -> list[Mapping[str, Any]]:
+    """Filter after strict parsing and reject stale selections fail-closed."""
+    parsed = list(rows)
+    if enabled_ids is None:
+        return parsed
+    if isinstance(enabled_ids, (str, bytes)):
+        raise TypeError(
+            f"enabled {label} IDs must be a sequence of complete IDs, not text."
+        )
+    requested = tuple(str(value).strip() for value in enabled_ids)
+    if any(not value for value in requested):
+        raise ValueError(f"enabled {label} IDs must be nonempty strings.")
+    if len(set(requested)) != len(requested):
+        raise ValueError(f"enabled {label} IDs must be unique.")
+    available = tuple(dict.fromkeys(str(row[id_key]) for row in parsed))
+    unknown = sorted(set(requested) - set(available))
+    if unknown:
+        raise ValueError(
+            f"enabled {label} ID(s) {unknown} are not present in the parsed "
+            f"placement CSV; available IDs are {list(available)}. Refresh the "
+            "feature configuration before validating or building."
+        )
+    selected = set(requested)
+    return [row for row in parsed if str(row[id_key]) in selected]
+
+
 def discover_feature_dataset_ids(
     *,
     point_locations_csv: Optional[PathValue] = None,
@@ -422,6 +534,14 @@ def discover_feature_dataset_ids(
     return FeatureDatasetRequirements(
         point_dataset_ids=_ordered_dataset_ids(point_rows),
         line_dataset_ids=_ordered_dataset_ids(line_rows),
+        point_placement_count=len(point_rows),
+        line_path_count=len({str(row["line_id"]) for row in line_rows}),
+        line_segment_count=len(line_rows),
+        point_instances=tuple(
+            (str(row["placement_id"]), str(row["dataset_id"]))
+            for row in point_rows
+        ),
+        line_instances=_line_instance_descriptors(line_rows),
     )
 
 
@@ -527,6 +647,8 @@ def prepare_feature_input_preview(
     surface_units: str = "inches",
     point_locations_csv: Optional[PathValue] = None,
     line_locations_csv: Optional[PathValue] = None,
+    enabled_point_placement_ids: Optional[Sequence[str]] = None,
+    enabled_line_ids: Optional[Sequence[str]] = None,
     base_dir: Optional[PathValue] = None,
 ) -> FeatureInputPreview:
     """Prepare an input-only CAD preview without response-dataset mappings.
@@ -580,6 +702,24 @@ def prepare_feature_input_preview(
         read_line_placement_csv(line_locations_csv, base_dir=base_dir)
         if line_locations_csv is not None else []
     )
+    all_point_rows = list(point_rows)
+    all_line_rows = list(line_rows)
+    point_rows = _filter_enabled_rows(
+        point_rows,
+        id_key="placement_id",
+        enabled_ids=enabled_point_placement_ids,
+        label="point placement",
+    )
+    line_rows = _filter_enabled_rows(
+        line_rows,
+        id_key="line_id",
+        enabled_ids=enabled_line_ids,
+        label="line path",
+    )
+    # Input preview is also the clean-body comparison view.  An all-disabled
+    # feature mask therefore renders the body with no feature artists while
+    # retaining the complete parsed descriptor catalog for re-enabling items.
+    # Authoritative validation/build still rejects an empty feature set.
     point_groups: dict[str, list[np.ndarray]] = {}
     point_normal_groups: dict[str, list[np.ndarray]] = {}
     point_roll_groups: dict[str, list[np.ndarray]] = {}
@@ -606,8 +746,16 @@ def prepare_feature_input_preview(
     )
     line_normals = _input_line_preview_normals(line_rows)
     requirements = FeatureDatasetRequirements(
-        point_dataset_ids=_ordered_dataset_ids(point_rows),
-        line_dataset_ids=_ordered_dataset_ids(line_rows),
+        point_dataset_ids=_ordered_dataset_ids(all_point_rows),
+        line_dataset_ids=_ordered_dataset_ids(all_line_rows),
+        point_placement_count=len(all_point_rows),
+        line_path_count=len({str(row["line_id"]) for row in all_line_rows}),
+        line_segment_count=len(all_line_rows),
+        point_instances=tuple(
+            (str(row["placement_id"]), str(row["dataset_id"]))
+            for row in all_point_rows
+        ),
+        line_instances=_line_instance_descriptors(all_line_rows),
     )
     geometry = FeaturePreviewGeometry(
         surface_triangles_cad_m=(
@@ -685,13 +833,46 @@ def compute_skin_limit(
     return limit, wavelength
 
 
-def _sample_perimeter(perimeter: np.ndarray, samples_per_segment: int = 33) -> np.ndarray:
+def _sample_perimeter(
+    perimeter: np.ndarray, samples_per_segment: int = 33
+) -> np.ndarray:
+    """Return evenly sampled segment points for legacy placement callers.
+
+    The feature workflow now performs its production surface query directly so
+    it can obtain distance and normal in one pass, but ``place_features.py``
+    still imports this compatibility helper for the local/HPC script API.
+    """
+
     segments = np.asarray(perimeter, dtype=float)
     parameter = np.linspace(0.0, 1.0, max(2, int(samples_per_segment)))
     return (
         segments[:, 0, None, :] * (1.0 - parameter)[None, :, None]
         + segments[:, 1, None, :] * parameter[None, :, None]
     ).reshape(-1, 3)
+
+
+def _surface_distances_and_normals(
+    surface: TriangleSurface,
+    points: np.ndarray,
+    *,
+    normal_hints: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Query a production triangle surface once for both placement quantities.
+
+    Lightweight service tests historically supplied surface-like doubles with
+    only ``distance`` and ``normal`` methods, so retain that compatibility while
+    ensuring a real :class:`TriangleSurface` performs one nearest-facet search.
+    """
+
+    query = np.atleast_2d(np.asarray(points, dtype=float))
+    if isinstance(surface, TriangleSurface):
+        distances, _nearest_points, normals, _facet_indices = surface.nearest(
+            query, normal_hints=normal_hints
+        )
+    else:  # Compatibility for injected surface-like test/service objects.
+        distances = surface.distance(query)
+        normals = surface.normal(query)
+    return np.asarray(distances, dtype=float), np.asarray(normals, dtype=float)
 
 
 def _resolved_dataset_paths(
@@ -747,6 +928,7 @@ def prepare_line_placements(
     normal_tolerance_deg: float,
     locations_csv: Optional[PathValue],
     datasets: Mapping[str, PathValue],
+    enabled_line_ids: Optional[Sequence[str]] = None,
     base_dir: Optional[PathValue] = None,
     preview_paths_cad_m: Optional[dict[str, dict[str, np.ndarray]]] = None,
     preview_endpoint_normals_cad: Optional[
@@ -756,22 +938,40 @@ def prepare_line_placements(
     """Validate and prepare line-expanded feature placements."""
 
     if locations_csv is None:
+        if enabled_line_ids:
+            raise ValueError(
+                "enabled line path IDs require line_locations_csv."
+            )
         if datasets:
             raise ValueError(
                 "line_datasets is configured but line_locations_csv is None."
             )
         return [], []
-    if not datasets:
-        raise ValueError(
-            "line_locations_csv is configured but line_datasets is empty."
-        )
-
     normal_tolerance = validate_normal_tolerance(normal_tolerance_deg)
     coordinates = resolve_path(locations_csv, base_dir=base_dir)
     rows = read_line_placement_csv(coordinates)
+    rows = _filter_enabled_rows(
+        rows,
+        id_key="line_id",
+        enabled_ids=enabled_line_ids,
+        label="line path",
+    )
+    if not rows:
+        return [], []
+    if not datasets:
+        raise ValueError(
+            "enabled line paths require at least one mapped line response."
+        )
     coordinates_sha256 = sha256_file(str(coordinates))
+    active_dataset_ids = set(_ordered_dataset_ids(rows))
     dataset_paths, dataset_hashes = _resolved_dataset_paths(
-        datasets, kind="line", base_dir=base_dir
+        {
+            dataset_id: value
+            for dataset_id, value in datasets.items()
+            if dataset_id in active_dataset_ids
+        },
+        kind="line",
+        base_dir=base_dir,
     )
     _require_known_dataset_ids(rows, dataset_paths, coordinates=coordinates)
 
@@ -858,20 +1058,18 @@ def prepare_line_placements(
             )
         segment_normals = segment_normals / normal_magnitudes[:, :, None]
 
-        if surface is None:
-            offset = perimeter_surface_deviation(
-                perimeter, profile, samples_per_segment=33
-            )
-        else:
-            offset = float(np.max(surface.distance(_sample_perimeter(perimeter))))
-        if offset > limit:
-            raise ValueError(
-                f"{coordinates}: line_id {line_id!r} is {offset * 1e3:.3f} mm "
-                f"off the skin ({720.0 * offset / wavelength:.1f} deg two-way "
-                f"phase); allowed {limit * 1e3:.3f} mm."
-            )
-
-        normal_parameter = np.linspace(0.0, 1.0, 33)
+        distance_parameter = np.linspace(0.0, 1.0, 33)
+        distance_points = (
+            perimeter[:, 0, None, :]
+            * (1.0 - distance_parameter)[None, :, None]
+            + perimeter[:, 1, None, :]
+            * distance_parameter[None, :, None]
+        ).reshape(-1, 3)
+        # Validate orientation at open, one-sided within-segment samples.  At
+        # a real mesh crease the shared endpoint belongs equally to both
+        # incident facets, and assigning it to one by triangle storage order
+        # must not reject the other segment's valid discontinuous normal.
+        normal_parameter = (np.arange(33, dtype=float) + 0.5) / 33.0
         normal_points = (
             perimeter[:, 0, None, :]
             * (1.0 - normal_parameter)[None, :, None]
@@ -892,16 +1090,75 @@ def prepare_line_placements(
                 "supply the outward normal at the added vertex."
             )
         supplied /= supplied_magnitudes[:, None]
-        derived = np.asarray(normal_fn(normal_points), dtype=float)
+        if surface is None:
+            offset = perimeter_surface_deviation(
+                perimeter, profile, samples_per_segment=33
+            )
+            derived = np.asarray(normal_fn(normal_points), dtype=float)
+        else:
+            # One batched exact surface query preserves the single-query
+            # performance contract.  Closed samples own the distance gate;
+            # open samples own the normal gate.  Hints resolve the remaining
+            # deliberate case of a line lying exactly on a shared mesh edge.
+            query_points = np.concatenate((distance_points, normal_points))
+            distance_hints = (
+                segment_normals[:, 0, None, :]
+                * (1.0 - distance_parameter)[None, :, None]
+                + segment_normals[:, 1, None, :]
+                * distance_parameter[None, :, None]
+            ).reshape(-1, 3)
+            distance_hint_magnitudes = np.linalg.norm(distance_hints, axis=1)
+            if np.any(distance_hint_magnitudes <= 1.0e-12):
+                raise ValueError(
+                    f"{coordinates}: line_id {line_id!r} endpoint-normal "
+                    "interpolation becomes singular; subdivide the line and "
+                    "supply the outward normal at the added vertex."
+                )
+            distance_hints /= distance_hint_magnitudes[:, None]
+            query_hints = np.concatenate((
+                distance_hints,
+                supplied,
+            ))
+            surface_distances, query_normals = _surface_distances_and_normals(
+                surface, query_points, normal_hints=query_hints
+            )
+            if (
+                surface_distances.shape != (len(query_points),)
+                or not np.all(np.isfinite(surface_distances))
+                or np.any(surface_distances < 0.0)
+            ):
+                raise ValueError("surface distance query returned invalid values.")
+            offset = float(np.max(surface_distances[:len(distance_points)]))
+            derived = query_normals[len(distance_points):]
+        if offset > limit:
+            raise ValueError(
+                f"{coordinates}: line_id {line_id!r} is {offset * 1e3:.3f} mm "
+                f"off the skin ({720.0 * offset / wavelength:.1f} deg two-way "
+                f"phase); allowed {limit * 1e3:.3f} mm."
+            )
+
         if derived.shape != normal_points.shape or not np.all(np.isfinite(derived)):
             raise ValueError("surface normal query returned invalid vectors.")
         derived_magnitudes = np.linalg.norm(derived, axis=1)
         if np.any(derived_magnitudes <= 1.0e-12):
             raise ValueError("surface normal query returned a zero-length vector.")
         derived /= derived_magnitudes[:, None]
-        differences = np.degrees(np.arccos(np.clip(
+        alignments = np.clip(
             np.sum(supplied * derived, axis=1), -1.0, 1.0
-        )))
+        )
+        differences = np.degrees(np.arccos(alignments))
+        if np.any(alignments <= _OUTWARD_ALIGNMENT_EPS):
+            flat_index = int(np.argmin(alignments))
+            segment_index, sample_index = divmod(
+                flat_index, len(normal_parameter)
+            )
+            raise ValueError(
+                f"{coordinates}:line {group[segment_index]['_csv_line']} "
+                "supplied normal interpolation is not an outward skin normal "
+                f"({differences[flat_index]:.2f} deg at segment fraction "
+                f"{normal_parameter[sample_index]:.5g}); outward normals must "
+                "have a positive dot product with the body normal."
+            )
         if np.any(differences > normal_tolerance):
             flat_index = int(np.argmax(differences))
             segment_index, sample_index = divmod(
@@ -965,6 +1222,7 @@ def prepare_point_placements(
     normal_tolerance_deg: float,
     locations_csv: Optional[PathValue],
     datasets: Mapping[str, PathValue],
+    enabled_point_placement_ids: Optional[Sequence[str]] = None,
     base_dir: Optional[PathValue] = None,
     pattern_loader: Optional[Callable[..., Any]] = None,
     preview_locations_cad_m: Optional[dict[str, list[np.ndarray]]] = None,
@@ -976,22 +1234,40 @@ def prepare_point_placements(
     """Validate and prepare compact 3-D point-feature placements."""
 
     if locations_csv is None:
+        if enabled_point_placement_ids:
+            raise ValueError(
+                "enabled point placement IDs require point_locations_csv."
+            )
         if datasets:
             raise ValueError(
                 "point_datasets is configured but point_locations_csv is None."
             )
         return [], []
-    if not datasets:
-        raise ValueError(
-            "point_locations_csv is configured but point_datasets is empty."
-        )
-
     normal_tolerance = validate_normal_tolerance(normal_tolerance_deg)
     coordinates = resolve_path(locations_csv, base_dir=base_dir)
     rows = read_point_placement_csv(coordinates)
+    rows = _filter_enabled_rows(
+        rows,
+        id_key="placement_id",
+        enabled_ids=enabled_point_placement_ids,
+        label="point placement",
+    )
+    if not rows:
+        return [], []
+    if not datasets:
+        raise ValueError(
+            "enabled point placements require at least one mapped point response."
+        )
     coordinates_sha256 = sha256_file(str(coordinates))
+    active_dataset_ids = set(_ordered_dataset_ids(rows))
     dataset_paths, dataset_hashes = _resolved_dataset_paths(
-        datasets, kind="point", base_dir=base_dir
+        {
+            dataset_id: value
+            for dataset_id, value in datasets.items()
+            if dataset_id in active_dataset_ids
+        },
+        kind="point",
+        base_dir=base_dir,
     )
     _require_known_dataset_ids(rows, dataset_paths, coordinates=coordinates)
 
@@ -1037,26 +1313,43 @@ def prepare_point_placements(
             np.array([row["x"], row["y"], row["z"]], dtype=float) * scale
         )
         location = to_axis_frame(location_cad_m)
-        offset = float(
-            surface_of_revolution_distance(profile, location[None, :])[0]
-            if surface is None
-            else surface.distance(location[None, :])[0]
+        normal = unit_vector(
+            to_axis_frame([row["nx"], row["ny"], row["nz"]]),
+            "supplied normal",
         )
+        if surface is None:
+            offset = float(
+                surface_of_revolution_distance(profile, location[None, :])[0]
+            )
+            derived_value = normal_fn(location[None, :])[0]
+        else:
+            surface_distances, surface_normals = _surface_distances_and_normals(
+                surface, location[None, :], normal_hints=normal[None, :]
+            )
+            if (
+                surface_distances.shape != (1,)
+                or not np.all(np.isfinite(surface_distances))
+                or surface_distances[0] < 0.0
+            ):
+                raise ValueError("surface distance query returned invalid values.")
+            offset = float(surface_distances[0])
+            if surface_normals.shape != (1, 3):
+                raise ValueError("surface normal query returned invalid vectors.")
+            derived_value = surface_normals[0]
         if offset > limit:
             raise ValueError(
                 f"{coordinates}:line {csv_line} is {offset * 1e3:.3f} mm off "
                 f"the skin ({720.0 * offset / wavelength:.1f} deg two-way phase)."
             )
-        derived = unit_vector(
-            normal_fn(location[None, :])[0], "derived normal"
-        )
-        normal = unit_vector(
-            to_axis_frame([row["nx"], row["ny"], row["nz"]]),
-            "supplied normal",
-        )
-        difference = math.degrees(math.acos(np.clip(
-            float(normal @ derived), -1.0, 1.0
-        )))
+        derived = unit_vector(derived_value, "derived normal")
+        alignment = float(np.clip(float(normal @ derived), -1.0, 1.0))
+        difference = math.degrees(math.acos(alignment))
+        if alignment <= _OUTWARD_ALIGNMENT_EPS:
+            raise ValueError(
+                f"{coordinates}:line {csv_line} supplied normal is not an "
+                f"outward skin normal ({difference:.2f} deg); outward normals "
+                "must have a positive dot product with the body normal."
+            )
         if difference > normal_tolerance:
             raise ValueError(
                 f"{coordinates}:line {csv_line} supplied normal differs "
@@ -1125,18 +1418,63 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
     if not isinstance(request, FeatureAssemblyRequest):
         raise TypeError("request must be a FeatureAssemblyRequest.")
     base = resolve_path(request.base_grim, base_dir=request.base_dir)
-    output = resolve_path(request.output_grim, base_dir=request.base_dir)
-    if output == base:
-        raise ValueError(
-            "output_grim must differ from base_grim so the clean-body "
-            "response is not overwritten."
-        )
+    output = _canonical_grim_output_path(
+        request.output_grim, base_dir=request.base_dir
+    )
+    _reject_output_aliases(request, base=base, output=output)
     if request.line_locations_csv is None and request.point_locations_csv is None:
         raise ValueError(
             "Configure line_locations_csv or point_locations_csv."
         )
     if not base.is_file():
         raise FileNotFoundError(f"Base monostatic GRIM not found: {base}")
+    base_sha256 = sha256_file(str(base))
+    prepared_source_sha256 = {str(base): base_sha256}
+    prepared_input_sources: dict[str, dict[str, str]] = {
+        "base_grim": {"path": str(base), "sha256": base_sha256}
+    }
+
+    def snapshot_input_source(
+        role: str,
+        value: Optional[PathValue],
+        *,
+        label: str,
+    ) -> Optional[Path]:
+        if value is None:
+            return None
+        source = resolve_path(value, base_dir=request.base_dir)
+        if not source.is_file():
+            raise FileNotFoundError(f"{label} not found: {source}")
+        digest = sha256_file(str(source))
+        previous = prepared_source_sha256.get(str(source))
+        if previous is not None and previous != digest:
+            raise RuntimeError(
+                f"Feature-assembly source changed while input files were "
+                f"being snapshotted: {source}. Revalidate the assembly."
+            )
+        prepared_source_sha256[str(source)] = digest
+        prepared_input_sources[role] = {
+            "path": str(source),
+            "sha256": digest,
+        }
+        return source
+
+    # Snapshot every spatial-definition file before the first parser/mesh
+    # reader sees it.  The end-of-prepare check below then proves that all
+    # prepared geometry came from one immutable set of input bytes.
+    surface_path = snapshot_input_source(
+        "surface_mesh", request.surface_mesh, label="Surface mesh"
+    )
+    line_coordinates_path = snapshot_input_source(
+        "line_locations_csv",
+        request.line_locations_csv,
+        label="Line-placement CSV",
+    )
+    point_coordinates_path = snapshot_input_source(
+        "point_locations_csv",
+        request.point_locations_csv,
+        label="Point-placement CSV",
+    )
 
     embedded_grid = load_body_requested_radar_grid(str(base))
     profile: Optional[np.ndarray] = None
@@ -1155,12 +1493,8 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         }
 
     surface: Optional[TriangleSurface] = None
-    surface_path: Optional[Path] = None
     surface_triangles_cad_m: Optional[np.ndarray] = None
-    if request.surface_mesh is not None:
-        surface_path = resolve_path(request.surface_mesh, base_dir=request.base_dir)
-        if not surface_path.is_file():
-            raise FileNotFoundError(f"Surface mesh not found: {surface_path}")
+    if surface_path is not None:
         surface_scale = _library_unit_scale(
             request.surface_units, label="surface_units"
         )
@@ -1202,8 +1536,9 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         skin_limit_m=skin_limit,
         wavelength_m=wavelength,
         normal_tolerance_deg=normal_tolerance,
-        locations_csv=request.line_locations_csv,
+        locations_csv=line_coordinates_path,
         datasets=request.line_datasets,
+        enabled_line_ids=request.enabled_line_ids,
         base_dir=request.base_dir,
         preview_paths_cad_m=line_preview_paths,
         preview_endpoint_normals_cad=line_preview_endpoint_normals,
@@ -1215,13 +1550,20 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         skin_limit_m=skin_limit,
         wavelength_m=wavelength,
         normal_tolerance_deg=normal_tolerance,
-        locations_csv=request.point_locations_csv,
+        locations_csv=point_coordinates_path,
         datasets=request.point_datasets,
+        enabled_point_placement_ids=request.enabled_point_placement_ids,
         base_dir=request.base_dir,
         preview_locations_cad_m=point_preview_lists,
         preview_normals_cad=point_preview_normals,
         preview_roll_references_cad=point_preview_roll_references,
     )
+
+    if not lines and not points:
+        raise ValueError(
+            "No enabled spatial features remain. Enable at least one point "
+            "placement or line path before validating or building."
+        )
 
     normal_fn = (
         surface.normal
@@ -1239,6 +1581,23 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         line_dataset_ids=tuple(dict.fromkeys(
             str(record["dataset_id"]) for record in line_records
         )),
+        point_placement_count=len(point_records),
+        line_path_count=len(line_records),
+        line_segment_count=sum(
+            int(record["segment_count"]) for record in line_records
+        ),
+        point_instances=tuple(
+            (str(record["placement_id"]), str(record["dataset_id"]))
+            for record in point_records
+        ),
+        line_instances=tuple(
+            (
+                str(record["line_id"]),
+                str(record["dataset_id"]),
+                int(record["segment_count"]),
+            )
+            for record in line_records
+        ),
     )
     preview = FeaturePreviewGeometry(
         surface_triangles_cad_m=(
@@ -1290,8 +1649,61 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         "shadow_bias_m": (
             None if occluder is None else float(occluder.bias)
         ),
+        "enabled_selection": {
+            "point_placement_ids": [
+                str(record["placement_id"]) for record in point_records
+            ],
+            "line_ids": [str(record["line_id"]) for record in line_records],
+        },
+        "line_phase_mapping_deg": {
+            "TM": float(PSI_HH_DEG),
+            "TE": float(PSI_VV_DEG),
+        },
+        "model_scope": {
+            "body_feature_mutual_coupling": False,
+            "multiple_scattering": False,
+            "line_mapping_validation_scope": "circumferential PEC groove",
+            "point_pattern_semantics": (
+                "installed-feature-minus-clean-skin local complex Jones field"
+            ),
+        },
+        "prepared_input_sources": {
+            role: dict(source)
+            for role, source in prepared_input_sources.items()
+        },
         "placements": line_records + point_records,
     }
+    for record in line_records + point_records:
+        dataset = record.get("dataset")
+        dataset_sha256 = record.get("dataset_sha256")
+        if dataset is None or dataset_sha256 is None:
+            # Retain compatibility with injected/custom placement preparers
+            # whose records predate source-integrity metadata.
+            continue
+        source = str(resolve_path(dataset, base_dir=request.base_dir))
+        digest = str(dataset_sha256)
+        previous = prepared_source_sha256.get(source)
+        if previous is not None and previous != digest:
+            raise ValueError(
+                f"Prepared response source has conflicting hashes: {source}."
+            )
+        prepared_source_sha256[source] = digest
+
+    # Establish one coherent snapshot at the end of preparation.  This catches
+    # a source modified while placement validation itself was still running.
+    for source, expected in prepared_source_sha256.items():
+        try:
+            actual = sha256_file(source)
+        except OSError as exc:
+            raise RuntimeError(
+                "Feature-assembly source became unavailable during "
+                f"preparation: {source}. Revalidate the assembly."
+            ) from exc
+        if actual != expected:
+            raise RuntimeError(
+                "Feature-assembly source changed during preparation: "
+                f"{source}. Revalidate the assembly."
+            )
     return FeatureAssemblyPlan(
         request=request,
         base_path=base,
@@ -1311,6 +1723,7 @@ def prepare_feature_assembly(request: FeatureAssemblyRequest) -> FeatureAssembly
         skin_limit_m=float(skin_limit),
         highest_frequency_wavelength_m=float(wavelength),
         feature_provenance=provenance,
+        prepared_source_sha256=prepared_source_sha256,
     )
 
 
@@ -1319,6 +1732,14 @@ def execute_feature_assembly(plan: FeatureAssemblyPlan) -> str:
 
     if not isinstance(plan, FeatureAssemblyPlan):
         raise TypeError("plan must be a FeatureAssemblyPlan.")
+    # Recheck immediately before publication.  A symlink or hard link may have
+    # been created after preparation, and the backend must remain safe for
+    # headless callers that do not pass through the GRIM GUI model.
+    _reject_output_aliases(
+        plan.request,
+        base=plan.base_path,
+        output=plan.output_path,
+    )
     return add_features_to_monostatic_grim(
         str(plan.base_path),
         str(plan.output_path),
@@ -1327,9 +1748,12 @@ def execute_feature_assembly(plan: FeatureAssemblyPlan) -> str:
         radar_grid=plan.radar_grid,
         surface_normal_fn=plan.surface_normal_fn,
         occluder=plan.occluder,
+        psi_tm_deg=PSI_HH_DEG,
+        psi_te_deg=PSI_VV_DEG,
         declared_coherent_base=True,
         feature_provenance=plan.feature_provenance,
         history=str(plan.request.history),
+        expected_source_sha256=plan.prepared_source_sha256,
     )
 
 

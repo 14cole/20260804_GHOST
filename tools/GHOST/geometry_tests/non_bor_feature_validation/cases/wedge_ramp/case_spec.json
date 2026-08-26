@@ -1,0 +1,93 @@
+{
+  "schema": "ghost.validation.external-feature-case-spec.v1",
+  "case_id": "wedge_ramp",
+  "status": "definition_only_no_solver_results",
+  "global_contract": {
+    "coordinates": "+y nose, +x right, +z up",
+    "origin_m": [0.0, 0.0, 0.0],
+    "time_convention": "exp(+j*omega*t)",
+    "outgoing_wave": "exp(-j*k*r)",
+    "look_direction": "coming-from",
+    "complex_amplitude": "F",
+    "rcs_normalization": "sigma_3d = 4*pi*abs(F)^2",
+    "polarizations": ["VV", "HH", "VH"],
+    "cross_pol_contract": "reciprocal monostatic VH=HV; export VH",
+    "phase_reference": "global origin (0,0,0); no post-export recentering"
+  },
+  "monostatic_grid": {
+    "frequencies_ghz": [8.0, 10.0, 12.0],
+    "azimuths_deg": {"start": 0.0, "stop": 355.0, "step": 5.0},
+    "elevations_deg": [-20.0, 0.0, 20.0],
+    "ordering": "azimuth, elevation, frequency, polarization"
+  },
+  "body": {
+    "name": "closed PEC deck-and-ramp prism",
+    "units": "meters",
+    "material": "PEC",
+    "construction": "extrude the y-z polygon from x=-0.4 to x=+0.4 and close both end caps",
+    "yz_polygon": [
+      [-0.60, 0.00],
+      [0.60, 0.00],
+      [0.60, 0.30],
+      [0.10, 0.30],
+      [-0.35, 0.10],
+      [-0.60, 0.10]
+    ],
+    "surface_mesh_requirement": "export the identical global-coordinate clean-body skin used for feature validation; preserve hard deck/ramp edges"
+  },
+  "featured_geometry": [
+    {
+      "feature_id": "ramp_gap_001",
+      "kind": "line_expansion_open_gap",
+      "host": "sloped ramp",
+      "centerline_start_m": [-0.25, -0.10, 0.2111111111111111],
+      "centerline_stop_m": [0.25, -0.10, 0.2111111111111111],
+      "outward_normal": [0.0, -0.4061384660534476, 0.9138115486202572],
+      "explicit_gap_width_m": 0.003,
+      "line_delta_requirement": "feature-centered matched clean/featured 2-D coupons; complex OPN-FRD"
+    },
+    {
+      "feature_id": "ramp_fastener_001",
+      "kind": "compact_installed_fastener",
+      "host": "sloped ramp",
+      "phase_center_m": [0.17, -0.02, 0.2466666666666667],
+      "outward_normal": [0.0, -0.4061384660534476, 0.9138115486202572],
+      "roll_reference": [1.0, 0.0, 0.0],
+      "explicit_geometry": "8 mm diameter, 2 mm high PEC circular cap installed into the skin",
+      "point_delta_requirement": "matching local 3-D installed and clean-skin patches; installed-minus-clean complex Jones field at the stated phase center"
+    },
+    {
+      "feature_id": "deck_gap_control_001",
+      "kind": "line_expansion_open_gap",
+      "host": "horizontal upper deck",
+      "centerline_start_m": [-0.25, 0.35, 0.30],
+      "centerline_stop_m": [0.25, 0.35, 0.30],
+      "outward_normal": [0.0, 0.0, 1.0],
+      "explicit_gap_width_m": 0.003,
+      "line_delta_requirement": "reuse only after the ramp and deck host-coupon stacks are shown equivalent"
+    },
+    {
+      "feature_id": "deck_fastener_control_001",
+      "kind": "compact_installed_fastener",
+      "host": "horizontal upper deck",
+      "phase_center_m": [-0.17, 0.43, 0.30],
+      "outward_normal": [0.0, 0.0, 1.0],
+      "roll_reference": [1.0, 0.0, 0.0],
+      "explicit_geometry": "same fastener installation as ramp_fastener_001",
+      "point_delta_requirement": "same local-patch differencing and phase-center contract as ramp_fastener_001"
+    }
+  ],
+  "required_artifacts": {
+    "clean_truth": "clean_truth.grim",
+    "clean_prediction": "clean_prediction.grim",
+    "featured_truth": "featured_truth.grim",
+    "featured_prediction": "featured_prediction.grim"
+  },
+  "mandatory_controls": [
+    "confirm all four artifacts have byte-identical coordinate grids and convention metadata",
+    "compare clean baseline, featured total, and isolated complex feature delta",
+    "repeat with ramp_gap_001 translated +25 mm in x to expose translation-phase errors",
+    "repeat with ramp_fastener_001 roll rotated 45 degrees to expose local-frame errors",
+    "report mesh-convergence change separately from reconstruction error"
+  ]
+}

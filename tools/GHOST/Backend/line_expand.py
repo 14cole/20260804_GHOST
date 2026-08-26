@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Line-expanded feature components on a BoR body.
+Line-expanded feature components on a clean platform body.
 
 A feature that is locally two-dimensional (a panel gap, a seal, a lap joint,
 a step, a coating edge) is characterised by a 2D cross-section solve and then
@@ -39,11 +39,16 @@ Two quantities, in this order:
 ``psi_TM`` and ``psi_TE`` are legacy empirical local-coefficient phase
 mappings between the 2D solver's bare-integral amplitudes and the BoR
 far-field convention. They are applied before the polarization contributions
-are added.  Their original ring-calibration fixture is not currently shipped
-with this repository, so they must be revalidated against the independent BoR
-or full-3D comparison described in ``FEATURE_VALIDATION_GUIDE.md`` before a
-feature family is released. Magnitudes are absolute: the |A|^2/(4k) and
-4pi|F|^2 normalisations are not fitted.
+are added.  The original ring-calibration fixture is not shipped, but the
+repository now carries a replacement all-GHOST circumferential PEC-groove
+regression in ``tests/test_feature_reconstruction_physics.py``.  That fixture
+checks this mapping for one controlled case; each feature family still needs
+the independent BoR or full-3D validation described in
+``FEATURE_VALIDATION_GUIDE.md``. Magnitudes are absolute: the |A|^2/(4k) and
+4pi|F|^2 normalisations are not fitted. The same expansion can be placed on an
+external non-BoR body response when its matching triangle surface supplies
+skin validation, outward normals, and optional geometric shadowing; the body
+field itself is added in the radar frame and is not recomputed here.
 
 Conventions:
   - e^{+jwt}; look directions ``d`` are COMING-FROM unit vectors.
@@ -63,9 +68,11 @@ import numpy as np
 C0 = 299792458.0
 
 # Legacy local-polarization inter-solver calibration constants.  The original
-# ring-calibration fixture is not present in this repository; see
-# FEATURE_VALIDATION_GUIDE.md for the required independent validation before
-# releasing a feature family.  They multiply the 2-D TM and TE coefficients
+# ring-calibration fixture is unavailable; the checked-in replacement PEC
+# ring-groove regression tests this exact software path but does not establish
+# transferability to another feature family. See FEATURE_VALIDATION_GUIDE.md
+# for the required independent validation before release. They multiply the
+# 2-D TM and TE coefficients
 # BEFORE their projections are added. A finite perimeter
 # mixes both local coefficients into an HH/VV channel away from broadside, so a
 # phase measured from an already-summed output channel cannot simply be applied
@@ -73,8 +80,8 @@ C0 = 299792458.0
 # amplitude scale. Re-measure if either solver's far-field convention changes.
 PSI_VV_DEG = -9.2       # theta-pol-dominant channel (2D TE coefficient)
 PSI_HH_DEG = 166.9      # phi-pol-dominant channel   (2D TM coefficient)
-# No runtime grazing-angle gate is claimed here. The original ring-calibration
-# fixture is absent, and a single angular constant would not be transferable
+# No runtime grazing-angle gate is claimed here. The replacement ring fixture
+# covers one PEC groove, and a single angular constant is not transferable
 # across arbitrary cross-sections, materials, corners, and junctions. Validate
 # the chosen coupon and placement envelope as described in
 # FEATURE_VALIDATION_GUIDE.md.
@@ -554,8 +561,8 @@ def expand_perimeter(segments: 'np.ndarray',
     whether any phase mapping is required. Do not treat the legacy defaults as
     certified without that comparison.
 
-    Returns ``{"F_vv", "F_hh", "F_vh"}`` complex arrays over directions, in the
-    BoR amplitude normalisation (sigma = 4 pi |F|^2).
+    Returns ``{"F_vv", "F_hh", "F_vh"}`` complex arrays over directions in the
+    physical 3-D amplitude normalization (sigma = 4 pi |F|^2).
     """
     freq = float(frequency_ghz if frequency_ghz is not None else coefficients.frequency_ghz)
     if not math.isfinite(freq) or freq <= 0.0:
@@ -565,8 +572,12 @@ def expand_perimeter(segments: 'np.ndarray',
                          f"asked for {freq} GHz.")
     k = 2.0 * math.pi * freq * 1e9 / C0
     lam = C0 / (freq * 1e9)
-    cal_tm = np.exp(1j * math.radians(float(psi_tm_deg)))
-    cal_te = np.exp(1j * math.radians(float(psi_te_deg)))
+    phase_tm = float(psi_tm_deg)
+    phase_te = float(psi_te_deg)
+    if not math.isfinite(phase_tm) or not math.isfinite(phase_te):
+        raise ValueError("line phase mappings must be finite degrees.")
+    cal_tm = np.exp(1j * math.radians(phase_tm))
+    cal_te = np.exp(1j * math.radians(phase_te))
 
     max_piece_wavelengths = float(max_piece_wavelengths)
     if (not math.isfinite(max_piece_wavelengths)

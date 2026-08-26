@@ -22,6 +22,9 @@ from assembly_workspace import (  # noqa: E402
     FEATURE_PREVIEW_ROOT_KEY,
     FeatureBuildResult,
     GUI_AVAILABLE,
+    _feature_preview_nonvector_bounds,
+    _finite_points,
+    _line_paths,
     decimate_triangles_for_display,
     display_unit_spec,
     feature_preview_group_id,
@@ -58,6 +61,52 @@ class AssemblyGeometryTests(unittest.TestCase):
         self.assertAlmostEqual(
             orientation_vector_length_m([[2, 3, 4], [2, 3, 4]]), 0.0254
         )
+
+    def test_preview_bounds_validate_views_without_copying_full_geometry(self):
+        points = np.asarray([[2.0, 3.0, 4.0], [5.0, 7.0, 11.0]])
+        path = np.asarray(
+            [[-3.0, 1.0, 2.0], [0.0, 13.0, 6.0], [8.0, 2.0, -5.0]]
+        )
+
+        self.assertIs(
+            _finite_points(points, label="test points", copy=False), points
+        )
+        self.assertIs(_line_paths(path, copy=False)[0], path)
+        with (
+            patch(
+                "assembly_workspace._finite_points", wraps=_finite_points
+            ) as point_validator,
+            patch(
+                "assembly_workspace._line_paths", wraps=_line_paths
+            ) as line_validator,
+        ):
+            bounds = _feature_preview_nonvector_bounds(
+                None,
+                {"point data": points},
+                {"line data": {"line 1": path}},
+            )
+
+        np.testing.assert_array_equal(bounds[0], [-3.0, 1.0, -5.0])
+        np.testing.assert_array_equal(bounds[1], [8.0, 13.0, 11.0])
+        self.assertIs(point_validator.call_args.kwargs["copy"], False)
+        self.assertIs(line_validator.call_args.kwargs["copy"], False)
+
+        with self.assertRaisesRegex(ValueError, "only finite coordinates"):
+            _feature_preview_nonvector_bounds(
+                None,
+                {"bad points": [[0.0, np.nan, 0.0]]},
+                {},
+            )
+        with self.assertRaisesRegex(ValueError, "nonfinite coordinate"):
+            _feature_preview_nonvector_bounds(
+                None,
+                {},
+                {
+                    "bad lines": {
+                        "line 1": [[0.0, 0.0, 0.0], [np.inf, 1.0, 0.0]]
+                    }
+                },
+            )
 
     def test_bor_profile_revolves_about_cad_nose_axis(self):
         profile = np.asarray(
@@ -375,6 +424,37 @@ class AssemblyGuiTests(unittest.TestCase):
         canvas.model.add_points("points:detached", [[0.0, 0.0, 0.0]])
         self.assertNotIn("points:detached", canvas._artists)
 
+    def test_canvas_scene_transaction_defers_feedback_and_redraw(self):
+        canvas = AssemblySceneCanvas()
+
+        with patch.object(canvas, "draw_idle") as draw_idle:
+            canvas.begin_scene_updates()
+            try:
+                canvas.add_points("points:a", [[1.0, 2.0, 3.0]])
+                canvas.add_lines(
+                    "lines:a",
+                    [[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]],
+                )
+                self.assertEqual(draw_idle.call_count, 0)
+            finally:
+                canvas.end_scene_updates()
+
+        self.assertEqual(draw_idle.call_count, 1)
+        self.assertEqual(canvas.preview_state, "ready")
+
+    def test_feature_preview_load_and_clear_each_request_one_redraw(self):
+        from assembly_tree import AssemblyTreePanel
+
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+        with patch.object(workspace.scene_canvas, "draw_idle") as draw_idle:
+            workspace.load_feature_preview(self._feature_plan())
+        self.assertEqual(draw_idle.call_count, 1)
+
+        with patch.object(workspace.scene_canvas, "draw_idle") as draw_idle:
+            workspace.clear_feature_preview()
+        self.assertEqual(draw_idle.call_count, 1)
+        self.assertEqual(workspace.scene_canvas.preview_state, "empty")
+
     def test_drag_lod_restores_selected_surface_proxy(self):
         source = np.zeros((4_100, 3, 3), dtype=float)
         source[:, :, 0] = np.arange(4_100, dtype=float)[:, None]
@@ -448,7 +528,7 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertEqual(workspace.left_tabs.count(), 2)
         self.assertEqual(workspace.left_tabs.tabText(0), "Place Features")
         self.assertEqual(
-            workspace.left_tabs.tabText(1), "Combine Datasets / Visibility"
+            workspace.left_tabs.tabText(1), "Datasets + Preview Layers"
         )
         self.assertIs(panel.parentWidget(), workspace.combine_visibility_tab)
         self.assertTrue(workspace.cmb_display_units.isEnabled())
@@ -464,6 +544,11 @@ class AssemblyGuiTests(unittest.TestCase):
         )
         self.assertFalse(workspace.feature_controls_host.isHidden())
         self.assertIs(controls.parentWidget(), workspace.feature_controls_host)
+
+        workspace.btn_preview_layers.click()
+        self.assertIs(
+            workspace.left_tabs.currentWidget(), workspace.combine_visibility_tab
+        )
 
     @staticmethod
     def _feature_plan():
@@ -902,7 +987,7 @@ class AssemblyGuiTests(unittest.TestCase):
         panel._set_dirty(False)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            for index, version in enumerate(("3", 0, 4, True)):
+            for index, version in enumerate(("3", 0, 5, True)):
                 with self.subTest(version=version):
                     path = os.path.join(temp_dir, f"version-{index}.asy")
                     with open(path, "w", encoding="utf-8") as stream:
@@ -915,7 +1000,7 @@ class AssemblyGuiTests(unittest.TestCase):
                         self.assertFalse(panel._load())
 
                     critical.assert_called_once()
-                    self.assertIn("integer from 1 through 3", critical.call_args.args[2])
+                    self.assertIn("integer from 1 through 4", critical.call_args.args[2])
                     self.assertEqual(panel.tree.topLevelItemCount(), 1)
                     self.assertIs(panel.tree.topLevelItem(0), live_root)
                     self.assertIsNone(panel.assembly_path)
@@ -1014,7 +1099,7 @@ class AssemblyGuiTests(unittest.TestCase):
                 self.assertTrue(panel._save(path=target))
             self.assertFalse(panel.is_dirty())
             saved = json.loads(target.read_text(encoding="utf-8"))
-            self.assertEqual(saved["version"], 3)
+            self.assertEqual(saved["version"], 4)
             self.assertEqual(saved["tree"][0]["name"], "Unsaved Response")
 
     def test_toolbar_delete_refuses_service_owned_preview(self):

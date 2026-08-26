@@ -1,0 +1,387 @@
+{
+  "schema": "ghost.validation.external-feature-plan.v1",
+  "description": "Deterministic external full-wave handoff for rounded-enclosure, wedge/ramp, swept-wing, and representative vehicle-door feature validation. This file defines inputs and expected filenames; it contains no electromagnetic results, and its acceptance gates remain uncalibrated engineering targets until independent results exist.",
+  "recommended_execution_order": ["rounded-enclosure", "wedge-ramp", "swept-wing-panel", "vehicle-door-section"],
+  "artifact_filenames": {
+    "clean_truth": "clean_truth.grim",
+    "clean_prediction": "clean_prediction.grim",
+    "featured_truth": "featured_truth.grim",
+    "featured_prediction": "featured_prediction.grim"
+  },
+  "solve_contract": {
+    "coordinate_frame": {
+      "x": "right",
+      "y": "nose",
+      "z": "up",
+      "length_unit": "m"
+    },
+    "global_phase_origin_m": [0.0, 0.0, 0.0],
+    "time_convention": "exp(+jwt)",
+    "outgoing_wave": "exp(-jkr)",
+    "look_vector": "target_to_radar",
+    "translation_check": "A target translation r must multiply monostatic F by exp(+2jk*d_dot_r).",
+    "polarizations": ["VV", "HH", "VH"],
+    "polarization_frame": "radar earth-frame V/H; VH is the reciprocal monostatic cross-polarized channel",
+    "amplitude_normalization": "F physical far-field amplitude; sigma_3d=4*pi*|F|^2",
+    "acceptance_grid": {
+      "frequencies_GHz": [8.0, 10.0, 12.0],
+      "azimuths_deg": [
+        0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0,
+        45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0,
+        90.0, 95.0, 100.0, 105.0, 110.0, 115.0, 120.0, 125.0,
+        130.0, 135.0, 140.0, 145.0, 150.0, 155.0, 160.0, 165.0,
+        170.0, 175.0, 180.0, 185.0, 190.0, 195.0, 200.0, 205.0,
+        210.0, 215.0, 220.0, 225.0, 230.0, 235.0, 240.0, 245.0,
+        250.0, 255.0, 260.0, 265.0, 270.0, 275.0, 280.0, 285.0,
+        290.0, 295.0, 300.0, 305.0, 310.0, 315.0, 320.0, 325.0,
+        330.0, 335.0, 340.0, 345.0, 350.0, 355.0
+      ],
+      "elevations_deg": [-20.0, 0.0, 20.0]
+    },
+    "smoke_grid": {
+      "frequencies_GHz": [10.0],
+      "azimuths_deg": [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0],
+      "elevations_deg": [0.0]
+    },
+    "reference_convergence": {
+      "required_refinement_levels": 3,
+      "maximum_last-step_active_magnitude_change_db": 0.5,
+      "maximum_last-step_active_phase_change_deg": 5.0,
+      "active_field_floor_db": -35.0,
+      "rule": "Converge clean and featured solves separately with the same meshing strategy. Reference-solver change must remain materially below the reconstruction error reported by the four-artifact validator."
+    },
+    "shared_rules": [
+      "Use the identical frequency, angle, polarization order, phase origin, material dispersion, far-field normalization, and time convention for all four artifacts.",
+      "The clean and featured CAD must differ only in feature-local geometry or material explicitly named by the case.",
+      "Export signed complex real/imaginary F. Never subtract or compare dBsm to form a feature delta.",
+      "Do not fit phase, amplitude, range, angle, or phase center after solving.",
+      "Use the exact same assembly surface mesh for placement preflight and for documenting outward normals."
+    ]
+  },
+  "feature_reference_contracts": {
+    "canonical-open-gap": {
+      "kind": "line",
+      "delta": "complex OPN minus FRD from the matched feature-centered two-dimensional coupon required by the canonical wedge/wing source spec",
+      "explicit_geometry": "Remove the centered strip of PEC surface at the case width. Do not add a fitted groove depth, backing, fill, or impedance not present in the canonical source spec.",
+      "phase_center": "center of the open strip",
+      "path_direction": "the ordered path in case_spec.json; reversing it requires the documented coupon-angle transformation",
+      "tessellation": "preserve every path vertex and host-normal discontinuity; segment splitting must not change the reconstructed result"
+    },
+    "circular-fastener-cap": {
+      "kind": "point",
+      "delta": "complex installed-patch minus identical clean-skin patch from a local three-dimensional solve",
+      "installed_geometry": "8 mm diameter, 2 mm high PEC circular cap installed into the named host skin",
+      "phase_center": "center of the cap/skin intersection",
+      "local_axes": "+z is outward normal; +x is the supplied roll_ref; +y completes a right-handed frame",
+      "surface_matching": "use the host geometry and installation in the canonical wedge/wing source spec; never substitute the isolated cap response"
+    },
+    "pec-backed-groove": {
+      "kind": "line",
+      "delta": "complex OPN minus FRD from a matched two-dimensional coupon",
+      "coupon": "locally tangent PEC skin with a centered rectangular groove of the case width and 0.004 m depth; PEC floor and walls; no open cavity behind the floor",
+      "phase_center": "center of the groove mouth",
+      "path_direction": "the ordered path in case_spec.json; reversing it requires mirrored line-response angles",
+      "tessellation": "continuous CAD path for full wave; assembly polyline maximum chord 0.005 m and a vertex at every face/fillet transition"
+    },
+    "lossy-filled-groove": {
+      "kind": "line",
+      "delta": "complex filled-groove minus flush-PEC from a matched two-dimensional coupon",
+      "coupon": "0.003 m wide by 0.005 m deep groove, completely filled flush with homogeneous eps_r=4.0-j0.2 and mu_r=1.0 under exp(+jwt); PEC floor and walls",
+      "phase_center": "center of the groove mouth",
+      "path_direction": "the ordered path in case_spec.json; reversing it requires mirrored line-response angles",
+      "tessellation": "continuous CAD path for full wave; assembly polyline maximum chord 0.005 m and a vertex at every curvature transition"
+    },
+    "oval-quarter-turn-fastener": {
+      "kind": "point",
+      "delta": "complex installed-patch minus identical clean-skin patch from a local three-dimensional solve",
+      "installed_geometry": "PEC elliptical capped boss, semi-axes 0.006 m along roll_ref and 0.004 m across roll_ref, height 0.0015 m along the outward normal, intersected cleanly with the local skin",
+      "phase_center": "center of the fastener/skin intersection",
+      "local_axes": "+z is outward normal; +x is roll_ref; +y completes a right-handed frame",
+      "required_pattern_extent": "full 0 to less than 360 degree local azimuth, including the exact local elevations reached by the acceptance look grid",
+      "surface_matching": "solve the installed and clean local patches on the case-named tangent/curved skin; do not use the isolated metal boss"
+    }
+  },
+  "bodies": {
+    "wedge-ramp": {
+      "name": "closed PEC deck-and-ramp prism",
+      "material": "PEC",
+      "canonical_source_spec": "cases/wedge_ramp/case_spec.json",
+      "clean_geometry": {
+        "construction": "Extrude the ordered yz polygon from x=-0.400 m to x=+0.400 m and close both end caps. Preserve every hard deck/ramp edge.",
+        "yz_polygon_m": [[-0.6, 0.0], [0.6, 0.0], [0.6, 0.3], [0.1, 0.3], [-0.35, 0.1], [-0.6, 0.1]],
+        "x_extent_m": [-0.4, 0.4],
+        "clean_feature_state": "Continuous PEC sloped ramp and upper deck; suppress both gaps and both fastener caps.",
+        "cad_tolerance_m": 1e-06
+      },
+      "surface_normal_contract": {
+        "definition": "Use exact outward planar face normals and retain the ramp/deck normal discontinuity.",
+        "sloped_ramp": [0.0, -0.4061384660534476, 0.9138115486202572],
+        "upper_deck": [0.0, 0.0, 1.0]
+      }
+    },
+    "swept-wing-panel": {
+      "name": "faceted PEC swept-wing skin",
+      "material": "PEC",
+      "canonical_source_spec": "cases/swept_wing_panel/case_spec.json",
+      "clean_geometry": {
+        "construction": "Triangulate the listed three span stations by the three chord fractions using straight edges. Do not smooth the deliberate spanwise normal break and do not change triangle diagonals between clean and featured models.",
+        "station_columns": ["x_span", "y_leading_edge", "chord", "z_skin", "mid_chord_camber"],
+        "stations_m": [[0.08, 0.43, 0.62, 0.035, 0.025], [0.46, 0.365, 0.49, 0.078, 0.025], [0.83, 0.245, 0.35, 0.145, 0.025]],
+        "chord_fractions": [0.0, 0.64, 1.0],
+        "surface_rule": "At each station, y=y_leading_edge-fraction*chord and z=z_skin+[0,mid_chord_camber,0] for the three chord fractions.",
+        "clean_feature_state": "Continuous faceted PEC skin with the hinge filled flush and no access fastener cap.",
+        "mesh_identity_rule": "Assembly and full wave must use identical vertices, triangle diagonals, hard edges, and global coordinates."
+      },
+      "surface_normal_contract": {
+        "definition": "Use the exact outward normal of the canonical incident triangle; never average across the middle span-station crease.",
+        "hinge_rule": "For each of the two 0.64-chord hinge segments use the outward normal of its specified aft-side triangle, preserving the discontinuity at x=0.460 m.",
+        "fastener_rule": "Use the exact outward normal of the outboard forward cell's aft triangle; project that triangle's first directed edge into its tangent plane for roll_ref."
+      }
+    },
+    "rounded-enclosure": {
+      "name": "PEC rounded rectangular enclosure",
+      "material": "PEC",
+      "clean_geometry": {
+        "construction": "Closed solid rounded box centered at the global origin. Start from a 0.800 m x 1.200 m x 0.320 m box along x, y, z and apply a 0.080 m radius tangent fillet to every external edge and corner.",
+        "outer_dimensions_m": {"x": 0.8, "y": 1.2, "z": 0.32},
+        "external_fillet_radius_m": 0.08,
+        "clean_feature_state": "Continuous flush PEC everywhere; no groove and no fastener boss.",
+        "cad_tolerance_m": 1e-06
+      },
+      "surface_normal_contract": {
+        "definition": "Outward unit normal of the filleted solid.",
+        "upper_right_xz_fillet": "For |y|<=0.520 m, r(theta)=(0.320+0.080*cos(theta), y, 0.080+0.080*sin(theta)) m and n(theta)=(cos(theta),0,sin(theta)), 0<=theta<=90 deg.",
+        "top_plane": "z=+0.160 m, |x|<=0.320 m, |y|<=0.520 m, n=(0,0,1).",
+        "right_plane": "x=+0.400 m, |z|<=0.080 m, |y|<=0.520 m, n=(1,0,0)."
+      },
+      "named_paths": {
+        "wrapped-shoulder-loop": {
+          "description": "Closed service-hatch loop spanning the top plane, upper-right xz fillet, and right plane.",
+          "orientation": "ordered from top-aft to top-forward, then across the shoulder to the side and back aft",
+          "pieces": [
+            "top longitudinal: (x,z)=(0.220,0.160), y=-0.280 to +0.280 m",
+            "forward connector at y=+0.280 m: top x=0.220 to 0.320 m; fillet theta=90 to 0 deg; right plane z=0.080 to -0.020 m",
+            "side longitudinal: (x,z)=(0.400,-0.020), y=+0.280 to -0.280 m",
+            "aft connector at y=-0.280 m: right plane z=-0.020 to 0.080 m; fillet theta=0 to 90 deg; top x=0.320 to 0.220 m"
+          ],
+          "full_wave_path": "Use exact straight lines and exact 0.080 m circular arcs joined tangentially.",
+          "assembly_path": "Sample straight pieces and arcs at no more than 0.005 m chord; use the analytic outward normal at every endpoint."
+        },
+        "top-door-loop": {
+          "description": "Rounded rectangular closed loop on the planar top surface.",
+          "center_m": [0.06, -0.05, 0.16],
+          "size_m": {"x": 0.4, "y": 0.64},
+          "corner_radius_m": 0.06,
+          "normal": [0.0, 0.0, 1.0],
+          "orientation": "counterclockwise when viewed from +z",
+          "assembly_path": "Maximum 0.005 m chord with exact circular corner arcs."
+        }
+      },
+      "named_point_sets": {
+        "top-one": [
+          {"id": "re-top-01", "position_m": [-0.18, 0.2, 0.16], "normal": [0.0, 0.0, 1.0], "roll_ref": [0.0, 1.0, 0.0], "local_skin": "planar PEC"}
+        ],
+        "fillet-one": [
+          {"id": "re-fillet-55", "position_formula": "(0.320+0.080*cos(55 deg), 0.250, 0.080+0.080*sin(55 deg)) m", "position_m": [0.3658861149, 0.25, 0.1455321635], "normal": [0.5735764364, 0.0, 0.8191520443], "roll_ref": [0.0, 1.0, 0.0], "local_skin": "0.080 m radius cylindrical PEC fillet with axis +y"}
+        ],
+        "top-four": [
+          {"id": "re-top-nw", "position_m": [-0.17, -0.31, 0.16], "normal": [0.0, 0.0, 1.0], "roll_ref": [0.0, 1.0, 0.0]},
+          {"id": "re-top-ne", "position_m": [0.29, -0.31, 0.16], "normal": [0.0, 0.0, 1.0], "roll_ref": [0.0, 1.0, 0.0]},
+          {"id": "re-top-se", "position_m": [0.29, 0.21, 0.16], "normal": [0.0, 0.0, 1.0], "roll_ref": [0.0, 1.0, 0.0]},
+          {"id": "re-top-sw", "position_m": [-0.17, 0.21, 0.16], "normal": [0.0, 0.0, 1.0], "roll_ref": [0.0, 1.0, 0.0]}
+        ]
+      }
+    },
+    "vehicle-door-section": {
+      "name": "PEC representative vehicle door/body section",
+      "material": "PEC except the explicitly named filled seal",
+      "clean_geometry": {
+        "construction": "Closed shallow doubly-curved PEC shell. In the yz rectangle -0.750<=y<=0.750 m and -0.500<=z<=0.550 m, the outer skin is x_skin(y,z)=0.700-y^2/(2*3.000)-(z-0.025)^2/(2*4.000) m. The back is x_skin-0.120 m and the four perimeter walls close the volume.",
+        "domain_m": {"y": [-0.75, 0.75], "z": [-0.5, 0.55]},
+        "skin_formula_m": "x=0.700-y^2/6.000-(z-0.025)^2/8.000",
+        "back_offset_in_x_m": 0.12,
+        "clean_feature_state": "Continuous analytic outer PEC skin; the complete door path is suppressed/filled flush and all fastener bosses are removed.",
+        "perimeter_edges": "Keep sharp so the case retains realistic nearby diffraction.",
+        "cad_tolerance_m": 1e-06
+      },
+      "surface_normal_contract": {
+        "definition": "At outer-skin coordinates (y,z), n=normalize((1,y/3.000,(z-0.025)/4.000)).",
+        "point_position": "r(y,z)=(0.700-y^2/6.000-(z-0.025)^2/8.000, y, z) m.",
+        "roll_reference": "Project global +z into the local tangent plane and normalize; all listed points remain far from the singular case."
+      },
+      "named_paths": {
+        "door-perimeter": {
+          "description": "Rounded trapezoidal door shut line on the analytic outer skin.",
+          "yz_vertices_m": [[-0.55, -0.36], [0.54, -0.33], [0.58, 0.38], [-0.48, 0.43]],
+          "corner_fillet_radius_in_yz_m": 0.06,
+          "corner_rule": "Replace each polygon corner by the unique tangent circular arc of radius 0.060 m in the yz parameter plane; shorten both adjacent straight segments to the tangency points.",
+          "map_to_surface": "For every (y,z) sample, compute x from x_skin and compute n from the analytic normal formula.",
+          "orientation": "listed vertex order, with tangent fillets, then closed to the first vertex",
+          "full_wave_path": "Use exact yz lines/arcs mapped through x_skin.",
+          "assembly_path": "Maximum 0.005 m three-dimensional chord and a vertex at every line/arc tangency."
+        }
+      },
+      "named_point_sets": {
+        "door-fasteners-eight": {
+          "yz_positions_m": [[-0.44, -0.28], [0.0, -0.31], [0.43, -0.25], [0.5, 0.02], [0.46, 0.31], [0.0, 0.38], [-0.38, 0.35], [-0.48, 0.03]],
+          "position_rule": "Map each (y,z) through r(y,z).",
+          "normal_rule": "Use n(y,z) exactly.",
+          "roll_rule": "Use normalized projection of global +z into the tangent plane.",
+          "response_rule": "Build one installed-minus-clean local patch response per position, matching the translated and rotated analytic quadratic skin over a 0.160 m diameter patch."
+        },
+        "door-fasteners-four": {
+          "subset_indices_zero_based": [0, 2, 4, 6],
+          "source_set": "door-fasteners-eight"
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "wedge-ramp-canonical",
+      "name": "wedge/ramp - paired sloped and horizontal controls",
+      "body_id": "wedge-ramp",
+      "feature_summary": "3 mm ramp/deck gaps and matching ramp/deck compact fasteners",
+      "parameter_sweep": {"family": "wedge-host-orientation", "variable": "host_faces", "value": "sloped ramp plus horizontal deck control", "unit": "canonical configuration", "other_values": ["translate ramp gap +0.025 m in x", "rotate ramp fastener roll +45 deg"]},
+      "feature_spec": {
+        "canonical_source_spec": "cases/wedge_ramp/case_spec.json",
+        "line_reference_contract": "canonical-open-gap",
+        "point_reference_contract": "circular-fastener-cap",
+        "features": [
+          {"id": "ramp_gap_001", "kind": "line", "start_m": [-0.25, -0.1, 0.2111111111111111], "stop_m": [0.25, -0.1, 0.2111111111111111], "normal": [0.0, -0.4061384660534476, 0.9138115486202572], "width_m": 0.003},
+          {"id": "ramp_fastener_001", "kind": "point", "position_m": [0.17, -0.02, 0.2466666666666667], "normal": [0.0, -0.4061384660534476, 0.9138115486202572], "roll_ref": [1.0, 0.0, 0.0]},
+          {"id": "deck_gap_control_001", "kind": "line", "start_m": [-0.25, 0.35, 0.3], "stop_m": [0.25, 0.35, 0.3], "normal": [0.0, 0.0, 1.0], "width_m": 0.003},
+          {"id": "deck_fastener_control_001", "kind": "point", "position_m": [-0.17, 0.43, 0.3], "normal": [0.0, 0.0, 1.0], "roll_ref": [1.0, 0.0, 0.0]}
+        ],
+        "explicit_feature": "Use exactly the four features in the canonical source spec. The full-wave and reconstructed configurations must enable the same four IDs. Run the named translation and roll variants as required controls, not as fitted corrections."
+      },
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.15, "max_magnitude_p95_db": 2.0, "max_phase_rms_deg": 16.0, "min_coherence": 0.975}
+    },
+    {
+      "id": "swept-wing-canonical",
+      "name": "swept wing - hinge across normal break and access fastener",
+      "body_id": "swept-wing-panel",
+      "feature_summary": "2 mm swept flap hinge plus one anisotropic installed access fastener",
+      "parameter_sweep": {"family": "wing-placement-controls", "variable": "control", "value": "canonical combined", "unit": "canonical configuration", "other_values": ["split every hinge segment in half", "reverse hinge with coupon-angle mirroring", "translate hinge 0.020 m chordwise", "rotate fastener roll +45 deg"]},
+      "feature_spec": {
+        "canonical_source_spec": "cases/swept_wing_panel/case_spec.json",
+        "line_reference_contract": "canonical-open-gap",
+        "point_reference_contract": "circular-fastener-cap",
+        "features": [
+          {"id": "wing_flap_hinge_001", "kind": "line", "ordered_centerline_m": [[0.08, 0.0332, 0.06], [0.46, 0.0514, 0.103], [0.83, 0.021, 0.17]], "width_m": 0.002, "normal_rule": "canonical aft-side incident triangle per segment; discontinuous at the middle station"},
+          {"id": "wing_access_fastener_001", "kind": "point", "location_rule": "barycentric weights [0.22,0.33,0.45] on the outboard forward cell's aft triangle", "normal_rule": "exact outward host-triangle normal", "roll_rule": "project the triangle's first directed edge into the tangent plane"}
+        ],
+        "explicit_feature": "Use exactly the two features in the canonical source spec. Run segmentation, direction, translation, and roll variants as required controls without changing the acceptance grid or fitting the result."
+      },
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.2, "max_magnitude_p95_db": 2.75, "max_phase_rms_deg": 20.0, "min_coherence": 0.96}
+    },
+    {
+      "id": "rounded-shoulder-gap-w001",
+      "name": "rounded enclosure - wrapped shoulder groove 1 mm",
+      "body_id": "rounded-enclosure",
+      "feature_summary": "1 mm PEC-backed groove expanded around the wrapped shoulder loop",
+      "parameter_sweep": {"family": "rounded-shoulder-gap-width", "variable": "gap_width_mm", "value": 1.0, "unit": "mm", "other_values": [2.0, 4.0]},
+      "feature_spec": {"reference_contract": "pec-backed-groove", "path": "wrapped-shoulder-loop", "gap_width_m": 0.001, "gap_depth_m": 0.004, "explicit_feature": "Remove the named centered strip from the clean outer PEC skin to 0.004 m depth with PEC floor/walls; retain the exact rounded-box exterior elsewhere."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.15, "max_magnitude_p95_db": 2.0, "max_phase_rms_deg": 15.0, "min_coherence": 0.975}
+    },
+    {
+      "id": "rounded-shoulder-gap-w002",
+      "name": "rounded enclosure - wrapped shoulder groove 2 mm",
+      "body_id": "rounded-enclosure",
+      "feature_summary": "2 mm PEC-backed groove expanded around the wrapped shoulder loop",
+      "parameter_sweep": {"family": "rounded-shoulder-gap-width", "variable": "gap_width_mm", "value": 2.0, "unit": "mm", "other_values": [1.0, 4.0]},
+      "feature_spec": {"reference_contract": "pec-backed-groove", "path": "wrapped-shoulder-loop", "gap_width_m": 0.002, "gap_depth_m": 0.004, "explicit_feature": "Remove the named centered strip from the clean outer PEC skin to 0.004 m depth with PEC floor/walls; retain the exact rounded-box exterior elsewhere."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.15, "max_magnitude_p95_db": 2.0, "max_phase_rms_deg": 15.0, "min_coherence": 0.975}
+    },
+    {
+      "id": "rounded-shoulder-gap-w004",
+      "name": "rounded enclosure - wrapped shoulder groove 4 mm",
+      "body_id": "rounded-enclosure",
+      "feature_summary": "4 mm PEC-backed groove expanded around the wrapped shoulder loop",
+      "parameter_sweep": {"family": "rounded-shoulder-gap-width", "variable": "gap_width_mm", "value": 4.0, "unit": "mm", "other_values": [1.0, 2.0]},
+      "feature_spec": {"reference_contract": "pec-backed-groove", "path": "wrapped-shoulder-loop", "gap_width_m": 0.004, "gap_depth_m": 0.004, "explicit_feature": "Remove the named centered strip from the clean outer PEC skin to 0.004 m depth with PEC floor/walls; retain the exact rounded-box exterior elsewhere."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.15, "max_magnitude_p95_db": 2.0, "max_phase_rms_deg": 15.0, "min_coherence": 0.975}
+    },
+    {
+      "id": "rounded-fastener-top",
+      "name": "rounded enclosure - planar-top quarter-turn fastener",
+      "body_id": "rounded-enclosure",
+      "feature_summary": "one anisotropic installed-minus-clean point fastener on the planar top",
+      "parameter_sweep": {"family": "rounded-fastener-location", "variable": "surface_location", "value": "top-one", "unit": "named point set", "other_values": ["fillet-one"]},
+      "feature_spec": {"reference_contract": "oval-quarter-turn-fastener", "point_set": "top-one", "explicit_feature": "Add the named PEC oval capped boss at re-top-01; change no other surface."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.12, "max_magnitude_p95_db": 1.75, "max_phase_rms_deg": 14.0, "min_coherence": 0.98}
+    },
+    {
+      "id": "rounded-fastener-fillet55",
+      "name": "rounded enclosure - fillet-mounted quarter-turn fastener",
+      "body_id": "rounded-enclosure",
+      "feature_summary": "one anisotropic installed-minus-clean point fastener on the 55 degree upper-right fillet",
+      "parameter_sweep": {"family": "rounded-fastener-location", "variable": "surface_location", "value": "fillet-one", "unit": "named point set", "other_values": ["top-one"]},
+      "feature_spec": {"reference_contract": "oval-quarter-turn-fastener", "point_set": "fillet-one", "explicit_feature": "Add the named PEC oval capped boss along the analytic fillet normal at re-fillet-55; change no other surface."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.15, "max_magnitude_p95_db": 2.0, "max_phase_rms_deg": 16.0, "min_coherence": 0.975}
+    },
+    {
+      "id": "rounded-combined-door-fasteners",
+      "name": "rounded enclosure - top door loop and four fasteners",
+      "body_id": "rounded-enclosure",
+      "feature_summary": "2 mm PEC-backed top door loop plus four anisotropic point fasteners",
+      "parameter_sweep": {"family": "rounded-combined", "variable": "configuration", "value": "2 mm top loop plus top-four", "unit": "named configuration", "other_values": []},
+      "feature_spec": {"line_reference_contract": "pec-backed-groove", "point_reference_contract": "oval-quarter-turn-fastener", "path": "top-door-loop", "point_set": "top-four", "gap_width_m": 0.002, "gap_depth_m": 0.004, "explicit_feature": "Cut the complete named top groove and add all four named capped bosses in one featured CAD model. The assembled prediction must enable exactly those five spatial instances."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.2, "max_magnitude_p95_db": 2.5, "max_phase_rms_deg": 20.0, "min_coherence": 0.96}
+    },
+    {
+      "id": "door-open-gap-w0015",
+      "name": "vehicle door section - open groove 1.5 mm",
+      "body_id": "vehicle-door-section",
+      "feature_summary": "1.5 mm PEC-backed door-perimeter groove on the doubly-curved skin",
+      "parameter_sweep": {"family": "door-open-gap-width", "variable": "gap_width_mm", "value": 1.5, "unit": "mm", "other_values": [3.0]},
+      "feature_spec": {"reference_contract": "pec-backed-groove", "path": "door-perimeter", "gap_width_m": 0.0015, "gap_depth_m": 0.004, "explicit_feature": "Cut the centered mapped door-perimeter groove 0.004 m deep into the analytic outer skin with PEC floor/walls. Preserve the sharp body-section perimeter and every other surface."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.2, "max_magnitude_p95_db": 3.0, "max_phase_rms_deg": 22.0, "min_coherence": 0.95}
+    },
+    {
+      "id": "door-open-gap-w0030",
+      "name": "vehicle door section - open groove 3 mm",
+      "body_id": "vehicle-door-section",
+      "feature_summary": "3 mm PEC-backed door-perimeter groove on the doubly-curved skin",
+      "parameter_sweep": {"family": "door-open-gap-width", "variable": "gap_width_mm", "value": 3.0, "unit": "mm", "other_values": [1.5]},
+      "feature_spec": {"reference_contract": "pec-backed-groove", "path": "door-perimeter", "gap_width_m": 0.003, "gap_depth_m": 0.004, "explicit_feature": "Cut the centered mapped door-perimeter groove 0.004 m deep into the analytic outer skin with PEC floor/walls. Preserve the sharp body-section perimeter and every other surface."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.2, "max_magnitude_p95_db": 3.0, "max_phase_rms_deg": 22.0, "min_coherence": 0.95}
+    },
+    {
+      "id": "door-filled-seal-w0030",
+      "name": "vehicle door section - lossy filled seal 3 mm",
+      "body_id": "vehicle-door-section",
+      "feature_summary": "3 mm lossy filled door-perimeter seal on the doubly-curved skin",
+      "parameter_sweep": {"family": "door-gap-material", "variable": "fill", "value": "eps_r=4.0-j0.2, mu_r=1.0", "unit": "relative material under exp(+jwt)", "other_values": ["unfilled PEC-backed groove"]},
+      "feature_spec": {"reference_contract": "lossy-filled-groove", "path": "door-perimeter", "gap_width_m": 0.003, "gap_depth_m": 0.005, "fill_eps_r": [4.0, -0.2], "fill_mu_r": [1.0, 0.0], "explicit_feature": "Cut the centered 0.003 m by 0.005 m mapped groove and fill it flush with the named homogeneous material; retain PEC floor/walls and change nothing else."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.22, "max_magnitude_p95_db": 3.0, "max_phase_rms_deg": 23.0, "min_coherence": 0.95}
+    },
+    {
+      "id": "door-fasteners-four",
+      "name": "vehicle door section - four quarter-turn fasteners",
+      "body_id": "vehicle-door-section",
+      "feature_summary": "four position-specific installed-minus-clean anisotropic point fasteners",
+      "parameter_sweep": {"family": "door-fastener-count", "variable": "enabled_fastener_count", "value": 4, "unit": "instances", "other_values": [8]},
+      "feature_spec": {"reference_contract": "oval-quarter-turn-fastener", "point_set": "door-fasteners-four", "explicit_feature": "Add exactly subset indices 0,2,4,6 from door-fasteners-eight, each aligned to its analytic normal and roll; change no other surface."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.18, "max_magnitude_p95_db": 2.75, "max_phase_rms_deg": 20.0, "min_coherence": 0.96}
+    },
+    {
+      "id": "door-fasteners-eight",
+      "name": "vehicle door section - eight quarter-turn fasteners",
+      "body_id": "vehicle-door-section",
+      "feature_summary": "eight position-specific installed-minus-clean anisotropic point fasteners",
+      "parameter_sweep": {"family": "door-fastener-count", "variable": "enabled_fastener_count", "value": 8, "unit": "instances", "other_values": [4]},
+      "feature_spec": {"reference_contract": "oval-quarter-turn-fastener", "point_set": "door-fasteners-eight", "explicit_feature": "Add all eight named fasteners, each aligned to its analytic normal and roll; change no other surface."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.2, "max_magnitude_p95_db": 3.0, "max_phase_rms_deg": 22.0, "min_coherence": 0.95}
+    },
+    {
+      "id": "door-combined-seal-fasteners",
+      "name": "vehicle door section - filled seal and eight fasteners",
+      "body_id": "vehicle-door-section",
+      "feature_summary": "3 mm lossy filled door seal plus eight anisotropic point fasteners",
+      "parameter_sweep": {"family": "door-combined", "variable": "configuration", "value": "filled 3 mm seal plus eight fasteners", "unit": "named configuration", "other_values": []},
+      "feature_spec": {"line_reference_contract": "lossy-filled-groove", "point_reference_contract": "oval-quarter-turn-fastener", "path": "door-perimeter", "point_set": "door-fasteners-eight", "gap_width_m": 0.003, "gap_depth_m": 0.005, "fill_eps_r": [4.0, -0.2], "fill_mu_r": [1.0, 0.0], "explicit_feature": "Model the complete filled door-perimeter seal and all eight named fasteners in one featured CAD body. The assembled prediction must enable exactly those nine spatial instances."},
+      "gates": {"active_floor_db": -35.0, "max_normalized_rms": 0.25, "max_magnitude_p95_db": 3.5, "max_phase_rms_deg": 25.0, "min_coherence": 0.95}
+    }
+  ]
+}

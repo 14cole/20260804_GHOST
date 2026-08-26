@@ -33,22 +33,17 @@ def main() -> int:
             "compiler or set CC."
         )
     source = Path(__file__).resolve().with_name("bor_stream_kernel.c")
-    tag = f"{platform.system().lower()}-{platform.machine().lower()}"
+    system_name = platform.system().lower()
+    tag = f"{system_name}-{platform.machine().lower()}"
+    output_extension = ".dll" if system_name == "windows" else ".so"
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / f"bor_stream_kernel.{tag}.so"
+    output = output_dir / f"bor_stream_kernel.{tag}{output_extension}"
     temporary = output.with_name(f".{output.name}.tmp.{os.getpid()}")
-    command = [
-        compiler,
-        "-O3",
-        "-std=c99",
-        "-shared",
-        "-fPIC",
-        "-o",
-        str(temporary),
-        str(source),
-        "-lm",
-    ]
+    command = [compiler, "-O3", "-std=c99", "-shared"]
+    if system_name != "windows":
+        command.append("-fPIC")
+    command.extend(["-o", str(temporary), str(source), "-lm"])
     try:
         subprocess.run(command, check=True)
         library = ctypes.CDLL(str(temporary))

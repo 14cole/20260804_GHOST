@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import os
@@ -47,11 +48,12 @@ _ROLE_MODE    = Qt.UserRole + 3    # "coh" | "incoh" (every non-root node)
 _ROLE_PURPOSE = Qt.UserRole + 4    # "response" | "preview"
 _ROLE_PREVIEW_KEY = Qt.UserRole + 5  # stable runtime scene key (preview only)
 
-# Tree columns. Visibility is deliberately a preview concern only: the
-# recursive assembly calculation below never consults this column.
+# Tree columns. ``Use`` controls response membership; ``Show`` is deliberately
+# preview-only so hiding visual clutter can never silently change a result.
 _COLUMN_NAME       = 0
 _COLUMN_MODE       = 1
-_COLUMN_VISIBILITY = 2
+_COLUMN_INCLUDED   = 2
+_COLUMN_VISIBILITY = 3
 
 _TYPE_ROOT   = "root"
 _TYPE_BRANCH = "branch"
@@ -155,6 +157,82 @@ def _item_preview_visible(item: QTreeWidgetItem) -> bool:
             return False
         current = current.parent()
     return True
+
+
+def _inclusion_state(item: QTreeWidgetItem):
+    """Return one response node's explicit Build Platform check state."""
+    return item.checkState(_COLUMN_INCLUDED)
+
+
+def _set_inclusion_state(item: QTreeWidgetItem, included: bool) -> None:
+    """Set one response node's build state without changing descendants."""
+    if _is_preview_item(item):
+        return
+    item.setCheckState(
+        _COLUMN_INCLUDED,
+        Qt.Checked if bool(included) else Qt.Unchecked,
+    )
+
+
+def _response_subtree_items(item: QTreeWidgetItem) -> list[QTreeWidgetItem]:
+    """Return response nodes in a subtree, excluding runtime preview nodes."""
+    if _is_preview_item(item):
+        return []
+    items = [item]
+    for index in range(item.childCount()):
+        items.extend(_response_subtree_items(item.child(index)))
+    return items
+
+
+def _set_subtree_included(item: QTreeWidgetItem, included: bool) -> None:
+    """Apply one Build Platform inclusion state to a response subtree."""
+    for descendant in _response_subtree_items(item):
+        _set_inclusion_state(descendant, included)
+
+
+def _sync_inclusion_from_children(item: QTreeWidgetItem | None) -> None:
+    """Make response ancestors summarize their response children's Use state."""
+    current = item
+    while current is not None:
+        children = [
+            current.child(index)
+            for index in range(current.childCount())
+            if not _is_preview_item(current.child(index))
+        ]
+        states = [_inclusion_state(child) for child in children]
+        if states:
+            if all(state == Qt.Checked for state in states):
+                state = Qt.Checked
+            elif all(state == Qt.Unchecked for state in states):
+                state = Qt.Unchecked
+            else:
+                state = Qt.PartiallyChecked
+            current.setCheckState(_COLUMN_INCLUDED, state)
+        current = current.parent()
+
+
+def _item_response_included(item: QTreeWidgetItem) -> bool:
+    """Whether a response node participates in builds, including ancestors."""
+    if _is_preview_item(item):
+        return False
+    current = item
+    while current is not None:
+        if _inclusion_state(current) == Qt.Unchecked:
+            return False
+        current = current.parent()
+    return True
+
+
+def _inherit_container_states(
+    item: QTreeWidgetItem, parent: QTreeWidgetItem | None
+) -> None:
+    """Keep a newly attached subtree masked when its container is off."""
+    if parent is None:
+        return
+    if _visibility_state(parent) == Qt.Unchecked:
+        _set_subtree_visibility(item, False)
+    if not _is_preview_item(item) and _inclusion_state(parent) == Qt.Unchecked:
+        _set_subtree_included(item, False)
 
 
 def _apply_mode_badge(item: QTreeWidgetItem, mode: str | None) -> None:
@@ -326,6 +404,7 @@ def _item_to_dict(item: QTreeWidgetItem) -> dict | None:
     d: dict = {
         "name":     item.text(0),
         "type":     node_type,
+        "included": _inclusion_state(item) != Qt.Unchecked,
         # Preview visibility is persisted independently from response
         # inclusion. A partial branch is considered visible; its individual
         # child states reproduce the partial state when the tree is loaded.
@@ -358,8 +437,16 @@ def _dict_to_item(d: dict) -> QTreeWidgetItem:
     item.setData(0, _ROLE_TYPE, node_type)
     item.setData(0, _ROLE_PURPOSE, _PURPOSE_RESPONSE)
     _apply_flags(item, node_type)
-    # Version 1/2 .asy files did not carry preview visibility. Defaulting to
-    # checked keeps their historical appearance and build behavior.
+    included = d.get("included", True)
+    if type(included) is not bool:
+        raise ValueError(
+            f"assembly response node {d.get('name')!r} has a non-boolean "
+            "'included' value"
+        )
+    _set_inclusion_state(item, included)
+    # Version 1/2 .asy files did not carry preview visibility, and versions
+    # 1-3 did not carry response inclusion. Both default checked so historical
+    # assemblies retain their appearance and build behavior.
     _set_visibility_state(item, bool(d.get("visible", True)))
 
     if node_type == _TYPE_LEAF:
@@ -392,7 +479,53 @@ def _dict_to_item(d: dict) -> QTreeWidgetItem:
         item.addChild(_dict_to_item(child))
     if item.childCount():
         _sync_visibility_from_children(item)
+        _sync_inclusion_from_children(item)
     return item
+
+
+def _clone_response_item(item: QTreeWidgetItem) -> QTreeWidgetItem:
+    """Deep-copy one response subtree without aliasing any RcsGrid state."""
+    if _is_preview_item(item):
+        raise ValueError("runtime preview nodes cannot be duplicated")
+    node_type = item.data(0, _ROLE_TYPE)
+    if node_type not in (_TYPE_ROOT, _TYPE_BRANCH, _TYPE_LEAF):
+        raise ValueError(f"unsupported response node type {node_type!r}")
+
+    clone = QTreeWidgetItem([item.text(0)])
+    clone.setData(0, _ROLE_TYPE, node_type)
+    clone.setData(0, _ROLE_PURPOSE, _PURPOSE_RESPONSE)
+    _apply_flags(clone, node_type)
+    _set_visibility_state(clone, _visibility_state(item) != Qt.Unchecked)
+    _set_inclusion_state(clone, _inclusion_state(item) != Qt.Unchecked)
+
+    if node_type == _TYPE_LEAF:
+        clone.setData(0, _ROLE_NAME, item.data(0, _ROLE_NAME))
+        grid = item.data(0, _ROLE_GRID)
+        grid_copy = None if grid is None else copy.deepcopy(grid)
+        clone.setData(0, _ROLE_GRID, grid_copy)
+        _apply_leaf_style(clone, grid_copy is not None)
+        clone.setIcon(0, _node_icon(_TYPE_LEAF, has_data=(grid_copy is not None)))
+    else:
+        clone.setIcon(0, _node_icon(node_type, expanded=item.isExpanded()))
+        if node_type == _TYPE_ROOT:
+            font = clone.font(0)
+            font.setBold(True)
+            clone.setFont(0, font)
+
+    if node_type == _TYPE_ROOT:
+        _apply_mode_badge(clone, None)
+    else:
+        _set_node_mode(clone, _node_mode(item))
+
+    for index in range(item.childCount()):
+        child = item.child(index)
+        if not _is_preview_item(child):
+            clone.addChild(_clone_response_item(child))
+    if clone.childCount():
+        _sync_visibility_from_children(clone)
+        _sync_inclusion_from_children(clone)
+    clone.setExpanded(item.isExpanded())
+    return clone
 
 
 def _apply_flags(item: QTreeWidgetItem, node_type: str) -> None:
@@ -469,11 +602,17 @@ class AssemblyTree(QTreeWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("assemblyTree")
-        self.setColumnCount(3)
-        self.setHeaderLabels(["Assembly", "Mode", "Show"])
+        self.setColumnCount(4)
+        self.setHeaderLabels(["Assembly", "Mode", "Use", "Show"])
         self.setColumnWidth(0, 220)
         self.setColumnWidth(1, 56)
-        self.setColumnWidth(2, 62)
+        self.setColumnWidth(2, 48)
+        self.setColumnWidth(3, 54)
+        self.headerItem().setToolTip(
+            _COLUMN_INCLUDED,
+            "Include this response node in Build Platform. Uncheck a body or "
+            "feature branch to compare assembly variants without deleting it.",
+        )
         self.headerItem().setToolTip(
             _COLUMN_VISIBILITY,
             "Show or hide this node in the Assembly 3-D preview. "
@@ -502,6 +641,7 @@ class AssemblyTree(QTreeWidget):
         self.itemExpanded.connect(self._on_item_expanded)
         self.itemCollapsed.connect(self._on_item_collapsed)
         self._updating_visibility = False
+        self._updating_inclusion = False
         self.itemChanged.connect(self._on_item_changed)
         self._branch_drag_item: QTreeWidgetItem | None = None
         self._pending_branch_data: list | None = None
@@ -664,7 +804,28 @@ class AssemblyTree(QTreeWidget):
     # ── preview visibility --------------------------------------------------
 
     def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
-        if not self._updating_visibility and not _is_preview_item(item):
+        if (
+            column == _COLUMN_INCLUDED
+            and not _is_preview_item(item)
+            and not self._updating_inclusion
+        ):
+            state = _inclusion_state(item)
+            self._updating_inclusion = True
+            try:
+                if state in (Qt.Checked, Qt.Unchecked) and item.childCount():
+                    included = state == Qt.Checked
+                    for index in range(item.childCount()):
+                        _set_subtree_included(item.child(index), included)
+                _sync_inclusion_from_children(item.parent())
+            finally:
+                self._updating_inclusion = False
+            self.content_changed.emit()
+            return
+        if (
+            not self._updating_visibility
+            and not self._updating_inclusion
+            and not _is_preview_item(item)
+        ):
             self.content_changed.emit()
         if self._updating_visibility or column != _COLUMN_VISIBILITY:
             return
@@ -722,6 +883,25 @@ class AssemblyTree(QTreeWidget):
     # initial Assembly workspace prototype.
     item_preview_visible = item_visible
 
+    def set_item_included(self, item: QTreeWidgetItem, included: bool) -> None:
+        """Include/exclude a response subtree from Build Platform."""
+        if item is None:
+            return
+        if _is_preview_item(item):
+            raise ValueError("preview-only nodes cannot be included in response builds")
+        self._updating_inclusion = True
+        try:
+            _set_subtree_included(item, included)
+            _sync_inclusion_from_children(item.parent())
+        finally:
+            self._updating_inclusion = False
+        self.content_changed.emit()
+
+    @staticmethod
+    def item_included(item: QTreeWidgetItem) -> bool:
+        """Return effective Build Platform membership for one response node."""
+        return _item_response_included(item)
+
     def _refresh_visibility_after_structure_change(
         self, parent: QTreeWidgetItem | None
     ) -> None:
@@ -729,10 +909,13 @@ class AssemblyTree(QTreeWidget):
         if parent is None:
             return
         self._updating_visibility = True
+        self._updating_inclusion = True
         try:
             _sync_visibility_from_children(parent)
+            _sync_inclusion_from_children(parent)
         finally:
             self._updating_visibility = False
+            self._updating_inclusion = False
         self.visibility_changed.emit(parent, _item_preview_visible(parent))
 
     # ── branch indicators (plus/minus box) ───────────────────────────────────
@@ -783,6 +966,8 @@ class AssemblyTree(QTreeWidget):
 
     def _collect_leaf_data(self, item: QTreeWidgetItem) -> list[tuple[str, object]]:
         result: list[tuple[str, object]] = []
+        if not _item_response_included(item):
+            return result
         for i in range(item.childCount()):
             child = item.child(i)
             if _is_preview_item(child):
@@ -832,11 +1017,14 @@ class AssemblyTree(QTreeWidget):
             (old_parent or self.invisibleRootItem()).removeChild(item)
             new_parent = None
             if target is not None and target.data(0, _ROLE_TYPE) in (_TYPE_ROOT, _TYPE_BRANCH):
+                _inherit_container_states(item, target)
                 target.addChild(item)
                 target.setExpanded(True)
                 new_parent = target
             elif target is not None and target.data(0, _ROLE_TYPE) == _TYPE_LEAF:
                 parent = target.parent() or self.invisibleRootItem()
+                if parent is not self.invisibleRootItem():
+                    _inherit_container_states(item, parent)
                 parent.addChild(item)
                 parent.setExpanded(True)
                 new_parent = None if parent is self.invisibleRootItem() else parent
@@ -897,6 +1085,7 @@ class AssemblyTree(QTreeWidget):
         item.setData(0, _ROLE_NAME, dataset_name)
         item.setData(0, _ROLE_GRID, grid)
         _apply_flags(item, _TYPE_LEAF)
+        _set_inclusion_state(item, True)
         _set_visibility_state(item, True)
         _apply_leaf_style(item, grid is not None)
         item.setIcon(0, _node_icon(_TYPE_LEAF, has_data=(grid is not None)))
@@ -910,10 +1099,20 @@ class AssemblyTree(QTreeWidget):
         parent: QTreeWidgetItem | None = None,
         edit: bool = True,
     ) -> QTreeWidgetItem:
+        if node_type not in (_TYPE_ROOT, _TYPE_BRANCH):
+            raise ValueError(f"unsupported response container type {node_type!r}")
+        if node_type == _TYPE_ROOT and parent is not None:
+            raise ValueError("response roots must be top-level")
+        if parent is not None and (
+            _is_preview_item(parent)
+            or parent.data(0, _ROLE_TYPE) == _TYPE_LEAF
+        ):
+            raise ValueError("response branches require a root or branch parent")
         item = QTreeWidgetItem([name])
         item.setData(0, _ROLE_TYPE, node_type)
         item.setData(0, _ROLE_PURPOSE, _PURPOSE_RESPONSE)
         _apply_flags(item, node_type)
+        _set_inclusion_state(item, True)
         _set_visibility_state(item, True)
         item.setIcon(0, _node_icon(node_type, expanded=False))
         if node_type == _TYPE_ROOT:
@@ -925,6 +1124,7 @@ class AssemblyTree(QTreeWidget):
         else:
             _set_node_mode(item, _DEFAULT_MODE)
         if parent is not None:
+            _inherit_container_states(item, parent)
             parent.addChild(item)
             parent.setExpanded(True)
             self._refresh_visibility_after_structure_change(parent)
@@ -936,6 +1136,40 @@ class AssemblyTree(QTreeWidget):
             self.editItem(item, 0)
         self.content_changed.emit()
         return item
+
+    def duplicate_response_subtree(
+        self, item: QTreeWidgetItem
+    ) -> QTreeWidgetItem:
+        """Insert an independent, clearly named copy beside ``item``."""
+        if item is None or _is_preview_item(item):
+            raise ValueError("select a response root, branch, or dataset")
+
+        parent = item.parent()
+        container = parent or self.invisibleRootItem()
+        sibling_names = {
+            container.child(index).text(0)
+            for index in range(container.childCount())
+        }
+        base_name = f"{item.text(0)} Copy"
+        copy_name = base_name
+        suffix = 2
+        while copy_name in sibling_names:
+            copy_name = f"{base_name} {suffix}"
+            suffix += 1
+
+        clone = _clone_response_item(item)
+        clone.setText(0, copy_name)
+        source_index = container.indexOfChild(item)
+        container.insertChild(source_index + 1, clone)
+        clone.setExpanded(item.isExpanded())
+        if parent is not None:
+            self._refresh_visibility_after_structure_change(parent)
+        else:
+            self.visibility_changed.emit(clone, _item_preview_visible(clone))
+        self.setCurrentItem(clone)
+        self.scrollToItem(clone)
+        self.content_changed.emit()
+        return clone
 
     def _remove_item(self, item: QTreeWidgetItem) -> None:
         parent = item.parent()
@@ -976,6 +1210,7 @@ class AssemblyTree(QTreeWidget):
         menu = QMenu(self)
         act_root   = menu.addAction("Add Root")
         act_branch = menu.addAction("Add Branch")
+        act_duplicate = menu.addAction("Duplicate Subtree")
         act_del    = menu.addAction("Delete")
         menu.addSeparator()
         act_expand   = menu.addAction("Expand")
@@ -985,8 +1220,13 @@ class AssemblyTree(QTreeWidget):
         if preview_only:
             act_root.setVisible(False)
             act_branch.setVisible(False)
+            act_duplicate.setVisible(False)
             act_del.setVisible(False)
             act_rename.setVisible(False)
+        elif item is None:
+            act_duplicate.setEnabled(False)
+            act_del.setEnabled(False)
+            act_rename.setEnabled(False)
 
         # Per-node add-mode setters (only meaningful for non-root nodes).
         act_set_coh = None
@@ -1009,7 +1249,15 @@ class AssemblyTree(QTreeWidget):
         if chosen == act_root:
             self._make_node("New Root", _TYPE_ROOT, parent=None)
         elif chosen == act_branch:
-            self._make_node("New Branch", _TYPE_BRANCH, parent=item)
+            branch_parent = item
+            if (
+                branch_parent is not None
+                and branch_parent.data(0, _ROLE_TYPE) == _TYPE_LEAF
+            ):
+                branch_parent = branch_parent.parent()
+            self._make_node("New Branch", _TYPE_BRANCH, parent=branch_parent)
+        elif chosen == act_duplicate and item is not None:
+            self.duplicate_response_subtree(item)
         elif chosen == act_del and item is not None:
             self._remove_item(item)
         elif chosen == act_expand and item is not None:
@@ -1039,12 +1287,15 @@ def _attach(
         )
     attached_parent = None
     if target is not None and target.data(0, _ROLE_TYPE) in (_TYPE_ROOT, _TYPE_BRANCH):
+        _inherit_container_states(item, target)
         target.addChild(item)
         target.setExpanded(True)
         attached_parent = target
     elif target is not None and target.data(0, _ROLE_TYPE) == _TYPE_LEAF:
         # Drop on a leaf → insert into the leaf's parent container
         parent = target.parent() or tree.invisibleRootItem()
+        if parent is not tree.invisibleRootItem():
+            _inherit_container_states(item, parent)
         parent.addChild(item)
         parent.setExpanded(True)
         if parent is not tree.invisibleRootItem():
@@ -1108,9 +1359,15 @@ class AssemblyTreePanel(QWidget):
         row1.setSpacing(4)
         self.btn_add_root   = QToolButton(text="+ Root")
         self.btn_add_branch = QToolButton(text="+ Branch")
+        self.btn_duplicate  = QToolButton(text="Duplicate")
+        self.btn_duplicate.setToolTip(
+            "Copy the selected response subtree and all of its dataset data. "
+            "Use the Use checkboxes to compare variants."
+        )
         self.btn_delete     = QToolButton(text="Delete")
         row1.addWidget(self.btn_add_root)
         row1.addWidget(self.btn_add_branch)
+        row1.addWidget(self.btn_duplicate)
         row1.addWidget(self.btn_delete)
         row1.addStretch(1)
         layout.addLayout(row1)
@@ -1138,8 +1395,8 @@ class AssemblyTreePanel(QWidget):
         self.btn_build = QToolButton(text="Build Platform")
         self.btn_build.setToolTip(
             "Recursively combine the selected root/branch into a single dataset, "
-            "honouring each node's coherent / incoherent add-mode and aligning "
-            "axes across parts using the strategy chosen in the dialog."
+            "honouring Use checkboxes and each node's coherent / incoherent "
+            "add-mode, then aligning axes using the strategy chosen in the dialog."
         )
         row4.addWidget(self.btn_build)
         row4.addStretch(1)
@@ -1156,6 +1413,7 @@ class AssemblyTreePanel(QWidget):
             lambda: self.tree._make_node("New Root", _TYPE_ROOT)
         )
         self.btn_add_branch.clicked.connect(self._add_branch)
+        self.btn_duplicate.clicked.connect(self._duplicate_selected)
         self.btn_delete.clicked.connect(self._delete_selected)
         self.btn_expand.clicked.connect(self._expand_selected)
         self.btn_collapse.clicked.connect(self._collapse_selected)
@@ -1192,7 +1450,7 @@ class AssemblyTreePanel(QWidget):
             serialized = _item_to_dict(root.child(index))
             if serialized is not None:
                 nodes.append(serialized)
-        return {"version": 3, "tree": nodes}
+        return {"version": 4, "tree": nodes}
 
     def _confirm_unsaved_changes(
         self,
@@ -1276,6 +1534,27 @@ class AssemblyTreePanel(QWidget):
             )
             return
         self.tree._remove_item(item)
+
+    def _duplicate_selected(self) -> None:
+        item = self.tree.currentItem()
+        if item is None:
+            self._notify("Select a response root, branch, or dataset to duplicate.")
+            return
+        if _is_preview_item(item):
+            self._notify(
+                "Feature preview nodes are regenerated from Place Features and "
+                "cannot be duplicated here. Duplicate a response branch instead."
+            )
+            return
+        try:
+            duplicate = self.tree.duplicate_response_subtree(item)
+        except Exception as exc:
+            self._notify(f"Could not duplicate assembly subtree: {exc}")
+            return
+        self._notify(
+            f"Duplicated '{item.text(0)}' as '{duplicate.text(0)}'. "
+            "Uncheck Use on either variant for a trade study."
+        )
 
     def _expand_selected(self) -> None:
         item = self.tree.currentItem()
@@ -1377,7 +1656,9 @@ class AssemblyTreePanel(QWidget):
             self._notify(f"Build failed: {exc}")
             return
         if grid is None:
-            self._notify("Build produced no data (subtree has no loaded leaves).")
+            self._notify(
+                "Build produced no data (subtree has no enabled, loaded leaves)."
+            )
             return
         self.platform_built.emit(item.text(0), grid, history)
 
@@ -1406,9 +1687,9 @@ class AssemblyTreePanel(QWidget):
             if not isinstance(data, dict):
                 raise ValueError("Assembly file root must be a JSON object.")
             version = data.get("version", 1)
-            if type(version) is not int or not 1 <= version <= 3:
+            if type(version) is not int or not 1 <= version <= 4:
                 raise ValueError(
-                    "Assembly file 'version' must be an integer from 1 through 3."
+                    "Assembly file 'version' must be an integer from 1 through 4."
                 )
             raw_nodes = data.get("tree")
             if not isinstance(raw_nodes, list):
@@ -1653,9 +1934,9 @@ def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
     """Recursively materialise an assembly subtree into a single RcsGrid.
 
     Leaves return their stored grid (or None if empty). Branches/roots gather
-    every non-None child grid, separate them by add-mode, align all children
-    to a common axis grid per `axis_mode`, and combine coherent+incoherent
-    contributions as in `_combine_children`.
+    every enabled, non-None child grid, separate them by add-mode, align all
+    children to a common axis grid per `axis_mode`, and combine coherent+
+    incoherent contributions as in `_combine_children`.
 
     Returns (grid, history_string). Both are None / "" if the subtree has
     no loaded data.
@@ -1665,6 +1946,8 @@ def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
             "preview-only geometry is not a response assembly; use the feature "
             "workflow to apply point and line responses"
         )
+    if not _item_response_included(node):
+        return None, ""
     node_type = node.data(0, _ROLE_TYPE)
     if node_type == _TYPE_LEAF:
         grid = node.data(0, _ROLE_GRID)

@@ -149,13 +149,20 @@ def _group_id(value: str) -> str:
     return value
 
 
-def _finite_points(values: Any, *, label: str) -> np.ndarray:
+def _finite_points(
+    values: Any,
+    *,
+    label: str,
+    copy: bool = True,
+) -> np.ndarray:
     points = np.asarray(values, dtype=float)
     if points.ndim != 2 or points.shape[1] != 3 or len(points) == 0:
         raise ValueError(f"{label} must have shape (n, 3) with n > 0")
     if not np.all(np.isfinite(points)):
         raise ValueError(f"{label} must contain only finite coordinates")
-    return np.array(points, dtype=float, copy=True)
+    if copy:
+        return np.array(points, dtype=float, copy=True)
+    return points
 
 
 def _bounds_from_points(points: np.ndarray) -> np.ndarray:
@@ -274,7 +281,7 @@ def revolve_bor_profile_cad(
     return surface
 
 
-def _line_paths(values: Any) -> tuple[np.ndarray, ...]:
+def _line_paths(values: Any, *, copy: bool = True) -> tuple[np.ndarray, ...]:
     """Normalize one path, fixed-shape paths, or a sequence of paths."""
 
     try:
@@ -301,7 +308,9 @@ def _line_paths(values: Any) -> tuple[np.ndarray, ...]:
             raise ValueError(f"line path {index} must have shape (n, 3), n >= 2")
         if not np.all(np.isfinite(path)):
             raise ValueError(f"line path {index} contains a nonfinite coordinate")
-        paths.append(np.array(path, dtype=float, copy=True))
+        paths.append(
+            np.array(path, dtype=float, copy=True) if copy else path
+        )
     if not paths:
         raise ValueError("lines must contain at least one path")
     return tuple(paths)
@@ -341,7 +350,15 @@ def _feature_preview_nonvector_bounds(
             raise ValueError("body preview bounds must be finite with shape (2, 3)")
         bounds.append(body_bounds)
     for dataset_id, values in point_groups.items():
-        points = _finite_points(values, label=f"point dataset {dataset_id!r}")
+        # This pass only reads the prepared arrays to establish a common
+        # orientation-arrow scale.  The scene-model add pass below owns the
+        # defensive copies it retains, so copying the full point set here would
+        # double peak preview memory for no validation benefit.
+        points = _finite_points(
+            values,
+            label=f"point dataset {dataset_id!r}",
+            copy=False,
+        )
         bounds.append(_bounds_from_points(points))
     for dataset_id, paths_by_id in line_groups.items():
         if not isinstance(paths_by_id, dict):
@@ -349,9 +366,12 @@ def _feature_preview_nonvector_bounds(
                 "each prepared line dataset preview must map line_id to a CAD path"
             )
         for line_id, values in paths_by_id.items():
-            paths = _line_paths(values)
-            points = np.concatenate(paths, axis=0)
-            bounds.append(_bounds_from_points(points))
+            # Avoid both path copies and a second, concatenated copy of every
+            # vertex.  Per-path extrema combine exactly into the same overall
+            # bounds and retain all shape/finite-value validation.
+            paths = _line_paths(values, copy=False)
+            for path in paths:
+                bounds.append(_bounds_from_points(path))
     if not bounds:
         return np.zeros((2, 3), dtype=float)
     stacked = np.stack(bounds, axis=0)
@@ -929,6 +949,9 @@ if GUI_AVAILABLE:
             self._display_units = "Meters"
             self._interaction_lod_enabled = True
             self._interaction_detail_caps: dict[str, int | None] = {}
+            self._scene_update_depth = 0
+            self._scene_draw_pending = False
+            self._scene_feedback_pending = False
             self.model.add_listener(self._on_model_change)
             self._model_listener_attached = True
             self.destroyed.connect(self._detach_model_listener)
@@ -1003,6 +1026,47 @@ if GUI_AVAILABLE:
         @property
         def group_ids(self) -> tuple[str, ...]:
             return self.model.group_ids
+
+        def begin_scene_updates(self) -> None:
+            """Defer canvas feedback scans and redraws for a scene transaction."""
+
+            self._scene_update_depth += 1
+
+        def end_scene_updates(self) -> None:
+            """Flush one feedback update/redraw for a scene transaction."""
+
+            if self._scene_update_depth <= 0:
+                raise RuntimeError(
+                    "end_scene_updates called without begin_scene_updates"
+                )
+            self._scene_update_depth -= 1
+            if self._scene_update_depth:
+                return
+
+            feedback_pending = self._scene_feedback_pending
+            draw_pending = self._scene_draw_pending
+            self._scene_feedback_pending = False
+            self._scene_draw_pending = False
+            if feedback_pending:
+                # set_feedback() requests the one final draw after deriving the
+                # state from the fully populated/cleared model.
+                self.refresh_scene_feedback()
+            elif draw_pending:
+                self.draw_idle()
+
+        def _request_draw(self) -> None:
+            if self._scene_update_depth:
+                self._scene_draw_pending = True
+            else:
+                self.draw_idle()
+
+        def _request_scene_feedback(self) -> None:
+            if self._scene_update_depth:
+                self._scene_feedback_pending = True
+                self._scene_draw_pending = True
+            else:
+                # refresh_scene_feedback() also requests the artist redraw.
+                self.refresh_scene_feedback()
 
         def _style_axes(self) -> None:
             background = "#0b1222"
@@ -1224,7 +1288,7 @@ if GUI_AVAILABLE:
                 f"shown in {self._display_units.lower()}; underlying CAD and "
                 "physics geometry remains in meters."
             )
-            self.draw_idle()
+            self._request_draw()
 
         def set_interaction_lod_enabled(self, enabled: bool) -> None:
             self._interaction_lod_enabled = bool(enabled)
@@ -1254,7 +1318,7 @@ if GUI_AVAILABLE:
                     group_id, fast_cap, remember=False
                 )
             self._lod_artist.set_visible(bool(self._interaction_detail_caps))
-            self.draw_idle()
+            self._request_draw()
 
         def _end_interaction_lod(self, _event: Any) -> None:
             """Restore the selected detail after a rotate/zoom drag."""
@@ -1267,7 +1331,7 @@ if GUI_AVAILABLE:
                         group_id, cap, remember=False
                     )
             self._lod_artist.set_visible(False)
-            self.draw_idle()
+            self._request_draw()
 
         @property
         def preview_state(self) -> str:
@@ -1317,7 +1381,7 @@ if GUI_AVAILABLE:
             self._stage_artist.set_color(foreground)
             self._stage_artist.get_bbox_patch().set_edgecolor(border)
             self._stage_artist.set_visible(bool(text))
-            self.draw_idle()
+            self._request_draw()
 
         def set_feedback(self, state: str, message: str | None = None) -> None:
             """Show explicit canvas feedback without changing scene geometry.
@@ -1327,6 +1391,9 @@ if GUI_AVAILABLE:
             messages can never affect feature membership or assembly physics.
             """
 
+            # An explicit loading/error/empty message supersedes any generic
+            # model-change feedback queued earlier in the same scene transaction.
+            self._scene_feedback_pending = False
             normalized = str(state).strip().lower()
             if normalized not in self._FEEDBACK_DEFAULTS:
                 raise ValueError(
@@ -1343,11 +1410,13 @@ if GUI_AVAILABLE:
             else:
                 self._feedback_artist.set_color("#dbeafe")
                 self._feedback_artist.get_bbox_patch().set_edgecolor("#3b82f6")
-            self.draw_idle()
+            self._request_draw()
 
         def refresh_scene_feedback(self) -> None:
             """Reflect whether the current display has visible geometry."""
 
+            # An explicit refresh satisfies any queued model-change request.
+            self._scene_feedback_pending = False
             if not self.model.group_ids:
                 self.set_feedback("empty")
             elif any(
@@ -1380,8 +1449,7 @@ if GUI_AVAILABLE:
             # Direct scene API users receive the same positive feedback as
             # feature-plan users. Workspace loading subsequently adds a more
             # detailed count summary beneath the canvas.
-            self.refresh_scene_feedback()
-            self.draw_idle()
+            self._request_scene_feedback()
 
         def _detach_model_listener(self, *_args) -> None:
             """Release the model's strong callback when Qt destroys the canvas."""
@@ -1438,7 +1506,7 @@ if GUI_AVAILABLE:
             self.axes.set_ylim(float(lower[1]), float(upper[1]))
             self.axes.set_zlim(float(lower[2]), float(upper[2]))
             self.axes.set_box_aspect(tuple(float(value) for value in span))
-            self.draw_idle()
+            self._request_draw()
 
 
     class AssemblyWorkspace(QWidget):
@@ -1492,6 +1560,11 @@ if GUI_AVAILABLE:
                 "Refit the 3-D camera to the body, points, and lines whose Show "
                 "boxes are checked. This changes the view only."
             )
+            self.btn_preview_layers = QPushButton("Preview layers")
+            self.btn_preview_layers.setToolTip(
+                "Open the dataset tree, where Show boxes control body, point, "
+                "line, normal, and roll visibility without changing the RCS build."
+            )
             self.lbl_legend = QLabel(
                 '<span style="color:#94a3b8">\u25a0 Body</span>&nbsp;&nbsp;'
                 '<span style="color:#38bdf8">\u25cf Points</span>&nbsp;&nbsp;'
@@ -1509,6 +1582,7 @@ if GUI_AVAILABLE:
             toolbar.addWidget(title)
             toolbar.addStretch(1)
             toolbar.addWidget(self.lbl_legend)
+            toolbar.addWidget(self.btn_preview_layers)
             toolbar.addWidget(self.btn_fit_visible)
             outer.addLayout(toolbar)
 
@@ -1605,13 +1679,6 @@ if GUI_AVAILABLE:
             place_layout = QVBoxLayout(self.place_features_tab)
             place_layout.setContentsMargins(8, 8, 8, 8)
             place_layout.setSpacing(6)
-            place_help = QLabel(
-                "Place spatial features here. Select the clean-body response and "
-                "optional STL/facet or BoR geometry, then add point or line CSV "
-                "placements and their response datasets."
-            )
-            place_help.setWordWrap(True)
-            place_layout.addWidget(place_help)
             self.feature_controls_host = QWidget(self.place_features_tab)
             self.feature_controls_layout = QVBoxLayout(self.feature_controls_host)
             self.feature_controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -1624,8 +1691,10 @@ if GUI_AVAILABLE:
             combine_layout.setSpacing(6)
             combine_help = QLabel(
                 "Combine Datasets adds or subtracts whole GRIM responses. It is "
-                "separate from placing point and line features. The Show column "
-                "controls only the 3-D preview, not response inclusion."
+                "separate from placing point and line features. Use controls "
+                "which response branches Build Platform includes; Show controls "
+                "only the 3-D preview. Duplicate a branch to make an independent "
+                "trade-study variant without deleting the baseline."
             )
             combine_help.setWordWrap(True)
             combine_layout.addWidget(combine_help)
@@ -1633,7 +1702,7 @@ if GUI_AVAILABLE:
 
             self.left_tabs.addTab(self.place_features_tab, "Place Features")
             self.left_tabs.addTab(
-                self.combine_visibility_tab, "Combine Datasets / Visibility"
+                self.combine_visibility_tab, "Datasets + Preview Layers"
             )
             left_layout.addWidget(self.left_tabs, 1)
             splitter.addWidget(left_host)
@@ -1657,6 +1726,11 @@ if GUI_AVAILABLE:
             self._opacity_timer.setInterval(120)
             self._opacity_timer.timeout.connect(self._apply_body_rendering)
             self.btn_fit_visible.clicked.connect(self.scene_canvas.fit_visible)
+            self.btn_preview_layers.clicked.connect(
+                lambda _checked=False: self.left_tabs.setCurrentWidget(
+                    self.combine_visibility_tab
+                )
+            )
             self.cmb_display_units.currentIndexChanged.connect(
                 self._apply_display_units
             )
@@ -1842,11 +1916,15 @@ if GUI_AVAILABLE:
                     current.child(index) for index in range(current.childCount())
                 )
 
-            for identifier in identifiers:
-                if identifier in self.scene_model.group_ids:
-                    self.scene_model.remove_group(identifier)
-                self._pending_visibility.pop(identifier, None)
-                self._feature_preview_group_ids.discard(identifier)
+            self.scene_canvas.begin_scene_updates()
+            try:
+                for identifier in identifiers:
+                    if identifier in self.scene_model.group_ids:
+                        self.scene_model.remove_group(identifier)
+                    self._pending_visibility.pop(identifier, None)
+                    self._feature_preview_group_ids.discard(identifier)
+            finally:
+                self.scene_canvas.end_scene_updates()
             self._update_body_detail_label()
 
         def connect_tree_visibility(self) -> bool:
@@ -1938,18 +2016,22 @@ if GUI_AVAILABLE:
         def clear_feature_preview(self) -> None:
             """Remove only the service-owned feature scene and typed tree root."""
 
-            tree = getattr(self.assembly_tree_panel, "tree", None)
-            remover = getattr(tree, "remove_preview_root", None)
-            if callable(remover):
-                # The tree's preview_removing signal lets us clear the bound
-                # artists before the runtime-only root is detached.
-                remover(FEATURE_PREVIEW_ROOT_KEY)
-            for group_id in tuple(self._feature_preview_group_ids):
-                if group_id in self.scene_model.group_ids:
-                    self.scene_model.remove_group(group_id)
-                self._pending_visibility.pop(group_id, None)
-            self._feature_preview_group_ids.clear()
-            self.scene_canvas.set_preview_stage("none")
+            self.scene_canvas.begin_scene_updates()
+            try:
+                tree = getattr(self.assembly_tree_panel, "tree", None)
+                remover = getattr(tree, "remove_preview_root", None)
+                if callable(remover):
+                    # The tree's preview_removing signal lets us clear the bound
+                    # artists before the runtime-only root is detached.
+                    remover(FEATURE_PREVIEW_ROOT_KEY)
+                for group_id in tuple(self._feature_preview_group_ids):
+                    if group_id in self.scene_model.group_ids:
+                        self.scene_model.remove_group(group_id)
+                    self._pending_visibility.pop(group_id, None)
+                self._feature_preview_group_ids.clear()
+                self.scene_canvas.set_preview_stage("none")
+            finally:
+                self.scene_canvas.end_scene_updates()
             self._update_body_detail_label()
 
         @staticmethod
@@ -2083,17 +2165,18 @@ if GUI_AVAILABLE:
                 self._show_preview_error(exc)
                 raise
 
-            self.clear_feature_preview()
-            self.scene_canvas.set_feedback("loading")
-            self.lbl_status.setText(
-                "Preparing the body and feature placements for the 3-D preview\u2026"
-            )
-            root = tree.add_preview_root(
-                "Feature Assembly", stable_key=FEATURE_PREVIEW_ROOT_KEY
-            )
             scene_ids: list[str] = []
-            body_description = "no body geometry"
+            self.scene_canvas.begin_scene_updates()
             try:
+                self.clear_feature_preview()
+                self.scene_canvas.set_feedback("loading")
+                self.lbl_status.setText(
+                    "Preparing the body and feature placements for the 3-D preview\u2026"
+                )
+                root = tree.add_preview_root(
+                    "Feature Assembly", stable_key=FEATURE_PREVIEW_ROOT_KEY
+                )
+                body_description = "no body geometry"
                 body_id = feature_preview_group_id("body")
                 body_group: AssemblySceneGroup | None = None
                 if surface is not None:
@@ -2285,6 +2368,8 @@ if GUI_AVAILABLE:
                 self.clear_feature_preview()
                 self._show_preview_error(exc)
                 raise
+            finally:
+                self.scene_canvas.end_scene_updates()
 
         def mark_preview_stale(self, reason: str = "") -> None:
             """Keep the last geometry visible while clearly marking it outdated.

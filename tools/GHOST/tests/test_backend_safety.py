@@ -6,6 +6,7 @@ from __future__ import annotations
 import ctypes
 import importlib.machinery
 import os
+import platform
 import sys
 import tempfile
 import unittest
@@ -22,10 +23,32 @@ sys.path.insert(0, str(BACKEND))
 
 import feature_sum  # noqa: E402
 import fmm_helmholtz_2d  # noqa: E402
+import bor_streaming  # noqa: E402
 import rcs_solver  # noqa: E402
 
 
 class NativeLoaderTrustTests(unittest.TestCase):
+    def test_bor_native_extensions_are_host_specific(self) -> None:
+        self.assertEqual(bor_streaming._native_extensions("Windows"), (".dll",))
+        self.assertEqual(bor_streaming._native_extensions("Linux"), (".so",))
+        self.assertEqual(
+            bor_streaming._native_extensions("Darwin"), (".dylib", ".so")
+        )
+
+    def test_windows_loader_ignores_checked_in_linux_shared_object(self) -> None:
+        self.assertTrue((BACKEND / "fmm_near.so").is_file())
+        with (
+            mock.patch.object(platform, "system", return_value="Windows"),
+            mock.patch.object(platform, "machine", return_value="AMD64"),
+            mock.patch.object(
+                ctypes,
+                "CDLL",
+                side_effect=AssertionError("foreign .so must not reach ctypes"),
+            ) as loader,
+        ):
+            self.assertIsNone(fmm_helmholtz_2d.FMMOperator._load_native())
+        loader.assert_not_called()
+
     def test_native_candidates_never_come_from_working_directory(self) -> None:
         loaded = []
         fake_library = SimpleNamespace(compute_sk_blocks_batch_q=object())
@@ -43,11 +66,15 @@ class NativeLoaderTrustTests(unittest.TestCase):
             previous = Path.cwd()
             os.chdir(untrusted)
             try:
-                with mock.patch.object(
-                    ctypes,
-                    "CDLL",
-                    side_effect=lambda path: (
-                        loaded.append(Path(path).resolve()) or fake_library
+                with (
+                    mock.patch.object(platform, "system", return_value="Linux"),
+                    mock.patch.object(platform, "machine", return_value="x86_64"),
+                    mock.patch.object(
+                        ctypes,
+                        "CDLL",
+                        side_effect=lambda path: (
+                            loaded.append(Path(path).resolve()) or fake_library
+                        ),
                     ),
                 ):
                     kind, library = fmm_helmholtz_2d.FMMOperator._load_native()
