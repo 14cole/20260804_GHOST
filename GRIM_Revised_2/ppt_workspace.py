@@ -303,30 +303,6 @@ if GUI_AVAILABLE:
                 family="Arial",
             )
             output_directory.mkdir(parents=True, exist_ok=True)
-            if slide_plan.master_legend:
-                legend_path = output_directory / (
-                    f"preview_{generation:04d}_slide_{slide_index + 1:03d}_"
-                    "master_legend.png"
-                )
-                if not legend_path.is_file():
-                    render_master_legend_png(
-                        slide_plan.master_legend,
-                        legend_path,
-                        width_points=geometry.master_legend.width,
-                        height_points=geometry.master_legend.height,
-                        dpi=120,
-                    )
-                legend = geometry.master_legend
-                legend_axes = self.figure.add_axes(
-                    (
-                        x_position(legend.left),
-                        y_position_from_top(legend.bottom),
-                        page_width * legend.width / geometry.width,
-                        page_height * legend.height / geometry.height,
-                    )
-                )
-                legend_axes.imshow(imread(legend_path), aspect="auto")
-                legend_axes.set_axis_off()
             for placement_index, placement in enumerate(slide_plan.plots):
                 image_path = output_directory / (
                     f"preview_{generation:04d}_slide_{slide_index + 1:03d}_"
@@ -351,6 +327,37 @@ if GUI_AVAILABLE:
                 )
                 axes.imshow(imread(image_path), aspect="auto")
                 axes.set_axis_off()
+            # The master legend intentionally overlaps the top of the plot
+            # frames. Create it last and give it an explicit higher z-order so
+            # the preview matches PowerPoint's front-most legend layer.
+            if slide_plan.master_legend:
+                legend_path = output_directory / (
+                    f"preview_{generation:04d}_slide_{slide_index + 1:03d}_"
+                    "master_legend.png"
+                )
+                if not legend_path.is_file():
+                    render_master_legend_png(
+                        slide_plan.master_legend,
+                        legend_path,
+                        width_points=geometry.master_legend.width,
+                        height_points=geometry.master_legend.height,
+                        dpi=120,
+                    )
+                legend = geometry.master_legend
+                legend_axes = self.figure.add_axes(
+                    (
+                        x_position(legend.left),
+                        y_position_from_top(legend.bottom),
+                        page_width * legend.width / geometry.width,
+                        page_height * legend.height / geometry.height,
+                    ),
+                    label="GRIM master legend",
+                )
+                legend_axes.set_zorder(100.0)
+                legend_axes.set_facecolor("none")
+                legend_axes.patch.set_alpha(0.0)
+                legend_axes.imshow(imread(legend_path), aspect="auto")
+                legend_axes.set_axis_off()
             if slide_plan.footer:
                 self.figure.text(
                     x_position(geometry.footer.left),

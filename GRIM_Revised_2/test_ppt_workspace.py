@@ -320,6 +320,30 @@ class PptWorkspaceTests(unittest.TestCase):
             )
         )
 
+    def test_preview_master_legend_is_above_every_plot_layer(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.select_frequencies((1.0,))
+
+        self.assertTrue(widget.build_preview())
+        legend_axes = [
+            axes
+            for axes in widget.preview_canvas.figure.axes
+            if axes.get_label() == "GRIM master legend"
+        ]
+        self.assertEqual(len(legend_axes), 1)
+        plot_axes = [
+            axes
+            for axes in widget.preview_canvas.figure.axes
+            if axes is not legend_axes[0] and axes.images
+        ]
+        self.assertTrue(plot_axes)
+        self.assertEqual(legend_axes[0].patch.get_alpha(), 0.0)
+        self.assertGreater(
+            legend_axes[0].get_zorder(),
+            max(axes.get_zorder() for axes in plot_axes),
+        )
+
     def test_excessive_fixed_ticks_fail_before_rendering(self):
         widget = self.workspace()
         widget.set_dataset_catalog(self.entries())

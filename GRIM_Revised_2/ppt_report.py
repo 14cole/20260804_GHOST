@@ -40,6 +40,7 @@ MASTER_LEGEND_IMAGE_INDEX = -1
 
 PP_LAYOUT_BLANK = 12
 PP_SAVE_AS_OPEN_XML_PRESENTATION = 24
+MSO_BRING_TO_FRONT = 0
 MSO_FALSE = 0
 MSO_TRUE = -1
 MSO_TEXT_ORIENTATION_HORIZONTAL = 1
@@ -165,7 +166,7 @@ def azimuth_3x2_geometry() -> SlideGeometry:
         ),
         master_legend=Rect(
             0.76 * POINTS_PER_INCH,
-            0.81 * POINTS_PER_INCH,
+            1.05 * POINTS_PER_INCH,
             11.82 * POINTS_PER_INCH,
             0.22 * POINTS_PER_INCH,
         ),
@@ -191,7 +192,7 @@ def frequency_single_geometry() -> SlideGeometry:
         ),
         master_legend=Rect(
             0.76 * POINTS_PER_INCH,
-            0.81 * POINTS_PER_INCH,
+            1.05 * POINTS_PER_INCH,
             11.82 * POINTS_PER_INCH,
             0.22 * POINTS_PER_INCH,
         ),
@@ -1011,6 +1012,27 @@ class PowerPointComBridge:
                 alignment=PP_ALIGN_LEFT,
                 color=_office_rgb(23, 32, 51),
             )
+            for placement_index, placement in enumerate(slide_plan.plots):
+                image_path = Path(rendered_images[(slide_index, placement_index)])
+                if not image_path.is_file():
+                    raise RuntimeError(f"Rendered plot image is missing: {image_path}")
+                frame = placement.frame.scaled(x_scale, y_scale)
+                picture = slide.Shapes.AddPicture(
+                    str(image_path),
+                    MSO_FALSE,
+                    MSO_TRUE,
+                    frame.left,
+                    frame.top,
+                    frame.width,
+                    frame.height,
+                )
+                try:
+                    picture.AlternativeText = placement.plot.title
+                except Exception:
+                    pass
+            # The requested legend position intentionally overlaps the plot
+            # frames. Add it after every plot, then explicitly bring it to the
+            # front so template/COM insertion behavior cannot hide it.
             if slide_plan.master_legend:
                 legend_path = Path(
                     rendered_images[(slide_index, MASTER_LEGEND_IMAGE_INDEX)]
@@ -1034,23 +1056,11 @@ class PowerPointComBridge:
                     )
                 except Exception:
                     pass
-            for placement_index, placement in enumerate(slide_plan.plots):
-                image_path = Path(rendered_images[(slide_index, placement_index)])
-                if not image_path.is_file():
-                    raise RuntimeError(f"Rendered plot image is missing: {image_path}")
-                frame = placement.frame.scaled(x_scale, y_scale)
-                picture = slide.Shapes.AddPicture(
-                    str(image_path),
-                    MSO_FALSE,
-                    MSO_TRUE,
-                    frame.left,
-                    frame.top,
-                    frame.width,
-                    frame.height,
-                )
                 try:
-                    picture.AlternativeText = placement.plot.title
+                    legend_picture.ZOrder(MSO_BRING_TO_FRONT)
                 except Exception:
+                    # Insertion order already leaves the legend above plots;
+                    # this accommodates restricted/fake COM implementations.
                     pass
             if slide_plan.footer:
                 self._add_text(
@@ -1209,6 +1219,7 @@ __all__ = [
     "LayoutKind",
     "LegendEntry",
     "MASTER_LEGEND_IMAGE_INDEX",
+    "MSO_BRING_TO_FRONT",
     "PlotKind",
     "PlotPlacement",
     "PlotRenderStyle",

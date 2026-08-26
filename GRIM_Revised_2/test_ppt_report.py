@@ -7,6 +7,7 @@ from pathlib import Path
 
 from ppt_report import (
     MASTER_LEGEND_IMAGE_INDEX,
+    MSO_BRING_TO_FRONT,
     MSO_FALSE,
     POINTS_PER_INCH,
     PlotSeries,
@@ -80,6 +81,7 @@ class LayoutPlanningTests(unittest.TestCase):
 
     def test_report_header_and_plot_positions_match_team_template(self):
         expected_title = (0.76, 0.42, 11.82, 0.36)
+        expected_legend = (0.76, 1.05, 11.82, 0.22)
         for geometry in (azimuth_3x2_geometry(), frequency_single_geometry()):
             self.assertEqual(
                 tuple(
@@ -93,8 +95,21 @@ class LayoutPlanningTests(unittest.TestCase):
                 ),
                 expected_title,
             )
+            self.assertEqual(
+                tuple(
+                    round(value / POINTS_PER_INCH, 9)
+                    for value in (
+                        geometry.master_legend.left,
+                        geometry.master_legend.top,
+                        geometry.master_legend.width,
+                        geometry.master_legend.height,
+                    )
+                ),
+                expected_legend,
+            )
             self.assertLessEqual(geometry.title.bottom, geometry.master_legend.top)
-            self.assertLessEqual(
+            self.assertLess(geometry.master_legend.top, geometry.plot_frames[0].top)
+            self.assertGreater(
                 geometry.master_legend.bottom, geometry.plot_frames[0].top
             )
             self.assertAlmostEqual(
@@ -445,6 +460,10 @@ class FakeShape:
     def __init__(self):
         self.TextFrame = FakeTextFrame()
         self.AlternativeText = ""
+        self.zorder_commands = []
+
+    def ZOrder(self, command):
+        self.zorder_commands.append(command)
 
 
 class FakeShapes:
@@ -569,7 +588,7 @@ class ComBridgeFakeTests(unittest.TestCase):
             self.assertEqual(len(slide.Shapes.textboxes), 3)  # title, footer, page
             self.assertEqual(slide.Shapes.pictures[0][1].AlternativeText, "Plot one")
 
-    def test_bridge_places_one_master_legend_in_the_header_band(self):
+    def test_bridge_places_master_legend_last_and_brings_it_to_front(self):
         plan = plan_azimuth_slides((make_plot("one"),), master_legend=True)
         presentation = FakePresentation(seed_count=0, width=960.0, height=540.0)
         application = FakeApplication(presentation)
@@ -591,7 +610,8 @@ class ComBridgeFakeTests(unittest.TestCase):
             )
         slide = presentation.Slides.items[0]
         self.assertEqual(len(slide.Shapes.pictures), 2)
-        legend_args, legend_shape = slide.Shapes.pictures[0]
+        self.assertEqual(slide.Shapes.pictures[0][1].AlternativeText, "Plot one")
+        legend_args, legend_shape = slide.Shapes.pictures[-1]
         self.assertEqual(
             legend_args[3:],
             (
@@ -602,6 +622,7 @@ class ComBridgeFakeTests(unittest.TestCase):
             ),
         )
         self.assertEqual(legend_shape.AlternativeText, "Dataset legend: HH")
+        self.assertEqual(legend_shape.zorder_commands, [MSO_BRING_TO_FRONT])
 
     def test_new_deck_is_forced_to_widescreen(self):
         plan = plan_frequency_slides([make_plot("frequency", "frequency")])

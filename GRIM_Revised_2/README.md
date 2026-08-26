@@ -121,9 +121,10 @@ can appear once across the slide header, inside every plot, or not at all; the
 master header legend is the default and follows the dataset order above.
 
 The report header matches the team slide standard: the title box is 11.82 in ×
-0.36 in at X=0.76 in, Y=0.42 in. Plot rows begin at X=0.47 in, Y=1.09 in, with
-the master legend placed between the title and plots. The same title and header
-alignment is used for frequency-sweep slides.
+0.36 in at X=0.76 in, Y=0.42 in. Plot rows begin at X=0.47 in, Y=1.09 in. The
+master legend begins at X=0.76 in, Y=1.05 in and is explicitly layered above
+the slightly overlapping plot images. The same title and header alignment is
+used for frequency-sweep slides.
 
 **Build Preview** renders the real 16:9 slide geometry used by export. Review
 pages with Previous/Next, choose either a fresh blank deck or an optional blank
