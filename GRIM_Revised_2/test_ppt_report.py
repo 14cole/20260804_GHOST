@@ -855,7 +855,7 @@ class ComBridgeFakeTests(unittest.TestCase):
             self.assertEqual(len(presentation.Slides.items), 1)
             slide = presentation.Slides.items[0]
             self.assertEqual(len(slide.Shapes.pictures), 2)
-            self.assertEqual(len(slide.Shapes.textboxes), 3)  # title, footer, page
+            self.assertEqual(len(slide.Shapes.textboxes), 2)  # title and footer only
             self.assertEqual(slide.Shapes.pictures[0][1].AlternativeText, "Plot one")
 
     def test_bridge_places_master_legend_last_and_brings_it_to_front(self):

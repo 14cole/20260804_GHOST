@@ -35,7 +35,6 @@ SLIDE_WIDTH_POINTS = 13.3333333333 * POINTS_PER_INCH
 SLIDE_HEIGHT_POINTS = 7.5 * POINTS_PER_INCH
 SLIDE_TITLE_FONT_SIZE_POINTS = 21.0
 SLIDE_FOOTER_FONT_SIZE_POINTS = 8.5
-SLIDE_PAGE_NUMBER_FONT_SIZE_POINTS = 8.5
 MASTER_LEGEND_IMAGE_INDEX = -1
 
 PP_LAYOUT_BLANK = 12
@@ -1154,7 +1153,6 @@ class PowerPointComBridge:
                 "The PowerPoint template must use a widescreen 16:9 "
                 "slide size so the exported deck matches the GRIM preview."
             )
-        total_slides = len(plan.slides)
         for slide_index, slide_plan in enumerate(plan.slides):
             base_geometry = geometry_for_layout(slide_plan.layout)
             geometry = base_geometry.scaled_to(page_width, page_height)
@@ -1240,15 +1238,6 @@ class PowerPointComBridge:
                     alignment=PP_ALIGN_LEFT,
                     color=_office_rgb(72, 86, 106),
                 )
-            self._add_text(
-                slide,
-                geometry.page_number,
-                f"{slide_index + 1} / {total_slides}",
-                size=SLIDE_PAGE_NUMBER_FONT_SIZE_POINTS * min(x_scale, y_scale),
-                bold=False,
-                alignment=PP_ALIGN_RIGHT,
-                color=_office_rgb(72, 86, 106),
-            )
 
     def write(
         self,
@@ -1450,7 +1439,6 @@ __all__ = [
     "Rect",
     "RenderedImageKey",
     "SLIDE_FOOTER_FONT_SIZE_POINTS",
-    "SLIDE_PAGE_NUMBER_FONT_SIZE_POINTS",
     "SLIDE_TITLE_FONT_SIZE_POINTS",
     "SlideGeometry",
     "SlidePlan",

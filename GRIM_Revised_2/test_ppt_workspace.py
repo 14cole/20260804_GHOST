@@ -16,7 +16,7 @@ _IMPORT_ERROR: Exception | None = None
 try:
     import numpy as np
     from PySide6.QtCore import QCoreApplication
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
     from grim_dataset import RcsGrid
     from ppt_report import (
@@ -155,6 +155,10 @@ class PptWorkspaceTests(unittest.TestCase):
         widget = self.workspace()
         self.assertEqual(widget.controls_scroll.objectName(), "pptControlsScroll")
         self.assertEqual(widget.controls_content.objectName(), "pptControlsContent")
+        label_text = " ".join(
+            label.text().casefold() for label in widget.findChildren(QLabel)
+        )
+        self.assertNotIn("bundled temporary template supplies", label_text)
 
         preview_directory = Path(widget._preview_temp.name)
         marker = preview_directory / "preview_marker.png"
@@ -163,6 +167,19 @@ class PptWorkspaceTests(unittest.TestCase):
         widget.dispose()
         self.assertFalse(preview_directory.exists())
         widget.dispose()
+
+    def test_preview_leaves_page_numbering_to_the_slide_master(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog((self.entries()[0],))
+        widget.select_frequencies((1,))
+
+        self.assertTrue(widget.build_preview())
+
+        figure_text = {
+            artist.get_text() for artist in widget.preview_canvas.figure.texts
+        }
+        self.assertNotIn("1 / 1", figure_text)
+        self.assertEqual(widget.page_label.text(), "Slide 1 of 1")
 
     def test_catalog_preserves_check_state_and_user_order_by_stable_id(self):
         widget = self.workspace()

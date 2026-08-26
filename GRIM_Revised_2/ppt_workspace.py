@@ -28,7 +28,6 @@ from ppt_report import (
     PlotSpec,
     PresentationPlan,
     SLIDE_FOOTER_FONT_SIZE_POINTS,
-    SLIDE_PAGE_NUMBER_FONT_SIZE_POINTS,
     SLIDE_TITLE_FONT_SIZE_POINTS,
     SlidePlan,
     export_powerpoint_report,
@@ -282,7 +281,6 @@ if GUI_AVAILABLE:
             slide_plan: SlidePlan,
             *,
             slide_index: int,
-            slide_count: int,
             output_directory: Path,
             generation: int,
         ) -> None:
@@ -383,18 +381,6 @@ if GUI_AVAILABLE:
                     fontsize=SLIDE_FOOTER_FONT_SIZE_POINTS,
                     family="Arial",
                 )
-            self.figure.text(
-                x_position(geometry.page_number.right),
-                y_position_from_top(
-                    geometry.page_number.top + 0.58 * geometry.page_number.height
-                ),
-                f"{slide_index + 1} / {slide_count}",
-                ha="right",
-                va="center",
-                color="#48566a",
-                fontsize=SLIDE_PAGE_NUMBER_FONT_SIZE_POINTS,
-                family="Arial",
-            )
             self.draw_idle()
 
 
@@ -838,17 +824,6 @@ if GUI_AVAILABLE:
                 "'Master :: Layout' to qualify duplicate layout names."
             )
             deck_form.addRow("Frequency custom layout", self.frequency_layout_edit)
-            template_note = QLabel(
-                "The bundled temporary template supplies two named layouts. Replace "
-                "or edit its master/layout styling while keeping these names, or "
-                "enter the names used by another template. Its seed slides are "
-                "positioning guides only. The preview remains a white 16:9 page; "
-                "master graphics appear in the exported PPTX.",
-                deck_group,
-            )
-            template_note.setWordWrap(True)
-            template_note.setObjectName("pptTemplatePreviewNote")
-            deck_form.addRow("", template_note)
             self.output_edit, output_widget = self._path_row(
                 deck_group, "Choose report output", self._browse_output
             )
@@ -1464,7 +1439,6 @@ if GUI_AVAILABLE:
             self.preview_canvas.render_slide(
                 self._preview_plan.slides[self._current_slide_index],
                 slide_index=self._current_slide_index,
-                slide_count=slide_count,
                 output_directory=Path(self._preview_temp.name),
                 generation=self._preview_generation,
             )
