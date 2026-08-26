@@ -61,6 +61,11 @@ class ReleaseBuilderTests(unittest.TestCase):
         (self.source / ".venv" / "Lib" / "dependency.py").write_text(
             "ignored", encoding="utf-8"
         )
+        codex_scratch = self.source / ".codex-tmp" / "node_modules"
+        codex_scratch.mkdir(parents=True)
+        (codex_scratch / "external-runtime.js").write_text(
+            "ignored", encoding="utf-8"
+        )
         cache = self.source / "GRIM_Revised_2" / "__pycache__"
         cache.mkdir()
         (cache / "grim_cut_gui.cpython-312.pyc").write_bytes(b"ignored")
@@ -84,6 +89,7 @@ class ReleaseBuilderTests(unittest.TestCase):
         excluded_fragments = (
             "/.git/",
             "/.venv/",
+            "/.codex-tmp/",
             "/__pycache__/",
             "/.pytest_cache/",
         )

@@ -127,13 +127,34 @@ the slightly overlapping plot images. The same title and header alignment is
 used for frequency-sweep slides.
 
 **Build Preview** renders the real 16:9 slide geometry used by export. Review
-pages with Previous/Next, choose either a fresh blank deck or an optional blank
-widescreen 16:9 `.pptx`/`.potx` template, and then select **Export PPTX**. Export writes to a
-staging file and replaces the requested output only after PowerPoint succeeds.
+pages with Previous/Next, choose either a fresh blank deck or a widescreen 16:9
+`.pptx`/`.potx` template, and then select **Export PPTX**. GRIM includes
+`templates/GRIM_Report_Template.pptx` as an editable starting point and selects
+it automatically when that file is present. It provides the named custom
+layouts **GRIM Azimuth 3x2** and **GRIM Frequency Sweep** under **GRIM Report
+Master**. The two layout fields can instead name layouts in a team template;
+use `Master :: Layout` when a bare layout name is duplicated across masters.
+Leave an individual layout field blank to add that slide family with
+PowerPoint's generic blank layout, or clear the template path to create a fresh
+deck.
+
+The bundled template's two example slides make alignment easy to inspect and
+prototype on a PowerPoint-equipped machine. They are positioning guides: GRIM
+removes those seed slides during export after the report slides have inherited
+their named layouts. Only styling or graphics placed on the master/layout are
+inherited. GRIM's title, legend, and plot rectangles still use the fixed
+coordinates documented above. Report any desired coordinate changes after
+tuning the examples.
+
+Export writes to a staging file and replaces the requested output only after
+PowerPoint succeeds.
 An existing output requires explicit replacement confirmation. The preview
 shows GRIM content on a white page; a custom template's theme and master
 graphics appear only in the exported PPTX, which should be reviewed before use.
-GRIM will not close while an export is running.
+GRIM will not close while an export is running. Export closes only the temporary
+report presentation created by GRIM; presentations already open in PowerPoint
+and PowerPoint's application-level visibility and alert settings are preserved.
+GRIM never issues PowerPoint's application-wide **Quit** command.
 
 The slide preview uses GRIM's normal NumPy/Matplotlib/PySide dependencies.
 Final export currently requires Windows, desktop Microsoft PowerPoint, and the

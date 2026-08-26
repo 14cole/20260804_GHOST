@@ -19,7 +19,12 @@ try:
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from grim_dataset import RcsGrid
-    from ppt_report import azimuth_3x2_geometry
+    from ppt_report import (
+        DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+        DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+        azimuth_3x2_geometry,
+    )
+    import ppt_workspace
     from ppt_workspace import DatasetCatalogEntry, GUI_AVAILABLE, PptWorkspace
 except (ImportError, RuntimeError) as exc:  # pragma: no cover - dependency-specific
     _IMPORT_ERROR = exc
@@ -87,6 +92,57 @@ class PptWorkspaceTests(unittest.TestCase):
         widget = PptWorkspace(**kwargs)
         self.widgets.append(widget)
         return widget
+
+    def test_bundled_template_is_selected_with_named_layout_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            template = Path(directory) / "team-template.pptx"
+            template.write_bytes(b"temporary test template")
+            with mock.patch.object(
+                ppt_workspace,
+                "DEFAULT_POWERPOINT_TEMPLATE",
+                template,
+            ):
+                widget = self.workspace()
+
+        self.assertEqual(widget.template_edit.text(), str(template))
+        self.assertTrue(widget.azimuth_layout_edit.isEnabled())
+        self.assertTrue(widget.frequency_layout_edit.isEnabled())
+        self.assertEqual(
+            widget.azimuth_layout_edit.text(),
+            DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+        )
+        self.assertEqual(
+            widget.frequency_layout_edit.text(),
+            DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+        )
+        self.assertEqual(
+            widget._selected_template_layouts(),
+            {
+                "azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                "frequency_single": DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+            },
+        )
+
+    def test_missing_or_cleared_template_disables_named_layouts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing-template.pptx"
+            with mock.patch.object(
+                ppt_workspace,
+                "DEFAULT_POWERPOINT_TEMPLATE",
+                missing,
+            ):
+                widget = self.workspace()
+
+        self.assertEqual(widget.template_edit.text(), "")
+        self.assertFalse(widget.azimuth_layout_edit.isEnabled())
+        self.assertFalse(widget.frequency_layout_edit.isEnabled())
+        self.assertEqual(widget._selected_template_layouts(), {})
+
+        widget.template_edit.setText("custom.pptx")
+        self.assertTrue(widget.azimuth_layout_edit.isEnabled())
+        widget.template_edit.clear()
+        self.assertFalse(widget.azimuth_layout_edit.isEnabled())
+        self.assertEqual(widget._selected_template_layouts(), {})
 
     @staticmethod
     def entries():
@@ -391,10 +447,23 @@ class PptWorkspaceTests(unittest.TestCase):
     def test_async_export_uses_frozen_plan_and_exposes_busy_contract(self):
         started = threading.Event()
         release = threading.Event()
-        calls: list[tuple[object, str, str | None]] = []
+        calls: list[tuple[object, str, str | None, dict[str, str]]] = []
 
-        def fake_export(plan, destination, *, template_path=None):
-            calls.append((plan, str(destination), template_path))
+        def fake_export(
+            plan,
+            destination,
+            *,
+            template_path=None,
+            template_layouts=None,
+        ):
+            calls.append(
+                (
+                    plan,
+                    str(destination),
+                    template_path,
+                    dict(template_layouts or {}),
+                )
+            )
             started.set()
             if not release.wait(3.0):
                 raise RuntimeError("test release timed out")
@@ -403,17 +472,24 @@ class PptWorkspaceTests(unittest.TestCase):
 
         widget = self.workspace(exporter=fake_export)
         widget.set_dataset_catalog(self.entries())
-        with mock.patch.object(widget.preview_canvas, "render_slide"):
-            self.assertTrue(widget.build_preview())
-        frozen_plan = widget.preview_plan
-        exported: list[str] = []
-        widget.report_exported.connect(exported.append)
 
         with tempfile.TemporaryDirectory() as directory:
+            template = Path(directory) / "team-template.pptx"
+            template.write_bytes(b"temporary test template")
+            widget.template_edit.setText(str(template))
+            widget.azimuth_layout_edit.setText("Team Master :: Six Up")
+            widget.frequency_layout_edit.setText("Team Master :: One Up")
+            with mock.patch.object(widget.preview_canvas, "render_slide"):
+                self.assertTrue(widget.build_preview())
+            frozen_plan = widget.preview_plan
+            exported: list[str] = []
+            widget.report_exported.connect(exported.append)
             output = str(Path(directory) / "uniform_report.pptx")
             widget.output_edit.setText(output)
             self.assertTrue(widget.export_report())
             self.assertTrue(started.wait(2.0))
+            widget.azimuth_layout_edit.setText("Changed after start")
+            widget.frequency_layout_edit.clear()
             self.assertTrue(widget.job_is_running())
             self.assertEqual(widget.busy_operation(), "PowerPoint report export")
             self.assertFalse(widget.controls_content.isEnabled())
@@ -428,6 +504,14 @@ class PptWorkspaceTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertIs(calls[0][0], frozen_plan)
             self.assertEqual(calls[0][1], output)
+            self.assertEqual(calls[0][2], str(template))
+            self.assertEqual(
+                calls[0][3],
+                {
+                    "azimuth_3x2": "Team Master :: Six Up",
+                    "frequency_single": "Team Master :: One Up",
+                },
+            )
             self.assertEqual(exported, [output])
             self.assertTrue(Path(output).is_file())
 

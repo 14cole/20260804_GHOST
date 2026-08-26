@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import posixpath
 import tempfile
 import unittest
 import math
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+import xml.etree.ElementTree as ET
+
+import ppt_report
 
 from ppt_report import (
+    DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+    DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
     MASTER_LEGEND_IMAGE_INDEX,
     MSO_BRING_TO_FRONT,
     MSO_FALSE,
+    MSO_TRUE,
     POINTS_PER_INCH,
+    PP_LAYOUT_BLANK,
     PlotSeries,
     PlotSpec,
     PowerPointComBridge,
@@ -42,6 +53,130 @@ def make_plot(plot_id: str, kind: str = "azimuth_rect") -> PlotSpec:
             ),
         ),
     )
+
+
+class BundledTemplateContractTests(unittest.TestCase):
+    def test_bundled_template_keeps_named_layout_and_seed_contract(self):
+        template = (
+            Path(__file__).resolve().parent
+            / "templates"
+            / "GRIM_Report_Template.pptx"
+        )
+        self.assertTrue(template.is_file())
+        presentation_ns = {
+            "p": "http://schemas.openxmlformats.org/presentationml/2006/main"
+        }
+        relationship_tag = (
+            "{http://schemas.openxmlformats.org/package/2006/relationships}"
+            "Relationship"
+        )
+
+        def resolve_target(source_part: str, target: str) -> str:
+            if target.startswith("/"):
+                return target.lstrip("/")
+            return posixpath.normpath(
+                posixpath.join(posixpath.dirname(source_part), target)
+            )
+
+        with zipfile.ZipFile(template) as archive:
+            names = set(archive.namelist())
+            presentation = ET.fromstring(archive.read("ppt/presentation.xml"))
+            slide_size = presentation.find("p:sldSz", presentation_ns)
+            self.assertIsNotNone(slide_size)
+            assert slide_size is not None
+            self.assertEqual(
+                (int(slide_size.attrib["cx"]), int(slide_size.attrib["cy"])),
+                (12_192_000, 6_858_000),
+            )
+
+            master_parts = sorted(
+                name
+                for name in names
+                if name.startswith("ppt/slideMasters/slideMaster")
+                and name.endswith(".xml")
+            )
+            layout_parts = sorted(
+                name
+                for name in names
+                if name.startswith("ppt/slideLayouts/slideLayout")
+                and name.endswith(".xml")
+            )
+            slide_parts = sorted(
+                name
+                for name in names
+                if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+            )
+            self.assertEqual(len(master_parts), 1)
+            self.assertEqual(len(layout_parts), 2)
+            self.assertEqual(len(slide_parts), 2)
+
+            master_xml = ET.fromstring(archive.read(master_parts[0]))
+            master_c_sld = master_xml.find("p:cSld", presentation_ns)
+            self.assertIsNotNone(master_c_sld)
+            assert master_c_sld is not None
+            self.assertEqual(master_c_sld.attrib.get("name"), "GRIM Report Master")
+
+            layout_names: dict[str, str] = {}
+            for layout_part in layout_parts:
+                layout_xml = ET.fromstring(archive.read(layout_part))
+                layout_c_sld = layout_xml.find("p:cSld", presentation_ns)
+                self.assertIsNotNone(layout_c_sld)
+                assert layout_c_sld is not None
+                layout_names[layout_part] = layout_c_sld.attrib.get("name", "")
+
+                base_name = posixpath.basename(layout_part)
+                rels_part = f"ppt/slideLayouts/_rels/{base_name}.rels"
+                relationships = ET.fromstring(archive.read(rels_part))
+                master_targets = [
+                    resolve_target(layout_part, relationship.attrib["Target"])
+                    for relationship in relationships.findall(relationship_tag)
+                    if relationship.attrib.get("Type", "").endswith("/slideMaster")
+                ]
+                self.assertEqual(master_targets, master_parts)
+
+            self.assertEqual(
+                set(layout_names.values()),
+                {
+                    DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                    DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+                },
+            )
+
+            seeded_layouts: list[str] = []
+            for slide_part in slide_parts:
+                base_name = posixpath.basename(slide_part)
+                rels_part = f"ppt/slides/_rels/{base_name}.rels"
+                relationships = ET.fromstring(archive.read(rels_part))
+                layout_targets = [
+                    resolve_target(slide_part, relationship.attrib["Target"])
+                    for relationship in relationships.findall(relationship_tag)
+                    if relationship.attrib.get("Type", "").endswith("/slideLayout")
+                ]
+                self.assertEqual(len(layout_targets), 1)
+                seeded_layouts.append(layout_names[layout_targets[0]])
+            self.assertEqual(
+                seeded_layouts,
+                [
+                    DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                    DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+                ],
+            )
+
+            xml_payload = b"\n".join(
+                archive.read(name).lower()
+                for name in names
+                if name.endswith((".xml", ".rels"))
+            )
+            for prohibited in (
+                b"artifact",
+                b"chatgpt",
+                b"claude",
+                b"codex",
+                b"emery",
+                b"openai",
+                b"walnut",
+            ):
+                self.assertNotIn(prohibited, xml_payload)
 
 
 class LayoutPlanningTests(unittest.TestCase):
@@ -313,8 +448,18 @@ class RecordingWriter:
         self.calls = []
         self.image_paths: list[Path] = []
 
-    def write(self, plan, rendered_images, output_path, *, template_path=None):
-        self.calls.append((plan, output_path, template_path))
+    def write(
+        self,
+        plan,
+        rendered_images,
+        output_path,
+        *,
+        template_path=None,
+        template_layouts=None,
+    ):
+        self.calls.append(
+            (plan, output_path, template_path, dict(template_layouts or {}))
+        )
         self.image_paths = list(rendered_images.values())
         self.images_existed_during_write = all(path.is_file() for path in self.image_paths)
         if self.fail:
@@ -389,6 +534,48 @@ class SafeExportTests(unittest.TestCase):
             self.assertEqual(list(temp_parent.iterdir()), [])
             self.assertEqual(list(root.glob(".*.tmp.pptx")), [])
 
+    def test_named_layouts_are_normalized_and_forwarded(self):
+        plan = plan_azimuth_slides([make_plot("a")])
+        writer = RecordingWriter()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "named-layouts.pptx"
+            template.write_bytes(b"template")
+            export_powerpoint_report(
+                plan,
+                root / "report.pptx",
+                template_path=template,
+                template_layouts={
+                    "azimuth_3x2": f"  {DEFAULT_AZIMUTH_TEMPLATE_LAYOUT}  ",
+                },
+                writer=writer,
+                renderer=tiny_renderer,
+            )
+
+        self.assertEqual(
+            writer.calls[0][3],
+            {"azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT},
+        )
+
+    def test_named_layouts_without_template_fail_before_preflight_or_render(self):
+        plan = plan_azimuth_slides([make_plot("a")])
+        writer = PreflightRecordingWriter()
+        renderer = mock.Mock(side_effect=AssertionError("must not render"))
+
+        with self.assertRaisesRegex(ValueError, "require.*template"):
+            export_powerpoint_report(
+                plan,
+                "report.pptx",
+                template_layouts={
+                    "azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                },
+                writer=writer,
+                renderer=renderer,
+            )
+
+        self.assertFalse(writer.preflight_called)
+        renderer.assert_not_called()
+
     def test_failed_write_preserves_existing_destination(self):
         plan = plan_azimuth_slides([make_plot("a")])
         writer = RecordingWriter(fail=True)
@@ -414,7 +601,7 @@ class SafeExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             template = Path(directory) / "blank.pptx"
             template.write_bytes(b"template")
-            with self.assertRaisesRegex(ValueError, "different from the blank template"):
+            with self.assertRaisesRegex(ValueError, "different from the template"):
                 export_powerpoint_report(
                     plan,
                     template,
@@ -486,6 +673,7 @@ class FakeSlide:
     def __init__(self, owner=None):
         self.Shapes = FakeShapes()
         self.owner = owner
+        self.CustomLayout = None
 
     def Delete(self):
         self.owner.items.remove(self)
@@ -494,6 +682,8 @@ class FakeSlide:
 class FakeSlides:
     def __init__(self, seed_count=0):
         self.items = []
+        self.add_calls = []
+        self.add_slide_calls = []
         for _ in range(seed_count):
             self.items.append(FakeSlide(self))
 
@@ -504,10 +694,47 @@ class FakeSlides:
     def Item(self, index):
         return self.items[index - 1]
 
-    def Add(self, index, _layout):
+    def Add(self, index, layout):
+        self.add_calls.append((index, layout))
         slide = FakeSlide(self)
         self.items.insert(index - 1, slide)
         return slide
+
+    def AddSlide(self, index, custom_layout):
+        self.add_slide_calls.append((index, custom_layout))
+        slide = FakeSlide(self)
+        slide.CustomLayout = custom_layout
+        self.items.insert(index - 1, slide)
+        return slide
+
+
+class FakeComCollection:
+    def __init__(self, items=()):
+        self.items = list(items)
+
+    @property
+    def Count(self):
+        return len(self.items)
+
+    def Item(self, index):
+        return self.items[index - 1]
+
+
+class FakeCustomLayout:
+    def __init__(self, name):
+        self.Name = name
+
+
+class FakeSlideMaster:
+    def __init__(self, name, layouts=()):
+        self.Name = name
+        self.CustomLayouts = FakeComCollection(layouts)
+
+
+class FakeDesign:
+    def __init__(self, name, master_name, layouts=()):
+        self.Name = name
+        self.SlideMaster = FakeSlideMaster(master_name, layouts)
 
 
 class FakePageSetup:
@@ -517,40 +744,80 @@ class FakePageSetup:
 
 
 class FakePresentation:
-    def __init__(self, seed_count=1, *, width=800.0, height=450.0):
+    def __init__(
+        self,
+        seed_count=1,
+        *,
+        width=800.0,
+        height=450.0,
+        on_save=None,
+        save_error=None,
+        close_error=None,
+        designs=(),
+    ):
         self.Slides = FakeSlides(seed_count)
         self.PageSetup = FakePageSetup(width, height)
         self.closed = False
         self.saved = None
+        self.Saved = MSO_FALSE
+        self.on_save = on_save
+        self.save_error = save_error
+        self.close_error = close_error
+        self.Designs = FakeComCollection(designs)
 
     def SaveAs(self, path, file_format):
+        if self.save_error is not None:
+            raise self.save_error
         self.saved = (Path(path), file_format)
         Path(path).write_bytes(b"pptx from fake COM")
+        if self.on_save is not None:
+            self.on_save()
 
     def Close(self):
+        if self.close_error is not None:
+            raise self.close_error
         self.closed = True
 
 
 class FakePresentations:
-    def __init__(self, presentation):
+    def __init__(self, presentation, *, initial_count=0):
         self.presentation = presentation
+        self.initial_count = initial_count
+        self.report_open = False
         self.open_args = None
         self.add_args = None
 
+    @property
+    def Count(self):
+        report_count = int(self.report_open and not self.presentation.closed)
+        return self.initial_count + report_count
+
     def Open(self, path, **kwargs):
         self.open_args = (Path(path), kwargs)
+        self.report_open = True
         return self.presentation
 
     def Add(self, **kwargs):
         self.add_args = kwargs
+        self.report_open = True
         return self.presentation
 
 
 class FakeApplication:
-    def __init__(self, presentation):
-        self.Presentations = FakePresentations(presentation)
-        self.Visible = None
-        self.DisplayAlerts = None
+    def __init__(
+        self,
+        presentation,
+        *,
+        initial_presentation_count=0,
+        visible=True,
+        display_alerts=7,
+    ):
+        self.Presentations = FakePresentations(
+            presentation,
+            initial_count=initial_presentation_count,
+        )
+        self.Visible = visible
+        self.DisplayAlerts = display_alerts
         self.quit_called = False
 
     def Quit(self):
@@ -558,7 +825,7 @@ class FakeApplication:
 
 
 class ComBridgeFakeTests(unittest.TestCase):
-    def test_bridge_starts_private_app_clears_seed_and_writes_fixed_shapes(self):
+    def test_bridge_clears_seed_and_writes_fixed_shapes(self):
         plan = plan_azimuth_slides(
             [make_plot("one"), make_plot("two")], footer="Program | Classification"
         )
@@ -579,7 +846,10 @@ class ComBridgeFakeTests(unittest.TestCase):
 
             self.assertTrue(output.is_file())
             self.assertTrue(presentation.closed)
-            self.assertTrue(application.quit_called)
+            self.assertEqual(presentation.Saved, MSO_TRUE)
+            self.assertFalse(application.quit_called)
+            self.assertTrue(application.Visible)
+            self.assertEqual(application.DisplayAlerts, 7)
             self.assertEqual(application.Presentations.open_args[0], template)
             self.assertEqual(application.Presentations.open_args[1]["WithWindow"], MSO_FALSE)
             self.assertEqual(len(presentation.Slides.items), 1)
@@ -640,6 +910,266 @@ class ComBridgeFakeTests(unittest.TestCase):
                 places=6,
             )
             self.assertEqual(application.Presentations.add_args["WithWindow"], MSO_FALSE)
+            self.assertEqual(presentation.Slides.add_calls, [(1, PP_LAYOUT_BLANK)])
+            self.assertEqual(presentation.Slides.add_slide_calls, [])
+
+    def test_template_uses_named_layout_for_each_plan_family(self):
+        azimuth_plan = plan_azimuth_slides([make_plot("azimuth")])
+        frequency_plan = plan_frequency_slides(
+            [make_plot("frequency", "frequency")]
+        )
+        plan = combine_plans(azimuth_plan, frequency_plan)
+        azimuth_layout = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        frequency_layout = FakeCustomLayout(DEFAULT_FREQUENCY_TEMPLATE_LAYOUT)
+        unrelated_layout = FakeCustomLayout("Unrelated")
+        design = FakeDesign(
+            "Temporary Design",
+            "GRIM Report Master",
+            (frequency_layout, unrelated_layout, azimuth_layout),
+        )
+        presentation = FakePresentation(seed_count=2, designs=(design,))
+        application = FakeApplication(presentation)
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            template.write_bytes(b"template")
+            images = {}
+            for slide_index in range(2):
+                image = root / f"plot-{slide_index}.png"
+                image.write_bytes(b"png")
+                images[(slide_index, 0)] = image
+            bridge.write(
+                plan,
+                images,
+                root / "report.pptx",
+                template_path=template,
+                template_layouts={
+                    "azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                    "frequency_single": DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+                },
+            )
+
+        self.assertEqual(presentation.Slides.add_calls, [])
+        self.assertEqual(
+            presentation.Slides.add_slide_calls,
+            [(3, azimuth_layout), (4, frequency_layout)],
+        )
+        self.assertIs(presentation.Slides.items[0].CustomLayout, azimuth_layout)
+        self.assertIs(presentation.Slides.items[1].CustomLayout, frequency_layout)
+
+    def test_bare_duplicate_layout_requires_master_qualifier_before_clearing(self):
+        plan = plan_azimuth_slides([make_plot("azimuth")])
+        first = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        second = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT.lower())
+        presentation = FakePresentation(
+            seed_count=1,
+            designs=(
+                FakeDesign("Design A", "Master A", (first,)),
+                FakeDesign("Design B", "Master B", (second,)),
+            ),
+        )
+        bridge = PowerPointComBridge(
+            application_factory=lambda: FakeApplication(presentation)
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            template.write_bytes(b"template")
+            with self.assertRaisesRegex(RuntimeError, "Master :: Layout"):
+                bridge.write(
+                    plan,
+                    {},
+                    root / "report.pptx",
+                    template_path=template,
+                    template_layouts={
+                        "azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                    },
+                )
+
+        self.assertEqual(presentation.Slides.Count, 1)
+        self.assertEqual(presentation.Slides.add_calls, [])
+        self.assertEqual(presentation.Slides.add_slide_calls, [])
+        self.assertIsNone(presentation.saved)
+        self.assertTrue(presentation.closed)
+
+    def test_master_qualified_layout_disambiguates_case_insensitively(self):
+        plan = plan_azimuth_slides([make_plot("azimuth")])
+        first = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        second = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        presentation = FakePresentation(
+            seed_count=0,
+            designs=(
+                FakeDesign("Design A", "Master A", (first,)),
+                FakeDesign("Design B", "Master B", (second,)),
+            ),
+        )
+        bridge = PowerPointComBridge(
+            application_factory=lambda: FakeApplication(presentation)
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            template.write_bytes(b"template")
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            bridge.write(
+                plan,
+                {(0, 0): image},
+                root / "report.pptx",
+                template_path=template,
+                template_layouts={
+                    "azimuth_3x2": " master b :: grim azimuth 3X2 ",
+                },
+            )
+
+        self.assertEqual(presentation.Slides.add_slide_calls, [(1, second)])
+
+    def test_duplicate_layout_names_inside_one_master_require_renaming(self):
+        plan = plan_azimuth_slides([make_plot("azimuth")])
+        first = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        second = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        presentation = FakePresentation(
+            seed_count=1,
+            designs=(FakeDesign("Design A", "Master A", (first, second)),),
+        )
+        bridge = PowerPointComBridge(
+            application_factory=lambda: FakeApplication(presentation)
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            template.write_bytes(b"template")
+            with self.assertRaisesRegex(RuntimeError, "Rename the duplicate") as error:
+                bridge.write(
+                    plan,
+                    {},
+                    root / "report.pptx",
+                    template_path=template,
+                    template_layouts={
+                        "azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                    },
+                )
+
+        self.assertIn("rename required", str(error.exception))
+        self.assertNotIn("Use 'Master :: Layout'", str(error.exception))
+        self.assertEqual(presentation.Slides.Count, 1)
+
+    def test_duplicate_master_names_offer_unique_design_qualifiers(self):
+        plan = plan_azimuth_slides([make_plot("azimuth")])
+        first = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        second = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        presentation = FakePresentation(
+            seed_count=0,
+            designs=(
+                FakeDesign("Design One", "Shared Master", (first,)),
+                FakeDesign("Design Two", "Shared Master", (second,)),
+            ),
+        )
+        bridge = PowerPointComBridge(
+            application_factory=lambda: FakeApplication(presentation)
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            template.write_bytes(b"template")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Design One :: GRIM Azimuth 3x2.*Design Two :: GRIM Azimuth 3x2",
+            ):
+                bridge.write(
+                    plan,
+                    {},
+                    root / "ambiguous.pptx",
+                    template_path=template,
+                    template_layouts={
+                        "azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                    },
+                )
+
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            bridge.write(
+                plan,
+                {(0, 0): image},
+                root / "report.pptx",
+                template_path=template,
+                template_layouts={
+                    "azimuth_3x2": "design two :: grim azimuth 3x2",
+                },
+            )
+
+        self.assertEqual(presentation.Slides.add_slide_calls, [(1, second)])
+
+    def test_missing_required_layout_lists_available_before_clearing(self):
+        plan = plan_frequency_slides([make_plot("frequency", "frequency")])
+        other = FakeCustomLayout("Other Layout")
+        presentation = FakePresentation(
+            seed_count=1,
+            designs=(FakeDesign("Design A", "Master A", (other,)),),
+        )
+        bridge = PowerPointComBridge(
+            application_factory=lambda: FakeApplication(presentation)
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            template.write_bytes(b"template")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "GRIM Frequency Sweep.*Master A :: Other Layout",
+            ):
+                bridge.write(
+                    plan,
+                    {},
+                    root / "report.pptx",
+                    template_path=template,
+                    template_layouts={
+                        "frequency_single": DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+                    },
+                )
+
+        self.assertEqual(presentation.Slides.Count, 1)
+        self.assertEqual(presentation.Slides.add_calls, [])
+        self.assertEqual(presentation.Slides.add_slide_calls, [])
+
+    def test_unused_family_layout_is_not_required(self):
+        plan = plan_azimuth_slides([make_plot("azimuth")])
+        azimuth_layout = FakeCustomLayout(DEFAULT_AZIMUTH_TEMPLATE_LAYOUT)
+        presentation = FakePresentation(
+            seed_count=0,
+            designs=(
+                FakeDesign("Temporary Design", "GRIM Report Master", (azimuth_layout,)),
+            ),
+        )
+        bridge = PowerPointComBridge(
+            application_factory=lambda: FakeApplication(presentation)
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            template.write_bytes(b"template")
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            bridge.write(
+                plan,
+                {(0, 0): image},
+                root / "report.pptx",
+                template_path=template,
+                template_layouts={
+                    "azimuth_3x2": DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                    "frequency_single": DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+                },
+            )
+
+        self.assertEqual(presentation.Slides.add_slide_calls, [(1, azimuth_layout)])
 
     def test_non_widescreen_template_is_rejected_before_adding_report_slides(self):
         plan = plan_azimuth_slides([make_plot("one")])
@@ -660,7 +1190,185 @@ class ComBridgeFakeTests(unittest.TestCase):
                     template_path=template,
                 )
         self.assertTrue(presentation.closed)
-        self.assertTrue(application.quit_called)
+        self.assertFalse(application.quit_called)
+
+    def test_shared_powerpoint_and_user_presentations_remain_open(self):
+        plan = plan_frequency_slides([make_plot("frequency", "frequency")])
+        presentation = FakePresentation(seed_count=0)
+        application = FakeApplication(
+            presentation,
+            initial_presentation_count=2,
+            visible=True,
+            display_alerts=11,
+        )
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            bridge.write(plan, {(0, 0): image}, root / "report.pptx")
+
+        self.assertTrue(presentation.closed)
+        self.assertEqual(application.Presentations.Count, 2)
+        self.assertFalse(application.quit_called)
+        self.assertTrue(application.Visible)
+        self.assertEqual(application.DisplayAlerts, 11)
+
+    def test_preflight_does_not_quit_shared_powerpoint(self):
+        presentation = FakePresentation(seed_count=0)
+        application = FakeApplication(
+            presentation,
+            initial_presentation_count=1,
+            visible=True,
+            display_alerts=13,
+        )
+
+        PowerPointComBridge(application_factory=lambda: application).preflight()
+
+        self.assertFalse(application.quit_called)
+        self.assertEqual(application.Presentations.Count, 1)
+        self.assertTrue(application.Visible)
+        self.assertEqual(application.DisplayAlerts, 13)
+
+    def test_user_deck_opened_during_export_remains_open(self):
+        plan = plan_frequency_slides([make_plot("frequency", "frequency")])
+        application = None
+
+        def user_opens_presentation():
+            application.Presentations.initial_count = 1
+
+        presentation = FakePresentation(seed_count=0, on_save=user_opens_presentation)
+        application = FakeApplication(presentation)
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            bridge.write(plan, {(0, 0): image}, root / "report.pptx")
+
+        self.assertTrue(presentation.closed)
+        self.assertEqual(application.Presentations.Count, 1)
+        self.assertFalse(application.quit_called)
+
+    def test_active_powerpoint_is_reused_without_dispatch_or_quit(self):
+        presentation = FakePresentation(seed_count=0)
+        application = FakeApplication(
+            presentation,
+            initial_presentation_count=1,
+        )
+        pythoncom_fake = SimpleNamespace(
+            CoInitialize=mock.Mock(),
+            CoUninitialize=mock.Mock(),
+        )
+        client_fake = SimpleNamespace(
+            GetActiveObject=mock.Mock(return_value=application),
+            DispatchEx=mock.Mock(),
+        )
+        win32com_fake = SimpleNamespace(client=client_fake)
+
+        with (
+            mock.patch.object(ppt_report.sys, "platform", "win32"),
+            mock.patch.object(ppt_report, "pythoncom", pythoncom_fake),
+            mock.patch.object(ppt_report, "win32com", win32com_fake),
+        ):
+            PowerPointComBridge().preflight()
+
+        client_fake.GetActiveObject.assert_called_once_with("PowerPoint.Application")
+        client_fake.DispatchEx.assert_not_called()
+        pythoncom_fake.CoInitialize.assert_called_once_with()
+        pythoncom_fake.CoUninitialize.assert_called_once_with()
+        self.assertFalse(application.quit_called)
+
+    def test_preflight_never_quits_powerpoint_started_by_grim(self):
+        presentation = FakePresentation(seed_count=0)
+        application = FakeApplication(presentation)
+        pythoncom_fake = SimpleNamespace(
+            CoInitialize=mock.Mock(),
+            CoUninitialize=mock.Mock(),
+        )
+        client_fake = SimpleNamespace(
+            GetActiveObject=mock.Mock(side_effect=RuntimeError("not running")),
+            DispatchEx=mock.Mock(return_value=application),
+        )
+        win32com_fake = SimpleNamespace(client=client_fake)
+
+        with (
+            mock.patch.object(ppt_report.sys, "platform", "win32"),
+            mock.patch.object(ppt_report, "pythoncom", pythoncom_fake),
+            mock.patch.object(ppt_report, "win32com", win32com_fake),
+        ):
+            PowerPointComBridge().preflight()
+
+        client_fake.DispatchEx.assert_called_once_with("PowerPoint.Application")
+        pythoncom_fake.CoUninitialize.assert_called_once_with()
+        self.assertFalse(application.quit_called)
+
+    def test_failed_export_in_shared_powerpoint_closes_only_grim_presentation(self):
+        plan = plan_frequency_slides([make_plot("frequency", "frequency")])
+        presentation = FakePresentation(
+            seed_count=0,
+            save_error=RuntimeError("save failed"),
+        )
+        application = FakeApplication(
+            presentation,
+            initial_presentation_count=2,
+            visible=True,
+            display_alerts=17,
+        )
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            with self.assertRaisesRegex(RuntimeError, "save failed"):
+                bridge.write(plan, {(0, 0): image}, root / "report.pptx")
+
+        self.assertTrue(presentation.closed)
+        self.assertEqual(presentation.Saved, MSO_TRUE)
+        self.assertEqual(application.Presentations.Count, 2)
+        self.assertFalse(application.quit_called)
+        self.assertTrue(application.Visible)
+        self.assertEqual(application.DisplayAlerts, 17)
+
+    def test_close_failure_is_reported_without_quitting_powerpoint(self):
+        plan = plan_frequency_slides([make_plot("frequency", "frequency")])
+        presentation = FakePresentation(
+            seed_count=0,
+            close_error=RuntimeError("close failed"),
+        )
+        application = FakeApplication(presentation)
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            with self.assertRaisesRegex(RuntimeError, "temporary presentation"):
+                bridge.write(plan, {(0, 0): image}, root / "report.pptx")
+
+        self.assertFalse(presentation.closed)
+        self.assertFalse(application.quit_called)
+
+    def test_operation_and_close_failures_are_both_reported(self):
+        plan = plan_frequency_slides([make_plot("frequency", "frequency")])
+        presentation = FakePresentation(
+            seed_count=0,
+            save_error=RuntimeError("save failed"),
+            close_error=RuntimeError("close failed"),
+        )
+        application = FakeApplication(presentation)
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image = root / "plot.png"
+            image.write_bytes(b"png")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "save failed.*also could not close.*close failed",
+            ):
+                bridge.write(plan, {(0, 0): image}, root / "report.pptx")
+
+        self.assertFalse(presentation.closed)
+        self.assertFalse(application.quit_called)
 
 
 if __name__ == "__main__":

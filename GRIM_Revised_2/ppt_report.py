@@ -5,9 +5,9 @@ of Qt and PowerPoint.  They can therefore drive both the GRIM slide preview
 and ordinary unit tests.  Only :class:`PowerPointComBridge` knows about
 Windows COM automation.
 
-Live export starts its own hidden desktop PowerPoint instance; it does not
-require PowerPoint to be open before the export begins.  ``pywin32`` remains
-an optional, Windows-only runtime dependency.
+Live export attaches to desktop PowerPoint when it is already running or starts
+it when needed.  It closes only the temporary report presentation it creates.
+``pywin32`` remains an optional, Windows-only runtime dependency.
 """
 
 from __future__ import annotations
@@ -47,10 +47,13 @@ MSO_TEXT_ORIENTATION_HORIZONTAL = 1
 PP_ALIGN_LEFT = 1
 PP_ALIGN_CENTER = 2
 PP_ALIGN_RIGHT = 3
+DEFAULT_AZIMUTH_TEMPLATE_LAYOUT = "GRIM Azimuth 3x2"
+DEFAULT_FREQUENCY_TEMPLATE_LAYOUT = "GRIM Frequency Sweep"
 
 PlotKind = Literal["azimuth_rect", "azimuth_polar", "frequency"]
 LayoutKind = Literal["azimuth_3x2", "frequency_single"]
 RenderedImageKey = tuple[int, int]
+TemplateLayoutNames = Mapping[LayoutKind, str]
 
 
 @dataclass(frozen=True)
@@ -856,7 +859,28 @@ class PresentationWriter(Protocol):
         output_path: Path,
         *,
         template_path: Path | None = None,
+        template_layouts: TemplateLayoutNames | None = None,
     ) -> None: ...
+
+
+def _normalise_template_layouts(
+    values: Mapping[str, str] | None,
+) -> dict[LayoutKind, str]:
+    """Validate and freeze optional layout-family to custom-layout names."""
+
+    result: dict[LayoutKind, str] = {}
+    for raw_kind, raw_selector in (values or {}).items():
+        kind = str(raw_kind).strip()
+        selector = str(raw_selector).strip()
+        if kind == "azimuth_3x2":
+            if selector:
+                result["azimuth_3x2"] = selector
+        elif kind == "frequency_single":
+            if selector:
+                result["frequency_single"] = selector
+        else:
+            raise ValueError(f"Unknown PowerPoint layout family: {raw_kind!r}")
+    return result
 
 
 def _office_rgb(red: int, green: int, blue: int) -> int:
@@ -873,7 +897,7 @@ def _collection_item(collection: Any, index: int) -> Any:
 
 
 class PowerPointComBridge:
-    """Write a planned report using a private desktop PowerPoint instance."""
+    """Write a report without taking ownership of a running PowerPoint app."""
 
     def __init__(self, application_factory: Callable[[], Any] | None = None) -> None:
         self._application_factory = application_factory
@@ -894,7 +918,12 @@ class PowerPointComBridge:
         assert pythoncom is not None and win32com is not None
         pythoncom.CoInitialize()
         try:
-            application = win32com.client.DispatchEx("PowerPoint.Application")
+            try:
+                application = win32com.client.GetActiveObject(
+                    "PowerPoint.Application"
+                )
+            except Exception:
+                application = win32com.client.DispatchEx("PowerPoint.Application")
         except Exception:
             pythoncom.CoUninitialize()
             raise
@@ -907,20 +936,15 @@ class PowerPointComBridge:
         com_initialized = False
         try:
             application, com_initialized = self._new_application()
-            try:
-                application.Visible = MSO_FALSE
-            except Exception:
-                pass
         except Exception as exc:
             raise RuntimeError(
                 f"PowerPoint export is unavailable: {exc}"
             ) from exc
         finally:
-            if application is not None:
-                try:
-                    application.Quit()
-                except Exception:
-                    pass
+            # PowerPoint is a shared, single-instance COM server. Releasing our
+            # reference is safe; Application.Quit() is not, even if it appears
+            # empty, because a user presentation can arrive concurrently.
+            application = None
             if com_initialized and pythoncom is not None:
                 pythoncom.CoUninitialize()
 
@@ -939,9 +963,144 @@ class PowerPointComBridge:
         )
 
     @staticmethod
-    def _clear_template_slides(presentation: Any) -> None:
-        while int(presentation.Slides.Count) > 0:
+    def _delete_leading_slides(presentation: Any, count: int) -> None:
+        """Delete seed slides after report slides reference their layouts."""
+
+        for _index in range(int(count)):
             _collection_item(presentation.Slides, 1).Delete()
+
+    @staticmethod
+    def _custom_layout_catalog(
+        presentation: Any,
+    ) -> tuple[tuple[str, str, str, Any], ...]:
+        """Return ``(master, design, layout, COM layout)`` entries."""
+
+        entries: list[tuple[str, str, str, Any]] = []
+        designs = presentation.Designs
+        for design_index in range(1, int(designs.Count) + 1):
+            design = _collection_item(designs, design_index)
+            design_name = str(getattr(design, "Name", "") or "").strip()
+            if not design_name:
+                design_name = f"Design {design_index}"
+            master = design.SlideMaster
+            master_name = str(getattr(master, "Name", "") or "").strip()
+            if not master_name:
+                master_name = design_name
+            layouts = master.CustomLayouts
+            for layout_index in range(1, int(layouts.Count) + 1):
+                layout = _collection_item(layouts, layout_index)
+                layout_name = str(getattr(layout, "Name", "") or "").strip()
+                if not layout_name:
+                    layout_name = f"Layout {layout_index}"
+                entries.append((master_name, design_name, layout_name, layout))
+        return tuple(entries)
+
+    @classmethod
+    def _find_custom_layout(cls, presentation: Any, selector: str) -> Any:
+        """Resolve ``Layout`` or ``Master :: Layout`` without guessing."""
+
+        requested = str(selector).strip()
+        if not requested:
+            raise ValueError("A PowerPoint custom-layout name cannot be blank.")
+        requested_design: str | None = None
+        requested_layout = requested
+        if "::" in requested:
+            requested_design, requested_layout = (
+                part.strip() for part in requested.split("::", 1)
+            )
+            if not requested_design or not requested_layout:
+                raise ValueError(
+                    "Qualified PowerPoint layouts must use 'Master :: Layout'."
+                )
+
+        catalog = cls._custom_layout_catalog(presentation)
+        layout_key = requested_layout.casefold()
+        design_key = requested_design.casefold() if requested_design else None
+        matches = [
+            (index, master_name, design_name, layout_name, layout)
+            for index, (master_name, design_name, layout_name, layout) in enumerate(
+                catalog
+            )
+            if layout_name.casefold() == layout_key
+            and (
+                design_key is None
+                or master_name.casefold() == design_key
+                or design_name.casefold() == design_key
+            )
+        ]
+        if len(matches) == 1:
+            return matches[0][4]
+
+        options: list[tuple[str, bool]] = []
+        for master_name, design_name, layout_name, _layout in catalog:
+            layout_name_key = layout_name.casefold()
+
+            def qualifier_count(qualifier: str) -> int:
+                qualifier_key = qualifier.casefold()
+                return sum(
+                    1
+                    for other_master, other_design, other_layout, _other in catalog
+                    if other_layout.casefold() == layout_name_key
+                    and (
+                        other_master.casefold() == qualifier_key
+                        or other_design.casefold() == qualifier_key
+                    )
+                )
+
+            if qualifier_count(master_name) == 1:
+                options.append((f"{master_name} :: {layout_name}", True))
+            elif qualifier_count(design_name) == 1:
+                options.append((f"{design_name} :: {layout_name}", True))
+            else:
+                options.append(
+                    (
+                        "rename required for "
+                        f"master={master_name!r}, design={design_name!r}, "
+                        f"layout={layout_name!r}",
+                        False,
+                    )
+                )
+        available_options = tuple(dict.fromkeys(option for option, _usable in options))
+        available = ", ".join(available_options) or "(none)"
+        if len(matches) > 1 and requested_design is None:
+            matching_options = [options[index] for index, *_rest in matches]
+            if any(not usable for _option, usable in matching_options):
+                raise ValueError(
+                    f"PowerPoint custom layout {requested_layout!r} appears more "
+                    "than once and at least one duplicate cannot be selected by "
+                    "name. Rename the duplicate layout, master, or design in "
+                    f"PowerPoint. Available layouts: {available}"
+                )
+            raise ValueError(
+                f"PowerPoint custom layout {requested_layout!r} exists more than "
+                "once. Use 'Master :: Layout'; a unique Design name is also "
+                "accepted. Available layouts: "
+                f"{available}"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"PowerPoint custom layout {requested!r} is still ambiguous. "
+                "Choose a unique Master/Design qualifier shown below or rename "
+                f"the duplicate in PowerPoint. Available layouts: {available}"
+            )
+        raise ValueError(
+            f"PowerPoint custom layout {requested!r} was not found. "
+            f"Available layouts: {available}"
+        )
+
+    @classmethod
+    def _resolve_plan_layouts(
+        cls,
+        presentation: Any,
+        plan: PresentationPlan,
+        template_layouts: TemplateLayoutNames,
+    ) -> dict[LayoutKind, Any]:
+        used = {slide.layout for slide in plan.slides}
+        return {
+            kind: cls._find_custom_layout(presentation, selector)
+            for kind, selector in template_layouts.items()
+            if kind in used
+        }
 
     @staticmethod
     def _add_text(
@@ -981,6 +1140,8 @@ class PowerPointComBridge:
         presentation: Any,
         plan: PresentationPlan,
         rendered_images: Mapping[RenderedImageKey, Path],
+        *,
+        custom_layouts: Mapping[LayoutKind, Any] | None = None,
     ) -> None:
         page_width = float(presentation.PageSetup.SlideWidth)
         page_height = float(presentation.PageSetup.SlideHeight)
@@ -990,7 +1151,7 @@ class PowerPointComBridge:
         actual_ratio = page_width / page_height
         if not math.isclose(actual_ratio, expected_ratio, rel_tol=0.0, abs_tol=1.0e-3):
             raise RuntimeError(
-                "The blank PowerPoint template must use a widescreen 16:9 "
+                "The PowerPoint template must use a widescreen 16:9 "
                 "slide size so the exported deck matches the GRIM preview."
             )
         total_slides = len(plan.slides)
@@ -999,10 +1160,17 @@ class PowerPointComBridge:
             geometry = base_geometry.scaled_to(page_width, page_height)
             x_scale = page_width / base_geometry.width
             y_scale = page_height / base_geometry.height
-            slide = presentation.Slides.Add(
-                int(presentation.Slides.Count) + 1,
-                PP_LAYOUT_BLANK,
-            )
+            custom_layout = (custom_layouts or {}).get(slide_plan.layout)
+            if custom_layout is None:
+                slide = presentation.Slides.Add(
+                    int(presentation.Slides.Count) + 1,
+                    PP_LAYOUT_BLANK,
+                )
+            else:
+                slide = presentation.Slides.AddSlide(
+                    int(presentation.Slides.Count) + 1,
+                    custom_layout,
+                )
             self._add_text(
                 slide,
                 geometry.title,
@@ -1089,44 +1257,89 @@ class PowerPointComBridge:
         output_path: Path,
         *,
         template_path: Path | None = None,
+        template_layouts: TemplateLayoutNames | None = None,
     ) -> None:
-        """Create one PPTX and close all private COM objects before returning."""
+        """Create one PPTX and close only the presentation created by GRIM."""
 
         application = None
         presentation = None
         com_initialized = False
+        operation_error: str | None = None
+        close_error: str | None = None
+        custom_layouts: dict[LayoutKind, Any] | None = None
         try:
+            layout_names = _normalise_template_layouts(template_layouts)
+            if layout_names and template_path is None:
+                raise ValueError(
+                    "Named PowerPoint layouts require a .pptx or .potx template."
+                )
             application, com_initialized = self._new_application()
-            try:
-                application.Visible = MSO_FALSE
-            except Exception:
-                pass
-            try:
-                application.DisplayAlerts = MSO_FALSE
-            except Exception:
-                pass
             presentation = self._open_presentation(application, template_path)
-            self._clear_template_slides(presentation)
-            self._populate_presentation(presentation, plan, rendered_images)
+            seed_slide_count = int(presentation.Slides.Count)
+            custom_layouts = self._resolve_plan_layouts(
+                presentation,
+                plan,
+                layout_names,
+            )
+            self._populate_presentation(
+                presentation,
+                plan,
+                rendered_images,
+                custom_layouts=custom_layouts,
+            )
+            # Keep seed slides until every report slide references its custom
+            # layout. PowerPoint can otherwise discard an unused layout/master
+            # when its final seed slide is removed.
+            self._delete_leading_slides(presentation, seed_slide_count)
             presentation.SaveAs(
                 str(output_path),
                 PP_SAVE_AS_OPEN_XML_PRESENTATION,
             )
         except Exception as exc:
-            raise RuntimeError(f"PowerPoint report export failed: {exc}") from exc
+            detail = str(exc).strip()
+            operation_error = (
+                f"{type(exc).__name__}: {detail}"
+                if detail
+                else type(exc).__name__
+            )
         finally:
+            custom_layouts = None
             if presentation is not None:
+                # This is always GRIM's temporary report presentation. Mark it
+                # saved before closing so a failed export cannot raise a modal
+                # save prompt inside a user's already-running PowerPoint app.
+                try:
+                    presentation.Saved = MSO_TRUE
+                except Exception:
+                    pass
                 try:
                     presentation.Close()
-                except Exception:
-                    pass
-            if application is not None:
-                try:
-                    application.Quit()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    detail = str(exc).strip()
+                    close_error = (
+                        f"{type(exc).__name__}: {detail}"
+                        if detail
+                        else type(exc).__name__
+                    )
+            presentation = None
+            # Never call Application.Quit(): PowerPoint can return a user's
+            # existing single-instance process even after DispatchEx().
+            application = None
             if com_initialized and pythoncom is not None:
                 pythoncom.CoUninitialize()
+        if operation_error is not None:
+            message = f"PowerPoint report export failed: {operation_error}"
+            if close_error is not None:
+                message += (
+                    ". GRIM also could not close its temporary presentation: "
+                    f"{close_error}"
+                )
+            raise RuntimeError(message) from None
+        if close_error is not None:
+            raise RuntimeError(
+                "PowerPoint saved the report but GRIM could not close its "
+                f"temporary presentation: {close_error}"
+            ) from None
 
 
 def _validate_export_paths(
@@ -1144,7 +1357,7 @@ def _validate_export_paths(
         if not template.is_file():
             raise FileNotFoundError(f"PowerPoint template does not exist: {template}")
         if template == output:
-            raise ValueError("Choose an output file different from the blank template.")
+            raise ValueError("Choose an output file different from the template.")
     output.parent.mkdir(parents=True, exist_ok=True)
     return output, template
 
@@ -1154,6 +1367,7 @@ def export_powerpoint_report(
     destination: str | os.PathLike[str],
     *,
     template_path: str | os.PathLike[str] | None = None,
+    template_layouts: Mapping[str, str] | None = None,
     writer: PresentationWriter | None = None,
     dpi: int = 160,
     style: PlotRenderStyle = PlotRenderStyle(),
@@ -1171,6 +1385,11 @@ def export_powerpoint_report(
     """
 
     output, template = _validate_export_paths(destination, template_path)
+    layout_names = _normalise_template_layouts(template_layouts)
+    if layout_names and template is None:
+        raise ValueError(
+            "Named PowerPoint layouts require a .pptx or .potx template."
+        )
     bridge: PresentationWriter = writer or PowerPointComBridge()
     preflight = getattr(bridge, "preflight", None)
     if callable(preflight):
@@ -1198,12 +1417,10 @@ def export_powerpoint_report(
                 renderer=renderer,
                 legend_renderer=legend_renderer,
             )
-            bridge.write(
-                plan,
-                rendered,
-                staging,
-                template_path=template,
-            )
+            write_kwargs: dict[str, Any] = {"template_path": template}
+            if layout_names:
+                write_kwargs["template_layouts"] = layout_names
+            bridge.write(plan, rendered, staging, **write_kwargs)
             if not staging.is_file() or staging.stat().st_size <= 0:
                 raise RuntimeError("PowerPoint did not create a valid staging presentation.")
             os.replace(staging, output)
@@ -1217,6 +1434,8 @@ def export_powerpoint_report(
 
 __all__ = [
     "LayoutKind",
+    "DEFAULT_AZIMUTH_TEMPLATE_LAYOUT",
+    "DEFAULT_FREQUENCY_TEMPLATE_LAYOUT",
     "LegendEntry",
     "MASTER_LEGEND_IMAGE_INDEX",
     "MSO_BRING_TO_FRONT",
@@ -1235,6 +1454,7 @@ __all__ = [
     "SLIDE_TITLE_FONT_SIZE_POINTS",
     "SlideGeometry",
     "SlidePlan",
+    "TemplateLayoutNames",
     "azimuth_3x2_geometry",
     "combine_plans",
     "export_powerpoint_report",

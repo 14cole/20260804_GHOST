@@ -23,6 +23,8 @@ from ppt_plot_data import (
     get_plot_availability,
 )
 from ppt_report import (
+    DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+    DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
     PlotSpec,
     PresentationPlan,
     SLIDE_FOOTER_FONT_SIZE_POINTS,
@@ -40,6 +42,9 @@ from ppt_report import (
 
 _INITIAL_AZIMUTH_FREQUENCY_COUNT = 6
 _MAX_AZIMUTH_REPORT_FREQUENCIES = 60
+DEFAULT_POWERPOINT_TEMPLATE = (
+    Path(__file__).resolve().parent / "templates" / "GRIM_Report_Template.pptx"
+)
 
 
 @dataclass(frozen=True)
@@ -188,20 +193,27 @@ if GUI_AVAILABLE:
             plan: PresentationPlan,
             output_path: str,
             template_path: str,
+            template_layouts: Mapping[str, str],
         ) -> None:
             super().__init__()
             self._exporter = exporter
             self._plan = plan
             self._output_path = output_path
             self._template_path = template_path
+            self._template_layouts = dict(template_layouts)
 
         @Slot()
         def run(self) -> None:
             try:
+                kwargs: dict[str, Any] = {
+                    "template_path": self._template_path or None,
+                }
+                if self._template_layouts:
+                    kwargs["template_layouts"] = self._template_layouts
                 result = self._exporter(
                     self._plan,
                     self._output_path,
-                    template_path=self._template_path or None,
+                    **kwargs,
                 )
             except Exception as exc:
                 self.failed.emit(str(exc).strip() or type(exc).__name__)
@@ -791,18 +803,47 @@ if GUI_AVAILABLE:
             self.footer_edit.setPlaceholderText("Program | classification | analyst")
             deck_form.addRow("Footer", self.footer_edit)
             self.template_edit, template_widget = self._path_row(
-                deck_group, "Choose blank PowerPoint template", self._browse_template
+                deck_group, "Choose PowerPoint template", self._browse_template
             )
-            self.template_edit.setPlaceholderText("Optional blank .pptx or .potx")
+            self.template_edit.setPlaceholderText("Optional .pptx or .potx template")
             self.template_edit.setToolTip(
-                "Optional blank widescreen 16:9 .pptx or .potx. GRIM clears "
-                "template slides but retains the presentation theme and master graphics."
+                "Optional widescreen 16:9 .pptx or .potx. GRIM clears example "
+                "slides but retains themes, masters, graphics, and named layouts."
             )
-            deck_form.addRow("Blank template", template_widget)
+            if DEFAULT_POWERPOINT_TEMPLATE.is_file():
+                self.template_edit.setText(str(DEFAULT_POWERPOINT_TEMPLATE))
+            deck_form.addRow("PowerPoint template", template_widget)
+            self.azimuth_layout_edit = QLineEdit(
+                DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
+                deck_group,
+            )
+            self.azimuth_layout_edit.setPlaceholderText(
+                "Leave blank for PowerPoint's generic blank layout"
+            )
+            self.azimuth_layout_edit.setToolTip(
+                "Named custom layout for rectangular and polar azimuth reports. "
+                "Use 'Master :: Layout' when the same layout name appears under "
+                "more than one slide master."
+            )
+            deck_form.addRow("Azimuth custom layout", self.azimuth_layout_edit)
+            self.frequency_layout_edit = QLineEdit(
+                DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+                deck_group,
+            )
+            self.frequency_layout_edit.setPlaceholderText(
+                "Leave blank for PowerPoint's generic blank layout"
+            )
+            self.frequency_layout_edit.setToolTip(
+                "Named custom layout for one-plot frequency-sweep slides. Use "
+                "'Master :: Layout' to qualify duplicate layout names."
+            )
+            deck_form.addRow("Frequency custom layout", self.frequency_layout_edit)
             template_note = QLabel(
-                "The preview shows GRIM content on a white 16:9 page. Template theme "
-                "and master graphics appear only in the exported PPTX, so review the "
-                "finished deck when using a custom template.",
+                "The bundled temporary template supplies two named layouts. Replace "
+                "or edit its master/layout styling while keeping these names, or "
+                "enter the names used by another template. Its seed slides are "
+                "positioning guides only. The preview remains a white 16:9 page; "
+                "master graphics appear in the exported PPTX.",
                 deck_group,
             )
             template_note.setWordWrap(True)
@@ -928,10 +969,28 @@ if GUI_AVAILABLE:
             self.deck_title_edit.textChanged.connect(self._mark_preview_stale)
             self.footer_edit.textChanged.connect(self._mark_preview_stale)
             self.template_edit.textChanged.connect(self._mark_preview_stale)
+            self.template_edit.textChanged.connect(self._update_template_controls)
+            self.azimuth_layout_edit.textChanged.connect(self._mark_preview_stale)
+            self.frequency_layout_edit.textChanged.connect(self._mark_preview_stale)
             self.build_preview_button.clicked.connect(self.build_preview)
             self.export_button.clicked.connect(self.export_report)
             self.previous_slide_button.clicked.connect(self.previous_slide)
             self.next_slide_button.clicked.connect(self.next_slide)
+            self._update_template_controls()
+
+        def _update_template_controls(self, *_args: Any) -> None:
+            enabled = bool(self.template_edit.text().strip())
+            self.azimuth_layout_edit.setEnabled(enabled)
+            self.frequency_layout_edit.setEnabled(enabled)
+
+        def _selected_template_layouts(self) -> dict[str, str]:
+            if not self.template_edit.text().strip():
+                return {}
+            values = {
+                "azimuth_3x2": self.azimuth_layout_edit.text().strip(),
+                "frequency_single": self.frequency_layout_edit.text().strip(),
+            }
+            return {kind: selector for kind, selector in values.items() if selector}
 
         # ------------------------------------------------------------------
         # Selector synchronization and validation
@@ -1480,16 +1539,21 @@ if GUI_AVAILABLE:
             if template:
                 template_path = Path(template).expanduser()
                 if template_path.suffix.lower() not in {".pptx", ".potx"}:
-                    self._show_error("Blank templates must use .pptx or .potx.")
+                    self._show_error("PowerPoint templates must use .pptx or .potx.")
                     return False
                 if not template_path.is_file():
-                    self._show_error(f"Blank PowerPoint template not found: {template}")
+                    self._show_error(f"PowerPoint template not found: {template}")
                     return False
+            template_layouts = self._selected_template_layouts()
             thread = QThread(self)
-            # PresentationPlan and strings are immutable snapshots. Subsequent
-            # shell catalog updates cannot change a report already exporting.
+            # PresentationPlan and copied strings are immutable snapshots.
+            # Subsequent shell/catalog/layout edits cannot change an export.
             worker = _ExportWorker(
-                self._exporter, self._preview_plan, output, template
+                self._exporter,
+                self._preview_plan,
+                output,
+                template,
+                template_layouts,
             )
             worker.moveToThread(thread)
             thread.started.connect(worker.run)
@@ -1555,7 +1619,7 @@ if GUI_AVAILABLE:
         def _browse_template(self) -> None:
             path, _ = QFileDialog.getOpenFileName(
                 self,
-                "Choose blank PowerPoint template",
+                "Choose PowerPoint template",
                 self.template_edit.text().strip(),
                 "PowerPoint template (*.pptx *.potx);;All files (*)",
             )

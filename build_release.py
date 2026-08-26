@@ -53,6 +53,7 @@ REQUIRED_FILES = (
     "Launch_PowerPoint_Image_Imprinter.bat",
     "GRIM_Revised_2/GRIM.png",
     "GRIM_Revised_2/ppt_image_imprinter.py",
+    "GRIM_Revised_2/templates/GRIM_Report_Template.pptx",
     *(
         f"GRIM_Revised_2/{Path(relative).as_posix()}"
         for relative in GRIM_STARTUP_FILES
@@ -89,6 +90,7 @@ EXCLUDED_DIRECTORY_NAMES = frozenset(
         ".cache",
         ".agents",
         ".codex",
+        ".codex-tmp",
         ".idea",
         ".mypy_cache",
         ".ruff_cache",

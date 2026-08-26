@@ -102,7 +102,17 @@ py -m pip install -e ".[powerpoint]"
 ```
 
 The PPT slide preview works without PowerPoint; only final `.pptx` generation
-uses the desktop application.
+uses the desktop application. Export closes only GRIM's temporary report
+presentation, never issues PowerPoint's application-wide **Quit** command, and
+leaves presentations already open in PowerPoint running.
+
+GRIM ships an editable temporary template at
+`GRIM_Revised_2/templates/GRIM_Report_Template.pptx`. When present, the PPT tab
+selects it automatically and applies **GRIM Azimuth 3x2** or **GRIM Frequency
+Sweep** from **GRIM Report Master** to the corresponding report slides. Layout
+selectors are editable and accept `Master :: Layout` to disambiguate repeated
+names in a team template. Clearing the template path restores fresh-deck
+export.
 
 The integrated desktop distribution is intentionally run from this complete
 source tree (or an editable install), because the GHOST and FREDDY tabs include
@@ -202,8 +212,13 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
   and the PPT, Assembly, GHOST, FREDDY, and Runs workflows are not recorded.
 - Use **PPT** to check loaded datasets independently of the Plotting selection,
   choose rectangular/polar azimuth plots or a frequency sweep, and review the
-  actual 16:9 slide layout before export. Optional templates must also be blank
-  widescreen 16:9 decks. Azimuth reports always use six fixed
+  actual 16:9 slide layout before export. Optional templates must be widescreen
+  16:9 decks. GRIM's bundled temporary template includes representative seed
+  slides and named azimuth/frequency custom layouts; export inherits the
+  master/layout and removes the positioning-guide seeds. Only master/layout
+  styling persists. Template master graphics appear only in the exported deck,
+  while GRIM still places report content at its documented fixed coordinates.
+  Azimuth reports always use six fixed
   positions per slide (3 columns × 2 rows); frequency sweeps use one fixed
   full-slide plot. A master dataset legend can span the header beneath the
   aligned title box, with per-plot and no-legend alternatives. Optional fixed
