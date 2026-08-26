@@ -226,6 +226,27 @@ class InvocationTests(unittest.TestCase):
         with self.assertRaisesRegex(CommandFailedError, "permission denied"):
             failure_client.run_remote(("true",))
 
+    def test_putty_batch_prompt_failure_keeps_error_and_adds_guidance(self) -> None:
+        raw_error = "FATAL ERROR: Cannot Answer Interactive Prompts In Batch Mode"
+        runner = FakeRunner(completed(stderr=raw_error, returncode=1))
+        client = HpcRemoteClient(
+            ConnectionConfig.putty_saved_session("HPC Production"), runner
+        )
+
+        with self.assertRaises(CommandFailedError) as caught:
+            client.run_remote(("true",))
+
+        message = str(caught.exception)
+        self.assertIn(raw_error, message)
+        self.assertIn("saved PuTTY session interactively", message)
+        self.assertIn("auto-login username", message)
+        self.assertIn("verified host key", message)
+        self.assertIn("Pageant", message)
+        self.assertIn("connection sharing", message)
+        self.assertIn("Export Bundle", message)
+        self.assertIn("-batch", runner.calls[0][0])
+        self.assertNotIn("-pw", runner.calls[0][0])
+
     def test_missing_client_executable_is_a_clear_configuration_error(self) -> None:
         runner = FakeRunner(FileNotFoundError("missing"))
         client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
@@ -322,6 +343,27 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(argv[-2], "HPC Profile:/scratch/me/run 17/results")
         self.assertEqual(transfer.local_path.name, "results")
         self.assertEqual(timeout, 1800)
+
+    def test_pscp_batch_prompt_failure_adds_same_guidance(self) -> None:
+        raw_error = "cannot answer interactive prompts in batch mode"
+        with tempfile.TemporaryDirectory() as directory:
+            runner = FakeRunner(
+                completed(), completed(stderr=raw_error, returncode=1)
+            )
+            client = HpcRemoteClient(
+                ConnectionConfig.putty_saved_session("HPC Profile"), runner
+            )
+            bundle = Path(directory) / "bundle.zip"
+            bundle.write_bytes(b"bundle")
+
+            with self.assertRaises(CommandFailedError) as caught:
+                client.upload_bundle(bundle, "/scratch/grim")
+
+        message = str(caught.exception)
+        self.assertIn(raw_error, message)
+        self.assertIn("saved PuTTY session interactively", message)
+        self.assertEqual(runner.calls[-1][0][0:2], ("pscp", "-batch"))
+        self.assertNotIn("-pw", runner.calls[-1][0])
 
     def test_download_refuses_to_merge_with_an_existing_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

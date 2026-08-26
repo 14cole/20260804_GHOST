@@ -33,6 +33,7 @@ from ppt_report import (
     geometry_for_layout,
     plan_azimuth_slides,
     plan_frequency_slides,
+    render_master_legend_png,
     render_plot_png,
 )
 
@@ -145,7 +146,6 @@ try:  # Keep report planning importable on headless/minimal installations.
     from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
     from PySide6.QtWidgets import (
         QAbstractItemView,
-        QCheckBox,
         QComboBox,
         QDoubleSpinBox,
         QFileDialog,
@@ -303,6 +303,30 @@ if GUI_AVAILABLE:
                 family="Arial",
             )
             output_directory.mkdir(parents=True, exist_ok=True)
+            if slide_plan.master_legend:
+                legend_path = output_directory / (
+                    f"preview_{generation:04d}_slide_{slide_index + 1:03d}_"
+                    "master_legend.png"
+                )
+                if not legend_path.is_file():
+                    render_master_legend_png(
+                        slide_plan.master_legend,
+                        legend_path,
+                        width_points=geometry.master_legend.width,
+                        height_points=geometry.master_legend.height,
+                        dpi=120,
+                    )
+                legend = geometry.master_legend
+                legend_axes = self.figure.add_axes(
+                    (
+                        x_position(legend.left),
+                        y_position_from_top(legend.bottom),
+                        page_width * legend.width / geometry.width,
+                        page_height * legend.height / geometry.height,
+                    )
+                )
+                legend_axes.imshow(imread(legend_path), aspect="auto")
+                legend_axes.set_axis_off()
             for placement_index, placement in enumerate(slide_plan.plots):
                 image_path = output_directory / (
                     f"preview_{generation:04d}_slide_{slide_index + 1:03d}_"
@@ -383,6 +407,11 @@ if GUI_AVAILABLE:
             self._thread: QThread | None = None
             self._worker: _ExportWorker | None = None
             self._last_error = ""
+            self._active_x_axis_family = "azimuth"
+            self._x_axis_settings: dict[str, tuple[str, float, float, float]] = {
+                "azimuth": ("automatic", -180.0, 180.0, 45.0),
+                "frequency": ("automatic", 1.0, 10.0, 1.0),
+            }
             self._preview_temp = tempfile.TemporaryDirectory(prefix="grim-ppt-preview-")
             # Embedded hosts normally call dispose(), but a Python/Qt wrapper
             # can outlive its native widget during teardown or abnormal
@@ -395,7 +424,6 @@ if GUI_AVAILABLE:
             self._build_ui()
             self._connect_signals()
             self._update_plot_type_controls()
-            self.fixed_scale_widget.setVisible(False)
             self._refresh_availability()
 
         # ------------------------------------------------------------------
@@ -671,32 +699,74 @@ if GUI_AVAILABLE:
             plot_layout.addWidget(self.frequency_box)
 
             scale_form = QFormLayout()
+            scale_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            self.x_scale_mode_combo = QComboBox(plot_group)
+            self.x_scale_mode_combo.addItem("Automatic", "automatic")
+            self.x_scale_mode_combo.addItem("Fixed and uniform", "fixed")
+            self.x_scale_mode_combo.setToolTip(
+                "Fixed values are applied to every plot in the report. Step controls "
+                "major tick spacing only; it does not resample dataset values."
+            )
+            self.x_scale_label = QLabel("Horizontal axis (deg)", plot_group)
+            scale_form.addRow(self.x_scale_label, self.x_scale_mode_combo)
+            self.fixed_x_scale_widget = QWidget(plot_group)
+            fixed_x_layout = QHBoxLayout(self.fixed_x_scale_widget)
+            fixed_x_layout.setContentsMargins(0, 0, 0, 0)
+            self.x_min_spin = self._axis_spin_box(
+                self.fixed_x_scale_widget, value=-180.0
+            )
+            self.x_max_spin = self._axis_spin_box(
+                self.fixed_x_scale_widget, value=180.0
+            )
+            self.x_step_spin = self._axis_spin_box(
+                self.fixed_x_scale_widget, value=45.0, positive=True
+            )
+            for label, spin in (
+                ("Min", self.x_min_spin),
+                ("Max", self.x_max_spin),
+                ("Step", self.x_step_spin),
+            ):
+                fixed_x_layout.addWidget(QLabel(label, self.fixed_x_scale_widget))
+                fixed_x_layout.addWidget(spin)
+            scale_form.addRow("Fixed horizontal", self.fixed_x_scale_widget)
+
             self.scale_mode_combo = QComboBox(plot_group)
             self.scale_mode_combo.addItem("Shared automatic", "shared_auto")
-            self.scale_mode_combo.addItem("Fixed", "fixed")
+            self.scale_mode_combo.addItem("Fixed and uniform", "fixed")
             self.scale_mode_combo.setToolTip(
-                "Every plot in the report uses the same vertical RCS scale."
+                "Every plot uses one vertical RCS scale. Fixed mode also anchors "
+                "major ticks at the supplied minimum using the selected step."
             )
-            scale_form.addRow("RCS scale", self.scale_mode_combo)
+            scale_form.addRow("Vertical RCS axis", self.scale_mode_combo)
             self.fixed_scale_widget = QWidget(plot_group)
             fixed_scale_layout = QHBoxLayout(self.fixed_scale_widget)
             fixed_scale_layout.setContentsMargins(0, 0, 0, 0)
-            self.y_min_spin = QDoubleSpinBox(self.fixed_scale_widget)
-            self.y_min_spin.setRange(-500.0, 500.0)
-            self.y_min_spin.setDecimals(1)
-            self.y_min_spin.setValue(-60.0)
-            self.y_max_spin = QDoubleSpinBox(self.fixed_scale_widget)
-            self.y_max_spin.setRange(-500.0, 500.0)
-            self.y_max_spin.setDecimals(1)
-            self.y_max_spin.setValue(20.0)
-            fixed_scale_layout.addWidget(QLabel("Min", self.fixed_scale_widget))
-            fixed_scale_layout.addWidget(self.y_min_spin)
-            fixed_scale_layout.addWidget(QLabel("Max", self.fixed_scale_widget))
-            fixed_scale_layout.addWidget(self.y_max_spin)
-            scale_form.addRow("Fixed range", self.fixed_scale_widget)
-            self.show_legend_check = QCheckBox("Show dataset legend", plot_group)
-            self.show_legend_check.setChecked(True)
-            scale_form.addRow("", self.show_legend_check)
+            self.y_min_spin = self._axis_spin_box(
+                self.fixed_scale_widget, value=-60.0
+            )
+            self.y_max_spin = self._axis_spin_box(
+                self.fixed_scale_widget, value=20.0
+            )
+            self.y_step_spin = self._axis_spin_box(
+                self.fixed_scale_widget, value=10.0, positive=True
+            )
+            for label, spin in (
+                ("Min", self.y_min_spin),
+                ("Max", self.y_max_spin),
+                ("Step", self.y_step_spin),
+            ):
+                fixed_scale_layout.addWidget(QLabel(label, self.fixed_scale_widget))
+                fixed_scale_layout.addWidget(spin)
+            scale_form.addRow("Fixed vertical", self.fixed_scale_widget)
+            self.legend_mode_combo = QComboBox(plot_group)
+            self.legend_mode_combo.addItem("Master across slide", "master")
+            self.legend_mode_combo.addItem("Inside each plot", "per_plot")
+            self.legend_mode_combo.addItem("None", "none")
+            self.legend_mode_combo.setToolTip(
+                "The master legend appears once beneath the slide title and follows "
+                "the dataset order above."
+            )
+            scale_form.addRow("Dataset legend", self.legend_mode_combo)
             plot_layout.addLayout(scale_form)
             self.layout_value_label = QLabel(plot_group)
             self.layout_value_label.setWordWrap(True)
@@ -797,6 +867,23 @@ if GUI_AVAILABLE:
             layout.addWidget(button)
             return edit, widget
 
+        @staticmethod
+        def _axis_spin_box(
+            parent: QWidget,
+            *,
+            value: float,
+            positive: bool = False,
+        ) -> QDoubleSpinBox:
+            spin = QDoubleSpinBox(parent)
+            spin.setRange(1.0e-6 if positive else -1.0e9, 1.0e9)
+            spin.setDecimals(6)
+            spin.setValue(float(value))
+            spin.setSingleStep(1.0)
+            spin.setKeyboardTracking(False)
+            spin.setMinimumWidth(82)
+            spin.setMaximumWidth(106)
+            return spin
+
         def _connect_signals(self) -> None:
             self.dataset_list.itemChanged.connect(self._dataset_selection_changed)
             self.dataset_list.model().rowsMoved.connect(self._dataset_selection_changed)
@@ -817,12 +904,20 @@ if GUI_AVAILABLE:
                 self.elevation_combo,
                 self.azimuth_combo,
                 self.polarization_combo,
+                self.x_scale_mode_combo,
                 self.scale_mode_combo,
+                self.legend_mode_combo,
             ):
                 combo.currentIndexChanged.connect(self._control_changed)
-            for spin in (self.y_min_spin, self.y_max_spin):
+            for spin in (
+                self.x_min_spin,
+                self.x_max_spin,
+                self.x_step_spin,
+                self.y_min_spin,
+                self.y_max_spin,
+                self.y_step_spin,
+            ):
                 spin.valueChanged.connect(self._mark_preview_stale)
-            self.show_legend_check.toggled.connect(self._mark_preview_stale)
             self.deck_title_edit.textChanged.connect(self._mark_preview_stale)
             self.footer_edit.textChanged.connect(self._mark_preview_stale)
             self.template_edit.textChanged.connect(self._mark_preview_stale)
@@ -1007,25 +1102,60 @@ if GUI_AVAILABLE:
         def _update_plot_type_controls(self, *_args: Any) -> None:
             kind = str(self.plot_type_combo.currentData() or "azimuth_rect")
             azimuth_kind = kind in {"azimuth_rect", "azimuth_polar"}
+            x_family = "azimuth" if azimuth_kind else "frequency"
+            if x_family != self._active_x_axis_family:
+                self._x_axis_settings[self._active_x_axis_family] = (
+                    str(self.x_scale_mode_combo.currentData() or "automatic"),
+                    float(self.x_min_spin.value()),
+                    float(self.x_max_spin.value()),
+                    float(self.x_step_spin.value()),
+                )
+                mode, low, high, step = self._x_axis_settings[x_family]
+                widgets = (
+                    self.x_scale_mode_combo,
+                    self.x_min_spin,
+                    self.x_max_spin,
+                    self.x_step_spin,
+                )
+                for widget in widgets:
+                    widget.blockSignals(True)
+                try:
+                    mode_index = self.x_scale_mode_combo.findData(mode)
+                    self.x_scale_mode_combo.setCurrentIndex(max(mode_index, 0))
+                    self.x_min_spin.setValue(low)
+                    self.x_max_spin.setValue(high)
+                    self.x_step_spin.setValue(step)
+                finally:
+                    for widget in widgets:
+                        widget.blockSignals(False)
+                self._active_x_axis_family = x_family
             self.frequency_box.setVisible(azimuth_kind)
             self.azimuth_label.setVisible(not azimuth_kind)
             self.azimuth_combo.setVisible(not azimuth_kind)
+            self.x_scale_label.setText(
+                "Horizontal axis (deg)" if azimuth_kind else "Horizontal axis (GHz)"
+            )
             if azimuth_kind:
                 name = "rectangular" if kind == "azimuth_rect" else "polar"
                 self.layout_value_label.setText(
                     f"Fixed layout: six {name} azimuth plots per slide "
                     "(3 columns × 2 rows). Frequencies continue row-major on "
-                    "additional slides. All plots share one RCS scale."
+                    "additional slides. All plots share one RCS scale; the master "
+                    "legend occupies the header when selected."
                 )
             else:
                 self.layout_value_label.setText(
                     "Fixed layout: one full-width frequency sweep per slide. "
-                    "Selected datasets are overlaid and use one shared RCS scale."
+                    "Selected datasets are overlaid and use one shared RCS scale; "
+                    "the master legend occupies the header when selected."
                 )
-            self._mark_preview_stale()
+            self._control_changed()
 
         @Slot()
         def _control_changed(self, *_args: Any) -> None:
+            self.fixed_x_scale_widget.setVisible(
+                self.x_scale_mode_combo.currentData() == "fixed"
+            )
             self.fixed_scale_widget.setVisible(
                 self.scale_mode_combo.currentData() == "fixed"
             )
@@ -1043,14 +1173,68 @@ if GUI_AVAILABLE:
             self._set_status(message)
             self._update_navigation()
 
-        def _fixed_y_limits(self) -> tuple[float, float] | None:
-            if self.scale_mode_combo.currentData() != "fixed":
-                return None
-            low = float(self.y_min_spin.value())
-            high = float(self.y_max_spin.value())
-            if low >= high:
-                raise ValueError("Fixed RCS minimum must be less than the maximum.")
-            return low, high
+        @staticmethod
+        def _validated_fixed_axis(
+            mode: str,
+            low: float,
+            high: float,
+            step: float,
+            *,
+            axis_name: str,
+            maximum_span: float | None = None,
+        ) -> tuple[tuple[float, float] | None, float | None]:
+            if mode != "fixed":
+                return None, None
+            values = (float(low), float(high), float(step))
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError(f"Fixed {axis_name} values must be finite.")
+            low_value, high_value, step_value = values
+            if low_value >= high_value:
+                raise ValueError(
+                    f"Fixed {axis_name} minimum must be less than the maximum."
+                )
+            if step_value <= 0:
+                raise ValueError(f"Fixed {axis_name} step must be positive.")
+            span = high_value - low_value
+            if maximum_span is not None and span > maximum_span + 1.0e-9:
+                raise ValueError(
+                    f"Fixed {axis_name} range may span at most {maximum_span:g}."
+                )
+            tick_count = int(math.floor(span / step_value + 1.0e-9)) + 1
+            if tick_count > 1_000:
+                raise ValueError(
+                    f"Fixed {axis_name} step would create more than 1,000 ticks."
+                )
+            return (low_value, high_value), step_value
+
+        def _axis_overrides(
+            self, kind: str
+        ) -> tuple[
+            tuple[float, float] | None,
+            float | None,
+            tuple[float, float] | None,
+            float | None,
+        ]:
+            x_limits, x_step = self._validated_fixed_axis(
+                str(self.x_scale_mode_combo.currentData() or "automatic"),
+                self.x_min_spin.value(),
+                self.x_max_spin.value(),
+                self.x_step_spin.value(),
+                axis_name=(
+                    "azimuth axis (deg)"
+                    if kind in {"azimuth_rect", "azimuth_polar"}
+                    else "frequency axis (GHz)"
+                ),
+                maximum_span=360.0 if kind == "azimuth_polar" else None,
+            )
+            y_limits, y_step = self._validated_fixed_axis(
+                str(self.scale_mode_combo.currentData() or "shared_auto"),
+                self.y_min_spin.value(),
+                self.y_max_spin.value(),
+                self.y_step_spin.value(),
+                axis_name="vertical RCS axis",
+            )
+            return x_limits, x_step, y_limits, y_step
 
         def _build_plan(self) -> PresentationPlan:
             datasets = self._named_grids()
@@ -1071,8 +1255,12 @@ if GUI_AVAILABLE:
                 raise ValueError("The selected datasets have no common elevation cut.")
             if polarization is None:
                 raise ValueError("The selected datasets have no common polarization.")
-            fixed_limits = self._fixed_y_limits()
-            show_legend = self.show_legend_check.isChecked()
+            x_limits, x_tick_step, fixed_limits, y_tick_step = self._axis_overrides(
+                kind
+            )
+            legend_mode = str(self.legend_mode_combo.currentData() or "master")
+            show_plot_legends = legend_mode == "per_plot"
+            show_master_legend = legend_mode == "master"
             deck_title = self.deck_title_edit.text().strip()
             footer = self.footer_edit.text().strip()
             if kind in {"azimuth_rect", "azimuth_polar"}:
@@ -1105,13 +1293,23 @@ if GUI_AVAILABLE:
                     angle_display_unit="deg",
                     frequency_display_unit="GHz",
                     y_limits=fixed_limits,
-                    show_legend=show_legend,
+                    show_legend=show_plot_legends,
                 )
                 plots = _with_shared_y_limits(plots, fixed_limits)
+                plots = tuple(
+                    replace(
+                        plot,
+                        x_limits=x_limits,
+                        x_tick_step=x_tick_step,
+                        y_tick_step=y_tick_step,
+                    )
+                    for plot in plots
+                )
                 return plan_azimuth_slides(
                     plots,
                     slide_titles=deck_title or "RCS Azimuth Sweeps",
                     footer=footer,
+                    master_legend=show_master_legend,
                 )
             if kind == "frequency":
                 azimuth = self.azimuth_combo.currentData()
@@ -1126,14 +1324,23 @@ if GUI_AVAILABLE:
                     angle_display_unit="deg",
                     frequency_display_unit="GHz",
                     y_limits=fixed_limits,
-                    show_legend=show_legend,
+                    show_legend=show_plot_legends,
                 )
                 plot = _with_shared_y_limits((plot,), fixed_limits)[0]
+                plot = replace(
+                    plot,
+                    x_limits=x_limits,
+                    x_tick_step=x_tick_step,
+                    y_tick_step=y_tick_step,
+                )
                 slide_title = (
                     f"{deck_title} — {plot.title}" if deck_title else plot.title
                 )
                 return plan_frequency_slides(
-                    (plot,), slide_titles=slide_title, footer=footer
+                    (plot,),
+                    slide_titles=slide_title,
+                    footer=footer,
+                    master_legend=show_master_legend,
                 )
             raise ValueError(f"Unsupported PPT plot type: {kind!r}")
 

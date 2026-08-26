@@ -159,7 +159,12 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
   remote Python path supports cluster virtual environments, and downloads are
   terminal-state-only and collision-safe.
   GRIM stores no SSH password or private-key contents. The exported bundle and
-  its README remain the fallback for VPN, MFA, or site-policy restrictions.
+  its README remain the fallback for VPN, MFA, or site-policy restrictions. If
+  Plink reports that it cannot answer an interactive prompt in batch mode, run
+  the same saved session once from interactive Plink to identify the prompt;
+  configure a verified host key plus Pageant/key authentication, or reuse an
+  authenticated PuTTY session with SSH connection sharing enabled. The detailed
+  commands are in `GRIM_Revised_2/README.md`.
 - Use **Assembly → Place Features** to load the same strict placement CSV used
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
@@ -200,10 +205,13 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
   actual 16:9 slide layout before export. Optional templates must also be blank
   widescreen 16:9 decks. Azimuth reports always use six fixed
   positions per slide (3 columns × 2 rows); frequency sweeps use one fixed
-  full-slide plot. A shared vertical scale and fixed image rectangles prevent
-  plots from shifting when slides change or when reports come from different
-  analysts. The first six common frequencies are selected initially; one report
-  is capped at 60 frequencies (10 azimuth slides) to keep the preview responsive.
+  full-slide plot. A master dataset legend can span the header beneath the
+  aligned title box, with per-plot and no-legend alternatives. Optional fixed
+  horizontal and vertical minimum/maximum/step controls apply the same axes to
+  every plot without resampling data. Fixed image rectangles prevent plots from
+  shifting when slides change or when reports come from different analysts. The
+  first six common frequencies are selected initially; one report is capped at
+  60 frequencies (10 azimuth slides) to keep the preview responsive.
 
 The separately shipped **PowerPoint Image Imprinter** is a legacy/manual deck
 formatting helper, not another report generator. It copies the position, size,

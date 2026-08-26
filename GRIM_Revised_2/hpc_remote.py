@@ -33,6 +33,16 @@ DEFAULT_COMMAND_TIMEOUT = 60.0
 DEFAULT_TRANSFER_TIMEOUT = 1800.0
 MAX_TIMEOUT = 86400.0
 
+_PUTTY_BATCH_PROMPT_MARKER = "cannot answer interactive prompts in batch mode"
+_PUTTY_BATCH_PROMPT_GUIDANCE = (
+    "PuTTY needs an interactive response. Run the saved PuTTY session "
+    "interactively to identify and resolve the prompt. Save its auto-login "
+    "username and cache only a verified host key; use an approved key loaded "
+    "in Pageant or keep an authenticated PuTTY connection open with connection "
+    "sharing enabled. If site policy requires a prompt for every connection, "
+    "use Runs > Export Bundle and transfer/submit it manually."
+)
+
 
 class Transport(str, Enum):
     """Supported Windows-side SSH client families."""
@@ -62,13 +72,20 @@ class CommandTimeoutError(RemoteError, TimeoutError):
 class CommandFailedError(RemoteError):
     """Raised when an SSH, transfer, or remote command returns non-zero."""
 
-    def __init__(self, operation: str, result: "CommandResult") -> None:
+    def __init__(
+        self,
+        operation: str,
+        result: "CommandResult",
+        *,
+        guidance: str | None = None,
+    ) -> None:
         detail = result.stderr.strip() or result.stdout.strip() or "no error output"
         if len(detail) > 2000:
             detail = detail[:1997] + "..."
-        super().__init__(
-            f"{operation} failed with exit code {result.returncode}: {detail}"
-        )
+        message = f"{operation} failed with exit code {result.returncode}: {detail}"
+        if guidance:
+            message += f"\n\n{guidance}"
+        super().__init__(message)
         self.operation = operation
         self.result = result
 
@@ -1162,7 +1179,13 @@ class HpcRemoteClient:
             elapsed_seconds=elapsed,
         )
         if check and result.returncode != 0:
-            raise CommandFailedError(operation, result)
+            guidance = None
+            if (
+                self.config.transport is Transport.PUTTY
+                and _PUTTY_BATCH_PROMPT_MARKER in result.stderr.casefold()
+            ):
+                guidance = _PUTTY_BATCH_PROMPT_GUIDANCE
+            raise CommandFailedError(operation, result, guidance=guidance)
         return result
 
     @staticmethod

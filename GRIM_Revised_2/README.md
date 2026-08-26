@@ -113,8 +113,17 @@ Selected datasets are overlaid within each plot. GRIM uses exact common fixed
 axes and performs no hidden interpolation or extrapolation. Report magnitude
 is taken from stored linear RCS power and converted with the dataset's dBsm or
 dBke convention. **Shared automatic** vertical scaling is the default and is
-calculated once across the complete report; a fixed minimum/maximum can be
-entered when a program uses a prescribed scale. Legends use a fixed position.
+calculated once across the complete report. Either axis can instead use one
+fixed minimum, maximum, and major-tick step across every plot. Horizontal
+settings are retained separately for azimuth degrees and frequency GHz, and
+tick settings change only the view—not the dataset samples. Dataset legends
+can appear once across the slide header, inside every plot, or not at all; the
+master header legend is the default and follows the dataset order above.
+
+The report header matches the team slide standard: the title box is 11.82 in ×
+0.36 in at X=0.76 in, Y=0.42 in. Plot rows begin at X=0.47 in, Y=1.09 in, with
+the master legend placed between the title and plots. The same title and header
+alignment is used for frequency-sweep slides.
 
 **Build Preview** renders the real 16:9 slide geometry used by export. Review
 pages with Previous/Next, choose either a fresh blank deck or an optional blank
@@ -190,6 +199,30 @@ fingerprint through an approved SSH/PuTTY connection first. Password-only,
 interactive MFA, VPN, jump-host, or site-policy restrictions may require an
 OpenSSH config alias, an approved agent/session, or the manual bundle workflow.
 See `tools/GHOST/HPC.md` for Linux staging and scheduler details.
+
+If PuTTY reports **cannot answer interactive prompts in batch mode**, load the
+exact saved session named in Runs and first expose the unanswered prompt from
+PowerShell:
+
+```powershell
+plink.exe -v -T -load "Exact Saved Session Name" "echo GRIM_HPC_OK; hostname; id -un"
+```
+
+Save the username under **Connection > Data > Auto-login username**, accept a
+host key only after verifying its fingerprint, and use an approved key already
+unlocked in Pageant. Then verify the same path GRIM uses:
+
+```powershell
+plink.exe -batch -T -load "Exact Saved Session Name" "echo GRIM_HPC_OK; hostname; id -un"
+```
+
+If the site requires password or MFA entry on every new connection, enable
+**Connection > SSH > Share SSH connections if possible** in that saved session,
+open and authenticate the PuTTY session, and leave it open while GRIM runs.
+`plink.exe -shareexists -load "Exact Saved Session Name"` returns exit code zero
+when that upstream is reusable. If policy forbids either keys or connection
+sharing, use **Export Bundle** and submit through the approved interactive path;
+do not place a password on a Plink command line.
 
 ## Python recorder
 

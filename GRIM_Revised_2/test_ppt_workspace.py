@@ -189,6 +189,7 @@ class PptWorkspaceTests(unittest.TestCase):
         )
         widget.y_min_spin.setValue(-55.0)
         widget.y_max_spin.setValue(5.0)
+        widget.y_step_spin.setValue(5.0)
         with mock.patch.object(widget.preview_canvas, "render_slide"):
             self.assertTrue(widget.build_preview())
         assert widget.preview_plan is not None
@@ -198,6 +199,140 @@ class PptWorkspaceTests(unittest.TestCase):
             for placement in slide.plots
         }
         self.assertEqual(fixed, {(-55.0, 5.0)})
+        self.assertEqual(
+            {
+                placement.plot.y_tick_step
+                for slide in widget.preview_plan.slides
+                for placement in slide.plots
+            },
+            {5.0},
+        )
+
+    def test_fixed_axis_limits_and_ticks_apply_uniformly_without_resampling(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.x_scale_mode_combo.setCurrentIndex(
+            widget.x_scale_mode_combo.findData("fixed")
+        )
+        widget.x_min_spin.setValue(0.0)
+        widget.x_max_spin.setValue(360.0)
+        widget.x_step_spin.setValue(30.0)
+        widget.scale_mode_combo.setCurrentIndex(
+            widget.scale_mode_combo.findData("fixed")
+        )
+        widget.y_min_spin.setValue(-70.0)
+        widget.y_max_spin.setValue(10.0)
+        widget.y_step_spin.setValue(10.0)
+        source_x = tuple(float(value) for value in self.entries()[0].grid.azimuths)
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        plots = [
+            placement.plot
+            for slide in widget.preview_plan.slides
+            for placement in slide.plots
+        ]
+        self.assertTrue(plots)
+        self.assertTrue(all(plot.x_limits == (0.0, 360.0) for plot in plots))
+        self.assertTrue(all(plot.x_tick_step == 30.0 for plot in plots))
+        self.assertTrue(all(plot.y_limits == (-70.0, 10.0) for plot in plots))
+        self.assertTrue(all(plot.y_tick_step == 10.0 for plot in plots))
+        self.assertTrue(all(plot.series[0].x == source_x for plot in plots))
+
+    def test_horizontal_axis_settings_are_kept_separately_by_plot_family(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.x_scale_mode_combo.setCurrentIndex(
+            widget.x_scale_mode_combo.findData("fixed")
+        )
+        widget.x_min_spin.setValue(-90.0)
+        widget.x_max_spin.setValue(90.0)
+        widget.x_step_spin.setValue(15.0)
+
+        widget.set_plot_kind("frequency")
+        self.assertEqual(widget.x_scale_mode_combo.currentData(), "automatic")
+        self.assertEqual(widget.x_min_spin.value(), 1.0)
+        self.assertEqual(widget.x_max_spin.value(), 10.0)
+        self.assertIn("GHz", widget.x_scale_label.text())
+        widget.x_scale_mode_combo.setCurrentIndex(
+            widget.x_scale_mode_combo.findData("fixed")
+        )
+        widget.x_min_spin.setValue(2.0)
+        widget.x_max_spin.setValue(7.0)
+        widget.x_step_spin.setValue(0.5)
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        frequency_plot = widget.preview_plan.slides[0].plots[0].plot
+        self.assertEqual(frequency_plot.x_limits, (2.0, 7.0))
+        self.assertEqual(frequency_plot.x_tick_step, 0.5)
+
+        widget.set_plot_kind("azimuth_rect")
+        self.assertEqual(widget.x_scale_mode_combo.currentData(), "fixed")
+        self.assertEqual(widget.x_min_spin.value(), -90.0)
+        self.assertEqual(widget.x_max_spin.value(), 90.0)
+        self.assertEqual(widget.x_step_spin.value(), 15.0)
+        self.assertIn("deg", widget.x_scale_label.text())
+
+    def test_legend_modes_choose_master_per_plot_or_none(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+
+        def plan_for(mode):
+            widget.legend_mode_combo.setCurrentIndex(
+                widget.legend_mode_combo.findData(mode)
+            )
+            with mock.patch.object(widget.preview_canvas, "render_slide"):
+                self.assertTrue(widget.build_preview())
+            assert widget.preview_plan is not None
+            return widget.preview_plan
+
+        master = plan_for("master")
+        self.assertEqual(
+            [entry.label for entry in master.slides[0].master_legend],
+            ["Baseline", "Modified"],
+        )
+        self.assertTrue(
+            all(
+                not placement.plot.show_legend
+                for slide in master.slides
+                for placement in slide.plots
+            )
+        )
+
+        per_plot = plan_for("per_plot")
+        self.assertFalse(per_plot.slides[0].master_legend)
+        self.assertTrue(
+            all(
+                placement.plot.show_legend
+                for slide in per_plot.slides
+                for placement in slide.plots
+            )
+        )
+
+        no_legend = plan_for("none")
+        self.assertFalse(no_legend.slides[0].master_legend)
+        self.assertTrue(
+            all(
+                not placement.plot.show_legend
+                for slide in no_legend.slides
+                for placement in slide.plots
+            )
+        )
+
+    def test_excessive_fixed_ticks_fail_before_rendering(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.x_scale_mode_combo.setCurrentIndex(
+            widget.x_scale_mode_combo.findData("fixed")
+        )
+        widget.x_min_spin.setValue(0.0)
+        widget.x_max_spin.setValue(360.0)
+        widget.x_step_spin.setValue(0.1)
+        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+            self.assertFalse(widget.build_preview())
+        render.assert_not_called()
+        self.assertIn("more than 1,000 ticks", widget.last_error)
 
     def test_large_frequency_catalog_defaults_to_one_slide_and_limits_one_report(self):
         widget = self.workspace()

@@ -6,7 +6,9 @@ import math
 from pathlib import Path
 
 from ppt_report import (
+    MASTER_LEGEND_IMAGE_INDEX,
     MSO_FALSE,
+    POINTS_PER_INCH,
     PlotSeries,
     PlotSpec,
     PowerPointComBridge,
@@ -17,8 +19,10 @@ from ppt_report import (
     plan_azimuth_slides,
     plan_frequency_slides,
     polar_degree_ticks,
+    render_master_legend_png,
     render_plan_images,
     render_plot_png,
+    _inclusive_ticks,
 )
 
 
@@ -48,6 +52,12 @@ class LayoutPlanningTests(unittest.TestCase):
             ["0°", "45°", "90°", "135°", "180°", "-135°", "-90°", "-45°"],
         )
 
+    def test_fixed_ticks_start_at_the_user_minimum_and_are_bounded(self):
+        self.assertEqual(_inclusive_ticks(1.0, 10.0, 2.0), [1.0, 3.0, 5.0, 7.0, 9.0])
+        self.assertEqual(_inclusive_ticks(0.5, 1.0, 0.25), [0.5, 0.75, 1.0])
+        with self.assertRaisesRegex(ValueError, "more than 1,000"):
+            _inclusive_ticks(0.0, 1.0, 0.0001)
+
     def test_series_accepts_nan_gaps_but_rejects_invalid_axes(self):
         series = PlotSeries.from_values((0.0, 1.0, 2.0), (1.0, math.nan, 3.0))
         self.assertTrue(math.isnan(series.y[1]))
@@ -67,6 +77,34 @@ class LayoutPlanningTests(unittest.TestCase):
         for frame in geometry.plot_frames:
             self.assertLessEqual(frame.right, geometry.width)
             self.assertLessEqual(frame.bottom, geometry.height)
+
+    def test_report_header_and_plot_positions_match_team_template(self):
+        expected_title = (0.76, 0.42, 11.82, 0.36)
+        for geometry in (azimuth_3x2_geometry(), frequency_single_geometry()):
+            self.assertEqual(
+                tuple(
+                    round(value / POINTS_PER_INCH, 9)
+                    for value in (
+                        geometry.title.left,
+                        geometry.title.top,
+                        geometry.title.width,
+                        geometry.title.height,
+                    )
+                ),
+                expected_title,
+            )
+            self.assertLessEqual(geometry.title.bottom, geometry.master_legend.top)
+            self.assertLessEqual(
+                geometry.master_legend.bottom, geometry.plot_frames[0].top
+            )
+            self.assertAlmostEqual(
+                geometry.plot_frames[0].top / POINTS_PER_INCH, 1.09, places=9
+            )
+        self.assertAlmostEqual(
+            azimuth_3x2_geometry().plot_frames[0].left / POINTS_PER_INCH,
+            0.47,
+            places=9,
+        )
 
     def test_seven_azimuth_plots_make_six_then_one(self):
         plan = plan_azimuth_slides(
@@ -98,6 +136,56 @@ class LayoutPlanningTests(unittest.TestCase):
         self.assertTrue(all(len(slide.plots) == 1 for slide in plan.slides))
         self.assertEqual(plan.slides[0].plots[0].frame, frequency_single_geometry().plot_frames[0])
         self.assertEqual([slide.title for slide in plan.slides], ["Plot a", "Plot b"])
+
+    def test_master_legend_is_one_slide_level_key_and_suppresses_plot_legends(self):
+        plots = []
+        for index in range(2):
+            plots.append(
+                PlotSpec(
+                    plot_id=str(index),
+                    kind="azimuth_rect",
+                    title=f"Plot {index}",
+                    x_label="Azimuth (deg)",
+                    y_label="RCS (dBsm)",
+                    series=(
+                        PlotSeries.from_values((0, 1), (1, 2), label="Baseline"),
+                        PlotSeries.from_values((0, 1), (2, 3), label="Modified"),
+                    ),
+                    show_legend=True,
+                )
+            )
+        plan = plan_azimuth_slides(plots, master_legend=True)
+        slide = plan.slides[0]
+        self.assertEqual(
+            [entry.label for entry in slide.master_legend],
+            ["Baseline", "Modified"],
+        )
+        self.assertTrue(all(not placement.plot.show_legend for placement in slide.plots))
+
+    def test_master_legend_requires_stable_series_order(self):
+        first = make_plot("one")
+        second = PlotSpec(
+            plot_id="two",
+            kind="azimuth_rect",
+            title="Two",
+            x_label="Azimuth (deg)",
+            y_label="RCS (dBsm)",
+            series=(PlotSeries.from_values((0, 1), (1, 2), label="Different"),),
+        )
+        with self.assertRaisesRegex(ValueError, "same labeled series"):
+            plan_azimuth_slides((first, second), master_legend=True)
+
+    def test_polar_axis_rejects_more_than_one_full_turn(self):
+        with self.assertRaisesRegex(ValueError, "at most 360"):
+            PlotSpec(
+                plot_id="wide-polar",
+                kind="azimuth_polar",
+                title="Wide",
+                x_label="Azimuth (deg)",
+                y_label="RCS (dBsm)",
+                series=(PlotSeries.from_values((0, 1), (1, 2), label="A"),),
+                x_limits=(-181.0, 181.0),
+            )
 
     def test_wrong_plot_family_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Azimuth slides"):
@@ -149,6 +237,59 @@ class RenderingTests(unittest.TestCase):
                     "slide_001_slot_2_12_GHz.png",
                 ],
             )
+
+    def test_master_legend_gets_one_transparent_header_asset(self):
+        plot = PlotSpec(
+            plot_id="legend",
+            kind="azimuth_rect",
+            title="Legend",
+            x_label="Azimuth (deg)",
+            y_label="RCS (dBsm)",
+            series=(
+                PlotSeries.from_values((0, 1), (1, 2), label="Baseline"),
+                PlotSeries.from_values((0, 1), (2, 3), label="Modified"),
+            ),
+        )
+        plan = plan_azimuth_slides((plot,), master_legend=True)
+
+        def fake_renderer(_value, output_path, **_kwargs):
+            path = Path(output_path)
+            path.write_bytes(b"png")
+            return path
+
+        with tempfile.TemporaryDirectory() as directory:
+            rendered = render_plan_images(
+                plan,
+                directory,
+                renderer=fake_renderer,
+                legend_renderer=fake_renderer,
+            )
+            self.assertEqual(
+                set(rendered),
+                {(0, MASTER_LEGEND_IMAGE_INDEX), (0, 0)},
+            )
+            self.assertEqual(
+                rendered[(0, MASTER_LEGEND_IMAGE_INDEX)].name,
+                "slide_001_master_legend.png",
+            )
+
+    def test_real_master_legend_renderer_creates_png(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("Matplotlib is not installed in this headless test runtime.")
+        plot = make_plot("legend")
+        plan = plan_azimuth_slides((plot,), master_legend=True)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "legend.png"
+            render_master_legend_png(
+                plan.slides[0].master_legend,
+                output,
+                width_points=500.0,
+                height_points=20.0,
+                dpi=80,
+            )
+            self.assertEqual(output.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
 class RecordingWriter:
@@ -427,6 +568,40 @@ class ComBridgeFakeTests(unittest.TestCase):
             self.assertEqual(len(slide.Shapes.pictures), 2)
             self.assertEqual(len(slide.Shapes.textboxes), 3)  # title, footer, page
             self.assertEqual(slide.Shapes.pictures[0][1].AlternativeText, "Plot one")
+
+    def test_bridge_places_one_master_legend_in_the_header_band(self):
+        plan = plan_azimuth_slides((make_plot("one"),), master_legend=True)
+        presentation = FakePresentation(seed_count=0, width=960.0, height=540.0)
+        application = FakeApplication(presentation)
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+        geometry = azimuth_3x2_geometry()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legend = root / "legend.png"
+            plot = root / "plot.png"
+            legend.write_bytes(b"legend")
+            plot.write_bytes(b"plot")
+            bridge.write(
+                plan,
+                {
+                    (0, MASTER_LEGEND_IMAGE_INDEX): legend,
+                    (0, 0): plot,
+                },
+                root / "report.pptx",
+            )
+        slide = presentation.Slides.items[0]
+        self.assertEqual(len(slide.Shapes.pictures), 2)
+        legend_args, legend_shape = slide.Shapes.pictures[0]
+        self.assertEqual(
+            legend_args[3:],
+            (
+                geometry.master_legend.left,
+                geometry.master_legend.top,
+                geometry.master_legend.width,
+                geometry.master_legend.height,
+            ),
+        )
+        self.assertEqual(legend_shape.AlternativeText, "Dataset legend: HH")
 
     def test_new_deck_is_forced_to_widescreen(self):
         plan = plan_frequency_slides([make_plot("frequency", "frequency")])

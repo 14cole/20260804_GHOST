@@ -18,7 +18,7 @@ import re
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Protocol, Sequence
 
@@ -36,6 +36,7 @@ SLIDE_HEIGHT_POINTS = 7.5 * POINTS_PER_INCH
 SLIDE_TITLE_FONT_SIZE_POINTS = 21.0
 SLIDE_FOOTER_FONT_SIZE_POINTS = 8.5
 SLIDE_PAGE_NUMBER_FONT_SIZE_POINTS = 8.5
+MASTER_LEGEND_IMAGE_INDEX = -1
 
 PP_LAYOUT_BLANK = 12
 PP_SAVE_AS_OPEN_XML_PRESENTATION = 24
@@ -93,6 +94,7 @@ class SlideGeometry:
     width: float
     height: float
     title: Rect
+    master_legend: Rect
     footer: Rect
     page_number: Rect
     plot_frames: tuple[Rect, ...]
@@ -100,7 +102,13 @@ class SlideGeometry:
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
             raise ValueError("Slide dimensions must be positive.")
-        for box in (self.title, self.footer, self.page_number, *self.plot_frames):
+        for box in (
+            self.title,
+            self.master_legend,
+            self.footer,
+            self.page_number,
+            *self.plot_frames,
+        ):
             if box.right > self.width + 1e-6 or box.bottom > self.height + 1e-6:
                 raise ValueError("A slide element extends beyond the slide canvas.")
 
@@ -115,6 +123,7 @@ class SlideGeometry:
             width=float(width),
             height=float(height),
             title=self.title.scaled(x_scale, y_scale),
+            master_legend=self.master_legend.scaled(x_scale, y_scale),
             footer=self.footer.scaled(x_scale, y_scale),
             page_number=self.page_number.scaled(x_scale, y_scale),
             plot_frames=tuple(
@@ -128,10 +137,10 @@ def azimuth_3x2_geometry() -> SlideGeometry:
 
     slide_w = SLIDE_WIDTH_POINTS
     slide_h = SLIDE_HEIGHT_POINTS
-    margin_x = 34.0
+    margin_x = 0.47 * POINTS_PER_INCH
     column_gap = 12.0
     row_gap = 10.0
-    plot_top = 54.0
+    plot_top = 1.09 * POINTS_PER_INCH
     plot_bottom = 503.0
     plot_width = (slide_w - 2.0 * margin_x - 2.0 * column_gap) / 3.0
     plot_height = (plot_bottom - plot_top - row_gap) / 2.0
@@ -148,7 +157,18 @@ def azimuth_3x2_geometry() -> SlideGeometry:
     return SlideGeometry(
         width=slide_w,
         height=slide_h,
-        title=Rect(34.0, 13.0, slide_w - 68.0, 31.0),
+        title=Rect(
+            0.76 * POINTS_PER_INCH,
+            0.42 * POINTS_PER_INCH,
+            11.82 * POINTS_PER_INCH,
+            0.36 * POINTS_PER_INCH,
+        ),
+        master_legend=Rect(
+            0.76 * POINTS_PER_INCH,
+            0.81 * POINTS_PER_INCH,
+            11.82 * POINTS_PER_INCH,
+            0.22 * POINTS_PER_INCH,
+        ),
         footer=Rect(34.0, 514.0, slide_w - 150.0, 15.0),
         page_number=Rect(slide_w - 105.0, 514.0, 71.0, 15.0),
         plot_frames=frames,
@@ -163,10 +183,28 @@ def frequency_single_geometry() -> SlideGeometry:
     return SlideGeometry(
         width=slide_w,
         height=slide_h,
-        title=Rect(42.0, 15.0, slide_w - 84.0, 34.0),
+        title=Rect(
+            0.76 * POINTS_PER_INCH,
+            0.42 * POINTS_PER_INCH,
+            11.82 * POINTS_PER_INCH,
+            0.36 * POINTS_PER_INCH,
+        ),
+        master_legend=Rect(
+            0.76 * POINTS_PER_INCH,
+            0.81 * POINTS_PER_INCH,
+            11.82 * POINTS_PER_INCH,
+            0.22 * POINTS_PER_INCH,
+        ),
         footer=Rect(42.0, 514.0, slide_w - 158.0, 15.0),
         page_number=Rect(slide_w - 105.0, 514.0, 63.0, 15.0),
-        plot_frames=(Rect(54.0, 61.0, slide_w - 108.0, 438.0),),
+        plot_frames=(
+            Rect(
+                54.0,
+                1.09 * POINTS_PER_INCH,
+                slide_w - 108.0,
+                499.0 - 1.09 * POINTS_PER_INCH,
+            ),
+        ),
     )
 
 
@@ -223,6 +261,29 @@ class PlotSeries:
 
 
 @dataclass(frozen=True)
+class LegendEntry:
+    """One series key in a slide-level legend."""
+
+    label: str
+    series_index: int
+    color: str | None = None
+    line_style: str = "-"
+    line_width: float = 1.5
+
+    def __post_init__(self) -> None:
+        if not str(self.label).strip():
+            raise ValueError("Master legend entries require non-empty labels.")
+        if (
+            isinstance(self.series_index, bool)
+            or not isinstance(self.series_index, int)
+            or self.series_index < 0
+        ):
+            raise ValueError("Master legend series indices must be non-negative integers.")
+        if not math.isfinite(float(self.line_width)) or float(self.line_width) <= 0:
+            raise ValueError("Master legend line widths must be positive and finite.")
+
+
+@dataclass(frozen=True)
 class PlotSpec:
     """A Qt-free description of one independently rendered plot."""
 
@@ -255,6 +316,9 @@ class PlotSpec:
         for name, step in (("x", self.x_tick_step), ("y", self.y_tick_step)):
             if step is not None and (not math.isfinite(step) or step <= 0):
                 raise ValueError(f"{name}-axis tick step must be positive and finite.")
+        if self.kind == "azimuth_polar" and self.x_limits is not None:
+            if self.x_limits[1] - self.x_limits[0] > 360.0 + 1.0e-9:
+                raise ValueError("Polar azimuth limits may span at most 360 degrees.")
 
 
 @dataclass(frozen=True)
@@ -276,6 +340,7 @@ class SlidePlan:
     footer: str
     layout: LayoutKind
     plots: tuple[PlotPlacement, ...]
+    master_legend: tuple[LegendEntry, ...] = ()
 
     def __post_init__(self) -> None:
         geometry = geometry_for_layout(self.layout)
@@ -302,6 +367,34 @@ class SlidePlan:
             ):
                 raise ValueError("Plot row/column identity does not match its fixed slot.")
             seen_slots.add(placement.slot_index)
+
+
+def _master_legend_entries(plots: Sequence[PlotSpec]) -> tuple[LegendEntry, ...]:
+    """Return one stable legend signature shared by every supplied plot."""
+
+    signatures: list[tuple[LegendEntry, ...]] = []
+    for plot in plots:
+        signatures.append(
+            tuple(
+                LegendEntry(
+                    label=series.label,
+                    series_index=index,
+                    color=series.color,
+                    line_style=series.line_style,
+                    line_width=series.line_width,
+                )
+                for index, series in enumerate(plot.series)
+                if str(series.label).strip()
+            )
+        )
+    if not signatures or not signatures[0]:
+        return ()
+    if any(signature != signatures[0] for signature in signatures[1:]):
+        raise ValueError(
+            "A master legend requires every plot to use the same labeled series "
+            "in the same order and with the same line styles."
+        )
+    return signatures[0]
 
 
 @dataclass(frozen=True)
@@ -341,6 +434,7 @@ def plan_azimuth_slides(
     *,
     slide_titles: str | Sequence[str] = "Azimuth Sweeps",
     footer: str = "",
+    master_legend: bool = False,
 ) -> PresentationPlan:
     """Chunk azimuth plots into deterministic 3x2, row-major slides."""
 
@@ -349,6 +443,9 @@ def plan_azimuth_slides(
         raise ValueError("Select at least one azimuth plot.")
     if any(plot.kind not in ("azimuth_rect", "azimuth_polar") for plot in plot_values):
         raise ValueError("Azimuth slides can contain only rectangular or polar azimuth plots.")
+    legend_entries = _master_legend_entries(plot_values) if master_legend else ()
+    if legend_entries:
+        plot_values = tuple(replace(plot, show_legend=False) for plot in plot_values)
     geometry = azimuth_3x2_geometry()
     slide_count = math.ceil(len(plot_values) / 6)
     titles = _normalized_slide_titles(slide_titles, slide_count)
@@ -371,6 +468,7 @@ def plan_azimuth_slides(
                 footer=str(footer),
                 layout="azimuth_3x2",
                 plots=placements,
+                master_legend=legend_entries,
             )
         )
     return PresentationPlan(tuple(slides))
@@ -381,6 +479,7 @@ def plan_frequency_slides(
     *,
     slide_titles: str | Sequence[str] | None = None,
     footer: str = "",
+    master_legend: bool = False,
 ) -> PresentationPlan:
     """Place each frequency-sweep plot on its own full-size slide."""
 
@@ -389,6 +488,9 @@ def plan_frequency_slides(
         raise ValueError("Select at least one frequency-sweep plot.")
     if any(plot.kind != "frequency" for plot in plot_values):
         raise ValueError("Frequency-sweep slides can contain only frequency plots.")
+    legend_entries = _master_legend_entries(plot_values) if master_legend else ()
+    if legend_entries:
+        plot_values = tuple(replace(plot, show_legend=False) for plot in plot_values)
     titles = (
         tuple(plot.title for plot in plot_values)
         if slide_titles is None
@@ -401,6 +503,7 @@ def plan_frequency_slides(
             footer=str(footer),
             layout="frequency_single",
             plots=(PlotPlacement(plot, geometry.plot_frames[0], 0, 0, 0),),
+            master_legend=legend_entries,
         )
         for index, plot in enumerate(plot_values)
     )
@@ -487,6 +590,83 @@ def polar_degree_ticks(
     return tuple((value, _signed_degree_label(value)) for value in ticks)
 
 
+def render_master_legend_png(
+    entries: Sequence[LegendEntry],
+    output_path: str | os.PathLike[str],
+    *,
+    width_points: float,
+    height_points: float,
+    dpi: int = 160,
+    style: PlotRenderStyle = PlotRenderStyle(),
+) -> Path:
+    """Render one transparent, single-row dataset legend for a slide header."""
+
+    values = tuple(entries)
+    if not values:
+        raise ValueError("A master legend needs at least one labeled series.")
+    if width_points <= 0 or height_points <= 0:
+        raise ValueError("Master legend dimensions must be positive.")
+    if dpi < 72:
+        raise ValueError("Master legend rendering DPI must be at least 72.")
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from matplotlib.lines import Line2D
+
+    destination = Path(output_path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure = Figure(
+        figsize=(width_points / POINTS_PER_INCH, height_points / POINTS_PER_INCH),
+        dpi=dpi,
+        facecolor="none",
+    )
+    FigureCanvasAgg(figure)
+    handles = [
+        Line2D(
+            (),
+            (),
+            color=(
+                entry.color
+                or style.default_colors[entry.series_index % len(style.default_colors)]
+            ),
+            linestyle=entry.line_style,
+            linewidth=entry.line_width,
+            label=entry.label,
+        )
+        for entry in values
+    ]
+    total_characters = sum(len(entry.label) for entry in values)
+    font_size = 8.5
+    if len(values) > 6 or total_characters > 90:
+        font_size = 7.5
+    if len(values) > 9 or total_characters > 140:
+        font_size = 6.5
+    figure.legend(
+        handles=handles,
+        labels=[entry.label for entry in values],
+        loc="center",
+        ncol=len(values),
+        frameon=False,
+        bbox_to_anchor=(0.01, 0.0, 0.98, 1.0),
+        borderaxespad=0.0,
+        handlelength=2.4,
+        handletextpad=0.45,
+        columnspacing=1.0,
+        prop={"family": style.font_family, "size": font_size},
+        labelcolor=style.text,
+    )
+    figure.savefig(
+        destination,
+        format="png",
+        dpi=dpi,
+        transparent=True,
+        bbox_inches=None,
+        pad_inches=0.0,
+    )
+    figure.clear()
+    return destination
+
+
 def render_plot_png(
     plot: PlotSpec,
     output_path: str | os.PathLike[str],
@@ -506,7 +686,7 @@ def render_plot_png(
     # Local imports keep planning and fake-COM tests lightweight.
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
-    from matplotlib.ticker import MultipleLocator
+    from matplotlib.ticker import FixedLocator, MultipleLocator
 
     destination = Path(output_path).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -559,9 +739,19 @@ def render_plot_png(
     if plot.y_limits is not None:
         axes.set_ylim(*plot.y_limits)
     if plot.kind != "azimuth_polar" and plot.x_tick_step is not None:
-        axes.xaxis.set_major_locator(MultipleLocator(plot.x_tick_step))
+        if plot.x_limits is not None:
+            axes.xaxis.set_major_locator(
+                FixedLocator(_inclusive_ticks(*plot.x_limits, plot.x_tick_step))
+            )
+        else:
+            axes.xaxis.set_major_locator(MultipleLocator(plot.x_tick_step))
     if plot.y_tick_step is not None:
-        axes.yaxis.set_major_locator(MultipleLocator(plot.y_tick_step))
+        if plot.y_limits is not None:
+            axes.yaxis.set_major_locator(
+                FixedLocator(_inclusive_ticks(*plot.y_limits, plot.y_tick_step))
+            )
+        else:
+            axes.yaxis.set_major_locator(MultipleLocator(plot.y_tick_step))
     axes.set_title(
         plot.title,
         color=style.text,
@@ -609,6 +799,7 @@ def render_plan_images(
     dpi: int = 160,
     style: PlotRenderStyle = PlotRenderStyle(),
     renderer: Callable[..., Path] = render_plot_png,
+    legend_renderer: Callable[..., Path] = render_master_legend_png,
 ) -> dict[RenderedImageKey, Path]:
     """Render every placement to its own predictably named PNG file."""
 
@@ -616,6 +807,23 @@ def render_plan_images(
     output_dir.mkdir(parents=True, exist_ok=True)
     rendered: dict[RenderedImageKey, Path] = {}
     for slide_index, slide in enumerate(plan.slides):
+        if slide.master_legend:
+            geometry = geometry_for_layout(slide.layout)
+            legend_path = output_dir / f"slide_{slide_index + 1:03d}_master_legend.png"
+            legend_result = legend_renderer(
+                slide.master_legend,
+                legend_path,
+                width_points=geometry.master_legend.width,
+                height_points=geometry.master_legend.height,
+                dpi=dpi,
+                style=style,
+            )
+            legend_result_path = Path(legend_result).resolve()
+            if not legend_result_path.is_file():
+                raise RuntimeError(
+                    f"Master legend renderer did not create {legend_result_path}."
+                )
+            rendered[(slide_index, MASTER_LEGEND_IMAGE_INDEX)] = legend_result_path
         for placement_index, placement in enumerate(slide.plots):
             name = (
                 f"slide_{slide_index + 1:03d}_slot_{placement.slot_index + 1}_"
@@ -803,6 +1011,29 @@ class PowerPointComBridge:
                 alignment=PP_ALIGN_LEFT,
                 color=_office_rgb(23, 32, 51),
             )
+            if slide_plan.master_legend:
+                legend_path = Path(
+                    rendered_images[(slide_index, MASTER_LEGEND_IMAGE_INDEX)]
+                )
+                if not legend_path.is_file():
+                    raise RuntimeError(
+                        f"Rendered master legend image is missing: {legend_path}"
+                    )
+                legend_picture = slide.Shapes.AddPicture(
+                    str(legend_path),
+                    MSO_FALSE,
+                    MSO_TRUE,
+                    geometry.master_legend.left,
+                    geometry.master_legend.top,
+                    geometry.master_legend.width,
+                    geometry.master_legend.height,
+                )
+                try:
+                    legend_picture.AlternativeText = "Dataset legend: " + ", ".join(
+                        entry.label for entry in slide_plan.master_legend
+                    )
+                except Exception:
+                    pass
             for placement_index, placement in enumerate(slide_plan.plots):
                 image_path = Path(rendered_images[(slide_index, placement_index)])
                 if not image_path.is_file():
@@ -917,6 +1148,7 @@ def export_powerpoint_report(
     dpi: int = 160,
     style: PlotRenderStyle = PlotRenderStyle(),
     renderer: Callable[..., Path] = render_plot_png,
+    legend_renderer: Callable[..., Path] = render_master_legend_png,
     temporary_parent: str | os.PathLike[str] | None = None,
 ) -> Path:
     """Render individual PNGs and safely publish a PPTX report.
@@ -954,6 +1186,7 @@ def export_powerpoint_report(
                 dpi=dpi,
                 style=style,
                 renderer=renderer,
+                legend_renderer=legend_renderer,
             )
             bridge.write(
                 plan,
@@ -974,6 +1207,8 @@ def export_powerpoint_report(
 
 __all__ = [
     "LayoutKind",
+    "LegendEntry",
+    "MASTER_LEGEND_IMAGE_INDEX",
     "PlotKind",
     "PlotPlacement",
     "PlotRenderStyle",
@@ -998,5 +1233,6 @@ __all__ = [
     "plan_frequency_slides",
     "polar_degree_ticks",
     "render_plan_images",
+    "render_master_legend_png",
     "render_plot_png",
 ]
