@@ -709,10 +709,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.list_az = QListWidget()
         for widget in (self.list_pol, self.list_freq, self.list_elev, self.list_az):
             widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-            # Axis values are physical coordinates, not free-form labels.  In-
-            # place edits used to mutate the source grid without validating
-            # ordering or uniqueness, so selectors are intentionally read-only.
-            widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            # Edits are committed through RcsGrid.edit_axis_value(), which
+            # validates the new coordinate/label and transactionally reorders
+            # every aligned sample array when a numeric axis changes order.
+            widget.setEditTriggers(
+                QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+            )
+            widget.setToolTip(
+                "Double-click a value or press F2 to edit it. Numeric axes are "
+                "kept sorted and their samples move with the edited coordinate."
+            )
             widget.setMinimumHeight(96)
         self.lbl_pol = ClickableLabel("Polarization")
         self.lbl_freq = ClickableLabel("Frequency")
@@ -791,6 +797,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         _ops_pad("Calibration", (
             ("Range Cal", "btn_range_cal"),
         ), cols=1)
+        self.btn_overlap.setToolTip(
+            "Crop every selected dataset to the common axis values and finite "
+            "cells shared by all selected datasets. Selection order does not "
+            "choose a reference dataset."
+        )
         self.btn_range_cal.setToolTip(
             "Complex substitution calibration using loaded measured-cal and "
             "exact-reference datasets plus a signed one-way physical "
@@ -1056,6 +1067,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.list_freq.itemSelectionChanged.connect(self._on_param_selection_changed)
         self.list_elev.itemSelectionChanged.connect(self._on_param_selection_changed)
         self.list_az.itemSelectionChanged.connect(self._on_param_selection_changed)
+        self._connect_param_list(self.list_pol, "polarization")
+        self._connect_param_list(self.list_freq, "frequency")
+        self._connect_param_list(self.list_elev, "elevation")
+        self._connect_param_list(self.list_az, "azimuth")
         lbl_pol.doubleClicked.connect(lambda: self.list_pol.selectAll())
         lbl_freq.doubleClicked.connect(lambda: self.list_freq.selectAll())
         lbl_elev.doubleClicked.connect(lambda: self.list_elev.selectAll())
@@ -1986,6 +2001,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self._activate_plot_tab(tab_key)
         self._update_plot_color_buttons()
         self.plot_canvas.draw_idle()
+
+    def _connect_param_list(self, widget: QListWidget, axis_name: str) -> None:
+        widget.itemChanged.connect(
+            lambda item, axis=axis_name, axis_widget=widget: (
+                self._on_param_item_changed(item, axis, axis_widget)
+            )
+        )
 
     def _dataset_catalog(self) -> tuple[DatasetCatalogEntry, ...]:
         """Return stable, ordered dataset references for report consumers."""

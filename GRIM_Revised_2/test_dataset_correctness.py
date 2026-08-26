@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from itertools import permutations
 from unittest import mock
 
 import numpy as np
@@ -151,6 +152,144 @@ class DatasetCorrectnessTests(unittest.TestCase):
                 rcs_power=np.asarray([[-1.0]]).reshape(1, 1, 1, 1),
                 _adopt_clean_arrays=True,
             )
+
+    @staticmethod
+    def _indexed_grid(azimuths, elevations, frequencies, polarizations, offset):
+        shape = (
+            len(azimuths),
+            len(elevations),
+            len(frequencies),
+            len(polarizations),
+        )
+        power = offset + np.arange(np.prod(shape), dtype=np.float64).reshape(shape)
+        return RcsGrid(
+            azimuths,
+            elevations,
+            frequencies,
+            polarizations,
+            rcs_power=power,
+            rcs_phase=power / 1000.0,
+            units={"frequency": "GHz"},
+        )
+
+    def test_overlap_many_uses_common_ranges_across_every_grid(self):
+        grids = [
+            self._indexed_grid(
+                [0.0, 1.0, 2.0, 3.0],
+                [-1.0, 0.0, 1.0],
+                [1.0, 2.0, 3.0, 4.0],
+                ["VV", "HH"],
+                1000.0,
+            ),
+            self._indexed_grid(
+                [1.0, 2.0, 3.0, 4.0],
+                [0.0, 1.0, 2.0],
+                [2.0, 3.0, 4.0, 5.0],
+                ["HH", "VV"],
+                2000.0,
+            ),
+            self._indexed_grid(
+                [2.0, 3.0, 4.0, 5.0],
+                [-2.0, 0.0, 1.0],
+                [3.0, 4.0, 5.0, 6.0],
+                ["VV", "HH"],
+                3000.0,
+            ),
+        ]
+
+        outputs = RcsGrid.overlap_many(*grids)
+        for source, output in zip(grids, outputs):
+            np.testing.assert_array_equal(output.azimuths, [2.0, 3.0])
+            np.testing.assert_array_equal(output.elevations, [0.0, 1.0])
+            np.testing.assert_array_equal(output.frequencies, [3.0, 4.0])
+            np.testing.assert_array_equal(output.polarizations, ["HH", "VV"])
+
+            indices = []
+            for source_axis, output_axis in (
+                (source.azimuths, output.azimuths),
+                (source.elevations, output.elevations),
+                (source.frequencies, output.frequencies),
+                (source.polarizations, output.polarizations),
+            ):
+                indices.append(
+                    [int(np.flatnonzero(source_axis == value)[0]) for value in output_axis]
+                )
+            selection = np.ix_(*indices)
+            np.testing.assert_array_equal(output.rcs_power, source.rcs_power[selection])
+            np.testing.assert_array_equal(output.rcs_phase, source.rcs_phase[selection])
+
+    def test_overlap_many_intersects_finite_cells_across_every_grid(self):
+        grids = [
+            self._indexed_grid([0.0, 1.0], [0.0], [1.0, 2.0], ["HH", "VV"], offset)
+            for offset in (100.0, 200.0, 300.0)
+        ]
+        grids[1].rcs_power[0, 0, 0, 0] = np.nan
+        grids[1].rcs_phase[0, 0, 0, 0] = np.nan
+        grids[2].rcs_power[:, :, 1, :] = np.nan
+        grids[2].rcs_phase[:, :, 1, :] = np.nan
+
+        outputs = RcsGrid.overlap_many(*grids)
+        for output in outputs:
+            np.testing.assert_array_equal(output.frequencies, [1.0])
+            self.assertTrue(np.isnan(output.rcs_power[0, 0, 0, 0]))
+            self.assertTrue(np.isnan(output.rcs_phase[0, 0, 0, 0]))
+            self.assertTrue(np.isfinite(output.rcs_power[0, 0, 0, 1]))
+            self.assertTrue(np.isfinite(output.rcs_power[1, 0, 0, 0]))
+
+    def test_overlap_many_tolerance_and_labels_are_order_invariant(self):
+        grids = (
+            self._indexed_grid(
+                [2.0, 0.0, 1.0], [0.0], [2.0, 1.0], ["VV", "HH"], 1000.0
+            ),
+            self._indexed_grid(
+                [1.0000002, 2.0000002, 0.0000002],
+                [0.0000002],
+                [1.0000002, 2.0000002],
+                ["HH", "VV"],
+                2000.0,
+            ),
+            self._indexed_grid(
+                [0.0000008, 1.0000008, 2.0000008],
+                [0.0000008],
+                [2.0000008, 1.0000008],
+                ["VV", "HH"],
+                3000.0,
+            ),
+        )
+        baseline_outputs = RcsGrid.overlap_many(*grids, tol=1.0e-6)
+        baseline_by_grid = {
+            id(grid): output for grid, output in zip(grids, baseline_outputs)
+        }
+
+        for ordered_grids in permutations(grids):
+            with self.subTest(order=tuple(id(grid) for grid in ordered_grids)):
+                outputs = RcsGrid.overlap_many(*ordered_grids, tol=1.0e-6)
+                for source, output in zip(ordered_grids, outputs):
+                    baseline = baseline_by_grid[id(source)]
+                    np.testing.assert_array_equal(output.azimuths, [0.0, 1.0, 2.0])
+                    np.testing.assert_array_equal(output.elevations, [0.0])
+                    np.testing.assert_array_equal(output.frequencies, [1.0, 2.0])
+                    np.testing.assert_array_equal(output.polarizations, ["HH", "VV"])
+                    np.testing.assert_array_equal(output.azimuths, baseline.azimuths)
+                    np.testing.assert_array_equal(output.elevations, baseline.elevations)
+                    np.testing.assert_array_equal(output.frequencies, baseline.frequencies)
+                    np.testing.assert_array_equal(output.polarizations, baseline.polarizations)
+                    np.testing.assert_array_equal(output.rcs_power, baseline.rcs_power)
+                    np.testing.assert_array_equal(output.rcs_phase, baseline.rcs_phase)
+
+    def test_common_axis_alignment_does_not_chain_or_reuse_samples(self):
+        chained = ([0.0], [0.0000009], [0.0000018])
+        for ordered_axes in permutations(chained):
+            common, _indices = RcsGrid._common_axis_alignment(
+                ordered_axes, tol=1.0e-6
+            )
+            self.assertEqual(common.size, 0)
+
+        common, indices = RcsGrid._common_axis_alignment(
+            ([0.0, 0.5], [0.25]), tol=1.0
+        )
+        np.testing.assert_array_equal(common, [0.0])
+        self.assertEqual(indices, [[0], [0]])
 
     def test_azimuth_range_db_uses_amplitude_scaling(self):
         grid = self._single_sample()

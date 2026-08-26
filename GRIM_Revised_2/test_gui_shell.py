@@ -31,6 +31,7 @@ import grim_cut_dataset_mixin
 import freddy_integration
 import ghost_integration
 from grim_cut_dataset_mixin import (
+    DATASET_DIRTY_ROLE,
     DATASET_ID_ROLE,
     ConicGCDialog,
     RangeCalibrationDialog,
@@ -604,7 +605,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.table.item(0, 1).toolTip(), container
         )
 
-    def test_parameter_headers_follow_units_and_axes_are_read_only(self) -> None:
+    def test_parameter_headers_follow_units_and_axes_are_editable(self) -> None:
         dataset = _grid()
         dataset.units.update(
             {
@@ -627,10 +628,20 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.list_elev,
             self.window.list_az,
         ):
-            self.assertEqual(
-                widget.editTriggers(), QAbstractItemView.NoEditTriggers
+            self.assertTrue(
+                widget.editTriggers() & QAbstractItemView.DoubleClicked
             )
-            self.assertFalse(widget.item(0).flags() & Qt.ItemIsEditable)
+            self.assertTrue(widget.item(0).flags() & Qt.ItemIsEditable)
+
+        self.window.list_pol.item(0).setText("TOTAL")
+        self.app.processEvents()
+        edited_item = self.window.table.item(0, 0)
+        edited = edited_item.data(Qt.UserRole)
+        self.assertEqual(edited.polarizations.tolist(), ["TOTAL"])
+        self.assertIs(self.window.active_dataset, edited)
+        self.assertTrue(edited_item.data(DATASET_DIRTY_ROLE))
+        self.assertEqual(self.window.table.item(0, 1).text(), "Unsaved")
+        self.assertIn("Edit polarization axis[0]", edited.history)
 
     def test_batch_save_preserves_per_row_provenance_for_shared_grid(self) -> None:
         shared = _grid()

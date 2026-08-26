@@ -2500,7 +2500,7 @@ class DatasetOpsMixin:
             for idx in indices:
                 value = values[idx]
                 item = QListWidgetItem(str(value))
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
                 item.setData(Qt.UserRole, value)
                 item.setData(Qt.UserRole + 1, int(idx))
                 widget.addItem(item)
@@ -2514,26 +2514,127 @@ class DatasetOpsMixin:
         self._update_parameter_headers(None)
 
     def _on_param_item_changed(self, item: QListWidgetItem, axis_name: str, widget: QListWidget) -> None:
-        """Reject legacy programmatic inline edits without mutating the grid."""
+        """Validate and transactionally commit one inline parameter edit."""
 
-        if self.active_dataset is None:
+        dataset = self.active_dataset
+        if dataset is None:
             return
-        axis_arr = self.active_dataset.get_axis(axis_name)
+        axis_arr = dataset.get_axis(axis_name)
         idx = item.data(Qt.UserRole + 1)
         if idx is None:
             return
+        idx = int(idx)
         if idx < 0 or idx >= len(axis_arr):
             return
         old_value = axis_arr[idx]
-        widget.blockSignals(True)
+        entered_text = item.text()
+
+        def restore_item() -> None:
+            signals_were_blocked = widget.blockSignals(True)
+            try:
+                item.setText(str(old_value))
+                item.setData(Qt.UserRole, old_value)
+            finally:
+                widget.blockSignals(signals_were_blocked)
+
+        owning_row = None
+        for row in range(self.table.rowCount()):
+            name_item = self.table.item(row, 0)
+            if name_item is not None and name_item.data(Qt.UserRole) is dataset:
+                owning_row = row
+                break
+        if owning_row is None:
+            restore_item()
+            self.status.showMessage(
+                "Parameter edit rejected: the active dataset row is no longer available."
+            )
+            return
+
+        source_reference = self._python_reference_for_dataset(dataset)
         try:
-            item.setText(str(old_value))
-            item.setData(Qt.UserRole, old_value)
+            edited = dataset.edit_axis_value(axis_name, idx, entered_text)
+        except (IndexError, TypeError, ValueError) as exc:
+            restore_item()
+            self.status.showMessage(f"Parameter edit rejected: {exc}")
+            return
+
+        if edited is dataset:
+            restore_item()
+            self.status.showMessage(f"{axis_name.capitalize()} value is unchanged.")
+            return
+
+        name_item = self.table.item(owning_row, 0)
+        if name_item is None:
+            restore_item()
+            return
+        dataset_id = str(name_item.data(DATASET_ID_ROLE) or "")
+        dataset_name = name_item.text().strip() or f"Dataset {owning_row + 1}"
+        source_item = self.table.item(owning_row, 1)
+        source_path = (
+            str(source_item.data(DATASET_PATH_ROLE) or "")
+            if source_item is not None
+            else ""
+        )
+
+        table_signals_were_blocked = self.table.blockSignals(True)
+        try:
+            name_item.setData(Qt.UserRole, edited)
+            name_item.setData(DATASET_DIRTY_ROLE, True)
+            name_font = name_item.font()
+            name_font.setBold(True)
+            name_item.setFont(name_font)
+            name_item.setToolTip("Unsaved parameter edits")
+
+            if source_item is not None:
+                source_item.setText("Unsaved")
+                source_item.setToolTip(
+                    "Unsaved parameter edits"
+                    + (f"; original source: {source_path}" if source_path else "")
+                )
+
+            history_item = self.table.item(owning_row, 2)
+            if history_item is None:
+                history_item = QTableWidgetItem()
+                history_item.setFlags(history_item.flags() & ~Qt.ItemIsEditable)
+                self.table.setItem(owning_row, 2, history_item)
+            history_item.setText(str(edited.history or ""))
         finally:
-            widget.blockSignals(False)
+            self.table.blockSignals(table_signals_were_blocked)
+
+        self.active_dataset = edited
+        clear_plot = getattr(self, "_clear_plot", None)
+        if callable(clear_plot):
+            clear_plot()
+            canvas = getattr(self, "plot_canvas", None)
+            if canvas is not None:
+                canvas.draw_idle()
+        self._populate_params(edited)
+        notify = getattr(self, "_notify_dataset_catalog_changed", None)
+        if callable(notify):
+            notify()
+
+        recorder = getattr(self, "python_recorder", None)
+        if (
+            recorder is not None
+            and source_reference is not None
+            and dataset_id
+        ):
+            if axis_name == "polarization":
+                recorded_value = entered_text.strip()
+            else:
+                # The edited coordinate may have moved to another stored index,
+                # but replay uses the original index and entered value; the
+                # model performs the same stable sort deterministically.
+                recorded_value = float(entered_text)
+            recorder.record_method(
+                self._python_output_reference(dataset_id, dataset_name),
+                source_reference,
+                "edit_axis_value",
+                args=(axis_name, idx, recorded_value),
+                comment=f"Edit {axis_name} parameter for {dataset_name}",
+            )
         self.status.showMessage(
-            "Parameter axes are read-only. Use a validated dataset operation "
-            "to transform coordinates."
+            f"Edited {axis_name} parameter for {dataset_name}; dataset is unsaved."
         )
 
     def _selected_indices(self, widget: QListWidget) -> set[int]:

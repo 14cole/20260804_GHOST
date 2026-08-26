@@ -510,6 +510,166 @@ class RcsGrid:
             "polarizations": self.polarizations,
         }
 
+    def edit_axis_value(self, name, index, value):
+        """Return a grid with one safely edited axis value.
+
+        Numeric coordinate edits are kept finite and unique, then the edited
+        axis is stable-sorted.  Every sample array follows the same permutation,
+        including passthrough arrays whose leading four dimensions match the
+        RCS grid.  Polarization edits are label-only: surrounding whitespace is
+        removed, blank labels and case-insensitive duplicates are rejected, and
+        channel order is preserved.
+
+        The operation is transactional: validation and all reordered arrays are
+        prepared before a new :class:`RcsGrid` is returned, so ``self`` is never
+        partially mutated when an edit is invalid.
+        """
+
+        axis_specs = {
+            "azimuth": ("azimuths", 0),
+            "elevation": ("elevations", 1),
+            "frequency": ("frequencies", 2),
+            "polarization": ("polarizations", 3),
+        }
+        try:
+            attribute, axis_index = axis_specs[str(name).strip().lower()]
+        except KeyError as exc:
+            raise ValueError(f"unknown axis name: {name}") from exc
+
+        if isinstance(index, (bool, np.bool_)) or not isinstance(
+            index, (int, np.integer)
+        ):
+            raise TypeError("axis index must be an integer")
+        item_index = int(index)
+        source_axis = np.asarray(getattr(self, attribute))
+        if item_index < 0 or item_index >= source_axis.size:
+            raise IndexError(
+                f"{name} axis index {item_index} is outside 0..{source_axis.size - 1}"
+            )
+
+        axes = [
+            np.array(self.azimuths, copy=True),
+            np.array(self.elevations, copy=True),
+            np.array(self.frequencies, copy=True),
+            np.array(self.polarizations, copy=True),
+        ]
+        order = np.arange(source_axis.size, dtype=int)
+        reordered = False
+
+        if axis_index == 3:
+            old_value = str(source_axis[item_index])
+            new_value = str(value).strip()
+            if not new_value:
+                raise ValueError("polarization label must not be blank")
+            duplicate_key = new_value.casefold()
+            if any(
+                str(label).strip().casefold() == duplicate_key
+                for candidate_index, label in enumerate(source_axis)
+                if candidate_index != item_index
+            ):
+                raise ValueError(
+                    f"polarization label {new_value!r} duplicates another channel"
+                )
+            if new_value == old_value:
+                return self
+            # Building a fresh unicode array is important here: assigning a
+            # longer label into an existing fixed-width dtype (for example
+            # '<U2') would silently truncate it.
+            labels = [str(label) for label in source_axis.tolist()]
+            labels[item_index] = new_value
+            axes[axis_index] = np.asarray(labels, dtype=str)
+            old_text = repr(old_value)
+            new_text = repr(new_value)
+        else:
+            old_value = float(source_axis[item_index])
+            try:
+                new_value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{name} axis value must be numeric") from exc
+            if not np.isfinite(new_value):
+                raise ValueError(f"{name} axis value must be finite")
+            if axis_index == 2 and new_value <= 0.0:
+                raise ValueError("frequency axis value must be greater than zero")
+            if new_value == old_value:
+                return self
+
+            edited_axis = np.asarray(source_axis, dtype=float).copy()
+            edited_axis[item_index] = new_value
+            if np.unique(edited_axis).size != edited_axis.size:
+                raise ValueError(
+                    f"{name} axis value {new_value:g} duplicates another coordinate"
+                )
+            order = np.argsort(edited_axis, kind="stable")
+            reordered = not np.array_equal(
+                order, np.arange(edited_axis.size, dtype=int)
+            )
+            axes[axis_index] = edited_axis[order]
+            old_text = f"{old_value:g}"
+            new_text = f"{new_value:g}"
+
+        if reordered:
+            power = np.take(self.rcs_power, order, axis=axis_index)
+            phase = np.take(self.rcs_phase, order, axis=axis_index)
+        else:
+            power = self.rcs_power
+            phase = self.rcs_phase
+
+        original_shape = tuple(self.rcs_power.shape)
+        stale_grid_metadata = {
+            "solver_metadata_json",
+            "production_mesh_certification_json",
+            "source_body_mesh_certification_json",
+            "requested_radar_grid_json",
+        }
+        if axis_index == 3:
+            stale_grid_metadata.update(
+                {"polarization_alias_primary", "polarization_aliases_json"}
+            )
+
+        edited_extra = {}
+        for key, extra_value in self.extra.items():
+            if key in stale_grid_metadata:
+                continue
+            if reordered:
+                extra_array = np.asarray(extra_value)
+                if (
+                    extra_array.ndim >= 4
+                    and tuple(extra_array.shape[:4]) == original_shape
+                ):
+                    edited_extra[key] = np.take(
+                        extra_array, order, axis=axis_index
+                    )
+                    continue
+            # RcsGrid treats passthrough values as immutable.  Sharing an
+            # unchanged value keeps a metadata-only edit from duplicating
+            # potentially multi-gigabyte embedded body-model arrays; the
+            # containing ``extra`` dictionary itself is still new.
+            edited_extra[key] = extra_value
+
+        history_entry = (
+            f"Edit {name} axis[{item_index}]: {old_text} -> {new_text}"
+        )
+        if reordered:
+            history_entry += "; stable-sorted axis and sample arrays"
+        prior_history = str(self.history or "").strip()
+        history = (
+            f"{prior_history}\n{history_entry}" if prior_history else history_entry
+        )
+        return RcsGrid(
+            axes[0],
+            axes[1],
+            axes[2],
+            axes[3],
+            rcs_power=power,
+            rcs_phase=phase,
+            rcs_domain=self.rcs_domain,
+            source_path=self.source_path,
+            history=history,
+            units=copy.deepcopy(self.units),
+            extra=edited_extra,
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
+        )
+
     @staticmethod
     def _canonical_unit(value, aliases, default):
         text = str(value or default).strip().lower()
@@ -1791,42 +1951,103 @@ class RcsGrid:
         return combined[keep]
 
     @staticmethod
-    def _axis_intersection(axis_arrays, tol=1e-6):
-        if not axis_arrays:
-            return np.asarray([])
-        first = np.asarray(axis_arrays[0])
-        numeric_axis = np.issubdtype(first.dtype, np.number)
-        if numeric_axis:
-            common = first.astype(float, copy=False).ravel()
-            for axis_arr in axis_arrays[1:]:
-                other = np.asarray(axis_arr, dtype=float).ravel()
-                if other.size == 0 or common.size == 0:
-                    return np.asarray([])
-                sorted_other = np.sort(other)
-                pos = np.searchsorted(sorted_other, common)
-                n = sorted_other.size
-                left = np.clip(pos - 1, 0, n - 1)
-                right = np.clip(pos, 0, n - 1)
-                d_left = np.abs(sorted_other[left] - common)
-                d_right = np.abs(sorted_other[right] - common)
-                dist = np.minimum(d_left, d_right)
-                common = common[dist <= tol]
-                if common.size == 0:
-                    break
-            return common
-        common_list = [
-            value.item() if isinstance(value, np.generic) else value
-            for value in first
-        ]
-        for axis_arr in axis_arrays[1:]:
-            other_set = {
-                (v.item() if isinstance(v, np.generic) else v)
-                for v in np.asarray(axis_arr)
-            }
-            common_list = [v for v in common_list if v in other_set]
-            if not common_list:
-                break
-        return np.asarray(common_list)
+    def _common_axis_alignment(axis_arrays, tol=1e-6):
+        """Return a symmetric axis intersection and indices into every input.
+
+        Numeric values match only when one value from every axis fits in a
+        window no wider than ``tol``.  The lowest value in that window is the
+        canonical output coordinate.  Sorting the values before matching makes
+        both the coordinates and the chosen samples independent of which
+        dataset happened to be selected first.
+        """
+        arrays = [np.asarray(axis).ravel() for axis in axis_arrays]
+        if not arrays:
+            return np.asarray([]), []
+
+        try:
+            tol = float(tol)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("tol must be a finite nonnegative number") from exc
+        if not np.isfinite(tol) or tol < 0.0:
+            raise ValueError("tol must be a finite nonnegative number")
+
+        numeric_flags = [np.issubdtype(array.dtype, np.number) for array in arrays]
+        if any(numeric_flags) and not all(numeric_flags):
+            raise TypeError("axis inputs must all be numeric or all be nonnumeric")
+
+        if all(numeric_flags):
+            sorted_values = []
+            sorted_indices = []
+            for array in arrays:
+                values = array.astype(float, copy=False)
+                finite_indices = np.flatnonzero(np.isfinite(values))
+                order = np.argsort(values[finite_indices], kind="stable")
+                original_indices = finite_indices[order]
+                sorted_values.append(values[original_indices])
+                sorted_indices.append(original_indices)
+
+            if any(values.size == 0 for values in sorted_values):
+                return np.asarray([], dtype=float), [[] for _ in arrays]
+
+            pointers = np.zeros(len(arrays), dtype=np.int64)
+            common_values = []
+            matched_indices = [[] for _ in arrays]
+            while all(
+                pointer < values.size
+                for pointer, values in zip(pointers, sorted_values)
+            ):
+                current = np.asarray(
+                    [values[pointer] for values, pointer in zip(sorted_values, pointers)],
+                    dtype=float,
+                )
+                low = float(np.min(current))
+                high = float(np.max(current))
+                if high - low <= tol:
+                    common_values.append(low)
+                    for axis_idx in range(len(arrays)):
+                        matched_indices[axis_idx].append(
+                            int(sorted_indices[axis_idx][pointers[axis_idx]])
+                        )
+                        pointers[axis_idx] += 1
+                    continue
+
+                # A lowest value cannot match the current maximum or any later
+                # value from that maximum's axis, so discard every tied low.
+                for axis_idx, value in enumerate(current):
+                    if value == low:
+                        pointers[axis_idx] += 1
+
+            return np.asarray(common_values, dtype=float), matched_indices
+
+        indices_by_value = []
+        for array in arrays:
+            mapping = {}
+            for index, raw_value in enumerate(array):
+                value = raw_value.item() if isinstance(raw_value, np.generic) else raw_value
+                mapping.setdefault(value, []).append(index)
+            indices_by_value.append(mapping)
+
+        common_values = set(indices_by_value[0])
+        for mapping in indices_by_value[1:]:
+            common_values.intersection_update(mapping)
+
+        def _canonical_key(value):
+            value_type = type(value)
+            return (value_type.__module__, value_type.__qualname__, repr(value))
+
+        output_values = []
+        matched_indices = [[] for _ in arrays]
+        for value in sorted(common_values, key=_canonical_key):
+            occurrences = min(len(mapping[value]) for mapping in indices_by_value)
+            output_values.extend([value] * occurrences)
+            for axis_idx, mapping in enumerate(indices_by_value):
+                matched_indices[axis_idx].extend(mapping[value][:occurrences])
+        return np.asarray(output_values), matched_indices
+
+    @classmethod
+    def _axis_intersection(cls, axis_arrays, tol=1e-6):
+        common, _indices = cls._common_axis_alignment(axis_arrays, tol=tol)
+        return common
 
     @classmethod
     def _ensure_grids(cls, grids):
@@ -2482,6 +2703,10 @@ class RcsGrid:
     def overlap_many(cls, *grids, tol=1e-6):
         """Return one cropped dataset per input, all on common overlap axes.
 
+        Every input participates equally in one all-selected intersection; no
+        input is treated as a reference grid.  Numeric matching and the output
+        axis coordinates are therefore independent of input selection order.
+
         Overlap is enforced cell-wise: if any input is missing data (NaN) at a
         given (az, el, freq, pol) cell, that cell is set to NaN in every output.
         Axis values whose entire slice becomes NaN after this intersection are
@@ -2494,10 +2719,18 @@ class RcsGrid:
         for grid in grids[1:]:
             grids[0]._assert_physical_metadata_compatible(grid)
 
-        az_common = cls._axis_intersection([grid.azimuths for grid in grids], tol=tol)
-        el_common = cls._axis_intersection([grid.elevations for grid in grids], tol=tol)
-        f_common = cls._axis_intersection([grid.frequencies for grid in grids], tol=tol)
-        p_common = cls._axis_intersection([grid.polarizations for grid in grids], tol=0.0)
+        az_common, az_indices = cls._common_axis_alignment(
+            [grid.azimuths for grid in grids], tol=tol
+        )
+        el_common, el_indices = cls._common_axis_alignment(
+            [grid.elevations for grid in grids], tol=tol
+        )
+        f_common, f_indices = cls._common_axis_alignment(
+            [grid.frequencies for grid in grids], tol=tol
+        )
+        p_common, p_indices = cls._common_axis_alignment(
+            [grid.polarizations for grid in grids], tol=0.0
+        )
 
         if (
             az_common.size == 0
@@ -2509,13 +2742,11 @@ class RcsGrid:
 
         aligned_power = []
         aligned_phase = []
-        for grid in grids:
-            az_idx = cls._indices_for_axis_values(grid.azimuths, az_common, tol=tol)
-            el_idx = cls._indices_for_axis_values(grid.elevations, el_common, tol=tol)
-            f_idx = cls._indices_for_axis_values(grid.frequencies, f_common, tol=tol)
-            p_idx = cls._indices_for_axis_values(grid.polarizations, p_common, tol=0.0)
-            if az_idx is None or el_idx is None or f_idx is None or p_idx is None:
-                raise ValueError("failed to align a dataset during overlap")
+        for grid_idx, grid in enumerate(grids):
+            az_idx = az_indices[grid_idx]
+            el_idx = el_indices[grid_idx]
+            f_idx = f_indices[grid_idx]
+            p_idx = p_indices[grid_idx]
             aligned_power.append(grid.rcs_power[np.ix_(az_idx, el_idx, f_idx, p_idx)].copy())
             aligned_phase.append(grid.rcs_phase[np.ix_(az_idx, el_idx, f_idx, p_idx)].copy())
 
