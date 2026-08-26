@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 from pathlib import Path
 import tempfile
 import threading
@@ -15,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _IMPORT_ERROR: Exception | None = None
 try:
     import numpy as np
-    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtCore import QCoreApplication, Qt
     from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
     from grim_dataset import RcsGrid
@@ -31,8 +32,14 @@ except (ImportError, RuntimeError) as exc:  # pragma: no cover - dependency-spec
     GUI_AVAILABLE = False
 
 
-def _grid(*, frequencies=tuple(range(1, 8)), scale: float = 1.0):
-    azimuths = np.asarray((0.0, 90.0, 180.0, 270.0))
+def _grid(
+    *,
+    frequencies=tuple(range(1, 8)),
+    scale: float = 1.0,
+    azimuths=(0.0, 90.0, 180.0, 270.0),
+    angle_unit: str = "deg",
+):
+    azimuths = np.asarray(azimuths, dtype=float)
     elevations = np.asarray((0.0,))
     frequencies = np.asarray(frequencies, dtype=float)
     polarizations = np.asarray(("HH", "VV"))
@@ -55,8 +62,8 @@ def _grid(*, frequencies=tuple(range(1, 8)), scale: float = 1.0):
         rcs_power=power,
         rcs_phase=np.zeros(shape),
         units={
-            "azimuth": "deg",
-            "elevation": "deg",
+            "azimuth": angle_unit,
+            "elevation": angle_unit,
             "frequency": "GHz",
             "rcs_log_unit": "dBsm",
             "rcs_linear_quantity": "sigma_3d",
@@ -211,6 +218,132 @@ class PptWorkspaceTests(unittest.TestCase):
         self.assertEqual(widget.dataset_ids_in_order(), ("b", "c"))
         self.assertEqual(widget.selected_dataset_ids(), ("b", "c"))
 
+    def test_drag_reorder_preserves_every_flat_row_and_its_state(self):
+        widget = self.workspace()
+        entries = (
+            *self.entries(),
+            DatasetCatalogEntry("c", "Third", _grid(scale=1.8)),
+            DatasetCatalogEntry("d", "Fourth", _grid(scale=2.2)),
+        )
+        widget.set_dataset_catalog(entries)
+        widget.select_dataset_ids(("a", "c", "d"))
+        widget.dataset_list.item(1).setSelected(True)
+        widget.dataset_list.item(2).setSelected(True)
+        widget.dataset_list.setCurrentItem(widget.dataset_list.item(2))
+
+        self.assertTrue(widget.dataset_list.move_rows_to_insertion((1, 2), 0))
+        self.assertEqual(widget.dataset_ids_in_order(), ("b", "c", "a", "d"))
+        self.assertEqual(widget.dataset_list.count(), 4)
+        self.assertEqual(set(widget.dataset_ids_in_order()), {"a", "b", "c", "d"})
+        self.assertEqual(widget.selected_dataset_ids(), ("c", "a", "d"))
+        self.assertEqual(
+            {
+                str(item.data(ppt_workspace._CATALOG_ID_ROLE))
+                for item in widget.dataset_list.selectedItems()
+            },
+            {"b", "c"},
+        )
+        self.assertEqual(
+            widget.dataset_list.currentItem().data(ppt_workspace._CATALOG_ID_ROLE),
+            "c",
+        )
+
+        # A drop in viewport space after the final row moves the same objects
+        # to the end without losing their check states or stable IDs.
+        moved_rows = tuple(
+            widget.dataset_list.row(item)
+            for item in widget.dataset_list.selectedItems()
+        )
+        self.assertTrue(
+            widget.dataset_list.move_rows_to_insertion(
+                moved_rows,
+                widget.dataset_list.count(),
+            )
+        )
+        self.assertEqual(widget.dataset_ids_in_order(), ("a", "d", "b", "c"))
+        self.assertEqual(widget.dataset_list.count(), 4)
+        self.assertEqual(widget.selected_dataset_ids(), ("a", "d", "c"))
+        self.assertEqual(
+            {
+                str(item.data(ppt_workspace._CATALOG_ID_ROLE))
+                for item in widget.dataset_list.selectedItems()
+            },
+            {"b", "c"},
+        )
+
+    def test_dataset_rows_are_drag_sources_not_item_drop_parents(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+
+        self.assertEqual(
+            widget.dataset_list.dragDropMode(),
+            widget.dataset_list.DragDropMode.InternalMove,
+        )
+        self.assertTrue(widget.dataset_list.viewport().acceptDrops())
+        for index in range(widget.dataset_list.count()):
+            flags = widget.dataset_list.item(index).flags()
+            self.assertTrue(flags & Qt.ItemFlag.ItemIsDragEnabled)
+            self.assertFalse(flags & Qt.ItemFlag.ItemIsDropEnabled)
+
+    def test_drop_event_path_moves_rows_and_rejects_external_sources(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(
+            (
+                *self.entries(),
+                DatasetCatalogEntry("c", "Third", _grid(scale=1.8)),
+            )
+        )
+        catalog = widget.dataset_list
+        catalog.clearSelection()
+        catalog.item(0).setSelected(True)
+        catalog.setCurrentItem(catalog.item(0))
+        order_changes: list[bool] = []
+        catalog.order_changed.connect(lambda: order_changes.append(True))
+
+        class FakeDropEvent:
+            def __init__(self, source):
+                self._source = source
+                self.action = None
+                self.accepted = False
+                self.ignored = False
+
+            def source(self):
+                return self._source
+
+            def setDropAction(self, action):
+                self.action = action
+
+            def accept(self):
+                self.accepted = True
+
+            def ignore(self):
+                self.ignored = True
+
+        event = FakeDropEvent(catalog)
+        with mock.patch.object(
+            catalog,
+            "_drop_insertion_row",
+            return_value=catalog.count(),
+        ) as insertion:
+            catalog.dropEvent(event)
+        insertion.assert_called_once_with(event)
+        self.assertEqual(widget.dataset_ids_in_order(), ("b", "c", "a"))
+        self.assertEqual(catalog.count(), 3)
+        self.assertEqual(
+            catalog.currentItem().data(ppt_workspace._CATALOG_ID_ROLE), "a"
+        )
+        self.assertEqual(event.action, Qt.DropAction.MoveAction)
+        self.assertTrue(event.accepted)
+        self.assertFalse(event.ignored)
+        self.assertEqual(order_changes, [True])
+
+        external = FakeDropEvent(object())
+        with mock.patch.object(catalog, "_drop_insertion_row") as insertion:
+            catalog.dropEvent(external)
+        insertion.assert_not_called()
+        self.assertTrue(external.ignored)
+        self.assertEqual(widget.dataset_ids_in_order(), ("b", "c", "a"))
+
     def test_seven_frequency_azimuth_preview_pages_six_then_one(self):
         widget = self.workspace()
         widget.set_dataset_catalog(self.entries())
@@ -242,6 +375,243 @@ class PptWorkspaceTests(unittest.TestCase):
         self.assertEqual(widget.current_slide_index, 1)
         self.assertTrue(widget.previous_slide_button.isEnabled())
         self.assertFalse(widget.next_slide_button.isEnabled())
+
+    def test_vv_and_hh_choice_builds_separate_plots_in_one_report(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        choices = [
+            widget.polarization_combo.itemData(index)
+            for index in range(widget.polarization_combo.count())
+        ]
+        self.assertEqual(choices, ["HH", "VV", "VV and HH"])
+        widget.polarization_combo.setCurrentIndex(
+            widget.polarization_combo.findData("VV and HH")
+        )
+        widget.select_frequencies(range(1, 8))
+
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        self.assertEqual(len(widget.preview_plan.slides), 4)
+        self.assertEqual(
+            [len(slide.plots) for slide in widget.preview_plan.slides],
+            [6, 1, 6, 1],
+        )
+        self.assertEqual(
+            [slide.title for slide in widget.preview_plan.slides],
+            [
+                "RCS Report — VV",
+                "RCS Report — VV",
+                "RCS Report — HH",
+                "RCS Report — HH",
+            ],
+        )
+        self.assertTrue(
+            all(
+                placement.plot.title.endswith("| VV")
+                for slide in widget.preview_plan.slides[:2]
+                for placement in slide.plots
+            )
+        )
+        self.assertTrue(
+            all(
+                placement.plot.title.endswith("| HH")
+                for slide in widget.preview_plan.slides[2:]
+                for placement in slide.plots
+            )
+        )
+
+        widget.set_plot_kind("frequency")
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        self.assertEqual(len(widget.preview_plan.slides), 2)
+        self.assertEqual(
+            [slide.plots[0].plot.title.rsplit("|", 1)[-1].strip()
+             for slide in widget.preview_plan.slides],
+            ["VV", "HH"],
+        )
+        self.assertEqual(
+            [slide.title for slide in widget.preview_plan.slides],
+            ["RCS Report — VV", "RCS Report — HH"],
+        )
+        self.assertTrue(
+            all(
+                slide.plots[0].plot.title not in slide.title
+                for slide in widget.preview_plan.slides
+            )
+        )
+
+    def test_frequency_azimuth_band_controls_build_percentile_trace(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.set_plot_kind("frequency")
+        self.assertFalse(widget.frequency_azimuth_mode_combo.isHidden())
+        self.assertFalse(widget.azimuth_combo.isHidden())
+        self.assertTrue(widget.azimuth_band_widget.isHidden())
+
+        widget.frequency_azimuth_mode_combo.setCurrentIndex(
+            widget.frequency_azimuth_mode_combo.findData("band")
+        )
+        widget.azimuth_band_min_spin.setValue(90.0)
+        widget.azimuth_band_max_spin.setValue(270.0)
+        widget.azimuth_percentile_spin.setValue(50.0)
+        self.assertTrue(widget.azimuth_combo.isHidden())
+        self.assertFalse(widget.azimuth_band_widget.isHidden())
+        self.assertEqual(widget.azimuth_band_unit_label.text(), "deg")
+
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        self.assertEqual(len(widget.preview_plan.slides), 1)
+        plot = widget.preview_plan.slides[0].plots[0].plot
+        self.assertIn("P50 across Azimuth [90, 270] deg", plot.title)
+        self.assertEqual(len(plot.series), 2)
+
+        # Reversed endpoints are an intentional wrapped band, not a validation
+        # error or an implicit endpoint swap.
+        widget.azimuth_band_min_spin.setValue(270.0)
+        widget.azimuth_band_max_spin.setValue(90.0)
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        self.assertIn("(wrap)", widget.preview_plan.slides[0].plots[0].plot.title)
+
+    def test_azimuth_band_controls_fit_sidebar_and_are_accessibly_labeled(self):
+        widget = self.workspace()
+        widget.resize(750, 700)
+        widget.show()
+        widget.set_dataset_catalog(self.entries())
+        widget.set_plot_kind("frequency")
+        widget.frequency_azimuth_mode_combo.setCurrentIndex(
+            widget.frequency_azimuth_mode_combo.findData("band")
+        )
+        QCoreApplication.processEvents()
+
+        self.assertLessEqual(
+            widget.azimuth_band_widget.minimumSizeHint().width(),
+            widget.controls_scroll.viewport().width(),
+        )
+        self.assertLessEqual(
+            max(
+                child.geometry().right()
+                for child in (
+                    widget.azimuth_band_min_spin,
+                    widget.azimuth_band_max_spin,
+                    widget.azimuth_percentile_spin,
+                    widget.azimuth_band_unit_label,
+                )
+            ),
+            widget.azimuth_band_widget.contentsRect().right(),
+        )
+        self.assertIs(
+            widget.azimuth_band_min_label.buddy(), widget.azimuth_band_min_spin
+        )
+        self.assertIs(
+            widget.azimuth_band_max_label.buddy(), widget.azimuth_band_max_spin
+        )
+        self.assertIs(
+            widget.azimuth_percentile_label.buddy(),
+            widget.azimuth_percentile_spin,
+        )
+        for control in (
+            widget.azimuth_band_min_spin,
+            widget.azimuth_band_max_spin,
+            widget.azimuth_percentile_spin,
+        ):
+            self.assertTrue(control.accessibleName())
+            self.assertTrue(control.accessibleDescription())
+        self.assertIn("sample-weighted", widget.azimuth_band_widget.toolTip())
+        self.assertIn("common stored angles", widget.azimuth_band_widget.toolTip())
+
+    def test_band_mode_requires_two_common_azimuth_samples(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.set_plot_kind("frequency")
+        band_index = widget.frequency_azimuth_mode_combo.findData("band")
+        widget.frequency_azimuth_mode_combo.setCurrentIndex(band_index)
+        self.assertEqual(widget.frequency_azimuth_mode_combo.currentData(), "band")
+
+        widget.set_dataset_catalog(
+            (
+                DatasetCatalogEntry(
+                    "single",
+                    "Single angle",
+                    _grid(azimuths=(15.0,)),
+                ),
+            )
+        )
+        self.assertFalse(widget._azimuth_band_available)
+        self.assertEqual(widget.frequency_azimuth_mode_combo.currentData(), "exact")
+        self.assertFalse(
+            widget.frequency_azimuth_mode_combo.model().item(band_index).isEnabled()
+        )
+        self.assertIn(
+            "at least two common azimuth samples",
+            widget.frequency_azimuth_mode_combo.toolTip().casefold(),
+        )
+        self.assertFalse(widget.azimuth_combo.isHidden())
+        self.assertTrue(widget.azimuth_band_widget.isHidden())
+
+        # Programmatic callers cannot bypass the disabled GUI item and obtain
+        # a vague lower-level min/max error.
+        widget.frequency_azimuth_mode_combo.setCurrentIndex(band_index)
+        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+            self.assertFalse(widget.build_preview())
+        render.assert_not_called()
+        self.assertIn("at least two common azimuth samples", widget.last_error)
+
+    def test_band_mode_counts_periodic_seam_alias_as_one_sample(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(
+            (
+                DatasetCatalogEntry(
+                    "seam",
+                    "Duplicate seam direction",
+                    _grid(azimuths=(0.0, 360.0)),
+                ),
+            )
+        )
+
+        band_index = widget.frequency_azimuth_mode_combo.findData("band")
+        self.assertFalse(widget._azimuth_band_available)
+        self.assertFalse(
+            widget.frequency_azimuth_mode_combo.model().item(band_index).isEnabled()
+        )
+        self.assertIn(
+            "at least two common azimuth samples",
+            widget.frequency_azimuth_mode_combo.toolTip().casefold(),
+        )
+
+    def test_radian_band_endpoints_keep_precision_and_native_step(self):
+        widget = self.workspace()
+        azimuths = (-math.pi, -math.pi / 3.0, 0.0, math.pi / 3.0, math.pi)
+        widget.set_dataset_catalog(
+            (
+                DatasetCatalogEntry(
+                    "rad",
+                    "Radians",
+                    _grid(azimuths=azimuths, angle_unit="rad"),
+                ),
+            )
+        )
+        self.assertEqual(widget.azimuth_band_unit_label.text(), "rad")
+        self.assertGreaterEqual(widget.azimuth_band_min_spin.decimals(), 10)
+        self.assertGreaterEqual(widget.azimuth_band_max_spin.decimals(), 10)
+        self.assertAlmostEqual(
+            widget.azimuth_band_min_spin.minimum(), -math.pi, places=9
+        )
+        self.assertAlmostEqual(
+            widget.azimuth_band_max_spin.maximum(), math.pi, places=9
+        )
+        self.assertAlmostEqual(
+            widget.azimuth_band_min_spin.singleStep(), math.pi / 3.0, places=9
+        )
+        widget.azimuth_band_min_spin.setValue(math.pi / 7.0)
+        self.assertAlmostEqual(
+            widget.azimuth_band_min_spin.value(), math.pi / 7.0, places=9
+        )
+        self.assertIn("(rad)", widget.azimuth_band_min_spin.accessibleName())
 
     def test_all_plots_receive_one_shared_or_explicit_fixed_rcs_scale(self):
         widget = self.workspace()
@@ -448,18 +818,43 @@ class PptWorkspaceTests(unittest.TestCase):
         widget.set_dataset_catalog(self.entries())
         self.assertFalse(widget.frequency_box.isHidden())
         self.assertTrue(widget.azimuth_combo.isHidden())
-        self.assertIn("3 columns × 2 rows", widget.layout_value_label.text())
+        self.assertIsNone(widget.findChild(QLabel, "pptFixedLayoutLabel"))
 
         widget.set_plot_kind("frequency")
         self.assertTrue(widget.frequency_box.isHidden())
+        self.assertFalse(widget.frequency_azimuth_mode_combo.isHidden())
         self.assertFalse(widget.azimuth_combo.isHidden())
-        self.assertIn("one full-width", widget.layout_value_label.text())
+        self.assertTrue(widget.azimuth_band_widget.isHidden())
+        visible_text = " ".join(
+            label.text().casefold() for label in widget.findChildren(QLabel)
+        )
+        self.assertNotIn("fixed layout:", visible_text)
         with mock.patch.object(widget.preview_canvas, "render_slide"):
             self.assertTrue(widget.build_preview())
         assert widget.preview_plan is not None
         self.assertEqual(len(widget.preview_plan.slides), 1)
         self.assertEqual(widget.preview_plan.slides[0].layout, "frequency_single")
         self.assertEqual(len(widget.preview_plan.slides[0].plots), 1)
+
+    def test_workspace_has_no_footer_control_and_plans_no_custom_footer(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        self.assertFalse(hasattr(widget, "footer_edit"))
+        form_labels = " ".join(
+            label.text().casefold() for label in widget.findChildren(QLabel)
+        )
+        self.assertNotIn("footer", form_labels)
+
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        self.assertTrue(all(slide.footer == "" for slide in widget.preview_plan.slides))
+
+        widget.set_plot_kind("frequency")
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        self.assertTrue(all(slide.footer == "" for slide in widget.preview_plan.slides))
 
     def test_async_export_uses_frozen_plan_and_exposes_busy_contract(self):
         started = threading.Event()

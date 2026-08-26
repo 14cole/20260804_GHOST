@@ -88,11 +88,9 @@ py -3 -m venv .venv
 .venv\Scripts\python.exe -m grim_cut_gui
 ```
 
-All Windows and macOS launchers prefer this one repository-root `.venv`, then
-an active `VIRTUAL_ENV`, then a system Python. This keeps the integrated and
-standalone windows on the same dependency set. On macOS, use
-`Launch_GRIM_GUI.command` (and run `chmod +x Launch_GRIM_GUI.command` once if a
-manual file copy did not preserve executable permission).
+All Windows launchers prefer this one repository-root `.venv`, then an active
+`VIRTUAL_ENV`, then a system Python. This keeps the integrated and standalone
+windows on the same dependency set.
 
 To export `.pptx` files on Windows, install the optional PowerPoint bridge and
 have desktop Microsoft PowerPoint available:
@@ -142,8 +140,6 @@ py Backend\ghost_gui.py
 cd ..\FREDDY
 py impedance_gui.py
 ```
-
-On macOS, each tool folder contains a matching standalone `.command` launcher.
 
 ## Primary workflows
 
@@ -218,18 +214,24 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
   and the PPT, Assembly, GHOST, FREDDY, and Runs workflows are not recorded.
 - Use **PPT** to check loaded datasets independently of the Plotting selection,
   choose rectangular/polar azimuth plots or a frequency sweep, and review the
-  actual 16:9 slide layout before export. Optional templates must be widescreen
+  actual 16:9 slide layout before export. **VV and HH** produces separate
+  co-polar plots in one report. Frequency traces can use an exact azimuth or a
+  finite-sample percentile across an inclusive, optionally seam-wrapped azimuth
+  band. The percentile is sample-weighted across common stored directions;
+  periodic endpoint aliases count once. Optional templates must be widescreen
   16:9 decks. GRIM's bundled temporary template includes representative seed
   slides and named azimuth/frequency custom layouts; export inherits the
   master/layout and removes the positioning-guide seeds. Only master/layout
   styling persists. Template master graphics appear only in the exported deck,
-  while GRIM still places report content at its documented fixed coordinates.
+  and a named layout's title placeholder keeps its master formatting; plot and
+  legend images remain at GRIM's documented fixed coordinates.
   Azimuth reports always use six fixed
   positions per slide (3 columns × 2 rows); frequency sweeps use one fixed
   full-slide plot. A master dataset legend can span the header beneath the
   aligned title box, with per-plot and no-legend alternatives. Optional fixed
   horizontal and vertical minimum/maximum/step controls apply the same axes to
-  every plot without resampling data. Fixed image rectangles prevent plots from
+  every plot without resampling data. Footer and page furniture come from the
+  slide master. Fixed image rectangles prevent plots from
   shifting when slides change or when reports come from different analysts. The
   first six common frequencies are selected initially; one report is capped at
   60 frequencies (10 azimuth slides) to keep the preview responsive.

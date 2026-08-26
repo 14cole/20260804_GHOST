@@ -52,8 +52,6 @@ def _native_extensions(system_name: 'str') -> 'tuple[str, ...]':
     key = str(system_name).strip().lower()
     if key == "windows":
         return (".dll",)
-    if key == "darwin":
-        return (".dylib", ".so")
     return (".so",)
 
 
@@ -95,9 +93,9 @@ _FALLBACK_NOTICE_SHOWN = False
 
 def _notice_numpy_fallback():
     """One-time stderr notice when the streaming build runs on the NumPy
-    sampler.  Results are bit-equivalent; assembly is ~2-8x slower.  Also
-    diagnoses the found-but-wrong-platform case (e.g. a Mac .so copied to a
-    Linux cluster), which the loader correctly refuses to load."""
+    sampler.  Results are bit-equivalent; assembly is ~2-8x slower.  It also
+    diagnoses a native binary copied from the wrong operating system, which
+    the loader correctly refuses to load."""
     global _FALLBACK_NOTICE_SHOWN
     if _FALLBACK_NOTICE_SHOWN:
         return
@@ -108,7 +106,7 @@ def _notice_numpy_fallback():
     output_extension = _native_extensions(system_name)[0]
     others = [f for f in sorted(os.listdir(here))
               if f.startswith("bor_stream_kernel.")
-              and os.path.splitext(f)[1].lower() in {".so", ".dylib", ".dll"}
+              and os.path.splitext(f)[1].lower() in {".so", ".dll"}
               and tag not in f]
     hint = (f" (found {', '.join(others)} -- built for a DIFFERENT platform, "
             "so it was correctly skipped)" if others else "")

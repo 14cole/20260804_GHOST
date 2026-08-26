@@ -29,7 +29,7 @@ def _path_identity(path: Path) -> str:
 
     # normcase folds case on Windows and preserves it on POSIX. An additional
     # casefold would incorrectly merge distinct A.csv/a.csv files on a
-    # case-sensitive macOS or Linux filesystem.
+    # case-sensitive Linux filesystem.
     return os.path.normcase(str(path.resolve(strict=False)))
 
 

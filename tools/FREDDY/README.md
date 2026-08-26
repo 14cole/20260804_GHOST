@@ -32,12 +32,10 @@ py -3 -m pip install -r requirements.txt
 py -3 impedance_gui.py
 ```
 
-On macOS, use `Launch_FREDDY_GUI.command`, or run the same two commands with
-`python3` instead of `py -3`. `FREDDY_ROOT_PATH` is an optional GRIM
-development override that can point the embedded tab at another FREDDY root.
-The Windows and macOS launchers first use the repository-root `.venv`, then an
-active `VIRTUAL_ENV`, then a system Python; FREDDY does not require a separate
-environment under `tools/FREDDY`.
+`FREDDY_ROOT_PATH` is an optional GRIM development override that can point the
+embedded tab at another FREDDY root. The Windows launcher first uses the
+repository-root `.venv`, then an active `VIRTUAL_ENV`, then a system Python;
+FREDDY does not require a separate environment under `tools/FREDDY`.
 
 FREDDY output is CSV, not `.grim`: save a three-column IBC impedance file or a
 five-column material file for GHOST. In integrated GRIM, **Export and attach to

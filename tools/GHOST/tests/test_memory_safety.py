@@ -35,13 +35,11 @@ class AvailableMemoryDetectionTests(unittest.TestCase):
         with (
             mock.patch.object(rcs, "_psutil_available_bytes", return_value=None),
             mock.patch.object(rcs, "_windows_available_bytes", return_value=7 * GIB),
-            mock.patch.object(rcs, "_macos_available_bytes") as macos,
             mock.patch.object(rcs, "_posix_available_bytes") as posix,
             mock.patch.object(rcs, "_slurm_available_bytes", return_value=None),
             mock.patch.object(rcs, "_cgroup_available_bytes", return_value=None),
         ):
             self.assertEqual(rcs._detect_available_gb(), 7.0)
-        macos.assert_not_called()
         posix.assert_not_called()
 
     def test_windows_global_memory_status_fallback_reports_available_physical(self):
@@ -57,20 +55,6 @@ class AvailableMemoryDetectionTests(unittest.TestCase):
             mock.patch.object(rcs.ctypes, "windll", fake_windll, create=True),
         ):
             self.assertEqual(rcs._windows_available_bytes(), 5 * GIB)
-
-    def test_macos_vm_stat_fallback_is_conservative(self):
-        output = (
-            "Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
-            "Pages free:                              1000.\n"
-            "Pages inactive:                          2000.\n"
-            "Pages speculative:                       9000.\n"
-        )
-        completed = SimpleNamespace(stdout=output)
-        with (
-            mock.patch.object(rcs.sys, "platform", "darwin"),
-            mock.patch.object(rcs.subprocess, "run", return_value=completed),
-        ):
-            self.assertEqual(rcs._macos_available_bytes(), 3000 * 4096)
 
     def test_cgroup_limit_without_readable_usage_fails_closed(self):
         with mock.patch.object(

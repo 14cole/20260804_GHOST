@@ -40,7 +40,7 @@ ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 # These sentinels make an incomplete manual copy fail before any release
 # artifact is created.  They cover the host, assets, embedded tools, and the
-# standalone launch paths on both supported desktop platforms.
+# standalone Windows launch paths.
 REQUIRED_FILES = (
     "pyproject.toml",
     "README.md",
@@ -48,7 +48,6 @@ REQUIRED_FILES = (
     "clean_utf8.py",
     "Build_GRIM_Release.bat",
     "Launch_GRIM_GUI.bat",
-    "Launch_GRIM_GUI.command",
     "Launch_GRIM_Diagnostics.bat",
     "Launch_PowerPoint_Image_Imprinter.bat",
     "GRIM_Revised_2/GRIM.png",
@@ -59,7 +58,6 @@ REQUIRED_FILES = (
         for relative in GRIM_STARTUP_FILES
     ),
     "tools/GHOST/Launch_GHOST_GUI.bat",
-    "tools/GHOST/Launch_GHOST_GUI.command",
     *(
         f"tools/GHOST/Backend/{Path(relative).as_posix()}"
         for relative in GHOST_SENTINELS
@@ -67,7 +65,6 @@ REQUIRED_FILES = (
     "tools/GHOST/point_features_template.csv",
     "tools/GHOST/line_features_template.csv",
     "tools/FREDDY/Launch_FREDDY_GUI.bat",
-    "tools/FREDDY/Launch_FREDDY_GUI.command",
     "tools/FREDDY/impedance_gui.py",
     *(
         f"tools/FREDDY/{Path(relative).as_posix()}"
@@ -89,8 +86,6 @@ EXCLUDED_DIRECTORY_NAMES = frozenset(
         ".hypothesis",
         ".cache",
         ".agents",
-        ".codex",
-        ".codex-tmp",
         ".idea",
         ".mypy_cache",
         ".ruff_cache",
@@ -253,7 +248,11 @@ def _excluded_file_name(name: str) -> bool:
 
 def _excluded_directory_name(name: str) -> bool:
     lowered = name.casefold()
-    return lowered in EXCLUDED_DIRECTORY_NAMES or lowered.endswith(".egg-info")
+    return (
+        lowered.startswith(".")
+        or lowered in EXCLUDED_DIRECTORY_NAMES
+        or lowered.endswith(".egg-info")
+    )
 
 
 def collect_payload_files(source_root: Path, output_root: Path) -> tuple[Path, ...]:
@@ -410,7 +409,7 @@ def _write_text_file(path: Path, text: str) -> None:
 
 
 def _zip_member_mode(path: Path) -> int:
-    if path.suffix.casefold() in {".command", ".sh"}:
+    if path.suffix.casefold() == ".sh":
         return 0o755
     return 0o644
 

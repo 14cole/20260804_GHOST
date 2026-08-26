@@ -158,7 +158,9 @@ so report overlays can be reordered or changed without changing an active plot
 or dataset-operation selection. **Use main selection** provides an explicit
 one-click handoff when that is desired.
 
-Choose a common polarization and elevation, then one of these fixed layouts:
+Choose a common polarization and elevation, then one of these fixed layouts.
+When both co-polar channels are common, **VV and HH** creates separate VV and
+HH plots in the same report instead of requiring a second export:
 
 - **Azimuth — rectangular** or **Azimuth — polar**: one plot for each checked
   frequency, placed left-to-right in a fixed 3-column × 2-row grid. The seventh
@@ -166,8 +168,11 @@ Choose a common polarization and elevation, then one of these fixed layouts:
   stay empty instead of recentering the plots. GRIM initially checks the first
   six common frequencies and limits one report to 60 frequencies (10 slides),
   so very dense solver sweeps do not make the interface appear frozen.
-- **Frequency sweep**: one full-width plot per slide at one exact common
-  azimuth/elevation/polarization cut.
+- **Frequency sweep**: one full-width plot per slide at one elevation and
+  polarization. The trace can use one exact common azimuth cut or a selected
+  percentile across an inclusive azimuth band. A reversed Min/Max pair crosses
+  the periodic seam. Band statistics use the same common stored azimuth samples
+  for every overlay, operate in displayed dB units, and do not interpolate.
 
 Selected datasets are overlaid within each plot. GRIM uses exact common fixed
 axes and performs no hidden interpolation or extrapolation. Report magnitude
@@ -179,6 +184,13 @@ settings are retained separately for azimuth degrees and frequency GHz, and
 tick settings change only the view—not the dataset samples. Dataset legends
 can appear once across the slide header, inside every plot, or not at all; the
 master header legend is the default and follows the dataset order above.
+Dataset rows can be dragged only to insertion positions; reordering preserves
+every row, check state, and stable dataset identity. Slide footer/page furniture
+is left to the selected PowerPoint master rather than duplicated by GRIM.
+Azimuth-band percentiles are sample-weighted across the finite common stored
+angles; the plot title reports the common sample count. Periodic endpoint
+aliases such as 0°/360° are counted once, and limits outside the dataset's
+stored angular convention are rejected instead of silently reinterpreted.
 
 The report header matches the team slide standard: the title box is 11.82 in ×
 0.36 in at X=0.76 in, Y=0.42 in. Plot rows begin at X=0.47 in, Y=1.09 in. The
@@ -202,9 +214,11 @@ The bundled template's two example slides make alignment easy to inspect and
 prototype on a PowerPoint-equipped machine. They are positioning guides: GRIM
 removes those seed slides during export after the report slides have inherited
 their named layouts. Only styling or graphics placed on the master/layout are
-inherited. GRIM's title, legend, and plot rectangles still use the fixed
-coordinates documented above. Report any desired coordinate changes after
-tuning the examples.
+inherited. When a named custom layout supplies a title placeholder, GRIM fills
+that placeholder without replacing its master typography or placement;
+layouts without one use the documented GRIM title rectangle. Legend and plot
+rectangles retain their fixed coordinates. Report any desired coordinate
+changes after tuning the examples.
 
 Export writes to a staging file and replaces the requested output only after
 PowerPoint succeeds.
@@ -327,8 +341,10 @@ extension registry.
 named CREATE-RF SENTRi entry point. It strictly recognizes the two schemas in
 the team's `READ_SENTRi.m`: compact MHz `pp/tt/pt/tp` columns and descriptive
 Hz `PhiScat/ThetaScat` columns. SENTRi is not treated as CST. Its mapping is
-`elevation=Theta`, and GRIM stores the reported coherent phase with its
-original sign. The four channels map to `VV=tt`, `HV=pt`,
+native `elevation=Theta`, and GRIM stores the reported coherent phase with its
+original sign. Closed 0°/360° sweeps are deduplicated at canonical azimuth 0°,
+with the source 360° record taking precedence regardless of row order. The four
+channels map to `VV=tt`, `HV=pt`,
 `VH=tp`, and `HH=pp`. Generic unitless theta/phi tables are not guessed to be
 SENTRi. The normal two-row export—parameter names followed by an explicit
 `Hz`/`MHz`, `deg`, `dBsm`, `deg` units row—is validated and the units row is
@@ -337,6 +353,17 @@ A recognizable vendor-family header commits dispatch to the SENTRi
 reader, while all 11 required columns must be present for the file to load;
 damaged/partial SENTRi files therefore fail instead of falling through to a
 looser numeric-text reader.
+
+Import does not silently change SENTRi geometry. Select the loaded dataset and
+use **Geometry & Units → SENTRi El→GRIM** when a conventional signed elevation
+axis is needed. The exact mapping is `GRIM elevation = 90° - SENTRi Theta`, so
+waterline is 0°, top-down is +90°, and bottom-up is -90°. GRIM stable-sorts the
+new elevation axis and applies the same permutation to power, phase, and aligned
+sample metadata; it performs no interpolation and does not change phase.
+The converted dataset is stamped with the Production Assembly radar-coordinate
+contract so it can be used directly as a body for line and point feature
+placement. Accepted endpoint roundoff is normalized before grid construction,
+preventing near-zero/360° seam bins or elevations just outside ±90°.
 
 `RcsGrid.read_CST()` (also exposed as `grim_headless.read_CST()`) is the named
 CST entry point. It recognizes both the wide theta/phi export and row-oriented

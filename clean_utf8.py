@@ -41,7 +41,6 @@ TEXT_SUFFIXES = frozenset(
         ".cc",
         ".cfg",
         ".cmake",
-        ".command",
         ".conf",
         ".cpp",
         ".cst_data",
@@ -104,7 +103,6 @@ SKIP_DIRECTORY_NAMES = frozenset(
     {
         ".agents",
         ".cache",
-        ".codex",
         ".git",
         ".hg",
         ".hypothesis",
@@ -555,7 +553,8 @@ def _walk_candidates(
                 issues.append(ScanIssue(relative, f"cannot resolve directory: {exc}"))
                 continue
             if (
-                lowered_name in SKIP_DIRECTORY_NAMES
+                lowered_name.startswith(".")
+                or lowered_name in SKIP_DIRECTORY_NAMES
                 or lowered_name.endswith(".egg-info")
                 or _is_link_like(child)
                 or not _is_relative_to(resolved_child, root)

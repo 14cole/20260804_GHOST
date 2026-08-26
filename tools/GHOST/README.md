@@ -16,9 +16,8 @@ Run commands from this folder:
 py Backend\ghost_gui.py
 ```
 
-On Windows or macOS, `Launch_GHOST_GUI.bat` and
-`Launch_GHOST_GUI.command` first change to this folder and then open the same
-workspace.
+On Windows, `Launch_GHOST_GUI.bat` first changes to this folder and then opens
+the same workspace.
 
 ## Local and HPC drivers
 

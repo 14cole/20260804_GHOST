@@ -3818,6 +3818,63 @@ class DatasetOpsMixin:
             msg += f" Skipped: {', '.join(skipped)}"
         self.status.showMessage(msg)
 
+    def _convert_sentri_elevation_selected(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message=(
+                "Select one or more native SENTRi datasets to convert to "
+                "GRIM elevation."
+            ),
+        )
+        if datasets is None:
+            return
+
+        produced = 0
+        skipped: list[str] = []
+        for name, dataset in datasets:
+            try:
+                converted = dataset.convert_sentri_elevation_to_grim()
+            except Exception as exc:
+                skipped.append(f"{name} ({exc})")
+                continue
+
+            history = (
+                "SENTRi elevation to GRIM: elevation=90-theta; "
+                f"no interpolation or phase change: {name}"
+            )
+            output_name = f"{name} [SENTRi El→GRIM]"
+            output_id = self._add_dataset_row(
+                converted,
+                output_name,
+                history,
+                file_name="",
+            )
+            source_ref = self._python_reference_for_dataset(dataset)
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and source_ref is not None:
+                recorder.record_method(
+                    self._python_output_reference(output_id, output_name),
+                    source_ref,
+                    "convert_sentri_elevation_to_grim",
+                    comment=(
+                        f"Convert native SENTRi theta to GRIM signed "
+                        f"elevation for {name}"
+                    ),
+                )
+            produced += 1
+
+        if produced == 0:
+            msg = "SENTRi El→GRIM created 0 datasets."
+            if skipped:
+                msg += f" Skipped: {', '.join(skipped)}"
+            self.status.showMessage(msg)
+            return
+
+        msg = f"SENTRi El→GRIM created {produced} dataset(s)."
+        if skipped:
+            msg += f" Skipped: {', '.join(skipped)}"
+        self.status.showMessage(msg)
+
     def _elevation_to_azimuth_360_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,

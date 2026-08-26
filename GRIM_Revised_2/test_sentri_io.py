@@ -202,6 +202,137 @@ class SentriReaderTest(unittest.TestCase):
         np.testing.assert_allclose(zero_grid.azimuths, [-180.0])
         np.testing.assert_allclose(zero_grid.rcs_power, 0.0)
 
+    def test_zero_360_seam_always_uses_the_360_degree_record(self) -> None:
+        row_zero = "1000,90,0,1,21,2,22,3,23,4,24"
+        row_360 = "1000,90,360,11,31,12,32,13,33,14,34"
+
+        for rows in ((row_zero, row_360), (row_360, row_zero)):
+            with self.subTest(order=rows):
+                path = self._write(
+                    ".csv", COMPACT_HEADER + "\n" + "\n".join(rows) + "\n"
+                )
+                grid = RcsGrid.read_SENTRi(path)
+
+                np.testing.assert_allclose(grid.azimuths, [0.0])
+                np.testing.assert_allclose(
+                    grid.rcs_power[0, 0, 0, :],
+                    10.0 ** (np.asarray([12.0, 13.0, 14.0, 11.0]) / 10.0),
+                )
+                np.testing.assert_allclose(
+                    grid.rcs_phase[0, 0, 0, :],
+                    np.deg2rad([32.0, 33.0, 34.0, 31.0]),
+                )
+                self.assertTrue(
+                    grid.extra["sentri_zero_360_precedence_used"]
+                )
+                self.assertIn(
+                    "phi=360 supplies canonical azimuth 0",
+                    grid.extra["sentri_zero_360_seam_policy"],
+                )
+
+    def test_sentri_endpoint_roundoff_is_normalized_before_seam_precedence(self):
+        row_zero = "1000,-0.0000000005,0,1,21,2,22,3,23,4,24"
+        row_360 = "1000,0,360.0000000005,11,31,12,32,13,33,14,34"
+        path = self._write(
+            ".csv", COMPACT_HEADER + "\n" + row_zero + "\n" + row_360 + "\n"
+        )
+
+        grid = RcsGrid.read_SENTRi(path)
+
+        np.testing.assert_array_equal(grid.azimuths, [0.0])
+        np.testing.assert_array_equal(grid.elevations, [0.0])
+        np.testing.assert_allclose(
+            grid.rcs_power[0, 0, 0, :],
+            10.0 ** (np.asarray([12.0, 13.0, 14.0, 11.0]) / 10.0),
+        )
+        self.assertTrue(grid.extra["sentri_zero_360_precedence_used"])
+        np.testing.assert_array_equal(
+            grid.convert_sentri_elevation_to_grim().elevations,
+            [90.0],
+        )
+
+        fuzzy_signed_seam = self._write(
+            ".csv",
+            COMPACT_HEADER
+            + "\n1000,90,-180,0,0,0,0,0,0,0,0"
+            + "\n1000,90,180.0000000005,1,0,0,0,0,0,0,0\n",
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting duplicate SENTRi"):
+            RcsGrid.read_SENTRi(fuzzy_signed_seam)
+
+    def test_explicit_sentri_elevation_conversion_is_sorted_and_lossless(self) -> None:
+        rows = (
+            "1000,0,10,1,11,2,12,3,13,4,14",
+            "1000,90,10,5,15,6,16,7,17,8,18",
+            "1000,180,10,9,19,10,20,11,21,12,22",
+        )
+        path = self._write(
+            ".csv", COMPACT_HEADER + "\n" + "\n".join(rows) + "\n"
+        )
+        grid = RcsGrid.read_SENTRi(path)
+        aligned = np.arange(grid.rcs_power.size, dtype=float).reshape(
+            grid.rcs_power.shape
+        )
+        grid.extra["aligned"] = aligned
+        grid.extra["solver_metadata_json"] = "stale"
+
+        converted = grid.convert_sentri_elevation_to_grim()
+
+        np.testing.assert_allclose(grid.elevations, [0.0, 90.0, 180.0])
+        np.testing.assert_allclose(converted.elevations, [-90.0, 0.0, 90.0])
+        np.testing.assert_allclose(
+            converted.rcs_power,
+            np.take(grid.rcs_power, [2, 1, 0], axis=1),
+        )
+        np.testing.assert_allclose(
+            converted.rcs_phase,
+            np.take(grid.rcs_phase, [2, 1, 0], axis=1),
+        )
+        np.testing.assert_array_equal(
+            converted.extra["aligned"], np.take(aligned, [2, 1, 0], axis=1)
+        )
+        self.assertNotIn("solver_metadata_json", converted.extra)
+        self.assertEqual(
+            converted.units["elevation_coordinate_convention"],
+            "grim_elevation_waterline_zero_top_positive",
+        )
+        self.assertEqual(
+            converted.extra["assembly_angular_coordinate_contract"],
+            "ghost.radar-azimuth-elevation.coming-from.deg.v1",
+        )
+        self.assertIn("elevation=90-theta", converted.history)
+        self.assertIn("no interpolation or phase change", converted.history)
+        with self.assertRaisesRegex(ValueError, "already uses GRIM"):
+            converted.convert_sentri_elevation_to_grim()
+
+        generic = RcsGrid(
+            [0.0],
+            [0.0],
+            [1.0],
+            ["VV"],
+            rcs=np.ones((1, 1, 1, 1), dtype=np.complex128),
+            units={"elevation": "deg", "frequency": "GHz"},
+        )
+        with self.assertRaisesRegex(ValueError, "not marked as native SENTRi"):
+            generic.convert_sentri_elevation_to_grim()
+
+        nearly_duplicate = RcsGrid(
+            [0.0],
+            [90.0, 90.0 + 5.0e-10],
+            [1.0],
+            ["VV"],
+            rcs=np.ones((1, 2, 1, 1), dtype=np.complex128),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "elevation_coordinate_convention": "sentri_theta_top_zero",
+            },
+            extra={"source_format": "SENTRi test table"},
+        )
+        with self.assertRaisesRegex(ValueError, "near-duplicate GRIM elevation"):
+            nearly_duplicate.convert_sentri_elevation_to_grim()
+
     def test_incomplete_or_generic_theta_phi_table_is_not_sentri(self) -> None:
         path = self._write(
             ".csv",

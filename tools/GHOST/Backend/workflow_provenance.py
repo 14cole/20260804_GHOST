@@ -31,7 +31,6 @@ _BACKEND_SOURCE_SUFFIXES = (
     ".f",
     ".f90",
     ".so",
-    ".dylib",
     ".dll",
 )
 

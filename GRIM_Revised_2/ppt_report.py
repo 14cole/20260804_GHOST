@@ -432,29 +432,100 @@ def _normalized_slide_titles(
     return values
 
 
+def _normalized_polarization_labels(
+    labels: str | Sequence[str] | None,
+    count: int,
+) -> tuple[str, ...] | None:
+    """Return one nonblank polarization label per plot when requested."""
+
+    if labels is None:
+        return None
+    values = (str(labels).strip(),) * count if isinstance(labels, str) else tuple(
+        str(value).strip() for value in labels
+    )
+    if len(values) != count:
+        raise ValueError(
+            f"Expected {count} polarization labels but received {len(values)}."
+        )
+    if any(not value for value in values):
+        raise ValueError("PowerPoint polarization labels must be nonblank.")
+    return values
+
+
+def _section_slide_title(base_title: str, polarization: str | None) -> str:
+    """Keep the master title concise; cut details remain in the plot title."""
+
+    base = str(base_title).strip()
+    if not polarization:
+        return base
+    suffix = f" — {polarization}"
+    if base.casefold().endswith(suffix.casefold()):
+        return base
+    return f"{base}{suffix}" if base else polarization
+
+
 def plan_azimuth_slides(
     plots: Sequence[PlotSpec],
     *,
     slide_titles: str | Sequence[str] = "Azimuth Sweeps",
     footer: str = "",
     master_legend: bool = False,
+    polarization_labels: str | Sequence[str] | None = None,
 ) -> PresentationPlan:
-    """Chunk azimuth plots into deterministic 3x2, row-major slides."""
+    """Chunk azimuth plots into deterministic 3x2, row-major slides.
+
+    When ``polarization_labels`` supplies one label per plot, each polarization
+    is paginated independently in first-seen order.  A partially filled page
+    therefore keeps its blank slots instead of being filled by another
+    polarization.  Scalar slide titles receive a concise polarization suffix;
+    explicit title sequences remain exact.
+    """
 
     plot_values = tuple(plots)
     if not plot_values:
         raise ValueError("Select at least one azimuth plot.")
     if any(plot.kind not in ("azimuth_rect", "azimuth_polar") for plot in plot_values):
         raise ValueError("Azimuth slides can contain only rectangular or polar azimuth plots.")
+    labels = _normalized_polarization_labels(
+        polarization_labels,
+        len(plot_values),
+    )
     legend_entries = _master_legend_entries(plot_values) if master_legend else ()
     if legend_entries:
         plot_values = tuple(replace(plot, show_legend=False) for plot in plot_values)
     geometry = azimuth_3x2_geometry()
-    slide_count = math.ceil(len(plot_values) / 6)
-    titles = _normalized_slide_titles(slide_titles, slide_count)
+
+    if labels is None:
+        sections: tuple[tuple[str | None, tuple[PlotSpec, ...]], ...] = (
+            (None, plot_values),
+        )
+    else:
+        section_order = tuple(dict.fromkeys(labels))
+        sections = tuple(
+            (
+                label,
+                tuple(
+                    plot
+                    for plot, plot_label in zip(plot_values, labels)
+                    if plot_label == label
+                ),
+            )
+            for label in section_order
+        )
+
+    pages = tuple(
+        (label, section_plots[offset : offset + 6])
+        for label, section_plots in sections
+        for offset in range(0, len(section_plots), 6)
+    )
+    if isinstance(slide_titles, str):
+        titles = tuple(
+            _section_slide_title(slide_titles, label) for label, _chunk in pages
+        )
+    else:
+        titles = _normalized_slide_titles(slide_titles, len(pages))
     slides: list[SlidePlan] = []
-    for slide_index in range(slide_count):
-        chunk = plot_values[slide_index * 6 : (slide_index + 1) * 6]
+    for slide_index, (_label, chunk) in enumerate(pages):
         placements = tuple(
             PlotPlacement(
                 plot,
@@ -483,22 +554,39 @@ def plan_frequency_slides(
     slide_titles: str | Sequence[str] | None = None,
     footer: str = "",
     master_legend: bool = False,
+    polarization_labels: str | Sequence[str] | None = None,
 ) -> PresentationPlan:
-    """Place each frequency-sweep plot on its own full-size slide."""
+    """Place each frequency-sweep plot on its own full-size slide.
+
+    When polarization labels accompany a scalar deck title, the slide title is
+    only ``deck title — polarization``.  The complete cut description remains
+    visible as the plot title, avoiding overflow in the fixed one-line master
+    title frame.
+    """
 
     plot_values = tuple(plots)
     if not plot_values:
         raise ValueError("Select at least one frequency-sweep plot.")
     if any(plot.kind != "frequency" for plot in plot_values):
         raise ValueError("Frequency-sweep slides can contain only frequency plots.")
+    labels = _normalized_polarization_labels(
+        polarization_labels,
+        len(plot_values),
+    )
     legend_entries = _master_legend_entries(plot_values) if master_legend else ()
     if legend_entries:
         plot_values = tuple(replace(plot, show_legend=False) for plot in plot_values)
-    titles = (
-        tuple(plot.title for plot in plot_values)
-        if slide_titles is None
-        else _normalized_slide_titles(slide_titles, len(plot_values))
-    )
+    if labels is not None and (slide_titles is None or isinstance(slide_titles, str)):
+        base_title = "Frequency Sweeps" if slide_titles is None else slide_titles
+        titles = tuple(
+            _section_slide_title(base_title, label) for label in labels
+        )
+    else:
+        titles = (
+            tuple(plot.title for plot in plot_values)
+            if slide_titles is None
+            else _normalized_slide_titles(slide_titles, len(plot_values))
+        )
     geometry = frequency_single_geometry()
     slides = tuple(
         SlidePlan(
@@ -623,7 +711,7 @@ def render_master_legend_png(
         dpi=dpi,
         facecolor="none",
     )
-    FigureCanvasAgg(figure)
+    canvas = FigureCanvasAgg(figure)
     handles = [
         Line2D(
             (),
@@ -644,7 +732,7 @@ def render_master_legend_png(
         font_size = 7.5
     if len(values) > 9 or total_characters > 140:
         font_size = 6.5
-    figure.legend(
+    legend_artist = figure.legend(
         handles=handles,
         labels=[entry.label for entry in values],
         loc="center",
@@ -658,6 +746,18 @@ def render_master_legend_png(
         prop={"family": style.font_family, "size": font_size},
         labelcolor=style.text,
     )
+    canvas.draw()
+    legend_bounds = legend_artist.get_window_extent(canvas.get_renderer())
+    figure_bounds = figure.bbox
+    if (
+        legend_bounds.width > figure_bounds.width * 0.98
+        or legend_bounds.height > figure_bounds.height * 0.98
+    ):
+        figure.clear()
+        raise ValueError(
+            "The master legend does not fit in the slide header. Shorten "
+            "dataset names, select fewer overlays, or choose per-plot/no legend."
+        )
     figure.savefig(
         destination,
         format="png",
@@ -1134,6 +1234,44 @@ class PowerPointComBridge:
         text_range.ParagraphFormat.Alignment = alignment
         return shape
 
+    @classmethod
+    def _add_or_fill_title(
+        cls,
+        slide: Any,
+        box: Rect,
+        text: str,
+        *,
+        use_layout_placeholder: bool,
+        size: float,
+        color: int,
+    ) -> Any:
+        """Fill a named layout's title placeholder without restyling it.
+
+        PowerPoint exposes the inherited title through ``Shapes.Title``.  A
+        text-only assignment preserves the layout/master font, color,
+        alignment, margins, and position.  Layouts without a title placeholder
+        retain GRIM's deterministic fallback textbox geometry.
+        """
+
+        if use_layout_placeholder:
+            try:
+                title_shape = slide.Shapes.Title
+                title_shape.TextFrame.TextRange.Text = str(text)
+                return title_shape
+            except Exception:
+                # Some custom layouts intentionally omit a title placeholder;
+                # late-bound COM raises when Shapes.Title is unavailable.
+                pass
+        return cls._add_text(
+            slide,
+            box,
+            text,
+            size=size,
+            bold=True,
+            alignment=PP_ALIGN_LEFT,
+            color=color,
+        )
+
     def _populate_presentation(
         self,
         presentation: Any,
@@ -1169,13 +1307,12 @@ class PowerPointComBridge:
                     int(presentation.Slides.Count) + 1,
                     custom_layout,
                 )
-            self._add_text(
+            self._add_or_fill_title(
                 slide,
                 geometry.title,
                 slide_plan.title,
+                use_layout_placeholder=custom_layout is not None,
                 size=SLIDE_TITLE_FONT_SIZE_POINTS * min(x_scale, y_scale),
-                bold=True,
-                alignment=PP_ALIGN_LEFT,
                 color=_office_rgb(23, 32, 51),
             )
             for placement_index, placement in enumerate(slide_plan.plots):

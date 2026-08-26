@@ -23,7 +23,6 @@ import ctypes
 import ctypes.util
 import math
 import os
-import subprocess
 import sys
 import threading
 from dataclasses import dataclass
@@ -5672,38 +5671,6 @@ def _windows_available_bytes() -> 'Optional[int]':
     return int(status.ullAvailPhys)
 
 
-def _macos_available_bytes() -> 'Optional[int]':
-    """Conservative macOS ``vm_stat`` fallback when psutil is unavailable."""
-
-    if sys.platform != "darwin":
-        return None
-    try:
-        completed = subprocess.run(
-            ["/usr/bin/vm_stat"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-        lines = completed.stdout.splitlines()
-        page_size = int(
-            lines[0].split("page size of", 1)[1].split("bytes", 1)[0].strip()
-        )
-        pages = {}
-        for line in lines[1:]:
-            if ":" not in line:
-                continue
-            key, raw_value = line.split(":", 1)
-            pages[key.strip()] = int(raw_value.strip().rstrip("."))
-        # Free and inactive pages are the two reusable categories shared by
-        # both older and current vm_stat output.  Omitting less portable
-        # purgeable/speculative categories intentionally underestimates.
-        count = pages.get("Pages free", 0) + pages.get("Pages inactive", 0)
-        return max(0, count * page_size)
-    except (OSError, subprocess.SubprocessError, IndexError, ValueError):
-        return None
-
-
 def _posix_available_bytes() -> 'Optional[int]':
     """Linux/proc and POSIX sysconf availability fallbacks."""
 
@@ -5811,7 +5778,7 @@ def _cgroup_available_bytes() -> 'Optional[int]':
 def _detect_available_gb() -> 'float':
     """Memory this process may safely allocate now, in GiB.
 
-    ``psutil`` is preferred on desktops.  Native Windows/macOS/POSIX
+    ``psutil`` is preferred on desktops.  Native Windows/POSIX
     fallbacks keep the GUI safe without the optional dependency.  Scheduler
     and cgroup headroom are additional bounds, so the tightest known limit
     wins instead of a machine-total or historical fixed allowance.
@@ -5822,8 +5789,6 @@ def _detect_available_gb() -> 'float':
         host_available = _windows_available_bytes()
     if host_available is None:
         host_available = _posix_available_bytes()
-    if host_available is None:
-        host_available = _macos_available_bytes()
 
     bounds = []
     if host_available is not None:

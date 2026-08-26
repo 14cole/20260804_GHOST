@@ -61,9 +61,9 @@ class ReleaseBuilderTests(unittest.TestCase):
         (self.source / ".venv" / "Lib" / "dependency.py").write_text(
             "ignored", encoding="utf-8"
         )
-        codex_scratch = self.source / ".codex-tmp" / "node_modules"
-        codex_scratch.mkdir(parents=True)
-        (codex_scratch / "external-runtime.js").write_text(
+        hidden_scratch = self.source / ".workspace-scratch" / "node_modules"
+        hidden_scratch.mkdir(parents=True)
+        (hidden_scratch / "external-runtime.js").write_text(
             "ignored", encoding="utf-8"
         )
         cache = self.source / "GRIM_Revised_2" / "__pycache__"
@@ -89,7 +89,7 @@ class ReleaseBuilderTests(unittest.TestCase):
         excluded_fragments = (
             "/.git/",
             "/.venv/",
-            "/.codex-tmp/",
+            "/.workspace-scratch/",
             "/__pycache__/",
             "/.pytest_cache/",
         )

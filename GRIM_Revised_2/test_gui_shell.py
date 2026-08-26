@@ -415,6 +415,52 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertTrue(params["convention_attested"])
         dialog.deleteLater()
 
+    def test_sentri_elevation_button_is_explicit_and_converts_selected_data(self) -> None:
+        self.assertEqual(self.window.btn_sentri_elevation.text(), "SENTRi El→GRIM")
+        tooltip = self.window.btn_sentri_elevation.toolTip()
+        self.assertIn("elevation = 90° - Theta", tooltip)
+        self.assertIn("no interpolation or phase change", tooltip)
+
+        power = np.asarray([1.0, 2.0, 3.0]).reshape(1, 3, 1, 1)
+        phase = np.asarray([0.1, 0.2, 0.3]).reshape(1, 3, 1, 1)
+        source = RcsGrid(
+            [0.0],
+            [0.0, 90.0, 180.0],
+            [10.0],
+            ["VV"],
+            rcs_power=power,
+            rcs_phase=phase,
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "elevation_coordinate_convention": "sentri_theta_top_zero",
+            },
+            extra={"source_format": "SENTRi compact MHz RCS table"},
+        )
+        self.window._add_dataset_row(source, "Native SENTRi", "", "sentri.csv")
+        self.window.table.selectRow(0)
+        self.window.btn_sentri_elevation.click()
+        self.app.processEvents()
+
+        self.assertEqual(self.window.table.rowCount(), 2)
+        self.assertEqual(
+            self.window.table.item(1, 0).text(),
+            "Native SENTRi [SENTRi El→GRIM]",
+        )
+        converted = self.window.table.item(1, 0).data(Qt.UserRole)
+        np.testing.assert_allclose(converted.elevations, [-90.0, 0.0, 90.0])
+        np.testing.assert_allclose(
+            converted.rcs_power, np.take(power, [2, 1, 0], axis=1)
+        )
+        np.testing.assert_allclose(
+            converted.rcs_phase, np.take(phase, [2, 1, 0], axis=1)
+        )
+        self.assertIn(
+            "SENTRi El→GRIM created 1 dataset",
+            self.window.status.currentMessage(),
+        )
+
     def test_range_cal_operation_creates_complex_calibrated_dataset(self) -> None:
         truth = _grid(3.0)
         measured_cal = _grid(2.0)

@@ -1851,10 +1851,14 @@ class GeometryTab(QWidget):
                     other_prims = self._segment_primitives(other_seg)
                     if not other_prims:
                         continue
-                    osx, osy, _, _ = other_prims[0]
-                    _, _, oex, oey = other_prims[-1]
-                    other_end_keys.add(self._point_key(osx, osy, tol))
-                    other_end_keys.add(self._point_key(oex, oey, tol))
+                    other_start_x, other_start_y, _, _ = other_prims[0]
+                    _, _, other_end_x, other_end_y = other_prims[-1]
+                    other_end_keys.add(
+                        self._point_key(other_start_x, other_start_y, tol)
+                    )
+                    other_end_keys.add(
+                        self._point_key(other_end_x, other_end_y, tol)
+                    )
                 start_connected = self._point_key(sx, sy, tol) in other_end_keys
                 end_connected = self._point_key(ex, ey, tol) in other_end_keys
                 if start_connected and end_connected:

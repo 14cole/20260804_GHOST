@@ -143,8 +143,6 @@ def _native_acceleration_status(
     # supported, but only with extensions the current host can load.
     if system_name == "windows":
         extensions = (".dll",)
-    elif system_name == "darwin":
-        extensions = (".dylib", ".so")
     else:
         extensions = (".so",)
 

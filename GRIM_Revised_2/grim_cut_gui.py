@@ -810,11 +810,19 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         _ops_pad("Geometry & Units", (
             ("El→Az360", "btn_el_to_az360"),
             ("Swap El/Az", "btn_swap_el_az"),
+            ("SENTRi El→GRIM", "btn_sentri_elevation"),
             ("→ dBke", "btn_to_dbke"),
             ("→ dBsm", "btn_to_dbsm"),
             ("Conic ↔ GC (0°)", "btn_conic_gc"),
             ("Wedge → Conic", "btn_wedge_to_conic"),
         ))
+        self.btn_sentri_elevation.setToolTip(
+            "Convert selected native SENTRi polar Theta to GRIM signed "
+            "elevation: elevation = 90° - Theta (0° waterline, +90° "
+            "top-down, -90° bottom-up). Samples are reordered with the "
+            "monotonically increasing elevation axis; no interpolation or "
+            "phase change is applied."
+        )
         self.btn_conic_gc.setToolTip(
             "Exact 0° Conic/Great-Circle relabel only. General GC cuts are "
             "blocked because they require curved-path complex interpolation "
@@ -1151,6 +1159,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_duplicate.clicked.connect(self._duplicate_selected)
         self.btn_el_to_az360.clicked.connect(self._elevation_to_azimuth_360_selected)
         self.btn_swap_el_az.clicked.connect(self._swap_elevation_azimuth_selected)
+        self.btn_sentri_elevation.clicked.connect(
+            self._convert_sentri_elevation_selected
+        )
         self.btn_to_dbke.clicked.connect(self._convert_to_dbke_selected)
         self.btn_to_dbsm.clicked.connect(self._convert_to_dbsm_selected)
         self.btn_conic_gc.clicked.connect(self._convert_conic_gc_selected)

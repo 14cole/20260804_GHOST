@@ -31,9 +31,6 @@ class NativeLoaderTrustTests(unittest.TestCase):
     def test_bor_native_extensions_are_host_specific(self) -> None:
         self.assertEqual(bor_streaming._native_extensions("Windows"), (".dll",))
         self.assertEqual(bor_streaming._native_extensions("Linux"), (".so",))
-        self.assertEqual(
-            bor_streaming._native_extensions("Darwin"), (".dylib", ".so")
-        )
 
     def test_windows_loader_ignores_checked_in_linux_shared_object(self) -> None:
         self.assertTrue((BACKEND / "fmm_near.so").is_file())
@@ -59,7 +56,6 @@ class NativeLoaderTrustTests(unittest.TestCase):
             for name in (
                 "fmm_near.so",
                 "fmm_near.dll",
-                "fmm_near.dylib",
             ):
                 (untrusted / name).write_bytes(b"untrusted")
 

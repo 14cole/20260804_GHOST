@@ -41,29 +41,5 @@ class PortableLauncherTests(unittest.TestCase):
             self.assertIn('%~dp0..\\..', text)
             self.assertIn('%GRIM_REPO_ROOT%\\.venv', text)
 
-    def test_macos_launchers_share_repository_environment_priority(self) -> None:
-        root_launcher = self._text("Launch_GRIM_GUI.command")
-        self.assertTrue(root_launcher.startswith("#!/bin/zsh"))
-        self.assertLess(
-            root_launcher.find('$launcher_dir/.venv/bin/python3'),
-            root_launcher.find("VIRTUAL_ENV"),
-        )
-
-        for relative_path in (
-            "tools/FREDDY/Launch_FREDDY_GUI.command",
-            "tools/GHOST/Launch_GHOST_GUI.command",
-        ):
-            with self.subTest(launcher=relative_path):
-                text = self._text(relative_path)
-                self.assertIn('repo_root="${launcher_dir:h:h}"', text)
-                repository_environment = text.find(
-                    '$repo_root/.venv/bin/python3'
-                )
-                active_environment = text.find("VIRTUAL_ENV")
-                self.assertGreaterEqual(repository_environment, 0)
-                self.assertGreater(active_environment, repository_environment)
-                self.assertNotIn('$launcher_dir/.venv/bin/python3', text)
-
-
 if __name__ == "__main__":
     unittest.main()

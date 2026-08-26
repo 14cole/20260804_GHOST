@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ppt_plot_data import (
+    DUAL_COPOLARIZATION,
     NamedGrid,
     build_azimuth_specs,
-    build_frequency_spec,
+    build_frequency_specs,
     get_plot_availability,
 )
 from ppt_report import (
@@ -27,7 +28,6 @@ from ppt_report import (
     DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
     PlotSpec,
     PresentationPlan,
-    SLIDE_FOOTER_FONT_SIZE_POINTS,
     SLIDE_TITLE_FONT_SIZE_POINTS,
     SlidePlan,
     export_powerpoint_report,
@@ -147,7 +147,8 @@ try:  # Keep report planning importable on headless/minimal installations.
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
     from matplotlib.image import imread
-    from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtCore import QItemSelectionModel, QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtGui import QStandardItemModel
     from PySide6.QtWidgets import (
         QAbstractItemView,
         QComboBox,
@@ -155,6 +156,7 @@ try:  # Keep report planning importable on headless/minimal installations.
         QFileDialog,
         QFormLayout,
         QFrame,
+        QGridLayout,
         QGroupBox,
         QHBoxLayout,
         QLabel,
@@ -368,20 +370,112 @@ if GUI_AVAILABLE:
                 legend_axes.patch.set_alpha(0.0)
                 legend_axes.imshow(imread(legend_path), aspect="auto")
                 legend_axes.set_axis_off()
-            if slide_plan.footer:
-                self.figure.text(
-                    x_position(geometry.footer.left),
-                    y_position_from_top(
-                        geometry.footer.top + 0.58 * geometry.footer.height
-                    ),
-                    slide_plan.footer,
-                    ha="left",
-                    va="center",
-                    color="#48566a",
-                    fontsize=SLIDE_FOOTER_FONT_SIZE_POINTS,
-                    family="Arial",
-                )
             self.draw_idle()
+
+
+    class _DatasetOrderListWidget(QListWidget):
+        """Internal-move list that never treats another row as a drop target.
+
+        ``QListWidget`` exposes an ``OnItem`` drop mode whenever its rows carry
+        ``ItemIsDropEnabled``. Depending on the platform/style, an internal move
+        dropped in that zone can be delegated to the item model as a child drop.
+        Flat list rows cannot represent that relationship, which made the
+        dragged dataset appear to be absorbed by the target row.
+
+        This widget resolves every internal drop to an insertion boundary and
+        performs the move itself. Dataset IDs, check states, current item, and
+        multi-row selection remain attached to their original item objects.
+        """
+
+        order_changed = Signal()
+
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+            self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+            self.setDefaultDropAction(Qt.DropAction.MoveAction)
+            self.setDragEnabled(True)
+            self.setAcceptDrops(True)
+            self.viewport().setAcceptDrops(True)
+            self.setDropIndicatorShown(True)
+
+        def _drop_insertion_row(self, event: Any) -> int:
+            point = event.position().toPoint()
+            target_row = self.indexAt(point).row()
+            indicator = self.dropIndicatorPosition()
+            if (
+                indicator == QAbstractItemView.DropIndicatorPosition.OnViewport
+                or target_row < 0
+            ):
+                return self.count()
+            if indicator == QAbstractItemView.DropIndicatorPosition.BelowItem:
+                return target_row + 1
+            if indicator == QAbstractItemView.DropIndicatorPosition.AboveItem:
+                return target_row
+
+            # Defensive handling for styles that still report ``OnItem``:
+            # split the row into before/after insertion zones instead of
+            # passing an item-parent drop to QListWidget's model.
+            target = self.item(target_row)
+            rect = self.visualItemRect(target)
+            return target_row + int(point.y() >= rect.center().y())
+
+        def move_rows_to_insertion(
+            self, source_rows: Iterable[int], insertion_row: int
+        ) -> bool:
+            """Move flat rows to a pre-removal insertion boundary.
+
+            The helper is intentionally deterministic and independently
+            testable because drag/drop event synthesis varies across Qt
+            platform plugins. ``insertion_row == count()`` means the viewport
+            space after the final row.
+            """
+
+            rows = tuple(
+                sorted(
+                    {
+                        int(row)
+                        for row in source_rows
+                        if 0 <= int(row) < self.count()
+                    }
+                )
+            )
+            if not rows:
+                return False
+            boundary = max(0, min(int(insertion_row), self.count()))
+            items = tuple(self.item(row) for row in rows)
+            selected_items = tuple(self.selectedItems())
+            current_item = self.currentItem()
+            before = tuple(self.item(index) for index in range(self.count()))
+
+            for row in reversed(rows):
+                self.takeItem(row)
+            destination = boundary - sum(row < boundary for row in rows)
+            for offset, item in enumerate(items):
+                self.insertItem(destination + offset, item)
+
+            self.clearSelection()
+            for item in selected_items:
+                item.setSelected(True)
+            if current_item is not None:
+                self.setCurrentItem(
+                    current_item,
+                    QItemSelectionModel.SelectionFlag.NoUpdate,
+                )
+            after = tuple(self.item(index) for index in range(self.count()))
+            return after != before
+
+        def dropEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+            if event.source() is not self:
+                event.ignore()
+                return
+            rows = tuple(sorted({self.row(item) for item in self.selectedItems()}))
+            destination = self._drop_insertion_row(event)
+            changed = self.move_rows_to_insertion(rows, destination)
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            if changed:
+                self.order_changed.emit()
 
 
     class PptWorkspace(QWidget):
@@ -405,6 +499,8 @@ if GUI_AVAILABLE:
             self._availability: Any = None
             self._syncing = False
             self._frequency_choices_initialized = False
+            self._azimuth_band_axis_signature: tuple[str, tuple[float, ...]] | None = None
+            self._azimuth_band_available = False
             self._preview_plan: PresentationPlan | None = None
             self._preview_is_current = False
             self._preview_generation = 0
@@ -473,10 +569,12 @@ if GUI_AVAILABLE:
                 item = QListWidgetItem(entry.name)
                 item.setData(_CATALOG_ID_ROLE, dataset_id)
                 item.setFlags(
-                    item.flags()
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsDragEnabled
-                    | Qt.ItemFlag.ItemIsDropEnabled
+                    (
+                        item.flags()
+                        | Qt.ItemFlag.ItemIsUserCheckable
+                        | Qt.ItemFlag.ItemIsDragEnabled
+                    )
+                    & ~Qt.ItemFlag.ItemIsDropEnabled
                 )
                 checked = dataset_id in old_checked if had_catalog else True
                 if had_catalog and dataset_id not in old_order:
@@ -622,16 +720,9 @@ if GUI_AVAILABLE:
             )
             dataset_help.setWordWrap(True)
             dataset_layout.addWidget(dataset_help)
-            self.dataset_list = QListWidget(dataset_group)
+            self.dataset_list = _DatasetOrderListWidget(dataset_group)
             self.dataset_list.setObjectName("pptDatasetCatalog")
             self.dataset_list.setMinimumHeight(120)
-            self.dataset_list.setSelectionMode(
-                QAbstractItemView.SelectionMode.ExtendedSelection
-            )
-            self.dataset_list.setDragDropMode(
-                QAbstractItemView.DragDropMode.InternalMove
-            )
-            self.dataset_list.setDefaultDropAction(Qt.DropAction.MoveAction)
             self.dataset_list.setAlternatingRowColors(True)
             dataset_layout.addWidget(self.dataset_list)
             dataset_buttons = QHBoxLayout()
@@ -663,11 +754,105 @@ if GUI_AVAILABLE:
             self.elevation_label = QLabel("Elevation cut", plot_group)
             self.elevation_combo = QComboBox(plot_group)
             plot_form.addRow(self.elevation_label, self.elevation_combo)
+            self.polarization_combo = QComboBox(plot_group)
+            self.polarization_combo.setToolTip(
+                "'VV and HH' creates separate VV and HH plots in the same "
+                "PowerPoint; unlike polarizations are never combined."
+            )
+            plot_form.addRow("Polarization", self.polarization_combo)
+            self.frequency_azimuth_mode_label = QLabel(
+                "Frequency trace", plot_group
+            )
+            self.frequency_azimuth_mode_combo = QComboBox(plot_group)
+            self.frequency_azimuth_mode_combo.addItem(
+                "Exact azimuth cut", "exact"
+            )
+            self.frequency_azimuth_mode_combo.addItem(
+                "Percentile across azimuth band", "band"
+            )
+            self.frequency_azimuth_mode_combo.setToolTip(
+                "Use one stored azimuth cut, or calculate each frequency point "
+                "as a percentile across the selected stored azimuth samples. "
+                "Band mode does not interpolate."
+            )
+            plot_form.addRow(
+                self.frequency_azimuth_mode_label,
+                self.frequency_azimuth_mode_combo,
+            )
             self.azimuth_label = QLabel("Azimuth cut", plot_group)
             self.azimuth_combo = QComboBox(plot_group)
             plot_form.addRow(self.azimuth_label, self.azimuth_combo)
-            self.polarization_combo = QComboBox(plot_group)
-            plot_form.addRow("Polarization", self.polarization_combo)
+            self.azimuth_band_label = QLabel("Azimuth band", plot_group)
+            self.azimuth_band_widget = QWidget(plot_group)
+            azimuth_band_layout = QGridLayout(self.azimuth_band_widget)
+            azimuth_band_layout.setContentsMargins(0, 0, 0, 0)
+            azimuth_band_layout.setHorizontalSpacing(6)
+            azimuth_band_layout.setVerticalSpacing(4)
+            self.azimuth_band_min_spin = self._axis_spin_box(
+                self.azimuth_band_widget, value=-180.0
+            )
+            self.azimuth_band_max_spin = self._axis_spin_box(
+                self.azimuth_band_widget, value=180.0
+            )
+            self.azimuth_percentile_spin = QDoubleSpinBox(
+                self.azimuth_band_widget
+            )
+            self.azimuth_percentile_spin.setRange(0.0, 100.0)
+            self.azimuth_percentile_spin.setDecimals(1)
+            self.azimuth_percentile_spin.setSingleStep(5.0)
+            self.azimuth_percentile_spin.setValue(90.0)
+            self.azimuth_percentile_spin.setSuffix(" %")
+            self.azimuth_percentile_spin.setKeyboardTracking(False)
+            self.azimuth_percentile_spin.setMinimumWidth(82)
+            self.azimuth_band_unit_label = QLabel("deg", self.azimuth_band_widget)
+            self.azimuth_band_min_label = QLabel(
+                "Minimum", self.azimuth_band_widget
+            )
+            self.azimuth_band_max_label = QLabel(
+                "Maximum", self.azimuth_band_widget
+            )
+            self.azimuth_percentile_label = QLabel(
+                "Percentile", self.azimuth_band_widget
+            )
+            self.azimuth_band_min_label.setBuddy(self.azimuth_band_min_spin)
+            self.azimuth_band_max_label.setBuddy(self.azimuth_band_max_spin)
+            self.azimuth_percentile_label.setBuddy(self.azimuth_percentile_spin)
+            self.azimuth_band_min_spin.setAccessibleName("Azimuth band minimum")
+            self.azimuth_band_max_spin.setAccessibleName("Azimuth band maximum")
+            self.azimuth_percentile_spin.setAccessibleName(
+                "Azimuth band percentile"
+            )
+            self.azimuth_band_min_spin.setAccessibleDescription(
+                "Inclusive lower endpoint in the displayed dataset angular unit."
+            )
+            self.azimuth_band_max_spin.setAccessibleDescription(
+                "Inclusive upper endpoint. A value below the minimum endpoint "
+                "selects across the azimuth seam."
+            )
+            self.azimuth_percentile_spin.setAccessibleDescription(
+                "Percentile calculated across finite stored azimuth samples at "
+                "each frequency."
+            )
+            # Stack the three values instead of forcing both endpoints into
+            # one row.  The controls sidebar is intentionally narrow; this
+            # remains readable without a horizontal scrollbar at 405 px.
+            azimuth_band_layout.addWidget(self.azimuth_band_min_label, 0, 0)
+            azimuth_band_layout.addWidget(self.azimuth_band_min_spin, 0, 1)
+            azimuth_band_layout.addWidget(self.azimuth_band_unit_label, 0, 2)
+            azimuth_band_layout.addWidget(self.azimuth_band_max_label, 1, 0)
+            azimuth_band_layout.addWidget(self.azimuth_band_max_spin, 1, 1)
+            azimuth_band_layout.addWidget(self.azimuth_percentile_label, 2, 0)
+            azimuth_band_layout.addWidget(self.azimuth_percentile_spin, 2, 1)
+            azimuth_band_layout.setColumnStretch(1, 1)
+            self.azimuth_band_widget.setToolTip(
+                "Endpoints are inclusive and use the dataset's stored angular "
+                "unit. Min greater than Max selects a wrapped band across the "
+                "azimuth seam. The percentile is sample-weighted across common "
+                "stored angles: every finite stored angle contributes one sample, "
+                "with no angular interpolation. It is calculated independently "
+                "at each frequency in displayed dB units."
+            )
+            plot_form.addRow(self.azimuth_band_label, self.azimuth_band_widget)
             self.quantity_label = QLabel("Magnitude (dB)", plot_group)
             self.quantity_label.setToolTip(
                 "The initial PPT workflow exports calibrated RCS magnitude. "
@@ -773,10 +958,6 @@ if GUI_AVAILABLE:
             )
             scale_form.addRow("Dataset legend", self.legend_mode_combo)
             plot_layout.addLayout(scale_form)
-            self.layout_value_label = QLabel(plot_group)
-            self.layout_value_label.setWordWrap(True)
-            self.layout_value_label.setObjectName("pptFixedLayoutLabel")
-            plot_layout.addWidget(self.layout_value_label)
             controls.addWidget(plot_group)
 
             deck_group = QGroupBox("3  Slide text and files", self.controls_content)
@@ -785,9 +966,6 @@ if GUI_AVAILABLE:
             self.deck_title_edit = QLineEdit("RCS Report", deck_group)
             self.deck_title_edit.setPlaceholderText("RCS Report")
             deck_form.addRow("Slide title", self.deck_title_edit)
-            self.footer_edit = QLineEdit(deck_group)
-            self.footer_edit.setPlaceholderText("Program | classification | analyst")
-            deck_form.addRow("Footer", self.footer_edit)
             self.template_edit, template_widget = self._path_row(
                 deck_group, "Choose PowerPoint template", self._browse_template
             )
@@ -847,8 +1025,13 @@ if GUI_AVAILABLE:
             preview_layout = QVBoxLayout(preview_panel)
             preview_layout.setContentsMargins(8, 0, 0, 0)
             preview_header = QHBoxLayout()
-            preview_title = QLabel("Slide preview", preview_panel)
+            preview_title = QLabel("Plot-placement preview", preview_panel)
             preview_title.setStyleSheet("font-weight: 600;")
+            preview_title.setToolTip(
+                "Shows the exact GRIM plot, title, and legend rectangles. "
+                "Graphics inherited from a selected PowerPoint master appear "
+                "in the exported PPTX, not on this lightweight preview canvas."
+            )
             self.previous_slide_button = QPushButton("‹ Previous", preview_panel)
             self.next_slide_button = QPushButton("Next ›", preview_panel)
             self.page_label = QLabel("No preview", preview_panel)
@@ -909,7 +1092,7 @@ if GUI_AVAILABLE:
 
         def _connect_signals(self) -> None:
             self.dataset_list.itemChanged.connect(self._dataset_selection_changed)
-            self.dataset_list.model().rowsMoved.connect(self._dataset_selection_changed)
+            self.dataset_list.order_changed.connect(self._dataset_selection_changed)
             self.use_selected_button.clicked.connect(self._use_main_selection)
             self.all_datasets_button.clicked.connect(
                 lambda: self.select_dataset_ids(self.dataset_ids_in_order())
@@ -927,6 +1110,7 @@ if GUI_AVAILABLE:
                 self.elevation_combo,
                 self.azimuth_combo,
                 self.polarization_combo,
+                self.frequency_azimuth_mode_combo,
                 self.x_scale_mode_combo,
                 self.scale_mode_combo,
                 self.legend_mode_combo,
@@ -939,10 +1123,12 @@ if GUI_AVAILABLE:
                 self.y_min_spin,
                 self.y_max_spin,
                 self.y_step_spin,
+                self.azimuth_band_min_spin,
+                self.azimuth_band_max_spin,
+                self.azimuth_percentile_spin,
             ):
                 spin.valueChanged.connect(self._mark_preview_stale)
             self.deck_title_edit.textChanged.connect(self._mark_preview_stale)
-            self.footer_edit.textChanged.connect(self._mark_preview_stale)
             self.template_edit.textChanged.connect(self._mark_preview_stale)
             self.template_edit.textChanged.connect(self._update_template_controls)
             self.azimuth_layout_edit.textChanged.connect(self._mark_preview_stale)
@@ -952,6 +1138,45 @@ if GUI_AVAILABLE:
             self.previous_slide_button.clicked.connect(self.previous_slide)
             self.next_slide_button.clicked.connect(self.next_slide)
             self._update_template_controls()
+
+        def _set_azimuth_band_available(
+            self, available: bool, *, reason: str = ""
+        ) -> None:
+            """Enable band mode only when a percentile has multiple samples."""
+
+            self._azimuth_band_available = bool(available)
+            band_index = self.frequency_azimuth_mode_combo.findData("band")
+            model = self.frequency_azimuth_mode_combo.model()
+            if band_index >= 0 and isinstance(model, QStandardItemModel):
+                item = model.item(band_index)
+                if item is not None:
+                    item.setEnabled(self._azimuth_band_available)
+                    item.setToolTip(
+                        "Calculate a percentile across a common azimuth band."
+                        if self._azimuth_band_available
+                        else reason
+                    )
+
+            base_tooltip = (
+                "Use one stored azimuth cut, or calculate each frequency point "
+                "as a sample-weighted percentile across common stored azimuth "
+                "angles. Every stored angle contributes one sample; band mode "
+                "does not interpolate angles."
+            )
+            self.frequency_azimuth_mode_combo.setToolTip(
+                base_tooltip
+                if self._azimuth_band_available or not reason
+                else f"{base_tooltip}\n\nBand unavailable: {reason}"
+            )
+            if (
+                not self._azimuth_band_available
+                and self.frequency_azimuth_mode_combo.currentData() == "band"
+            ):
+                exact_index = self.frequency_azimuth_mode_combo.findData("exact")
+                self.frequency_azimuth_mode_combo.blockSignals(True)
+                self.frequency_azimuth_mode_combo.setCurrentIndex(exact_index)
+                self.frequency_azimuth_mode_combo.blockSignals(False)
+                self._control_changed()
 
         def _update_template_controls(self, *_args: Any) -> None:
             enabled = bool(self.template_edit.text().strip())
@@ -1014,11 +1239,17 @@ if GUI_AVAILABLE:
             if not selected:
                 self._availability = None
                 self._frequency_choices_initialized = False
+                self._azimuth_band_axis_signature = None
+                self._set_azimuth_band_available(
+                    False,
+                    reason="Load a dataset with at least two common azimuth samples.",
+                )
                 self.azimuth_label.setText("Azimuth cut")
+                self.azimuth_band_label.setText("Azimuth band")
                 self.elevation_label.setText("Elevation cut")
                 self._set_axis_combo(self.elevation_combo, (), "")
                 self._set_axis_combo(self.azimuth_combo, (), "")
-                self._set_axis_combo(self.polarization_combo, (), "")
+                self._set_polarization_combo(())
                 self._set_frequency_choices((), "")
                 return
             try:
@@ -1028,14 +1259,20 @@ if GUI_AVAILABLE:
                 )
             except Exception as exc:
                 self._availability = None
+                self._azimuth_band_axis_signature = None
+                self._set_azimuth_band_available(
+                    False,
+                    reason="Selected datasets do not have a usable common azimuth axis.",
+                )
                 self.azimuth_label.setText("Azimuth cut")
+                self.azimuth_band_label.setText("Azimuth band")
                 self.elevation_label.setText("Elevation cut")
                 self.dataset_summary_label.setText(
                     f"Selected datasets are not plot-compatible: {exc}"
                 )
                 self._set_axis_combo(self.elevation_combo, (), "")
                 self._set_axis_combo(self.azimuth_combo, (), "")
-                self._set_axis_combo(self.polarization_combo, (), "")
+                self._set_polarization_combo(())
                 self._set_frequency_choices((), "")
                 return
             self._availability = availability
@@ -1045,6 +1282,9 @@ if GUI_AVAILABLE:
             )
             self.azimuth_label.setText(
                 "Aspect cut" if great_circle else "Azimuth cut"
+            )
+            self.azimuth_band_label.setText(
+                "Aspect band" if great_circle else "Azimuth band"
             )
             self.elevation_label.setText(
                 "Pitch cut" if great_circle else "Elevation cut"
@@ -1070,11 +1310,11 @@ if GUI_AVAILABLE:
                 angle_unit,
                 preferred=0.0,
             )
-            self._set_axis_combo(
-                self.polarization_combo,
-                tuple(availability.polarizations),
-                "",
-                preferred="HH",
+            self._set_polarization_combo(
+                tuple(availability.polarizations), preferred="HH"
+            )
+            self._sync_azimuth_band_axis(
+                tuple(availability.azimuths), angle_unit
             )
             self._set_frequency_choices(
                 tuple(availability.frequencies), frequency_unit
@@ -1099,6 +1339,103 @@ if GUI_AVAILABLE:
                 target_index = 0
             combo.setCurrentIndex(target_index)
             combo.blockSignals(False)
+
+        def _set_polarization_combo(
+            self,
+            values: Sequence[Any],
+            *,
+            preferred: Any = None,
+        ) -> None:
+            current = self.polarization_combo.currentData()
+            available = tuple(str(value) for value in values)
+            copolar = tuple(
+                value for value in available if value in {"VV", "HH"}
+            )
+            remaining = tuple(
+                value for value in available if value not in {"VV", "HH"}
+            )
+            ordered: tuple[str, ...]
+            if set(copolar) == {"VV", "HH"}:
+                # Keep the report convenience directly after the two
+                # independent co-polar choices.  Cross-polar channels, when
+                # present, remain available after it.
+                ordered = (*copolar, DUAL_COPOLARIZATION, *remaining)
+            else:
+                ordered = available
+
+            self.polarization_combo.blockSignals(True)
+            self.polarization_combo.clear()
+            for value in ordered:
+                self.polarization_combo.addItem(value, value)
+            target = current if current is not None else preferred
+            target_index = self.polarization_combo.findData(target)
+            if target_index < 0 and self.polarization_combo.count():
+                target_index = 0
+            self.polarization_combo.setCurrentIndex(target_index)
+            self.polarization_combo.blockSignals(False)
+
+        def _sync_azimuth_band_axis(
+            self, values: Sequence[Any], unit: str
+        ) -> None:
+            numeric = tuple(float(value) for value in values)
+            unit_text = str(unit or "deg")
+            self.azimuth_band_unit_label.setText(unit_text)
+            axis_name = (
+                "Aspect"
+                if self.azimuth_band_label.text().casefold().startswith("aspect")
+                else "Azimuth"
+            )
+            self.azimuth_band_min_spin.setAccessibleName(
+                f"{axis_name} band minimum ({unit_text})"
+            )
+            self.azimuth_band_max_spin.setAccessibleName(
+                f"{axis_name} band maximum ({unit_text})"
+            )
+            is_radian = unit_text.strip().casefold() in {"rad", "radian", "radians"}
+            decimals = 10 if is_radian else 6
+            self.azimuth_band_min_spin.setDecimals(decimals)
+            self.azimuth_band_max_spin.setDecimals(decimals)
+            unique_count = _physical_angle_sample_count(numeric, unit_text)
+            self._set_azimuth_band_available(
+                unique_count >= 2,
+                reason=(
+                    "At least two common azimuth samples are required."
+                    if numeric
+                    else "No common azimuth samples are available."
+                ),
+            )
+            signature = (unit_text.casefold(), numeric)
+            if not numeric or signature == self._azimuth_band_axis_signature:
+                return
+
+            widgets = (
+                self.azimuth_band_min_spin,
+                self.azimuth_band_max_spin,
+            )
+            for widget in widgets:
+                widget.blockSignals(True)
+            try:
+                axis_min = min(numeric)
+                axis_max = max(numeric)
+                for widget in widgets:
+                    widget.setRange(axis_min, axis_max)
+                self.azimuth_band_min_spin.setValue(axis_min)
+                self.azimuth_band_max_spin.setValue(axis_max)
+                ordered = sorted(set(numeric))
+                if len(ordered) > 1:
+                    positive_steps = [
+                        right - left
+                        for left, right in zip(ordered, ordered[1:])
+                        if right > left
+                    ]
+                    if positive_steps:
+                        step = min(positive_steps)
+                        self.azimuth_band_min_spin.setSingleStep(step)
+                        self.azimuth_band_max_spin.setSingleStep(step)
+            finally:
+                for widget in widgets:
+                    widget.blockSignals(False)
+            self._azimuth_band_axis_signature = signature
 
         def _set_frequency_choices(
             self, values: Sequence[Any], unit: str
@@ -1171,29 +1508,26 @@ if GUI_AVAILABLE:
                         widget.blockSignals(False)
                 self._active_x_axis_family = x_family
             self.frequency_box.setVisible(azimuth_kind)
-            self.azimuth_label.setVisible(not azimuth_kind)
-            self.azimuth_combo.setVisible(not azimuth_kind)
+            self.frequency_azimuth_mode_label.setVisible(not azimuth_kind)
+            self.frequency_azimuth_mode_combo.setVisible(not azimuth_kind)
             self.x_scale_label.setText(
                 "Horizontal axis (deg)" if azimuth_kind else "Horizontal axis (GHz)"
             )
-            if azimuth_kind:
-                name = "rectangular" if kind == "azimuth_rect" else "polar"
-                self.layout_value_label.setText(
-                    f"Fixed layout: six {name} azimuth plots per slide "
-                    "(3 columns × 2 rows). Frequencies continue row-major on "
-                    "additional slides. All plots share one RCS scale; the master "
-                    "legend occupies the header when selected."
-                )
-            else:
-                self.layout_value_label.setText(
-                    "Fixed layout: one full-width frequency sweep per slide. "
-                    "Selected datasets are overlaid and use one shared RCS scale; "
-                    "the master legend occupies the header when selected."
-                )
             self._control_changed()
 
         @Slot()
         def _control_changed(self, *_args: Any) -> None:
+            frequency_kind = (
+                str(self.plot_type_combo.currentData() or "") == "frequency"
+            )
+            band_mode = (
+                str(self.frequency_azimuth_mode_combo.currentData() or "exact")
+                == "band"
+            )
+            self.azimuth_label.setVisible(frequency_kind and not band_mode)
+            self.azimuth_combo.setVisible(frequency_kind and not band_mode)
+            self.azimuth_band_label.setVisible(frequency_kind and band_mode)
+            self.azimuth_band_widget.setVisible(frequency_kind and band_mode)
             self.fixed_x_scale_widget.setVisible(
                 self.x_scale_mode_combo.currentData() == "fixed"
             )
@@ -1296,6 +1630,11 @@ if GUI_AVAILABLE:
                 raise ValueError("The selected datasets have no common elevation cut.")
             if polarization is None:
                 raise ValueError("The selected datasets have no common polarization.")
+            polarization_values = (
+                ("VV", "HH")
+                if str(polarization) == DUAL_COPOLARIZATION
+                else (str(polarization),)
+            )
             x_limits, x_tick_step, fixed_limits, y_tick_step = self._axis_overrides(
                 kind
             )
@@ -1303,7 +1642,6 @@ if GUI_AVAILABLE:
             show_plot_legends = legend_mode == "per_plot"
             show_master_legend = legend_mode == "master"
             deck_title = self.deck_title_edit.text().strip()
-            footer = self.footer_edit.text().strip()
             if kind in {"azimuth_rect", "azimuth_polar"}:
                 frequencies = self.selected_frequencies()
                 if not frequencies:
@@ -1349,14 +1687,45 @@ if GUI_AVAILABLE:
                 return plan_azimuth_slides(
                     plots,
                     slide_titles=deck_title or "RCS Azimuth Sweeps",
-                    footer=footer,
                     master_legend=show_master_legend,
+                    polarization_labels=tuple(
+                        value
+                        for value in polarization_values
+                        for _frequency in frequencies
+                    ),
                 )
             if kind == "frequency":
-                azimuth = self.azimuth_combo.currentData()
-                if azimuth is None:
-                    raise ValueError("The selected datasets have no common azimuth cut.")
-                plot = build_frequency_spec(
+                azimuth_mode = str(
+                    self.frequency_azimuth_mode_combo.currentData() or "exact"
+                )
+                azimuth = None
+                azimuth_band = None
+                azimuth_percentile = None
+                if azimuth_mode == "exact":
+                    azimuth = self.azimuth_combo.currentData()
+                    if azimuth is None:
+                        raise ValueError(
+                            "The selected datasets have no common azimuth cut."
+                        )
+                elif azimuth_mode == "band":
+                    if not self._azimuth_band_available:
+                        raise ValueError(
+                            "Azimuth-band percentile mode requires at least two "
+                            "common azimuth samples across the selected datasets."
+                        )
+                    azimuth_band = (
+                        float(self.azimuth_band_min_spin.value()),
+                        float(self.azimuth_band_max_spin.value()),
+                    )
+                    azimuth_percentile = float(
+                        self.azimuth_percentile_spin.value()
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported frequency azimuth mode: {azimuth_mode!r}"
+                    )
+
+                plots = build_frequency_specs(
                     datasets,
                     azimuth=azimuth,
                     elevation=elevation,
@@ -1364,24 +1733,26 @@ if GUI_AVAILABLE:
                     quantity="magnitude",
                     angle_display_unit="deg",
                     frequency_display_unit="GHz",
+                    azimuth_band=azimuth_band,
+                    azimuth_percentile=azimuth_percentile,
                     y_limits=fixed_limits,
                     show_legend=show_plot_legends,
                 )
-                plot = _with_shared_y_limits((plot,), fixed_limits)[0]
-                plot = replace(
-                    plot,
-                    x_limits=x_limits,
-                    x_tick_step=x_tick_step,
-                    y_tick_step=y_tick_step,
-                )
-                slide_title = (
-                    f"{deck_title} — {plot.title}" if deck_title else plot.title
+                plots = _with_shared_y_limits(plots, fixed_limits)
+                plots = tuple(
+                    replace(
+                        plot,
+                        x_limits=x_limits,
+                        x_tick_step=x_tick_step,
+                        y_tick_step=y_tick_step,
+                    )
+                    for plot in plots
                 )
                 return plan_frequency_slides(
-                    (plot,),
-                    slide_titles=slide_title,
-                    footer=footer,
+                    plots,
+                    slide_titles=deck_title or "RCS Frequency Sweeps",
                     master_legend=show_master_legend,
+                    polarization_labels=polarization_values,
                 )
             raise ValueError(f"Unsupported PPT plot type: {kind!r}")
 
@@ -1653,6 +2024,34 @@ def _plain_scalar(value: Any) -> Any:
         except (ValueError, TypeError):
             pass
     return value
+
+
+def _physical_angle_sample_count(
+    values: Sequence[float], unit: str, *, tol: float = 1.0e-6
+) -> int:
+    """Count distinct stored directions, collapsing the periodic seam alias."""
+
+    unit_name = str(unit).strip().casefold()
+    period = (
+        2.0 * math.pi
+        if unit_name in {"rad", "radian", "radians"}
+        else 360.0
+        if unit_name in {"deg", "degree", "degrees"}
+        else None
+    )
+    unique: list[float] = []
+    for raw_value in values:
+        value = float(raw_value)
+        if period is not None:
+            value %= period
+            if math.isclose(value, period, rel_tol=0.0, abs_tol=tol):
+                value = 0.0
+        if not any(
+            math.isclose(value, existing, rel_tol=0.0, abs_tol=tol)
+            for existing in unique
+        ):
+            unique.append(value)
+    return len(unique)
 
 
 def _axis_values_equal(left: Any, right: Any, tolerance: float = 1.0e-8) -> bool:

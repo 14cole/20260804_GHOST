@@ -733,7 +733,7 @@ def _native_project_path(value: str, project_directory: Path) -> Path | None:
 
     # New project files always use forward slashes for relative paths.  Accept
     # backslashes as separators too so an older Windows project can move to a
-    # Mac without treating the complete relative path as one filename.
+    # POSIX host without treating the complete relative path as one filename.
     relative_value = value.replace("\\", "/")
     return (project_directory / Path(relative_value)).resolve(strict=False)
 

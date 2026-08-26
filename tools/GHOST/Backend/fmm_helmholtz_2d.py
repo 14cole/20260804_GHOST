@@ -435,8 +435,8 @@ class FMMOperator:
         """Try to load the compiled Cython extension, then fall back to ctypes C .so.
 
         Candidate .so/.dll names are tried platform/arch-specific first
-        (e.g. ``fmm_near.darwin-arm64.so``) so a binary committed for one
-        platform -- such as the HPC Linux x86-64 build named ``fmm_near.so`` --
+        (for example ``fmm_near.windows-amd64.dll``) so a binary committed for
+        one platform -- such as the HPC Linux x86-64 build named ``fmm_near.so`` --
         does not shadow the matching local build. A ctypes library is accepted
         only if it actually exports ``compute_sk_blocks_batch_q``; a
         wrong-architecture file is rejected at load (raises OSError) and a file
@@ -477,7 +477,7 @@ class FMMOperator:
         # Fall back to ctypes .so/.dll. Prefer a platform/arch-tagged build,
         # then the generic name.
         import ctypes, os, platform
-        sysname = platform.system().lower()    # 'darwin', 'linux', 'windows'
+        sysname = platform.system().lower()    # 'linux' or 'windows'
         machine = platform.machine().lower()   # 'arm64', 'x86_64', 'amd64', ...
         here = str(here_path)
         bases = [f'fmm_near.{sysname}-{machine}', 'fmm_near']
@@ -487,8 +487,6 @@ class FMMOperator:
         # because the repository also ships a Linux acceleration kernel.
         if sysname == 'windows':
             exts = ['.dll']
-        elif sysname == 'darwin':
-            exts = ['.dylib', '.so']
         else:
             exts = ['.so']
         for base in bases:

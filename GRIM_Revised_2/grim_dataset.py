@@ -2418,6 +2418,134 @@ class RcsGrid:
             rcs_domain="power_phase",
         )
 
+    def convert_sentri_elevation_to_grim(self):
+        """Convert native SENTRi polar theta to GRIM signed elevation.
+
+        SENTRi uses a polar angle measured down from the top look: 0 degrees is
+        top-down, 90 degrees is waterline, and 180 degrees is bottom-up.  GRIM's
+        conic elevation is positive above waterline, so the exact relabel is
+        ``elevation = 90 - theta``.  The transformed elevation axis is
+        stable-sorted and every grid-shaped sample/provenance array follows the
+        same permutation.  There is no interpolation and no phase change.
+
+        The operation deliberately requires SENTRi convention metadata.  This
+        prevents an ordinary GRIM elevation axis from being flipped by an
+        accidentally clicked format-specific button.
+        """
+
+        native_tag = "sentri_theta_top_zero"
+        grim_tag = "grim_elevation_waterline_zero_top_positive"
+        units = copy.deepcopy(self.units)
+        extra = dict(self.extra)
+        convention = str(
+            units.get(
+                "elevation_coordinate_convention",
+                extra.get("sentri_elevation_convention", ""),
+            )
+            or ""
+        ).strip().lower()
+        source_format = str(extra.get("source_format", "") or "").strip()
+
+        if convention == grim_tag:
+            raise ValueError("dataset already uses GRIM signed elevation")
+        if convention != native_tag and not source_format.casefold().startswith(
+            "sentri"
+        ):
+            raise ValueError(
+                "dataset is not marked as native SENTRi elevation; load a "
+                "SENTRi table before using this conversion"
+            )
+
+        elevation_unit = self._canonical_unit(
+            units.get("elevation"), _ANGLE_UNITS, "deg"
+        )
+        if elevation_unit != "deg":
+            raise ValueError(
+                "SENTRi elevation conversion requires a degree-valued "
+                f"elevation axis; got {units.get('elevation')!r}"
+            )
+
+        native_theta = np.asarray(self.elevations, dtype=float)
+        if np.any(~np.isfinite(native_theta)):
+            raise ValueError("SENTRi theta axis must contain only finite values")
+        tolerance = 1.0e-9
+        if np.any(native_theta < -tolerance) or np.any(
+            native_theta > 180.0 + tolerance
+        ):
+            raise ValueError(
+                "native SENTRi theta must be within 0..180 degrees before "
+                "conversion"
+            )
+
+        converted_elevation = 90.0 - native_theta
+        converted_elevation[np.abs(converted_elevation) <= tolerance] = 0.0
+        order = np.argsort(converted_elevation, kind="stable")
+        converted_elevation = converted_elevation[order]
+        if (
+            converted_elevation.size > 1
+            and np.any(np.diff(converted_elevation) <= tolerance)
+        ):
+            raise ValueError(
+                "SENTRi elevation conversion would create duplicate or "
+                "near-duplicate GRIM elevation coordinates within 1e-9 deg"
+            )
+
+        power = np.take(self.rcs_power, order, axis=1)
+        phase = np.take(self.rcs_phase, order, axis=1)
+        original_shape = tuple(self.rcs_power.shape)
+        stale_grid_metadata = {
+            "solver_metadata_json",
+            "production_mesh_certification_json",
+            "source_body_mesh_certification_json",
+            "requested_radar_grid_json",
+        }
+        converted_extra = {}
+        for key, value in extra.items():
+            if key in stale_grid_metadata:
+                continue
+            value_array = np.asarray(value)
+            if (
+                value_array.ndim >= 4
+                and tuple(value_array.shape[:4]) == original_shape
+            ):
+                converted_extra[key] = np.take(value_array, order, axis=1)
+            else:
+                converted_extra[key] = value
+
+        units["elevation_coordinate_convention"] = grim_tag
+        converted_extra["sentri_elevation_convention"] = grim_tag
+        converted_extra["assembly_angular_coordinate_contract"] = (
+            "ghost.radar-azimuth-elevation.coming-from.deg.v1"
+        )
+        converted_extra["sentri_coordinate_mapping"] = (
+            "GRIM elevation = 90 deg - native SENTRi theta; "
+            "azimuth=wrapped phi"
+        )
+        prior_history = str(self.history or "").strip()
+        history_entry = (
+            "Convert native SENTRi theta to GRIM signed elevation "
+            "(elevation=90-theta); stable-sorted elevation and sample arrays; "
+            "no interpolation or phase change"
+        )
+        history = (
+            f"{prior_history}\n{history_entry}" if prior_history else history_entry
+        )
+
+        return RcsGrid(
+            np.array(self.azimuths, copy=True),
+            converted_elevation,
+            np.array(self.frequencies, copy=True),
+            np.array(self.polarizations, copy=True),
+            rcs_power=power,
+            rcs_phase=phase,
+            rcs_domain=self.rcs_domain,
+            source_path=self.source_path,
+            history=history,
+            units=units,
+            extra=converted_extra,
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
+        )
+
     def combine_elevation_pair_to_azimuth_360(
         self,
         elevation_lo: float | None = None,
@@ -3700,9 +3828,12 @@ class RcsGrid:
         * descriptive ``Frequency`` / ``Theta`` /
           ``RCSPhiScat_PhiInc`` columns.
 
-        SENTRi's reported ``Theta`` is stored directly as GRIM elevation.
-        Its reported E-field phase is stored with its original sign, so each
-        sample is reconstructed as
+        SENTRi's reported polar ``Theta`` is stored unchanged so importing a
+        file never silently changes its geometry.  The explicit
+        :meth:`convert_sentri_elevation_to_grim` operation maps that native
+        top-down convention to GRIM elevation when requested.  Reported
+        E-field phase is stored with its original sign, so each sample is
+        reconstructed as
         ``10**(dBsm/20) * exp(+1j*deg2rad(phase_deg))``.  These format-specific
         rules are deliberately separate from :meth:`read_CST`.
         """
@@ -3884,6 +4015,7 @@ class RcsGrid:
         )
         records = []
         seen = {}
+        used_zero_360_precedence = False
         for row_idx, row in enumerate(
             rows[data_start_idx:], start=data_start_idx + 1
         ):
@@ -3894,14 +4026,33 @@ class RcsGrid:
             if not np.isfinite(frequency_ghz) or frequency_ghz <= 0.0:
                 raise ValueError(f"line {row_idx}: frequency must be positive")
             theta_deg = _number(row, "theta", row_idx)
-            if theta_deg < -1.0e-9 or theta_deg > 180.0 + 1.0e-9:
+            coordinate_tolerance = 1.0e-9
+            if (
+                theta_deg < -coordinate_tolerance
+                or theta_deg > 180.0 + coordinate_tolerance
+            ):
                 raise ValueError(
                     f"line {row_idx}: SENTRi theta must be in [0, 180] deg"
                 )
+            # Vendor text exports can print endpoint roundoff just outside the
+            # declared theta domain.  Values accepted by the tolerance must be
+            # normalized before tuple keying and conversion, otherwise they
+            # survive as spurious +90.0000000005/-90.0000000005 elevations.
+            if abs(theta_deg) <= coordinate_tolerance:
+                theta_deg = 0.0
+            elif abs(theta_deg - 180.0) <= coordinate_tolerance:
+                theta_deg = 180.0
             elevation_deg = float(theta_deg)
-            azimuth_deg = _wrap_cst_azimuth_deg(
-                _number(row, "phi", row_idx)
-            )
+            raw_phi_deg = _number(row, "phi", row_idx)
+            if abs(raw_phi_deg) <= coordinate_tolerance:
+                raw_phi_deg = 0.0
+            elif abs(raw_phi_deg - 360.0) <= coordinate_tolerance:
+                raw_phi_deg = 360.0
+            azimuth_deg = _wrap_cst_azimuth_deg(raw_phi_deg)
+            if abs(azimuth_deg) <= coordinate_tolerance:
+                azimuth_deg = 0.0
+            elif abs(azimuth_deg + 180.0) <= coordinate_tolerance:
+                azimuth_deg = -180.0
 
             for polarization, magnitude_key, phase_key in channel_specs:
                 magnitude_dbsm = _number(
@@ -3914,8 +4065,55 @@ class RcsGrid:
                 )
                 phase = float(np.deg2rad(reported_phase_deg))
                 key = (azimuth_deg, elevation_deg, frequency_ghz, polarization)
+                record = (
+                    azimuth_deg, elevation_deg, float(frequency_ghz),
+                    polarization, power, phase,
+                )
                 if key in seen:
-                    prior_line, prior_power, prior_phase = seen[key]
+                    (
+                        prior_line,
+                        prior_power,
+                        prior_phase,
+                        prior_raw_phi,
+                        prior_record_index,
+                    ) = seen[key]
+
+                    # SENTRi closed sweeps conventionally contain both phi=0
+                    # and phi=360.  They describe the same direction, but the
+                    # closing sample is authoritative for this format.  Apply
+                    # that rule before the generic conflict check and make it
+                    # independent of file row order.  No other wrapped seam is
+                    # granted this exception.
+                    zero_360_pair = (
+                        abs(azimuth_deg) <= coordinate_tolerance
+                        and (
+                            (
+                                abs(prior_raw_phi) <= coordinate_tolerance
+                                and abs(raw_phi_deg - 360.0)
+                                <= coordinate_tolerance
+                            )
+                            or (
+                                abs(prior_raw_phi - 360.0)
+                                <= coordinate_tolerance
+                                and abs(raw_phi_deg) <= coordinate_tolerance
+                            )
+                        )
+                    )
+                    if zero_360_pair:
+                        used_zero_360_precedence = True
+                        if (
+                            abs(raw_phi_deg - 360.0)
+                            <= coordinate_tolerance
+                        ):
+                            records[prior_record_index] = record
+                            seen[key] = (
+                                row_idx,
+                                power,
+                                phase,
+                                raw_phi_deg,
+                                prior_record_index,
+                            )
+                        continue
                     if _cst_samples_equivalent(
                         prior_power, prior_phase, power, phase
                     ):
@@ -3924,13 +4122,11 @@ class RcsGrid:
                         f"line {row_idx}: conflicting duplicate SENTRi sample "
                         f"after azimuth wrapping; first defined on line {prior_line}"
                     )
-                seen[key] = (row_idx, power, phase)
-                records.append(
-                    (
-                        azimuth_deg, elevation_deg, float(frequency_ghz),
-                        polarization, power, phase,
-                    )
+                record_index = len(records)
+                seen[key] = (
+                    row_idx, power, phase, raw_phi_deg, record_index
                 )
+                records.append(record)
 
         if not records:
             raise ValueError("SENTRi table contains no data rows")
@@ -3979,10 +4175,19 @@ class RcsGrid:
                 "rcs_log_unit": "dBsm",
                 "rcs_linear_quantity": "sigma_3d",
                 "angular_coordinate_system": "conic",
+                "elevation_coordinate_convention": "sentri_theta_top_zero",
             },
             extra={
                 "source_format": f"SENTRi {schema_name} RCS table",
                 "sentri_coordinate_mapping": "elevation=theta; azimuth=wrapped phi",
+                "sentri_elevation_convention": "sentri_theta_top_zero",
+                "sentri_zero_360_seam_policy": (
+                    "source phi=360 supplies canonical azimuth 0 when both "
+                    "phi=0 and phi=360 are present"
+                ),
+                "sentri_zero_360_precedence_used": bool(
+                    used_zero_360_precedence
+                ),
                 "sentri_polarization_mapping": (
                     "VV=tt/theta-theta; HV=pt/phi-theta; "
                     "VH=tp/theta-phi; HH=pp/phi-phi"

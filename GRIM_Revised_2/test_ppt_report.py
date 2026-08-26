@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import math
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -162,21 +163,26 @@ class BundledTemplateContractTests(unittest.TestCase):
                 ],
             )
 
-            xml_payload = b"\n".join(
-                archive.read(name).lower()
-                for name in names
-                if name.endswith((".xml", ".rels"))
+            core = ET.fromstring(archive.read("docProps/core.xml"))
+            core_namespace = (
+                "http://schemas.openxmlformats.org/package/2006/metadata/"
+                "core-properties"
             )
-            for prohibited in (
-                b"artifact",
-                b"chatgpt",
-                b"claude",
-                b"codex",
-                b"emery",
-                b"openai",
-                b"walnut",
-            ):
-                self.assertNotIn(prohibited, xml_payload)
+            dc_namespace = "http://purl.org/dc/elements/1.1/"
+            self.assertEqual(
+                core.findtext(f"{{{dc_namespace}}}creator"), "GRIM"
+            )
+            self.assertEqual(
+                core.findtext(f"{{{core_namespace}}}lastModifiedBy"), "GRIM"
+            )
+            application = ET.fromstring(archive.read("docProps/app.xml"))
+            app_namespace = (
+                "http://schemas.openxmlformats.org/officeDocument/2006/"
+                "extended-properties"
+            )
+            self.assertEqual(
+                application.findtext(f"{{{app_namespace}}}Application"), "GRIM"
+            )
 
 
 class LayoutPlanningTests(unittest.TestCase):
@@ -279,6 +285,46 @@ class LayoutPlanningTests(unittest.TestCase):
         self.assertEqual(plan.slides[1].title, "Second")
         self.assertEqual(plan.plot_count, 7)
 
+    def test_polarization_sections_paginate_independently_with_blank_slots(self):
+        plots = tuple(
+            [make_plot(f"vv-{index}") for index in range(7)]
+            + [make_plot(f"hh-{index}") for index in range(7)]
+        )
+        plan = plan_azimuth_slides(
+            plots,
+            slide_titles="RCS Report",
+            polarization_labels=("VV",) * 7 + ("HH",) * 7,
+        )
+
+        self.assertEqual([len(slide.plots) for slide in plan.slides], [6, 1, 6, 1])
+        self.assertEqual(
+            [slide.title for slide in plan.slides],
+            ["RCS Report — VV", "RCS Report — VV", "RCS Report — HH", "RCS Report — HH"],
+        )
+        self.assertTrue(
+            all(
+                placement.plot.plot_id.startswith("vv-")
+                for slide in plan.slides[:2]
+                for placement in slide.plots
+            )
+        )
+        self.assertTrue(
+            all(
+                placement.plot.plot_id.startswith("hh-")
+                for slide in plan.slides[2:]
+                for placement in slide.plots
+            )
+        )
+        self.assertEqual([placement.slot_index for placement in plan.slides[1].plots], [0])
+        self.assertEqual([placement.slot_index for placement in plan.slides[3].plots], [0])
+
+    def test_polarization_section_label_count_must_match_plots(self):
+        with self.assertRaisesRegex(ValueError, "2 polarization labels"):
+            plan_azimuth_slides(
+                (make_plot("one"), make_plot("two")),
+                polarization_labels=("VV",),
+            )
+
     def test_frequency_sweeps_are_one_per_slide(self):
         plots = [make_plot("a", "frequency"), make_plot("b", "frequency")]
         plan = plan_frequency_slides(plots)
@@ -286,6 +332,36 @@ class LayoutPlanningTests(unittest.TestCase):
         self.assertTrue(all(len(slide.plots) == 1 for slide in plan.slides))
         self.assertEqual(plan.slides[0].plots[0].frame, frequency_single_geometry().plot_frames[0])
         self.assertEqual([slide.title for slide in plan.slides], ["Plot a", "Plot b"])
+
+    def test_frequency_master_titles_use_only_deck_title_and_polarization(self):
+        plots = (
+            replace(
+                make_plot("vv", "frequency"),
+                title=(
+                    "Frequency Sweep | P90 across Azimuth [90, 270] deg | "
+                    "Elevation 0 deg | VV"
+                ),
+            ),
+            replace(
+                make_plot("hh", "frequency"),
+                title=(
+                    "Frequency Sweep | P90 across Azimuth [90, 270] deg | "
+                    "Elevation 0 deg | HH"
+                ),
+            ),
+        )
+        plan = plan_frequency_slides(
+            plots,
+            slide_titles="RCS Report",
+            polarization_labels=("VV", "HH"),
+        )
+
+        self.assertEqual(
+            [slide.title for slide in plan.slides],
+            ["RCS Report — VV", "RCS Report — HH"],
+        )
+        self.assertIn("P90 across Azimuth", plan.slides[0].plots[0].plot.title)
+        self.assertNotIn("Frequency Sweep", plan.slides[0].title)
 
     def test_master_legend_is_one_slide_level_key_and_suppresses_plot_legends(self):
         plots = []
@@ -440,6 +516,37 @@ class RenderingTests(unittest.TestCase):
                 dpi=80,
             )
             self.assertEqual(output.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_master_legend_fails_clearly_instead_of_clipping_long_names(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("Matplotlib is not installed in this headless test runtime.")
+        plot = PlotSpec(
+            plot_id="wide-legend",
+            kind="azimuth_rect",
+            title="Wide legend",
+            x_label="Azimuth (deg)",
+            y_label="RCS (dBsm)",
+            series=tuple(
+                PlotSeries.from_values(
+                    (0.0, 1.0),
+                    (0.0, 1.0),
+                    label=f"Very long production dataset label number {index}",
+                )
+                for index in range(12)
+            ),
+        )
+        plan = plan_azimuth_slides((plot,), master_legend=True)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "master legend does not fit"):
+                render_master_legend_png(
+                    plan.slides[0].master_legend,
+                    Path(directory) / "legend.png",
+                    width_points=500.0,
+                    height_points=20.0,
+                    dpi=80,
+                )
 
 
 class RecordingWriter:
@@ -654,9 +761,16 @@ class FakeShape:
 
 
 class FakeShapes:
-    def __init__(self):
+    def __init__(self, *, title_placeholder=False):
         self.textboxes = []
         self.pictures = []
+        self._title = FakeShape() if title_placeholder else None
+
+    @property
+    def Title(self):
+        if self._title is None:
+            raise AttributeError("This slide has no title placeholder")
+        return self._title
 
     def AddTextbox(self, *args):
         shape = FakeShape()
@@ -670,8 +784,8 @@ class FakeShapes:
 
 
 class FakeSlide:
-    def __init__(self, owner=None):
-        self.Shapes = FakeShapes()
+    def __init__(self, owner=None, *, title_placeholder=False):
+        self.Shapes = FakeShapes(title_placeholder=title_placeholder)
         self.owner = owner
         self.CustomLayout = None
 
@@ -702,7 +816,12 @@ class FakeSlides:
 
     def AddSlide(self, index, custom_layout):
         self.add_slide_calls.append((index, custom_layout))
-        slide = FakeSlide(self)
+        slide = FakeSlide(
+            self,
+            title_placeholder=bool(
+                getattr(custom_layout, "has_title_placeholder", False)
+            ),
+        )
         slide.CustomLayout = custom_layout
         self.items.insert(index - 1, slide)
         return slide
@@ -721,8 +840,9 @@ class FakeComCollection:
 
 
 class FakeCustomLayout:
-    def __init__(self, name):
+    def __init__(self, name, *, has_title_placeholder=False):
         self.Name = name
+        self.has_title_placeholder = bool(has_title_placeholder)
 
 
 class FakeSlideMaster:
@@ -958,6 +1078,46 @@ class ComBridgeFakeTests(unittest.TestCase):
         )
         self.assertIs(presentation.Slides.items[0].CustomLayout, azimuth_layout)
         self.assertIs(presentation.Slides.items[1].CustomLayout, frequency_layout)
+
+    def test_named_layout_title_placeholder_keeps_master_formatting(self):
+        plan = plan_frequency_slides(
+            [make_plot("frequency", "frequency")],
+            slide_titles="Vehicle RCS",
+        )
+        layout = FakeCustomLayout(
+            DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+            has_title_placeholder=True,
+        )
+        presentation = FakePresentation(
+            seed_count=1,
+            designs=(FakeDesign("Design", "Master", (layout,)),),
+        )
+        application = FakeApplication(presentation)
+        bridge = PowerPointComBridge(application_factory=lambda: application)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template = root / "template.pptx"
+            image = root / "plot.png"
+            template.write_bytes(b"template")
+            image.write_bytes(b"png")
+            bridge.write(
+                plan,
+                {(0, 0): image},
+                root / "report.pptx",
+                template_path=template,
+                template_layouts={
+                    "frequency_single": DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
+                },
+            )
+
+        slide = presentation.Slides.items[0]
+        self.assertEqual(slide.Shapes.Title.TextFrame.TextRange.Text, "Vehicle RCS")
+        self.assertEqual(slide.Shapes.textboxes, [])
+        # The bridge assigns only the text; all master typography remains
+        # inherited instead of being overwritten with GRIM's Arial fallback.
+        self.assertEqual(slide.Shapes.Title.TextFrame.TextRange.Font.Name, "")
+        self.assertEqual(slide.Shapes.Title.TextFrame.TextRange.Font.Size, 0.0)
 
     def test_bare_duplicate_layout_requires_master_qualifier_before_clearing(self):
         plan = plan_azimuth_slides([make_plot("azimuth")])

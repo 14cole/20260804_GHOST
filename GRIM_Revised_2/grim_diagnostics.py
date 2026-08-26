@@ -372,8 +372,6 @@ def _native_library_extensions(system_name: str) -> tuple[str, ...]:
     key = str(system_name).strip().lower()
     if key == "windows":
         return (".dll",)
-    if key == "darwin":
-        return (".dylib", ".so")
     return (".so",)
 
 
@@ -420,7 +418,7 @@ def _native_results(
             found = sorted(
                 path.name
                 for path in backend.glob("fmm_near*")
-                if path.suffix.lower() in {".so", ".dylib", ".dll", ".pyd"}
+                if path.suffix.lower() in {".so", ".dll", ".pyd"}
             )
             extra = (f"Native files present: {', '.join(found)}.",) if found else ()
             results.append(
@@ -457,7 +455,7 @@ def _native_results(
         found = sorted(
             path.name
             for path in backend.glob("bor_stream_kernel.*")
-            if path.suffix.lower() in {".so", ".dylib", ".dll"}
+            if path.suffix.lower() in {".so", ".dll"}
         )
         extra = (f"Native files present: {', '.join(found)}.",) if found else ()
         results.append(

@@ -8,9 +8,11 @@ import numpy as np
 
 from grim_dataset import C0, GRIM_GC_CONVENTION, RcsGrid
 from ppt_plot_data import (
+    DUAL_COPOLARIZATION,
     NamedGrid,
     build_azimuth_specs,
     build_frequency_spec,
+    build_frequency_specs,
     get_plot_availability,
 )
 
@@ -179,6 +181,191 @@ class PptPlotDataTests(unittest.TestCase):
             polarization="VV",
         )
         self.assertIs(specs[0].series[0].x, specs[1].series[0].x)
+
+    def test_dual_copolarization_emits_separate_unique_plots_in_one_request(self):
+        power = np.ones((3, 1, 2, 2), dtype=float)
+        power[:, :, :, 1] = 100.0
+        grid = _grid(
+            frequencies=(1.0, 2.0),
+            polarizations=("VV", "HH"),
+            power=power,
+        )
+
+        azimuth_specs = build_azimuth_specs(
+            [("Dual", grid)],
+            frequencies=(1.0, 2.0),
+            elevation=0.0,
+            polarization=DUAL_COPOLARIZATION,
+        )
+        self.assertEqual(len(azimuth_specs), 4)
+        self.assertTrue(all("| VV" in spec.title for spec in azimuth_specs[:2]))
+        self.assertTrue(all("| HH" in spec.title for spec in azimuth_specs[2:]))
+        self.assertEqual(len({spec.plot_id for spec in azimuth_specs}), 4)
+        np.testing.assert_allclose(azimuth_specs[0].series[0].y, 0.0)
+        np.testing.assert_allclose(azimuth_specs[2].series[0].y, 20.0)
+
+        frequency_specs = build_frequency_specs(
+            [("Dual", grid)],
+            azimuth=0.0,
+            elevation=0.0,
+            polarization=("VV", "HH"),
+        )
+        self.assertEqual(len(frequency_specs), 2)
+        self.assertIn("| VV", frequency_specs[0].title)
+        self.assertIn("| HH", frequency_specs[1].title)
+        np.testing.assert_allclose(frequency_specs[0].series[0].y, 0.0)
+        np.testing.assert_allclose(frequency_specs[1].series[0].y, 20.0)
+
+    def test_dual_copolarization_reports_missing_common_component(self):
+        with self.assertRaisesRegex(ValueError, "HH.*not common"):
+            build_frequency_specs(
+                [("VV only", _grid())],
+                azimuth=0.0,
+                elevation=0.0,
+                polarization=DUAL_COPOLARIZATION,
+            )
+
+    def test_frequency_azimuth_band_is_display_domain_percentile_per_frequency(self):
+        # Columns are stored in native frequency order (2, 1 GHz).  The first
+        # overlay has azimuth distributions [0, 10, 20] and [10, 20, 30] dB;
+        # the second is 10 dB higher at every sample.
+        db_values = np.asarray(
+            [[0.0, 10.0], [10.0, 20.0], [20.0, 30.0]],
+            dtype=float,
+        )
+        first = _grid(
+            azimuths=(-10.0, 0.0, 10.0),
+            frequencies=(2.0, 1.0),
+            power=np.power(10.0, db_values / 10.0).reshape(3, 1, 2, 1),
+        )
+        second = _grid(
+            azimuths=(-10.0, 0.0, 10.0),
+            frequencies=(2.0, 1.0),
+            power=np.power(10.0, (db_values + 10.0) / 10.0).reshape(3, 1, 2, 1),
+        )
+        spec = build_frequency_spec(
+            [("First", first), ("Second", second)],
+            azimuth=None,
+            azimuth_band=(-10.0, 10.0),
+            azimuth_percentile=90.0,
+            elevation=0.0,
+            polarization="VV",
+        )
+        self.assertEqual(spec.series[0].x, (1.0, 2.0))
+        np.testing.assert_allclose(spec.series[0].y, (28.0, 18.0))
+        np.testing.assert_allclose(spec.series[1].y, (38.0, 28.0))
+        self.assertIn("P90 across Azimuth [-10, 10] deg", spec.title)
+
+    def test_frequency_band_retains_frequency_nan_gaps_and_rejects_phase(self):
+        power = np.asarray(
+            [[np.nan, 1.0], [np.nan, 100.0], [np.nan, 10000.0]],
+            dtype=float,
+        ).reshape(3, 1, 2, 1)
+        grid = _grid(frequencies=(1.0, 2.0), power=power)
+        spec = build_frequency_spec(
+            [("Gaps", grid)],
+            azimuth=None,
+            azimuth_band=(-90.0, 90.0),
+            azimuth_percentile=50.0,
+            elevation=0.0,
+            polarization="VV",
+        )
+        self.assertTrue(np.isnan(spec.series[0].y[0]))
+        self.assertAlmostEqual(spec.series[0].y[1], 20.0)
+
+        with self.assertRaisesRegex(ValueError, "unavailable for wrapped phase"):
+            build_frequency_spec(
+                [("Phase", grid)],
+                azimuth=None,
+                azimuth_band=(-90.0, 90.0),
+                azimuth_percentile=50.0,
+                elevation=0.0,
+                polarization="VV",
+                quantity="phase",
+            )
+
+    def test_frequency_band_supports_seam_wrap_and_requires_common_samples(self):
+        grid = _grid(
+            azimuths=(-180.0, -170.0, 0.0, 170.0),
+            frequencies=(1.0,),
+            power=np.asarray([1.0, 10.0, 1.0e6, 1000.0]).reshape(4, 1, 1, 1),
+        )
+        spec = build_frequency_spec(
+            [("Wrapped", grid)],
+            azimuth=None,
+            azimuth_band=(170.0, -170.0),
+            azimuth_percentile=50.0,
+            elevation=0.0,
+            polarization="VV",
+        )
+        self.assertAlmostEqual(spec.series[0].y[0], 10.0)
+        self.assertIn("(wrap)", spec.title)
+
+        with self.assertRaisesRegex(ValueError, "contains no samples common"):
+            build_frequency_spec(
+                [("Wrapped", grid)],
+                azimuth=None,
+                azimuth_band=(20.0, 30.0),
+                azimuth_percentile=90.0,
+                elevation=0.0,
+                polarization="VV",
+            )
+
+    def test_frequency_band_counts_periodic_seam_once_and_prefers_upper_alias(self):
+        # 0/360 and -pi/+pi are the same physical direction.  The upper
+        # stored representation wins, matching the SENTRi import policy, and
+        # the direction contributes only once to the percentile.
+        degree_grid = _grid(
+            azimuths=(0.0, 90.0, 180.0, 270.0, 360.0),
+            frequencies=(1.0,),
+            power=np.power(10.0, np.asarray([0, 10, 20, 30, 40]) / 10.0).reshape(
+                5, 1, 1, 1
+            ),
+        )
+        degree_spec = build_frequency_spec(
+            [("Degrees", degree_grid)],
+            azimuth=None,
+            azimuth_band=(0.0, 360.0),
+            azimuth_percentile=50.0,
+            elevation=0.0,
+            polarization="VV",
+        )
+        self.assertAlmostEqual(degree_spec.series[0].y[0], 25.0)
+        self.assertIn("(4 common samples)", degree_spec.title)
+
+        radian_grid = _grid(
+            azimuths=(-np.pi, -np.pi / 2.0, 0.0, np.pi / 2.0, np.pi),
+            frequencies=(1.0,),
+            power=np.power(10.0, np.asarray([0, 10, 20, 30, 40]) / 10.0).reshape(
+                5, 1, 1, 1
+            ),
+            angle_unit="rad",
+        )
+        radian_spec = build_frequency_spec(
+            [("Radians", radian_grid)],
+            azimuth=None,
+            azimuth_band=(-np.pi, np.pi),
+            azimuth_percentile=50.0,
+            elevation=0.0,
+            polarization="VV",
+        )
+        self.assertAlmostEqual(radian_spec.series[0].y[0], 25.0)
+        self.assertIn("[-180, 180] deg", radian_spec.title)
+
+    def test_frequency_band_rejects_limits_from_a_different_azimuth_convention(self):
+        grid = _grid(
+            azimuths=(-180.0, -170.0, 0.0, 170.0, 180.0),
+            frequencies=(1.0,),
+        )
+        with self.assertRaisesRegex(ValueError, "outside the stored azimuth range"):
+            build_frequency_spec(
+                [("Signed convention", grid)],
+                azimuth=None,
+                azimuth_band=(350.0, 10.0),
+                azimuth_percentile=90.0,
+                elevation=0.0,
+                polarization="VV",
+            )
 
     def test_phase_uses_stored_phase_preserves_nan_gaps_and_requires_reference(self):
         phase = np.asarray([0.0, np.nan, np.pi]).reshape(3, 1, 1, 1)

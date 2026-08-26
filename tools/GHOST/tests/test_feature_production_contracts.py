@@ -14,9 +14,11 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
+sys.path.append(str(REPO.parent.parent / "GRIM_Revised_2"))
 
 import feature_sum  # noqa: E402
 import feature_workflow  # noqa: E402
+from grim_dataset import RcsGrid  # noqa: E402
 
 
 def _write_response_placeholder(path):
@@ -547,6 +549,54 @@ class BaseContractTests(unittest.TestCase):
                 report["angular_contract"],
                 feature_sum.ASSEMBLY_RADAR_ANGULAR_CONTRACT,
             )
+
+    def test_saved_sentri_conversion_is_a_canonical_assembly_base(self):
+        native = RcsGrid(
+            [0.0],
+            [0.0, 90.0, 180.0],
+            [1.0],
+            ["VV"],
+            rcs=np.ones((1, 3, 1, 1), dtype=np.complex128),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+                "angular_coordinate_system": "conic",
+                "elevation_coordinate_convention": "sentri_theta_top_zero",
+            },
+            extra={
+                "source_format": "SENTRi descriptive Hz RCS table",
+                "sentri_coordinate_mapping": (
+                    "elevation=theta; azimuth=wrapped phi"
+                ),
+                "sentri_elevation_convention": "sentri_theta_top_zero",
+            },
+        )
+        converted = native.convert_sentri_elevation_to_grim()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(converted.save(Path(directory) / "converted.grim"))
+            payload = feature_sum._load_grim(str(path))
+            report = feature_sum.validate_assembly_base_grid_metadata(
+                payload,
+                {
+                    "frequencies_ghz": converted.frequencies.tolist(),
+                    "azimuths_deg": converted.azimuths.tolist(),
+                    "elevations_deg": converted.elevations.tolist(),
+                    "axis_az_deg": 0.0,
+                    "axis_el_deg": 0.0,
+                    "roll_deg": 0.0,
+                },
+                str(path),
+                allow_legacy_metadata=False,
+            )
+
+        self.assertEqual(report["status"], "canonical")
+        self.assertEqual(
+            report["angular_contract"],
+            feature_sum.ASSEMBLY_RADAR_ANGULAR_CONTRACT,
+        )
 
     def test_declared_base_rejects_contradictions_and_can_gate_missing_legacy(self):
         with tempfile.TemporaryDirectory() as directory:
