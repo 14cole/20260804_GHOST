@@ -726,13 +726,14 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 vv_payload[key] = np.asarray(gui_payload[key])[..., [1]]
             with vv_base.open("wb") as stream:
                 np.savez(stream, **vv_payload)
-            feature_sum.add_features_to_monostatic_grim(
-                str(vv_base), str(vv_combined), points=[point],
-                radar_grid=grid, declared_coherent_base=True,
-            )
-            with np.load(vv_combined, allow_pickle=False) as updated:
-                np.testing.assert_array_equal(updated["polarizations"], ["VV"])
-                self.assertEqual(updated["rcs_power"].shape[-1], 1)
+            with self.assertRaisesRegex(
+                ValueError, "require exactly VV, HH, and reciprocal"
+            ):
+                feature_sum.add_features_to_monostatic_grim(
+                    str(vv_base), str(vv_combined), points=[point],
+                    radar_grid=grid, declared_coherent_base=True,
+                )
+            self.assertFalse(vv_combined.exists())
 
             gui_payload["combine_role"] = np.asarray("power")
             with gui_base.open("wb") as stream:

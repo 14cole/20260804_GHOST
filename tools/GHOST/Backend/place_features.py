@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Coherently place point and line features on a platform result.
+"""Validate, then coherently place point and line features on a platform.
 
 Edit only the USER SETTINGS block, then run:
 
     python place_features.py
 
-The base may be a self-contained GHOST BoR monostatic GRIM or an attested
-external monostatic GRIM paired with an indexed ASCII ``.facet``/STL platform
-surface. GUI power/phase subtraction results are accepted directly. Point and
-line datasets use the single canonical OPN-FRD (featured-clean) differential
-response. Metadata that merely repeats that declaration is optional.
+Production is the default: the clean body must carry the strict coherent/grid
+metadata contract and every active feature response must have a validated,
+content-bound feature-library manifest. An external monostatic GRIM also needs
+its matching indexed ASCII ``.facet``/STL platform surface. Point and line
+datasets use the single canonical OPN-FRD (featured-clean) differential
+response.
 
 The executable settings wrapper delegates to :mod:`feature_workflow`, which
 is the Qt-free API for programmatic and GUI callers.
@@ -21,16 +22,46 @@ from pathlib import Path
 # USER SETTINGS
 # =============================================================================
 
-# Selecting this file explicitly attests that it is the coherent monostatic
-# platform field in the GHOST global-origin radar VV/HH/VH convention. A GRIM
-# GUI file may omit those tags; an explicitly power-only file is still refused.
+# Production is deliberately the default. It requires strict clean-body
+# metadata, validated response manifests, and an effective host material /
+# coating ID for every active response. Use "legacy" only for a reviewed older
+# library whose missing declarations you intentionally accept; that choice and
+# every compatibility assumption are recorded as warnings in the output.
+VALIDATION_PROFILE = "production"       # "production" or explicit "legacy"
+
+# The clean local material/coating stack expected by every response manifest.
+# A global value is convenient for a homogeneous host. Per-response overrides
+# support mixed vehicle stacks; use "point:<dataset_id>" / "line:<dataset_id>"
+# when the same dataset ID appears in both feature kinds, or a bare dataset ID
+# when it is unambiguous. Production requires one effective value per active
+# response, and it must match manifest host.material after case/space folding.
+EXPECTED_HOST_MATERIAL = None            # e.g. "PEC outer skin"
+EXPECTED_HOST_MATERIALS = {
+    # "line:door_seam": "primer + topcoat stack v3",
+    # "point:fastener": "aluminum skin stack v2",
+}
+
+# Validation never publishes output by itself. If a completed plan contains
+# warnings, execution prints its sealed SHA-256 and stops. After reviewing the
+# exact warning-bearing plan, copy that digest here. Any input/configuration
+# change produces a different digest and invalidates the waiver automatically.
+# Leave None for normal Production use.
+ACKNOWLEDGED_PLAN_SHA256 = None
+
+# The Production profile verifies that this file declares the coherent
+# monostatic platform field in the GHOST global-origin radar VV/HH/VH
+# convention. Legacy may supply missing declarations, but an explicitly
+# power-only file is always refused.
 BASE_MONOSTATIC_GRIM = "rcs_runs_bor/run_x/results/body.grim"
 OUTPUT_MONOSTATIC_GRIM = "rcs_runs_bor/run_x/results/body_with_features.grim"
 COORDINATE_UNITS = "inches"
 
-# Required for a non-BoR base. It may also be supplied for a BoR result when
-# mesh-based skin checks and shadowing are desired. The mesh and coordinate
-# files must use the same CAD frame/origin (+y nose, +x right, +z up).
+# Required for a non-BoR base. Production also requires the canonical
+# <surface>.assembly.json binding made by create_feature_manifest.py after the
+# exact base/surface/units/frame registration is reviewed. A surface may also
+# be supplied for a BoR result when mesh-based skin checks and shadowing are
+# desired. The mesh and coordinate files must use the same CAD frame/origin
+# (+y nose, +x right, +z up).
 SURFACE_MESH = None               # e.g. "platform.facet" or "platform.stl"
 SURFACE_UNITS = "inches"
 FLIP_SURFACE_NORMALS = False      # True only when mesh winding points inward
@@ -72,12 +103,12 @@ POINT_FEATURE_DATASETS = {
     # "antenna": "antenna_opn_minus_frd.grim",
 }
 
-# Listing a dataset above explicitly attests that it is the coherent
-# installed-feature-minus-clean-skin delta, with its origin at the aperture
-# phase center, exp(+jwt), and the documented cavity-frame VV/HH/VH basis.
-# This accepts a GRIM GUI subtraction that dropped those convention tags and
-# whose generic container remains tagged power_phase. Incorrect placement
-# declarations produce incorrect coherent phase; do not list standalone fields.
+# In Production, each listed response needs a team-attested manifest created
+# and checked with create_feature_manifest.py. The manifest binds the exact
+# response bytes and records the reviewed subtraction, phase/frame, host, and
+# applicability evidence; it does not independently certify electromagnetic
+# accuracy. Incorrect declarations produce incorrect coherent phase; do not
+# list standalone fields.
 # Every point dataset must contain VV, HH, and reciprocal VH/HV. Missing point
 # cross-polarization is not guessed to be zero. Every line dataset must contain
 # the 2-D TE and TM complex responses. OPN-FRD is the only accepted delta order.
@@ -195,11 +226,33 @@ def _compact_points(profile, surface, scale, limit, wavelength):
     )
 
 
+def _validation_policy():
+    """Return strict backend flags for the one explicit profile setting."""
+
+    profile = str(VALIDATION_PROFILE).strip().casefold()
+    if profile == "production":
+        return profile, False, True
+    if profile == "legacy":
+        return profile, True, False
+    raise ValueError(
+        "VALIDATION_PROFILE must be exactly 'production' or 'legacy'."
+    )
+
+
 def main():
     if LINE_FEATURE_LOCATIONS_CSV is None and POINT_FEATURE_LOCATIONS_CSV is None:
         raise SystemExit(
             "Configure LINE_FEATURE_LOCATIONS_CSV or POINT_FEATURE_LOCATIONS_CSV."
         )
+    try:
+        profile, allow_legacy_metadata, require_manifests = _validation_policy()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        f"Validation profile: {profile.title()} "
+        f"(strict base metadata={'yes' if not allow_legacy_metadata else 'no'}, "
+        f"validated feature manifests={'yes' if require_manifests else 'no'})"
+    )
     request = FeatureAssemblyRequest(
         base_grim=BASE_MONOSTATIC_GRIM,
         output_grim=OUTPUT_MONOSTATIC_GRIM,
@@ -216,20 +269,50 @@ def main():
         skin_tol_m=SKIN_TOL_M,
         skin_phase_tol_deg=SKIN_PHASE_TOL_DEG,
         normal_tol_deg=NORMAL_TOL_DEG,
+        allow_legacy_base_metadata=allow_legacy_metadata,
+        require_feature_manifests=require_manifests,
+        expected_host_material=EXPECTED_HOST_MATERIAL,
+        expected_host_materials=EXPECTED_HOST_MATERIALS,
         base_dir=PROJECT_ROOT,
         history="place_features.py coherent platform line/compact placement",
     )
     try:
         plan = prepare_feature_assembly(request)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
+    if plan.validation_warnings:
+        print(
+            f"Validation completed with {len(plan.validation_warnings)} "
+            "warning(s):"
+        )
+        for index, warning in enumerate(plan.validation_warnings, start=1):
+            print(f"  {index}. {warning}")
+        plan_sha256 = str(plan.prepared_plan_sha256).strip()
+        if len(plan_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in plan_sha256
+        ):
+            raise SystemExit(
+                "Output was not published because the warning-bearing plan "
+                "does not carry a valid sealed SHA-256. Validate it again with "
+                "the current backend."
+            )
+        print(f"Prepared warning-bearing plan SHA-256: {plan_sha256}")
+        if str(ACKNOWLEDGED_PLAN_SHA256 or "").strip() != plan_sha256:
+            raise SystemExit(
+                "Output was not published. Review the warnings above, then "
+                "copy this exact digest into ACKNOWLEDGED_PLAN_SHA256 to waive "
+                "them for this sealed configuration."
+            )
     if plan.occluder is not None:
         print(
             "Geometric shadowing enabled: "
             f"{len(plan.surface.triangles)} triangles, "
             f"ray bias {plan.occluder.bias * 1e3:.4g} mm"
         )
-    saved = execute_feature_assembly(plan)
+    try:
+        saved = execute_feature_assembly(plan)
+    except (FileNotFoundError, ValueError, RuntimeError) as exc:
+        raise SystemExit(str(exc)) from exc
     print(f"Wrote one combined monostatic dataset: {saved}")
 
 

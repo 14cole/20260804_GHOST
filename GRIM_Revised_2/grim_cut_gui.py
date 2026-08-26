@@ -2291,11 +2291,33 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             getattr(self.feature_assembly_panel, "job_is_running", lambda: False)()
         )
         if feature_busy:
+            feature_operation = str(
+                getattr(
+                    self.feature_assembly_panel,
+                    "busy_operation",
+                    lambda: "",
+                )()
+            )
+            if feature_operation == "build":
+                getattr(
+                    self.feature_assembly_panel,
+                    "request_cancel",
+                    lambda: None,
+                )()
+                detail = (
+                    "Safe cancellation was requested. Wait for the current "
+                    "numerical step to finish, then close GRIM again. Existing "
+                    "output will be kept."
+                )
+            else:
+                detail = (
+                    "Feature validation is still running. Wait for it to finish "
+                    "before closing GRIM."
+                )
             QMessageBox.warning(
                 self,
                 "Feature Assembly Still Running",
-                "Feature validation or assembly is still running. Wait for it "
-                "to finish before closing GRIM.",
+                detail,
             )
             self.main_tabs.setCurrentWidget(self.assembly_workspace)
             event.ignore()
@@ -2332,6 +2354,14 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             )
             self.main_tabs.setCurrentWidget(self.runs_workspace)
             self.runs_workspace.focus_workspace()
+            event.ignore()
+            return
+
+        feature_request_close = getattr(
+            self.feature_assembly_panel, "request_close", None
+        )
+        if callable(feature_request_close) and not feature_request_close(self):
+            self.main_tabs.setCurrentWidget(self.assembly_workspace)
             event.ignore()
             return
 

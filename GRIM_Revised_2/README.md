@@ -48,17 +48,56 @@ while new IDs default enabled and choosing a different CSV resets the choice.
 Use **Find feature** to filter by instance ID, dataset ID, or mapped response;
 filtering never changes membership. **Copy full selection** records the exact
 enabled/disabled configuration even when the on-screen summary is shortened.
+Use the named **Reusable assembly recipe** bar to save the body, CSVs, response
+mappings, tolerances, validation profile, host material/coating IDs, and exact
+membership as one portable
+`.assembly.json` trade-study variant. Paths are stored relative to the recipe
+when possible. Loading a recipe warns when an input is missing or has changed;
+it never silently treats changed bytes as the saved configuration. Loading a
+different recipe or closing GRIM with recipe edits presents **Save / Discard /
+Cancel**, so a trade-study configuration is not silently lost. Version 1
+recipes remain readable, but are flagged for a host-ID review before Production
+validation.
 If every feature is unchecked, **Preview geometry** deliberately shows the
 clean body alone; validation and build still require at least one enabled
 feature.
+The selected clean-body `.grim` is preflighted before it receives a ready check.
+An embedded BoR response may supply its own preview geometry; an external 3-D
+body requires its matching STL/facet mesh. A malformed ZIP or incomplete GRIM
+key set is shown as unready rather than being counted as a body.
+For an external 3-D body, Production also requires a reviewed solve-to-mesh
+binding. **Bind / refresh...** records the team geometry revision and the
+registration evidence ID against the exact clean-body GRIM, mesh bytes, CAD
+frame, and selected mesh units. **Check binding** verifies those exact inputs.
+The adjacent status clearly reports Missing, Unchecked, Stale, Invalid, or
+Current; Production validation remains locked until the current selection has
+been checked. Embedded BoR geometry is self-bound and needs no sidecar.
 **Validate placements** then checks the body skin, supplied normals, and mapping
-completeness. **Assemble & save** performs the full response evaluation and
-writes the result. An unchanged validated plan is reused at assembly time; any
+completeness. The placement-QA table gives every enabled point and line a
+pass/fail-ready record and selects the matching spatial-tree row when clicked.
+Warnings remain prominent rather than disappearing into the log. Mesh QA also
+reports open edges, nonmanifold edges, duplicate facets, and inconsistent
+winding; these are warnings because an intentionally open skin can still be a
+valid placement surface, but they deserve review before enabling shadowing.
+**Assemble validated & save** is locked until the exact current configuration
+has completed Validate placements. It never performs an unreviewed validation
+on the way to publication. If validation returns applicability or compatibility
+warnings, the operator must review them and apply the one-validation warning
+waiver before assembly is enabled. The action performs the full response
+evaluation and writes the result. Its progress bar covers the
+direction/frequency work, and **Cancel
+assembly** cooperatively stops before publication. A cancelled or failed build
+keeps any existing output and removes its temporary artifact. An unchanged
+validated plan is reused at assembly time; any
 path, option, or source-file change invalidates it. Prepared base, surface,
 placement CSV, and active response bytes are hash-checked again before the
 atomic output is published. Existing output replacement
 requires confirmation, and output aliases of the clean body or mapped responses
-are rejected. The preview draws locations and
+are rejected. Before loading the large response cubes, Assembly estimates peak
+RAM and the scratch space needed for its two atomic staging archives. An
+oversized job fails early with the requested grid, estimated requirement, and
+remedies; a confirmed per-process allocation can be declared with
+`GHOST_MAX_SOLVE_GB`. The preview draws locations and
 paths, with magenta arrows for supplied outward point/line-endpoint normals.
 Lavender point arrows show the roll reference projected perpendicular to the
 normal—the solver-effective local `+x`/azimuth-zero direction. Arrow lengths
@@ -66,6 +105,10 @@ are normalized and scaled from the non-vector scene extent for display only;
 they do not encode vector magnitude or alter validation. Preview Geometry omits
 zero or parallel arrows instead of treating the preview as a validation pass;
 **Validate placements** reports those errors precisely.
+For line paths, the preview can additionally draw signed frame arrows: `+t`
+follows the CSV head-to-tail order and `+b = +t × +n` identifies the coupon's
+signed across-gap axis. Reversing line order is therefore a physical change for
+an asymmetric response, not merely a display change.
 
 The viewer's **3-D display only** controls can show axis ticks in meters,
 inches, or feet without changing the meter-valued CAD data. The body can be
@@ -87,8 +130,25 @@ CSV/STL or modify placement validation, shadowing, or the assembled RCS.
 
 Point datasets require compatible 3-D delta channels (VV, HH, and reciprocal
 cross-polarization where used). Line datasets require the TE and TM 2-D delta
-responses consumed by line expansion. Shadowing is geometric blockage; it
+responses consumed by line expansion. The GUI starts in the visibly labeled
+**Production (recommended)** profile: clean-body metadata is strict, certified
+feature-library manifests are required, and every active response row must have
+an effective host material/coating ID. The global field is a convenience default;
+use per-response row overrides for mixed vehicle substrates or coating stacks.
+The manifest binds each
+response ID to its installed-minus-clean sign, phase origin, local frame, host
+material declaration, frequency range, footprint, curvature/conical limits,
+and validation case IDs. Legacy files remain available only through explicit
+**Legacy compatibility** and produce visible QA warnings. Placement skin
+distance is displayed in millimeters (stored as meters in recipes); the safe
+controls cap phase error at 90 degrees and provide a one-click reset to the
+1 mm / 15 degree / 15 degree defaults.
+
+Shadowing is geometric blockage accelerated on the full source mesh; it
 does not add diffraction, creeping waves, or body-feature multiple scattering.
+Assembly is a coherent first-order reduced model. Production confidence still
+requires representative clean/featured full-wave comparisons for each feature
+family and the intended host/material/curvature/aspect envelope.
 
 ## PPT reports
 

@@ -180,6 +180,15 @@ class TriangleSurface:
             self._centroid_tree = cKDTree(self.centroids)
         except ImportError:  # exact brute-force fallback for minimal installs
             self._centroid_tree = None
+        self._topology_report = None
+
+    @property
+    def topology_report(self):
+        """Lazily reconstruct edge topology for placement/shadow QA."""
+        if self._topology_report is None:
+            from mesh_quality import audit_triangle_topology
+            self._topology_report = audit_triangle_topology(self.triangles)
+        return self._topology_report
 
     @staticmethod
     def _closest_on_triangles(point, tris):

@@ -704,6 +704,8 @@ def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
                         'runtime_environment_sha256',
                         'run_solve_spec_sha256',
                         'collection_source_sha256',
+                        'assembly_angular_coordinate_contract',
+                        'feature_library_manifest_json',
                         'requested_radar_grid_json',
                         'body_profile_rho_m',
                         'body_profile_z_m',

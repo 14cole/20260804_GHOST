@@ -16,11 +16,17 @@ from the coherent physical assembly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 import hashlib
+import inspect
+import json
 import math
 import os
 from pathlib import Path
+import tempfile
+import threading
 from typing import Any, Callable, Iterable, Mapping, Protocol, runtime_checkable
+import zipfile
 
 
 UNIT_CHOICES = (
@@ -34,6 +40,22 @@ UNIT_CHOICES = (
 # The complete disabled-ID list remains available through the explicit copy
 # action next to the summary.
 FEATURE_SELECTION_DISPLAY_ID_LIMIT = 8
+
+FEATURE_RECIPE_SCHEMA = "grim.feature-assembly-recipe"
+FEATURE_RECIPE_VERSION = 3
+FEATURE_RECIPE_SUFFIX = ".assembly.json"
+# Hash normal placement/library inputs while keeping recipe saves responsive for
+# very large vehicle meshes and clean-body response files. Large inputs still
+# retain size and nanosecond modification-time identity in the manifest.
+FEATURE_RECIPE_HASH_LIMIT_BYTES = 16 * 1024 * 1024
+
+VALIDATION_PROFILES = (
+    ("Production (recommended)", "production", False, True),
+    ("Legacy compatibility", "legacy", True, False),
+)
+DEFAULT_SKIN_TOL_MM = 1.0
+DEFAULT_SKIN_PHASE_TOL_DEG = 15.0
+DEFAULT_NORMAL_TOL_DEG = 15.0
 
 
 # Display/template mirrors of GHOST's versioned point- and line-placement v1
@@ -119,8 +141,10 @@ class FeatureWorkflowAdapter:
     """Neutral adapter around the authoritative feature-workflow API.
 
     Pass ``FeatureWorkflowAdapter.from_module(feature_workflow)`` to the panel.
-    Keeping these four callables explicit avoids importing GHOST from GRIM and
+    Keeping the core callables explicit avoids importing GHOST from GRIM and
     makes dependency injection straightforward in tests and packaged builds.
+    The binding callables are optional for older/limited services; Production
+    external-body readiness reports their absence instead of guessing.
     """
 
     request_factory: Callable[..., Any]
@@ -128,6 +152,9 @@ class FeatureWorkflowAdapter:
     prepare: Callable[[Any], Any]
     execute: Callable[[Any], Any]
     preview_inputs: Callable[..., Any] | None = None
+    check_surface_binding: Callable[..., Any] | None = None
+    write_surface_binding: Callable[..., Any] | None = None
+    surface_binding_path: Callable[[Any], Path] | None = None
 
     @classmethod
     def from_module(cls, module: _FeatureWorkflowModule) -> "FeatureWorkflowAdapter":
@@ -163,6 +190,9 @@ class FeatureWorkflowAdapter:
             prepare=module.prepare_feature_assembly,
             execute=module.execute_feature_assembly,
             preview_inputs=getattr(module, "prepare_feature_input_preview", None),
+            check_surface_binding=getattr(module, "check_surface_binding", None),
+            write_surface_binding=getattr(module, "write_surface_binding", None),
+            surface_binding_path=getattr(module, "surface_binding_path", None),
         )
 
     @classmethod
@@ -198,6 +228,9 @@ class FeatureWorkflowAdapter:
             prepare=service.prepare,
             execute=service.execute,
             preview_inputs=getattr(service, "prepare_input_preview", None),
+            check_surface_binding=getattr(service, "check_surface_binding", None),
+            write_surface_binding=getattr(service, "write_surface_binding", None),
+            surface_binding_path=getattr(service, "surface_binding_path", None),
         )
 
 
@@ -233,13 +266,53 @@ class FeatureAssemblyValues:
     skin_tol_m: float = 1.0e-3
     skin_phase_tol_deg: float = 15.0
     normal_tol_deg: float = 15.0
+    allow_legacy_base_metadata: bool = False
+    require_feature_manifests: bool = True
+    expected_host_material: str = ""
     base_dir: str | None = None
     point_datasets: dict[str, str] = field(default_factory=dict)
     line_datasets: dict[str, str] = field(default_factory=dict)
+    point_host_materials: dict[str, str] = field(default_factory=dict)
+    line_host_materials: dict[str, str] = field(default_factory=dict)
     # Spatial feature-definition state. These stable CSV IDs are independent
     # from both preview visibility and whole-response dataset arithmetic.
     excluded_point_placement_ids: set[str] = field(default_factory=set)
     excluded_line_ids: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class LoadedFeatureAssemblyRecipe:
+    """One validated recipe plus non-fatal source-integrity observations."""
+
+    path: Path
+    name: str
+    variant: str
+    values: FeatureAssemblyValues
+    source_warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BaseGrimPreflight:
+    """Cheap ZIP-key classification used only for honest GUI readiness."""
+
+    valid: bool
+    embedded_bor: bool
+    requires_surface_mesh: bool
+    summary: str
+    keys: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class SurfaceBindingReadiness:
+    """Cheap UI state for an explicitly checked external-body binding."""
+
+    code: str
+    message: str
+    ready: bool
+    required: bool
+    external_body: bool
+    sidecar_path: Path | None = None
+    identity_key: tuple[Any, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -253,12 +326,7 @@ class FeatureBuildDispatch:
 
 @dataclass(frozen=True)
 class _FileFingerprint:
-    """Stable-enough identity for detecting in-place input edits.
-
-    Placement CSVs are small, so hashing them avoids accepting a rewrite whose
-    size and timestamp happen to be unchanged.  Larger GRIM/STL inputs use the
-    same helper only when a validated plan is being considered for reuse.
-    """
+    """Cheap GUI cache identity; backend content hashes remain authoritative."""
 
     resolved_path: str
     exists: bool
@@ -443,6 +511,12 @@ def _clean_path(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _normalize_host_material(value: Any) -> str:
+    """Collapse insignificant host-ID whitespace while preserving display case."""
+
+    return " ".join(str(value or "").split())
+
+
 def _resolved_user_path(value: Any, *, base_dir: Any = None) -> Path:
     """Resolve a user path with the same base-directory rule as GHOST."""
 
@@ -477,6 +551,138 @@ def _paths_alias(first: Path, second: Path) -> bool:
         return first.samefile(second)
     except (FileNotFoundError, OSError):
         return False
+
+
+_BASE_GRIM_REQUIRED_KEYS = frozenset(
+    {
+        "azimuths",
+        "elevations",
+        "frequencies",
+        "polarizations",
+        "rcs_power",
+        "rcs_phase",
+    }
+)
+
+
+@lru_cache(maxsize=64)
+def _preflight_base_grim_zip(
+    resolved_path: str,
+    size: int,
+    mtime_ns: int,
+) -> BaseGrimPreflight:
+    """Inspect only the immutable ZIP directory identified by path/stat."""
+
+    del size, mtime_ns  # Values deliberately participate in the cache key.
+    path = Path(resolved_path)
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            keys = frozenset(
+                Path(name).stem
+                for name in archive.namelist()
+                if name.casefold().endswith(".npy")
+                and not name.endswith(("/", "\\"))
+            )
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        return BaseGrimPreflight(
+            False,
+            False,
+            False,
+            f"Invalid GRIM container: {exc}",
+        )
+    missing = sorted(_BASE_GRIM_REQUIRED_KEYS - keys)
+    if missing:
+        return BaseGrimPreflight(
+            False,
+            False,
+            False,
+            "Malformed GRIM response; missing key(s): " + ", ".join(missing),
+            keys,
+        )
+    has_real = "rcs_amp_real" in keys
+    has_imag = "rcs_amp_imag" in keys
+    if has_real != has_imag:
+        return BaseGrimPreflight(
+            False,
+            False,
+            False,
+            "Malformed GRIM response; complex amplitude must contain both "
+            "rcs_amp_real and rcs_amp_imag.",
+            keys,
+        )
+    has_rho = "body_profile_rho_m" in keys
+    has_z = "body_profile_z_m" in keys
+    if has_rho != has_z:
+        return BaseGrimPreflight(
+            False,
+            False,
+            False,
+            "Malformed embedded body profile; both rho and z arrays are required.",
+            keys,
+        )
+    has_requested_grid = "requested_radar_grid_json" in keys
+    if has_requested_grid and not (has_rho and has_z):
+        return BaseGrimPreflight(
+            False,
+            False,
+            False,
+            "Malformed embedded BoR metadata; requested radar grid has no body profile.",
+            keys,
+        )
+    embedded_bor = bool(has_rho and has_z and has_requested_grid)
+    if embedded_bor:
+        summary = (
+            "Embedded BoR geometry detected; a separate mesh is optional unless "
+            "geometric shadowing is enabled."
+        )
+    elif has_rho and has_z:
+        summary = (
+            "Legacy body profile lacks the requested radar-grid record; provide a "
+            "matching STL/facet mesh or regenerate the body response."
+        )
+    else:
+        summary = (
+            "External 3-D body response detected; choose its matching STL/facet "
+            "surface before validation."
+        )
+    return BaseGrimPreflight(
+        True,
+        embedded_bor,
+        not embedded_bor,
+        summary,
+        keys,
+    )
+
+
+def preflight_base_grim(
+    value: Any,
+    *,
+    base_dir: Any = None,
+) -> BaseGrimPreflight:
+    """Classify one selected base without loading its potentially large arrays."""
+
+    if not _clean_path(value):
+        return BaseGrimPreflight(
+            False, False, False, "Choose a clean-body .grim response."
+        )
+    try:
+        path = _resolved_user_path(value, base_dir=base_dir)
+        if not path.is_file():
+            return BaseGrimPreflight(
+                False, False, False, f"Clean-body file was not found: {path}"
+            )
+        if path.suffix.casefold() != ".grim":
+            return BaseGrimPreflight(
+                False, False, False, "Clean-body response must use the .grim extension."
+            )
+        stat = path.stat()
+        return _preflight_base_grim_zip(
+            str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)
+        )
+    except OSError as exc:
+        return BaseGrimPreflight(
+            False, False, False, f"Clean-body preflight failed: {exc}"
+        )
 
 
 def _fingerprint_file(
@@ -525,12 +731,730 @@ def _fingerprint_file(
     raise RuntimeError(f"Input changed while it was being read: {resolved}")
 
 
+def _surface_binding_sidecar_path(
+    surface_mesh: Any,
+    *,
+    base_dir: Any = None,
+) -> Path | None:
+    """Return the backend's canonical ``<surface>.assembly.json`` path."""
+
+    if not _clean_path(surface_mesh):
+        return None
+    resolved = _resolved_user_path(surface_mesh, base_dir=base_dir)
+    return Path(str(resolved) + ".assembly.json")
+
+
+def _surface_binding_identity_key(
+    base_grim: Any,
+    surface_mesh: Any,
+    surface_units: Any,
+    *,
+    base_dir: Any = None,
+) -> tuple[Any, ...] | None:
+    """Stat-only cache key; this deliberately never hashes large body files."""
+
+    sidecar = _surface_binding_sidecar_path(surface_mesh, base_dir=base_dir)
+    if sidecar is None:
+        return None
+    fingerprints = (
+        _fingerprint_file(base_grim, base_dir=base_dir, include_hash=False),
+        _fingerprint_file(surface_mesh, base_dir=base_dir, include_hash=False),
+        _fingerprint_file(sidecar, include_hash=False),
+    )
+    return (
+        str(surface_units).strip(),
+        *(
+            (
+                value.resolved_path,
+                value.exists,
+                value.size,
+                value.mtime_ns,
+                value.ctime_ns,
+            )
+            for value in fingerprints
+        ),
+    )
+
+
+def assess_surface_binding_readiness(
+    *,
+    base_grim: Any,
+    surface_mesh: Any,
+    surface_units: Any,
+    production_profile: bool,
+    base_dir: Any = None,
+    checked_key: tuple[Any, ...] | None = None,
+    checked_binding: Mapping[str, Any] | None = None,
+    error_key: tuple[Any, ...] | None = None,
+    check_error: str = "",
+    tools_available: bool = True,
+) -> SurfaceBindingReadiness:
+    """Describe binding readiness without content-hashing from a GUI refresh.
+
+    Exact base/surface hashes are intentionally delegated to the explicit
+    backend Check/Bind actions. A matching stat key means that explicit check
+    still describes the same selected paths, units, and sidecar bytes.
+    """
+
+    required = bool(production_profile)
+    preflight = preflight_base_grim(base_grim, base_dir=base_dir)
+    if not preflight.valid:
+        return SurfaceBindingReadiness(
+            "waiting",
+            "Select a valid clean-body GRIM before checking registration.",
+            ready=not required,
+            required=False,
+            external_body=False,
+        )
+    if preflight.embedded_bor:
+        return SurfaceBindingReadiness(
+            "not_required",
+            "✓ Embedded BoR geometry is self-bound; no external surface "
+            "binding is required.",
+            ready=True,
+            required=False,
+            external_body=False,
+        )
+
+    surface_path = (
+        _resolved_user_path(surface_mesh, base_dir=base_dir)
+        if _clean_path(surface_mesh)
+        else None
+    )
+    sidecar = _surface_binding_sidecar_path(surface_mesh, base_dir=base_dir)
+    if (
+        surface_path is None
+        or not surface_path.is_file()
+        or surface_path.suffix.casefold() not in {".stl", ".facet"}
+    ):
+        return SurfaceBindingReadiness(
+            "waiting",
+            "Choose the matching STL/facet mesh before checking solve-to-CAD "
+            "registration.",
+            ready=not required,
+            required=required,
+            external_body=True,
+            sidecar_path=sidecar,
+        )
+    if not tools_available:
+        return SurfaceBindingReadiness(
+            "unavailable",
+            "✗ The connected GHOST backend cannot check external-body bindings.",
+            ready=not required,
+            required=required,
+            external_body=True,
+            sidecar_path=sidecar,
+        )
+    if sidecar is None or not sidecar.is_file():
+        qualifier = "Production requires" if required else "Production will require"
+        return SurfaceBindingReadiness(
+            "missing",
+            f"✗ Binding missing — {qualifier} {surface_path.name}.assembly.json.",
+            ready=not required,
+            required=required,
+            external_body=True,
+            sidecar_path=sidecar,
+        )
+    try:
+        identity = _surface_binding_identity_key(
+            base_grim,
+            surface_mesh,
+            surface_units,
+            base_dir=base_dir,
+        )
+    except OSError as exc:
+        return SurfaceBindingReadiness(
+            "invalid",
+            f"✗ Binding status could not be read: {exc}",
+            ready=not required,
+            required=required,
+            external_body=True,
+            sidecar_path=sidecar,
+        )
+    if error_key == identity and str(check_error).strip():
+        return SurfaceBindingReadiness(
+            "invalid",
+            "✗ Binding is stale or invalid: " + str(check_error).strip(),
+            ready=not required,
+            required=required,
+            external_body=True,
+            sidecar_path=sidecar,
+            identity_key=identity,
+        )
+    if checked_key == identity and isinstance(checked_binding, Mapping):
+        geometry = str(checked_binding.get("geometry_id", "")).strip()
+        case_id = str(checked_binding.get("attestation_case_id", "")).strip()
+        return SurfaceBindingReadiness(
+            "valid",
+            f"✓ Current reviewed binding — geometry {geometry}; registration {case_id}.",
+            ready=True,
+            required=required,
+            external_body=True,
+            sidecar_path=sidecar,
+            identity_key=identity,
+        )
+    if checked_key is not None or error_key is not None:
+        message = (
+            "⚠ Binding check is stale — the body, mesh, units, or sidecar changed. "
+            "Click Check binding again."
+        )
+        code = "stale"
+    else:
+        message = (
+            "○ Binding found but not checked for the current body, mesh, and units. "
+            "Click Check binding before Production validation."
+        )
+        code = "unchecked"
+    return SurfaceBindingReadiness(
+        code,
+        message,
+        ready=not required,
+        required=required,
+        external_body=True,
+        sidecar_path=sidecar,
+        identity_key=identity,
+    )
+
+
+def _recipe_target_path(value: str | Path) -> Path:
+    raw = _clean_path(value)
+    if not raw:
+        raise ValueError("Choose where to save the Assembly recipe.")
+    target = Path(raw).expanduser()
+    if target.suffix.casefold() != ".json":
+        target = Path(str(target) + FEATURE_RECIPE_SUFFIX)
+    return target.resolve()
+
+
+def _recipe_relative_path(
+    value: Any,
+    *,
+    source_base_dir: Any,
+    recipe_dir: Path,
+) -> str:
+    """Store one effective path relative to the recipe when possible."""
+
+    if not _clean_path(value):
+        return ""
+    resolved = _resolved_user_path(value, base_dir=source_base_dir)
+    try:
+        relative = os.path.relpath(str(resolved), str(recipe_dir))
+    except ValueError:  # Different Windows drives cannot form a relative path.
+        return str(resolved)
+    return Path(relative).as_posix()
+
+
+def _recipe_absolute_path(value: Any, *, recipe_dir: Path) -> str:
+    raw = _clean_path(value)
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = recipe_dir / path
+    return str(path.resolve())
+
+
+def _recipe_source_items(
+    values: FeatureAssemblyValues,
+) -> tuple[tuple[str, str | None, str], ...]:
+    items: list[tuple[str, str | None, str]] = [
+        ("base_grim", None, _clean_path(values.base_grim)),
+        ("surface_mesh", None, _clean_path(values.surface_mesh)),
+        ("point_locations_csv", None, _clean_path(values.point_locations_csv)),
+        ("line_locations_csv", None, _clean_path(values.line_locations_csv)),
+    ]
+    items.extend(
+        ("point_dataset", str(dataset_id), _clean_path(path))
+        for dataset_id, path in sorted(values.point_datasets.items())
+    )
+    items.extend(
+        ("line_dataset", str(dataset_id), _clean_path(path))
+        for dataset_id, path in sorted(values.line_datasets.items())
+    )
+    return tuple(item for item in items if item[2])
+
+
+def feature_assembly_recipe_payload(
+    values: FeatureAssemblyValues,
+    *,
+    recipe_path: str | Path,
+    name: str,
+    variant: str,
+) -> dict[str, Any]:
+    """Return a portable, versioned recipe with lightweight source identity."""
+
+    if not isinstance(values, FeatureAssemblyValues):
+        raise TypeError("values must be FeatureAssemblyValues")
+    target = _recipe_target_path(recipe_path)
+    recipe_dir = target.parent
+    clean_name = str(name).strip()
+    clean_variant = str(variant).strip()
+    if not clean_name:
+        raise ValueError("Enter an Assembly recipe name.")
+    if not clean_variant:
+        raise ValueError("Enter a variant name, such as Baseline or Option A.")
+
+    def relative(path: Any) -> str:
+        return _recipe_relative_path(
+            path,
+            source_base_dir=values.base_dir,
+            recipe_dir=recipe_dir,
+        )
+
+    serialized_values: dict[str, Any] = {
+        "base_grim": relative(values.base_grim),
+        "output_grim": relative(values.output_grim),
+        "coordinate_units": str(values.coordinate_units),
+        "surface_mesh": relative(values.surface_mesh),
+        "surface_units": str(values.surface_units),
+        "flip_surface_normals": bool(values.flip_surface_normals),
+        "shadow": bool(values.shadow),
+        "shadow_bias_m": (
+            None
+            if values.shadow_bias_m is None
+            else float(values.shadow_bias_m)
+        ),
+        "point_locations_csv": relative(values.point_locations_csv),
+        "line_locations_csv": relative(values.line_locations_csv),
+        "skin_tol_m": float(values.skin_tol_m),
+        "skin_phase_tol_deg": float(values.skin_phase_tol_deg),
+        "normal_tol_deg": float(values.normal_tol_deg),
+        "allow_legacy_base_metadata": bool(values.allow_legacy_base_metadata),
+        "require_feature_manifests": bool(values.require_feature_manifests),
+        "expected_host_material": str(values.expected_host_material).strip(),
+        # Every effective path above is rebased to this recipe directory.
+        "base_dir": ".",
+        "point_datasets": {
+            str(dataset_id): relative(path)
+            for dataset_id, path in sorted(values.point_datasets.items())
+        },
+        "line_datasets": {
+            str(dataset_id): relative(path)
+            for dataset_id, path in sorted(values.line_datasets.items())
+        },
+        "point_host_materials": {
+            str(dataset_id): str(
+                values.point_host_materials.get(dataset_id, "")
+            ).strip()
+            for dataset_id in sorted(values.point_datasets)
+        },
+        "line_host_materials": {
+            str(dataset_id): str(
+                values.line_host_materials.get(dataset_id, "")
+            ).strip()
+            for dataset_id in sorted(values.line_datasets)
+        },
+        "excluded_point_placement_ids": sorted(
+            str(value) for value in values.excluded_point_placement_ids
+        ),
+        "excluded_line_ids": sorted(
+            str(value) for value in values.excluded_line_ids
+        ),
+    }
+
+    manifest: list[dict[str, Any]] = []
+    for role, dataset_id, path in _recipe_source_items(values):
+        resolved = _resolved_user_path(path, base_dir=values.base_dir)
+        try:
+            size = int(resolved.stat().st_size) if resolved.is_file() else None
+            include_hash = bool(
+                size is not None and size <= FEATURE_RECIPE_HASH_LIMIT_BYTES
+            )
+            fingerprint = _fingerprint_file(
+                path,
+                base_dir=values.base_dir,
+                include_hash=include_hash,
+            )
+        except OSError:
+            fingerprint = _FileFingerprint(
+                resolved_path=_path_key(resolved), exists=False
+            )
+        record: dict[str, Any] = {
+            "role": role,
+            "path": relative(path),
+            "exists": fingerprint.exists,
+            "size": fingerprint.size,
+            "mtime_ns": fingerprint.mtime_ns,
+        }
+        if dataset_id is not None:
+            record["dataset_id"] = dataset_id
+        if fingerprint.sha256 is not None:
+            record["sha256"] = fingerprint.sha256
+        manifest.append(record)
+
+    return {
+        "schema": FEATURE_RECIPE_SCHEMA,
+        "version": FEATURE_RECIPE_VERSION,
+        "name": clean_name,
+        "variant": clean_variant,
+        "path_policy": "relative-to-recipe",
+        "values": serialized_values,
+        "source_manifest": manifest,
+    }
+
+
+def write_feature_assembly_recipe(
+    values: FeatureAssemblyValues,
+    path: str | Path,
+    *,
+    name: str,
+    variant: str,
+) -> Path:
+    """Atomically save one portable Assembly recipe."""
+
+    target = _recipe_target_path(path)
+    if not target.parent.is_dir():
+        raise FileNotFoundError(
+            f"Assembly recipe folder does not exist: {target.parent}"
+        )
+    payload = feature_assembly_recipe_payload(
+        values,
+        recipe_path=target,
+        name=name,
+        variant=variant,
+    )
+    serialized = json.dumps(
+        payload,
+        indent=2,
+        ensure_ascii=False,
+        allow_nan=False,
+    ) + "\n"
+    temporary_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, target)
+    finally:
+        if temporary_name:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+    return target
+
+
+def _recipe_string_mapping(value: Any, label: str) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Assembly recipe {label} must be an object.")
+    result: dict[str, str] = {}
+    for key, path in value.items():
+        dataset_id = str(key).strip()
+        if not dataset_id or not isinstance(path, str):
+            raise ValueError(
+                f"Assembly recipe {label} must map nonempty IDs to paths."
+            )
+        result[dataset_id] = path
+    return result
+
+
+def _recipe_id_set(value: Any, label: str) -> set[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"Assembly recipe {label} must be a list.")
+    result = {str(item).strip() for item in value}
+    if "" in result or len(result) != len(value):
+        raise ValueError(
+            f"Assembly recipe {label} contains a blank or duplicate ID."
+        )
+    return result
+
+
+def read_feature_assembly_recipe(
+    path: str | Path,
+) -> LoadedFeatureAssemblyRecipe:
+    """Load one recipe and report missing or changed referenced inputs."""
+
+    source = Path(_clean_path(path)).expanduser().resolve()
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Assembly recipe is not valid JSON ({exc.msg} at line {exc.lineno})."
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("Assembly recipe root must be a JSON object.")
+    if payload.get("schema") != FEATURE_RECIPE_SCHEMA:
+        raise ValueError(
+            f"Not a {FEATURE_RECIPE_SCHEMA!r} Assembly recipe."
+        )
+    version = payload.get("version")
+    if version not in {1, 2, FEATURE_RECIPE_VERSION}:
+        raise ValueError(
+            f"Unsupported Assembly recipe version {version!r}; this GRIM build "
+            f"supports versions 1 through {FEATURE_RECIPE_VERSION}."
+        )
+    name = payload.get("name")
+    variant = payload.get("variant")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Assembly recipe name must be a nonempty string.")
+    if not isinstance(variant, str) or not variant.strip():
+        raise ValueError("Assembly recipe variant must be a nonempty string.")
+    raw_values = payload.get("values")
+    if not isinstance(raw_values, Mapping):
+        raise ValueError("Assembly recipe values must be a JSON object.")
+
+    required = {
+        "base_grim",
+        "output_grim",
+        "coordinate_units",
+        "surface_mesh",
+        "surface_units",
+        "flip_surface_normals",
+        "shadow",
+        "shadow_bias_m",
+        "point_locations_csv",
+        "line_locations_csv",
+        "skin_tol_m",
+        "skin_phase_tol_deg",
+        "normal_tol_deg",
+        "allow_legacy_base_metadata",
+        "require_feature_manifests",
+        "base_dir",
+        "point_datasets",
+        "line_datasets",
+        "excluded_point_placement_ids",
+        "excluded_line_ids",
+    }
+    if version >= 2:
+        required.add("expected_host_material")
+    if version >= 3:
+        required.update({"point_host_materials", "line_host_materials"})
+    missing = sorted(required - set(raw_values))
+    if missing:
+        raise ValueError(
+            "Assembly recipe is missing value(s): " + ", ".join(missing)
+        )
+    for key in (
+        "base_grim",
+        "output_grim",
+        "surface_mesh",
+        "point_locations_csv",
+        "line_locations_csv",
+    ):
+        if not isinstance(raw_values[key], str):
+            raise ValueError(f"Assembly recipe {key} must be a path string.")
+    if any(
+        not isinstance(raw_values[key], bool)
+        for key in (
+            "flip_surface_normals",
+            "shadow",
+            "allow_legacy_base_metadata",
+            "require_feature_manifests",
+        )
+    ):
+        raise ValueError("Assembly recipe boolean settings must be true or false.")
+    expected_host_material = raw_values.get("expected_host_material", "")
+    if not isinstance(expected_host_material, str):
+        raise ValueError(
+            "Assembly recipe expected_host_material must be a text value."
+        )
+
+    coordinate_units = str(raw_values["coordinate_units"])
+    surface_units = str(raw_values["surface_units"])
+    supported_units = {value for _label, value in UNIT_CHOICES}
+    if coordinate_units not in supported_units or surface_units not in supported_units:
+        raise ValueError("Assembly recipe contains unsupported coordinate units.")
+    skin_tol = _require_finite_nonnegative(
+        raw_values["skin_tol_m"], "Recipe skin distance tolerance"
+    )
+    phase_tol = _require_finite_nonnegative(
+        raw_values["skin_phase_tol_deg"], "Recipe skin phase tolerance"
+    )
+    normal_tol = _require_finite_nonnegative(
+        raw_values["normal_tol_deg"], "Recipe normal tolerance"
+    )
+    if skin_tol > 0.1:
+        raise ValueError(
+            "Assembly recipe skin distance tolerance must not exceed 100 mm."
+        )
+    if not 0.0 < phase_tol <= 90.0:
+        raise ValueError(
+            "Assembly recipe skin phase tolerance must be above 0 and at most "
+            "90 degrees."
+        )
+    if normal_tol >= 90.0:
+        raise ValueError("Assembly recipe normal tolerance must be below 90 degrees.")
+    shadow_bias_raw = raw_values["shadow_bias_m"]
+    shadow_bias = (
+        None
+        if shadow_bias_raw is None
+        else _require_finite_nonnegative(shadow_bias_raw, "Recipe shadow bias")
+    )
+
+    point_paths = _recipe_string_mapping(
+        raw_values["point_datasets"], "point_datasets"
+    )
+    line_paths = _recipe_string_mapping(
+        raw_values["line_datasets"], "line_datasets"
+    )
+    point_host_materials = _recipe_string_mapping(
+        raw_values.get("point_host_materials", {}), "point_host_materials"
+    )
+    line_host_materials = _recipe_string_mapping(
+        raw_values.get("line_host_materials", {}), "line_host_materials"
+    )
+    unknown_point_hosts = sorted(set(point_host_materials) - set(point_paths))
+    unknown_line_hosts = sorted(set(line_host_materials) - set(line_paths))
+    if unknown_point_hosts or unknown_line_hosts:
+        raise ValueError(
+            "Assembly recipe host-material rows reference unknown response IDs: "
+            f"point={unknown_point_hosts}, line={unknown_line_hosts}."
+        )
+    recipe_dir = source.parent
+    values = FeatureAssemblyValues(
+        base_grim=_recipe_absolute_path(raw_values["base_grim"], recipe_dir=recipe_dir),
+        output_grim=_recipe_absolute_path(raw_values["output_grim"], recipe_dir=recipe_dir),
+        coordinate_units=coordinate_units,
+        surface_mesh=_recipe_absolute_path(raw_values["surface_mesh"], recipe_dir=recipe_dir),
+        surface_units=surface_units,
+        flip_surface_normals=raw_values["flip_surface_normals"],
+        shadow=raw_values["shadow"],
+        shadow_bias_m=shadow_bias,
+        point_locations_csv=_recipe_absolute_path(
+            raw_values["point_locations_csv"], recipe_dir=recipe_dir
+        ),
+        line_locations_csv=_recipe_absolute_path(
+            raw_values["line_locations_csv"], recipe_dir=recipe_dir
+        ),
+        skin_tol_m=skin_tol,
+        skin_phase_tol_deg=phase_tol,
+        normal_tol_deg=normal_tol,
+        allow_legacy_base_metadata=raw_values["allow_legacy_base_metadata"],
+        require_feature_manifests=raw_values["require_feature_manifests"],
+        expected_host_material=expected_host_material.strip(),
+        base_dir=None,
+        point_datasets={
+            dataset_id: _recipe_absolute_path(value, recipe_dir=recipe_dir)
+            for dataset_id, value in point_paths.items()
+        },
+        line_datasets={
+            dataset_id: _recipe_absolute_path(value, recipe_dir=recipe_dir)
+            for dataset_id, value in line_paths.items()
+        },
+        point_host_materials=point_host_materials,
+        line_host_materials=line_host_materials,
+        excluded_point_placement_ids=_recipe_id_set(
+            raw_values["excluded_point_placement_ids"],
+            "excluded_point_placement_ids",
+        ),
+        excluded_line_ids=_recipe_id_set(
+            raw_values["excluded_line_ids"], "excluded_line_ids"
+        ),
+    )
+
+    current_sources = {
+        (role, dataset_id): path_value
+        for role, dataset_id, path_value in _recipe_source_items(values)
+    }
+    warnings: list[str] = []
+    if version == 1:
+        warnings.append(
+            "Recipe v1 predates host material/coating identity. Enter that ID "
+            "before using the Production validation profile."
+        )
+    elif version == 2:
+        warnings.append(
+            "Recipe v2 has only one global host material/coating ID. Review "
+            "per-response host IDs before Production validation of mixed stacks."
+        )
+    raw_manifest = payload.get("source_manifest", [])
+    if not isinstance(raw_manifest, list):
+        raise ValueError("Assembly recipe source_manifest must be a list.")
+    seen_manifest_keys: set[tuple[str, str | None]] = set()
+    for index, record in enumerate(raw_manifest):
+        if not isinstance(record, Mapping):
+            raise ValueError(
+                f"Assembly recipe source_manifest entry {index} must be an object."
+            )
+        role = str(record.get("role", "")).strip()
+        dataset_raw = record.get("dataset_id")
+        dataset_id = None if dataset_raw is None else str(dataset_raw).strip()
+        key = (role, dataset_id)
+        if not role or key in seen_manifest_keys:
+            raise ValueError(
+                "Assembly recipe source_manifest contains a blank or duplicate role."
+            )
+        seen_manifest_keys.add(key)
+        current_path = current_sources.get(key)
+        if not current_path:
+            warnings.append(f"{role}: referenced source is no longer configured")
+            continue
+        display = role if dataset_id is None else f"{role} {dataset_id!r}"
+        saved_exists = record.get("exists")
+        if not isinstance(saved_exists, bool):
+            raise ValueError(
+                f"Assembly recipe source_manifest {display} has invalid exists state."
+            )
+        try:
+            current = _fingerprint_file(
+                current_path,
+                include_hash=isinstance(record.get("sha256"), str),
+            )
+        except OSError as exc:
+            warnings.append(f"{display}: could not verify source ({exc})")
+            continue
+        if not current.exists:
+            warnings.append(f"{display}: file is missing")
+            continue
+        if not saved_exists:
+            warnings.append(f"{display}: file was missing when this recipe was saved")
+            continue
+        saved_hash = record.get("sha256")
+        if isinstance(saved_hash, str):
+            if current.sha256 != saved_hash:
+                warnings.append(f"{display}: file content changed since recipe save")
+            continue
+        saved_size = record.get("size")
+        if isinstance(saved_size, int) and current.size != saved_size:
+            warnings.append(f"{display}: file size changed since recipe save")
+        elif (
+            isinstance(record.get("mtime_ns"), int)
+            and current.mtime_ns != record["mtime_ns"]
+        ):
+            warnings.append(
+                f"{display}: timestamp changed; large-file content was not hashed"
+            )
+
+    return LoadedFeatureAssemblyRecipe(
+        path=source,
+        name=name.strip(),
+        variant=variant.strip(),
+        values=values,
+        source_warnings=tuple(warnings),
+    )
+
+
 def _callable_key(value: Callable[..., Any]) -> tuple[int, int]:
     """Identify a bound function without depending on transient method objects."""
 
     owner = getattr(value, "__self__", None)
     function = getattr(value, "__func__", value)
     return (id(owner), id(function))
+
+
+def _callable_accepts_runtime_hooks(value: Callable[..., Any]) -> bool:
+    """Whether ``value`` accepts Assembly progress/cancellation keywords."""
+
+    try:
+        parameters = inspect.signature(value).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return True
+    return {"cancel_check", "progress_callback"}.issubset(parameters)
 
 
 def _require_finite_nonnegative(value: Any, label: str) -> float:
@@ -987,6 +1911,18 @@ class FeatureAssemblyFormModel:
             dataset_id: _clean_path(self.values.line_datasets.get(dataset_id))
             for dataset_id in line_ids
         }
+        self.values.point_host_materials = {
+            dataset_id: str(
+                self.values.point_host_materials.get(dataset_id, "")
+            ).strip()
+            for dataset_id in point_ids
+        }
+        self.values.line_host_materials = {
+            dataset_id: str(
+                self.values.line_host_materials.get(dataset_id, "")
+            ).strip()
+            for dataset_id in line_ids
+        }
         self.invalidate_prepared_plan()
 
     def invalidate_dataset_requirements(self, kind: str | None = None) -> None:
@@ -1002,6 +1938,7 @@ class FeatureAssemblyFormModel:
             self._point_requirements_csv = ""
             self._point_requirements_fingerprint = None
             self.values.point_datasets = {}
+            self.values.point_host_materials = {}
         if normalized in (None, "line"):
             self._line_dataset_ids = ()
             self._line_path_count = 0
@@ -1010,6 +1947,7 @@ class FeatureAssemblyFormModel:
             self._line_requirements_csv = ""
             self._line_requirements_fingerprint = None
             self.values.line_datasets = {}
+            self.values.line_host_materials = {}
         self.invalidate_prepared_plan()
 
     def query_dataset_ids(self, service: Any) -> Any:
@@ -1056,6 +1994,12 @@ class FeatureAssemblyFormModel:
     def set_line_dataset(self, dataset_id: str, path: str) -> None:
         self._set_dataset("line", dataset_id, path)
 
+    def set_point_host_material(self, dataset_id: str, material: str) -> None:
+        self._set_host_material("point", dataset_id, material)
+
+    def set_line_host_material(self, dataset_id: str, material: str) -> None:
+        self._set_host_material("line", dataset_id, material)
+
     def _set_dataset(self, kind: str, dataset_id: str, path: str) -> None:
         key = str(dataset_id).strip()
         ids = self._point_dataset_ids if kind == "point" else self._line_dataset_ids
@@ -1067,6 +2011,21 @@ class FeatureAssemblyFormModel:
             else self.values.line_datasets
         )
         mapping[key] = _clean_path(path)
+        self.invalidate_prepared_plan()
+
+    def _set_host_material(
+        self, kind: str, dataset_id: str, material: str
+    ) -> None:
+        key = str(dataset_id).strip()
+        ids = self._point_dataset_ids if kind == "point" else self._line_dataset_ids
+        if key not in ids:
+            raise KeyError(f"Unknown {kind} dataset_id {key!r}.")
+        mapping = (
+            self.values.point_host_materials
+            if kind == "point"
+            else self.values.line_host_materials
+        )
+        mapping[key] = str(material).strip()
         self.invalidate_prepared_plan()
 
     def missing_dataset_mappings(self) -> tuple[str, ...]:
@@ -1082,12 +2041,65 @@ class FeatureAssemblyFormModel:
         )
         return tuple(missing)
 
+    def effective_host_materials(self) -> dict[str, str]:
+        """Resolve per-response host IDs, using the global value as a default."""
+
+        default = _normalize_host_material(self.values.expected_host_material)
+        effective: dict[str, str] = {}
+        for kind, dataset_ids, overrides in (
+            (
+                "point",
+                self.active_point_dataset_ids(),
+                self.values.point_host_materials,
+            ),
+            (
+                "line",
+                self.active_line_dataset_ids(),
+                self.values.line_host_materials,
+            ),
+        ):
+            for dataset_id in dataset_ids:
+                override = _normalize_host_material(overrides.get(dataset_id, ""))
+                # Preserve one stable spelling when a per-response value is
+                # equivalent to the global default after the backend's
+                # whitespace/case normalization.
+                if (
+                    override
+                    and default
+                    and override.casefold() == default.casefold()
+                ):
+                    override = default
+                effective[f"{kind}:{dataset_id}"] = override or default
+        return effective
+
+    def missing_host_material_mappings(self) -> tuple[str, ...]:
+        effective = self.effective_host_materials()
+        missing: list[str] = []
+        missing.extend(
+            f"point:{dataset_id}"
+            for dataset_id in self.active_point_dataset_ids()
+            if not effective.get(f"point:{dataset_id}")
+        )
+        missing.extend(
+            f"line:{dataset_id}"
+            for dataset_id in self.active_line_dataset_ids()
+            if not effective.get(f"line:{dataset_id}")
+        )
+        return tuple(missing)
+
     def _validate_output_target(self) -> None:
         values = self.values
         output = _normalized_grim_output_path(
             values.output_grim, base_dir=values.base_dir
         )
         protected: list[tuple[str, str]] = [("clean-body response", values.base_grim)]
+        protected.extend(
+            (
+                ("surface mesh", values.surface_mesh),
+                ("point placement CSV", values.point_locations_csv),
+                ("line placement CSV", values.line_locations_csv),
+            )
+        )
         protected.extend(
             (f"point response {dataset_id!r}", path)
             for dataset_id, path in values.point_datasets.items()
@@ -1149,6 +2161,17 @@ class FeatureAssemblyFormModel:
             raise ValueError(
                 "Choose an OPN-FRD GRIM response for: " + ", ".join(missing)
             )
+        missing_hosts = self.missing_host_material_mappings()
+        if (
+            values.require_feature_manifests
+            and not values.allow_legacy_base_metadata
+            and missing_hosts
+        ):
+            raise ValueError(
+                "Production validation requires a host material/coating ID for: "
+                + ", ".join(missing_hosts)
+                + ". Enter a per-response ID or the global default."
+            )
         if values.shadow and not _clean_path(values.surface_mesh):
             raise ValueError(
                 "Geometric shadowing requires an STL or facet surface mesh."
@@ -1157,10 +2180,18 @@ class FeatureAssemblyFormModel:
             raise ValueError(f"Unsupported coordinate units: {values.coordinate_units!r}.")
         if values.surface_units not in {value for _, value in UNIT_CHOICES}:
             raise ValueError(f"Unsupported surface units: {values.surface_units!r}.")
-        _require_finite_nonnegative(values.skin_tol_m, "Skin distance tolerance")
-        _require_finite_nonnegative(
+        skin = _require_finite_nonnegative(
+            values.skin_tol_m, "Skin distance tolerance"
+        )
+        phase = _require_finite_nonnegative(
             values.skin_phase_tol_deg, "Skin phase tolerance"
         )
+        if skin > 0.1:
+            raise ValueError("Skin distance tolerance must not exceed 100 mm.")
+        if not 0.0 < phase <= 90.0:
+            raise ValueError(
+                "Skin phase tolerance must be above 0 and at most 90 degrees."
+            )
         normal = _require_finite_nonnegative(
             values.normal_tol_deg, "Normal tolerance"
         )
@@ -1207,6 +2238,16 @@ class FeatureAssemblyFormModel:
             skin_tol_m=float(values.skin_tol_m),
             skin_phase_tol_deg=float(values.skin_phase_tol_deg),
             normal_tol_deg=float(values.normal_tol_deg),
+            allow_legacy_base_metadata=bool(
+                values.allow_legacy_base_metadata
+            ),
+            require_feature_manifests=bool(
+                values.require_feature_manifests
+            ),
+            expected_host_material=(
+                str(values.expected_host_material).strip() or None
+            ),
+            expected_host_materials=self.effective_host_materials(),
             base_dir=values.base_dir,
         )
 
@@ -1247,6 +2288,17 @@ class FeatureAssemblyFormModel:
             float(values.skin_tol_m),
             float(values.skin_phase_tol_deg),
             float(values.normal_tol_deg),
+            bool(values.allow_legacy_base_metadata),
+            bool(values.require_feature_manifests),
+            str(values.expected_host_material).strip(),
+            tuple(
+                (dataset_id, str(values.point_host_materials.get(dataset_id, "")).strip())
+                for dataset_id in self.active_point_dataset_ids()
+            ),
+            tuple(
+                (dataset_id, str(values.line_host_materials.get(dataset_id, "")).strip())
+                for dataset_id in self.active_line_dataset_ids()
+            ),
             (
                 _path_key(Path(values.base_dir).expanduser().resolve())
                 if _clean_path(values.base_dir)
@@ -1258,17 +2310,22 @@ class FeatureAssemblyFormModel:
         self,
     ) -> tuple[tuple[str, _FileFingerprint], ...]:
         values = self.values
+        # The prepared backend plan already hashes exact source bytes and
+        # verifies them again immediately before atomic publication. Re-reading
+        # multi-GB GRIM/STL inputs in the GUI cache added no correctness and
+        # could dominate Validate -> Build latency; stat identity is sufficient
+        # to decide whether to reuse the plan optimistically.
         sources: list[tuple[str, str, bool]] = [
-            ("base", _clean_path(values.base_grim), True),
-            ("surface", _clean_path(values.surface_mesh), True),
-            ("point CSV", _clean_path(values.point_locations_csv), True),
-            ("line CSV", _clean_path(values.line_locations_csv), True),
+            ("base", _clean_path(values.base_grim), False),
+            ("surface", _clean_path(values.surface_mesh), False),
+            ("point CSV", _clean_path(values.point_locations_csv), False),
+            ("line CSV", _clean_path(values.line_locations_csv), False),
         ]
         sources.extend(
             (
                 f"point:{dataset_id}",
                 _clean_path(values.point_datasets.get(dataset_id)),
-                True,
+                False,
             )
             for dataset_id in self.active_point_dataset_ids()
         )
@@ -1276,7 +2333,7 @@ class FeatureAssemblyFormModel:
             (
                 f"line:{dataset_id}",
                 _clean_path(values.line_datasets.get(dataset_id)),
-                True,
+                False,
             )
             for dataset_id in self.active_line_dataset_ids()
         )
@@ -1307,15 +2364,41 @@ class FeatureAssemblyFormModel:
         request: Any,
         *,
         before: tuple[tuple[str, _FileFingerprint], ...] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> Any:
         # ``assemble`` may already have captured this exact full-content
         # snapshot while deciding whether a validated plan can be reused.  Pass
         # it through so a cache miss does not immediately reread every large
         # GRIM/STL response before the authoritative prepare operation.
+        # A user-requested re-validation is a new review attempt: the old plan
+        # must not remain publishable if this attempt fails or is cancelled.
+        self.invalidate_prepared_plan()
         semantic_before = self._semantic_signature()
         if before is None:
             before = self._source_fingerprints()
-        plan = adapter.prepare(request)
+        if cancel_check is not None and cancel_check():
+            self.invalidate_prepared_plan()
+            raise InterruptedError(
+                "Placement validation cancelled; no reviewed plan was retained."
+            )
+        try:
+            if _callable_accepts_runtime_hooks(adapter.prepare):
+                plan = adapter.prepare(
+                    request,
+                    cancel_check=cancel_check,
+                    progress_callback=progress_callback,
+                )
+            else:
+                plan = adapter.prepare(request)
+        except InterruptedError:
+            self.invalidate_prepared_plan()
+            raise
+        if cancel_check is not None and cancel_check():
+            self.invalidate_prepared_plan()
+            raise InterruptedError(
+                "Placement validation cancelled; no reviewed plan was retained."
+            )
         after = self._source_fingerprints()
         semantic_after = self._semantic_signature()
         if semantic_before != semantic_after:
@@ -1335,6 +2418,14 @@ class FeatureAssemblyFormModel:
                 "An Assembly input changed during validation. Save the input, "
                 "refresh the placement CSVs, and validate again."
             )
+        # Close the final cooperative-cancel window after potentially lengthy
+        # source re-fingerprinting and immediately before making the reviewed
+        # plan publishable from the cache.
+        if cancel_check is not None and cancel_check():
+            self.invalidate_prepared_plan()
+            raise InterruptedError(
+                "Placement validation cancelled; no reviewed plan was retained."
+            )
         self._prepared_plan_cache = _PreparedPlanCache(
             plan=plan,
             semantic_signature=semantic_before,
@@ -1343,10 +2434,41 @@ class FeatureAssemblyFormModel:
         )
         return plan
 
-    def prepare_preview(self, service: Any) -> Any:
+    def prepare_preview(
+        self,
+        service: Any,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> Any:
         adapter = coerce_feature_workflow(service)
         request = self.build_request(adapter)
-        return self._prepare_and_cache(adapter, request)
+        return self._prepare_and_cache(
+            adapter,
+            request,
+            cancel_check=cancel_check,
+            progress_callback=progress_callback,
+        )
+
+    def validated_plan_is_current(
+        self,
+        service: Any,
+        *,
+        verify_sources: bool = False,
+    ) -> bool:
+        """Return whether the cached authoritative validation matches live inputs."""
+
+        adapter = coerce_feature_workflow(service)
+        cached = self._prepared_plan_cache
+        if cached is None:
+            return False
+        if cached.semantic_signature != self._semantic_signature():
+            return False
+        if cached.service_key != self._service_key(adapter):
+            return False
+        if verify_sources and cached.source_fingerprints != self._source_fingerprints():
+            return False
+        return True
 
     def prepare_input_preview(self, service: Any) -> Any:
         """Preview selected geometry/locations before response mapping.
@@ -1442,7 +2564,13 @@ class FeatureAssemblyFormModel:
         )
         return _VerifiedInputPreview(preview=preview, discovery=discovery)
 
-    def assemble(self, service: Any) -> FeatureBuildDispatch:
+    def assemble(
+        self,
+        service: Any,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> FeatureBuildDispatch:
         adapter = coerce_feature_workflow(service)
         request = self.build_request(adapter)
         signature = self._semantic_signature()
@@ -1470,11 +2598,66 @@ class FeatureAssemblyFormModel:
         # have appeared after the initial request validation while a cached plan
         # was being accepted.
         self._validate_output_target()
-        output = adapter.execute(plan)
+        if cancel_check is not None and cancel_check():
+            raise InterruptedError(
+                "Feature assembly cancelled; existing output kept."
+            )
+        if _callable_accepts_runtime_hooks(adapter.execute):
+            output = adapter.execute(
+                plan,
+                cancel_check=cancel_check,
+                progress_callback=progress_callback,
+            )
+        else:
+            # Compatible injected/test services may predate runtime hooks. The
+            # authoritative bundled backend accepts them; legacy services still
+            # execute, but cannot be interrupted mid-call.
+            output = adapter.execute(plan)
         return FeatureBuildDispatch(
             plan=plan,
             output_path=str(output),
             reused_validated_plan=reused,
+        )
+
+    def assemble_validated(
+        self,
+        service: Any,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> FeatureBuildDispatch:
+        """Publish only the exact, unchanged plan produced by ``prepare_preview``."""
+
+        adapter = coerce_feature_workflow(service)
+        # Preserve all local completeness/alias checks, but never silently
+        # prepare a replacement plan after the operator's review gate.
+        self.build_request(adapter)
+        if not self.validated_plan_is_current(adapter, verify_sources=True):
+            self.invalidate_prepared_plan()
+            raise RuntimeError(
+                "Assembly inputs changed or have not been validated. Run Validate "
+                "placements, review the current QA result, then assemble again."
+            )
+        cache = self._prepared_plan_cache
+        if cache is None:  # Defensive: covered by validated_plan_is_current.
+            raise RuntimeError("No current validated Assembly plan is available.")
+        self._validate_output_target()
+        if cancel_check is not None and cancel_check():
+            raise InterruptedError(
+                "Feature assembly cancelled; existing output kept."
+            )
+        if _callable_accepts_runtime_hooks(adapter.execute):
+            output = adapter.execute(
+                cache.plan,
+                cancel_check=cancel_check,
+                progress_callback=progress_callback,
+            )
+        else:
+            output = adapter.execute(cache.plan)
+        return FeatureBuildDispatch(
+            plan=cache.plan,
+            output_path=str(output),
+            reused_validated_plan=True,
         )
 
 
@@ -1487,6 +2670,8 @@ try:  # Keep the model importable on headless/minimal installations.
         QCheckBox,
         QComboBox,
         QDoubleSpinBox,
+        QDialog,
+        QDialogButtonBox,
         QFileDialog,
         QFormLayout,
         QFrame,
@@ -1497,6 +2682,7 @@ try:  # Keep the model importable on headless/minimal installations.
         QLineEdit,
         QMenu,
         QMessageBox,
+        QProgressBar,
         QPushButton,
         QScrollArea,
         QSizePolicy,
@@ -1521,15 +2707,49 @@ if GUI_AVAILABLE:
     class _OperationWorker(QObject):
         succeeded = Signal(object)
         failed = Signal(str)
+        cancelled = Signal(str)
+        progress = Signal(int, str)
 
-        def __init__(self, operation: Callable[[], Any]) -> None:
+        def __init__(
+            self,
+            operation: Callable[..., Any],
+            *,
+            cooperative: bool = False,
+        ) -> None:
             super().__init__()
             self._operation = operation
+            self._cooperative = bool(cooperative)
+            self._cancel_event = threading.Event()
+            self._last_percent = -1
+
+        def request_cancel(self) -> None:
+            """Thread-safe direct call from the GUI thread."""
+
+            self._cancel_event.set()
+
+        def is_cancelled(self) -> bool:
+            return self._cancel_event.is_set()
+
+        def report_progress(self, done: int, total: int, message: str) -> None:
+            count = max(1, int(total))
+            percent = max(0, min(100, int(round(100.0 * int(done) / count))))
+            # Avoid flooding the Qt event queue on dense direction grids.
+            if percent != self._last_percent or percent in (0, 100):
+                self._last_percent = percent
+                self.progress.emit(percent, str(message))
 
         @Slot()
         def run(self) -> None:
             try:
-                result = self._operation()
+                result = (
+                    self._operation(self.is_cancelled, self.report_progress)
+                    if self._cooperative
+                    else self._operation()
+                )
+            except InterruptedError as exc:
+                self.cancelled.emit(
+                    str(exc) or "Feature assembly cancelled; existing output kept."
+                )
             except Exception as exc:  # The UI reports authoritative validation errors.
                 self.failed.emit(str(exc) or type(exc).__name__)
             else:
@@ -1740,6 +2960,89 @@ if GUI_AVAILABLE:
             self.editing_finished.emit()
 
 
+    class _SurfaceBindingDialog(QDialog):
+        """Small attestation form for one exact external body/mesh pair."""
+
+        def __init__(
+            self,
+            parent: QWidget,
+            *,
+            geometry_id: str = "",
+            attestation_case_id: str = "",
+        ) -> None:
+            super().__init__(parent)
+            self.setWindowTitle("Bind clean-body solve to surface mesh")
+            self.setModal(True)
+            layout = QVBoxLayout(self)
+            explanation = QLabel(
+                "Create the canonical reviewed registration record for the exact "
+                "clean-body GRIM, selected mesh bytes, and selected mesh units.",
+                self,
+            )
+            explanation.setWordWrap(True)
+            layout.addWidget(explanation)
+            form = QFormLayout()
+            self.geometry_id_edit = QLineEdit(self)
+            self.geometry_id_edit.setPlaceholderText("Example: vehicle-door-mesh-r7")
+            self.geometry_id_edit.setText(str(geometry_id))
+            self.case_id_edit = QLineEdit(self)
+            self.case_id_edit.setPlaceholderText("Example: solver-registration-042")
+            self.case_id_edit.setText(str(attestation_case_id))
+            form.addRow("Team geometry revision ID:", self.geometry_id_edit)
+            form.addRow("Reviewed registration / case ID:", self.case_id_edit)
+            layout.addLayout(form)
+            attestation_text = QLabel(
+                "Required review: a responsible team member confirmed that this "
+                "exact mesh, selected units, CAD axes, and origin match the exact "
+                "clean-body solve.",
+                self,
+            )
+            attestation_text.setWordWrap(True)
+            layout.addWidget(attestation_text)
+            self.attestation = QCheckBox(
+                "I attest that the required registration review is complete.", self
+            )
+            layout.addWidget(self.attestation)
+            limitation = QLabel(
+                "This records the review and exact file identities; it does not "
+                "independently prove electromagnetic or solve-to-CAD correctness.",
+                self,
+            )
+            limitation.setObjectName("featureHint")
+            limitation.setWordWrap(True)
+            layout.addWidget(limitation)
+            self.buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok
+                | QDialogButtonBox.StandardButton.Cancel,
+                parent=self,
+            )
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+                "Create reviewed binding"
+            )
+            self.buttons.accepted.connect(self.accept)
+            self.buttons.rejected.connect(self.reject)
+            layout.addWidget(self.buttons)
+            self.geometry_id_edit.textChanged.connect(self._update_accept_enabled)
+            self.case_id_edit.textChanged.connect(self._update_accept_enabled)
+            self.attestation.toggled.connect(self._update_accept_enabled)
+            self._update_accept_enabled()
+
+        def _update_accept_enabled(self, *_args: Any) -> None:
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+                bool(
+                    self.geometry_id_edit.text().strip()
+                    and self.case_id_edit.text().strip()
+                    and self.attestation.isChecked()
+                )
+            )
+
+        def binding_values(self) -> tuple[str, str]:
+            return (
+                self.geometry_id_edit.text().strip(),
+                self.case_id_edit.text().strip(),
+            )
+
+
     class _DatasetMappingEditor(QWidget):
         mapping_changed = Signal()
         catalog_notice = Signal(str)
@@ -1751,11 +3054,12 @@ if GUI_AVAILABLE:
             self._required_ids: tuple[str, ...] = ()
             self._catalog: tuple[LoadedDatasetEntry, ...] = ()
             self._loaded_buttons: dict[str, _LoadedDatasetButton] = {}
-            self.table = QTableWidget(0, 4, self)
+            self.table = QTableWidget(0, 5, self)
             self.table.setHorizontalHeaderLabels(
                 [
                     "dataset_id",
                     "OPN − FRD response (.grim)",
+                    "Host material / coating ID",
                     "Loaded",
                     "",
                 ]
@@ -1770,8 +3074,9 @@ if GUI_AVAILABLE:
             header = self.table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
             self.empty_label = QLabel(empty_text, self)
             self.empty_label.setWordWrap(True)
             self.completeness_label = QLabel(self)
@@ -1793,6 +3098,13 @@ if GUI_AVAILABLE:
             result: dict[str, str] = {}
             for row, dataset_id in enumerate(self._ids):
                 item = self.table.item(row, 1)
+                result[dataset_id] = "" if item is None else item.text().strip()
+            return result
+
+        def host_materials(self) -> dict[str, str]:
+            result: dict[str, str] = {}
+            for row, dataset_id in enumerate(self._ids):
+                item = self.table.item(row, 2)
                 result[dataset_id] = "" if item is None else item.text().strip()
             return result
 
@@ -1829,10 +3141,19 @@ if GUI_AVAILABLE:
             self,
             dataset_ids: tuple[str, ...] | list[str],
             mapping: Mapping[str, str] | None = None,
+            host_materials: Mapping[str, str] | None = None,
         ) -> None:
             existing = self.mapping() if self._ids else {}
+            existing_hosts = self.host_materials() if self._ids else {}
             if mapping is not None:
                 existing.update({str(key): _clean_path(value) for key, value in mapping.items()})
+            if host_materials is not None:
+                existing_hosts.update(
+                    {
+                        str(key): str(value).strip()
+                        for key, value in host_materials.items()
+                    }
+                )
             self._ids = tuple(str(value) for value in dataset_ids)
             self._required_ids = self._ids
             self._loaded_buttons = {}
@@ -1847,6 +3168,12 @@ if GUI_AVAILABLE:
                 self.table.setItem(
                     row, 1, QTableWidgetItem(existing.get(dataset_id, ""))
                 )
+                host_item = QTableWidgetItem(existing_hosts.get(dataset_id, ""))
+                host_item.setToolTip(
+                    "Optional per-response override. Leave blank to use the "
+                    "global default host material/coating ID."
+                )
+                self.table.setItem(row, 2, host_item)
                 loaded_button = _LoadedDatasetButton(self.table)
                 loaded_button.set_catalog(self._catalog)
                 loaded_button.path_selected.connect(
@@ -1854,12 +3181,12 @@ if GUI_AVAILABLE:
                 )
                 loaded_button.notice.connect(self.catalog_notice.emit)
                 self._loaded_buttons[dataset_id] = loaded_button
-                self.table.setCellWidget(row, 2, loaded_button)
+                self.table.setCellWidget(row, 3, loaded_button)
                 button = QPushButton("Browse…", self.table)
                 button.clicked.connect(
                     lambda _checked=False, key=dataset_id: self._browse(key)
                 )
-                self.table.setCellWidget(row, 3, button)
+                self.table.setCellWidget(row, 4, button)
             self.table.blockSignals(False)
             has_rows = bool(self._ids)
             self.empty_label.setVisible(not has_rows)
@@ -1900,6 +3227,13 @@ if GUI_AVAILABLE:
             except ValueError as exc:
                 raise KeyError(f"Unknown dataset_id {dataset_id!r}.") from exc
             self.table.item(row, 1).setText(_clean_path(path))
+
+        def set_host_material(self, dataset_id: str, material: str) -> None:
+            try:
+                row = self._ids.index(str(dataset_id))
+            except ValueError as exc:
+                raise KeyError(f"Unknown dataset_id {dataset_id!r}.") from exc
+            self.table.item(row, 2).setText(str(material).strip())
 
         def _browse(self, dataset_id: str) -> None:
             current = self.mapping().get(dataset_id, "")
@@ -2163,6 +3497,37 @@ if GUI_AVAILABLE:
                     )
             return point_ids, line_ids
 
+        def select_instance(self, kind: str, instance_id: str) -> bool:
+            """Reveal and select one QA-linked spatial feature leaf."""
+
+            normalized = str(kind).strip().lower()
+            target = str(instance_id).strip()
+            if normalized not in {"point", "line"} or not target:
+                return False
+            pending = [
+                self.topLevelItem(index)
+                for index in range(self.topLevelItemCount())
+            ]
+            while pending:
+                item = pending.pop()
+                pending.extend(
+                    item.child(index) for index in range(item.childCount())
+                )
+                if (
+                    item.data(0, self._ROLE_KIND) == normalized
+                    and str(item.data(0, self._ROLE_INSTANCE_ID) or "") == target
+                ):
+                    self.setCurrentItem(item)
+                    current = item.parent()
+                    while current is not None:
+                        current.setExpanded(True)
+                        current = current.parent()
+                    self.scrollToItem(
+                        item, QAbstractItemView.ScrollHint.PositionAtCenter
+                    )
+                    return True
+            return False
+
 
     class FeatureAssemblyPanel(QWidget):
         """New-user-facing feature assembly form with background execution."""
@@ -2187,7 +3552,17 @@ if GUI_AVAILABLE:
             self._active_kind = ""
             self._discovery_paths: tuple[str, str] | None = None
             self._preview_is_current = False
+            self._validated_plan_current = False
+            self._validation_warning_count = 0
             self._loaded_dataset_catalog: tuple[LoadedDatasetEntry, ...] = ()
+            self._recipe_path: Path | None = None
+            self._recipe_dirty = False
+            self._recipe_source_warnings: tuple[str, ...] = ()
+            self._loading_recipe = False
+            self._surface_binding_checked_key: tuple[Any, ...] | None = None
+            self._surface_binding_checked: Mapping[str, Any] | None = None
+            self._surface_binding_error_key: tuple[Any, ...] | None = None
+            self._surface_binding_error = ""
             self._build_ui()
 
         def _build_ui(self) -> None:
@@ -2215,6 +3590,54 @@ if GUI_AVAILABLE:
             self.next_step_label.setObjectName("featureNextStep")
             self.next_step_label.setWordWrap(True)
             outer.addWidget(self.next_step_label)
+
+            recipe_group = QGroupBox("Reusable assembly recipe", self)
+            recipe_group.setObjectName("featureRecipeBar")
+            recipe_layout = QVBoxLayout(recipe_group)
+            recipe_layout.setContentsMargins(8, 6, 8, 6)
+            recipe_layout.setSpacing(5)
+            recipe_fields = QHBoxLayout()
+            recipe_fields.addWidget(QLabel("Assembly:"))
+            self.recipe_name_edit = QLineEdit(recipe_group)
+            self.recipe_name_edit.setPlaceholderText("Vehicle feature assembly")
+            self.recipe_name_edit.setText("Vehicle feature assembly")
+            self.recipe_name_edit.setToolTip(
+                "A human-readable name stored in the portable recipe."
+            )
+            recipe_fields.addWidget(self.recipe_name_edit, 2)
+            recipe_fields.addWidget(QLabel("Variant:"))
+            self.recipe_variant_edit = QLineEdit(recipe_group)
+            self.recipe_variant_edit.setPlaceholderText("Baseline / Option A")
+            self.recipe_variant_edit.setText("Baseline")
+            self.recipe_variant_edit.setToolTip(
+                "Name this exact feature membership for repeatable trade studies."
+            )
+            recipe_fields.addWidget(self.recipe_variant_edit, 2)
+            recipe_layout.addLayout(recipe_fields)
+            recipe_actions = QHBoxLayout()
+            self.recipe_status_label = QLabel(recipe_group)
+            self.recipe_status_label.setObjectName("featureRecipeStatus")
+            self.recipe_status_label.setWordWrap(True)
+            recipe_actions.addWidget(self.recipe_status_label, 1)
+            self.load_recipe_button = QPushButton("Load…", recipe_group)
+            self.load_recipe_button.setToolTip(
+                "Restore body, placements, response mappings, tolerances, and exact "
+                "enabled/disabled feature membership from a versioned recipe."
+            )
+            recipe_actions.addWidget(self.load_recipe_button)
+            self.save_recipe_button = QPushButton("Save", recipe_group)
+            self.save_recipe_button.setToolTip(
+                "Save changes to the current recipe. Source identities are recorded "
+                "so moved, missing, or modified inputs can be reported on load."
+            )
+            recipe_actions.addWidget(self.save_recipe_button)
+            self.save_recipe_as_button = QPushButton("Save as…", recipe_group)
+            self.save_recipe_as_button.setToolTip(
+                "Save this named variant as a separate portable .assembly.json file."
+            )
+            recipe_actions.addWidget(self.save_recipe_as_button)
+            recipe_layout.addLayout(recipe_actions)
+            outer.addWidget(recipe_group)
 
             scroll = QScrollArea(self)
             scroll.setObjectName("featureAssemblyScroll")
@@ -2280,6 +3703,35 @@ if GUI_AVAILABLE:
             body_form.addRow("Clean-body response:", self.base_picker)
             body_form.addRow("Surface mesh (optional):", self.surface_picker)
             body_form.addRow("Surface mesh units:", self.surface_units)
+            binding_box = QWidget(body_group)
+            binding_layout = QVBoxLayout(binding_box)
+            binding_layout.setContentsMargins(0, 0, 0, 0)
+            binding_layout.setSpacing(4)
+            self.surface_binding_status = QLabel(binding_box)
+            self.surface_binding_status.setObjectName("featureSurfaceBindingStatus")
+            self.surface_binding_status.setWordWrap(True)
+            binding_layout.addWidget(self.surface_binding_status)
+            binding_actions = QHBoxLayout()
+            binding_actions.setContentsMargins(0, 0, 0, 0)
+            self.check_surface_binding_button = QPushButton(
+                "Check binding", binding_box
+            )
+            self.check_surface_binding_button.setToolTip(
+                "Explicitly hash and verify the exact clean-body response, mesh, "
+                "units, frame declaration, and reviewed IDs."
+            )
+            self.bind_surface_button = QPushButton(
+                "Bind / refresh…", binding_box
+            )
+            self.bind_surface_button.setToolTip(
+                "Create the canonical <surface>.assembly.json after a responsible "
+                "team member reviews solve-to-CAD registration."
+            )
+            binding_actions.addWidget(self.check_surface_binding_button)
+            binding_actions.addWidget(self.bind_surface_button)
+            binding_actions.addStretch(1)
+            binding_layout.addLayout(binding_actions)
+            body_form.addRow("Solve ↔ mesh registration:", binding_box)
             body_form.addRow("Mesh options:", mesh_options)
             self.body_preview_help = QLabel(
                 "Body preview: selected mesh, or the base file's embedded BoR. "
@@ -2539,25 +3991,68 @@ if GUI_AVAILABLE:
             advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             self.skin_tol = QDoubleSpinBox(advanced)
             self.skin_tol.setDecimals(6)
-            self.skin_tol.setRange(0.0, 1.0e3)
-            self.skin_tol.setValue(1.0e-3)
-            self.skin_tol.setSuffix(" m")
+            self.skin_tol.setRange(0.0, 100.0)
+            self.skin_tol.setSingleStep(0.01)
+            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM)
+            self.skin_tol.setSuffix(" mm")
+            self.skin_tol.setToolTip(
+                "Maximum accepted distance from a feature to the host skin. This "
+                "control is displayed in millimeters; recipes store meters."
+            )
             self.phase_tol = QDoubleSpinBox(advanced)
-            self.phase_tol.setDecimals(2)
-            self.phase_tol.setRange(0.0, 1.0e6)
-            self.phase_tol.setValue(15.0)
+            self.phase_tol.setDecimals(1)
+            self.phase_tol.setRange(0.1, 90.0)
+            self.phase_tol.setSingleStep(1.0)
+            self.phase_tol.setValue(DEFAULT_SKIN_PHASE_TOL_DEG)
             self.phase_tol.setSuffix("°")
+            self.phase_tol.setToolTip(
+                "Maximum two-way phase error used to derive a frequency-aware "
+                "skin-distance limit. Values above 90° are intentionally blocked."
+            )
             self.normal_tol = QDoubleSpinBox(advanced)
-            self.normal_tol.setDecimals(2)
-            self.normal_tol.setRange(0.0, 89.99)
-            self.normal_tol.setValue(15.0)
+            self.normal_tol.setDecimals(1)
+            self.normal_tol.setRange(0.1, 89.9)
+            self.normal_tol.setSingleStep(1.0)
+            self.normal_tol.setValue(DEFAULT_NORMAL_TOL_DEG)
             self.normal_tol.setSuffix("°")
             self.shadow_bias = QLineEdit(advanced)
             self.shadow_bias.setPlaceholderText("Auto (recommended)")
+            self.validation_profile = QComboBox(advanced)
+            for label, key, allow_legacy, require_manifests in VALIDATION_PROFILES:
+                self.validation_profile.addItem(
+                    label,
+                    (key, allow_legacy, require_manifests),
+                )
+            self.validation_profile.setCurrentIndex(0)
+            self.validation_profile.setToolTip(
+                "Production rejects missing clean-body metadata and uncertified "
+                "feature responses. Legacy compatibility is an explicit exception "
+                "and reports applicability gaps as review warnings."
+            )
+            self.expected_host_material = QLineEdit(advanced)
+            self.expected_host_material.setPlaceholderText(
+                "Default for blank response rows, e.g. PEC or paint-stack-v3"
+            )
+            self.expected_host_material.setToolTip(
+                "Convenience default for response rows left blank. Enter a per-row "
+                "override beside each mapped response when the vehicle has mixed "
+                "host materials or coating stacks."
+            )
+            self.reset_qa_defaults_button = QPushButton(
+                "Reset placement-check defaults", advanced
+            )
+            self.reset_qa_defaults_button.setToolTip(
+                "Restore 1 mm skin distance, 15° phase, and 15° normal limits."
+            )
             advanced_form.addRow("Maximum skin distance:", self.skin_tol)
             advanced_form.addRow("Maximum two-way phase error:", self.phase_tol)
             advanced_form.addRow("Maximum normal mismatch:", self.normal_tol)
             advanced_form.addRow("Shadow ray bias (m):", self.shadow_bias)
+            advanced_form.addRow("Validation profile:", self.validation_profile)
+            advanced_form.addRow(
+                "Default host material / coating ID:", self.expected_host_material
+            )
+            advanced_form.addRow("", self.reset_qa_defaults_button)
             self.advanced_section = _DisclosureSection(
                 "Advanced placement checks · defaults active",
                 content,
@@ -2573,7 +4068,9 @@ if GUI_AVAILABLE:
                 "Preview Geometry is visual QA only. Validate Placements additionally "
                 "checks skin distance, outward normals, frame validity, and response "
                 "mappings. Magenta arrows are normals; lavender arrows are point-roll "
-                "references. Preview Layers → Show changes only the display. Spatial "
+                "references. Cyan line +t follows increasing segment_index; blue +b "
+                "is the signed across-line axis (+t × +n). Preview Layers → Show "
+                "changes only the display. Spatial "
                 "Feature Configuration → Use controls which parsed instances enter "
                 "preview, validation, response loading, and build.",
                 content,
@@ -2598,6 +4095,77 @@ if GUI_AVAILABLE:
             self.build_summary_label.setObjectName("featureBuildSummary")
             self.build_summary_label.setWordWrap(True)
             review_form.addRow("This build:", self.build_summary_label)
+            self.model_scope_label = QLabel(
+                "Model boundary: Assembly coherently superposes reviewed local "
+                "feature deltas. It does not solve body–feature mutual coupling, "
+                "feature–feature multiple scattering, diffraction, or creeping "
+                "waves. Production validation certifies the inputs and declared "
+                "applicability envelope—not full-vehicle Maxwell accuracy.",
+                review_group,
+            )
+            self.model_scope_label.setWordWrap(True)
+            self.model_scope_label.setObjectName("featureHint")
+            review_form.addRow("Physics scope:", self.model_scope_label)
+            self.validation_qa_label = QLabel(
+                "Run Validate placements to see a row for every enabled point "
+                "and line path.",
+                review_group,
+            )
+            self.validation_qa_label.setWordWrap(True)
+            self.validation_qa_label.setObjectName("featureValidationSummary")
+            review_form.addRow("Placement QA:", self.validation_qa_label)
+            self.validation_warning_label = QLabel(review_group)
+            self.validation_warning_label.setWordWrap(True)
+            self.validation_warning_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.validation_warning_label.setObjectName("featureValidationWarning")
+            self.validation_warning_label.setVisible(False)
+            review_form.addRow("QA warnings:", self.validation_warning_label)
+            self.validation_warning_ack = QCheckBox(
+                "I reviewed and accept these warnings for this output.",
+                review_group,
+            )
+            self.validation_warning_ack.setToolTip(
+                "This acknowledgment applies only to the current successful "
+                "validation. Any input change or re-validation clears it."
+            )
+            self.validation_warning_ack.setVisible(False)
+            review_form.addRow("Warning waiver:", self.validation_warning_ack)
+            self.validation_qa_table = QTableWidget(0, 6, review_group)
+            self.validation_qa_table.setHorizontalHeaderLabels(
+                ["Type", "Instance", "Response ID", "Skin offset", "Normal error", "Result"]
+            )
+            self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.ResizeToContents
+            )
+            self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                1, QHeaderView.ResizeMode.Stretch
+            )
+            self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                2, QHeaderView.ResizeMode.Stretch
+            )
+            for column in (3, 4, 5):
+                self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                    column, QHeaderView.ResizeMode.ResizeToContents
+                )
+            self.validation_qa_table.verticalHeader().setVisible(False)
+            self.validation_qa_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            self.validation_qa_table.setSelectionBehavior(
+                QAbstractItemView.SelectionBehavior.SelectRows
+            )
+            self.validation_qa_table.setSelectionMode(
+                QAbstractItemView.SelectionMode.SingleSelection
+            )
+            self.validation_qa_table.setAlternatingRowColors(True)
+            self.validation_qa_table.setMinimumHeight(135)
+            self.validation_qa_table.setToolTip(
+                "Successful authoritative placement records. Click a row to reveal "
+                "the same instance in Spatial Feature Configuration."
+            )
+            review_form.addRow("", self.validation_qa_table)
             content_layout.addWidget(review_group)
             content_layout.addStretch(1)
             scroll.setWidget(content)
@@ -2613,6 +4181,29 @@ if GUI_AVAILABLE:
             self.status_label.setMargin(6)
             outer.addWidget(self.status_label)
 
+            operation_row = QHBoxLayout()
+            self.operation_progress = QProgressBar(self)
+            self.operation_progress.setRange(0, 100)
+            self.operation_progress.setValue(0)
+            self.operation_progress.setTextVisible(True)
+            self.operation_progress.setFormat("Preparing…")
+            self.operation_progress.setToolTip(
+                "Live progress for the current Assembly operation. Cancellation "
+                "is cooperative and never publishes a partial response."
+            )
+            self.operation_progress.setVisible(False)
+            operation_row.addWidget(self.operation_progress, 1)
+            self.cancel_operation_button = QPushButton("Cancel operation", self)
+            self.cancel_operation_button.setToolTip(
+                "Cooperatively stop validation or assembly after the current safe "
+                "physics step. Cancellation never publishes a partial output or "
+                "retains a partially validated plan."
+            )
+            self.cancel_operation_button.setVisible(False)
+            self.cancel_operation_button.setEnabled(False)
+            operation_row.addWidget(self.cancel_operation_button)
+            outer.addLayout(operation_row)
+
             action_row = QHBoxLayout()
             self.input_preview_button = QPushButton("Preview geometry", self)
             self.input_preview_button.setToolTip(
@@ -2624,10 +4215,10 @@ if GUI_AVAILABLE:
                 "Validate body skin, normals, and response mapping completeness, then "
                 "show the prepared body and features in the 3-D Assembly view."
             )
-            self.build_button = QPushButton("Assemble && save", self)
+            self.build_button = QPushButton("Assemble validated && save", self)
             self.build_button.setToolTip(
-                "Run the same validation, coherently add every enabled mapped feature, "
-                "and save the selected output .grim file."
+                "Publish the exact current validation: coherently add every enabled "
+                "mapped feature and atomically save the selected output .grim file."
             )
             self.build_button.setDefault(True)
             action_row.addWidget(self.input_preview_button)
@@ -2636,6 +4227,11 @@ if GUI_AVAILABLE:
             outer.addLayout(action_row)
 
             self.status_changed.connect(self.status_label.setText)
+            self.recipe_name_edit.textEdited.connect(self._recipe_metadata_changed)
+            self.recipe_variant_edit.textEdited.connect(self._recipe_metadata_changed)
+            self.load_recipe_button.clicked.connect(self._load_recipe_dialog)
+            self.save_recipe_button.clicked.connect(self._save_recipe)
+            self.save_recipe_as_button.clicked.connect(self._save_recipe_as)
             self.base_picker.editing_finished.connect(self._base_path_changed)
             self.surface_picker.editing_finished.connect(self._input_setting_changed)
             self.output_picker.editing_finished.connect(self._output_path_changed)
@@ -2649,17 +4245,36 @@ if GUI_AVAILABLE:
                 self._mark_preview_stale
             )
             self.surface_units.currentIndexChanged.connect(self._mark_preview_stale)
+            self.check_surface_binding_button.clicked.connect(
+                self.check_selected_surface_binding
+            )
+            self.bind_surface_button.clicked.connect(
+                self.bind_selected_surface
+            )
             self.flip_normals.toggled.connect(self._mark_preview_stale)
             self.shadow.toggled.connect(self._mark_preview_stale)
             self.skin_tol.valueChanged.connect(self._mark_preview_stale)
             self.phase_tol.valueChanged.connect(self._mark_preview_stale)
             self.normal_tol.valueChanged.connect(self._mark_preview_stale)
             self.shadow_bias.editingFinished.connect(self._mark_preview_stale)
+            self.validation_profile.currentIndexChanged.connect(
+                self._validation_profile_changed
+            )
+            self.expected_host_material.textEdited.connect(
+                self._mark_preview_stale
+            )
+            self.reset_qa_defaults_button.clicked.connect(
+                self._reset_qa_defaults
+            )
+            self.validation_warning_ack.toggled.connect(
+                self._update_workflow_readiness
+            )
             self.point_mapping.mapping_changed.connect(self._mapping_changed)
             self.line_mapping.mapping_changed.connect(self._mapping_changed)
             self.spatial_feature_tree.selection_changed.connect(
                 self._spatial_selection_changed
             )
+            self.validation_qa_table.cellClicked.connect(self._qa_row_clicked)
             self.base_picker.catalog_notice.connect(
                 self._loaded_dataset_notice
             )
@@ -2691,8 +4306,55 @@ if GUI_AVAILABLE:
             self.input_preview_button.clicked.connect(self.preview_inputs)
             self.preview_button.clicked.connect(self.validate_and_preview)
             self.build_button.clicked.connect(self.assemble_and_save)
+            self.cancel_operation_button.clicked.connect(
+                self.request_cancel
+            )
             self._refresh_spatial_feature_tree()
+            self._update_recipe_status()
             self._update_workflow_readiness()
+
+        def _validation_profile_flags(self) -> tuple[bool, bool]:
+            data = self.validation_profile.currentData()
+            if not isinstance(data, (tuple, list)) or len(data) != 3:
+                return False, True
+            return bool(data[1]), bool(data[2])
+
+        def _set_validation_profile_from_values(
+            self, values: FeatureAssemblyValues
+        ) -> None:
+            target = (
+                bool(values.allow_legacy_base_metadata),
+                bool(values.require_feature_manifests),
+            )
+            index = 0
+            for candidate in range(self.validation_profile.count()):
+                data = self.validation_profile.itemData(candidate)
+                if (
+                    isinstance(data, (tuple, list))
+                    and len(data) == 3
+                    and (bool(data[1]), bool(data[2])) == target
+                ):
+                    index = candidate
+                    break
+            self.validation_profile.setCurrentIndex(index)
+
+        @Slot()
+        def _validation_profile_changed(self, *_args: Any) -> None:
+            allow_legacy, require_manifests = self._validation_profile_flags()
+            self.model.values.allow_legacy_base_metadata = allow_legacy
+            self.model.values.require_feature_manifests = require_manifests
+            self._mark_preview_stale()
+
+        @Slot()
+        def _reset_qa_defaults(self) -> None:
+            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM)
+            self.phase_tol.setValue(DEFAULT_SKIN_PHASE_TOL_DEG)
+            self.normal_tol.setValue(DEFAULT_NORMAL_TOL_DEG)
+            self.shadow_bias.clear()
+            self.status_changed.emit(
+                "Restored the conservative placement-check defaults. Validate "
+                "again before assembly."
+            )
 
         def set_service(self, service: Any) -> None:
             coerce_feature_workflow(service)  # Fail early with an actionable API error.
@@ -2701,6 +4363,292 @@ if GUI_AVAILABLE:
 
         def service(self) -> Any:
             return self._service
+
+        def _update_recipe_status(self) -> None:
+            name = self.recipe_name_edit.text().strip() or "Unnamed assembly"
+            variant = self.recipe_variant_edit.text().strip() or "Unnamed variant"
+            state = "modified — save to keep changes" if self._recipe_dirty else "saved"
+            if self._recipe_path is None:
+                text = f"{name} · {variant} · not saved yet"
+            else:
+                text = (
+                    f"{name} · {variant} · {state} · "
+                    f"{self._recipe_path.name}"
+                )
+            if self._recipe_source_warnings:
+                count = len(self._recipe_source_warnings)
+                text += f" · ⚠ {count} source warning(s)"
+                self.recipe_status_label.setToolTip(
+                    "\n".join(self._recipe_source_warnings)
+                )
+            else:
+                self.recipe_status_label.setToolTip(
+                    "Recipes preserve all effective paths, units, mappings, "
+                    "tolerances, and feature membership."
+                )
+            self.recipe_status_label.setText(text)
+            self.save_recipe_button.setEnabled(
+                not self.job_is_running() and self._recipe_path is not None
+            )
+
+        @Slot(str)
+        def _recipe_metadata_changed(self, _text: str) -> None:
+            self._set_recipe_dirty()
+
+        def _set_recipe_dirty(self) -> None:
+            if self._loading_recipe:
+                return
+            self._recipe_dirty = True
+            # Once edited, the saved source warning snapshot no longer exactly
+            # describes the live configuration. The next save records a new one.
+            self._recipe_source_warnings = ()
+            self._update_recipe_status()
+
+        def _recipe_default_path(self) -> str:
+            anchor = self.output_picker.path() or self.base_picker.path()
+            parent = Path(anchor).expanduser().parent if anchor else Path.cwd()
+            raw_name = self.recipe_variant_edit.text().strip() or "baseline"
+            safe_name = "_".join(raw_name.split())
+            safe_name = "".join(
+                character
+                for character in safe_name
+                if character.isalnum() or character in {"-", "_"}
+            ) or "baseline"
+            return str(parent / f"{safe_name}{FEATURE_RECIPE_SUFFIX}")
+
+        def save_recipe_path(self, path: str | Path) -> Path:
+            """Save the live form to ``path``; exposed for integration tests."""
+
+            if self.job_is_running():
+                raise RuntimeError(
+                    "Wait for the current feature operation before saving its recipe."
+                )
+            self._pull_values()
+            saved = write_feature_assembly_recipe(
+                self.model.values,
+                path,
+                name=self.recipe_name_edit.text(),
+                variant=self.recipe_variant_edit.text(),
+            )
+            self._recipe_path = saved
+            self._recipe_dirty = False
+            self._recipe_source_warnings = ()
+            self._update_recipe_status()
+            self.status_changed.emit(
+                f"Saved Assembly recipe {saved.name}. This named variant can be "
+                "reloaded locally or after copying its referenced files."
+            )
+            return saved
+
+        @Slot()
+        def _save_recipe(self) -> None:
+            if self._recipe_path is None:
+                self._save_recipe_as()
+                return
+            try:
+                self.save_recipe_path(self._recipe_path)
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        @Slot()
+        def _save_recipe_as(self) -> None:
+            if self.job_is_running():
+                self.status_changed.emit(
+                    "Wait for the current feature operation before saving a recipe."
+                )
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Assembly recipe",
+                self._recipe_default_path(),
+                "GRIM Assembly recipe (*.assembly.json);;JSON file (*.json);;All files (*)",
+            )
+            if not path:
+                return
+            try:
+                self.save_recipe_path(path)
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        @Slot()
+        def _load_recipe_dialog(self) -> None:
+            if self.job_is_running():
+                self.status_changed.emit(
+                    "Wait for the current feature operation before loading a recipe."
+                )
+                return
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load Assembly recipe",
+                str(self._recipe_path or Path.cwd()),
+                "GRIM Assembly recipe (*.assembly.json *.json);;All files (*)",
+            )
+            if not path:
+                return
+            if not self._confirm_dirty_recipe("load another recipe"):
+                return
+            try:
+                self.load_recipe_path(path)
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        def _confirm_dirty_recipe(self, action: str) -> bool:
+            """Offer Save/Discard/Cancel before losing edited recipe state."""
+
+            if not self._recipe_dirty:
+                return True
+            answer = QMessageBox.warning(
+                self,
+                "Unsaved Assembly recipe",
+                "This Assembly recipe has unsaved changes. Save them before you "
+                f"{action}?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return False
+            if answer == QMessageBox.StandardButton.Discard:
+                self._recipe_dirty = False
+                self._recipe_source_warnings = ()
+                self._update_recipe_status()
+                return True
+            if answer != QMessageBox.StandardButton.Save:
+                return False
+            if self._recipe_path is not None:
+                try:
+                    self.save_recipe_path(self._recipe_path)
+                except Exception as exc:
+                    self._show_error(str(exc))
+                    return False
+            else:
+                self._save_recipe_as()
+            return not self._recipe_dirty
+
+        def request_close(self, parent: QWidget | None = None) -> bool:
+            """Return True only when active work and unsaved recipes are resolved."""
+
+            if self.is_busy():
+                if self._active_kind in {"preview", "build"}:
+                    self.request_cancel()
+                else:
+                    self.status_changed.emit(
+                        "Feature validation is still running; wait before closing."
+                    )
+                return False
+            return self._confirm_dirty_recipe("close GRIM")
+
+        def load_recipe_path(
+            self,
+            path: str | Path,
+            *,
+            refresh: bool = True,
+        ) -> LoadedFeatureAssemblyRecipe:
+            """Restore one recipe and optionally parse its placement CSVs."""
+
+            if self.job_is_running():
+                raise RuntimeError(
+                    "Wait for the current feature operation before loading a recipe."
+                )
+            loaded = read_feature_assembly_recipe(path)
+            previous_preview = self._preview_is_current
+            self._loading_recipe = True
+            try:
+                self.model = FeatureAssemblyFormModel(loaded.values)
+                values = self.model.values
+                self.base_picker.set_path(values.base_grim)
+                self.surface_picker.set_path(values.surface_mesh)
+                self.output_picker.set_path(values.output_grim)
+                self.point_csv_picker.set_path(values.point_locations_csv)
+                self.line_csv_picker.set_path(values.line_locations_csv)
+                coordinate_index = self.coordinate_units.findData(
+                    values.coordinate_units
+                )
+                surface_index = self.surface_units.findData(values.surface_units)
+                if coordinate_index < 0 or surface_index < 0:
+                    raise ValueError("Recipe units are unavailable in this GRIM build.")
+                self.coordinate_units.setCurrentIndex(coordinate_index)
+                self.surface_units.setCurrentIndex(surface_index)
+                self.flip_normals.setChecked(values.flip_surface_normals)
+                self.shadow.setChecked(values.shadow)
+                self.skin_tol.setValue(values.skin_tol_m * 1.0e3)
+                self.phase_tol.setValue(values.skin_phase_tol_deg)
+                self.normal_tol.setValue(values.normal_tol_deg)
+                self._set_validation_profile_from_values(values)
+                self.expected_host_material.setText(values.expected_host_material)
+                self.shadow_bias.setText(
+                    "" if values.shadow_bias_m is None else f"{values.shadow_bias_m:.12g}"
+                )
+                # Display saved mappings immediately, while readiness still
+                # requires the authoritative CSV re-scan before validation.
+                self.point_mapping.set_dataset_ids(
+                    tuple(values.point_datasets),
+                    values.point_datasets,
+                    values.point_host_materials,
+                )
+                self.line_mapping.set_dataset_ids(
+                    tuple(values.line_datasets),
+                    values.line_datasets,
+                    values.line_host_materials,
+                )
+                self.spatial_feature_filter.clear()
+                self.recipe_name_edit.setText(loaded.name)
+                self.recipe_variant_edit.setText(loaded.variant)
+                self._recipe_path = loaded.path
+                self._recipe_dirty = False
+                self._recipe_source_warnings = loaded.source_warnings
+                self._preview_is_current = False
+                self._validated_plan_current = False
+                self._validation_warning_count = 0
+                self._refresh_spatial_feature_tree()
+                self._clear_validation_qa(
+                    "Recipe loaded. Run Validate placements to refresh per-instance QA."
+                )
+                self._update_recipe_status()
+                self._update_workflow_readiness()
+            finally:
+                self._loading_recipe = False
+
+            if previous_preview:
+                message = (
+                    "Assembly recipe loaded — the previous 3-D preview is out of "
+                    "date until this recipe is previewed or validated."
+                )
+                self.preview_stale.emit(message)
+
+            warning_text = ""
+            if loaded.source_warnings:
+                warning_text = (
+                    f" {len(loaded.source_warnings)} referenced source warning(s) "
+                    "are listed on the recipe status tooltip."
+                )
+            self.status_changed.emit(
+                f"Loaded Assembly recipe {loaded.name} · {loaded.variant}."
+                + warning_text
+            )
+
+            placement_paths = tuple(
+                value
+                for value in (
+                    loaded.values.point_locations_csv,
+                    loaded.values.line_locations_csv,
+                )
+                if value
+            )
+            can_refresh = bool(
+                refresh
+                and placement_paths
+                and all(Path(value).is_file() for value in placement_paths)
+            )
+            if can_refresh:
+                try:
+                    coerce_feature_workflow(self._service)
+                except (RuntimeError, TypeError):
+                    can_refresh = False
+            if can_refresh:
+                self.refresh_dataset_ids()
+            return loaded
 
         def set_loaded_dataset_catalog(self, entries: Iterable[Any]) -> None:
             """Offer saved, file-backed GRIM rows without replacing Browse.
@@ -2765,6 +4713,176 @@ if GUI_AVAILABLE:
         def _loaded_dataset_notice(self, message: str) -> None:
             self.status_changed.emit(message)
 
+        def _surface_binding_inputs(
+            self,
+        ) -> tuple[FeatureWorkflowAdapter, Path, Path, str]:
+            """Return validated absolute inputs for an explicit binding action."""
+
+            self._pull_values()
+            values = self.model.values
+            preflight = preflight_base_grim(
+                values.base_grim, base_dir=values.base_dir
+            )
+            if not preflight.valid:
+                raise ValueError(preflight.summary)
+            if preflight.embedded_bor:
+                raise ValueError(
+                    "This clean-body GRIM embeds its BoR geometry; an external "
+                    "solve-to-mesh binding is not required."
+                )
+            base = _resolved_user_path(values.base_grim, base_dir=values.base_dir)
+            surface = _resolved_user_path(
+                values.surface_mesh, base_dir=values.base_dir
+            )
+            if not surface.is_file() or surface.suffix.casefold() not in {
+                ".stl", ".facet"
+            }:
+                raise ValueError(
+                    "Choose the matching STL or .facet body surface first."
+                )
+            adapter = coerce_feature_workflow(self._service)
+            return adapter, base, surface, str(values.surface_units)
+
+        def _prompt_surface_binding_details(
+            self,
+            sidecar: Path,
+        ) -> tuple[str, str] | None:
+            """Collect reviewed IDs and a deliberate attestation in one dialog."""
+
+            geometry_id = ""
+            case_id = ""
+            if isinstance(self._surface_binding_checked, Mapping):
+                geometry_id = str(
+                    self._surface_binding_checked.get("geometry_id", "")
+                ).strip()
+                case_id = str(
+                    self._surface_binding_checked.get("attestation_case_id", "")
+                ).strip()
+            elif sidecar.is_file():
+                # Prefill human IDs only. This is convenience, never validation;
+                # the backend hashes and validates again after the dialog.
+                try:
+                    if sidecar.stat().st_size <= 1024 * 1024:
+                        raw = json.loads(sidecar.read_text(encoding="utf-8-sig"))
+                        if isinstance(raw, Mapping):
+                            geometry_id = str(raw.get("geometry_id", "")).strip()
+                            case_id = str(
+                                raw.get("attestation_case_id", "")
+                            ).strip()
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
+            dialog = _SurfaceBindingDialog(
+                self,
+                geometry_id=geometry_id,
+                attestation_case_id=case_id,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return dialog.binding_values()
+
+        @Slot()
+        def check_selected_surface_binding(self) -> None:
+            """Explicitly verify the exact current external body registration."""
+
+            if self.job_is_running():
+                self.status_changed.emit("An Assembly operation is already running.")
+                return
+            try:
+                adapter, base, surface, units = self._surface_binding_inputs()
+                if not callable(adapter.check_surface_binding):
+                    raise RuntimeError(
+                        "The connected GHOST backend cannot check external-body "
+                        "surface bindings."
+                    )
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+
+            def operation() -> Mapping[str, Any]:
+                binding, sidecar = adapter.check_surface_binding(
+                    base,
+                    surface,
+                    surface_units=units,
+                )
+                return {
+                    "binding": dict(binding),
+                    "sidecar": str(sidecar),
+                    "base": str(base),
+                    "surface": str(surface),
+                    "surface_units": units,
+                    "identity_key": _surface_binding_identity_key(
+                        base, surface, units
+                    ),
+                }
+
+            self._start_operation("binding_check", operation)
+
+        @Slot()
+        def bind_selected_surface(self) -> None:
+            """Create or refresh one explicitly reviewed exact-file binding."""
+
+            if self.job_is_running():
+                self.status_changed.emit("An Assembly operation is already running.")
+                return
+            try:
+                adapter, base, surface, units = self._surface_binding_inputs()
+                if not callable(adapter.write_surface_binding):
+                    raise RuntimeError(
+                        "The connected GHOST backend cannot create external-body "
+                        "surface bindings."
+                    )
+                sidecar = _surface_binding_sidecar_path(surface)
+                if sidecar is None:  # Defensive; surface is validated above.
+                    raise RuntimeError("Could not resolve the canonical binding path.")
+                details = self._prompt_surface_binding_details(sidecar)
+                if details is None:
+                    self.status_changed.emit("Surface binding was not changed.")
+                    return
+                geometry_id, case_id = details
+                overwrite = sidecar.exists()
+                if overwrite:
+                    answer = QMessageBox.warning(
+                        self,
+                        "Replace reviewed surface binding?",
+                        f"{sidecar.name} already exists. Replace it with a new "
+                        "binding for the exact current body, mesh, units, and "
+                        "reviewed IDs?",
+                        QMessageBox.StandardButton.Yes
+                        | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer != QMessageBox.StandardButton.Yes:
+                        self.status_changed.emit(
+                            "Surface binding refresh cancelled; existing sidecar kept."
+                        )
+                        return
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+
+            def operation() -> Mapping[str, Any]:
+                binding, written = adapter.write_surface_binding(
+                    base,
+                    surface,
+                    surface_units=units,
+                    geometry_id=geometry_id,
+                    attestation_case_id=case_id,
+                    attest_reviewed_registration=True,
+                    overwrite=overwrite,
+                )
+                return {
+                    "binding": dict(binding),
+                    "sidecar": str(written),
+                    "base": str(base),
+                    "surface": str(surface),
+                    "surface_units": units,
+                    "identity_key": _surface_binding_identity_key(
+                        base, surface, units
+                    ),
+                }
+
+            self._start_operation("binding_write", operation)
+
         def _update_workflow_readiness(self) -> None:
             """Keep the compact step summary and actions honest and actionable."""
 
@@ -2776,7 +4894,22 @@ if GUI_AVAILABLE:
             values.line_locations_csv = self.line_csv_picker.path()
             values.point_datasets = self.point_mapping.mapping()
             values.line_datasets = self.line_mapping.mapping()
+            values.point_host_materials = self.point_mapping.host_materials()
+            values.line_host_materials = self.line_mapping.host_materials()
             values.coordinate_units = str(self.coordinate_units.currentData())
+            values.surface_units = str(self.surface_units.currentData())
+            values.flip_surface_normals = self.flip_normals.isChecked()
+            values.shadow = self.shadow.isChecked()
+            values.skin_tol_m = self.skin_tol.value() * 1.0e-3
+            values.skin_phase_tol_deg = self.phase_tol.value()
+            values.normal_tol_deg = self.normal_tol.value()
+            (
+                values.allow_legacy_base_metadata,
+                values.require_feature_manifests,
+            ) = self._validation_profile_flags()
+            values.expected_host_material = (
+                self.expected_host_material.text().strip()
+            )
 
             point_selected = bool(values.point_locations_csv)
             line_selected = bool(values.line_locations_csv)
@@ -2939,14 +5072,67 @@ if GUI_AVAILABLE:
                 "Selected: " + ("; ".join(selected_parts) if selected_parts else "none yet")
             )
             self.feature_summary_label.setVisible(point_selected and line_selected)
+            strict_feature_library = bool(values.require_feature_manifests)
+            production_profile = bool(
+                strict_feature_library and not values.allow_legacy_base_metadata
+            )
+            qa_mode = (
+                "Production — strict body metadata, certified response manifests"
+                if production_profile
+                else "legacy response compatibility (warnings shown after validation)"
+            )
+            host_id = values.expected_host_material.strip()
+            try:
+                effective_hosts = self.model.effective_host_materials()
+                missing_host_materials = self.model.missing_host_material_mappings()
+                host_mapping_error = ""
+            except ValueError as exc:
+                effective_hosts = {}
+                missing_host_materials = tuple(
+                    f"point:{value}" for value in active_point_ids
+                ) + tuple(f"line:{value}" for value in active_line_ids)
+                host_mapping_error = str(exc)
+            explicit_host_count = sum(
+                bool(str(value).strip())
+                for value in (
+                    *values.point_host_materials.values(),
+                    *values.line_host_materials.values(),
+                )
+            )
+            host_text = (
+                f"default {host_id}"
+                if host_id
+                else (
+                    f"{explicit_host_count} per-response override(s)"
+                    if explicit_host_count
+                    else "not set"
+                )
+            )
+            if not production_profile and missing_host_materials:
+                host_text += " (Legacy warning expected)"
             self.build_summary_label.setText(
-                "; ".join(selected_parts)
+                (
+                    "; ".join(selected_parts)
+                    + f"; QA: {qa_mode}; host: {host_text}"
+                )
                 if selected_parts
                 else "Choose a point or line placement CSV."
             )
+            self.advanced_section.header.setText(
+                "Advanced placement checks · "
+                + (
+                    "Production validation"
+                    if production_profile
+                    else "legacy-library compatibility"
+                )
+            )
 
             has_body = bool(values.base_grim)
-            body_ready = existing_grim_file(values.base_grim)
+            base_preflight = preflight_base_grim(
+                values.base_grim, base_dir=values.base_dir
+            )
+            body_ready = base_preflight.valid
+            self.body_preview_help.setText(base_preflight.summary)
             has_placements = point_selected or line_selected
             has_enabled_features = bool(
                 self.model.enabled_point_placement_ids
@@ -2972,10 +5158,60 @@ if GUI_AVAILABLE:
             )
             surface_selected = bool(values.surface_mesh)
             surface_file_ready = existing_surface_file(values.surface_mesh)
+            surface_required = bool(
+                body_ready
+                and (base_preflight.requires_surface_mesh or self.shadow.isChecked())
+            )
             surface_ready = (
                 surface_file_ready
-                if self.shadow.isChecked()
+                if surface_required
                 else not surface_selected or surface_file_ready
+            )
+            binding_status = assess_surface_binding_readiness(
+                base_grim=values.base_grim,
+                surface_mesh=values.surface_mesh,
+                surface_units=values.surface_units,
+                production_profile=production_profile,
+                base_dir=values.base_dir,
+                checked_key=self._surface_binding_checked_key,
+                checked_binding=self._surface_binding_checked,
+                error_key=self._surface_binding_error_key,
+                check_error=self._surface_binding_error,
+                tools_available=bool(
+                    adapter is not None
+                    and callable(adapter.check_surface_binding)
+                ),
+            )
+            self.surface_binding_status.setText(binding_status.message)
+            self.surface_binding_status.setProperty(
+                "bindingState", binding_status.code
+            )
+            binding_action_ready = bool(
+                not self.job_is_running()
+                and binding_status.external_body
+                and surface_file_ready
+            )
+            self.check_surface_binding_button.setEnabled(
+                binding_action_ready
+                and adapter is not None
+                and callable(adapter.check_surface_binding)
+                and binding_status.sidecar_path is not None
+                and binding_status.sidecar_path.is_file()
+            )
+            self.bind_surface_button.setEnabled(
+                binding_action_ready
+                and adapter is not None
+                and callable(adapter.write_surface_binding)
+            )
+            self.bind_surface_button.setText(
+                "Refresh binding…"
+                if binding_status.sidecar_path is not None
+                and binding_status.sidecar_path.is_file()
+                else "Bind body to mesh…"
+            )
+            host_material_ready = bool(
+                not host_mapping_error
+                and (not production_profile or not missing_host_materials)
             )
             has_output = bool(values.output_grim)
             output_ready = has_output
@@ -3005,13 +5241,23 @@ if GUI_AVAILABLE:
                     response_files_ready,
                     output_ready,
                     surface_ready,
+                    binding_status.ready,
                     settings_ready,
+                    host_material_ready,
                 )
             )
+            validation_current = bool(
+                self._validated_plan_current
+                and service_ready
+                and adapter is not None
+                and self.model.validated_plan_is_current(adapter)
+            )
+            if not validation_current:
+                self._validated_plan_current = False
 
             checks = [
                 (service_ready, "GHOST backend"),
-                (body_ready, "body file"),
+                (body_ready, "valid body GRIM"),
                 (has_placements, "placements"),
                 (has_enabled_features, "features enabled"),
                 (scans_current and has_placements, "CSV read"),
@@ -3020,8 +5266,11 @@ if GUI_AVAILABLE:
                     "response files",
                 ),
             ]
-            if surface_selected or self.shadow.isChecked():
+            if surface_selected or surface_required:
                 checks.append((surface_ready, "surface mesh"))
+            if binding_status.external_body and production_profile:
+                checks.append((binding_status.ready, "reviewed body binding"))
+            checks.append((host_material_ready, "host material IDs"))
             if not settings_ready:
                 checks.append((False, "advanced settings"))
             checks.append((output_ready, "output"))
@@ -3037,7 +5286,24 @@ if GUI_AVAILABLE:
             elif not has_body:
                 next_step = "Next: choose the clean-body .grim response."
             elif not body_ready:
-                next_step = "Next: choose an existing clean-body .grim file."
+                next_step = "Next: " + base_preflight.summary
+            elif not surface_ready:
+                next_step = (
+                    "Next: choose the matching .stl or .facet surface mesh required "
+                    "for this external 3-D body or shadowing."
+                )
+            elif binding_status.required and not binding_status.ready:
+                next_step = "Next: " + binding_status.message.lstrip("✗⚠○ ")
+            elif not host_material_ready:
+                next_step = "Next: " + (
+                    host_mapping_error
+                    if host_mapping_error
+                    else (
+                        "enter a per-response host material/coating ID for "
+                        + ", ".join(missing_host_materials)
+                        + ", or enter one global default."
+                    )
+                )
             elif not has_placements:
                 next_step = "Next: choose a point or line placement CSV."
             elif not scans_current:
@@ -3050,19 +5316,24 @@ if GUI_AVAILABLE:
                 next_step = "Next: map every dataset_id to its OPN − FRD response."
             elif not response_files_ready:
                 next_step = "Next: map each response to an existing .grim file."
-            elif not surface_ready:
-                next_step = "Next: choose an existing .stl or .facet surface mesh."
             elif not settings_ready:
                 next_step = "Next: enter a finite, non-negative shadow ray bias or leave it blank."
             elif not has_output:
                 next_step = "Next: choose the assembled output file."
             elif not output_ready:
                 next_step = "Next: choose an output that does not alias an Assembly input."
-            else:
+            elif not validation_current:
                 next_step = (
-                    "Ready: validate in 3-D, or assemble directly (validation runs "
-                    "automatically)."
+                    "Ready to review: run Validate placements. Assembly is locked "
+                    "until that current validation succeeds."
                 )
+            elif self._validation_warning_count and not self.validation_warning_ack.isChecked():
+                next_step = (
+                    "Validation passed with warnings. Review every warning and check "
+                    "the one-time waiver before assembly."
+                )
+            else:
+                next_step = "Validated and reviewed — ready to assemble and save."
             self.next_step_label.setText(next_step)
 
             busy = self.job_is_running()
@@ -3071,13 +5342,20 @@ if GUI_AVAILABLE:
                 and adapter is not None
                 and callable(adapter.preview_inputs)
             )
-            preview_possible = any(
-                (
-                    body_ready,
-                    surface_file_ready,
-                    point_selected and existing_file(values.point_locations_csv),
-                    line_selected and existing_file(values.line_locations_csv),
+            preview_possible = bool(
+                (not has_body or body_ready)
+                and any(
+                    (
+                        body_ready,
+                        surface_file_ready,
+                        point_selected and existing_file(values.point_locations_csv),
+                        line_selected and existing_file(values.line_locations_csv),
+                    )
                 )
+            )
+            warnings_reviewed = bool(
+                not self._validation_warning_count
+                or self.validation_warning_ack.isChecked()
             )
             self.scan_button.setEnabled(not busy and service_ready and has_placements)
             self.input_preview_button.setEnabled(
@@ -3086,7 +5364,9 @@ if GUI_AVAILABLE:
                 and preview_possible
             )
             self.preview_button.setEnabled(not busy and full_ready)
-            self.build_button.setEnabled(not busy and full_ready)
+            self.build_button.setEnabled(
+                not busy and full_ready and validation_current and warnings_reviewed
+            )
             self.point_clear_button.setEnabled(not busy and point_selected)
             self.line_clear_button.setEnabled(not busy and line_selected)
 
@@ -3098,16 +5378,37 @@ if GUI_AVAILABLE:
 
             return self.job_is_running()
 
+        def busy_operation(self) -> str:
+            return str(self._active_kind)
+
         def can_close(self) -> bool:
-            """Closing is safe only after the non-cancellable physics job ends."""
+            """Closing is safe after any active worker reaches a safe boundary."""
 
             return not self.is_busy()
 
-        def closeEvent(self, event: Any) -> None:
-            if self.is_busy():
+        @Slot()
+        def request_cancel(self) -> None:
+            """Request cooperative cancellation of validation or assembly."""
+
+            if self._active_kind not in {"preview", "build"} or self._worker is None:
+                return
+            self._worker.request_cancel()
+            self.cancel_operation_button.setEnabled(False)
+            if self._active_kind == "preview":
+                self.operation_progress.setFormat("Cancelling validation safely…")
                 self.status_changed.emit(
-                    "Feature validation/assembly is still running; wait before closing."
+                    "Validation cancellation requested. Finishing the current safe "
+                    "check; no reviewed plan will be retained."
                 )
+            else:
+                self.operation_progress.setFormat("Cancelling assembly safely…")
+                self.status_changed.emit(
+                    "Assembly cancellation requested. Finishing the current safe "
+                    "numerical step; no partial output will be published."
+                )
+
+        def closeEvent(self, event: Any) -> None:
+            if not self.request_close(self):
                 event.ignore()
                 return
             super().closeEvent(event)
@@ -3127,16 +5428,25 @@ if GUI_AVAILABLE:
             self._mark_preview_stale()
 
         def _output_path_changed(self) -> None:
-            self.model.invalidate_prepared_plan()
-            self._update_workflow_readiness()
+            self._mark_preview_stale()
 
         @Slot()
         def _mark_preview_stale(self, *_args: Any) -> None:
-            self.model.invalidate_prepared_plan()
-            self._update_workflow_readiness()
-            if not self._preview_is_current:
+            if self._loading_recipe:
                 return
+            had_current_review = bool(
+                self._preview_is_current or self._validated_plan_current
+            )
+            self.model.invalidate_prepared_plan()
             self._preview_is_current = False
+            self._validated_plan_current = False
+            self._clear_validation_qa(
+                "Inputs changed. Run Validate placements to refresh per-instance QA."
+            )
+            self._set_recipe_dirty()
+            self._update_workflow_readiness()
+            if not had_current_review:
+                return
             message = (
                 "Inputs changed — the 3-D preview is out of date. Preview "
                 "inputs again, or validate placements for an authoritative preview."
@@ -3186,6 +5496,12 @@ if GUI_AVAILABLE:
         def _mapping_changed(self) -> None:
             self.model.values.point_datasets = self.point_mapping.mapping()
             self.model.values.line_datasets = self.line_mapping.mapping()
+            self.model.values.point_host_materials = (
+                self.point_mapping.host_materials()
+            )
+            self.model.values.line_host_materials = (
+                self.line_mapping.host_materials()
+            )
             self._refresh_spatial_feature_tree()
             self._mark_preview_stale()
             missing = [
@@ -3261,9 +5577,18 @@ if GUI_AVAILABLE:
             values.line_locations_csv = self.line_csv_picker.path()
             values.point_datasets = self.point_mapping.mapping()
             values.line_datasets = self.line_mapping.mapping()
-            values.skin_tol_m = self.skin_tol.value()
+            values.point_host_materials = self.point_mapping.host_materials()
+            values.line_host_materials = self.line_mapping.host_materials()
+            values.skin_tol_m = self.skin_tol.value() * 1.0e-3
             values.skin_phase_tol_deg = self.phase_tol.value()
             values.normal_tol_deg = self.normal_tol.value()
+            (
+                values.allow_legacy_base_metadata,
+                values.require_feature_manifests,
+            ) = self._validation_profile_flags()
+            values.expected_host_material = (
+                self.expected_host_material.text().strip()
+            )
 
         def _show_error(self, text: str) -> None:
             message = str(text).strip() or "Feature assembly failed."
@@ -3303,10 +5628,14 @@ if GUI_AVAILABLE:
 
         def _apply_requirements_to_tables(self) -> None:
             self.point_mapping.set_dataset_ids(
-                self.model.point_dataset_ids, self.model.values.point_datasets
+                self.model.point_dataset_ids,
+                self.model.values.point_datasets,
+                self.model.values.point_host_materials,
             )
             self.line_mapping.set_dataset_ids(
-                self.model.line_dataset_ids, self.model.values.line_datasets
+                self.model.line_dataset_ids,
+                self.model.values.line_datasets,
+                self.model.values.line_host_materials,
             )
             self._refresh_spatial_feature_tree()
 
@@ -3319,6 +5648,158 @@ if GUI_AVAILABLE:
                 self.model.active_line_dataset_ids()
             )
             self._update_spatial_selection_summary()
+
+        def _clear_validation_qa(self, message: str) -> None:
+            self._validated_plan_current = False
+            self._validation_warning_count = 0
+            self.validation_qa_table.setRowCount(0)
+            self.validation_qa_label.setText(str(message))
+            self.validation_warning_label.clear()
+            self.validation_warning_label.setVisible(False)
+            self.validation_warning_ack.blockSignals(True)
+            self.validation_warning_ack.setChecked(False)
+            self.validation_warning_ack.blockSignals(False)
+            self.validation_warning_ack.setVisible(False)
+
+        def _show_validation_qa(self, plan: Any) -> None:
+            """Present backend-produced pass records without redoing physics."""
+
+            validation_warnings = tuple(
+                str(value).strip()
+                for value in (getattr(plan, "validation_warnings", ()) or ())
+                if str(value).strip()
+            )
+            self._validation_warning_count = len(validation_warnings)
+            self.validation_warning_ack.blockSignals(True)
+            self.validation_warning_ack.setChecked(False)
+            self.validation_warning_ack.blockSignals(False)
+            self.validation_warning_ack.setVisible(bool(validation_warnings))
+            if validation_warnings:
+                self.validation_warning_label.setText(
+                    "⚠ VALIDATION PASSED WITH RELEASE WARNINGS:\n• "
+                    + "\n• ".join(validation_warnings)
+                    + "\nResolve them where possible. Otherwise review each warning "
+                    "and use the one-time waiver below before assembly."
+                )
+                self.validation_warning_label.setVisible(True)
+            else:
+                self.validation_warning_label.clear()
+                self.validation_warning_label.setVisible(False)
+
+            raw_rows: list[tuple[str, Mapping[str, Any]]] = []
+            for kind, attribute in (
+                ("line", "line_records"),
+                ("point", "point_records"),
+            ):
+                records = getattr(plan, attribute, ()) or ()
+                for record in records:
+                    if isinstance(record, Mapping):
+                        raw_rows.append((kind, record))
+            self.validation_qa_table.setRowCount(len(raw_rows))
+            skin_limit = getattr(plan, "skin_limit_m", None)
+            try:
+                skin_limit_value = float(skin_limit)
+            except (TypeError, ValueError):
+                skin_limit_value = float("nan")
+            normal_limit = float(self.model.values.normal_tol_deg)
+            offsets: list[float] = []
+            normal_errors: list[float] = []
+            for row, (kind, record) in enumerate(raw_rows):
+                identifier_key = "line_id" if kind == "line" else "placement_id"
+                identifier = str(record.get(identifier_key, "")).strip()
+                dataset_id = str(record.get("dataset_id", "")).strip()
+                offset_raw = record.get(
+                    "max_skin_offset_m" if kind == "line" else "skin_offset_m"
+                )
+                try:
+                    offset = float(offset_raw)
+                except (TypeError, ValueError):
+                    offset = float("nan")
+                if math.isfinite(offset):
+                    offsets.append(offset)
+                    ratio = (
+                        0.0
+                        if skin_limit_value == 0.0 and offset == 0.0
+                        else (
+                            100.0 * offset / skin_limit_value
+                            if math.isfinite(skin_limit_value)
+                            and skin_limit_value > 0.0
+                            else float("nan")
+                        )
+                    )
+                    offset_text = f"{offset * 1e3:.4g} mm"
+                    if math.isfinite(ratio):
+                        offset_text += f" ({ratio:.1f}%)"
+                else:
+                    offset_text = "checked"
+                normal_raw = record.get("max_normal_error_deg")
+                try:
+                    normal_error = float(normal_raw)
+                except (TypeError, ValueError):
+                    normal_error = float("nan")
+                if math.isfinite(normal_error):
+                    normal_errors.append(normal_error)
+                    normal_text = f"{normal_error:.3g}° / {normal_limit:.3g}°"
+                else:
+                    normal_text = "outward ✓"
+                values = (
+                    "Line" if kind == "line" else "Point",
+                    identifier,
+                    dataset_id,
+                    offset_text,
+                    normal_text,
+                    "PASS",
+                )
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    if column == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, (kind, identifier))
+                    if column == 5:
+                        item.setToolTip(
+                            "Passed the authoritative skin, outward-normal, frame, "
+                            "response-mapping, and source-integrity checks."
+                        )
+                    self.validation_qa_table.setItem(row, column, item)
+
+            if not raw_rows:
+                self.validation_qa_label.setText(
+                    "Validation completed, but this service returned no per-instance "
+                    "QA records."
+                )
+                return
+            point_count = sum(kind == "point" for kind, _record in raw_rows)
+            line_count = len(raw_rows) - point_count
+            summary = (
+                f"✓ {len(raw_rows)} enabled placement(s) passed: {point_count} point, "
+                f"{line_count} line."
+            )
+            if validation_warnings:
+                summary += (
+                    f" ⚠ {len(validation_warnings)} production QA warning(s) "
+                    "require review."
+                )
+            if offsets:
+                summary += f" Worst skin offset {max(offsets) * 1e3:.4g} mm."
+            if normal_errors:
+                summary += f" Worst recorded normal error {max(normal_errors):.3g}°."
+            summary += " Click a row to find that instance above."
+            self.validation_qa_label.setText(summary)
+
+        @Slot(int, int)
+        def _qa_row_clicked(self, row: int, _column: int) -> None:
+            item = self.validation_qa_table.item(int(row), 0)
+            payload = None if item is None else item.data(Qt.ItemDataRole.UserRole)
+            if (
+                isinstance(payload, (tuple, list))
+                and len(payload) == 2
+                and self.spatial_feature_tree.select_instance(
+                    str(payload[0]), str(payload[1])
+                )
+            ):
+                self.status_changed.emit(
+                    f"Selected validated {payload[0]} feature {payload[1]!r} "
+                    "in Spatial Feature Configuration."
+                )
 
         def _update_spatial_selection_summary(self) -> None:
             self.spatial_selection_summary.setText(
@@ -3412,8 +5893,19 @@ if GUI_AVAILABLE:
             except Exception as exc:
                 self._show_error(str(exc))
                 return
+            self._clear_validation_qa(
+                "Validation is running. Assembly remains locked until it succeeds."
+            )
+            self.model.invalidate_prepared_plan()
+            self._update_workflow_readiness()
             self._start_operation(
-                "preview", lambda: self.model.prepare_preview(adapter)
+                "preview",
+                lambda cancel_check, progress_callback: self.model.prepare_preview(
+                    adapter,
+                    cancel_check=cancel_check,
+                    progress_callback=progress_callback,
+                ),
+                cooperative=True,
             )
 
         @Slot()
@@ -3424,6 +5916,27 @@ if GUI_AVAILABLE:
             try:
                 self._pull_values()
                 adapter = coerce_feature_workflow(self._service)
+                if not self._validated_plan_current:
+                    raise ValueError(
+                        "Run Validate placements and review its current QA result "
+                        "before assembling."
+                    )
+                if not self.model.validated_plan_is_current(
+                    adapter, verify_sources=True
+                ):
+                    self._validated_plan_current = False
+                    raise ValueError(
+                        "An Assembly input changed after validation. Validate and "
+                        "review the current configuration again."
+                    )
+                if (
+                    self._validation_warning_count
+                    and not self.validation_warning_ack.isChecked()
+                ):
+                    raise ValueError(
+                        "Review the validation warnings and check the one-time "
+                        "warning waiver before assembling."
+                    )
             except Exception as exc:
                 self._show_error(str(exc))
                 return
@@ -3442,33 +5955,76 @@ if GUI_AVAILABLE:
                 if answer != QMessageBox.StandardButton.Yes:
                     self.status_changed.emit("Assembly cancelled; existing output kept.")
                     return
-            self._start_operation("build", lambda: self.model.assemble(adapter))
+            self._start_operation(
+                "build",
+                lambda cancel_check, progress_callback: self.model.assemble_validated(
+                    adapter,
+                    cancel_check=cancel_check,
+                    progress_callback=progress_callback,
+                ),
+                cooperative=True,
+            )
 
         def _set_busy(self, busy: bool) -> None:
             self.form_content.setEnabled(not busy)
+            self.load_recipe_button.setEnabled(not busy)
+            self.save_recipe_as_button.setEnabled(not busy)
             if busy:
                 self.scan_button.setEnabled(False)
                 self.input_preview_button.setEnabled(False)
                 self.preview_button.setEnabled(False)
                 self.build_button.setEnabled(False)
+                self.save_recipe_button.setEnabled(False)
+                self.operation_progress.setVisible(True)
+                if self._active_kind in {"preview", "build"}:
+                    self.operation_progress.setRange(0, 100)
+                    self.operation_progress.setValue(0)
+                    if self._active_kind == "preview":
+                        self.operation_progress.setFormat(
+                            "0% · Checking Assembly inputs"
+                        )
+                        self.cancel_operation_button.setText("Cancel validation")
+                    else:
+                        self.operation_progress.setFormat("0% · Preparing assembly")
+                        self.cancel_operation_button.setText("Cancel assembly")
+                    self.cancel_operation_button.setVisible(True)
+                    self.cancel_operation_button.setEnabled(True)
+                else:
+                    self.operation_progress.setRange(0, 0)
+                    self.operation_progress.setFormat("Working…")
+                    self.cancel_operation_button.setVisible(False)
+                    self.cancel_operation_button.setEnabled(False)
             else:
+                self.operation_progress.setVisible(False)
+                self.operation_progress.setRange(0, 100)
+                self.cancel_operation_button.setVisible(False)
+                self.cancel_operation_button.setEnabled(False)
+                self._update_recipe_status()
                 self._update_workflow_readiness()
 
         def _start_operation(
-            self, kind: str, operation: Callable[[], Any]
+            self,
+            kind: str,
+            operation: Callable[..., Any],
+            *,
+            cooperative: bool = False,
         ) -> None:
             if self.job_is_running():
                 raise RuntimeError("A feature operation is already running.")
             thread = QThread(self)
-            worker = _OperationWorker(operation)
+            worker = _OperationWorker(operation, cooperative=cooperative)
             worker.moveToThread(thread)
             thread.started.connect(worker.run)
             worker.succeeded.connect(self._operation_succeeded)
             worker.failed.connect(self._operation_failed)
+            worker.cancelled.connect(self._operation_cancelled)
+            worker.progress.connect(self._operation_progress)
             worker.succeeded.connect(thread.quit)
             worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
             worker.succeeded.connect(worker.deleteLater)
             worker.failed.connect(worker.deleteLater)
+            worker.cancelled.connect(worker.deleteLater)
             thread.finished.connect(thread.deleteLater)
             thread.finished.connect(self._operation_thread_finished)
             self._thread = thread
@@ -3477,6 +6033,8 @@ if GUI_AVAILABLE:
             self._set_busy(True)
             status = {
                 "discover": "Reading placement CSV schemas…",
+                "binding_check": "Checking exact body-to-mesh binding…",
+                "binding_write": "Writing and verifying reviewed body binding…",
                 "input_preview": (
                     "Loading body geometry and placement locations for visual preview…"
                 ),
@@ -3486,10 +6044,99 @@ if GUI_AVAILABLE:
             self.status_changed.emit(status)
             thread.start()
 
+        @Slot(int, str)
+        def _operation_progress(self, percent: int, message: str) -> None:
+            if self._active_kind not in {"preview", "build"}:
+                return
+            value = max(0, min(100, int(percent)))
+            self.operation_progress.setRange(0, 100)
+            self.operation_progress.setValue(value)
+            self.operation_progress.setFormat(f"{value}% · {message}")
+
+        @Slot(str)
+        def _operation_cancelled(self, text: str) -> None:
+            if self._active_kind == "preview":
+                self.model.invalidate_prepared_plan()
+                self._preview_is_current = False
+                stale_message = (
+                    "Validation cancelled — the Assembly preview is not a current "
+                    "authoritative review."
+                )
+                self._clear_validation_qa(
+                    "Validation cancelled. Assembly remains locked; run Validate "
+                    "placements again when ready."
+                )
+                self.status_changed.emit(
+                    text
+                    or "Placement validation cancelled; no reviewed plan was retained."
+                )
+                self.preview_stale.emit(stale_message)
+                return
+            self.status_changed.emit(text or "Assembly cancelled; existing output kept.")
+
         @Slot(object)
         def _operation_succeeded(self, result: Any) -> None:
             kind = self._active_kind
-            if kind == "discover":
+            if kind in {"binding_check", "binding_write"}:
+                try:
+                    values = self.model.values
+                    current_base = _resolved_user_path(
+                        self.base_picker.path(), base_dir=values.base_dir
+                    )
+                    current_surface = _resolved_user_path(
+                        self.surface_picker.path(), base_dir=values.base_dir
+                    )
+                    current_units = str(self.surface_units.currentData())
+                    current_key = _surface_binding_identity_key(
+                        current_base, current_surface, current_units
+                    )
+                    result_key = result.get("identity_key")
+                    same_selection = (
+                        _path_key(current_base) == _path_key(Path(result["base"]))
+                        and _path_key(current_surface)
+                        == _path_key(Path(result["surface"]))
+                        and current_units == str(result["surface_units"])
+                    )
+                    if not same_selection or current_key != result_key:
+                        raise RuntimeError(
+                            "Body binding inputs changed while the operation was "
+                            "finishing. Check the current selection again."
+                        )
+                    binding = result["binding"]
+                    if not isinstance(binding, Mapping):
+                        raise RuntimeError(
+                            "The backend returned an invalid binding result."
+                        )
+                except Exception as exc:
+                    self._surface_binding_error_key = None
+                    self._surface_binding_error = str(exc)
+                    self.status_changed.emit(str(exc))
+                    self._update_workflow_readiness()
+                    return
+                self._surface_binding_checked_key = current_key
+                self._surface_binding_checked = dict(binding)
+                self._surface_binding_error_key = None
+                self._surface_binding_error = ""
+                if kind == "binding_write":
+                    self.model.invalidate_prepared_plan()
+                    self._preview_is_current = False
+                    self._clear_validation_qa(
+                        "Body binding refreshed. Validate placements again so the "
+                        "reviewed plan includes the new exact sidecar."
+                    )
+                    self.preview_stale.emit(
+                        "The body binding changed; the prior Assembly review is stale."
+                    )
+                    verb = "Created and verified"
+                else:
+                    verb = "Verified"
+                self.status_changed.emit(
+                    f"✓ {verb} body binding: geometry "
+                    f"{binding.get('geometry_id')!r}; registration "
+                    f"{binding.get('attestation_case_id')!r}."
+                )
+                self._update_workflow_readiness()
+            elif kind == "discover":
                 current_paths = (
                     self.point_csv_picker.path(),
                     self.line_csv_picker.path(),
@@ -3501,7 +6148,25 @@ if GUI_AVAILABLE:
                         "CSV paths changed during discovery; re-scan them."
                     )
                     return
+                recipe_state_before = (
+                    dict(self.model.values.point_datasets),
+                    dict(self.model.values.line_datasets),
+                    dict(self.model.values.point_host_materials),
+                    dict(self.model.values.line_host_materials),
+                    set(self.model.values.excluded_point_placement_ids),
+                    set(self.model.values.excluded_line_ids),
+                )
                 self.model.update_dataset_requirements(result)
+                recipe_state_after = (
+                    dict(self.model.values.point_datasets),
+                    dict(self.model.values.line_datasets),
+                    dict(self.model.values.point_host_materials),
+                    dict(self.model.values.line_host_materials),
+                    set(self.model.values.excluded_point_placement_ids),
+                    set(self.model.values.excluded_line_ids),
+                )
+                if recipe_state_after != recipe_state_before:
+                    self._set_recipe_dirty()
                 self._apply_requirements_to_tables()
                 point_count = len(self.model.point_dataset_ids)
                 line_count = len(self.model.line_dataset_ids)
@@ -3545,6 +6210,9 @@ if GUI_AVAILABLE:
                 except (AttributeError, TypeError):
                     count_text = ""
                 self._preview_is_current = True
+                self._clear_validation_qa(
+                    "Geometry preview only — physical placement QA has not run."
+                )
                 self.status_changed.emit(
                     "Geometry preview prepared"
                     + count_text
@@ -3557,6 +6225,16 @@ if GUI_AVAILABLE:
                 self._update_workflow_readiness()
             elif kind == "preview":
                 self._preview_is_current = True
+                self._show_validation_qa(result)
+                self._validated_plan_current = True
+                warning_count = len(
+                    getattr(result, "validation_warnings", ()) or ()
+                )
+                warning_text = (
+                    f" ⚠ Review {warning_count} production QA warning(s) below."
+                    if warning_count
+                    else ""
+                )
                 skin_limit = getattr(result, "skin_limit_m", None)
                 skin_text = (
                     f" Effective skin limit: {float(skin_limit) * 1e3:.3f} mm."
@@ -3569,12 +6247,15 @@ if GUI_AVAILABLE:
                     "view."
                     + skin_text
                     + " Build will reuse this validation while inputs remain unchanged."
+                    + warning_text
                 )
                 self.preview_ready.emit(result)
                 self._update_workflow_readiness()
             elif kind == "build":
                 dispatch = result
                 self._preview_is_current = True
+                self._show_validation_qa(dispatch.plan)
+                self._validated_plan_current = True
                 self.preview_ready.emit(dispatch.plan)
                 self.feature_built.emit(str(dispatch.output_path))
                 reuse_text = (
@@ -3582,9 +6263,19 @@ if GUI_AVAILABLE:
                     if dispatch.reused_validated_plan
                     else ""
                 )
+                warning_count = len(
+                    getattr(dispatch.plan, "validation_warnings", ()) or ()
+                )
+                warning_text = (
+                    f" ⚠ Output saved with {warning_count} recorded production "
+                    "QA warning(s); review them before release."
+                    if warning_count
+                    else ""
+                )
                 self.status_changed.emit(
                     f"Saved assembled response: {dispatch.output_path}."
                     + reuse_text
+                    + warning_text
                     + " The result is ready in GRIM for plotting or further "
                     "dataset assembly."
                 )
@@ -3592,7 +6283,20 @@ if GUI_AVAILABLE:
 
         @Slot(str)
         def _operation_failed(self, text: str) -> None:
-            if self._active_kind == "discover":
+            if self._active_kind in {"binding_check", "binding_write"}:
+                try:
+                    self._surface_binding_error_key = (
+                        _surface_binding_identity_key(
+                            self.base_picker.path(),
+                            self.surface_picker.path(),
+                            str(self.surface_units.currentData()),
+                            base_dir=self.model.values.base_dir,
+                        )
+                    )
+                except OSError:
+                    self._surface_binding_error_key = None
+                self._surface_binding_error = str(text)
+            elif self._active_kind == "discover":
                 changed = False
                 for kind, picker in (
                     ("point", self.point_csv_picker),
@@ -3608,6 +6312,12 @@ if GUI_AVAILABLE:
                 # during its operation. Mirror that safe model state into the
                 # mapping tables before readiness is recomputed.
                 self._apply_requirements_to_tables()
+                if self._active_kind in {"preview", "build"}:
+                    self._validated_plan_current = False
+                    self.validation_qa_label.setText(
+                        "Validation stopped at the reported error. Correct that "
+                        "instance, then validate again."
+                    )
             self._show_error(text)
 
         @Slot()
@@ -3632,18 +6342,30 @@ else:
 
 __all__ = [
     "GUI_AVAILABLE",
+    "FEATURE_RECIPE_SCHEMA",
+    "FEATURE_RECIPE_SUFFIX",
+    "FEATURE_RECIPE_VERSION",
     "LINE_PLACEMENT_COLUMNS",
     "LINE_PLACEMENT_EXAMPLE",
     "POINT_PLACEMENT_COLUMNS",
     "POINT_PLACEMENT_EXAMPLE",
     "UNIT_CHOICES",
+    "VALIDATION_PROFILES",
+    "BaseGrimPreflight",
+    "SurfaceBindingReadiness",
     "FeatureAssemblyFormModel",
     "FeatureAssemblyPanel",
     "FeatureAssemblyValues",
     "FeatureBuildDispatch",
     "FeatureWorkflowAdapter",
     "LoadedDatasetEntry",
+    "LoadedFeatureAssemblyRecipe",
     "coerce_feature_workflow",
+    "assess_surface_binding_readiness",
+    "feature_assembly_recipe_payload",
     "placement_csv_template_text",
+    "preflight_base_grim",
+    "read_feature_assembly_recipe",
+    "write_feature_assembly_recipe",
     "write_placement_csv_template",
 ]

@@ -24,6 +24,7 @@ from assembly_workspace import (  # noqa: E402
     GUI_AVAILABLE,
     _feature_preview_nonvector_bounds,
     _finite_points,
+    _line_frame_orientation_overlays,
     _line_paths,
     decimate_triangles_for_display,
     display_unit_spec,
@@ -37,6 +38,37 @@ from assembly_workspace import (  # noqa: E402
 
 
 class AssemblyGeometryTests(unittest.TestCase):
+    def test_line_frame_arrows_expose_segment_direction_and_signed_binormal(self):
+        forward = np.asarray([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+        normals = np.asarray([[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]])
+
+        frame = _line_frame_orientation_overlays((forward,), normals)
+
+        np.testing.assert_allclose(frame["tangent_origins"], [[1.0, 0.0, 0.0]])
+        np.testing.assert_allclose(frame["tangent_directions"], [[1.0, 0.0, 0.0]])
+        # The production convention is signed +b = +t x +n.
+        np.testing.assert_allclose(frame["binormal_directions"], [[0.0, -1.0, 0.0]])
+
+        reversed_frame = _line_frame_orientation_overlays(
+            (forward[::-1],), normals
+        )
+        np.testing.assert_allclose(
+            reversed_frame["tangent_directions"], [[-1.0, 0.0, 0.0]]
+        )
+        np.testing.assert_allclose(
+            reversed_frame["binormal_directions"], [[0.0, 1.0, 0.0]]
+        )
+
+    def test_line_frame_display_is_deterministically_capped(self):
+        path = np.column_stack(
+            (np.arange(401, dtype=float), np.zeros(401), np.zeros(401))
+        )
+        frame = _line_frame_orientation_overlays((path,), None, max_frames=25)
+        self.assertEqual(frame["frame_source_count"], 400)
+        self.assertEqual(frame["frame_display_count"], 25)
+        self.assertEqual(frame["tangent_origins"].shape, (25, 3))
+        self.assertEqual(frame["binormal_origins"].shape, (0, 3))
+
     def test_display_unit_helpers_convert_ticks_without_geometry_conversion(self):
         self.assertEqual(tuple(DISPLAY_UNIT_SPECS), ("Meters", "Inches", "Feet"))
         self.assertEqual(display_unit_spec("meters"), ("m", 1.0))
@@ -375,6 +407,12 @@ class AssemblySceneModelTests(unittest.TestCase):
         np.testing.assert_allclose(origins[2], [1.0, 0.0, 0.0])
         np.testing.assert_allclose(directions[1], [0.0, 0.0, 1.0])
         np.testing.assert_allclose(directions[2], [0.0, 1.0, 0.0])
+        np.testing.assert_allclose(
+            group.style["tangent_directions"][0], [1.0, 0.0, 0.0]
+        )
+        np.testing.assert_allclose(
+            group.style["binormal_directions"][0], [0.0, -1.0, 0.0]
+        )
 
 
 @unittest.skipUnless(GUI_AVAILABLE, "PySide6/Matplotlib GUI dependencies unavailable")
@@ -423,6 +461,27 @@ class AssemblyGuiTests(unittest.TestCase):
         canvas._detach_model_listener()
         canvas.model.add_points("points:detached", [[0.0, 0.0, 0.0]])
         self.assertNotIn("points:detached", canvas._artists)
+
+    def test_orientation_controls_redraw_frames_without_mutating_geometry(self):
+        canvas = AssemblySceneCanvas()
+        path = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        normals = np.asarray([[[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]]])
+        group = canvas.add_lines(
+            "lines:frame-control", path, endpoint_normals=normals
+        )
+        original = tuple(np.array(value, copy=True) for value in group.geometry)
+        self.assertEqual(len(canvas._artists[group.group_id]), 4)
+
+        canvas.set_orientation_scale(2.0)
+        self.assertEqual(canvas.orientation_scale, 2.0)
+        canvas.set_orientation_vectors_visible(False)
+        self.assertFalse(canvas.orientation_vectors_visible)
+        self.assertNotIsInstance(canvas._artists[group.group_id], tuple)
+        for before, after in zip(original, group.geometry):
+            np.testing.assert_array_equal(before, after)
+
+        canvas.set_orientation_vectors_visible(True)
+        self.assertEqual(len(canvas._artists[group.group_id]), 4)
 
     def test_canvas_scene_transaction_defers_feedback_and_redraw(self):
         canvas = AssemblySceneCanvas()
@@ -682,7 +741,14 @@ class AssemblyGuiTests(unittest.TestCase):
         np.testing.assert_allclose(origins[2], [0.5, 0.2, 0.0])
         np.testing.assert_allclose(directions[1], [0.0, 0.0, 1.0])
         np.testing.assert_allclose(directions[2], [0.0, 1.0, 0.0])
-        self.assertEqual(len(workspace.scene_canvas._artists[gap_id]), 2)
+        self.assertEqual(len(workspace.scene_canvas._artists[gap_id]), 4)
+        self.assertEqual(gap.style["frame_source_count"], 3)
+        np.testing.assert_allclose(
+            gap.style["tangent_directions"][0], [1.0, 0.0, 0.0]
+        )
+        np.testing.assert_allclose(
+            gap.style["binormal_directions"][0], [0.0, -1.0, 0.0]
+        )
 
         orientation_lengths = {
             workspace.scene_model.group(group_id).style[

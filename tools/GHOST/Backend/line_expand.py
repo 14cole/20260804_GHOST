@@ -65,7 +65,14 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from occluder import PackedVisibility, visible_query_adapter
+
 C0 = 299792458.0
+
+# This taper is part of the reusable line-response model contract, not merely
+# a plotting preference.  Feature-library manifests bind this exact value so a
+# future numerical-default change cannot silently reuse an older validation.
+GRAZING_TAPER_DEG = 10.0
 
 # Legacy local-polarization inter-solver calibration constants.  The original
 # ring-calibration fixture is unavailable; the checked-in replacement PEC
@@ -532,6 +539,61 @@ def _subdivide(segments: 'np.ndarray', max_len: 'float',
     )
 
 
+def prepare_perimeter_frame(
+    segments: 'np.ndarray',
+    max_piece_length_m: 'float',
+    *,
+    normal_fn: 'Optional[Callable[[np.ndarray], np.ndarray]]' = None,
+    segment_normals: 'Optional[np.ndarray]' = None,
+) -> 'Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]':
+    """Return the exact subdivided geometry/frame used by line expansion.
+
+    The shared helper prevents production applicability checks from drifting
+    away from the numerical solver.  It returns piece starts, physical chord
+    tangents, lengths, midpoints, normalized skin normals, and the chord
+    tangent projected into the local skin plane (the solver's signed ``+t``).
+    """
+
+    if segment_normals is not None and normal_fn is not None:
+        raise ValueError("supply segment_normals or normal_fn, not both.")
+    r0, path_t_hat, dL, supplied_normals = _subdivide(
+        np.asarray(segments, dtype=float),
+        float(max_piece_length_m),
+        segment_normals=segment_normals,
+    )
+    r_mid = r0 + path_t_hat * (dL[:, None] / 2.0)
+    if supplied_normals is None:
+        if normal_fn is None:
+            raise ValueError(
+                "normal_fn is required when segment_normals is absent."
+            )
+        n_hat = np.asarray(normal_fn(r_mid), dtype=float)
+    else:
+        n_hat = supplied_normals
+    if n_hat.shape != r_mid.shape or not np.all(np.isfinite(n_hat)):
+        raise ValueError(
+            "normal_fn must return one finite 3-vector per perimeter point."
+        )
+    normal_norm = np.linalg.norm(n_hat, axis=1)
+    if np.any(normal_norm <= 1.0e-12):
+        raise ValueError("normal_fn returned a zero-length surface normal.")
+    n_hat = n_hat / normal_norm[:, None]
+
+    # Translation follows the physical chord.  The local 2-D response frame
+    # uses its projection into the skin tangent plane.
+    frame_t_hat = path_t_hat - (
+        np.sum(path_t_hat * n_hat, axis=1)[:, None] * n_hat
+    )
+    tangent_norm = np.linalg.norm(frame_t_hat, axis=1)
+    if np.any(tangent_norm < 1e-9):
+        raise ValueError(
+            "a perimeter segment is normal to the skin -- check that the "
+            "perimeter and the generatrix share a frame."
+        )
+    frame_t_hat /= tangent_norm[:, None]
+    return r0, path_t_hat, dL, r_mid, n_hat, frame_t_hat
+
+
 def expand_perimeter(segments: 'np.ndarray',
                      coefficients: 'SeamCoefficients',
                      normal_fn: 'Optional[Callable[[np.ndarray], np.ndarray]]',
@@ -539,10 +601,15 @@ def expand_perimeter(segments: 'np.ndarray',
                      frequency_ghz: 'Optional[float]' = None,
                      psi_tm_deg: 'float' = 0.0,
                      psi_te_deg: 'float' = 0.0,
-                     grazing_taper_deg: 'float' = 10.0,
+                     grazing_taper_deg: 'float' = GRAZING_TAPER_DEG,
                      max_piece_wavelengths: 'float' = 0.05,
+                     max_piece_length_m: 'Optional[float]' = None,
                      occluder=None,
-                     segment_normals: 'Optional[np.ndarray]' = None
+                     shadow_points: 'Optional[np.ndarray]' = None,
+                     segment_normals: 'Optional[np.ndarray]' = None,
+                     cancel_check: 'Optional[Callable[[], bool]]' = None,
+                     progress_callback: 'Optional[Callable[[int, int], None]]' = None,
+                     _shadow_visibility=None,
                      ) -> 'Dict[str, np.ndarray]':
     """Expand a seam coefficient along a 3D perimeter.
 
@@ -583,40 +650,30 @@ def expand_perimeter(segments: 'np.ndarray',
     if (not math.isfinite(max_piece_wavelengths)
             or max_piece_wavelengths <= 0.0):
         raise ValueError("max_piece_wavelengths must be positive and finite.")
-    if segment_normals is not None and normal_fn is not None:
-        raise ValueError("supply segment_normals or normal_fn, not both.")
-    r0, path_t_hat, dL, supplied_normals = _subdivide(
-        np.asarray(segments, dtype=float), max_piece_wavelengths * lam,
-        segment_normals=segment_normals,
-    )
-    r_mid = r0 + path_t_hat * (dL[:, None] / 2.0)
-    if supplied_normals is None:
-        if normal_fn is None:
-            raise ValueError("normal_fn is required when segment_normals is absent.")
-        n_hat = np.asarray(normal_fn(r_mid), dtype=float)
+    if max_piece_length_m is None:
+        maximum_piece_length = max_piece_wavelengths * lam
     else:
-        n_hat = supplied_normals
-    if n_hat.shape != r_mid.shape or not np.all(np.isfinite(n_hat)):
-        raise ValueError(
-            "normal_fn must return one finite 3-vector per perimeter point."
+        maximum_piece_length = float(max_piece_length_m)
+        if not math.isfinite(maximum_piece_length) or maximum_piece_length <= 0.0:
+            raise ValueError("max_piece_length_m must be positive and finite.")
+    r0, path_t_hat, dL, r_mid, n_hat, frame_t_hat = (
+        prepare_perimeter_frame(
+            np.asarray(segments, dtype=float),
+            maximum_piece_length,
+            normal_fn=normal_fn,
+            segment_normals=segment_normals,
         )
-    normal_norm = np.linalg.norm(n_hat, axis=1)
-    if np.any(normal_norm <= 1.0e-12):
-        raise ValueError("normal_fn returned a zero-length surface normal.")
-    n_hat = n_hat / normal_norm[:, None]
-    # Keep the actual chord tangent for the translation integral.  Project a
-    # separate copy into the skin tangent plane only to construct the local
-    # polarization/cross-section frame.  Using the projected vector in beta
-    # while r0 and dL still followed the original chord made phase depend on
-    # how the same geometric line happened to be split into CSV segments.
-    frame_t_hat = path_t_hat - (
-        np.sum(path_t_hat * n_hat, axis=1)[:, None] * n_hat
     )
-    tn = np.linalg.norm(frame_t_hat, axis=1)
-    if np.any(tn < 1e-9):
-        raise ValueError("a perimeter segment is normal to the skin -- check that "
-                         "the perimeter and the generatrix share a frame.")
-    frame_t_hat /= tn[:, None]
+    visibility_origins = r_mid
+    if shadow_points is not None:
+        visibility_origins = np.asarray(shadow_points, dtype=float)
+        if visibility_origins.shape != r_mid.shape or not np.all(
+            np.isfinite(visibility_origins)
+        ):
+            raise ValueError(
+                "shadow_points must contain one finite registered skin point "
+                "for every solver line piece."
+            )
     b_hat = np.cross(frame_t_hat, n_hat)
 
     dirs = np.atleast_2d(np.asarray(directions, dtype=float))
@@ -630,6 +687,28 @@ def expand_perimeter(segments: 'np.ndarray',
     dirs = dirs / direction_norm[:, None]
     e_vv, e_hh = _pol_unit_vectors(dirs)
 
+    packed_shadow = None
+    dense_shadow = None
+    if _shadow_visibility is not None:
+        if isinstance(_shadow_visibility, PackedVisibility):
+            packed_shadow = _shadow_visibility
+            visibility_shape = packed_shadow.shape
+        else:
+            dense_shadow = np.asarray(_shadow_visibility, dtype=bool)
+            visibility_shape = dense_shadow.shape
+        expected_shape = (len(visibility_origins), len(dirs))
+        if visibility_shape != expected_shape:
+            raise ValueError(
+                "precomputed line visibility must have shape "
+                "(n_solver_pieces, n_directions); expected "
+                f"{expected_shape}, got {visibility_shape}."
+            )
+    visible_query = (
+        visible_query_adapter(occluder)
+        if occluder is not None and _shadow_visibility is None
+        else None
+    )
+
     F = {"F_vv": np.zeros(len(dirs), dtype=complex),
          "F_hh": np.zeros(len(dirs), dtype=complex),
          "F_vh": np.zeros(len(dirs), dtype=complex)}
@@ -639,11 +718,15 @@ def expand_perimeter(segments: 'np.ndarray',
         raise ValueError("grazing_taper_deg must be positive and finite.")
 
     for i, d in enumerate(dirs):
+        if cancel_check is not None and cancel_check():
+            raise InterruptedError("Feature assembly cancelled.")
         d_n = n_hat @ d
         d_b = b_hat @ d
         d_path = path_t_hat @ d
         lit = d_n > 0.0
         if not np.any(lit):
+            if progress_callback is not None:
+                progress_callback(i + 1, len(dirs))
             continue
         phi = np.degrees(np.arctan2(d_n, d_b))            # 90 deg = normal
         a_tm = np.zeros(len(phi), dtype=complex)
@@ -655,8 +738,14 @@ def expand_perimeter(segments: 'np.ndarray',
         w_lit = np.clip(np.degrees(np.arcsin(np.clip(d_n, -1.0, 1.0))) / taper, 0.0, 1.0)
         w_lit = np.where(lit, 0.5 - 0.5 * np.cos(math.pi * w_lit), 0.0)
         # geometric body shadowing (STL): zero any point the body blocks
-        if occluder is not None:
-            w_lit = w_lit * occluder.visible(r_mid, d).astype(float)
+        if packed_shadow is not None:
+            w_lit = w_lit * packed_shadow.column(i).astype(float)
+        elif dense_shadow is not None:
+            w_lit = w_lit * dense_shadow[:, i].astype(float)
+        elif visible_query is not None:
+            w_lit = w_lit * visible_query(
+                visibility_origins, d, cancel_check=cancel_check
+            ).astype(float)
         # closed-form phase integral over each piece: Int e^{j beta u} du
         beta = 2.0 * k * d_path
         x = 0.5 * beta * dL
@@ -676,6 +765,8 @@ def expand_perimeter(segments: 'np.ndarray',
             tx_te, rx_te = e_te_local @ e_t, e_te_local @ e_r
             coeff = tx_tm * rx_tm * a_tm + tx_te * rx_te * a_te
             F[key][i] = pref * np.sum(w_lit * coeff * phase)
+        if progress_callback is not None:
+            progress_callback(i + 1, len(dirs))
     return F
 
 

@@ -263,7 +263,7 @@ class RcsGrid:
             extra: Optional passthrough metadata from the source file -- keys this
                 class does not model, carried so save() can write them back.
                 Producers that store the raw complex far-field amplitude
-                (rcs_amp_real / rcs_amp_imag, as the Claude21 RCS solver's .grim
+                (rcs_amp_real / rcs_amp_imag, as GHOST .grim
                 exports do) rely on this: without it a load/save round-trip
                 silently drops the amplitude and those tools can no longer read
                 the file.  Array entries are only re-emitted while their shape
@@ -3031,7 +3031,7 @@ class RcsGrid:
 
     # keys this class fully models and always rewrites itself.  rcs_domain and
     # power_domain are deliberately NOT here: a producer may tag a file with a
-    # domain word outside this class's 3-value vocabulary (the Claude21 solver
+    # domain word outside this class's 3-value vocabulary (the GHOST backend
     # writes rcs_domain='delta' / power_domain='delta_amp_sq', and routes on it),
     # so those tags are captured in `extra` and re-emitted verbatim by save().
     _RESERVED_KEYS = ("azimuths", "elevations", "frequencies", "polarizations",
@@ -3179,7 +3179,7 @@ class RcsGrid:
                 )
 
             # keys this class does not model (e.g. the raw complex amplitude and
-            # provenance flags written by the Claude21 solver exports) ride along
+            # provenance flags written by solver exports) ride along
             # in `extra` so save() can put them back -- see _extra_to_write
             extra = {k: data[k] for k in getattr(data, "files", [])
                      if k not in cls._RESERVED_KEYS}

@@ -202,7 +202,13 @@ On macOS, each tool folder contains a matching standalone `.command` launcher.
   A validated preview is reused by **Assemble & Save** while every path, option,
   and source-file fingerprint remains unchanged. Existing outputs require
   confirmation, and the clean body or a mapped response can never be selected
-  as the output target.
+  as the output target. Named portable `.assembly.json` recipes retain exact
+  mappings, tolerances, and feature membership for trade studies and warn when
+  referenced inputs change. The linked placement-QA table, signed line-frame
+  arrows, mesh-topology report, and optional strict feature-library manifests
+  make assumptions visible before a build. Long builds report progress and can
+  be cooperatively cancelled without publishing a partial artifact or replacing
+  a prior output.
 - Use **Plotting** and **ISAR** to inspect and process compatible RCS datasets.
 - Use **Python** to copy or save the readable headless script assembled from
   successful dataset operations and supported rectangular/polar azimuth,

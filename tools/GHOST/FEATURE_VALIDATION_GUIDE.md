@@ -76,9 +76,31 @@ canonical Assembly tree and the 3-D placement preview:
    extent; arrow length does not represent input magnitude or affect validation.
    The geometry-only preview omits zero or parallel arrows; validation
    remains responsible for reporting those physical placement errors.
+   Enable signed line-frame arrows when checking a seam: `+t` follows each
+   head-to-tail segment and `+b = +t × +n` is the coupon's signed across-gap
+   axis. Reversing the line reverses `+b` and is physically meaningful for an
+   asymmetric response.
 6. Select **Assemble & save** only after the placement report is
-   correct. Full response compatibility is enforced while assembling. The
-   saved result is automatically available to GRIM as a dataset.
+   correct. Review every row in the linked placement-QA table and every mesh or
+   feature-library warning. Full response compatibility is enforced while
+   assembling. The progress bar reports frequency/direction work; cancellation
+   is cooperative and occurs before atomic publication, so an existing output
+   is retained. The saved result is automatically available to GRIM as a
+   dataset.
+
+Before numerical execution, Assembly conservatively estimates peak RAM and
+same-volume scratch for the component and final atomic staging archives. A job
+that exceeds detected capacity is rejected before full response loading or
+temporary-file creation, with the grid size and practical remedies in the
+error. `GHOST_MAX_SOLVE_GB` may declare a confirmed process allocation on a
+workstation or scheduler; do not raise it beyond memory actually reserved for
+the process. Free scratch is checked again under the destination lock before
+staging begins.
+
+Save the setup as a named `.assembly.json` recipe before running variants. The
+recipe records relative paths where possible, exact enabled/disabled IDs,
+mappings, tolerances, and source identities. A later load reports moved,
+missing, or changed inputs instead of silently reusing the old validation.
 
 Per-node **Show** checkboxes and the global **Show All** checkbox under
 **Preview Layers** are preview controls only. They never include or exclude a
@@ -104,7 +126,130 @@ For unattended studies, `Backend/place_features.py` remains a settings wrapper
 and `Backend/feature_workflow.py` exposes the Qt-free
 `FeatureAssemblyRequest` service. Both call the same validation and placement
 implementation used by the GUI; they are automation alternatives, not a
-second physics path.
+second physics path. The wrapper defaults to `VALIDATION_PROFILE =
+"production"`, which requires strict clean-body metadata, validated response
+manifests, and one effective host material/coating ID for every active response.
+Use `EXPECTED_HOST_MATERIAL` for a homogeneous body or kind-qualified
+`EXPECTED_HOST_MATERIALS` entries such as `line:door_seam` and
+`point:fastener` for mixed stacks. `VALIDATION_PROFILE = "legacy"` is the
+explicit compatibility choice for reviewed older inputs.
+
+Preparation prints every validation warning and does not publish when any are
+present. It prints the sealed plan SHA-256 with the warnings. Review that exact
+plan first; only then copy its digest into `ACKNOWLEDGED_PLAN_SHA256` if the
+waiver is justified. Any input, selection, tolerance, host map, or source change
+changes the digest and invalidates the acknowledgment. This keeps unattended
+execution from silently turning a stale compatibility waiver into a distributed
+result.
+
+## Creating and checking a team-attested feature manifest
+
+A production point or line library must place exactly one UTF-8 JSON sidecar
+next to each mapped GRIM response. Use the supported command to create the
+sidecar only after a responsible team member has reviewed the declared host,
+response conventions, applicability envelope, and referenced validation
+evidence:
+
+```bash
+python Backend/create_feature_manifest.py create door_seam.grim \
+  --dataset-id door_seam --feature-kind line \
+  --host-material "PEC outer skin" \
+  --frequency-min-ghz 1 --frequency-max-ghz 12 \
+  --footprint-radius-m 0.02 \
+  --minimum-along-line-normal-turn-radius-m 0.5 \
+  --maximum-conical-incidence-deg 20 \
+  --maximum-path-vertex-turn-deg 30 \
+  --validation-status validated \
+  --validation-case-id door-seam-flat-pec-v3 \
+  --phase-calibration-case-id line-phase-map-v1 \
+  --attest-reviewed-evidence
+
+python Backend/create_feature_manifest.py check door_seam.grim \
+  --dataset-id door_seam --feature-kind line
+```
+
+The create command writes `door_seam.grim.feature.json` by default and refuses
+to overwrite it without `--force`. For `door_seam.grim`, Assembly supports
+either
+`door_seam.grim.feature.json` or `door_seam.feature.json`, never both. The same
+JSON may instead be embedded under `feature_library_manifest_json`; embedded
+and sidecar declarations must agree when both exist. The supported creator
+does not rewrite a response archive that already embeds a declaration. It
+always writes the current v2 response and line-calibration schemas. Existing v1
+declarations remain readable only through explicit Legacy compatibility; review
+the evidence and recreate them before Production use.
+
+This is a complete line-response example (replace the engineering values and
+case IDs with evidence from that exact response library):
+
+```json
+{
+  "schema": "ghost.feature-library-manifest.v2",
+  "dataset_id": "door_seam",
+  "feature_kind": "line",
+  "subtraction_order": "featured_minus_clean",
+  "phase_origin": "placement_line_on_host_outer_skin",
+  "frame_convention": "line_local:+t=head_to_tail;+n=outward;+b=cross(t,n)",
+  "time_convention": "exp(+jwt)",
+  "response_content_sha256": "<64-character digest written by the creator>",
+  "host": {
+    "material": "PEC outer skin used by clean and featured coupon solves"
+  },
+  "applicability": {
+    "frequency_ghz": {"min": 1.0, "max": 12.0},
+    "footprint_radius_m": 0.02,
+    "minimum_along_line_normal_turn_radius_m": 0.5,
+    "maximum_conical_incidence_deg": 20.0,
+    "maximum_path_vertex_turn_deg": 30.0
+  },
+  "line_phase_calibration": {
+    "schema": "ghost.line-phase-calibration.v2",
+    "tm_deg": 166.9,
+    "te_deg": -9.2,
+    "grazing_taper_deg": 10.0,
+    "case_ids": ["line-phase-map-v1"]
+  },
+  "validation": {
+    "status": "validated",
+    "case_ids": ["door-seam-flat-pec-v3", "door-seam-curved-pec-v2"]
+  }
+}
+```
+
+For a point library, set `feature_kind` to `point`, use
+`phase_origin = placement_point_at_pattern_phase_center`, and use this exact
+frame string:
+
+```text
+cavity spherical: +z=aperture outward; az=atan2(y,x); el=asin(z); VV=theta; HH=phi; VH=HV
+```
+
+Point manifests omit the three line-only applicability values and the complete
+`line_phase_calibration` object. `footprint_radius_m` bounds the local
+installation region represented by the delta. Overlapping footprints identify
+feature clusters whose mutual coupling is omitted. In Production an overlap is
+rejected; Legacy shows it as a QA warning. Line placements are additionally
+gated against the declared frequency, normal-turn-radius,
+maximum-conical-incidence, and path-vertex-turn envelopes. The 10-degree
+grazing taper records the fixed complex-amplitude visibility ramp used by the
+current line-expansion implementation; it is not a fitted manifest parameter.
+
+Production compares each manifest `host.material` with the effective host ID
+declared for that response. That catches a library/configuration mismatch, but
+an STL/facet file does not carry reliable per-region material IDs: GRIM cannot
+derive or independently prove the declaration from geometry. Use kind-qualified
+host mappings when a point and line response share a `dataset_id` but belong on
+different stacks.
+
+The Production profile rejects missing, provisional, or uncertified evidence.
+Use Legacy only to evaluate an established library whose missing contracts have
+been explicitly reviewed; the profile and warnings are recorded in provenance.
+A manifest is a **team attestation**, not a machine-issued certificate. The
+checker verifies the schema, exact response-content hash, conventions, host ID,
+envelope fields, and evidence identifiers. It does not solve Maxwell's
+equations, assess mesh convergence, inspect the cited cases, or prove that a
+locally derived delta remains accurate on a full vehicle. Independent converged
+full-wave comparisons and representative envelope coverage remain required.
 
 ## External 3-D solver conventions
 
@@ -179,21 +324,55 @@ multiple scattering.
 ## Placing on an external platform result
 
 An imported clean-platform monostatic GRIM does not need to originate in the
-BoR solver. In the Assembly form, select the attested external GRIM as the base
-and select its matching indexed ASCII `.facet` or STL surface. The surface
+BoR solver. In the Assembly form, select the external GRIM as the base and
+select its matching indexed ASCII `.facet` or STL surface. The surface
 supplies skin checks and outward normals; the GRIM supplies the exact
 frequency/azimuth/elevation grid on which the feature field is evaluated and
 coherently added. Unlike a self-contained BoR profile, an external base cannot
 be validated for placement without that surface.
 
-Selecting the base GRIM attests that the file is the coherent physical
-platform far field at the global vehicle origin in radar-frame VV/HH/VH. This
-supplies role/convention tags or raw real/imaginary redundancy stripped by a
-GRIM GUI save; the stored sigma and phase still undergo full normalization and
-consistency checks. A base explicitly tagged `combine_role=power` remains
-invalid; other descriptive metadata is superseded by the explicit base
-selection. The combined output is written back with the complete canonical
-coherent schema.
+Production also requires one canonical `<surface>.assembly.json` binding. It
+binds the exact external base and surface bytes to the selected surface units,
+fixed CAD frame, a team-controlled geometry revision, and the reviewed
+solve-to-surface registration case:
+
+```bash
+python Backend/create_feature_manifest.py create-surface-binding \
+  clean_vehicle.grim vehicle.stl --surface-units inches \
+  --geometry-id vehicle-mesh-r7 \
+  --attestation-case-id solver-registration-042 \
+  --attest-reviewed-registration
+
+python Backend/create_feature_manifest.py check-surface-binding \
+  clean_vehicle.grim vehicle.stl --surface-units inches \
+  --geometry-id vehicle-mesh-r7
+```
+
+For `vehicle.stl`, the only supported path is
+`vehicle.stl.assembly.json`. The checker re-hashes both selected files and
+requires `frame_convention = CAD:+y=nose;+x=right;+z=up`; a changed GRIM,
+changed mesh, or different unit selection fails. This eliminates invalid
+cross-format hash comparisons, but remains a team attestation: exact byte
+identity cannot prove that the external solver actually used that mesh, origin,
+scale, or orientation. The cited registration evidence must establish those
+facts independently.
+
+Assembly reconstructs edge topology and rejects duplicate faces, non-manifold
+edges, mixed winding, and globally inward closed components (unless one valid
+global normal flip is selected). It does not yet prove that nonadjacent
+triangles never self-intersect or that nested/overlapping closed shells are
+intentional. The cited registration evidence must therefore include a CAD/mesh
+integrity check for self-intersections and unintended duplicate shells; do not
+waive a topology warning merely because the preview looks solid.
+
+Production requires the base GRIM itself to declare that it is the coherent
+physical platform far field at the global vehicle origin in radar-frame
+VV/HH/VH, along with the required angular/grid conventions. Legacy treats the
+explicit base selection as the operator declaration for missing descriptive
+tags and records each assumption as a warning. In both profiles, stored sigma
+and phase undergo full normalization and consistency checks, and a base
+explicitly tagged `combine_role=power` remains invalid. The combined output is
+written back with the complete canonical coherent schema.
 
 The platform GRIM, surface mesh, and placement CSV must use the same physical
 origin and orientation. A mismatch creates a deterministic two-way phase error
@@ -327,6 +506,13 @@ coupon's signed across-gap axis; an asymmetric coupon must also be mirrored as
 `A_reversed(phi) = A(180 - phi)`. Use one consistent winding for closed door
 loops and document which side of the 2-D coupon corresponds to the path's
 positive across-gap direction.
+
+An immediate return along the previous segment is rejected, including a
+near-retrace whose applicability footprints still overlap beyond the shared
+endpoint neighborhood. Ordinary corners remain legal, but their turn angle
+must stay inside the response manifest's reviewed corner envelope. Closed-loop
+corners and junctions still require independent evidence because the straight
+2-D coefficient does not create a 3-D corner interaction.
 
 Line expansion applies a 10-degree **raised-cosine grazing illumination
 ramp** to complex field amplitude: the weight is zero at grazing, one-half at

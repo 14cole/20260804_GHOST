@@ -49,16 +49,66 @@ import json
 import hashlib
 import math
 import os
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+import errno
+import shutil
+import tempfile
+import zipfile
+from types import MappingProxyType
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
 from geometry_io import material_sidecar_paths
-from line_expand import (C0, PSI_HH_DEG, PSI_VV_DEG, SeamCoefficients,
+from line_expand import (C0, GRAZING_TAPER_DEG, PSI_HH_DEG, PSI_VV_DEG, SeamCoefficients,
                          _pol_unit_vectors, combine, dbsm, expand_perimeter,
-                         read_perimeter_txt, surface_of_revolution_normal)
+                         prepare_perimeter_frame, read_perimeter_txt,
+                         surface_of_revolution_normal)
+from occluder import (
+    PackedVisibility,
+    PackedVisibilityRow,
+    visible_query_adapter,
+)
 
 PathOrList = Union[str, Sequence[str]]
+ProgressCallback = Callable[[int, int, str], None]
+
+
+class AssemblyCapacityEstimate(NamedTuple):
+    """Conservative resources required by one placed-feature publication."""
+
+    grid_cells: int
+    look_count: int
+    shadow_mask_bytes: int
+    estimated_peak_memory_bytes: int
+    estimated_scratch_bytes: int
+
+
+_BYTES_PER_GIB = 1024 ** 3
+# These coefficients intentionally cover the current retained arrays plus the
+# larger validation/compression temporaries.  They are a production admission
+# guard, not a promise that NumPy will allocate exactly this amount.
+_ASSEMBLY_BYTES_PER_GRID_CELL = 320
+_ASSEMBLY_BYTES_PER_LOOK = 512
+_ASSEMBLY_BVH_WORK_BYTES_PER_TRIANGLE = 192
+_ASSEMBLY_FIXED_MEMORY_BYTES = 64 * 1024 ** 2
+_ASSEMBLY_FIXED_SCRATCH_BYTES = 32 * 1024 ** 2
+_ASSEMBLY_SCRATCH_MARGIN = 1.10
+
+
+def _check_cancel(cancel_check: 'Optional[Callable[[], bool]]') -> None:
+    """Raise the one cooperative-cancellation exception used by Assembly."""
+    if cancel_check is not None and cancel_check():
+        raise InterruptedError("Feature assembly cancelled; existing output kept.")
+
+
+def _report_progress(
+    progress_callback: 'Optional[ProgressCallback]',
+    completed: int,
+    total: int,
+    message: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(int(completed), max(1, int(total)), str(message))
 
 PHYSICAL_3D_AMPLITUDE_CONVENTION = (
     "F physical far-field amplitude; sigma_3d=4*pi*|F|^2"
@@ -112,6 +162,19 @@ POINT_PATTERN_FRAME_CONVENTION = (
     "cavity spherical: +z=aperture outward; az=atan2(y,x); el=asin(z); "
     "VV=theta; HH=phi; VH=HV"
 )
+
+# Assembly consumes one deliberately narrow radar-coordinate convention.  This
+# tag is stronger than the generic ``angular_coordinate_system='conic'`` label:
+# some vendor imports (notably historical SENTRi tables) store polar theta
+# directly in the elevation slot while still calling the resulting grid conic.
+# A conversion that actually rewrites such axes may stamp this exact value.
+ASSEMBLY_RADAR_ANGULAR_CONTRACT = (
+    "ghost.radar-azimuth-elevation.coming-from.deg.v1"
+)
+
+# Internal-only key returned by the declared-base validator.  It is never
+# copied into a GRIM payload; the public feature provenance records it instead.
+_LEGACY_BASE_ASSUMPTIONS_KEY = "_ghost_legacy_base_metadata_assumptions"
 
 
 def point_pattern_convention_metadata() -> 'Dict[str, str]':
@@ -388,6 +451,209 @@ def _require_linear_quantity(grim, label, expected):
                 f"got units.{key}={units[key]!r}."
             )
     return units
+
+
+def _optional_scalar_text(metadata, key, label):
+    """Return stripped scalar metadata or ``None`` when the key is absent.
+
+    An explicitly present array-valued value is a contradiction, not legacy
+    missing metadata, and therefore remains a hard error.
+    """
+
+    if key not in metadata:
+        return None
+    value = _metadata_text(metadata, key, label, required=False)
+    return value if value else None
+
+
+def validate_assembly_base_grid_metadata(
+    base_payload,
+    radar_grid,
+    label,
+    *,
+    allow_legacy_metadata=True,
+):
+    """Validate a base field at the Assembly coordinate-system boundary.
+
+    The numerical grid must be the exact canonical radar azimuth/elevation
+    grid used by :func:`export_radar_grim`.  Missing descriptive metadata can
+    be accepted only through the explicit legacy-compatibility argument and is
+    returned for provenance.  Present contradictory metadata is never
+    overwritten or treated as an attestation.
+
+    In particular, CREATE-RF SENTRi historically reports polar ``theta`` and
+    GRIM stores it directly in the elevation array.  Numeric values from a
+    partial theta sweep can fall inside [-90, 90] and otherwise look plausible,
+    so vendor/mapping metadata is inspected and rejected unless an upstream
+    conversion explicitly stamped :data:`ASSEMBLY_RADAR_ANGULAR_CONTRACT`.
+    """
+
+    if not isinstance(base_payload, dict):
+        raise TypeError(f"{label}: base payload must be a mapping.")
+    if not isinstance(radar_grid, dict):
+        raise TypeError(f"{label}: radar_grid must be a mapping.")
+    required = {
+        "frequencies_ghz", "azimuths_deg", "elevations_deg",
+        "axis_az_deg", "axis_el_deg",
+    }
+    missing = sorted(required - set(radar_grid))
+    if missing:
+        raise ValueError(f"{label}: radar_grid is missing {missing}.")
+
+    azimuths, elevations = validate_radar_grid(
+        radar_grid["azimuths_deg"], radar_grid["elevations_deg"]
+    )
+    frequencies = np.asarray(radar_grid["frequencies_ghz"], dtype=float)
+    if (
+        frequencies.ndim != 1
+        or frequencies.size == 0
+        or not np.all(np.isfinite(frequencies))
+        or np.any(frequencies <= 0.0)
+        or np.any(np.diff(frequencies) <= 0.0)
+    ):
+        raise ValueError(
+            f"{label}: Assembly frequencies must be a nonempty, positive, "
+            "strictly increasing GHz axis."
+        )
+    for key, bounds in (
+        ("axis_az_deg", None),
+        ("axis_el_deg", (-90.0, 90.0)),
+        ("roll_deg", None),
+    ):
+        if key == "roll_deg" and key not in radar_grid:
+            value = 0.0
+        else:
+            value = float(radar_grid[key])
+        if not math.isfinite(value) or (
+            bounds is not None and not bounds[0] <= value <= bounds[1]
+        ):
+            raise ValueError(f"{label}: radar_grid {key} is invalid.")
+
+    for payload_key, requested, display in (
+        ("azimuths", np.asarray(azimuths, dtype=float), "azimuth"),
+        ("elevations", np.asarray(elevations, dtype=float), "elevation"),
+        ("frequencies", frequencies, "frequency"),
+    ):
+        if payload_key not in base_payload:
+            raise ValueError(f"{label}: base is missing its {display} axis.")
+        stored = np.asarray(base_payload[payload_key], dtype=float)
+        if not np.array_equal(stored, requested):
+            raise ValueError(
+                f"{label}: supplied radar_grid {display} values do not exactly "
+                "match the base GRIM axis."
+            )
+
+    legacy_missing = []
+    if "units" in base_payload:
+        units = _units_metadata(base_payload, label)
+    else:
+        # A real _load_grim call already requires dimensional units.  Keeping
+        # this branch makes the boundary validator independently useful for
+        # legacy service payloads and test doubles while still recording every
+        # assumption rather than manufacturing silent metadata.
+        units = {}
+        legacy_missing.append("units")
+    expected_units = {
+        "azimuth": "deg",
+        "elevation": "deg",
+        "frequency": "ghz",
+    }
+    for key, expected in expected_units.items():
+        if key not in units or not str(units[key]).strip():
+            legacy_missing.append(f"units.{key}")
+            continue
+        if str(units[key]).strip().lower() != expected:
+            raise ValueError(
+                f"{label}: Assembly requires units.{key}={expected!r}; got "
+                f"{units[key]!r}."
+            )
+
+    coordinate_tags = []
+    unit_coordinate = units.get("angular_coordinate_system")
+    if unit_coordinate is not None and str(unit_coordinate).strip():
+        coordinate_tags.append(("units.angular_coordinate_system", unit_coordinate))
+    payload_coordinate = _optional_scalar_text(
+        base_payload, "angular_coordinate_system", label
+    )
+    if payload_coordinate is not None:
+        coordinate_tags.append(("angular_coordinate_system", payload_coordinate))
+    for key, value in coordinate_tags:
+        if str(value).strip().lower().replace("-", "_") not in {
+            "conic", "az_el", "azimuth_elevation"
+        }:
+            raise ValueError(
+                f"{label}: {key}={value!r} is not the canonical conic radar "
+                "azimuth/elevation coordinate system required by Assembly."
+            )
+    if not coordinate_tags:
+        legacy_missing.append("angular_coordinate_system")
+
+    contract = _optional_scalar_text(
+        base_payload, "assembly_angular_coordinate_contract", label
+    )
+    if contract is not None and contract != ASSEMBLY_RADAR_ANGULAR_CONTRACT:
+        raise ValueError(
+            f"{label}: assembly_angular_coordinate_contract={contract!r}; "
+            f"require {ASSEMBLY_RADAR_ANGULAR_CONTRACT!r}."
+        )
+    explicit_canonical = contract == ASSEMBLY_RADAR_ANGULAR_CONTRACT
+
+    source_format = (_optional_scalar_text(
+        base_payload, "source_format", label
+    ) or "").lower()
+    sentri_mapping = (_optional_scalar_text(
+        base_payload, "sentri_coordinate_mapping", label
+    ) or "").lower().replace(" ", "")
+    if (
+        "sentri" in source_format
+        or "elevation=theta" in sentri_mapping
+        or "azimuth=wrappedphi" in sentri_mapping
+    ) and not explicit_canonical:
+        raise ValueError(
+            f"{label}: the base retains an unconverted SENTRi theta/phi "
+            "coordinate mapping. Assembly requires canonical radar azimuth "
+            "and elevation; explicitly convert/regrid the dataset and stamp "
+            f"{ASSEMBLY_RADAR_ANGULAR_CONTRACT!r}."
+        )
+
+    # Dataset rotations are metadata-level transforms that Assembly does not
+    # apply.  A nonzero value would silently double-count or omit an attitude.
+    for key in ("angular_roll_deg", "angular_tilt_deg"):
+        values = []
+        if key in units:
+            values.append((f"units.{key}", units[key]))
+        raw = _optional_scalar_text(base_payload, key, label)
+        if raw is not None:
+            values.append((key, raw))
+        for source, value in values:
+            try:
+                angle = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label}: {source} must be numeric.") from exc
+            if not math.isfinite(angle) or abs(angle) > 1.0e-12:
+                raise ValueError(
+                    f"{label}: {source}={value!r}; Assembly requires an "
+                    "unrotated base grid and applies vehicle attitude itself."
+                )
+
+    if legacy_missing and not bool(allow_legacy_metadata):
+        raise ValueError(
+            f"{label}: strict Assembly metadata validation is missing "
+            f"{legacy_missing}. Re-export/canonicalize the base or explicitly "
+            "enable the recorded legacy compatibility path."
+        )
+    return {
+        "schema": "ghost.assembly-base-grid-contract.v1",
+        "status": (
+            "canonical" if explicit_canonical and not legacy_missing
+            else "legacy_compatible"
+        ),
+        "angular_contract": (
+            contract if explicit_canonical else "legacy conic azimuth/elevation attestation"
+        ),
+        "legacy_missing_metadata": legacy_missing,
+        "legacy_compatibility_enabled": bool(allow_legacy_metadata),
+    }
 
 
 def _require_singleton_zero_elevation(
@@ -2201,21 +2467,32 @@ def prepare_point_pattern(pattern, *, declared_coherent_delta=False,
             assume_missing_cross_pol_zero=assume_missing_cross_pol_zero,
         )
     )
-    if sign == 1.0:
-        return loaded
+    amplitude = loaded.amplitude if sign == 1.0 else -loaded.amplitude
+    arrays = [
+        np.asarray(loaded.azimuths),
+        np.asarray(loaded.elevations),
+        np.asarray(loaded.frequencies),
+        np.asarray(amplitude),
+    ]
+    for value in arrays:
+        value.setflags(write=False)
     return PreparedPointPattern(
-        loaded.azimuths,
-        loaded.elevations,
-        loaded.frequencies,
-        -loaded.amplitude,
-        loaded.channel_indices,
+        arrays[0],
+        arrays[1],
+        arrays[2],
+        arrays[3],
+        MappingProxyType(dict(loaded.channel_indices)),
     )
 
 
 def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
                               frequency_ghz, roll_ref=None,
                               tol_ghz: 'float' = 1e-6, occluder=None,
-                              _interpolator_cache=None) -> 'Dict[str, np.ndarray]':
+                              _interpolator_cache=None,
+                              _visibility=None,
+                              cancel_check: 'Optional[Callable[[], bool]]' = None,
+                              progress_callback: 'Optional[Callable[[int, int], None]]' = None
+                              ) -> 'Dict[str, np.ndarray]':
     """Place a precomputed 3-D delta pattern at a single body coordinate.
 
     Unlike the line-expanded features (distributed along a perimeter/span), a
@@ -2295,6 +2572,18 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
             or np.any(np.linalg.norm(dirs, axis=1) <= 1e-12):
         raise ValueError("directions must contain finite nonzero 3-vectors.")
     dirs = dirs / np.linalg.norm(dirs, axis=1)[:, None]
+    visibility = None
+    if _visibility is not None:
+        visibility = (
+            _visibility
+            if isinstance(_visibility, PackedVisibilityRow)
+            else np.asarray(_visibility, dtype=bool)
+        )
+        if visibility.shape != (len(dirs),):
+            raise ValueError(
+                "precomputed point visibility must contain one value per "
+                "requested direction."
+            )
     e_vv, e_hh = _pol_unit_vectors(dirs)
     F = {c: np.zeros(len(dirs), complex) for c in ("F_vv", "F_hh", "F_vh")}
 
@@ -2325,8 +2614,20 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
         Scav[ch] = values
     evc, ehc = _pol_unit_vectors(dc)                           # cavity meridian basis (cavity coords)
     rc2 = rc[None, :]
-    for i in np.nonzero(lit)[0]:
-        if occluder is not None and not bool(occluder.visible(rc2, dirs[i])[0]):
+    lit_indices = np.nonzero(lit)[0]
+    for ordinal, i in enumerate(lit_indices, 1):
+        _check_cancel(cancel_check)
+        if visibility is not None:
+            is_visible = bool(visibility[i])
+        elif occluder is not None:
+            is_visible = bool(occluder.visible(
+                rc2, dirs[i], cancel_check=cancel_check
+            )[0])
+        else:
+            is_visible = True
+        if not is_visible:
+            if progress_callback is not None:
+                progress_callback(ordinal, len(lit_indices))
             continue                                           # body blocks the cavity
         Evv, Ehh = R @ evc[i], R @ ehc[i]                      # -> body coords
         M = np.array([[Evv @ e_vv[i], Evv @ e_hh[i]],
@@ -2338,6 +2639,8 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
         F["F_vv"][i] = Sb[0, 0] * ph
         F["F_hh"][i] = Sb[1, 1] * ph
         F["F_vh"][i] = Sb[0, 1] * ph
+        if progress_callback is not None:
+            progress_callback(ordinal, len(lit_indices))
     return F
 
 
@@ -2466,7 +2769,11 @@ def sum_features(bor_result: 'Dict[str, Any]',
                  corners: 'Sequence[Dict[str, Any]]' = (),
                  points: 'Sequence[Dict[str, Any]]' = (),
                  occluder=None,
-                 retain_feature_amplitudes: 'bool' = True
+                 retain_feature_amplitudes: 'bool' = True,
+                 cancel_check: 'Optional[Callable[[], bool]]' = None,
+                 progress_callback: 'Optional[ProgressCallback]' = None,
+                 _point_visibility_matrix=None,
+                 _line_visibility_matrices=None,
                  ) -> 'Dict[str, np.ndarray]':
     """Combine the BoR body with any number of line-expanded features.
 
@@ -2495,6 +2802,7 @@ def sum_features(bor_result: 'Dict[str, Any]',
     Returns a dict with per-channel sigma (m^2) and dBsm, the per-feature and
     body amplitudes (for auditing interference), and the combine mode.
     """
+    _check_cancel(cancel_check)
     dirs = np.atleast_2d(np.asarray(directions, dtype=float))
     if normal_fn is None and generatrix is not None:
         normal_fn = surface_of_revolution_normal(generatrix)
@@ -2541,7 +2849,33 @@ def sum_features(bor_result: 'Dict[str, Any]',
         else:
             feats.append(feature)
 
-    for pl in placements:
+    component_total = len(placements) + len(corners) + len(points)
+    component_completed = 0
+    if _line_visibility_matrices is None:
+        line_visibility_matrices = (None,) * len(placements)
+    else:
+        line_visibility_matrices = tuple(_line_visibility_matrices)
+        if len(line_visibility_matrices) != len(placements):
+            raise ValueError(
+                "precomputed line visibility must contain one entry per "
+                "line placement."
+            )
+
+    def _component_progress(label: str, done: int, total: int) -> None:
+        if component_total <= 0:
+            return
+        fraction = (component_completed + float(done) / max(1, int(total))) \
+            / component_total
+        _report_progress(
+            progress_callback,
+            int(round(1000.0 * fraction)),
+            1000,
+            label,
+        )
+
+    for placement_index, pl in enumerate(placements, 1):
+        _check_cancel(cancel_check)
+        line_label = str(pl.get("line_id", "")).strip() or str(placement_index)
         coef = pl["delta"]
         if isinstance(coef, SeamCoefficients):
             pass
@@ -2589,17 +2923,29 @@ def sum_features(bor_result: 'Dict[str, Any]',
             raise ValueError(
                 "placement segment_normals cannot be combined with normal or normal_fn."
             )
-        _record_feature(expand_perimeter(
+        line_feature = expand_perimeter(
             per, coef,
             None if segment_normals is not None else _placement_normal_fn(pl),
             dirs,
             frequency_ghz=frequency_ghz,
             psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
+            grazing_taper_deg=GRAZING_TAPER_DEG,
+            max_piece_length_m=pl.get("max_piece_length_m"),
             occluder=occluder,
+            shadow_points=pl.get("shadow_points"),
             segment_normals=segment_normals,
-        ))
+            cancel_check=cancel_check,
+            progress_callback=lambda done, total, label=line_label: (
+                _component_progress(f"Expanding line {label}", done, total)
+            ),
+            _shadow_visibility=line_visibility_matrices[placement_index - 1],
+        )
+        _record_feature(line_feature)
+        component_completed += 1
+        _component_progress(f"Expanded line {line_label}", 0, 1)
 
-    for cn in corners:
+    for corner_index, cn in enumerate(corners, 1):
+        _check_cancel(cancel_check)
         cf = corner_amplitude(cn["fold"], cn["n_wing"], cn["n_body"],
                               float(cn["face_width"]), dirs, frequency_ghz,
                               internal_phase_deg=float(cn.get("internal_phase_deg", 0.0)),
@@ -2608,14 +2954,75 @@ def sum_features(bor_result: 'Dict[str, Any]',
         if "warning" in cf:
             warnings.append(cf.pop("warning"))
         _record_feature(cf)
+        component_completed += 1
+        _component_progress(f"Evaluated corner {corner_index}", 0, 1)
 
     point_interpolator_cache = {}
-    for pt in points:
-        _record_feature(point_scatterer_amplitude(
+    point_visibility = None
+    if points:
+        if _point_visibility_matrix is not None:
+            point_visibility = (
+                _point_visibility_matrix
+                if isinstance(_point_visibility_matrix, PackedVisibility)
+                else np.asarray(_point_visibility_matrix, dtype=bool)
+            )
+            if point_visibility.shape != (len(points), len(dirs)):
+                raise ValueError(
+                    "precomputed point visibility must have shape "
+                    "(n_points, n_directions)."
+                )
+        elif occluder is not None:
+            locations = np.asarray(
+                [point.get("shadow_location", point["location"])
+                 for point in points], dtype=float
+            ).reshape(len(points), 3)
+            facing_normals = np.asarray(
+                [point["aperture_normal"] for point in points], dtype=float
+            ).reshape(len(points), 3)
+            if callable(getattr(occluder, "visible_many_packed", None)):
+                point_visibility = occluder.visible_many_packed(
+                    locations,
+                    dirs,
+                    facing_normals=facing_normals,
+                    cancel_check=cancel_check,
+                )
+            else:
+                # Compatibility for third-party occluder-like objects. The
+                # bundled production Occluder always uses the packed path.
+                point_visibility = occluder.visible_many(
+                    locations,
+                    dirs,
+                    cancel_check=cancel_check,
+                ).T
+    for point_index, pt in enumerate(points, 1):
+        _check_cancel(cancel_check)
+        point_label = str(pt.get("placement_id", "")).strip() or str(point_index)
+        point_feature = point_scatterer_amplitude(
             pt["pattern"], pt["location"], pt["aperture_normal"], dirs, frequency_ghz,
             roll_ref=pt.get("roll_ref"), occluder=occluder,
-            _interpolator_cache=point_interpolator_cache))
+            _interpolator_cache=point_interpolator_cache,
+            _visibility=(
+                None
+                if point_visibility is None
+                else (
+                    point_visibility.row(point_index - 1)
+                    if isinstance(point_visibility, PackedVisibility)
+                    else point_visibility[point_index - 1]
+                )
+            ),
+            cancel_check=cancel_check,
+            progress_callback=lambda done, total, label=point_label: (
+                _component_progress(f"Placing point {label}", done, total)
+            ),
+        )
+        _record_feature(point_feature)
+        component_completed += 1
+        _component_progress(f"Placed point {point_label}", 0, 1)
 
+    if component_total == 0:
+        _report_progress(progress_callback, 1, 1, "No placed features")
+
+    _check_cancel(cancel_check)
     combined_features = [feature_total] if stream_features else feats
     out = combine(body, combined_features, mode=mode)
     for ch in ("vv", "hh", "vh"):
@@ -2634,6 +3041,212 @@ def sum_features(bor_result: 'Dict[str, Any]',
 # -----------------------------------------------------------------------------
 # Export a combined vehicle signature to .grim
 # -----------------------------------------------------------------------------
+
+
+def _reusable_line_shadow_inputs(
+    placements,
+    *,
+    normal_fn,
+    perimeter_scale,
+    cancel_check=None,
+):
+    """Build exact frozen piece origins/normals for reusable line shadows.
+
+    A placement is cacheable only when it explicitly freezes
+    ``max_piece_length_m``. Generic callers that retain the wavelength-based
+    per-frequency grid deliberately stay on the existing uncached path.
+    """
+
+    prepared = []
+    for placement_index, placement in enumerate(placements, 1):
+        _check_cancel(cancel_check)
+        maximum_piece_length = placement.get("max_piece_length_m")
+        if maximum_piece_length is None:
+            prepared.append(None)
+            continue
+        perimeter = placement["perimeter"]
+        if not isinstance(perimeter, np.ndarray):
+            perimeter = read_perimeter_txt(
+                str(perimeter),
+                scale=float(placement.get("scale", perimeter_scale)),
+            )
+        segment_normals = placement.get("segment_normals")
+        if segment_normals is not None and (
+            placement.get("normal") is not None
+            or callable(placement.get("normal_fn"))
+        ):
+            raise ValueError(
+                "placement segment_normals cannot be combined with normal or "
+                "normal_fn."
+            )
+        placement_normal_fn = None
+        if segment_normals is None:
+            if callable(placement.get("normal_fn")):
+                placement_normal_fn = placement["normal_fn"]
+            elif placement.get("normal") is not None:
+                normal = np.asarray(placement["normal"], dtype=float)
+                if (
+                    normal.shape != (3,)
+                    or not np.all(np.isfinite(normal))
+                    or np.linalg.norm(normal) <= 1.0e-12
+                ):
+                    raise ValueError(
+                        "placement normal must be a finite nonzero 3-vector."
+                    )
+                normal = normal / np.linalg.norm(normal)
+                placement_normal_fn = lambda points, _normal=normal: np.tile(
+                    _normal, (len(np.atleast_2d(points)), 1)
+                )
+            elif normal_fn is not None:
+                placement_normal_fn = normal_fn
+            else:
+                raise ValueError(
+                    "placement has no normal and no body generatrix/normal_fn "
+                    "was provided."
+                )
+        (
+            _starts,
+            _path_tangents,
+            _piece_lengths,
+            midpoints,
+            sampled_normals,
+            _frame_tangents,
+        ) = prepare_perimeter_frame(
+            np.asarray(perimeter, dtype=float),
+            float(maximum_piece_length),
+            normal_fn=placement_normal_fn,
+            segment_normals=segment_normals,
+        )
+        origins = midpoints
+        if placement.get("shadow_points") is not None:
+            origins = np.asarray(placement["shadow_points"], dtype=float)
+            if origins.shape != midpoints.shape or not np.all(np.isfinite(origins)):
+                raise ValueError(
+                    "shadow_points must contain one finite registered skin "
+                    "point for every solver line piece."
+                )
+        label = str(placement.get("line_id", "")).strip() or str(
+            placement_index
+        )
+        prepared.append((origins, sampled_normals, label))
+    _check_cancel(cancel_check)
+    return tuple(prepared)
+
+
+def _precompute_line_shadow_visibility(
+    prepared_inputs,
+    directions,
+    occluder,
+    *,
+    cancel_check=None,
+    progress_callback=None,
+):
+    """Return one packed piece/look mask per cacheable line placement.
+
+    The bundled :class:`Occluder` supplies its accelerated packed query.
+    Occluder-like integrations that expose only the historical ``visible``
+    method retain compatibility through a bounded one-look-at-a-time fallback.
+    """
+
+    dirs = np.atleast_2d(np.asarray(directions, dtype=float))
+    if dirs.ndim != 2 or dirs.shape[1] != 3 or len(dirs) == 0:
+        raise ValueError("directions must have shape (n, 3).")
+    if not np.all(np.isfinite(dirs)):
+        raise ValueError("directions contain NaN or infinite values.")
+    direction_norms = np.linalg.norm(dirs, axis=1)
+    if np.any(direction_norms <= 1.0e-12):
+        raise ValueError("directions contain a zero-length vector.")
+    dirs = dirs / direction_norms[:, None]
+    cacheable_count = sum(item is not None for item in prepared_inputs)
+    total_steps = cacheable_count * len(dirs)
+    completed_steps = 0
+    result = []
+    legacy_visible_query = (
+        None
+        if callable(getattr(occluder, "visible_many_packed", None))
+        else visible_query_adapter(occluder)
+    )
+    for item in prepared_inputs:
+        if item is None:
+            result.append(None)
+            continue
+        _check_cancel(cancel_check)
+        origins, normals, label = item
+        origins = np.asarray(origins, dtype=float)
+        normals = np.asarray(normals, dtype=float)
+        if (
+            origins.ndim != 2
+            or origins.shape[1] != 3
+            or normals.shape != origins.shape
+            or not np.all(np.isfinite(origins))
+            or not np.all(np.isfinite(normals))
+        ):
+            raise ValueError(
+                "reusable line shadow origins/normals must be matching finite "
+                "(n_solver_pieces, 3) arrays."
+            )
+        normal_norms = np.linalg.norm(normals, axis=1)
+        if np.any(normal_norms <= 1.0e-12):
+            raise ValueError(
+                "reusable line shadow normals must contain nonzero 3-vectors."
+            )
+        normals = normals / normal_norms[:, None]
+
+        def line_progress(done, total, *, _base=completed_steps, _label=label):
+            if progress_callback is not None:
+                progress_callback(
+                    _base + int(done),
+                    max(1, total_steps),
+                    f"Preparing reusable line {_label} body-shadow visibility",
+                )
+
+        if callable(getattr(occluder, "visible_many_packed", None)):
+            visibility = occluder.visible_many_packed(
+                origins,
+                dirs,
+                facing_normals=normals,
+                cancel_check=cancel_check,
+                progress_callback=line_progress,
+            )
+        else:
+            packed = np.zeros(
+                (len(origins), (len(dirs) + 7) // 8), dtype=np.uint8
+            )
+            point_indices = np.arange(len(origins), dtype=np.intp)
+            for direction_index, direction in enumerate(dirs):
+                _check_cancel(cancel_check)
+                active = np.flatnonzero((normals @ direction) > 0.0)
+                if active.size:
+                    visible = np.asarray(
+                        legacy_visible_query(
+                            origins[active],
+                            direction,
+                            cancel_check=cancel_check,
+                        ),
+                        dtype=bool,
+                    )
+                    if visible.shape != (len(active),):
+                        raise ValueError(
+                            "occluder.visible must return one Boolean per "
+                            "queried line solver piece."
+                        )
+                    visible_points = point_indices[active][visible]
+                    if visible_points.size:
+                        packed[
+                            visible_points, direction_index // 8
+                        ] |= np.uint8(1 << (direction_index % 8))
+                line_progress(direction_index + 1, len(dirs))
+            _check_cancel(cancel_check)
+            visibility = PackedVisibility(
+                packed,
+                n_points=len(origins),
+                n_directions=len(dirs),
+            )
+        _check_cancel(cancel_check)
+        result.append(visibility)
+        completed_steps += len(dirs)
+    _check_cancel(cancel_check)
+    return tuple(result)
 
 
 def _prepared_line_placements_at_frequency(
@@ -2743,6 +3356,16 @@ def export_signature_grim(out_path: 'str', *,
     amp = {c: np.zeros((n_r, n_a, n_f), dtype=complex) for c in chans}
     power = {c: np.zeros((n_r, n_a, n_f), dtype=float) for c in chans}
     line_payload_cache = {}
+    line_visibility = (None,) * len(placements)
+    if occluder is not None and placements:
+        line_shadow_inputs = _reusable_line_shadow_inputs(
+            placements,
+            normal_fn=normal_fn,
+            perimeter_scale=perimeter_scale,
+        )
+        line_visibility = _precompute_line_shadow_visibility(
+            line_shadow_inputs, dirs, occluder
+        )
     for fi, f in enumerate(freqs):
         frequency_placements = _prepared_line_placements_at_frequency(
             placements, float(f), line_payload_cache
@@ -2752,7 +3375,8 @@ def export_signature_grim(out_path: 'str', *,
                            perimeter_scale=perimeter_scale,
                            psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
                            corners=corners, points=points, occluder=occluder,
-                           retain_feature_amplitudes=False)
+                           retain_feature_amplitudes=False,
+                           _line_visibility_matrices=line_visibility)
         for c in chans:
             a = np.asarray(res[f"amp_{c}"]).reshape(n_a, n_r).T       # -> [roll, aspect]
             s = np.asarray(res[f"sigma_{c}"]).reshape(n_a, n_r).T
@@ -2989,7 +3613,10 @@ def export_radar_grim(out_path: 'str', *,
                       corners: 'Sequence[Dict[str, Any]]' = (),
                       points: 'Sequence[Dict[str, Any]]' = (),
                       occluder=None,
-                      source_path: 'str' = "", history: 'str' = "") -> 'str':
+                      source_path: 'str' = "", history: 'str' = "",
+                      cancel_check: 'Optional[Callable[[], bool]]' = None,
+                      progress_callback: 'Optional[ProgressCallback]' = None
+                      ) -> 'str':
     """Monostatic radar-frame RCS -> ONE .grim with axes
     (azimuth, elevation, frequency, polarization=[VV,HH,VH]).
 
@@ -3011,6 +3638,7 @@ def export_radar_grim(out_path: 'str', *,
     """
     from grim_io import _save_grim_npz
 
+    _check_cancel(cancel_check)
     if normal_fn is None and generatrix is not None:
         normal_fn = surface_of_revolution_normal(
             np.asarray(generatrix, dtype=float)
@@ -3061,16 +3689,128 @@ def export_radar_grim(out_path: 'str', *,
     shape = (len(az), len(el), len(freqs), n_pol)
     amp = np.zeros(shape, dtype=complex)
     line_payload_cache = {}
+    has_point_shadow = bool(occluder is not None and points)
+    line_shadow_inputs = (None,) * len(placements)
+    if occluder is not None and placements:
+        line_shadow_inputs = _reusable_line_shadow_inputs(
+            placements,
+            normal_fn=normal_fn,
+            perimeter_scale=perimeter_scale,
+            cancel_check=cancel_check,
+        )
+    has_line_shadow = bool(
+        occluder is not None and any(
+            item is not None for item in line_shadow_inputs
+        )
+    )
+    point_shadow_start = 0
+    line_shadow_start = 1000 if has_point_shadow else 0
+    shadow_progress_offset = 1000 * (
+        int(has_point_shadow) + int(has_line_shadow)
+    )
+    field_progress_total = max(
+        1, (len(freqs) * 1000) + shadow_progress_offset
+    )
+    point_visibility = None
+    if has_point_shadow:
+        _report_progress(
+            progress_callback,
+            0,
+            field_progress_total,
+            "Preparing reusable point body-shadow visibility",
+        )
+        point_locations = np.asarray(
+            [point.get("shadow_location", point["location"])
+             for point in points], dtype=float
+        ).reshape(len(points), 3)
+        point_normals = np.asarray(
+            [point["aperture_normal"] for point in points], dtype=float
+        ).reshape(len(points), 3)
+        last_shadow_progress = -1
+
+        def shadow_progress(done, total):
+            nonlocal last_shadow_progress
+            scaled = int(round(1000.0 * int(done) / max(1, int(total))))
+            if scaled <= last_shadow_progress:
+                return
+            last_shadow_progress = scaled
+            _report_progress(
+                progress_callback,
+                point_shadow_start + scaled,
+                field_progress_total,
+                "Preparing reusable point body-shadow visibility",
+            )
+
+        if callable(getattr(occluder, "visible_many_packed", None)):
+            point_visibility = occluder.visible_many_packed(
+                point_locations,
+                d_v_flat,
+                facing_normals=point_normals,
+                cancel_check=cancel_check,
+                progress_callback=shadow_progress,
+            )
+        else:
+            point_visibility = occluder.visible_many(
+                point_locations,
+                d_v_flat,
+                cancel_check=cancel_check,
+            ).T
+    line_visibility = (None,) * len(placements)
+    if has_line_shadow:
+        _report_progress(
+            progress_callback,
+            line_shadow_start,
+            field_progress_total,
+            "Preparing reusable line body-shadow visibility",
+        )
+        last_line_shadow_progress = -1
+
+        def line_shadow_progress(done, total, message):
+            nonlocal last_line_shadow_progress
+            scaled = int(round(1000.0 * int(done) / max(1, int(total))))
+            if scaled <= last_line_shadow_progress:
+                return
+            last_line_shadow_progress = scaled
+            _report_progress(
+                progress_callback,
+                line_shadow_start + scaled,
+                field_progress_total,
+                message,
+            )
+
+        line_visibility = _precompute_line_shadow_visibility(
+            line_shadow_inputs,
+            d_v_flat,
+            occluder,
+            cancel_check=cancel_check,
+            progress_callback=line_shadow_progress,
+        )
+    _report_progress(progress_callback, shadow_progress_offset,
+                     field_progress_total,
+                     "Preparing feature field")
     for fi, f in enumerate(freqs):
+        _check_cancel(cancel_check)
         frequency_placements = _prepared_line_placements_at_frequency(
             placements, float(f), line_payload_cache
         )
+        def frequency_progress(done, total, message, *, _fi=fi, _f=float(f)):
+            local = int(round(1000.0 * int(done) / max(1, int(total))))
+            _report_progress(
+                progress_callback,
+                shadow_progress_offset + _fi * 1000 + local,
+                field_progress_total,
+                f"{_f:g} GHz - {message}",
+            )
         res = sum_features(_pick_body(bor_result, f), frequency_placements, d_v_flat, float(f),
                            normal_fn=normal_fn, mode="coherent",
                            perimeter_scale=perimeter_scale,
                            psi_tm_deg=psi_tm_deg, psi_te_deg=psi_te_deg,
                            corners=corners, points=points, occluder=occluder,
-                           retain_feature_amplitudes=False)
+                           retain_feature_amplitudes=False,
+                           cancel_check=cancel_check,
+                           progress_callback=frequency_progress,
+                           _point_visibility_matrix=point_visibility,
+                           _line_visibility_matrices=line_visibility)
         S = np.zeros((len(d_v_flat), 2, 2), dtype=complex)
         S[:, 0, 0] = res["amp_vv"]
         S[:, 1, 1] = res["amp_hh"]
@@ -3083,7 +3823,14 @@ def export_radar_grim(out_path: 'str', *,
         amp[:, :, fi, 0] = vv
         amp[:, :, fi, 1] = hh
         amp[:, :, fi, 2] = vh
+        _report_progress(
+            progress_callback,
+            shadow_progress_offset + (fi + 1) * 1000,
+            field_progress_total,
+            f"Completed {float(f):g} GHz",
+        )
 
+    _check_cancel(cancel_check)
     amp_real = amp.real.astype(np.float64)
     amp_imag = amp.imag.astype(np.float64)
     amp_stored = amp_real.astype(float) + 1j * amp_imag.astype(float)
@@ -3105,8 +3852,12 @@ def export_radar_grim(out_path: 'str', *,
                     f"axis_az={axis_az_deg:g} axis_el={axis_el_deg:g} "
                     f"roll={roll_deg:g}").strip(" |"),
         "units": json.dumps({"azimuth": "deg", "elevation": "deg",
-                             "frequency": "GHz", "rcs_log_unit": "dBsm",
-                             "rcs_linear_quantity": "sigma_3d"}),
+                              "frequency": "GHz", "rcs_log_unit": "dBsm",
+                              "rcs_linear_quantity": "sigma_3d",
+                              "angular_coordinate_system": "conic"}),
+        "assembly_angular_coordinate_contract": (
+            ASSEMBLY_RADAR_ANGULAR_CONTRACT
+        ),
         "phase_reference": RADAR_COMPONENT_PHASE_REFERENCE,
         "amplitude_convention": PHYSICAL_3D_AMPLITUDE_CONVENTION,
         "raw_complex_amplitude_preserved": True,
@@ -3115,10 +3866,9 @@ def export_radar_grim(out_path: 'str', *,
         "complex_field_domain": RADAR_COMPONENT_FIELD_DOMAIN,
     }
     saved = os.path.abspath(_save_grim_npz(payload, out))
-    # grim_io intentionally writes a fixed cross-tool core schema, so stamp
-    # the component-only combining semantic after that writer returns.
-    from components import tag_component
-    tag_component(saved, "coherent")
+    # combine_role is part of grim_io's preserved optional schema.  Writing it
+    # in the original payload avoids a second full archive load/recompression,
+    # which is material on vehicle-scale grids.
     return saved
 
 
@@ -3305,7 +4055,9 @@ def save_monostatic_grim(
     return destination
 
 
-def _validate_declared_coherent_base(base_payload, label):
+def _validate_declared_coherent_base(
+    base_payload, label, *, allow_legacy_metadata=True
+):
     """Validate a GUI-derived platform field under an explicit declaration.
 
     GRIM may retain only sigma and phase after a derived operation. Selecting
@@ -3333,6 +4085,16 @@ def _validate_declared_coherent_base(base_payload, label):
     candidate["combine_role"] = np.asarray("coherent")
 
     units = _require_linear_quantity(candidate, label, "sigma_3d")
+    legacy_missing = []
+    if "rcs_log_unit" in units and str(
+        units["rcs_log_unit"]
+    ).strip().lower() != "dbsm":
+        raise ValueError(
+            f"{label}: units.rcs_log_unit={units['rcs_log_unit']!r}; a "
+            "declared coherent 3-D base requires dBsm."
+        )
+    if "rcs_log_unit" not in units or not str(units["rcs_log_unit"]).strip():
+        legacy_missing.append("units.rcs_log_unit")
     units["rcs_log_unit"] = "dBsm"
     units.setdefault("azimuth", "deg")
     units.setdefault("elevation", "deg")
@@ -3346,17 +4108,38 @@ def _validate_declared_coherent_base(base_payload, label):
         "amplitude_convention": COMPONENT_AMPLITUDE_CONVENTION,
         "complex_field_domain": COMPONENT_COMPLEX_FIELD_DOMAIN,
     }
+    normalized_aliases = {
+        "rcs_domain": lambda value: value.lower().replace("-", "_"),
+        "power_domain": lambda value: value.lower().replace("-", "_"),
+    }
     for key, required in expected.items():
-        # The BASE_MONOSTATIC_GRIM selection supersedes descriptive metadata
-        # that a GUI may omit or copy from an input grid. The loaded numerical
-        # sigma/phase normalization and combine_role='power' remain hard gates.
+        got = _optional_scalar_text(candidate, key, label)
+        if got is None:
+            legacy_missing.append(key)
+        else:
+            normalize = normalized_aliases.get(key, lambda value: value)
+            if normalize(got) != normalize(required):
+                raise ValueError(
+                    f"{label}: declared coherent base metadata contradicts "
+                    f"the Assembly contract: {key}={got!r}; require "
+                    f"{required!r}. Re-export or explicitly canonicalize the "
+                    "base; contradictory metadata cannot be overwritten."
+                )
         candidate[key] = np.asarray(required)
+
+    if legacy_missing and not bool(allow_legacy_metadata):
+        raise ValueError(
+            f"{label}: strict coherent-base validation is missing "
+            f"{legacy_missing}. Re-export the base with canonical metadata or "
+            "explicitly enable the recorded legacy compatibility path."
+        )
 
     amplitude = np.asarray(candidate["_amp"], dtype=np.complex128)
     candidate["rcs_amp_real"] = amplitude.real.astype(np.float64)
     candidate["rcs_amp_imag"] = amplitude.imag.astype(np.float64)
     candidate["raw_complex_amplitude_preserved"] = np.asarray(True)
     validate_component_schema(candidate, label)
+    candidate[_LEGACY_BASE_ASSUMPTIONS_KEY] = tuple(legacy_missing)
     return candidate
 
 
@@ -3448,6 +4231,417 @@ def _verify_expected_source_sha256(
             )
 
 
+def _normalize_expected_absent_paths(paths) -> 'Tuple[str, ...]':
+    if paths is None:
+        return ()
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        raise TypeError("expected_absent_paths must be a sequence of paths.")
+    return tuple(dict.fromkeys(
+        os.path.abspath(os.fspath(path)) for path in paths
+    ))
+
+
+def _verify_expected_absent_paths(paths: 'Sequence[str]', *, stage: 'str') -> None:
+    for path in paths:
+        if os.path.exists(path):
+            raise RuntimeError(
+                f"Prepared feature-assembly sidecar state changed {stage}: "
+                f"{path} now exists. Revalidate before publishing output."
+            )
+
+
+def _acquire_destination_lock(destination: 'str'):
+    """Acquire a nonblocking process lock for one Assembly destination."""
+
+    directory = os.path.dirname(os.path.abspath(destination))
+    lock_path = os.path.join(
+        directory, f".{os.path.basename(destination)}.assembly.lock"
+    )
+    stream = open(lock_path, "a+b")
+    try:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"\0")
+            stream.flush()
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        stream.close()
+        raise RuntimeError(
+            f"{destination}: another Assembly build is already publishing to "
+            "this output. Wait for it to finish or choose a different file."
+        ) from exc
+    return stream
+
+
+def _release_destination_lock(stream) -> None:
+    if stream is None:
+        return
+    try:
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        stream.close()
+
+
+def _decoded_feature_provenance(payload, label):
+    if "feature_provenance_json" not in payload:
+        return []
+    raw = np.asarray(payload["feature_provenance_json"])
+    if raw.size != 1:
+        raise ValueError(
+            f"{label}: feature_provenance_json must be one scalar JSON value."
+        )
+    value = raw.reshape(()).item()
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    try:
+        decoded = json.loads(str(value))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{label}: feature_provenance_json is malformed."
+        ) from exc
+    records = decoded if isinstance(decoded, list) else [decoded]
+    if any(not isinstance(record, dict) for record in records):
+        raise ValueError(
+            f"{label}: feature_provenance_json records must be objects."
+        )
+    return records
+
+
+def _placement_identity_sets(provenance):
+    """Collect stable instance IDs and physical signatures from provenance."""
+
+    # Point placement_id and line_id share one Assembly namespace. Keeping the
+    # kind in the identity would let a later build reuse the same visible ID
+    # under the other feature type and defeat provenance/selection integrity.
+    identities = set()
+    signatures = set()
+
+    def visit(value):
+        if isinstance(value, dict):
+            schema = str(value.get("schema", ""))
+            if "line-placement" in schema or value.get("kind") == "line_2d_delta":
+                if value.get("line_id") is not None:
+                    identities.add(str(value["line_id"]))
+            if "point-placement" in schema or value.get("kind") == "compact_3d_delta":
+                if value.get("placement_id") is not None:
+                    identities.add(str(value["placement_id"]))
+            signature = value.get("component_signature")
+            if signature is not None:
+                signatures.add(str(signature))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(provenance)
+    return identities, signatures
+
+
+def _reject_reused_feature_components(existing_records, incoming_details, label):
+    existing_ids, existing_signatures = _placement_identity_sets(existing_records)
+    incoming_ids, incoming_signatures = _placement_identity_sets(incoming_details)
+    duplicate_ids = sorted(existing_ids & incoming_ids)
+    duplicate_signatures = sorted(existing_signatures & incoming_signatures)
+    if duplicate_ids or duplicate_signatures:
+        descriptions = []
+        if duplicate_ids:
+            descriptions.append(
+                "placement IDs "
+                + ", ".join(repr(identity) for identity in duplicate_ids)
+            )
+        if duplicate_signatures:
+            descriptions.append(
+                f"{len(duplicate_signatures)} identical physical component "
+                "signature(s)"
+            )
+        raise ValueError(
+            f"{label}: refusing to add features already present in the base "
+            + " and ".join(descriptions)
+            + ". Start from the clean body or use new, non-duplicate components."
+        )
+
+
+def _npz_uncompressed_bytes(path: 'str') -> int:
+    """Return archive payload bytes without inflating its NumPy members."""
+
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            return int(sum(member.file_size for member in archive.infolist()))
+    except (OSError, zipfile.BadZipFile):
+        # Schema validation will produce the authoritative malformed-file error.
+        # The physical file size is still a useful lower bound for admission.
+        try:
+            return int(os.path.getsize(path))
+        except OSError:
+            return 0
+
+
+def _capacity_snapshot_array_bytes(radar_grid, placements, points) -> int:
+    """Bytes copied by the sealed execution snapshot, deduplicated by identity."""
+
+    seen_arrays = set()
+    seen_objects = set()
+
+    def visit(value) -> int:
+        if isinstance(value, np.ndarray):
+            identity = id(value)
+            if identity in seen_arrays:
+                return 0
+            seen_arrays.add(identity)
+            return int(value.nbytes)
+        if isinstance(value, dict):
+            return sum(visit(child) for child in value.values())
+        if isinstance(value, (list, tuple)):
+            identity = id(value)
+            if identity in seen_objects:
+                return 0
+            seen_objects.add(identity)
+            return sum(visit(child) for child in value)
+        attributes = getattr(value, "__dict__", None)
+        if isinstance(attributes, dict):
+            identity = id(value)
+            if identity in seen_objects:
+                return 0
+            seen_objects.add(identity)
+            return visit(attributes)
+        return 0
+
+    return int(visit(radar_grid) + visit(placements) + visit(points))
+
+
+def _line_response_cache_bytes(placements) -> int:
+    """Estimate retained uncompressed line-response payloads during expansion."""
+
+    sources = set()
+    for placement in placements:
+        value = placement.get("delta")
+        candidates = value if isinstance(value, (list, tuple)) else (value,)
+        for candidate in candidates:
+            if not isinstance(candidate, (str, os.PathLike)):
+                continue
+            path = os.path.abspath(os.fspath(candidate))
+            if os.path.isfile(path):
+                sources.add(path)
+    # _load_grim retains the stored arrays and a complex amplitude.  Twice the
+    # uncompressed archive is a conservative allowance for that canonical view.
+    return int(2 * sum(_npz_uncompressed_bytes(path) for path in sources))
+
+
+def estimate_feature_assembly_capacity(
+    base_path: 'str',
+    out_path: 'str',
+    *,
+    radar_grid: 'Dict[str, Any]',
+    placements: 'Sequence[Dict[str, Any]]' = (),
+    points: 'Sequence[Dict[str, Any]]' = (),
+    occluder=None,
+) -> 'AssemblyCapacityEstimate':
+    """Estimate peak RAM and same-volume scratch for one Assembly build.
+
+    The estimate deliberately follows the current implementation rather than a
+    theoretical minimum: the base and feature grids coexist during coherent
+    addition, and atomic publication retains the component archive while the
+    final archive is staged.  It is suitable for admission control and remains
+    monotone in every grid/feature dimension.
+    """
+
+    try:
+        frequency_count = int(np.asarray(
+            radar_grid["frequencies_ghz"]
+        ).size)
+        azimuth_count = int(np.asarray(radar_grid["azimuths_deg"]).size)
+        elevation_count = int(np.asarray(
+            radar_grid["elevations_deg"]
+        ).size)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Assembly capacity preflight requires frequencies_ghz, "
+            "azimuths_deg, and elevations_deg."
+        ) from exc
+    if min(frequency_count, azimuth_count, elevation_count) <= 0:
+        raise ValueError("Assembly capacity preflight requires nonempty axes.")
+
+    look_count = azimuth_count * elevation_count
+    grid_cells = look_count * frequency_count * 3
+    packed_columns = (look_count + 7) // 8
+    line_piece_count = 0
+    if occluder is not None:
+        for placement in placements:
+            shadow_points = placement.get("shadow_points")
+            if shadow_points is not None:
+                line_piece_count += int(len(np.atleast_2d(shadow_points)))
+                continue
+            maximum_piece_length = placement.get("max_piece_length_m")
+            if maximum_piece_length is None:
+                # The wavelength-dependent generic path computes visibility one
+                # direction at a time and retains no packed piece/look matrix.
+                continue
+            maximum_piece_length = float(maximum_piece_length)
+            if not math.isfinite(maximum_piece_length) \
+                    or maximum_piece_length <= 0.0:
+                raise ValueError(
+                    "max_piece_length_m must be positive and finite."
+                )
+            perimeter = placement["perimeter"]
+            if not isinstance(perimeter, np.ndarray):
+                perimeter = read_perimeter_txt(
+                    str(perimeter), scale=float(placement.get("scale", 1.0))
+                )
+            segments = np.asarray(perimeter, dtype=float)
+            if segments.ndim != 3 or segments.shape[1:] != (2, 3):
+                raise ValueError(
+                    "perimeter must have shape (n_segments, 2, 3)."
+                )
+            lengths = np.linalg.norm(
+                segments[:, 1, :] - segments[:, 0, :], axis=1
+            )
+            if np.any(~np.isfinite(lengths)) or np.any(lengths <= 0.0):
+                raise ValueError(
+                    "perimeter must contain finite nonzero-length segments."
+                )
+            line_piece_count += int(np.sum(np.maximum(
+                1, np.ceil(lengths / maximum_piece_length).astype(np.int64)
+            )))
+    shadow_mask_bytes = (
+        (len(points) + line_piece_count) * packed_columns
+        if occluder is not None else 0
+    )
+    triangle_count = (
+        int(len(occluder.tris)) if occluder is not None else 0
+    )
+    snapshot_bytes = _capacity_snapshot_array_bytes(
+        radar_grid, placements, points
+    )
+
+    # A canonical coherent GRIM stores float64 real/imaginary amplitude and
+    # float32 power/phase: 24 uncompressed bytes per cell.
+    core_archive_bytes = 24 * grid_cells
+    base_archive_bytes = _npz_uncompressed_bytes(os.path.abspath(base_path))
+    base_extra_bytes = max(0, base_archive_bytes - core_archive_bytes)
+    response_cache_bytes = _line_response_cache_bytes(placements)
+    estimated_peak_memory = int(
+        _ASSEMBLY_FIXED_MEMORY_BYTES
+        + _ASSEMBLY_BYTES_PER_GRID_CELL * grid_cells
+        + _ASSEMBLY_BYTES_PER_LOOK * look_count
+        + shadow_mask_bytes
+        + _ASSEMBLY_BVH_WORK_BYTES_PER_TRIANGLE * triangle_count
+        + snapshot_bytes
+        + 2 * base_extra_bytes
+        + response_cache_bytes
+    )
+
+    component_archive_bytes = core_archive_bytes + 1024 ** 2
+    final_archive_bytes = max(core_archive_bytes, base_archive_bytes) + 1024 ** 2
+    estimated_scratch = int(math.ceil(
+        _ASSEMBLY_SCRATCH_MARGIN
+        * (component_archive_bytes + final_archive_bytes)
+        + _ASSEMBLY_FIXED_SCRATCH_BYTES
+    ))
+    return AssemblyCapacityEstimate(
+        grid_cells=int(grid_cells),
+        look_count=int(look_count),
+        shadow_mask_bytes=int(shadow_mask_bytes),
+        estimated_peak_memory_bytes=estimated_peak_memory,
+        estimated_scratch_bytes=estimated_scratch,
+    )
+
+
+def _feature_assembly_memory_limit_bytes() -> int:
+    """Safe current-process allocation limit, isolated for deterministic tests."""
+
+    from rcs_solver import _solve_memory_limit_gb
+    return max(0, int(float(_solve_memory_limit_gb()) * _BYTES_PER_GIB))
+
+
+def _feature_assembly_disk_free_bytes(destination: 'str') -> int:
+    """Free bytes on the nearest existing ancestor of the output directory."""
+
+    candidate = os.path.dirname(os.path.abspath(destination))
+    while not os.path.exists(candidate):
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    return int(shutil.disk_usage(candidate).free)
+
+
+def _assert_feature_assembly_disk_capacity(
+    estimate: 'AssemblyCapacityEstimate', destination: 'str'
+) -> None:
+    available = _feature_assembly_disk_free_bytes(destination)
+    required = int(estimate.estimated_scratch_bytes)
+    if required <= available:
+        return
+    raise OSError(
+        errno.ENOSPC,
+        "Feature Assembly requires an estimated "
+        f"{required / _BYTES_PER_GIB:.2f} GiB of free scratch space on the "
+        "output volume, but only "
+        f"{available / _BYTES_PER_GIB:.2f} GiB is available. Assembly stages "
+        "the feature field and final response beside the destination so an "
+        "existing output remains atomic. Free space, choose an output on a "
+        "larger volume, or reduce the angular/frequency grid.",
+        os.path.abspath(destination),
+    )
+
+
+def preflight_feature_assembly_capacity(
+    base_path: 'str',
+    out_path: 'str',
+    *,
+    radar_grid: 'Dict[str, Any]',
+    placements: 'Sequence[Dict[str, Any]]' = (),
+    points: 'Sequence[Dict[str, Any]]' = (),
+    occluder=None,
+) -> 'AssemblyCapacityEstimate':
+    """Reject an Assembly build before expensive allocation or staging."""
+
+    destination = os.path.abspath(
+        out_path if str(out_path).lower().endswith(".grim")
+        else str(out_path) + ".grim"
+    )
+    estimate = estimate_feature_assembly_capacity(
+        base_path,
+        destination,
+        radar_grid=radar_grid,
+        placements=placements,
+        points=points,
+        occluder=occluder,
+    )
+    required = int(estimate.estimated_peak_memory_bytes)
+    limit = _feature_assembly_memory_limit_bytes()
+    if limit <= 0 or required > limit:
+        availability = (
+            "could not be detected"
+            if limit <= 0
+            else f"has a safe allocation limit of {limit / _BYTES_PER_GIB:.2f} GiB"
+        )
+        raise MemoryError(
+            "Feature Assembly grid "
+            f"({estimate.look_count:,} looks, {estimate.grid_cells:,} "
+            "polarized frequency cells) requires an estimated "
+            f"{required / _BYTES_PER_GIB:.2f} GiB peak RAM, but available "
+            f"memory {availability}. Reduce azimuth/elevation/frequency scope "
+            "or shadowed feature count. If a larger per-process allocation is "
+            "confirmed, set GHOST_MAX_SOLVE_GB to that limit and retry."
+        )
+    _assert_feature_assembly_disk_capacity(estimate, destination)
+    return estimate
+
+
 def add_features_to_monostatic_grim(
     base_path: 'str',
     out_path: 'str',
@@ -3461,9 +4655,16 @@ def add_features_to_monostatic_grim(
     psi_tm_deg: 'float' = PSI_HH_DEG,
     psi_te_deg: 'float' = PSI_VV_DEG,
     declared_coherent_base: 'bool' = False,
+    allow_legacy_base_metadata: 'bool' = True,
     feature_provenance: 'Optional[Dict[str, Any]]' = None,
     history: 'str' = "",
     expected_source_sha256: 'Optional[Dict[str, str]]' = None,
+    expected_absent_paths: 'Optional[Sequence[str]]' = None,
+    expected_output_sha256: 'Optional[str]' = None,
+    expect_output_absent: 'bool' = False,
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+    progress_callback: 'Optional[ProgressCallback]' = None,
+    _capacity_estimate: 'Optional[AssemblyCapacityEstimate]' = None,
 ) -> 'str':
     """Coherently add placed features to one monostatic deliverable.
 
@@ -3472,25 +4673,96 @@ def add_features_to_monostatic_grim(
     path or intentionally replace ``base_path``.
     """
 
+    _check_cancel(cancel_check)
+    _report_progress(progress_callback, 0, 100, "Checking prepared inputs")
     expected_sources = _normalize_expected_source_sha256(
         expected_source_sha256
     )
+    absent_sources = _normalize_expected_absent_paths(expected_absent_paths)
     _verify_expected_source_sha256(
         expected_sources, stage="before execution"
     )
+    _verify_expected_absent_paths(
+        absent_sources, stage="before execution"
+    )
+    expected_destination_sha256 = None
+    if expected_output_sha256 is not None:
+        expected_destination_sha256 = str(expected_output_sha256).strip().lower()
+        if len(expected_destination_sha256) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in expected_destination_sha256
+        ):
+            raise ValueError(
+                "expected_output_sha256 must be a 64-character hexadecimal "
+                "SHA-256 digest."
+            )
+    if expect_output_absent and expected_destination_sha256 is not None:
+        raise ValueError(
+            "expect_output_absent cannot be combined with expected_output_sha256."
+        )
 
     base = os.path.abspath(str(base_path))
     if not os.path.isfile(base):
         raise FileNotFoundError(f"Base monostatic GRIM does not exist: {base}")
+    destination = os.path.abspath(
+        out_path if str(out_path).lower().endswith(".grim")
+        else str(out_path) + ".grim"
+    )
+    embedded_grid = load_body_requested_radar_grid(base)
+    capacity_grid = dict(radar_grid) if radar_grid is not None else embedded_grid
+    if capacity_grid is not None:
+        if _capacity_estimate is None:
+            _capacity_estimate = preflight_feature_assembly_capacity(
+                base,
+                destination,
+                radar_grid=capacity_grid,
+                placements=placements,
+                points=points,
+                occluder=occluder,
+            )
+        elif not isinstance(_capacity_estimate, AssemblyCapacityEstimate):
+            raise TypeError(
+                "_capacity_estimate must be an AssemblyCapacityEstimate."
+            )
+    from workflow_provenance import sha256_file
+    base_snapshot_sha256 = sha256_file(base)
     base_payload = _load_grim(base)
+    if sha256_file(base) != base_snapshot_sha256:
+        raise RuntimeError(
+            f"{base}: base response changed while it was being loaded. "
+            "Output was not published."
+        )
     label = os.path.basename(base)
+    existing_provenance_records = _decoded_feature_provenance(
+        base_payload, label
+    )
+    incoming_provenance = dict(feature_provenance or {})
+    if (
+        existing_provenance_records
+        and incoming_provenance.get("feature_library_manifest_policy")
+        == "required_validated"
+    ):
+        raise ValueError(
+            f"{label}: strict production Assembly cannot add another batch to "
+            "a feature-bearing base because cross-build applicability-footprint "
+            "coupling cannot be re-evaluated safely. Start from the clean body "
+            "and include every enabled point/line feature in one Assembly plan."
+        )
+    _reject_reused_feature_components(
+        existing_provenance_records,
+        incoming_provenance,
+        label,
+    )
     if declared_coherent_base:
-        validated_base = _validate_declared_coherent_base(base_payload, label)
+        validated_base = _validate_declared_coherent_base(
+            base_payload,
+            label,
+            allow_legacy_metadata=allow_legacy_base_metadata,
+        )
     else:
         from components import validate_component_schema
         validate_component_schema(base_payload, label)
         validated_base = base_payload
-    embedded_grid = load_body_requested_radar_grid(base)
     grid = dict(radar_grid) if radar_grid is not None else embedded_grid
     if grid is None:
         raise ValueError(
@@ -3505,6 +4777,12 @@ def add_features_to_monostatic_grim(
     missing_grid = sorted(required_grid - set(grid))
     if missing_grid:
         raise ValueError(f"radar_grid is missing {missing_grid}.")
+    base_grid_contract = validate_assembly_base_grid_metadata(
+        base_payload,
+        grid,
+        label,
+        allow_legacy_metadata=allow_legacy_base_metadata,
+    )
 
     profile = None
     if embedded_grid is not None:
@@ -3513,20 +4791,53 @@ def add_features_to_monostatic_grim(
         load_body_grim(base)
         profile = load_body_profile_grim(base)
 
-    destination = os.path.abspath(
-        out_path if str(out_path).lower().endswith(".grim")
-        else str(out_path) + ".grim"
-    )
     os.makedirs(os.path.dirname(destination), exist_ok=True)
-    component_tmp = os.path.join(
-        os.path.dirname(destination),
-        f".{os.path.basename(destination)}.features.{os.getpid()}.grim",
-    )
-    output_tmp = os.path.join(
-        os.path.dirname(destination),
-        f".{os.path.basename(destination)}.tmp.{os.getpid()}.grim",
-    )
+    component_tmp = None
+    output_tmp = None
+    destination_lock = None
     try:
+        destination_lock = _acquire_destination_lock(destination)
+        if _capacity_estimate is not None:
+            # Free space can change during a long validation or while waiting
+            # for the destination lock. Recheck immediately before staging.
+            _assert_feature_assembly_disk_capacity(
+                _capacity_estimate, destination
+            )
+        destination_initial_sha256 = (
+            sha256_file(destination) if os.path.isfile(destination) else None
+        )
+        if expect_output_absent:
+            if os.path.exists(destination):
+                raise RuntimeError(
+                    f"{destination}: output was created after Assembly "
+                    "validation. The newer destination was not reviewed; "
+                    "validate and confirm again."
+                )
+        elif expected_destination_sha256 is not None and (
+            destination_initial_sha256 != expected_destination_sha256
+        ):
+            raise RuntimeError(
+                f"{destination}: output changed after Assembly validation. "
+                "The newer destination was not reviewed; validate and confirm "
+                "again."
+            )
+        component_fd, component_tmp = tempfile.mkstemp(
+            prefix=f".{os.path.basename(destination)}.features.",
+            suffix=".grim",
+            dir=os.path.dirname(destination),
+        )
+        os.close(component_fd)
+        output_fd, output_tmp = tempfile.mkstemp(
+            prefix=f".{os.path.basename(destination)}.tmp.",
+            suffix=".grim",
+            dir=os.path.dirname(destination),
+        )
+        os.close(output_fd)
+
+        def field_progress(done, total, message):
+            scaled = int(round(85.0 * int(done) / max(1, int(total))))
+            _report_progress(progress_callback, scaled, 100, message)
+
         export_radar_grim(
             component_tmp,
             bor_result=None,
@@ -3545,7 +4856,12 @@ def add_features_to_monostatic_grim(
             axis_el_deg=grid["axis_el_deg"],
             roll_deg=grid.get("roll_deg", 0.0),
             history="placed coherent feature field",
+            cancel_check=cancel_check,
+            progress_callback=field_progress,
         )
+        _check_cancel(cancel_check)
+        _report_progress(progress_callback, 87, 100,
+                         "Combining with the clean-body field")
         component = _load_grim(component_tmp)
         for key in ("azimuths", "elevations", "frequencies"):
             if not np.array_equal(base_payload[key], component[key]):
@@ -3554,7 +4870,7 @@ def add_features_to_monostatic_grim(
                     "grid."
                 )
         base_channels, base_order = _canonical_3d_channel_indices(
-            base_payload["polarizations"], label, require_all=False
+            base_payload["polarizations"], label, require_all=True
         )
         component_channels, component_order = _canonical_3d_channel_indices(
             component["polarizations"], "placed feature field"
@@ -3572,6 +4888,11 @@ def add_features_to_monostatic_grim(
             payload = {
                 key: np.array(stored[key], copy=True) for key in stored.files
             }
+        if sha256_file(base) != base_snapshot_sha256:
+            raise RuntimeError(
+                f"{base}: base response changed during assembly. Output was "
+                "not published."
+            )
         # The base solver/certification audit describes the unmodified body
         # field.  Once a feature contribution changes that field it is useful
         # only as source provenance, not as a certificate for the derived
@@ -3621,17 +4942,10 @@ def add_features_to_monostatic_grim(
         ):
             payload.pop(key, None)
 
-        from workflow_provenance import sha256_file
-        records = []
-        if "feature_provenance_json" in payload:
-            raw = np.asarray(payload["feature_provenance_json"]).reshape(()).item()
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            decoded = json.loads(str(raw))
-            records = list(decoded) if isinstance(decoded, list) else [decoded]
+        records = list(existing_provenance_records)
         records.append({
             "schema": "ghost.workflow.coherent-feature-addition.v1",
-            "source_monostatic_sha256": sha256_file(base),
+            "source_monostatic_sha256": base_snapshot_sha256,
             "line_feature_count": int(len(placements)),
             "compact_feature_count": int(len(points)),
             "corner_estimate_count": int(len(corners)),
@@ -3639,6 +4953,7 @@ def add_features_to_monostatic_grim(
                 "TM": float(psi_tm_deg),
                 "TE": float(psi_te_deg),
             },
+            "line_grazing_taper_deg": float(GRAZING_TAPER_DEG),
             "model_scope": {
                 "translation_phase": "exp(+2j*k*d_dot_r)",
                 "body_feature_mutual_coupling": False,
@@ -3651,13 +4966,29 @@ def add_features_to_monostatic_grim(
                     "local installed-feature-minus-clean-skin complex Jones field"
                 ),
             },
+            "base_grid_contract": base_grid_contract,
+            "base_coherent_metadata_contract": {
+                "legacy_compatibility_enabled": bool(
+                    allow_legacy_base_metadata
+                ),
+                "legacy_missing_metadata": list(
+                    validated_base.get(_LEGACY_BASE_ASSUMPTIONS_KEY, ())
+                ),
+            },
             "details": dict(feature_provenance or {}),
         })
         payload["feature_provenance_json"] = np.asarray(json.dumps(
-            records, sort_keys=True, separators=(",", ":")
+            records, sort_keys=True, separators=(",", ":"), allow_nan=False
         ))
         from grim_io import _save_grim_npz
+        _check_cancel(cancel_check)
+        _report_progress(progress_callback, 94, 100,
+                         "Writing verified assembled response")
         _save_grim_npz(payload, output_tmp)
+        # The cancellation callback is caller-controlled and may itself have
+        # side effects. Invoke it before the final source/destination checks;
+        # nothing user-callable may run between those checks and os.replace.
+        _check_cancel(cancel_check)
         # The clean body and line-response GRIMs are opened during execution.
         # Rechecking after all numerical reads and immediately before the
         # atomic replace prevents a prepared plan from publishing an artifact
@@ -3665,9 +4996,50 @@ def add_features_to_monostatic_grim(
         _verify_expected_source_sha256(
             expected_sources, stage="during execution"
         )
+        _verify_expected_absent_paths(
+            absent_sources, stage="during execution"
+        )
+        if sha256_file(base) != base_snapshot_sha256:
+            raise RuntimeError(
+                f"{base}: base response changed during assembly. Output was "
+                "not published."
+            )
+        if destination_initial_sha256 is None:
+            if os.path.exists(destination):
+                raise RuntimeError(
+                    f"{destination}: output was created by another process "
+                    "during assembly; it was not overwritten."
+                )
+        elif (
+            not os.path.isfile(destination)
+            or sha256_file(destination) != destination_initial_sha256
+        ):
+            raise RuntimeError(
+                f"{destination}: output changed during assembly; the newer "
+                "file was not overwritten."
+            )
         os.replace(output_tmp, destination)
+        # Publication is already complete and atomic.  A display-only callback
+        # failure at this point must not turn a successful artifact into an
+        # apparent failed build that a caller may retry and duplicate.
+        try:
+            _report_progress(progress_callback, 100, 100,
+                             "Assembled response published")
+        except Exception:
+            pass
     finally:
         for path in (component_tmp, output_tmp):
-            if os.path.exists(path):
-                os.unlink(path)
+            try:
+                if path is not None and os.path.exists(path):
+                    os.unlink(path)
+            except OSError:
+                # Staging cleanup must never mask the primary failure or turn
+                # an already-published artifact into an apparent failed build.
+                pass
+        try:
+            _release_destination_lock(destination_lock)
+        except OSError:
+            # Closing the descriptor releases the OS lock. Do not report a
+            # false build failure after a successful atomic publication.
+            pass
     return destination

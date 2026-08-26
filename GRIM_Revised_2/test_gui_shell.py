@@ -1137,6 +1137,21 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.main_tabs.currentWidget(), self.window.ghost_integration
         )
 
+    def test_unsaved_feature_recipe_can_cancel_unified_close(self) -> None:
+        event = QCloseEvent()
+        with mock.patch.object(
+            self.window.feature_assembly_panel,
+            "request_close",
+            return_value=False,
+        ) as request_close:
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        request_close.assert_called_once_with(self.window)
+        self.assertIs(
+            self.window.main_tabs.currentWidget(), self.window.assembly_workspace
+        )
+
     def test_unsaved_python_script_can_cancel_unified_close(self) -> None:
         self.window.python_recorder._lines.extend(["value = 1", ""])
         self.window.python_recorder._notify()
@@ -1245,12 +1260,23 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 "job_is_running",
                 return_value=True,
             ),
+            mock.patch.object(
+                self.window.feature_assembly_panel,
+                "busy_operation",
+                return_value="build",
+            ),
+            mock.patch.object(
+                self.window.feature_assembly_panel,
+                "request_cancel",
+            ) as request_cancel,
             mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning,
         ):
             self.window.closeEvent(event)
 
         self.assertFalse(event.isAccepted())
         warning.assert_called_once()
+        request_cancel.assert_called_once_with()
+        self.assertIn("Safe cancellation", warning.call_args.args[2])
         self.assertIs(
             self.window.main_tabs.currentWidget(), self.window.assembly_workspace
         )

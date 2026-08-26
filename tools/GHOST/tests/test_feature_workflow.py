@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -27,6 +28,22 @@ LINE_HEADER = (
     "line_id,dataset_id,segment_index,x1,y1,z1,x2,y2,z2,"
     "n1x,n1y,n1z,n2x,n2y,n2z\n"
 )
+
+
+def _write_empty_base(path, grid=None):
+    """Write a real coherent GRIM instead of a metadata-free placeholder."""
+
+    selected = dict(grid or {
+        "frequencies_ghz": [1.0],
+        "azimuths_deg": [0.0],
+        "elevations_deg": [0.0],
+        "axis_az_deg": 0.0,
+        "axis_el_deg": 0.0,
+        "roll_deg": 0.0,
+    })
+    feature_sum.export_radar_grim(
+        str(path), bor_result=None, placements=[], **selected
+    )
 
 
 class DatasetDiscoveryTests(unittest.TestCase):
@@ -89,7 +106,7 @@ class DatasetDiscoveryTests(unittest.TestCase):
 class RequestPlanTests(unittest.TestCase):
     def _prepare_minimal_line_plan(self, root):
         base = root / "body.grim"
-        base.write_bytes(b"prepared clean body")
+        _write_empty_base(base)
         line_csv = root / "lines.csv"
         line_csv.write_text(
             LINE_HEADER
@@ -103,6 +120,11 @@ class RequestPlanTests(unittest.TestCase):
             "kind": "delta",
             "declared_coherent_delta": True,
             "delta_sign": 1.0,
+            "perimeter": np.asarray([
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]),
+            "segment_normals": np.asarray([[0.0, 0.0, 1.0]]),
         }]
         line_records = [{
             "schema": feature_workflow.LINE_PLACEMENT_SCHEMA,
@@ -150,6 +172,11 @@ class RequestPlanTests(unittest.TestCase):
                 "prepare_point_placements",
                 return_value=([], []),
             ),
+            mock.patch.object(
+                feature_workflow,
+                "_apply_feature_library_contracts",
+                return_value=({}, [], {}, set()),
+            ),
         ):
             return feature_workflow.prepare_feature_assembly(request)
 
@@ -159,7 +186,15 @@ class RequestPlanTests(unittest.TestCase):
         surface = root / "body.facet"
         coordinates = root / "lines.csv"
         response = root / "gap.grim"
-        base.write_bytes(b"external coherent body")
+        grid = {
+            "frequencies_ghz": [1.0],
+            "azimuths_deg": [0.0],
+            "elevations_deg": [0.0],
+            "axis_az_deg": 0.0,
+            "axis_el_deg": 0.0,
+            "roll_deg": 0.0,
+        }
+        _write_empty_base(base, grid)
         surface.write_bytes(b"external plane mesh snapshot")
         coordinates.write_text(
             LINE_HEADER
@@ -177,11 +212,7 @@ class RequestPlanTests(unittest.TestCase):
             line_datasets={"gap": response},
             base_dir=root,
         )
-        payload = {
-            "frequencies": np.asarray([1.0]),
-            "azimuths": np.asarray([0.0]),
-            "elevations": np.asarray([0.0]),
-        }
+        payload = feature_sum._load_grim(str(base))
         triangles = np.asarray([[[-1.0, -1.0, 0.0],
                                  [1.0, -1.0, 0.0],
                                  [0.0, 1.0, 0.0]]])
@@ -264,7 +295,7 @@ class RequestPlanTests(unittest.TestCase):
     def test_all_disabled_request_fails_before_response_loading(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "body.grim").touch()
+            _write_empty_base(root / "body.grim")
             (root / "points.csv").write_text(
                 POINT_HEADER + "p1,fastener,0,0,0,0,0,1,1,0,0\n",
                 encoding="utf-8",
@@ -333,6 +364,7 @@ class RequestPlanTests(unittest.TestCase):
             )
 
             self.assertEqual(len(points), 1)
+            self.assertEqual(points[0]["placement_id"], "keep")
             self.assertEqual([record["placement_id"] for record in records], ["keep"])
 
     def test_disabled_line_mapping_is_not_loaded_or_hashed(self):
@@ -371,6 +403,7 @@ class RequestPlanTests(unittest.TestCase):
             )
 
             self.assertEqual(len(placements), 1)
+            self.assertEqual(placements[0]["line_id"], "keep")
             self.assertEqual([record["line_id"] for record in records], ["keep"])
 
     def test_disabled_physically_invalid_rows_do_not_block_trade_study(self):
@@ -689,6 +722,62 @@ class RequestPlanTests(unittest.TestCase):
 
             self.assertFalse(plan.output_path.exists())
 
+    def test_changed_prepared_geometry_requires_revalidation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = self._prepare_minimal_line_plan(Path(directory))
+            plan.line_placements[0]["perimeter"][0, 0] = 123.0
+            with self.assertRaisesRegex(
+                RuntimeError, "plan changed after validation"
+            ):
+                feature_workflow.execute_feature_assembly(plan)
+            self.assertFalse(plan.output_path.exists())
+
+    def test_capacity_rejection_precedes_execution_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = self._prepare_minimal_line_plan(Path(directory))
+            with (
+                mock.patch.object(
+                    feature_workflow,
+                    "preflight_feature_assembly_capacity",
+                    side_effect=MemoryError("capacity rejected"),
+                ),
+                mock.patch.object(
+                    feature_workflow, "_execution_plan_snapshot"
+                ) as snapshot,
+            ):
+                with self.assertRaisesRegex(MemoryError, "capacity rejected"):
+                    feature_workflow.execute_feature_assembly(plan)
+            snapshot.assert_not_called()
+            self.assertFalse(plan.output_path.exists())
+
+    def test_progress_callback_cannot_mutate_private_execution_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = self._prepare_minimal_line_plan(Path(directory))
+            reviewed = np.array(
+                plan.line_placements[0]["perimeter"], copy=True
+            )
+
+            def mutate_public_plan(_done, _total, _message):
+                plan.line_placements[0]["perimeter"][:] = -999.0
+
+            def fake_build(_base, output, *, placements, progress_callback, **_kwargs):
+                progress_callback(1, 2, "building")
+                np.testing.assert_array_equal(
+                    placements[0]["perimeter"], reviewed
+                )
+                self.assertFalse(placements[0]["perimeter"].flags.writeable)
+                return output
+
+            with mock.patch.object(
+                feature_workflow,
+                "add_features_to_monostatic_grim",
+                side_effect=fake_build,
+            ):
+                saved = feature_workflow.execute_feature_assembly(
+                    plan, progress_callback=mutate_public_plan
+                )
+            self.assertEqual(saved, str(plan.output_path))
+
     def test_line_csv_mutated_after_parse_fails_prepare_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -724,6 +813,11 @@ class RequestPlanTests(unittest.TestCase):
                     "read_line_placement_csv",
                     side_effect=read_then_mutate,
                 ),
+                mock.patch.object(
+                    feature_workflow,
+                    "_apply_feature_library_contracts",
+                    return_value=({}, [], {}, set()),
+                ),
             ):
                 with self.assertRaisesRegex(
                     RuntimeError, "source changed during preparation"
@@ -757,6 +851,11 @@ class RequestPlanTests(unittest.TestCase):
                     "read_surface_mesh",
                     side_effect=read_then_mutate,
                 ),
+                mock.patch.object(
+                    feature_workflow,
+                    "_apply_feature_library_contracts",
+                    return_value=({}, [], {}, set()),
+                ),
             ):
                 with self.assertRaisesRegex(
                     RuntimeError, "source changed during preparation"
@@ -785,6 +884,11 @@ class RequestPlanTests(unittest.TestCase):
                     "read_surface_mesh",
                     return_value=triangles,
                 ),
+                mock.patch.object(
+                    feature_workflow,
+                    "_apply_feature_library_contracts",
+                    return_value=({}, [], {}, set()),
+                ),
             ):
                 plan = feature_workflow.prepare_feature_assembly(request)
 
@@ -802,7 +906,17 @@ class RequestPlanTests(unittest.TestCase):
     def test_plan_carries_full_cad_preview_geometry_in_meters(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "body.grim").touch()
+            _write_empty_base(
+                root / "body.grim",
+                {
+                    "frequencies_ghz": [1.0],
+                    "azimuths_deg": [0.0, 90.0],
+                    "elevations_deg": [0.0],
+                    "axis_az_deg": 0.0,
+                    "axis_el_deg": 0.0,
+                    "roll_deg": 0.0,
+                },
+            )
             (root / "body.facet").touch()
             (root / "gap.grim").write_bytes(b"line delta")
             (root / "antenna.grim").write_bytes(b"point delta")
@@ -833,19 +947,11 @@ class RequestPlanTests(unittest.TestCase):
                 point_datasets={"antenna": "antenna.grim"},
                 base_dir=root,
             )
-            payload = {
-                "frequencies": np.asarray([1.0]),
-                "azimuths": np.asarray([0.0, 90.0]),
-                "elevations": np.asarray([0.0]),
-            }
             with (
                 mock.patch.object(
                     feature_workflow,
                     "load_body_requested_radar_grid",
                     return_value=None,
-                ),
-                mock.patch.object(
-                    feature_workflow, "_load_grim", return_value=payload
                 ),
                 mock.patch.object(
                     feature_workflow,
@@ -856,6 +962,11 @@ class RequestPlanTests(unittest.TestCase):
                     feature_workflow,
                     "prepare_point_pattern",
                     return_value="prepared point pattern",
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "_apply_feature_library_contracts",
+                    return_value=({}, [], {}, set()),
                 ),
             ):
                 plan = feature_workflow.prepare_feature_assembly(request)
@@ -886,6 +997,14 @@ class RequestPlanTests(unittest.TestCase):
                 )
 
             preview = plan.preview_geometry
+            topology = plan.feature_provenance["surface_mesh_topology"]
+            self.assertEqual(topology["schema"], "ghost.assembly-mesh-topology.v1")
+            self.assertEqual(topology["boundary_edge_count"], 3)
+            self.assertFalse(topology["watertight"])
+            self.assertTrue(any(
+                "open boundary edge" in warning
+                for warning in plan.validation_warnings
+            ))
             expected_surface_cad_m = surface_in * 0.0254
             np.testing.assert_allclose(
                 preview.surface_triangles_cad_m, expected_surface_cad_m
@@ -935,15 +1054,6 @@ class RequestPlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             base = root / "body.grim"
-            base.touch()
-            line_csv = root / "lines.csv"
-            line_csv.write_text(
-                LINE_HEADER
-                + "gap_1,gap,1,0,0,0,1,0,0,0,0,1,0,0,1\n",
-                encoding="utf-8",
-            )
-            dataset = root / "gap.grim"
-            dataset.write_bytes(b"delta")
             grid = {
                 "frequencies_ghz": [1.0, 2.0],
                 "azimuths_deg": [0.0, 90.0],
@@ -952,12 +1062,26 @@ class RequestPlanTests(unittest.TestCase):
                 "axis_el_deg": 0.0,
                 "roll_deg": 0.0,
             }
+            _write_empty_base(base, grid)
+            line_csv = root / "lines.csv"
+            line_csv.write_text(
+                LINE_HEADER
+                + "gap_1,gap,1,0,0,0,1,0,0,0,0,1,0,0,1\n",
+                encoding="utf-8",
+            )
+            dataset = root / "gap.grim"
+            dataset.write_bytes(b"delta")
             profile = np.asarray([[1.0, 1.0], [1.0, -1.0]])
             line_placements = [{
                 "delta": str(dataset),
                 "kind": "delta",
                 "declared_coherent_delta": True,
                 "delta_sign": 1.0,
+                "perimeter": np.asarray([
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                ]),
+                "segment_normals": np.asarray([[0.0, 0.0, 1.0]]),
             }]
             line_records = [{
                 "schema": feature_workflow.LINE_PLACEMENT_SCHEMA,
@@ -1041,10 +1165,26 @@ class RequestPlanTests(unittest.TestCase):
             self.assertEqual(saved, expected_output)
             args, kwargs = add_features.call_args
             self.assertEqual(args, (str(base.resolve()), expected_output))
-            self.assertIs(kwargs["placements"], plan.line_placements)
-            self.assertIs(kwargs["points"], plan.point_placements)
+            # Execution receives a sealed deep snapshot. A callback or caller
+            # mutating the public plan after validation must not alter the
+            # arrays used to build the output.
+            self.assertIsNot(kwargs["placements"], plan.line_placements)
+            np.testing.assert_allclose(
+                kwargs["placements"][0]["perimeter"],
+                plan.line_placements[0]["perimeter"],
+            )
+            np.testing.assert_allclose(
+                kwargs["placements"][0]["segment_normals"],
+                plan.line_placements[0]["segment_normals"],
+            )
+            self.assertEqual(kwargs["points"], plan.point_placements)
             self.assertTrue(kwargs["declared_coherent_base"])
-            self.assertIs(kwargs["feature_provenance"], plan.feature_provenance)
+            self.assertIsNot(
+                kwargs["feature_provenance"], plan.feature_provenance
+            )
+            self.assertEqual(
+                kwargs["feature_provenance"], plan.feature_provenance
+            )
             self.assertEqual(kwargs["psi_tm_deg"], feature_workflow.PSI_HH_DEG)
             self.assertEqual(kwargs["psi_te_deg"], feature_workflow.PSI_VV_DEG)
             self.assertEqual(kwargs["history"], "service test")
@@ -1146,7 +1286,7 @@ class AtomicSourceSnapshotTests(unittest.TestCase):
                 side_effect=save_then_change_source,
             ):
                 with self.assertRaisesRegex(
-                    RuntimeError, "source changed during execution"
+                    RuntimeError, "base response changed during assembly"
                 ):
                     feature_sum.add_features_to_monostatic_grim(
                         str(base),
@@ -1270,6 +1410,143 @@ class PlacementSafetyTests(unittest.TestCase):
                 datasets={"line": line_dataset},
             )
             self.assertEqual(surface.nearest.call_count, 1)
+
+
+class ApplicabilityGeometryTests(unittest.TestCase):
+    def test_point_support_requires_every_exact_frequency(self):
+        pattern = SimpleNamespace(
+            frequencies=np.asarray([1.0, 3.0]),
+            elevations=np.asarray([-90.0, 90.0]),
+        )
+        placement = {
+            "pattern": pattern,
+            "aperture_normal": np.asarray([0.0, 0.0, 1.0]),
+            "roll_ref": np.asarray([1.0, 0.0, 0.0]),
+        }
+        with self.assertRaisesRegex(ValueError, "no exact 2 GHz"):
+            feature_workflow._validate_point_requested_support(
+                placement,
+                np.asarray([[0.0, 0.0, 1.0]]),
+                np.asarray([1.0, 2.0]),
+                dataset_id="fastener",
+            )
+
+    def test_point_support_checks_installed_lit_elevation(self):
+        pattern = SimpleNamespace(
+            frequencies=np.asarray([1.0]),
+            elevations=np.asarray([40.0, 90.0]),
+        )
+        placement = {
+            "pattern": pattern,
+            "aperture_normal": np.asarray([0.0, 0.0, 1.0]),
+            "roll_ref": np.asarray([1.0, 0.0, 0.0]),
+        }
+        look = np.asarray([[np.cos(np.deg2rad(30.0)), 0.0,
+                            np.sin(np.deg2rad(30.0))]])
+        with self.assertRaisesRegex(ValueError, "elevation support"):
+            feature_workflow._validate_point_requested_support(
+                placement, look, np.asarray([1.0]), dataset_id="fastener"
+            )
+
+    def test_line_metrics_use_solver_frame_and_exact_normal_turn_radius(self):
+        placement = {
+            "perimeter": np.asarray([[[0.0, 0.0, 0.0],
+                                       [2.0, 0.0, 0.0]]]),
+            "segment_normals": np.asarray([[[0.0, 0.0, 1.0],
+                                              [0.0, 1.0, 0.0]]]),
+            "max_piece_length_m": 0.1,
+        }
+        look = np.asarray([[0.0, 0.0, 1.0]])
+        metrics = feature_workflow._line_applicability_metrics(
+            placement, look, requested_frequencies_ghz=[1.0, 10.0]
+        )
+        self.assertAlmostEqual(
+            metrics["estimated_min_along_line_normal_turn_radius_m"],
+            1.0,
+            places=12,
+        )
+        self.assertTrue(metrics["along_line_normal_turn_detected"])
+        self.assertEqual(len(metrics["required_cut_angle_ranges_deg"]), 2)
+        for support in metrics["required_cut_angle_ranges_deg"]:
+            self.assertGreater(support["lit_query_count"], 0)
+            self.assertGreaterEqual(support["minimum_deg"], 0.0)
+            self.assertLessEqual(support["maximum_deg"], 180.0)
+
+    def test_line_vertex_normal_jump_and_path_turn_are_explicit(self):
+        placement = {
+            "perimeter": np.asarray([
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+            ]),
+            "segment_normals": np.asarray([
+                [[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+                [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            ]),
+            "max_piece_length_m": 0.1,
+        }
+        metrics = feature_workflow._line_applicability_metrics(
+            placement,
+            np.asarray([[0.0, 0.0, 1.0]]),
+            requested_frequencies_ghz=[1.0],
+        )
+        self.assertEqual(
+            metrics["estimated_min_along_line_normal_turn_radius_m"], 0.0
+        )
+        self.assertAlmostEqual(
+            metrics["maximum_shared_vertex_normal_jump_deg"], 90.0
+        )
+        self.assertAlmostEqual(metrics["maximum_path_vertex_turn_deg"], 90.0)
+
+    def test_one_line_cannot_fold_back_inside_its_own_footprint(self):
+        segments = np.asarray([
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            [[1.0, 0.0, 0.0], [1.0, 0.1, 0.0]],
+            [[1.0, 0.1, 0.0], [0.0, 0.1, 0.0]],
+        ])
+        overlap = feature_workflow._line_self_footprint_overlap(
+            segments, 0.06
+        )
+        self.assertIsNotNone(overlap)
+        self.assertEqual(overlap[:2], (0, 2))
+        self.assertAlmostEqual(overlap[2], 0.1)
+
+    def test_near_retrace_is_nonlocal_but_ordinary_corner_is_not(self):
+        nearly_retraced = np.asarray([
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            [[2.0, 0.0, 0.0], [1.0, 0.001, 0.0]],
+        ])
+        overlap = feature_workflow._line_self_footprint_overlap(
+            nearly_retraced, 0.1
+        )
+        self.assertIsNotNone(overlap)
+        self.assertEqual(overlap[:2], (0, 1))
+
+        right_angle = np.asarray([
+            [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            [[2.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
+        ])
+        self.assertIsNone(feature_workflow._line_self_footprint_overlap(
+            right_angle, 0.1
+        ))
+
+    def test_bor_binding_checks_facet_interiors_not_only_vertices(self):
+        profile = np.asarray([[1.0, -1.0], [1.0, 1.0]])
+        # Every vertex lies exactly on the unit cylinder, but the long chord
+        # and triangle interior cut deeply through it. Vertex-only validation
+        # would accept this unrelated/coarse shadow mesh.
+        triangle = np.asarray([[
+            [1.0, 0.0, -1.0],
+            [-0.5, np.sqrt(0.75), -1.0],
+            [1.0, 0.0, 1.0],
+        ]])
+        surface = feature_workflow.TriangleSurface(triangle)
+        with self.assertRaisesRegex(ValueError, "sampled facet point"):
+            feature_workflow._validate_bor_surface_agreement(
+                profile,
+                surface,
+                skin_limit_m=1.0e-3,
+                shadow_requested=False,
+            )
 
 
 if __name__ == "__main__":

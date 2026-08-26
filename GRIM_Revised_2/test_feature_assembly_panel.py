@@ -22,6 +22,7 @@ GHOST_BACKEND = (
     Path(__file__).resolve().parents[1] / "tools" / "GHOST" / "Backend"
 )
 
+import feature_assembly_panel as feature_panel_module  # noqa: E402
 from feature_assembly_panel import (  # noqa: E402
     GUI_AVAILABLE,
     LINE_PLACEMENT_COLUMNS,
@@ -32,10 +33,44 @@ from feature_assembly_panel import (  # noqa: E402
     FeatureBuildDispatch,
     FeatureWorkflowAdapter,
     LoadedDatasetEntry,
+    FEATURE_RECIPE_SCHEMA,
+    FEATURE_RECIPE_VERSION,
+    assess_surface_binding_readiness,
+    preflight_base_grim,
+    read_feature_assembly_recipe,
     _normalized_grim_output_path,
     placement_csv_template_text,
+    write_feature_assembly_recipe,
     write_placement_csv_template,
 )
+
+
+def _write_minimal_base_grim(path: Path, *, embedded_bor: bool = False) -> None:
+    """Write enough native GRIM structure for the lightweight body preflight."""
+
+    payload = {
+        "azimuths": np.asarray([0.0]),
+        "elevations": np.asarray([0.0]),
+        "frequencies": np.asarray([1.0]),
+        "polarizations": np.asarray(["HH"]),
+        "rcs_power": np.zeros((1, 1, 1, 1), dtype=np.float32),
+        "rcs_phase": np.zeros((1, 1, 1, 1), dtype=np.float32),
+    }
+    if embedded_bor:
+        payload.update(
+            body_profile_rho_m=np.asarray([0.0, 0.1, 0.0]),
+            body_profile_z_m=np.asarray([-0.1, 0.0, 0.1]),
+            requested_radar_grid_json=np.asarray("{}"),
+        )
+    with path.open("wb") as stream:
+        np.savez_compressed(stream, **payload)
+
+
+def _close_panel_without_prompt(panel) -> None:
+    """Close a disposable test panel without exercising its close prompt."""
+
+    panel._recipe_dirty = False
+    panel.close()
 
 
 @contextmanager
@@ -196,6 +231,7 @@ def _ready_point_model() -> FeatureAssemblyFormModel:
         skin_tol_m=8.0e-4,
         skin_phase_tol_deg=12.0,
         normal_tol_deg=9.0,
+        expected_host_material="PEC",
     )
     model = FeatureAssemblyFormModel(values)
     model.update_dataset_requirements(
@@ -206,6 +242,283 @@ def _ready_point_model() -> FeatureAssemblyFormModel:
 
 
 class FeatureAssemblyModelTests(unittest.TestCase):
+    def test_versioned_recipe_round_trip_preserves_all_effective_state(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            inputs = root / "inputs"
+            recipes = root / "recipes"
+            inputs.mkdir()
+            recipes.mkdir()
+            for name, content in (
+                ("body.grim", b"clean response"),
+                ("body.stl", b"solid body"),
+                ("points.csv", b"point placement bytes"),
+                ("lines.csv", b"line placement bytes"),
+                ("fastener.grim", b"point delta"),
+                ("seal.grim", b"line delta"),
+            ):
+                (inputs / name).write_bytes(content)
+            values = FeatureAssemblyValues(
+                base_grim="inputs/body.grim",
+                output_grim="outputs/vehicle_features.grim",
+                coordinate_units="millimeters",
+                surface_mesh="inputs/body.stl",
+                surface_units="meters",
+                flip_surface_normals=True,
+                shadow=True,
+                shadow_bias_m=2.5e-5,
+                point_locations_csv="inputs/points.csv",
+                line_locations_csv="inputs/lines.csv",
+                skin_tol_m=7.5e-4,
+                skin_phase_tol_deg=11.0,
+                normal_tol_deg=8.0,
+                allow_legacy_base_metadata=False,
+                require_feature_manifests=True,
+                expected_host_material="paint-stack-v3",
+                base_dir=str(root),
+                point_datasets={"fastener": "inputs/fastener.grim"},
+                line_datasets={"seal": "inputs/seal.grim"},
+                point_host_materials={"fastener": "paint-stack-v3"},
+                line_host_materials={"seal": "rubber-seal-host-v1"},
+                excluded_point_placement_ids={"bolt_002"},
+                excluded_line_ids={"rear_door"},
+            )
+            saved = write_feature_assembly_recipe(
+                values,
+                recipes / "vehicle",
+                name="Full vehicle",
+                variant="Doors + fasteners",
+            )
+
+            self.assertTrue(str(saved).endswith(".assembly.json"))
+            document = json.loads(saved.read_text(encoding="utf-8"))
+            self.assertEqual(document["schema"], FEATURE_RECIPE_SCHEMA)
+            self.assertEqual(document["version"], FEATURE_RECIPE_VERSION)
+            self.assertFalse(Path(document["values"]["base_grim"]).is_absolute())
+            self.assertTrue(document["source_manifest"])
+            self.assertTrue(
+                all("sha256" in record for record in document["source_manifest"])
+            )
+
+            loaded = read_feature_assembly_recipe(saved)
+            self.assertEqual(loaded.name, "Full vehicle")
+            self.assertEqual(loaded.variant, "Doors + fasteners")
+            self.assertEqual(loaded.source_warnings, ())
+            restored = loaded.values
+            self.assertEqual(restored.coordinate_units, "millimeters")
+            self.assertEqual(restored.surface_units, "meters")
+            self.assertTrue(restored.flip_surface_normals)
+            self.assertTrue(restored.shadow)
+            self.assertEqual(restored.shadow_bias_m, 2.5e-5)
+            self.assertEqual(restored.skin_tol_m, 7.5e-4)
+            self.assertEqual(restored.skin_phase_tol_deg, 11.0)
+            self.assertEqual(restored.normal_tol_deg, 8.0)
+            self.assertFalse(restored.allow_legacy_base_metadata)
+            self.assertTrue(restored.require_feature_manifests)
+            self.assertEqual(restored.expected_host_material, "paint-stack-v3")
+            self.assertEqual(
+                restored.point_host_materials, {"fastener": "paint-stack-v3"}
+            )
+            self.assertEqual(
+                restored.line_host_materials, {"seal": "rubber-seal-host-v1"}
+            )
+            self.assertEqual(
+                Path(restored.base_grim), (inputs / "body.grim").resolve()
+            )
+            self.assertEqual(
+                Path(restored.output_grim),
+                (root / "outputs" / "vehicle_features.grim").resolve(),
+            )
+            self.assertEqual(
+                Path(restored.point_datasets["fastener"]),
+                (inputs / "fastener.grim").resolve(),
+            )
+            self.assertEqual(restored.excluded_point_placement_ids, {"bolt_002"})
+            self.assertEqual(restored.excluded_line_ids, {"rear_door"})
+
+    def test_recipe_reports_content_change_without_silently_rejecting_variant(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            body = root / "body.grim"
+            points = root / "points.csv"
+            body.write_bytes(b"body")
+            points.write_bytes(b"AAAA")
+            recipe = write_feature_assembly_recipe(
+                FeatureAssemblyValues(
+                    base_grim=str(body), point_locations_csv=str(points)
+                ),
+                root / "trade",
+                name="Vehicle",
+                variant="Baseline",
+            )
+            # Same length defeats size-only identity but must be found by SHA-256.
+            points.write_bytes(b"BBBB")
+
+            loaded = read_feature_assembly_recipe(recipe)
+
+            self.assertEqual(loaded.values.point_locations_csv, str(points.resolve()))
+            self.assertTrue(
+                any("content changed" in warning for warning in loaded.source_warnings)
+            )
+
+    def test_recipe_rejects_unknown_schema_version(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "future.assembly.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": FEATURE_RECIPE_SCHEMA,
+                        "version": 99,
+                        "name": "Future",
+                        "variant": "Option",
+                        "values": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unsupported.*version"):
+                read_feature_assembly_recipe(path)
+
+    def test_v1_recipe_migrates_without_inventing_host_material_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            recipe = write_feature_assembly_recipe(
+                FeatureAssemblyValues(),
+                root / "legacy",
+                name="Vehicle",
+                variant="Legacy library",
+            )
+            document = json.loads(recipe.read_text(encoding="utf-8"))
+            document["version"] = 1
+            document["values"].pop("expected_host_material")
+            recipe.write_text(json.dumps(document), encoding="utf-8")
+
+            loaded = read_feature_assembly_recipe(recipe)
+
+            self.assertEqual(loaded.values.expected_host_material, "")
+            self.assertTrue(
+                any("predates host material" in value for value in loaded.source_warnings)
+            )
+
+    def test_v2_recipe_migrates_global_host_as_default_with_review_warning(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            recipe = write_feature_assembly_recipe(
+                FeatureAssemblyValues(
+                    point_datasets={"fastener": "fastener.grim"},
+                    expected_host_material="PEC",
+                ),
+                root / "v2",
+                name="Vehicle",
+                variant="One host",
+            )
+            document = json.loads(recipe.read_text(encoding="utf-8"))
+            document["version"] = 2
+            document["values"].pop("point_host_materials")
+            document["values"].pop("line_host_materials")
+            recipe.write_text(json.dumps(document), encoding="utf-8")
+
+            loaded = read_feature_assembly_recipe(recipe)
+
+            self.assertEqual(loaded.values.expected_host_material, "PEC")
+            self.assertEqual(loaded.values.point_host_materials, {})
+            self.assertTrue(
+                any("only one global" in value for value in loaded.source_warnings)
+            )
+
+    def test_base_grim_preflight_distinguishes_external_bor_and_malformed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            external = root / "external.grim"
+            embedded = root / "bor.grim"
+            malformed = root / "malformed.grim"
+            _write_minimal_base_grim(external)
+            _write_minimal_base_grim(embedded, embedded_bor=True)
+            malformed.write_bytes(b"not a ZIP")
+
+            external_result = preflight_base_grim(external)
+            embedded_result = preflight_base_grim(embedded)
+            malformed_result = preflight_base_grim(malformed)
+
+            self.assertTrue(external_result.valid)
+            self.assertTrue(external_result.requires_surface_mesh)
+            self.assertFalse(external_result.embedded_bor)
+            self.assertTrue(embedded_result.valid)
+            self.assertTrue(embedded_result.embedded_bor)
+            self.assertFalse(embedded_result.requires_surface_mesh)
+            self.assertFalse(malformed_result.valid)
+            self.assertIn("Invalid GRIM container", malformed_result.summary)
+
+    def test_external_binding_readiness_is_explicit_cached_and_stat_invalidated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            external = root / "clean_vehicle.grim"
+            embedded = root / "clean_bor.grim"
+            surface = root / "vehicle.facet"
+            _write_minimal_base_grim(external)
+            _write_minimal_base_grim(embedded, embedded_bor=True)
+            surface.write_text("4 2\nmesh\n", encoding="utf-8")
+
+            missing = assess_surface_binding_readiness(
+                base_grim=external,
+                surface_mesh=surface,
+                surface_units="meters",
+                production_profile=True,
+            )
+            self.assertEqual(missing.code, "missing")
+            self.assertFalse(missing.ready)
+            self.assertTrue(missing.required)
+
+            sidecar = Path(str(surface) + ".assembly.json")
+            sidecar.write_text("{}\n", encoding="utf-8")
+            unchecked = assess_surface_binding_readiness(
+                base_grim=external,
+                surface_mesh=surface,
+                surface_units="meters",
+                production_profile=True,
+            )
+            self.assertEqual(unchecked.code, "unchecked")
+            self.assertFalse(unchecked.ready)
+            self.assertIsNotNone(unchecked.identity_key)
+
+            checked = assess_surface_binding_readiness(
+                base_grim=external,
+                surface_mesh=surface,
+                surface_units="meters",
+                production_profile=True,
+                checked_key=unchecked.identity_key,
+                checked_binding={
+                    "geometry_id": "vehicle-r7",
+                    "attestation_case_id": "registration-42",
+                },
+            )
+            self.assertEqual(checked.code, "valid")
+            self.assertTrue(checked.ready)
+            self.assertIn("vehicle-r7", checked.message)
+
+            stale = assess_surface_binding_readiness(
+                base_grim=external,
+                surface_mesh=surface,
+                surface_units="inches",
+                production_profile=True,
+                checked_key=unchecked.identity_key,
+                checked_binding={
+                    "geometry_id": "vehicle-r7",
+                    "attestation_case_id": "registration-42",
+                },
+            )
+            self.assertEqual(stale.code, "stale")
+            self.assertFalse(stale.ready)
+
+            self_bound = assess_surface_binding_readiness(
+                base_grim=embedded,
+                surface_mesh="",
+                surface_units="meters",
+                production_profile=True,
+            )
+            self.assertEqual(self_bound.code, "not_required")
+            self.assertTrue(self_bound.ready)
+
     def test_loaded_dataset_entry_requires_a_clean_existing_grim_file(self):
         with tempfile.TemporaryDirectory() as folder:
             saved = Path(folder) / "saved.grim"
@@ -329,6 +642,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 base_grim="body.grim",
                 output_grim="assembled.grim",
                 point_locations_csv="points.csv",
+                expected_host_material="PEC",
             )
         )
         model.update_dataset_requirements(
@@ -395,6 +709,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 base_grim="body.grim",
                 output_grim="assembled.grim",
                 point_locations_csv="points.csv",
+                expected_host_material="PEC",
             )
         )
         model.update_dataset_requirements(
@@ -462,6 +777,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 base_grim="body.grim",
                 output_grim="assembled.grim",
                 point_locations_csv="points.csv",
+                expected_host_material="PEC",
             )
         )
         model.update_dataset_requirements(
@@ -560,6 +876,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                     base_grim=str(base),
                     output_grim=str(output),
                     point_locations_csv=str(points),
+                    expected_host_material="PEC",
                 )
             )
             model.update_dataset_requirements(
@@ -669,6 +986,63 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "less than 90"):
             model.validate()
 
+    def test_production_host_ids_resolve_per_response_with_global_fallback(self):
+        model = _ready_point_model()
+        model.values.expected_host_material = ""
+        with self.assertRaisesRegex(ValueError, "point:fastener"):
+            model.validate()
+
+        model.set_point_host_material("fastener", "coated-aluminum-v2")
+        model.validate()
+        self.assertEqual(
+            model.effective_host_materials(),
+            {"point:fastener": "coated-aluminum-v2"},
+        )
+
+    def test_point_and_line_can_share_dataset_id_with_distinct_host_stacks(self):
+        model = FeatureAssemblyFormModel(FeatureAssemblyValues(
+            expected_host_material="  PEC   outer skin  ",
+        ))
+        model.update_dataset_requirements({
+            "point_dataset_ids": ("shared",),
+            "line_dataset_ids": ("shared",),
+        })
+        model.set_point_host_material("shared", "pec OUTER skin")
+        model.set_line_host_material("shared", "rubber   seal stack v2")
+
+        self.assertEqual(model.effective_host_materials(), {
+            "point:shared": "PEC outer skin",
+            "line:shared": "rubber seal stack v2",
+        })
+        self.assertEqual(model.missing_host_material_mappings(), ())
+
+    def test_output_alias_guard_includes_mesh_and_placement_csvs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            sources = {
+                "surface mesh": root / "body.facet",
+                "point placement CSV": root / "points.csv",
+                "line placement CSV": root / "lines.csv",
+            }
+            for path in sources.values():
+                path.write_bytes(b"stable source")
+            model = FeatureAssemblyFormModel(
+                FeatureAssemblyValues(
+                    surface_mesh=str(sources["surface mesh"]),
+                    point_locations_csv=str(sources["point placement CSV"]),
+                    line_locations_csv=str(sources["line placement CSV"]),
+                )
+            )
+            for label, source in sources.items():
+                output = root / f"{label.replace(' ', '_')}.grim"
+                try:
+                    os.link(source, output)
+                except (NotImplementedError, OSError) as exc:
+                    self.skipTest(f"hard links are unavailable: {exc}")
+                model.values.output_grim = str(output)
+                with self.assertRaisesRegex(ValueError, label):
+                    model._validate_output_target()
+
     def test_request_construction_uses_exact_mapping_and_controls(self):
         workflow = _FakeWorkflow()
         model = _ready_point_model()
@@ -694,6 +1068,12 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         self.assertEqual(request.kwargs["skin_tol_m"], 8.0e-4)
         self.assertEqual(request.kwargs["skin_phase_tol_deg"], 12.0)
         self.assertEqual(request.kwargs["normal_tol_deg"], 9.0)
+        self.assertFalse(request.kwargs["allow_legacy_base_metadata"])
+        self.assertTrue(request.kwargs["require_feature_manifests"])
+        self.assertEqual(request.kwargs["expected_host_material"], "PEC")
+        self.assertEqual(
+            request.kwargs["expected_host_materials"], {"point:fastener": "PEC"}
+        )
 
     def test_discovery_updates_ids_and_preserves_surviving_paths(self):
         workflow = _FakeWorkflow()
@@ -748,6 +1128,136 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             ["prepare", "execute"],
         )
         self.assertIs(workflow.calls[-1][1], dispatch.plan)
+
+    def test_validated_publish_never_prepares_an_unreviewed_replacement(self):
+        workflow = _FakeWorkflow()
+        model = _ready_point_model()
+
+        with self.assertRaisesRegex(RuntimeError, "have not been validated"):
+            model.assemble_validated(workflow)
+        self.assertEqual(workflow.calls, [])
+
+        model.prepare_preview(workflow)
+        model.values.normal_tol_deg = 8.0
+        with self.assertRaisesRegex(RuntimeError, "Validate placements"):
+            model.assemble_validated(workflow)
+
+        self.assertEqual(
+            [name for name, _value in workflow.calls],
+            ["prepare"],
+        )
+
+    def test_build_forwards_progress_and_cooperative_cancellation_hooks(self):
+        class HookWorkflow(_FakeWorkflow):
+            def execute_feature_assembly(
+                self, plan, *, cancel_check=None, progress_callback=None
+            ):
+                self.calls.append(("execute", plan))
+                self.received_cancel = cancel_check
+                self.received_progress = progress_callback
+                progress_callback(2, 4, "placing points")
+                return plan.request.kwargs["output_grim"]
+
+        workflow = HookWorkflow()
+        model = _ready_point_model()
+        progress = []
+        dispatch = model.assemble(
+            workflow,
+            cancel_check=lambda: False,
+            progress_callback=lambda done, total, message: progress.append(
+                (done, total, message)
+            ),
+        )
+
+        self.assertEqual(dispatch.output_path, "assembled.grim")
+        self.assertFalse(workflow.received_cancel())
+        self.assertEqual(progress, [(2, 4, "placing points")])
+
+    def test_validation_forwards_progress_and_cooperative_cancellation_hooks(self):
+        class HookPrepareWorkflow(_FakeWorkflow):
+            def prepare_feature_assembly(
+                self, request, *, cancel_check=None, progress_callback=None
+            ):
+                self.calls.append(("prepare", request))
+                self.received_cancel = cancel_check
+                self.received_progress = progress_callback
+                progress_callback(3, 5, "Checking line paths")
+                return SimpleNamespace(request=request, validation_warnings=())
+
+        workflow = HookPrepareWorkflow()
+        model = _ready_point_model()
+        progress = []
+
+        plan = model.prepare_preview(
+            workflow,
+            cancel_check=lambda: False,
+            progress_callback=lambda done, total, message: progress.append(
+                (done, total, message)
+            ),
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(callable(workflow.received_cancel))
+        self.assertTrue(callable(workflow.received_progress))
+        self.assertEqual(progress, [(3, 5, "Checking line paths")])
+        self.assertTrue(model.validated_plan_is_current(workflow))
+
+    def test_cancelled_validation_discards_the_previous_cached_plan(self):
+        model = _ready_point_model()
+        first_workflow = _FakeWorkflow()
+        model.prepare_preview(first_workflow)
+        self.assertIsNotNone(model._prepared_plan_cache)
+
+        class CancellingPrepareWorkflow(_FakeWorkflow):
+            def prepare_feature_assembly(
+                self, request, *, cancel_check=None, progress_callback=None
+            ):
+                self.calls.append(("prepare", request))
+                progress_callback(1, 4, "Checking body surface")
+                raise InterruptedError("operator cancelled validation")
+
+        workflow = CancellingPrepareWorkflow()
+        with self.assertRaisesRegex(InterruptedError, "operator cancelled"):
+            model.prepare_preview(
+                workflow,
+                cancel_check=lambda: False,
+                progress_callback=lambda *_args: None,
+            )
+
+        self.assertIsNone(model._prepared_plan_cache)
+        self.assertFalse(model.validated_plan_is_current(workflow))
+
+    def test_cancel_after_final_fingerprint_never_caches_reviewed_plan(self):
+        model = _ready_point_model()
+        workflow = _FakeWorkflow()
+        calls = 0
+
+        def cancel_at_final_cache_boundary():
+            nonlocal calls
+            calls += 1
+            return calls == 3
+
+        with self.assertRaisesRegex(InterruptedError, "no reviewed plan"):
+            model.prepare_preview(
+                workflow,
+                cancel_check=cancel_at_final_cache_boundary,
+            )
+
+        self.assertEqual(calls, 3)
+        self.assertIsNone(model._prepared_plan_cache)
+        self.assertFalse(model.validated_plan_is_current(workflow))
+
+    def test_cancel_before_execute_keeps_legacy_service_untouched(self):
+        workflow = _FakeWorkflow()
+        model = _ready_point_model()
+
+        with self.assertRaisesRegex(InterruptedError, "cancelled"):
+            model.assemble(workflow, cancel_check=lambda: True)
+
+        self.assertEqual(
+            [name for name, _value in workflow.calls],
+            ["prepare"],
+        )
 
     def test_fingerprint_passes_are_bounded_for_cold_and_cached_builds(self):
         workflow = _FakeWorkflow()
@@ -846,6 +1356,219 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_surface_binding_dialog_requires_ids_and_explicit_attestation(self):
+        from PySide6.QtWidgets import QDialogButtonBox, QWidget
+
+        parent = QWidget()
+        dialog = feature_panel_module._SurfaceBindingDialog(parent)
+        accept = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.assertFalse(accept.isEnabled())
+        dialog.geometry_id_edit.setText("vehicle-r7")
+        dialog.case_id_edit.setText("registration-case-42")
+        self.assertFalse(accept.isEnabled())
+        dialog.attestation.setChecked(True)
+        self.assertTrue(accept.isEnabled())
+        self.assertEqual(
+            dialog.binding_values(), ("vehicle-r7", "registration-case-42")
+        )
+        dialog.close()
+        parent.close()
+
+    def test_external_body_binding_actions_gate_production_and_refresh_stale_files(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        ghost_context = _isolated_ghost_backend()
+        ghost = ghost_context.__enter__()
+        self.addCleanup(ghost_context.__exit__, None, None, None)
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            base = root / "clean_vehicle.grim"
+            surface = root / "vehicle.facet"
+            _write_minimal_base_grim(base)
+            surface.write_text("4 2\nexact mesh revision 7\n", encoding="utf-8")
+            panel = FeatureAssemblyPanel(service=ghost.feature_workflow)
+            try:
+                panel.set_base_grim(str(base))
+                panel.set_surface_mesh(str(surface))
+                panel.surface_units.setCurrentIndex(
+                    panel.surface_units.findData("meters")
+                )
+                panel._update_workflow_readiness()
+                self.assertIn("Binding missing", panel.surface_binding_status.text())
+                self.assertFalse(panel.check_surface_binding_button.isEnabled())
+                self.assertTrue(panel.bind_surface_button.isEnabled())
+                self.assertIn("reviewed body binding", panel.readiness_label.text())
+                self.assertFalse(panel.preview_button.isEnabled())
+
+                def run_synchronously(kind, operation, **_kwargs):
+                    panel._active_kind = kind
+                    try:
+                        panel._operation_succeeded(operation())
+                    finally:
+                        panel._active_kind = ""
+
+                with mock.patch.object(
+                    panel,
+                    "_prompt_surface_binding_details",
+                    return_value=("vehicle-r7", "registration-case-42"),
+                ), mock.patch.object(
+                    panel, "_start_operation", side_effect=run_synchronously
+                ):
+                    panel.bind_selected_surface()
+
+                sidecar = Path(str(surface) + ".assembly.json")
+                self.assertTrue(sidecar.is_file())
+                self.assertIn("Current reviewed binding", panel.surface_binding_status.text())
+                self.assertIn("vehicle-r7", panel.surface_binding_status.text())
+
+                # A stat change immediately makes the cached green check stale;
+                # no repeated content hashing occurs in the readiness refresh.
+                surface.write_text(
+                    "4 2\nexact mesh revision 8 changed\n", encoding="utf-8"
+                )
+                panel._update_workflow_readiness()
+                self.assertIn("check is stale", panel.surface_binding_status.text())
+                self.assertFalse(panel.preview_button.isEnabled())
+
+                with mock.patch.object(
+                    panel,
+                    "_prompt_surface_binding_details",
+                    return_value=("vehicle-r8", "registration-case-43"),
+                ), mock.patch.object(
+                    QMessageBox,
+                    "warning",
+                    return_value=QMessageBox.StandardButton.Yes,
+                ) as overwrite_prompt, mock.patch.object(
+                    panel, "_start_operation", side_effect=run_synchronously
+                ):
+                    panel.bind_selected_surface()
+                overwrite_prompt.assert_called_once()
+                self.assertIn("vehicle-r8", panel.surface_binding_status.text())
+
+                # The separate Check action also restores readiness from an
+                # existing canonical sidecar without rewriting it.
+                panel._surface_binding_checked_key = None
+                panel._surface_binding_checked = None
+                panel._update_workflow_readiness()
+                self.assertIn("not checked", panel.surface_binding_status.text())
+                self.assertTrue(panel.check_surface_binding_button.isEnabled())
+                before = sidecar.read_bytes()
+                with mock.patch.object(
+                    panel, "_start_operation", side_effect=run_synchronously
+                ):
+                    panel.check_selected_surface_binding()
+                self.assertEqual(sidecar.read_bytes(), before)
+                self.assertIn("Current reviewed binding", panel.surface_binding_status.text())
+            finally:
+                _close_panel_without_prompt(panel)
+
+    def test_recipe_load_restores_named_variant_and_tracks_later_edits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            body = root / "body.grim"
+            points = root / "points.csv"
+            response = root / "fastener.grim"
+            body.write_bytes(b"body")
+            points.write_bytes(b"points")
+            response.write_bytes(b"delta")
+            recipe = write_feature_assembly_recipe(
+                FeatureAssemblyValues(
+                    base_grim=str(body),
+                    output_grim=str(root / "assembled.grim"),
+                    coordinate_units="meters",
+                    point_locations_csv=str(points),
+                    point_datasets={"fastener": str(response)},
+                    excluded_point_placement_ids={"bolt_002"},
+                    expected_host_material="coated-aluminum-v2",
+                ),
+                root / "vehicle",
+                name="Test vehicle",
+                variant="No rear fastener",
+            )
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            try:
+                loaded = panel.load_recipe_path(recipe, refresh=False)
+                self.assertEqual(loaded.variant, "No rear fastener")
+                self.assertEqual(panel.recipe_name_edit.text(), "Test vehicle")
+                self.assertEqual(
+                    panel.recipe_variant_edit.text(), "No rear fastener"
+                )
+                self.assertFalse(panel._recipe_dirty)
+                self.assertEqual(panel.skin_tol.value(), 1.0)
+                self.assertEqual(
+                    panel.expected_host_material.text(), "coated-aluminum-v2"
+                )
+                self.assertIn("saved", panel.recipe_status_label.text())
+                self.assertEqual(
+                    panel.point_mapping.mapping(), {"fastener": str(response.resolve())}
+                )
+                self.assertEqual(
+                    panel.model.values.excluded_point_placement_ids, {"bolt_002"}
+                )
+
+                panel.recipe_variant_edit.setFocus()
+                panel.recipe_variant_edit.insert(" updated")
+                self.app.processEvents()
+
+                self.assertTrue(panel._recipe_dirty)
+                self.assertIn("modified", panel.recipe_status_label.text())
+            finally:
+                _close_panel_without_prompt(panel)
+
+    def test_validation_qa_rows_link_back_to_spatial_instances(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        try:
+            panel.model.update_dataset_requirements(
+                {
+                    "point_dataset_ids": ("fastener",),
+                    "line_dataset_ids": ("seal",),
+                    "point_instances": (("bolt_1", "fastener"),),
+                    "line_instances": (("door_gap", "seal", 2),),
+                }
+            )
+            panel._apply_requirements_to_tables()
+            plan = SimpleNamespace(
+                skin_limit_m=1.0e-3,
+                validation_warnings=(
+                    "fastener response has no certified library manifest",
+                ),
+                point_records=(
+                    {
+                        "placement_id": "bolt_1",
+                        "dataset_id": "fastener",
+                        "skin_offset_m": 2.0e-4,
+                    },
+                ),
+                line_records=(
+                    {
+                        "line_id": "door_gap",
+                        "dataset_id": "seal",
+                        "max_skin_offset_m": 3.0e-4,
+                        "max_normal_error_deg": 2.5,
+                    },
+                ),
+            )
+
+            panel._show_validation_qa(plan)
+
+            self.assertEqual(panel.validation_qa_table.rowCount(), 2)
+            self.assertIn("2 enabled", panel.validation_qa_label.text())
+            self.assertIn("1 production QA warning", panel.validation_qa_label.text())
+            self.assertFalse(panel.validation_warning_label.isHidden())
+            self.assertIn("RELEASE WARNINGS", panel.validation_warning_label.text())
+            self.assertFalse(panel.validation_warning_ack.isHidden())
+            self.assertFalse(panel.validation_warning_ack.isChecked())
+            self.assertIn(
+                "no certified library manifest",
+                panel.validation_warning_label.text(),
+            )
+            panel._qa_row_clicked(0, 0)
+            current = panel.spatial_feature_tree.currentItem()
+            self.assertIsNotNone(current)
+            self.assertIn("door_gap", current.text(0))
+        finally:
+            _close_panel_without_prompt(panel)
+
     def test_public_busy_and_close_contract_starts_idle(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
         self.assertFalse(panel.is_busy())
@@ -858,15 +1581,263 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertIn("No Assembly operation", panel.status_label.text())
         self.assertFalse(panel.advanced_section.header.isChecked())
         self.assertTrue(panel.skin_tol.isEnabled())
+        self.assertEqual(panel.validation_profile.currentData()[0], "production")
+        self.assertEqual(panel._validation_profile_flags(), (False, True))
+        self.assertEqual(panel.skin_tol.suffix().strip(), "mm")
+        self.assertAlmostEqual(panel.skin_tol.value(), 1.0)
+        self.assertLessEqual(panel.skin_tol.singleStep(), 0.01)
+        self.assertEqual(panel.phase_tol.maximum(), 90.0)
         self.assertFalse(panel.scan_button.isEnabled())
         self.assertFalse(panel.preview_button.isEnabled())
         self.assertFalse(panel.build_button.isEnabled())
+        self.assertFalse(panel.operation_progress.isVisible())
+        self.assertFalse(panel.cancel_operation_button.isVisible())
         self.assertIn("Preview Layers → Show", panel.preview_help_label.text())
         self.assertIn(
             "Spatial Feature Configuration → Use",
             panel.preview_help_label.text(),
         )
-        panel.close()
+        _close_panel_without_prompt(panel)
+
+    def test_qa_defaults_reset_in_display_units_without_changing_profile(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        panel.skin_tol.setValue(22.0)
+        panel.phase_tol.setValue(75.0)
+        panel.normal_tol.setValue(33.0)
+        panel.validation_profile.setCurrentIndex(1)
+
+        panel.reset_qa_defaults_button.click()
+        panel._pull_values()
+
+        self.assertAlmostEqual(panel.skin_tol.value(), 1.0)
+        self.assertAlmostEqual(panel.model.values.skin_tol_m, 1.0e-3)
+        self.assertEqual(panel.phase_tol.value(), 15.0)
+        self.assertEqual(panel.normal_tol.value(), 15.0)
+        self.assertEqual(panel._validation_profile_flags(), (True, False))
+        _close_panel_without_prompt(panel)
+
+    def test_dirty_recipe_close_and_load_offer_save_discard_cancel(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            load_target = write_feature_assembly_recipe(
+                FeatureAssemblyValues(),
+                root / "load_target",
+                name="Load target",
+                variant="Baseline",
+            )
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            panel._recipe_dirty = True
+
+            with mock.patch.object(
+                QMessageBox,
+                "warning",
+                return_value=QMessageBox.StandardButton.Cancel,
+            ):
+                self.assertFalse(panel.request_close())
+            self.assertTrue(panel._recipe_dirty)
+
+            with mock.patch.object(
+                QFileDialog,
+                "getOpenFileName",
+                return_value=(str(load_target), ""),
+            ), mock.patch.object(
+                QMessageBox,
+                "warning",
+                return_value=QMessageBox.StandardButton.Cancel,
+            ), mock.patch.object(panel, "load_recipe_path") as load_mock:
+                panel._load_recipe_dialog()
+                load_mock.assert_not_called()
+
+            panel._recipe_path = root / "saved.assembly.json"
+            with mock.patch.object(
+                QMessageBox,
+                "warning",
+                return_value=QMessageBox.StandardButton.Save,
+            ):
+                self.assertTrue(panel.request_close())
+            self.assertTrue(panel._recipe_path.is_file())
+            self.assertFalse(panel._recipe_dirty)
+
+            panel._recipe_dirty = True
+            with mock.patch.object(
+                QMessageBox,
+                "warning",
+                return_value=QMessageBox.StandardButton.Discard,
+            ):
+                self.assertTrue(panel.request_close())
+            _close_panel_without_prompt(panel)
+
+    def test_body_preflight_controls_readiness_for_external_bor_and_malformed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            external = root / "external.grim"
+            embedded = root / "bor.grim"
+            malformed = root / "bad.grim"
+            _write_minimal_base_grim(external)
+            _write_minimal_base_grim(embedded, embedded_bor=True)
+            malformed.write_bytes(b"broken")
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            panel.validation_profile.setCurrentIndex(1)
+
+            panel.base_picker.set_path(str(external))
+            panel._update_workflow_readiness()
+            self.assertIn("✓ valid body GRIM", panel.readiness_label.text())
+            self.assertIn("surface mesh", panel.next_step_label.text())
+
+            panel.base_picker.set_path(str(embedded))
+            panel._update_workflow_readiness()
+            self.assertIn("✓ valid body GRIM", panel.readiness_label.text())
+            self.assertNotIn("surface mesh", panel.next_step_label.text())
+
+            panel.base_picker.set_path(str(malformed))
+            panel._update_workflow_readiness()
+            self.assertIn("○ valid body GRIM", panel.readiness_label.text())
+            self.assertIn("Invalid GRIM container", panel.next_step_label.text())
+            _close_panel_without_prompt(panel)
+
+    def test_assembly_button_requires_current_validation_and_warning_waiver(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            base = root / "body.grim"
+            surface = root / "body.facet"
+            points = root / "points.csv"
+            response = root / "fastener.grim"
+            _write_minimal_base_grim(base, embedded_bor=True)
+            surface.write_text("0 0\n", encoding="utf-8")
+            points.write_bytes(b"stable placements")
+            response.write_bytes(b"stable response")
+            workflow = _FakeWorkflow()
+            panel = FeatureAssemblyPanel(service=workflow)
+            panel.base_picker.set_path(str(base))
+            panel.surface_picker.set_path(str(surface))
+            panel.point_csv_picker.set_path(str(points))
+            panel.output_picker.set_path(str(root / "assembled.grim"))
+            panel.expected_host_material.setText("")
+            panel._pull_values()
+            panel.model.update_dataset_requirements(
+                {"point_dataset_ids": ("fastener",), "line_dataset_ids": ()}
+            )
+            panel.model.set_point_dataset("fastener", str(response))
+            panel._apply_requirements_to_tables()
+            panel.point_mapping.set_host_material("fastener", "paint-stack-v3")
+            panel._update_workflow_readiness()
+
+            self.assertEqual(
+                panel.model.values.point_host_materials,
+                {"fastener": "paint-stack-v3"},
+            )
+
+            self.assertTrue(panel.preview_button.isEnabled())
+            self.assertFalse(panel.build_button.isEnabled())
+            self.assertIn("run Validate", panel.next_step_label.text())
+
+            plan = panel.model.prepare_preview(workflow)
+            panel._show_validation_qa(plan)
+            panel._validated_plan_current = True
+            panel._update_workflow_readiness()
+            self.assertTrue(panel.build_button.isEnabled())
+
+            warning_plan = SimpleNamespace(
+                validation_warnings=("legacy response applicability is unproven",),
+                point_records=(),
+                line_records=(),
+            )
+            panel._show_validation_qa(warning_plan)
+            panel._validated_plan_current = True
+            panel._update_workflow_readiness()
+            self.assertFalse(panel.build_button.isEnabled())
+            panel.validation_warning_ack.setChecked(True)
+            self.assertTrue(panel.build_button.isEnabled())
+
+            panel.normal_tol.setValue(16.0)
+            self.app.processEvents()
+            self.assertFalse(panel._validated_plan_current)
+            self.assertFalse(panel.build_button.isEnabled())
+            self.assertFalse(panel.validation_warning_ack.isChecked())
+            _close_panel_without_prompt(panel)
+
+    def test_progress_display_and_cancel_request_are_explicit(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        worker = SimpleNamespace(request_cancel=mock.Mock())
+        try:
+            panel._active_kind = "build"
+            panel._worker = worker
+            panel.operation_progress.setVisible(True)
+            panel.cancel_operation_button.setVisible(True)
+            panel.cancel_operation_button.setEnabled(True)
+
+            panel._operation_progress(37, "Expanding line door_gap")
+            self.assertEqual(panel.operation_progress.value(), 37)
+            self.assertIn("door_gap", panel.operation_progress.format())
+
+            panel.request_cancel()
+            worker.request_cancel.assert_called_once_with()
+            self.assertFalse(panel.cancel_operation_button.isEnabled())
+            self.assertIn(
+                "Cancelling assembly safely", panel.operation_progress.format()
+            )
+            self.assertIn("no partial output", panel.status_label.text())
+        finally:
+            panel._active_kind = ""
+            panel._worker = None
+            _close_panel_without_prompt(panel)
+
+    def test_validation_worker_exposes_progress_and_cooperative_cancel(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        worker = SimpleNamespace(request_cancel=mock.Mock())
+        try:
+            panel._active_kind = "preview"
+            panel._worker = worker
+            panel._validated_plan_current = True
+            panel._preview_is_current = True
+            panel.model._prepared_plan_cache = object()
+            panel._set_busy(True)
+
+            self.assertFalse(panel.cancel_operation_button.isHidden())
+            self.assertEqual(
+                panel.cancel_operation_button.text(), "Cancel validation"
+            )
+            panel._operation_progress(55, "Checking line paths")
+            self.assertEqual(panel.operation_progress.value(), 55)
+            self.assertIn("Checking line paths", panel.operation_progress.format())
+
+            panel.request_cancel()
+            worker.request_cancel.assert_called_once_with()
+            self.assertFalse(panel.cancel_operation_button.isEnabled())
+            self.assertIn(
+                "Cancelling validation safely", panel.operation_progress.format()
+            )
+            self.assertIn("no reviewed plan", panel.status_label.text())
+
+            panel._operation_cancelled("operator cancelled validation")
+            self.assertIsNone(panel.model._prepared_plan_cache)
+            self.assertFalse(panel._validated_plan_current)
+            self.assertFalse(panel._preview_is_current)
+            self.assertFalse(panel.build_button.isEnabled())
+            self.assertIn("operator cancelled", panel.status_label.text())
+        finally:
+            panel._active_kind = ""
+            panel._worker = None
+            panel._set_busy(False)
+            _close_panel_without_prompt(panel)
+
+    def test_validate_action_starts_a_cooperative_worker(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        panel.model._prepared_plan_cache = object()
+        try:
+            with mock.patch.object(panel, "_start_operation") as start:
+                panel.validate_and_preview()
+
+            start.assert_called_once()
+            self.assertEqual(start.call_args.args[0], "preview")
+            self.assertTrue(start.call_args.kwargs["cooperative"])
+            self.assertIsNone(panel.model._prepared_plan_cache)
+            self.assertFalse(panel._validated_plan_current)
+            self.assertIn("Assembly remains locked", panel.validation_qa_label.text())
+        finally:
+            _close_panel_without_prompt(panel)
 
     def test_reselecting_unchanged_csv_preserves_response_mapping(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -888,7 +1859,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             )
             self.assertEqual(panel.model.point_dataset_ids, ("fastener",))
             self.assertFalse(panel.job_is_running())
-            panel.close()
+            _close_panel_without_prompt(panel)
 
     def test_selecting_different_csv_resets_same_named_feature_exclusion(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -916,7 +1887,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             self.assertEqual(panel.model.values.excluded_point_placement_ids, set())
             self.assertEqual(panel.model.point_dataset_ids, ())
             refresh.assert_called_once_with()
-            panel.close()
+            _close_panel_without_prompt(panel)
 
     def test_spatial_tree_group_use_recursively_updates_model_membership(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
@@ -948,7 +1919,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertEqual(panel.model.enabled_point_placement_ids, ())
         self.assertFalse(panel.input_preview_button.isEnabled())
         self.assertIn("enable at least one", panel.status_label.text().lower())
-        panel.close()
+        _close_panel_without_prompt(panel)
 
     def test_tree_leaf_selection_reaches_real_backend_field_and_provenance(self):
         """Close the UI-to-saved-artifact loop on a non-BoR external body."""
@@ -1015,7 +1986,9 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 panel.surface_units.setCurrentIndex(
                     panel.surface_units.findData("meters")
                 )
-                panel.skin_tol.setValue(1.0e-8)
+                # This fixture intentionally predates certified feature manifests.
+                panel.validation_profile.setCurrentIndex(1)
+                panel.skin_tol.setValue(1.0e-5)  # millimeters = 1e-8 meters
                 panel.phase_tol.setValue(0.1)
                 panel.normal_tol.setValue(2.0)
                 panel._pull_values()
@@ -1121,7 +2094,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                     ["seal_keep"],
                 )
             finally:
-                panel.close()
+                _close_panel_without_prompt(panel)
 
     def test_spatial_tree_filter_matches_instance_dataset_and_response(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
@@ -1190,7 +2163,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertFalse(hardware.isExpanded())
         self.assertFalse(latch.isExpanded())
         self.assertFalse(seal.isExpanded())
-        panel.close()
+        _close_panel_without_prompt(panel)
 
     def test_copy_full_selection_keeps_large_trade_study_membership_exact(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
@@ -1223,7 +2196,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertIn("fastener_010", copied)
         self.assertNotIn("more", copied)
         self.assertIn("Copied the full", panel.status_label.text())
-        panel.close()
+        _close_panel_without_prompt(panel)
 
     def test_input_change_marks_a_current_preview_stale(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
@@ -1237,20 +2210,24 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("out of date", messages[0])
         self.assertIn("out of date", panel.status_label.text())
-        panel.close()
+        _close_panel_without_prompt(panel)
 
     def test_readiness_disables_alias_output_and_missing_mapped_response(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             base = root / "body.grim"
+            surface = root / "body.facet"
             points = root / "points.csv"
             response = root / "fastener.grim"
-            base.write_bytes(b"base response")
+            _write_minimal_base_grim(base, embedded_bor=True)
+            surface.write_text("0 0\n", encoding="utf-8")
             points.write_bytes(b"stable placement bytes")
             response.write_bytes(b"feature response")
 
             panel = FeatureAssemblyPanel(service=_FakeWorkflow())
             panel.base_picker.set_path(str(base))
+            panel.surface_picker.set_path(str(surface))
+            panel.expected_host_material.setText("PEC")
             panel.point_csv_picker.set_path(str(points))
             panel.output_picker.set_path(str(base))
             panel.model.values.point_locations_csv = str(points)
@@ -1274,7 +2251,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             self.assertFalse(panel.preview_button.isEnabled())
             self.assertFalse(panel.build_button.isEnabled())
             self.assertIn("existing .grim", panel.next_step_label.text())
-            panel.close()
+            _close_panel_without_prompt(panel)
 
     def test_loaded_catalog_selects_only_saved_grim_artifacts(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1366,7 +2343,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             self.assertIn(
                 "Save unsaved derived datasets first", panel.status_label.text()
             )
-            panel.close()
+            _close_panel_without_prompt(panel)
 
     def test_loaded_catalog_rejects_duplicate_stable_ids_atomically(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
@@ -1386,7 +2363,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             [entry.dataset_id for entry in panel.loaded_dataset_catalog()],
             ["one"],
         )
-        panel.close()
+        _close_panel_without_prompt(panel)
 
 
 if __name__ == "__main__":

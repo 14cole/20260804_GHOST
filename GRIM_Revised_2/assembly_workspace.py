@@ -70,8 +70,11 @@ BODY_RENDER_MODES = ("Solid", "Solid + edges", "Wireframe")
 
 NORMAL_VECTOR_COLOR = "#f472b6"
 ROLL_VECTOR_COLOR = "#c084fc"
+LINE_TANGENT_VECTOR_COLOR = "#67e8f9"
+LINE_BINORMAL_VECTOR_COLOR = "#818cf8"
 DEFAULT_ORIENTATION_VECTOR_LENGTH_M = 0.0254
 ORIENTATION_VECTOR_FRACTION = 0.07
+MAX_LINE_FRAME_ARROWS = 250
 
 
 def display_unit_spec(name: str) -> tuple[str, float]:
@@ -508,6 +511,144 @@ def _line_endpoint_orientation_overlays(
     }
 
 
+def _line_frame_orientation_overlays(
+    paths: tuple[np.ndarray, ...],
+    endpoint_normals: Any | None,
+    *,
+    max_frames: int = MAX_LINE_FRAME_ARROWS,
+) -> dict[str, Any]:
+    """Build display-only signed ``+t``/``+b`` frames along line paths.
+
+    ``+t`` follows increasing CSV ``segment_index``. With usable endpoint
+    normals it is projected into the local skin plane exactly as the line
+    expansion's frame construction does; ``+b = +t × +n``. A deterministic
+    cap prevents a finely segmented vehicle seam from flooding Matplotlib with
+    thousands of quiver arrows. Geometry and physics remain full-resolution.
+    """
+
+    cap = int(max_frames)
+    if cap < 1:
+        raise ValueError("max_frames must be a positive integer")
+    normal_candidates: tuple[Any, ...] | None = None
+    if endpoint_normals is not None:
+        if len(paths) == 1:
+            array = np.asarray(endpoint_normals, dtype=float)
+            if array.ndim == 3:
+                normal_candidates = (array,)
+            else:
+                try:
+                    normal_candidates = tuple(endpoint_normals)
+                except TypeError as exc:
+                    raise ValueError(
+                        "line endpoint normals must match the preview paths"
+                    ) from exc
+        else:
+            try:
+                normal_candidates = tuple(endpoint_normals)
+            except TypeError as exc:
+                raise ValueError(
+                    "line endpoint normals must match the preview paths"
+                ) from exc
+        if len(normal_candidates) != len(paths):
+            raise ValueError("line endpoint normals must match the preview paths")
+
+    tangent_origins: list[np.ndarray] = []
+    tangent_directions: list[np.ndarray] = []
+    binormal_origins: list[np.ndarray] = []
+    binormal_directions: list[np.ndarray] = []
+    for path_index, path in enumerate(paths):
+        starts = path[:-1]
+        ends = path[1:]
+        origins = 0.5 * (starts + ends)
+        chords = ends - starts
+        chord_lengths = np.linalg.norm(chords, axis=1)
+        chord_valid = chord_lengths > 1.0e-12
+        raw_tangents = np.zeros_like(chords)
+        raw_tangents[chord_valid] = (
+            chords[chord_valid] / chord_lengths[chord_valid, None]
+        )
+        tangents = np.array(raw_tangents, copy=True)
+        binormal_valid = np.zeros(len(chords), dtype=bool)
+        binormals = np.zeros_like(chords)
+        if normal_candidates is not None:
+            normals = np.asarray(normal_candidates[path_index], dtype=float)
+            expected = (len(path) - 1, 2, 3)
+            if normals.shape != expected:
+                raise ValueError(
+                    f"line endpoint normals {path_index} must have shape {expected}"
+                )
+            if not np.all(np.isfinite(normals)):
+                raise ValueError(
+                    f"line endpoint normals {path_index} contain a nonfinite vector"
+                )
+            midpoint_normals = normals[:, 0, :] + normals[:, 1, :]
+            normal_lengths = np.linalg.norm(midpoint_normals, axis=1)
+            normal_valid = normal_lengths > 1.0e-12
+            unit_normals = np.zeros_like(midpoint_normals)
+            unit_normals[normal_valid] = (
+                midpoint_normals[normal_valid]
+                / normal_lengths[normal_valid, None]
+            )
+            projected = raw_tangents - (
+                np.sum(raw_tangents * unit_normals, axis=1)[:, None]
+                * unit_normals
+            )
+            projected_lengths = np.linalg.norm(projected, axis=1)
+            frame_valid = chord_valid & normal_valid & (projected_lengths > 1.0e-12)
+            tangents[frame_valid] = (
+                projected[frame_valid] / projected_lengths[frame_valid, None]
+            )
+            binormals[frame_valid] = np.cross(
+                tangents[frame_valid], unit_normals[frame_valid]
+            )
+            binormal_lengths = np.linalg.norm(binormals, axis=1)
+            binormal_valid = frame_valid & (binormal_lengths > 1.0e-12)
+            binormals[binormal_valid] /= binormal_lengths[binormal_valid, None]
+        tangent_origins.append(origins[chord_valid])
+        tangent_directions.append(tangents[chord_valid])
+        if np.any(binormal_valid):
+            binormal_origins.append(origins[binormal_valid])
+            binormal_directions.append(binormals[binormal_valid])
+
+    def combine(values: list[np.ndarray]) -> np.ndarray:
+        return (
+            np.concatenate(values, axis=0)
+            if values
+            else np.empty((0, 3), dtype=float)
+        )
+
+    all_tangent_origins = combine(tangent_origins)
+    all_tangent_directions = combine(tangent_directions)
+    all_binormal_origins = combine(binormal_origins)
+    all_binormal_directions = combine(binormal_directions)
+    source_count = len(all_tangent_origins)
+
+    def sample_pair(
+        origins: np.ndarray, directions: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if len(origins) <= cap:
+            return origins, directions
+        indices = np.rint(
+            np.linspace(0, len(origins) - 1, cap, endpoint=True)
+        ).astype(int)
+        return origins[indices], directions[indices]
+
+    all_tangent_origins, all_tangent_directions = sample_pair(
+        all_tangent_origins, all_tangent_directions
+    )
+    all_binormal_origins, all_binormal_directions = sample_pair(
+        all_binormal_origins, all_binormal_directions
+    )
+    return {
+        "tangent_origins": all_tangent_origins,
+        "tangent_directions": all_tangent_directions,
+        "binormal_origins": all_binormal_origins,
+        "binormal_directions": all_binormal_directions,
+        "frame_source_count": source_count,
+        "frame_display_count": len(all_tangent_origins),
+    }
+
+
 @dataclass
 class AssemblySceneGroup:
     """One addressable render group in a common CAD/meter scene."""
@@ -838,11 +979,19 @@ class AssemblySceneModel:
         if not np.isfinite(length) or length <= 0.0:
             raise ValueError("orientation_length_m must be finite and positive")
         overlays = _line_endpoint_orientation_overlays(paths, endpoint_normals)
+        frames = _line_frame_orientation_overlays(paths, endpoint_normals)
         bounds_points = [points]
         origins = overlays["normal_origins"]
         directions = overlays["normal_directions"]
         if len(origins):
             bounds_points.extend((origins, origins + length * directions))
+        for prefix in ("tangent", "binormal"):
+            frame_origins = frames[f"{prefix}_origins"]
+            frame_directions = frames[f"{prefix}_directions"]
+            if len(frame_origins):
+                bounds_points.extend(
+                    (frame_origins, frame_origins + length * frame_directions)
+                )
         return self._store(
             AssemblySceneGroup(
                 key,
@@ -857,7 +1006,10 @@ class AssemblySceneModel:
                     "alpha": float(alpha),
                     "orientation_length_m": length,
                     "normal_color": NORMAL_VECTOR_COLOR,
+                    "tangent_color": LINE_TANGENT_VECTOR_COLOR,
+                    "binormal_color": LINE_BINORMAL_VECTOR_COLOR,
                     **overlays,
+                    **frames,
                 },
                 source_count=sum(max(0, len(path) - 1) for path in paths),
                 display_count=sum(max(0, len(path) - 1) for path in paths),
@@ -947,6 +1099,8 @@ if GUI_AVAILABLE:
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.model = model if model is not None else AssemblySceneModel()
             self._display_units = "Meters"
+            self._orientation_scale = 1.0
+            self._orientation_vectors_visible = True
             self._interaction_lod_enabled = True
             self._interaction_detail_caps: dict[str, int | None] = {}
             self._scene_update_depth = 0
@@ -1125,7 +1279,7 @@ if GUI_AVAILABLE:
         ) -> Any | None:
             """Draw one collection for a complete orientation-vector type."""
 
-            if len(origins) == 0:
+            if len(origins) == 0 or not self._orientation_vectors_visible:
                 return None
             return self.axes.quiver(
                 origins[:, 0],
@@ -1134,7 +1288,7 @@ if GUI_AVAILABLE:
                 directions[:, 0],
                 directions[:, 1],
                 directions[:, 2],
-                length=float(length_m),
+                length=float(length_m) * self._orientation_scale,
                 normalize=False,
                 color=color,
                 linewidth=1.15,
@@ -1254,11 +1408,82 @@ if GUI_AVAILABLE:
                 )
                 if normal_artist is not None:
                     artists.append(normal_artist)
+                tangent_artist = self._orientation_quiver(
+                    style.get("tangent_origins", np.empty((0, 3))),
+                    style.get("tangent_directions", np.empty((0, 3))),
+                    length_m=float(
+                        style.get(
+                            "orientation_length_m",
+                            DEFAULT_ORIENTATION_VECTOR_LENGTH_M,
+                        )
+                    ),
+                    color=style.get(
+                        "tangent_color", LINE_TANGENT_VECTOR_COLOR
+                    ),
+                    label=f"{group.label} path +t",
+                )
+                if tangent_artist is not None:
+                    artists.append(tangent_artist)
+                binormal_artist = self._orientation_quiver(
+                    style.get("binormal_origins", np.empty((0, 3))),
+                    style.get("binormal_directions", np.empty((0, 3))),
+                    length_m=float(
+                        style.get(
+                            "orientation_length_m",
+                            DEFAULT_ORIENTATION_VECTOR_LENGTH_M,
+                        )
+                    ),
+                    color=style.get(
+                        "binormal_color", LINE_BINORMAL_VECTOR_COLOR
+                    ),
+                    label=f"{group.label} signed +b",
+                )
+                if binormal_artist is not None:
+                    artists.append(binormal_artist)
             else:  # Defensive: models should never store an unknown kind.
                 raise ValueError(f"unsupported assembly scene kind {group.kind!r}")
             stored: Any = artists[0] if len(artists) == 1 else tuple(artists)
             self._set_artist_visible(stored, group.visible)
             self._artists[group.group_id] = stored
+
+        @property
+        def orientation_scale(self) -> float:
+            return self._orientation_scale
+
+        @property
+        def orientation_vectors_visible(self) -> bool:
+            return self._orientation_vectors_visible
+
+        def _refresh_orientation_artists(self) -> None:
+            self.begin_scene_updates()
+            try:
+                for group_id in self.model.group_ids:
+                    group = self.model.group(group_id)
+                    if group.kind in {"points", "lines"}:
+                        self._add_artist(group)
+                self._scene_draw_pending = True
+            finally:
+                self.end_scene_updates()
+
+        def set_orientation_scale(self, scale: float) -> None:
+            """Set display-only frame arrow scale without changing geometry."""
+
+            value = float(scale)
+            if not np.isfinite(value) or not 0.1 <= value <= 4.0:
+                raise ValueError("orientation scale must be between 0.1 and 4.0")
+            if value == self._orientation_scale:
+                return
+            self._orientation_scale = value
+            self._refresh_orientation_artists()
+
+        def set_orientation_vectors_visible(self, visible: bool) -> None:
+            """Show or hide all frame arrows while retaining points and paths."""
+
+            state = bool(visible)
+            if state == self._orientation_vectors_visible:
+                return
+            self._orientation_vectors_visible = state
+            self._refresh_orientation_artists()
 
         @property
         def display_units(self) -> str:
@@ -1563,14 +1788,16 @@ if GUI_AVAILABLE:
             self.btn_preview_layers = QPushButton("Preview layers")
             self.btn_preview_layers.setToolTip(
                 "Open the dataset tree, where Show boxes control body, point, "
-                "line, normal, and roll visibility without changing the RCS build."
+                "line, and frame visibility without changing the RCS build."
             )
             self.lbl_legend = QLabel(
                 '<span style="color:#94a3b8">\u25a0 Body</span>&nbsp;&nbsp;'
                 '<span style="color:#38bdf8">\u25cf Points</span>&nbsp;&nbsp;'
                 '<span style="color:#f59e0b">\u2501 Lines</span>&nbsp;&nbsp;'
                 '<span style="color:#f472b6">\u2197 Normals</span>&nbsp;&nbsp;'
-                '<span style="color:#c084fc">\u2197 Point +x (roll)</span>'
+                '<span style="color:#c084fc">\u2197 Point +x</span>&nbsp;&nbsp;'
+                '<span style="color:#67e8f9">\u2197 Line +t</span>&nbsp;&nbsp;'
+                '<span style="color:#818cf8">\u2197 Line +b</span>'
             )
             self.lbl_status = QLabel(
                 "Preview is empty. Choose an optional STL/facet or BoR body, then "
@@ -1658,6 +1885,29 @@ if GUI_AVAILABLE:
                 "then restores the selected detail on release."
             )
             detail_row.addWidget(self.chk_interaction_lod)
+
+            self.chk_orientation_frames = QCheckBox(
+                "Show orientation frames", self
+            )
+            self.chk_orientation_frames.setChecked(True)
+            self.chk_orientation_frames.setToolTip(
+                "Show display-only point +z/+x and line +n/+t/+b arrows. "
+                "For lines, +t follows increasing segment_index and +b = +t × +n."
+            )
+            detail_row.addWidget(self.chk_orientation_frames)
+            detail_row.addWidget(QLabel("Arrow size"))
+            self.sld_orientation_scale = QSlider(Qt.Horizontal, self)
+            self.sld_orientation_scale.setRange(25, 250)
+            self.sld_orientation_scale.setValue(100)
+            self.sld_orientation_scale.setTracking(False)
+            self.sld_orientation_scale.setFixedWidth(90)
+            self.sld_orientation_scale.setToolTip(
+                "Scale orientation arrows from 25% to 250%. This never changes "
+                "feature coordinates, frames, validation, or RCS."
+            )
+            self.lbl_orientation_scale = QLabel("100%")
+            detail_row.addWidget(self.sld_orientation_scale)
+            detail_row.addWidget(self.lbl_orientation_scale)
             detail_row.addStretch(1)
             outer.addLayout(detail_row)
 
@@ -1749,6 +1999,12 @@ if GUI_AVAILABLE:
             self.chk_interaction_lod.toggled.connect(
                 self.scene_canvas.set_interaction_lod_enabled
             )
+            self.chk_orientation_frames.toggled.connect(
+                self.scene_canvas.set_orientation_vectors_visible
+            )
+            self.sld_orientation_scale.valueChanged.connect(
+                self._apply_orientation_scale
+            )
             self._connect_tree_panel_signals()
             self._update_body_detail_label()
 
@@ -1767,6 +2023,11 @@ if GUI_AVAILABLE:
             units = self.cmb_display_units.itemData(int(index))
             self.scene_canvas.set_display_units(str(units))
             self._update_body_detail_label()
+
+        def _apply_orientation_scale(self, value: int) -> None:
+            percent = int(value)
+            self.lbl_orientation_scale.setText(f"{percent}%")
+            self.scene_canvas.set_orientation_scale(percent / 100.0)
 
         def _queue_body_opacity(self, value: int) -> None:
             self.lbl_body_opacity.setText(f"{int(value)}%")
@@ -1806,6 +2067,10 @@ if GUI_AVAILABLE:
                 for group_id in self._surface_group_ids()
             ]
             has_body = bool(surfaces)
+            has_features = any(
+                self.scene_model.group(group_id).kind in {"points", "lines"}
+                for group_id in self.scene_model.group_ids
+            )
             for control in (
                 self.cmb_body_render,
                 self.sld_body_opacity,
@@ -1813,6 +2078,9 @@ if GUI_AVAILABLE:
                 self.chk_interaction_lod,
             ):
                 control.setEnabled(has_body)
+            self.chk_orientation_frames.setEnabled(has_features)
+            self.sld_orientation_scale.setEnabled(has_features)
+            self.lbl_orientation_scale.setEnabled(has_features)
             unit_text = self.scene_canvas.display_units.lower()
             if not surfaces:
                 self.lbl_body_detail.setText(
@@ -2350,7 +2618,9 @@ if GUI_AVAILABLE:
                             f"{point_summary}; {line_summary}. Axes use the selected "
                             "display units; backend CAD geometry remains meters. "
                             "Magenta arrows show normalized outward normals; lavender "
-                            "point arrows show projected roll/local +x. "
+                            "point arrows show projected roll/local +x. Cyan line "
+                            "+t follows increasing segment_index; blue +b is the "
+                            "signed local across-line direction (+t × +n). "
                             "Drag to rotate and "
                             "scroll to zoom. Tree Show boxes change only this preview, "
                             "never the assembled RCS."

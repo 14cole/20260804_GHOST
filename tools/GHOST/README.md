@@ -57,8 +57,27 @@ See:
 
 The GRIM Assembly form and automation wrapper both call
 `Backend/feature_workflow.py`. `Backend/place_features.py` remains a thin
-settings-based wrapper for unattended work. The GUI does not reimplement
-placement, phase, expansion, or shadowing physics.
+settings-based wrapper for unattended work. It defaults to the Production
+profile: strict clean-body metadata, validated content-bound feature manifests,
+and declared host material/coating IDs. Legacy compatibility must be selected
+explicitly. A warning-bearing plan prints its sealed SHA-256 and requires that
+exact digest as the acknowledgment before execution, so a changed plan cannot
+reuse an old waiver. The GUI does not reimplement placement, phase, expansion,
+or shadowing physics.
+
+Create and check a reviewed feature-response sidecar with:
+
+```powershell
+py Backend\create_feature_manifest.py create --help
+py Backend\create_feature_manifest.py check --help
+py Backend\create_feature_manifest.py create-surface-binding --help
+py Backend\create_feature_manifest.py check-surface-binding --help
+```
+
+This is a team-attestation and integrity tool, not an electromagnetic
+certificate. See [FEATURE_VALIDATION_GUIDE.md](FEATURE_VALIDATION_GUIDE.md) for
+the exact manifest fields, headless settings, reduced-order limitations, and
+required independent full-wave evidence.
 
 Use `1c_build_deltas/subtract_datasets.py` for canonical OPN-FRD 2-D deltas.
 General CEM joins and coherent subtraction are under `CEM_Tools`.
