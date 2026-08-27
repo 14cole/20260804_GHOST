@@ -3853,7 +3853,7 @@ class RcsGrid:
             - each signal is one (azimuth, elevation) look;
             - the four polarizations VV/VH/HV/HH become the polarization axis;
             - the complex scattering samples become ``rcs`` (power = |c|**2);
-            - frequencies (stored in Hz) are presented in GHz.
+            - Xpatch frequencies are retained in their documented GHz unit.
         """
         import read_ss
 
@@ -3861,10 +3861,10 @@ class RcsGrid:
 
         az = np.round(np.asarray(data["az"], dtype=float), 4)
         el = np.round(np.asarray(data["el"], dtype=float), 4)
+        # MATLAB ssread/xpheaders document both uniform and discrete Xpatch
+        # frequency values in GHz. Do not use a magnitude heuristic here: a
+        # converter must preserve the source convention deterministically.
         freq = np.asarray(data["freq"], dtype=float)
-        # Xpatch stores frequency in Hz; present it as GHz (the grid's unit).
-        if freq.size and np.nanmedian(np.abs(freq)) >= 1.0e6:
-            freq = freq / 1.0e9
 
         n_sig = int(az.size)
         n_freq = int(freq.size)

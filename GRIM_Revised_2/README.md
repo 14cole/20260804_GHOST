@@ -337,6 +337,12 @@ shared loader accepts `.grim`, native flat `.csv`, SENTRi `.csv`/`.txt`, CST
 legacy `.ptm`, and Xpatch `.ss` files. Folder and headless loads use the same
 extension registry.
 
+Xpatch `.ss` imports retain the documented GHz frequency values and interpret
+each binary signal record as one angular look with frequency-varying
+VV/VH/HV/HH complex samples. Saving the imported dataset as `.grim` maps those
+records into GRIM's azimuth/elevation/frequency/polarization grid without
+transposing the physical axes or applying a frequency-magnitude heuristic.
+
 `RcsGrid.read_SENTRi()` (also exposed as `grim_headless.read_SENTRi()`) is the
 named CREATE-RF SENTRi entry point. It strictly recognizes the two schemas in
 the team's `READ_SENTRi.m`: compact MHz `pp/tt/pt/tp` columns and descriptive

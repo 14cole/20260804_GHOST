@@ -3,8 +3,10 @@ read_ss.py - standalone reader for Xpatch .ss signature files.
 
 Ported from the hand-transcribed MATLAB ssread.m / xpheaders.m in this project.
 READ ONLY (no write support). Pulls exactly what GRIM needs: the complex
-scattering data (VV/VH/HV/HH), the frequency axis, and the azimuth/elevation of
-each signal.
+scattering data (VV/VH/HV/HH), the frequency axis in GHz, and the
+azimuth/elevation of each signal. Polarization arrays use ``(signal,
+frequency)`` order internally; :meth:`RcsGrid.load_ss` maps those records into
+GRIM's ``(azimuth, elevation, frequency, polarization)`` grid.
 
 How it works -- the .ss format is self-framing. Every "signal" record starts
 with two big-endian int32s, nbytesb and nbytesd:

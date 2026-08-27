@@ -254,13 +254,44 @@ class TestSsParsing(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "collision.ss")
             build_ss(
-                path, 2, 4, 1, 9.0e9, 10.0e9,
+                path, 2, 4, 1, 9.0, 10.0,
                 dict(edge_diff=False, iqmatrix=False, ibspsave=1),
                 "incident",
                 sweep_values=[15.0, 15.0],
             )
             with self.assertRaisesRegex(ValueError, "angular coordinate collision"):
                 RcsGrid.load_ss(path)
+
+    def test_ss_to_grim_round_trip_preserves_ghz_axes_and_complex_samples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "source.ss")
+            build_ss(
+                source, 2, 3, 2, 9.0, 11.0,
+                dict(edge_diff=True, iqmatrix=True, ibspsave=3),
+                "incident",
+                sweep_values=[10.0, 20.0],
+                pre_frequency_padding=37,
+            )
+
+            converted = RcsGrid.load_ss(source)
+            np.testing.assert_allclose(converted.frequencies, [9.0, 10.0, 11.0])
+            np.testing.assert_allclose(converted.azimuths, [10.0, 20.0])
+            np.testing.assert_allclose(converted.elevations, [10.0, 20.0])
+            np.testing.assert_array_equal(converted.polarizations, ["VV", "VH", "HV", "HH"])
+            self.assertEqual(converted.units["frequency"], "GHz")
+            self.assertEqual(converted.linear_quantity(), "sigma_3d")
+
+            expected_first = np.asarray([10.0, 11.0, 12.0], dtype=np.complex64)
+            expected_second = expected_first + np.complex64(1j)
+            np.testing.assert_allclose(converted.rcs[0, 0, :, 0], expected_first)
+            np.testing.assert_allclose(converted.rcs[1, 1, :, 0], expected_second)
+
+            output = converted.save(os.path.join(tmp, "converted"))
+            restored = RcsGrid.load(output)
+            np.testing.assert_allclose(restored.frequencies, converted.frequencies)
+            np.testing.assert_array_equal(restored.polarizations, converted.polarizations)
+            np.testing.assert_allclose(restored.rcs, converted.rcs, equal_nan=True)
+            self.assertEqual(restored.units["frequency"], "GHz")
 
 
 if __name__ == "__main__":
