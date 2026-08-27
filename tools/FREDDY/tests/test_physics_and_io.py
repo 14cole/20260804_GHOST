@@ -201,6 +201,22 @@ class PhysicsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mix_anisotropic(e0, m0, e90, m90, 45.0)
 
+    def test_anisotropic_oblique_tm_fails_closed_without_eps_z(self) -> None:
+        table_0 = MaterialTable(
+            [1.0, 20.0], [2.0 - 0.1j, 2.0 - 0.1j], [1.0, 1.0]
+        )
+        table_90 = MaterialTable(
+            [1.0, 20.0], [4.0 - 0.2j, 4.0 - 0.2j], [1.0, 1.0]
+        )
+        layer = LoadedLayer(0.001, True, 0.0, table_0, table_90)
+
+        compute_angle_metrics(10.0, 30.0, [layer], "te")
+        compute_angle_metrics(10.0, 0.0, [layer], "tm")
+        with self.assertRaisesRegex(ValueError, "Oblique TM is not supported"):
+            compute_angle_metrics(10.0, 30.0, [layer], "tm")
+        with self.assertRaisesRegex(ValueError, "Oblique TM is not supported"):
+            compute_angle_metrics_many([9.0, 10.0], 30.0, [layer], "tm")
+
     def test_polarization_labels_are_unambiguous_with_legacy_aliases(self) -> None:
         self.assertEqual(normalize_wave_polarization("TE"), "te")
         self.assertEqual(normalize_wave_polarization("TM"), "tm")

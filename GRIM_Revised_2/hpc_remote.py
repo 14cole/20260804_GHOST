@@ -760,7 +760,7 @@ class HpcRemoteClient:
         """Return active/pending Slurm rows from ``squeue``."""
 
         normalized = _validate_job_ids(job_ids)
-        result = self.run_remote(
+        result = self._run_remote(
             (
                 "squeue",
                 "--noheader",
@@ -770,7 +770,18 @@ class HpcRemoteClient:
             ),
             timeout=timeout,
             operation="query Slurm queue",
+            check=False,
         )
+        if result.returncode != 0:
+            # A purged completed job commonly makes squeue exit 1. Treat that
+            # as the expected hand-off to sacct, not as a transport failure.
+            missing_job = (
+                not result.stdout.strip()
+                and "invalid job id" in result.stderr.casefold()
+            )
+            if missing_job:
+                return ()
+            raise CommandFailedError("query Slurm queue", result)
         return self._parse_status_rows(result.stdout, source="squeue")
 
     def query_sacct(
@@ -784,9 +795,10 @@ class HpcRemoteClient:
                 "sacct",
                 "--noheader",
                 "--parsable2",
+                "--array",
                 "--jobs",
                 ",".join(normalized),
-                "--format=JobIDRaw,State%32,JobName,Elapsed,ExitCode",
+                "--format=JobID,State%32,JobName,Elapsed,ExitCode",
             ),
             timeout=timeout,
             operation="query Slurm accounting",

@@ -254,8 +254,18 @@ def load_pattern_any(path: 'str', *, pol_map: 'Optional[Dict[str, str]]' = None,
     if ext == ".grim":
         try:
             amp = field_amplitude(grid, str(path))
-        except Exception:                     # noqa: BLE001  (not one of ours)
-            pass
+        except Exception as exc:              # legacy viewer file or bad convention
+            declared_quantity = str(
+                (getattr(grid, "units", {}) or {}).get("rcs_linear_quantity", "")
+            ).strip()
+            if declared_quantity:
+                raise ValueError(
+                    f"{path} declares rcs_linear_quantity={declared_quantity!r}, "
+                    "but its field-amplitude convention cannot be determined; "
+                    "refusing to guess sigma_3d normalization"
+                ) from exc
+            # Truly legacy, untagged viewer files predate convention metadata
+            # and historically mean sigma_3d. Preserve only that narrow path.
     pols = [str(p) for p in np.asarray(grid.polarizations).ravel()]
     if pol_map:
         pols = [pol_map.get(p, p) for p in pols]

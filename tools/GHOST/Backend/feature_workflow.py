@@ -2735,14 +2735,7 @@ def _line_applicability_metrics(
     ):
         raise ValueError("requested line frequencies must be positive and finite.")
     fixed_piece_length = placement.get("max_piece_length_m")
-    maximum_conical = 0.0
-    cut_ranges = []
-    for frequency in frequencies:
-        maximum_piece_length = (
-            0.05 * C0 / (float(frequency) * 1.0e9)
-            if fixed_piece_length is None
-            else float(fixed_piece_length)
-        )
+    def measure_frame(maximum_piece_length: float) -> tuple[float, float | None, float | None, int]:
         (
             _starts,
             _path_tangents,
@@ -2763,9 +2756,7 @@ def _line_applicability_metrics(
         # is evaluated (the fixed grazing taper drives it smoothly to zero).
         lit = normal_projection > 0.0
         if np.any(lit):
-            maximum_conical = max(
-                maximum_conical, float(np.max(conical[lit]))
-            )
+            lit_maximum_conical = float(np.max(conical[lit]))
             binormals = np.cross(frame_tangents, sampled_normals)
             binormal_projection = radar_directions @ binormals.T
             installed_phi = np.degrees(np.arctan2(
@@ -2778,6 +2769,29 @@ def _line_applicability_metrics(
             cut_min = None
             cut_max = None
             lit_count = 0
+            lit_maximum_conical = 0.0
+        return lit_maximum_conical, cut_min, cut_max, lit_count
+
+    maximum_conical = 0.0
+    cut_ranges = []
+    if fixed_piece_length is not None:
+        # A fixed installed piece grid is independent of frequency.  Measure it
+        # once and report the identical geometric support for every requested
+        # solve frequency.
+        maximum_conical, cut_min, cut_max, lit_count = measure_frame(
+            float(fixed_piece_length)
+        )
+        measurements = [(cut_min, cut_max, lit_count)] * len(frequencies)
+    else:
+        measurements = []
+        for frequency in frequencies:
+            measured_conical, cut_min, cut_max, lit_count = measure_frame(
+                0.05 * C0 / (float(frequency) * 1.0e9)
+            )
+            maximum_conical = max(maximum_conical, measured_conical)
+            measurements.append((cut_min, cut_max, lit_count))
+
+    for frequency, (cut_min, cut_max, lit_count) in zip(frequencies, measurements):
         cut_ranges.append({
             "frequency_ghz": float(frequency),
             "minimum_deg": cut_min,

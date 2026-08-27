@@ -9,7 +9,9 @@ import uuid
 
 import numpy as np
 
+from matplotlib import colormaps
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QByteArray, QMimeData, QTimer, Signal
 from PySide6.QtGui import QColor, QDrag, QKeySequence, QPixmap, QShortcut
@@ -78,6 +80,21 @@ BLUE_PALETTE = {
     "muted": "#94a3b8",
     "fg": "#dbeafe",
 }
+RAYTHEON_COLORMAP = "grim_raytheon"
+
+
+def _register_grim_colormaps() -> None:
+    """Register branded plot palettes once, including their reversed forms."""
+    raytheon = LinearSegmentedColormap.from_list(
+        RAYTHEON_COLORMAP,
+        ["#050b14", "#183b61", "#00a3e0", "#f4f7fa", "#c8102e"],
+    )
+    for cmap in (raytheon, raytheon.reversed(name=f"{RAYTHEON_COLORMAP}_r")):
+        if cmap.name not in colormaps:
+            colormaps.register(cmap)
+
+
+_register_grim_colormaps()
 SPLASH_DURATION_MS = 4000
 
 # Plot-operation buttons, per tab: (row1_specs, row2_specs). Each spec is
@@ -828,6 +845,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "blocked because they require curved-path complex interpolation "
             "and polarization-basis rotation."
         )
+        self.btn_wedge_to_conic.setToolTip(
+            "Convert a vertical-turntable/body-y-wedge acquisition into the "
+            "normal tilted-pylon conic grid. Requires a full revolution, at "
+            "least two measured wedge tilts, finite complex phase, and VV/HH "
+            "plus VH or HV unless zero cross-pol is explicitly assumed. "
+            "Unsupported side-aspect/elevation combinations remain NaN."
+        )
 
         dock_layout.addWidget(sec_datasets, 1)
         dock_layout.addWidget(sec_params)
@@ -1413,11 +1437,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(QLabel("Plot X Min"), row, 0)
         spin_plot_xmin = QDoubleSpinBox()
         spin_plot_xmin.setRange(-1e9, 1e9)
+        spin_plot_xmin.setDecimals(6)
         spin_plot_xmin.setValue(-180.0)
         settings_layout.addWidget(spin_plot_xmin, row, 1)
         settings_layout.addWidget(QLabel("Plot X Max"), row, 2)
         spin_plot_xmax = QDoubleSpinBox()
         spin_plot_xmax.setRange(-1e9, 1e9)
+        spin_plot_xmax.setDecimals(6)
         spin_plot_xmax.setValue(180.0)
         settings_layout.addWidget(spin_plot_xmax, row, 3)
         settings_layout.addWidget(QLabel("Plot X Step"), row, 4)
@@ -1432,11 +1458,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(QLabel("Plot Y Min"), row, 0)
         spin_plot_ymin = QDoubleSpinBox()
         spin_plot_ymin.setRange(-1e9, 1e9)
+        spin_plot_ymin.setDecimals(12)
         spin_plot_ymin.setValue(-80.0)
         settings_layout.addWidget(spin_plot_ymin, row, 1)
         settings_layout.addWidget(QLabel("Plot Y Max"), row, 2)
         spin_plot_ymax = QDoubleSpinBox()
         spin_plot_ymax.setRange(-1e9, 1e9)
+        spin_plot_ymax.setDecimals(12)
         spin_plot_ymax.setValue(0.0)
         settings_layout.addWidget(spin_plot_ymax, row, 3)
         settings_layout.addWidget(QLabel("Plot Y Step"), row, 4)
@@ -1451,11 +1479,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(QLabel(f"{z_label} Min"), row, 0)
         spin_plot_zmin = QDoubleSpinBox()
         spin_plot_zmin.setRange(-1e9, 1e9)
+        spin_plot_zmin.setDecimals(12)
         spin_plot_zmin.setValue(0.0)
         settings_layout.addWidget(spin_plot_zmin, row, 1)
         settings_layout.addWidget(QLabel(f"{z_label} Max"), row, 2)
         spin_plot_zmax = QDoubleSpinBox()
         spin_plot_zmax.setRange(-1e9, 1e9)
+        spin_plot_zmax.setDecimals(12)
         spin_plot_zmax.setValue(0.0)
         settings_layout.addWidget(spin_plot_zmax, row, 3)
         settings_layout.addWidget(QLabel(f"{z_label} Step"), row, 4)
@@ -1500,9 +1530,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
         settings_layout.addWidget(QLabel("Colormap"), row, 0)
         combo_colormap = QComboBox()
-        combo_colormap.addItems(
-            ["viridis", "plasma", "inferno", "magma", "cividis", "turbo"]
-        )
+        for name in ("viridis", "plasma", "inferno", "magma", "cividis", "turbo"):
+            combo_colormap.addItem(name, name)
+        combo_colormap.insertSeparator(combo_colormap.count())
+        for label, cmap_name in (
+            ("Colorful", "turbo"),
+            ("Light", "YlGnBu"),
+            ("Dark", "magma"),
+            ("Raytheon-inspired", RAYTHEON_COLORMAP),
+        ):
+            combo_colormap.addItem(label, cmap_name)
         settings_layout.addWidget(combo_colormap, row, 1)
         chk_colorbar = QCheckBox("Show Colorbar")
         chk_colorbar.setChecked(True)

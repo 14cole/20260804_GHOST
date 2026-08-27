@@ -1373,9 +1373,15 @@ def build_sbatch_script(
     """
 
     import shlex
+    from pathlib import PurePosixPath
 
-    run_dir = Path(run_dir)
-    script_path = Path(script_path)
+    run_dir_text = str(run_dir).replace("\\", "/")
+    script_path_text = str(script_path).replace("\\", "/")
+    for label, value in (("run_dir", run_dir_text), ("script_path", script_path_text)):
+        if any(char in value for char in ('"', "\r", "\n")):
+            raise ValueError(f"{label} contains characters unsafe for an sbatch script")
+    run_dir = PurePosixPath(run_dir_text)
+    script_path = PurePosixPath(script_path_text)
     array = f"0-{max(1, int(array_size)) - 1}"
     if array_throttle and int(array_throttle) > 0:
         array += f"%{int(array_throttle)}"
@@ -1387,8 +1393,8 @@ def build_sbatch_script(
         "#SBATCH --nodes=1",
         "#SBATCH --ntasks=1",
         f"#SBATCH --partition={partition}",
-        f"#SBATCH --output={run_dir}/logs/sub{submission_index}_%A_%a.out",
-        f"#SBATCH --error={run_dir}/logs/sub{submission_index}_%A_%a.err",
+        f'#SBATCH --output="{run_dir}/logs/sub{submission_index}_%A_%a.out"',
+        f'#SBATCH --error="{run_dir}/logs/sub{submission_index}_%A_%a.err"',
         # A requeued task re-joins the run and picks up whatever is unclaimed,
         # so preemption costs only the units that were in flight.
         "#SBATCH --requeue",

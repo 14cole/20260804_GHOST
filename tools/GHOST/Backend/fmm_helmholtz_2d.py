@@ -226,6 +226,16 @@ def _translation_matrix_H(k, d_vec, p):
     H_vals = _h2(idx.ravel(), k * rho).reshape(2*p+1, 2*p+1)
     return H_vals * np.exp(1j * idx * alpha)
 
+def _translation_matrix_L2L(k, d_vec, p):
+    """Build the J-based parent-to-child local translation matrix."""
+    rho = math.sqrt(d_vec[0]**2 + d_vec[1]**2)
+    if rho < 1e-15: return np.eye(2*p+1, dtype=np.complex128)
+    alpha = math.atan2(d_vec[1], d_vec[0])
+    ns = np.arange(-p, p+1)
+    idx = ns[None, :] - ns[:, None]  # m - n
+    J_vals = _jv(idx.ravel(), k * rho).reshape(2*p+1, 2*p+1)
+    return J_vals * np.exp(1j * idx * alpha)
+
 def _p2m(sources, strengths, center, k, p):
     d = sources - center; r = np.sqrt(d[:,0]**2 + d[:,1]**2); theta = np.arctan2(d[:,1], d[:,0])
     ns = np.arange(-p, p+1)
@@ -242,14 +252,7 @@ def _m2l(O_src, src_c, tgt_c, k, p):
     return T @ O_src
 
 def _l2l(L_parent, parent_c, child_c, k, p):
-    d = child_c - parent_c
-    rho = math.sqrt(d[0]**2 + d[1]**2)
-    if rho < 1e-15: return L_parent.copy()
-    alpha = math.atan2(d[1], d[0])
-    ns = np.arange(-p, p+1)
-    idx = ns[None, :] - ns[:, None]  # m - n
-    J_vals = _jv(idx.ravel(), k * rho).reshape(2*p+1, 2*p+1)
-    T = J_vals * np.exp(1j * idx * alpha)
+    T = _translation_matrix_L2L(k, child_c - parent_c, p)
     return T @ L_parent
 
 def _l2p_slp(L, targets, center, k, p):
@@ -353,6 +356,12 @@ class FMMOperator:
             diam = 2*self.tree.boxes[lboxes[0]].half_size if lboxes else 0
             self.p_level.append(_trunc_order(self.k, diam, n_digits, domain_diam=root_diam))
 
+        # The tree, wavenumber, expansion orders, and box offsets are immutable
+        # for the lifetime of this operator.  Cache translation matrices lazily
+        # so iterative solves build each distinct M2M/M2L/L2L matrix once rather
+        # than repeating the Bessel/Hankel work on every matvec.
+        self._translation_matrices = {"m2m": {}, "m2l": {}, "l2l": {}}
+
         # Precompute all source quadrature points per leaf.
         self._precompute_quad_points()
 
@@ -378,7 +387,7 @@ class FMMOperator:
 
         # Collect all unique near pairs, classify as special or regular.
         computed = set()
-        special = []     # self + touching -> Python recursive quadrature
+        special = []     # self + touching + close separated -> converged Python path
         regular = {}     # quadrature_order -> [(obs_idx, src_idx), ...]
         for leaf_id in self.tree.get_leaves():
             leaf = self.tree.boxes[leaf_id]
@@ -397,17 +406,30 @@ class FMMOperator:
                     else:
                         dist = float(np.linalg.norm(self.centers[oi] - self.centers[si]))
                         scale = max(self.lengths[oi], self.lengths[si], 1e-15)
-                        adapt_order, _ = _near_singular_scheme(dist, scale)
-                        q = max(self.nq_order, min(16, max(5, int(adapt_order))))
-                        regular.setdefault(q, []).append((oi, si))
+                        if dist / scale < 0.75:
+                            # Match the dense operator: a fixed tensor rule is
+                            # not converged for narrow, nearly parallel gaps.
+                            special.append((oi, si))
+                        else:
+                            adapt_order, _ = _near_singular_scheme(dist, scale)
+                            q = max(self.nq_order, min(16, max(5, int(adapt_order))))
+                            regular.setdefault(q, []).append((oi, si))
 
         # Special pairs: Python (self/touching need Duffy/recursive).
         for oi, si in special:
             obs = self.elements[oi]; src = self.elements[si]
             oids = np.array(obs.node_ids, dtype=int)
             sids = np.array(src.node_ids, dtype=int)
-            s_blk, k_blk = self._sk_near(obs, src, self.k, self.obs_nd,
-                                          self.nq_order, self.nq_order)
+            s_blk, k_blk = self._sk_near(
+                obs,
+                src,
+                self.k,
+                self.obs_nd,
+                self.nq_order,
+                self.nq_order,
+                compute_single_layer=not self.obs_nd,
+                compute_double_layer=self.obs_nd,
+            )
             blk = k_blk if self.obs_nd else s_blk
             # Broadcast 2x2 block into flat row/col/val triples.
             rr, cc = np.meshgrid(oids, sids, indexing='ij')
@@ -662,6 +684,23 @@ class FMMOperator:
         self._far_field_fmm(x, result)
         return result
 
+    def _translation_matrix(self, kind, d_vec, p):
+        d_vec = np.asarray(d_vec, dtype=float)
+        key = (int(p), float(d_vec[0]), float(d_vec[1]))
+        cache = self._translation_matrices[kind]
+        matrix = cache.get(key)
+        if matrix is None:
+            if kind == "m2m":
+                matrix = _translation_matrix_J(self.k, d_vec, p)
+            elif kind == "m2l":
+                matrix = _translation_matrix_H(self.k, d_vec, p)
+            elif kind == "l2l":
+                matrix = _translation_matrix_L2L(self.k, d_vec, p)
+            else:
+                raise ValueError(f"unknown FMM translation kind: {kind}")
+            cache[key] = matrix
+        return matrix
+
     def _far_field_fmm(self, x, result):
         tree = self.tree; boxes = tree.boxes; k = self.k
         if tree.n_levels < 2: return
@@ -701,7 +740,9 @@ class FMMOperator:
                     lo = max(-p_use, -pc); hi = min(p_use, pc)
                     O2[lo+p_use:hi+p_use+1] = O[lo+pc:hi+pc+1]
                     O = O2
-                O_sh = _m2m(O, box.center, boxes[pid].center, k, p_use)
+                O_sh = self._translation_matrix(
+                    "m2m", box.center - boxes[pid].center, p_use
+                ) @ O
                 if pid not in multipole:
                     multipole[pid] = np.zeros(2*p_p+1, dtype=np.complex128)
                 pp = (len(multipole[pid])-1)//2
@@ -723,7 +764,9 @@ class FMMOperator:
                         lo = max(-p_use, -ps); hi = min(p_use, ps)
                         O2[lo+p_use:hi+p_use+1] = O[lo+ps:hi+ps+1]
                         O = O2
-                    L_c = _m2l(O, boxes[sbid].center, box.center, k, p_use)
+                    L_c = self._translation_matrix(
+                        "m2l", box.center - boxes[sbid].center, p_use
+                    ) @ O
                     lo = max(-p_use, -p_lev); hi = min(p_use, p_lev)
                     L[lo+p_lev:hi+p_lev+1] += L_c[lo+p_use:hi+p_use+1]
                 local[bid] = L
@@ -741,7 +784,9 @@ class FMMOperator:
                     lo = max(-p_use, -pp); hi = min(p_use, pp)
                     Lp2[lo+p_use:hi+p_use+1] = Lp[lo+pp:hi+pp+1]
                     Lp = Lp2
-                Lsh = _l2l(Lp, boxes[box.parent].center, box.center, k, p_use)
+                Lsh = self._translation_matrix(
+                    "l2l", box.center - boxes[box.parent].center, p_use
+                ) @ Lp
                 if bid not in local:
                     local[bid] = np.zeros(2*pc+1, dtype=np.complex128)
                 lo = max(-p_use, -pc); hi = min(p_use, pc)

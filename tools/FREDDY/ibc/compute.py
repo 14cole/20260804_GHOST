@@ -861,6 +861,22 @@ def mix_anisotropic_many(
     )
 
 
+def validate_anisotropic_oblique_model(
+    layers: list[LoadedLayer], theta_deg: float, wave_pol: str
+) -> None:
+    """Refuse oblique TM when the available directional data omit eps_z."""
+    if (
+        str(wave_pol).strip().lower() == "tm"
+        and abs(float(theta_deg)) > 1e-12
+        and any(layer.anisotropic and not layer.is_sheet for layer in layers)
+    ):
+        raise ValueError(
+            "Oblique TM is not supported for anisotropic layers by the scalar "
+            "two-principal-axis model because out-of-plane permittivity is unknown. "
+            "Use normal incidence, TE, or a full tensor material formulation."
+        )
+
+
 def build_uncertainty_scales(cfg: UncertaintyConfig) -> list[tuple[float, float, float]]:
     if not cfg.enabled:
         return [(1.0, 1.0, 1.0)]
@@ -952,6 +968,7 @@ def prepare_layer_wave_terms_many(
     theta_deg = validate_incidence_angle(theta_deg)
     if wave_pol not in {"te", "tm"}:
         raise ValueError(f"Unsupported wave polarization: {wave_pol}")
+    validate_anisotropic_oblique_model(layers, theta_deg, wave_pol)
     if prepared_properties is not None and len(prepared_properties) != len(layers):
         raise ValueError("Prepared material properties do not match the layer stack.")
 
@@ -1486,6 +1503,7 @@ def compute_angle_metrics_many(
         }
     _validate_frequency_vector(f_ghz)
     theta_deg = validate_incidence_angle(theta_deg)
+    validate_anisotropic_oblique_model(layers, theta_deg, wave_pol)
 
     if not NUMPY_AVAILABLE:
         rows = [
@@ -1599,6 +1617,7 @@ def compute_angle_metrics(
 ) -> dict[str, float]:
     f_ghz = _validate_frequency_ghz(f_ghz)
     theta_deg = validate_incidence_angle(theta_deg)
+    validate_anisotropic_oblique_model(layers, theta_deg, wave_pol)
     z0 = ambient_wave_impedance(theta_deg, wave_pol)
 
     # Metal-backed reflection.

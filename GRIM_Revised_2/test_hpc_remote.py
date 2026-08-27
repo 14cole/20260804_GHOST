@@ -602,9 +602,10 @@ class SchedulerTests(unittest.TestCase):
             ],
         )
         self.assertIn(
-            "--format=JobIDRaw,State%32,JobName,Elapsed,ExitCode",
+            "--format=JobID,State%32,JobName,Elapsed,ExitCode",
             shlex.split(runner.calls[1][0][-1]),
         )
+        self.assertIn("--array", shlex.split(runner.calls[1][0][-1]))
 
     def test_query_jobs_uses_sacct_only_for_jobs_missing_from_queue(self) -> None:
         runner = FakeRunner(
@@ -666,6 +667,34 @@ class SchedulerTests(unittest.TestCase):
 
         self.assertEqual(statuses[0].job_id, "12")
         self.assertEqual(statuses[0].state, "FAILED")
+
+    def test_query_jobs_falls_back_to_sacct_after_squeue_purges_job(self) -> None:
+        runner = FakeRunner(
+            completed(
+                stderr="slurm_load_jobs error: Invalid job id specified\n",
+                returncode=1,
+            ),
+            completed(
+                "12_0|COMPLETED|grim|00:02|0:0\n"
+                "12_1|FAILED|grim|00:01|1:0\n"
+            ),
+        )
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        statuses = client.query_jobs(["12"])
+
+        self.assertEqual(statuses[0].job_id, "12")
+        self.assertEqual(statuses[0].state, "FAILED")
+        self.assertEqual(statuses[0].source, "sacct")
+
+    def test_squeue_does_not_hide_transport_or_authentication_failures(self) -> None:
+        runner = FakeRunner(
+            completed(stderr="Permission denied (publickey).\n", returncode=255)
+        )
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        with self.assertRaisesRegex(CommandFailedError, "Permission denied"):
+            client.query_squeue(["12"])
 
     def test_cancel_validates_ids_and_passes_each_as_a_quoted_token(self) -> None:
         runner = FakeRunner(completed())

@@ -41,7 +41,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from grim_dataset import C0, RcsGrid, canonical_angular_coordinate_system
+from grim_dataset import (
+    C0,
+    RcsGrid,
+    canonical_angular_coordinate_system,
+    wedge_to_conic_geometry_deg,
+)
 from grim_headless import (
     SUPPORTED_EXTENSIONS,
     is_supported_path,
@@ -254,23 +259,9 @@ def _sorted_polarization_values(values) -> list:
 
 
 def _wedge_to_conic_deg(phi_deg: np.ndarray, tau_deg: np.ndarray):
-    """Forward map: turntable angle φ + wedge tilt τ → conic (longitude, latitude).
+    """Compatibility wrapper around the tested dataset geometry kernel."""
 
-    Physical setup: vertical-axis turntable, target tilted by a foam wedge
-    with ridge along body-y (pitch wedge). LOS in body frame is
-        r̂_body = (cos τ cos φ, −sin φ, sin τ cos φ)
-    Conic output: φ' = atan2(r̂_y, r̂_x), θ' = arcsin(r̂_z).
-    """
-    phi = np.deg2rad(np.asarray(phi_deg, dtype=float))
-    tau = np.deg2rad(np.asarray(tau_deg, dtype=float))
-    ct, st = np.cos(tau), np.sin(tau)
-    cp, sp = np.cos(phi), np.sin(phi)
-    rx = ct * cp
-    ry = -sp
-    rz = np.clip(st * cp, -1.0, 1.0)
-    lat = np.arcsin(rz)
-    lon = np.arctan2(ry, rx)
-    return np.rad2deg(lon), np.rad2deg(lat)
+    return wedge_to_conic_geometry_deg(phi_deg, tau_deg)
 
 
 class AlignDialog(QDialog):
@@ -842,8 +833,7 @@ class ConicGCDialog(QDialog):
 
 
 class WedgeConicDialog(QDialog):
-    """Pick mode (relabel / re-grid) for converting a turntable+wedge dataset
-    to conic coordinates. Bounds are derived from the input dataset.
+    """Confirm the physical conventions for a wedge-to-conic re-grid.
 
     Geometry: vertical-axis turntable (axis = world-z, fixed), target tilted
     by a foam wedge with ridge along body-y (pitch wedge). The current
@@ -859,21 +849,22 @@ class WedgeConicDialog(QDialog):
 
         layout.addWidget(QLabel(
             "Input axes: azimuth = turntable angle φ, elevation = wedge tilt τ.\n"
-            "Output axes: azimuth = conic longitude φ', elevation = conic latitude θ'."
+            "Output axes: normal-range conic azimuth/elevation. The converter "
+            "uses the full complex Jones matrix, rotates V/H, and leaves "
+            "unsupported normal-range looks as NaN.\n\n"
+            "A single wedge tilt cannot produce a normal constant-elevation "
+            "azimuth sweep; two or more measured tilts are required."
         ))
 
-        mode_group = QGroupBox("Mode")
-        mode_layout = QVBoxLayout(mode_group)
-        self._radio_relabel = QRadioButton(
-            "Relabel (flatten to 1D scatter on φ' — preserves σ exactly, loses grid structure)"
+        self._chk_attest_axes = QCheckBox(
+            "I confirm azimuth is rotation about fixed world +z and elevation "
+            "is article pitch about body +y before turntable rotation."
         )
-        self._radio_regrid = QRadioButton(
-            "Re-grid (interpolate onto a uniform conic grid, bounds auto-derived)"
+        layout.addWidget(self._chk_attest_axes)
+        self._chk_cross_zero = QCheckBox(
+            "Assume missing VH/HV is exactly zero (only use when justified)."
         )
-        self._radio_regrid.setChecked(True)
-        mode_layout.addWidget(self._radio_relabel)
-        mode_layout.addWidget(self._radio_regrid)
-        layout.addWidget(mode_group)
+        layout.addWidget(self._chk_cross_zero)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -882,7 +873,9 @@ class WedgeConicDialog(QDialog):
 
     def get_params(self) -> dict:
         return {
-            "mode": "relabel" if self._radio_relabel.isChecked() else "regrid",
+            "mode": "regrid",
+            "attest_wedge_axes": self._chk_attest_axes.isChecked(),
+            "assume_missing_cross_pol_zero": self._chk_cross_zero.isChecked(),
         }
 
 
@@ -901,7 +894,7 @@ class ExportCsvDialog(QDialog):
         self._combo_scale.addItem("dB (dimensionless ratio)", "db")
         self._combo_scale.addItem("dBsm", "dbsm")
         self._combo_scale.addItem("dBke", "dbke")
-        self._combo_scale.addItem("Both (Linear + dBsm + dBke)", "both")
+        self._combo_scale.addItem("Both (Linear + dataset's physical dB unit)", "both")
         grid.addWidget(self._combo_scale, 0, 1)
 
         layout.addLayout(grid)
@@ -1109,11 +1102,20 @@ def _write_dataset_csv(
         raise ValueError(
             "CSV magnitude scale must be linear, db, dbsm, dbke, or both"
         )
-    is_ratio = dataset.linear_quantity() == "power_ratio"
+    quantity = dataset.linear_quantity()
+    is_ratio = quantity == "power_ratio"
     if is_ratio and scale not in {"linear", "db"}:
         raise ValueError("dimensionless power ratios can be exported only as Linear or dB")
     if not is_ratio and scale == "db":
         raise ValueError("dimensionless dB export is only valid for power-ratio datasets")
+    if quantity == "sigma_3d" and scale == "dbke":
+        raise ValueError("sigma_3d datasets cannot be labeled dBke; convert to sigma_2d first")
+    if quantity == "sigma_2d" and scale == "dbsm":
+        raise ValueError("sigma_2d datasets cannot be labeled dBsm; convert to sigma_3d first")
+    if quantity not in {"sigma_3d", "sigma_2d", "power_ratio"} and scale != "linear":
+        raise ValueError(
+            f"dataset quantity {quantity!r} has no supported logarithmic CSV unit"
+        )
     az = dataset.azimuths
     el = dataset.elevations
     fr = dataset.frequencies
@@ -1126,6 +1128,16 @@ def _write_dataset_csv(
     rcs_log_unit = _canonical_rcs_log_unit(
         (dataset.units or {}).get("rcs_log_unit", dataset.default_log_unit())
     )
+    expected_log_unit = {
+        "sigma_3d": "dBsm",
+        "sigma_2d": "dBke",
+        "power_ratio": "dB",
+    }.get(quantity)
+    if expected_log_unit is not None and rcs_log_unit != expected_log_unit:
+        raise ValueError(
+            f"dataset metadata is inconsistent: {quantity} requires "
+            f"rcs_log_unit={expected_log_unit}, not {rcs_log_unit}"
+        )
     angular_coordinate_system = dataset.angular_coordinate_system()
     great_circle_convention = (
         dataset.great_circle_coordinate_convention()
@@ -1148,9 +1160,11 @@ def _write_dataset_csv(
         header.append("magnitude_linear")
     if scale == "db":
         header.append("magnitude_db")
-    if scale in ("dbsm", "both"):
+    write_dbsm = scale == "dbsm" or (scale == "both" and quantity == "sigma_3d")
+    write_dbke = scale == "dbke" or (scale == "both" and quantity == "sigma_2d")
+    if write_dbsm:
         header.append("magnitude_dbsm")
-    if scale in ("dbke", "both"):
+    if write_dbke:
         header.append("magnitude_dbke")
     if include_phase:
         header.append("phase_deg")
@@ -1180,11 +1194,11 @@ def _write_dataset_csv(
                             row.append(_csv_number(mag, ".10g"))
                         if scale == "db":
                             row.append(_csv_number(dataset.linear_to_dbsm(mag), ".6f"))
-                        if scale in ("dbsm", "both"):
+                        if write_dbsm:
                             row.append(_csv_number(
                                 dataset.linear_to_dbsm(mag), ".6f"
                             ))
-                        if scale in ("dbke", "both"):
+                        if write_dbke:
                             row.append(_csv_number(
                                 dataset.linear_to_dbke(mag, fr_v), ".6f"
                             ))
@@ -1340,6 +1354,10 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
                         raise ValueError(f"line {line_no}: invalid magnitude_linear ({exc})") from exc
                     if not np.isfinite(lin_value):
                         lin_value = None
+                    elif lin_value < 0.0:
+                        raise ValueError(
+                            f"line {line_no}: magnitude_linear must be >= 0"
+                        )
             if lin_value is None and has_dbsm:
                 db_text = _cell(row, "magnitude_dbsm")
                 if db_text:
@@ -1380,7 +1398,7 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
             if pol_text not in pol_order:
                 pol_order.append(pol_text)
             records.append((
-                az, el, fr, pol_text, lin_value, dbke_value, phase_rad
+                az, el, fr, pol_text, lin_value, dbke_value, phase_rad, line_no
             ))
 
     if not records:
@@ -1445,7 +1463,8 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
     power = np.full(shape, np.nan, dtype=np.float32)
     phase = np.full(shape, np.nan, dtype=np.float32)
 
-    for az, el, fr, pol, lin_value, dbke_value, phase_rad in records:
+    seen_samples: dict[tuple[int, int, int, int], tuple[float, float, int]] = {}
+    for az, el, fr, pol, lin_value, dbke_value, phase_rad, line_no in records:
         if lin_value is None and dbke_value is not None:
             freq_hz = (
                 float(fr) * _FREQUENCY_UNIT_FACTORS[frequency_unit]
@@ -1457,12 +1476,32 @@ def _load_dataset_csv(path: str) -> "RcsGrid":
                 )
         if lin_value is None:
             lin_value = float("nan")
-        elif np.isfinite(lin_value):
-            lin_value = max(lin_value, 0.0)
         ai = az_index[float(az)]
         ei = el_index[float(el)]
         fi = fr_index[float(fr)]
         pi = pol_index[str(pol)]
+        idx = (ai, ei, fi, pi)
+        if idx in seen_samples:
+            prior_power, prior_phase, prior_line = seen_samples[idx]
+            same_power = bool(np.isclose(
+                lin_value, prior_power, rtol=1e-12, atol=0.0, equal_nan=True
+            ))
+            zero_power = same_power and lin_value == 0.0
+            same_phase = zero_power or (
+                (np.isnan(phase_rad) and np.isnan(prior_phase))
+                or (
+                    np.isfinite(phase_rad)
+                    and np.isfinite(prior_phase)
+                    and abs(np.angle(np.exp(1j * (phase_rad - prior_phase)))) <= 1e-12
+                )
+            )
+            if not (same_power and same_phase):
+                raise ValueError(
+                    f"line {line_no}: conflicting duplicate CSV sample; "
+                    f"first defined on line {prior_line}"
+                )
+            continue
+        seen_samples[idx] = (lin_value, phase_rad, line_no)
         power[ai, ei, fi, pi] = np.float32(lin_value)
         phase[ai, ei, fi, pi] = np.float32(phase_rad)
 
@@ -4407,7 +4446,14 @@ class DatasetOpsMixin:
         dlg = WedgeConicDialog(parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
-        mode = dlg.get_params()["mode"]
+        params = dlg.get_params()
+        mode = params["mode"]
+        if not params["attest_wedge_axes"]:
+            self.status.showMessage(
+                "Wedge→Conic cancelled: confirm the physical axis convention."
+            )
+            return
+        assume_cross_zero = params["assume_missing_cross_pol_zero"]
 
         produced = 0
         skipped: list[str] = []
@@ -4419,10 +4465,10 @@ class DatasetOpsMixin:
                     skipped.append(f"{name} (need ≥2 azimuths and ≥1 elevation)")
                     continue
 
-                if mode == "relabel":
-                    result, suffix, hist_extra = self._wedge_to_conic_relabel(dataset)
-                else:
-                    result, suffix, hist_extra = self._wedge_to_conic_regrid(dataset)
+                result, suffix, hist_extra = self._wedge_to_conic_regrid(
+                    dataset,
+                    assume_missing_cross_pol_zero=assume_cross_zero,
+                )
             except Exception as exc:
                 skipped.append(f"{name} ({exc})")
                 continue
@@ -4442,7 +4488,10 @@ class DatasetOpsMixin:
                     self._python_output_reference(output_id, output_name),
                     "wedge_to_conic",
                     [source_ref],
-                    kwargs={"mode": mode},
+                    kwargs={
+                        "mode": mode,
+                        "assume_missing_cross_pol_zero": assume_cross_zero,
+                    },
                     comment=f"Wedge-to-Conic {mode} for {name}",
                 )
             produced += 1
@@ -4456,134 +4505,25 @@ class DatasetOpsMixin:
         self.status.showMessage(msg)
 
     def _wedge_to_conic_relabel(self, dataset: "RcsGrid"):
-        """Flatten the (φ, τ) grid to a 1-D scatter on conic longitude φ'.
-
-        Each input sample carries a unique (φ', θ') pair. Sort by φ' and store
-        θ' per sample in history (the result isn't on a rectangular conic
-        grid; this preserves σ exactly without interpolation).
-        """
-        az_in = np.asarray(dataset.azimuths, dtype=float)
-        el_in = np.asarray(dataset.elevations, dtype=float)
-        n_az, n_el = az_in.size, el_in.size
-
-        phi_grid, tau_grid = np.meshgrid(az_in, el_in, indexing="ij")
-        new_lon, new_lat = _wedge_to_conic_deg(phi_grid.ravel(), tau_grid.ravel())
-
-        order = np.argsort(new_lon, kind="stable")
-        flat_power = dataset.rcs_power.reshape(
-            n_az * n_el, dataset.frequencies.size, dataset.polarizations.size
+        raise ValueError(
+            "Wedge samples have paired longitude/latitude coordinates and "
+            "cannot be represented by a one-dimensional RcsGrid relabel. Use "
+            "the physical re-grid with at least two measured wedge tilts."
         )
-        flat_phase = dataset.rcs_phase.reshape(
-            n_az * n_el, dataset.frequencies.size, dataset.polarizations.size
+
+    def _wedge_to_conic_regrid(
+        self,
+        dataset: "RcsGrid",
+        *,
+        assume_missing_cross_pol_zero=False,
+    ):
+        """Run the tested physical direction/Jones conversion."""
+
+        result = dataset.convert_wedge_to_conic(
+            attest_wedge_axes=True,
+            assume_missing_cross_pol_zero=assume_missing_cross_pol_zero,
         )
-        sorted_lon = new_lon[order]
-        sorted_lat = new_lat[order]
-        sorted_power = flat_power[order][:, None, :, :]
-        sorted_phase = flat_phase[order][:, None, :, :]
-
-        result = RcsGrid(
-            sorted_lon,
-            np.array([0.0]),
-            dataset.frequencies,
-            dataset.polarizations,
-            rcs=None,
-            rcs_power=sorted_power,
-            rcs_phase=sorted_phase,
-            rcs_domain=dataset.rcs_domain,
-            units=dict(dataset.units or {}),
-        )
-        lat_preview = ", ".join(f"{v:.3g}" for v in sorted_lat[: min(8, sorted_lat.size)])
-        if sorted_lat.size > 8:
-            lat_preview += f", … ({sorted_lat.size} total)"
-        hist_extra = (
-            f"; relabeled axis 0 to conic longitude φ' (sorted asc); "
-            f"θ' per sample = [{lat_preview}]; "
-            f"θ' ∈ [{sorted_lat.min():.3g}, {sorted_lat.max():.3g}]"
-        )
-        return result, "φ'-scatter", hist_extra
-
-    def _wedge_to_conic_regrid(self, dataset: "RcsGrid"):
-        """Interpolate the (φ, τ) scatter onto a uniform conic (φ', θ') grid.
-
-        The forward map (φ, τ) → (φ', θ') isn't bijective, so we can't
-        back-solve like the conic↔GC re-grid does. Instead, forward-map every
-        input sample, then use `LinearNDInterpolator` (Delaunay triangulation
-        on the scattered output points) to fill the output grid. Phase uses
-        nearest-neighbour (`NearestNDInterpolator`) for the same wrap reasons
-        as the conic↔GC path.
-
-        Output bounds: hull of the forward-mapped longitude/latitude (no user
-        inputs). Output sample count: input N_φ × N_τ.
-        """
-        from scipy.interpolate import LinearNDInterpolator
-
-        az_in = np.asarray(dataset.azimuths, dtype=float)
-        el_in = np.asarray(dataset.elevations, dtype=float)
-        n_az, n_el = az_in.size, el_in.size
-
-        phi_grid, tau_grid = np.meshgrid(az_in, el_in, indexing="ij")
-        lon_in, lat_in = _wedge_to_conic_deg(phi_grid.ravel(), tau_grid.ravel())
-
-        lon_lo, lon_hi = float(lon_in.min()), float(lon_in.max())
-        lat_lo, lat_hi = float(lat_in.min()), float(lat_in.max())
-        if not (lon_hi > lon_lo) or not (lat_hi > lat_lo):
-            raise ValueError("forward-mapped hull is degenerate")
-
-        n_lon = max(int(n_az), 2)
-        n_lat = max(int(n_el), 2)
-        lon_grid = np.linspace(lon_lo, lon_hi, n_lon, dtype=float)
-        lat_grid = np.linspace(lat_lo, lat_hi, n_lat, dtype=float)
-        lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid, indexing="ij")
-        query = np.column_stack([lon_mesh.ravel(), lat_mesh.ravel()])
-        points = np.column_stack([lon_in, lat_in])
-
-        n_f = dataset.frequencies.size
-        n_pol = dataset.polarizations.size
-        phase_complete = not np.any(
-            np.isfinite(dataset.rcs_power) & ~np.isfinite(dataset.rcs_phase)
-        )
-        if phase_complete:
-            flat_complex = dataset.rcs.reshape(n_az * n_el, n_f * n_pol)
-            real_out = LinearNDInterpolator(
-                points, flat_complex.real, fill_value=np.nan
-            )(query)
-            imag_out = LinearNDInterpolator(
-                points, flat_complex.imag, fill_value=np.nan
-            )(query)
-            complex_out = real_out + 1j * imag_out
-            power_out = np.abs(complex_out) ** 2
-            phase_out = np.angle(complex_out)
-        else:
-            flat_power = dataset.rcs_power.reshape(n_az * n_el, n_f * n_pol)
-            power_out = LinearNDInterpolator(
-                points, flat_power, fill_value=np.nan
-            )(query)
-            phase_out = np.full(power_out.shape, np.nan, dtype=power_out.dtype)
-
-        new_shape = (n_lon, n_lat, n_f, n_pol)
-        power_out = power_out.reshape(new_shape).astype(dataset.rcs_power.dtype)
-        phase_out = phase_out.reshape(new_shape).astype(dataset.rcs_phase.dtype)
-
-        result = RcsGrid(
-            lon_grid,
-            lat_grid,
-            dataset.frequencies,
-            dataset.polarizations,
-            rcs=None,
-            rcs_power=power_out,
-            rcs_phase=phase_out,
-            rcs_domain=dataset.rcs_domain,
-            units=dict(dataset.units or {}),
-        )
-        in_bounds = int(np.sum(np.isfinite(power_out[..., 0, 0])))
-        total = n_lon * n_lat
-        coverage = 100.0 * in_bounds / max(total, 1)
-        hist_extra = (
-            f"; output axes φ'=[{lon_grid[0]:g}..{lon_grid[-1]:g}/{lon_grid.size}], "
-            f"θ'=[{lat_grid[0]:g}..{lat_grid[-1]:g}/{lat_grid.size}]; "
-            f"coverage {coverage:.1f}%"
-        )
-        return result, "φ'×θ'", hist_extra
+        return result, "normal conic", "; inverse-mapped complex Jones re-grid"
 
     def _medianize_selected(self) -> None:
         datasets = self._selected_datasets_ordered(

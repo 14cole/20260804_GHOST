@@ -480,8 +480,9 @@ class PlotOpsMixin:
         self._style_plot_axes()
 
     def _clear_plot(self) -> None:
-        self.plot_ax.clear()
         self._remove_colorbar()
+        self.plot_figure.clear()
+        self.plot_ax = self.plot_figure.add_subplot(111)
         self.plot_axes = None
         self._style_plot_axes()
         self._apply_plot_limits()
@@ -938,7 +939,10 @@ class PlotOpsMixin:
         self._fit_y()
 
     def _effective_colormap(self) -> str:
-        name = self.combo_colormap.currentText()
+        name = str(
+            self.combo_colormap.currentData()
+            or self.combo_colormap.currentText()
+        )
         if self.chk_colormap_invert.isChecked():
             name = name + "_r"
         return name

@@ -477,7 +477,10 @@ def estimate_bor_resources(
     estimated_precision = "double"
     if kind == "conductor":
         from bor_solver import estimate_bor_table_gb
-        from bor_streaming import estimate_streaming_gb
+        from bor_streaming import (
+            BOR_STREAM_TILE_BUDGET_GB,
+            estimate_streaming_gb,
+        )
 
         has_ibc = any(chain.ibc_flag > 0 for chain in chains)
         formulation = "efie" if has_ibc else "cfie"
@@ -508,6 +511,10 @@ def estimate_bor_resources(
             held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
         estimated_assembly = "streaming" if use_streaming else "tables"
         estimated_precision = "single" if use_single else "double"
+        assembly_peak_gb = (
+            held_assembly_gb + BOR_STREAM_TILE_BUDGET_GB
+            if use_streaming else held_assembly_gb
+        )
     else:
         # Penetrable and multi-surface formulations currently retain dense
         # all-mode self/cross-operator tables.  Count every surface's two
@@ -518,10 +525,11 @@ def estimate_bor_resources(
             surface_layout, mode_cap
         )
         held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
+        assembly_peak_gb = held_assembly_gb
         estimated_assembly = "dense-all-mode-tables"
 
     peak_gb = estimate_bor_total_peak_gb(
-        held_assembly_gb,
+        assembly_peak_gb,
         dense_peak_gb,
     )
     return {
@@ -932,6 +940,12 @@ def solve_monostatic_rcs_bor(
         raise ValueError("At least one frequency is required.")
     if not elevations_deg:
         raise ValueError("At least one aspect angle is required.")
+    cfie_alpha = float(cfie_alpha)
+    if not math.isfinite(cfie_alpha) or not (0.0 < cfie_alpha <= 1.0):
+        raise ValueError(
+            "BoR CFIE alpha must be finite and satisfy 0 < alpha <= 1. "
+            "Use the explicit EFIE formulation API when pure EFIE is intended."
+        )
     frequencies = [float(f) for f in frequencies_ghz]
     if any((not math.isfinite(f)) or f <= 0.0 for f in frequencies):
         raise ValueError("Frequencies must be positive finite GHz values.")
@@ -1057,7 +1071,7 @@ def solve_monostatic_rcs_bor(
                     zs_elem[ei] = materials.get_impedance(
                         c.ibc_flag, freq_ghz, arc_s=float(elem_arc[ei]))
             has_ibc = bool(np.any(np.abs(zs_elem) > 0.0))
-            form = "efie" if (has_ibc or cfie_alpha <= 0.0) else "cfie"
+            form = "efie" if has_ibc else "cfie"
             out = solve_bor(pts, freq_hz, aspects, formulation=form,
                             cfie_alpha=cfie_alpha,
                             zs=zs_elem if has_ibc else None,

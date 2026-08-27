@@ -35,12 +35,14 @@ from grim_cut_dataset_mixin import (
     DATASET_ID_ROLE,
     ConicGCDialog,
     RangeCalibrationDialog,
+    WedgeConicDialog,
 )
 from assembly_tree import (
     AssemblyTreePanel,
     _TYPE_BRANCH,
     _TYPE_ROOT,
     _attach,
+    _branch_drop_would_create_cycle,
 )
 from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
 
@@ -157,6 +159,24 @@ class UnifiedGuiShellTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_friendly_colormap_presets_include_raytheon_and_reverse(self) -> None:
+        from matplotlib import colormaps
+
+        context = self.window._plot_contexts["plotting"]
+        expected = {
+            "Colorful": "turbo",
+            "Light": "YlGnBu",
+            "Dark": "magma",
+            "Raytheon-inspired": grim_cut_gui.RAYTHEON_COLORMAP,
+        }
+        for label, cmap_name in expected.items():
+            with self.subTest(label=label):
+                index = context.combo_colormap.findText(label)
+                self.assertGreaterEqual(index, 0)
+                self.assertEqual(context.combo_colormap.itemData(index), cmap_name)
+        self.assertIn(grim_cut_gui.RAYTHEON_COLORMAP, colormaps)
+        self.assertIn(grim_cut_gui.RAYTHEON_COLORMAP + "_r", colormaps)
+
     def setUp(self) -> None:
         self.feature_service = _FakeFeatureWorkflow()
         self.ghost_patch = mock.patch.object(
@@ -208,6 +228,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 "Python",
             ],
         )
+
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.ppt_workspace), 2
         )
@@ -248,6 +269,24 @@ class UnifiedGuiShellTest(unittest.TestCase):
             left_tabs.currentWidget(),
             self.window.assembly_workspace.place_features_tab,
         )
+
+    def test_clear_rebuilds_one_full_plot_axis_and_limits_keep_small_values(self):
+        self.window.plot_figure.clear()
+        first = self.window.plot_figure.add_subplot(121)
+        second = self.window.plot_figure.add_subplot(122)
+        self.window.plot_ax = first
+        self.window.plot_axes = [first, second]
+
+        self.window._clear_plot()
+
+        self.assertEqual(self.window.plot_figure.axes, [self.window.plot_ax])
+        self.assertIsNone(self.window.plot_axes)
+        self.assertGreaterEqual(self.window.spin_plot_ymin.decimals(), 12)
+        self.assertGreaterEqual(self.window.spin_plot_zmin.decimals(), 12)
+        self.window.spin_plot_ymin.setValue(4.0e-4)
+        self.window.spin_plot_zmin.setValue(1.0e-8)
+        self.assertAlmostEqual(self.window.spin_plot_ymin.value(), 4.0e-4)
+        self.assertAlmostEqual(self.window.spin_plot_zmin.value(), 1.0e-8)
 
     def test_dark_theme_explicitly_styles_logs_and_workspace_scroll_surfaces(self) -> None:
         qss = self.window.styleSheet().lower()
@@ -1131,6 +1170,21 @@ class UnifiedGuiShellTest(unittest.TestCase):
         )
         legacy_dialog.deleteLater()
 
+    def test_wedge_dialog_requires_axis_attestation_and_only_offers_regrid(self):
+        dialog = WedgeConicDialog()
+        self.assertEqual(dialog.get_params()["mode"], "regrid")
+        self.assertFalse(dialog.get_params()["attest_wedge_axes"])
+        self.assertFalse(
+            dialog.get_params()["assume_missing_cross_pol_zero"]
+        )
+        dialog._chk_attest_axes.setChecked(True)
+        dialog._chk_cross_zero.setChecked(True)
+        self.assertTrue(dialog.get_params()["attest_wedge_axes"])
+        self.assertTrue(
+            dialog.get_params()["assume_missing_cross_pol_zero"]
+        )
+        dialog.deleteLater()
+
     def test_feature_panel_preview_and_output_use_workspace_paths(self) -> None:
         plan = SimpleNamespace(
             surface_triangles_cad_m=np.asarray(
@@ -1394,6 +1448,17 @@ class UnifiedGuiShellTest(unittest.TestCase):
 
         self.assertEqual(self.window.table.rowCount(), start_rows + 1)
         self.assertEqual(self.window.table.item(start_rows, 0).text(), "Payload")
+
+    def test_internal_branch_drop_blocks_descendants_but_allows_move_up(self) -> None:
+        tree = self.window.assembly_workspace.assembly_tree_panel.tree
+        root = tree._make_node("Vehicle", _TYPE_ROOT, edit=False)
+        branch = tree._make_node("Payload", _TYPE_BRANCH, parent=root, edit=False)
+        child = tree._make_node("Sensors", _TYPE_BRANCH, parent=branch, edit=False)
+
+        self.assertTrue(_branch_drop_would_create_cycle(branch, child))
+        self.assertTrue(_branch_drop_would_create_cycle(branch, branch))
+        self.assertFalse(_branch_drop_would_create_cycle(branch, root))
+        self.assertFalse(_branch_drop_would_create_cycle(branch, None))
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ from scipy.linalg import get_lapack_funcs
 from scipy.spatial import cKDTree
 
 from bor_kernels import (
-    C0, ETA0, FFT_BUILD_BUDGET, Generatrix, cached_leggauss,
+    C0, ETA0, FFT_BUILD_BUDGET, N_XI_SAFETY_CAP, Generatrix, cached_leggauss,
     gauss_on_generatrix,
     modal_kernels_fft, modal_kernels_near, kernels_for_mode,
     mfie_kernels_fft, mfie_kernels_near, mfie_for_mode,
@@ -462,9 +462,10 @@ class BorPecSolver:
         # refined curve in the FFT table.  Their gap scales like h, which can
         # force an arbitrarily large azimuth grid even though the interaction
         # is local and is better integrated directly.  Keep two neighbours on
-        # each side in the near stencil.  Nonlocal re-entrant folds remain in
-        # the far-gap preflight and therefore still fail closed at the cap.
+        # each side in the near stencil. Geometrically sharp pairs beyond that
+        # stencil are added below using the FFT resolution threshold.
         self.near_span = 2
+        self._configure_near_pair_routing()
         self.Nn = self.gen.n_nodes
         self._build_point_matrices()
         # Compute the TRUE closest topologically-far same-surface pair before
@@ -595,14 +596,92 @@ class BorPecSolver:
             + self.g.T1.reshape(scale_shape) * values[elem + 1]
         )
 
-    def _far_gap(self) -> 'float':
-        """True minimum distance among topologically far element pairs.
+    def _configure_near_pair_routing(self) -> 'None':
+        """Route geometrically sharp pairs to direct modal integration.
 
-        Same/nearby elements use the refined near path.  Every pair with
-        topological separation greater than ``near_span`` remains in the FFT
-        far table, so its closest meridian gap must enter the sampling
-        requirement.  Checking only a local pair misses
-        opposite walls of re-entrant grooves and folds.
+        The topological stencil handles self/shared-node pairs.  In addition,
+        any disjoint segment pair whose meridian gap would by itself require
+        more than the bounded azimuthal FFT grid is treated by the existing
+        regular-cell near path.  This prevents smooth electrically large
+        bodies from acquiring an artificial radius ceiling while retaining
+        the cap for genuinely excessive global oscillation/mode bandwidth.
+        """
+
+        gen = self.gen
+        ne = gen.n_elems
+        sources = [set(range(max(0, e - self.near_span),
+                             min(ne, e + self.near_span + 1)))
+                   for e in range(ne)]
+        rho_max = float(np.max(gen.nodes[:, 0]))
+        # n_xi_for_pairs uses eight samples across the closest far-pair peak.
+        # A small margin keeps power-of-two rounding on the safe side.
+        direct_gap = (
+            1.001 * 8.0 * 2.0 * math.pi * rho_max / N_XI_SAFETY_CAP
+        )
+        scale = max(
+            float(np.ptp(gen.nodes[:, 0])),
+            float(np.ptp(gen.nodes[:, 1])),
+            1.0e-15,
+        )
+        touch_tol = max(1.0e-14, 1.0e-10 * scale)
+        mids = 0.5 * (gen.nodes[gen.elem_n0] + gen.nodes[gen.elem_n1])
+        half = 0.5 * gen.lengths
+        if ne and direct_gap > 0.0:
+            tree = cKDTree(mids)
+            max_half = float(np.max(half))
+            for e in range(ne):
+                radius = float(half[e]) + max_half + direct_gap
+                for candidate in tree.query_ball_point(mids[e], radius):
+                    f = int(candidate)
+                    if f <= e + self.near_span:
+                        continue
+                    lower = (
+                        float(np.linalg.norm(mids[e] - mids[f]))
+                        - float(half[e]) - float(half[f])
+                    )
+                    if lower > direct_gap:
+                        continue
+                    gap = _segment_distance(
+                        gen.nodes[gen.elem_n0[e]], gen.nodes[gen.elem_n1[e]],
+                        gen.nodes[gen.elem_n0[f]], gen.nodes[gen.elem_n1[f]],
+                    )
+                    if gap <= touch_tol:
+                        raise ValueError(
+                            "Nonadjacent BoR generatrix elements "
+                            f"{e} and {f} touch or overlap (gap {gap:.3g} m). "
+                            "This creates a non-manifold surface and is not "
+                            "supported."
+                        )
+                    if gap <= direct_gap:
+                        sources[e].add(f)
+                        sources[f].add(e)
+
+        self._near_sources_by_element = tuple(
+            tuple(sorted(values)) for values in sources
+        )
+        self._near_pair_count = sum(map(len, self._near_sources_by_element))
+        self._far_gap_pair = None
+        self._far_gap_cache = (
+            0.0 if self._near_pair_count == ne * ne else float(direct_gap)
+        )
+
+    def _near_gauss_mask(self) -> 'np.ndarray':
+        """Boolean point-pair mask corresponding to direct element pairs."""
+
+        ne = self.gen.n_elems
+        element_mask = np.zeros((ne, ne), dtype=bool)
+        for e, sources in enumerate(self._near_sources_by_element):
+            element_mask[e, list(sources)] = True
+        elem = self.g.elem.astype(int, copy=False)
+        return element_mask[elem[:, None], elem[None, :]]
+
+    def _far_gap(self) -> 'float':
+        """Conservative minimum distance among FFT-routed element pairs.
+
+        Same/nearby and geometrically sharp pairs use direct modal integration.
+        The routing threshold is a conservative lower bound for every pair
+        left in the FFT table and therefore safely sizes both table and
+        streaming assembly.
 
         A midpoint bounding-sphere tree finds every pair that could improve
         the initial local-neighbour bound, then exact segment distance makes
@@ -692,8 +771,7 @@ class BorPecSolver:
         RQ = g.rho[None, :]
         ZP = g.z[:, None]
         ZQ = g.z[None, :]
-        ediff = np.abs(g.elem[:, None].astype(int) - g.elem[None, :].astype(int))
-        near_mask = ediff <= self.near_span
+        near_mask = self._near_gauss_mask()
         n_xi = n_xi_for_pairs(self.k, float(np.max(g.rho)), m_max,
                               self._far_gap(), bracket=False)
         G = modal_kernels_fft(RP, ZP, RQ, ZQ, self.k, m_max, n_xi=n_xi)
@@ -764,9 +842,7 @@ class BorPecSolver:
         else:
             ne = self.gen.n_elems
             for e in range(ne):
-                for f in range(e - self.near_span, e + self.near_span + 1):
-                    if f < 0 or f >= ne:
-                        continue
+                for f in self._near_sources_by_element[e]:
                     (s, sp, w, rho_p, tr_p, tz_p, Tp, Dp,
                      rho_q, tr_q, tz_q, Tq, Dq, Gm) = self._near_pair_data(e, f, m_max)
                     Gn, Gcn, Gsn = kernels_for_mode(Gm, m)
@@ -811,8 +887,7 @@ class BorPecSolver:
         n_xi = n_xi_for_pairs(self.k, float(np.max(g.rho)), m_max,
                               self._far_gap(), bracket=True)
         K = mfie_kernels_fft(*args, self.k, m_max, n_xi=n_xi)
-        ediff = np.abs(g.elem[:, None].astype(int) - g.elem[None, :].astype(int))
-        near_flat = np.flatnonzero((ediff <= self.near_span).ravel())
+        near_flat = np.flatnonzero(self._near_gauss_mask().ravel())
         K = list(K)
         for i in range(4):
             Kf = K[i].reshape(-1, K[i].shape[-1])
@@ -904,9 +979,7 @@ class BorPecSolver:
         else:
             ne = self.gen.n_elems
             for e in range(ne):
-                for f in range(e - self.near_span, e + self.near_span + 1):
-                    if f < 0 or f >= ne:
-                        continue
+                for f in self._near_sources_by_element[e]:
                     w, rho_p, Tp, rho_q, Tq, Kn = self._near_mfie_data(e, f, m_max)
                     rr = rho_p * rho_q * w
                     rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
@@ -978,8 +1051,7 @@ class BorPecSolver:
                               self._far_gap(), bracket=True)
         K = ibc_kernels_fft(g.rho, g.z, g.trho, g.tz, g.rho, g.z, g.trho, g.tz,
                             self.k, m_max, n_xi=n_xi)
-        ediff = np.abs(g.elem[:, None].astype(int) - g.elem[None, :].astype(int))
-        near_flat = np.flatnonzero((ediff <= self.near_span).ravel())
+        near_flat = np.flatnonzero(self._near_gauss_mask().ravel())
         K = list(K)
         for i in range(4):
             Kf = K[i].reshape(-1, K[i].shape[-1])
@@ -1046,9 +1118,7 @@ class BorPecSolver:
         else:
             ne = self.gen.n_elems
             for e in range(ne):
-                for f in range(e - self.near_span, e + self.near_span + 1):
-                    if f < 0 or f >= ne:
-                        continue
+                for f in self._near_sources_by_element[e]:
                     welem = 1.0 if src_welem is None else src_welem[f]
                     if abs(welem) == 0.0:
                         continue
@@ -1366,9 +1436,8 @@ class BorPecSolver:
         ne = self.gen.n_elems
         pairs = [
             (e, f)
-            for e in range(ne)
-            for f in range(e - self.near_span, e + self.near_span + 1)
-            if 0 <= f < ne
+            for e, sources in enumerate(self._near_sources_by_element)
+            for f in sources
         ]
         streaming = self._stream is not None   # far blocks already built
         if not streaming and (efie or mfie or ibc):
@@ -2303,11 +2372,7 @@ def estimate_bor_operator_storage_gb(
         if ibc:
             retained += 4.0 * point_count ** 2 * signed_modes * table_bytes
 
-        pair_count = sum(
-            min(elem_count, elem + int(solver.near_span) + 1)
-            - max(0, elem - int(solver.near_span))
-            for elem in range(elem_count)
-        )
+        pair_count = int(solver._near_pair_count)
         enabled_kinds = int(efie) + int(mfie) + int(ibc)
         # Each prepared kind retains four block families, every signed mode,
         # and four nodal entries per directed near pair, plus three index maps.
@@ -2480,6 +2545,10 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
             f"Unsupported BoR formulation '{formulation}'. "
             "Use 'efie', 'cfie', or 'mfie'."
         )
+    if form == "cfie":
+        cfie_alpha = float(cfie_alpha)
+        if not np.isfinite(cfie_alpha) or not (0.0 < cfie_alpha <= 1.0):
+            raise ValueError("CFIE alpha must be finite and satisfy 0 < alpha <= 1.")
     points = _validate_solve_bor_generatrix(points, form)
     solver = BorPecSolver(points, freq_hz, gauss_order=gauss_order)
     k = solver.k
@@ -2516,7 +2585,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     n_dofs = 2 * solver.Nn
 
     # -- far-assembly strategy and memory budget --
-    from bor_streaming import estimate_streaming_gb
+    from bor_streaming import BOR_STREAM_TILE_BUDGET_GB, estimate_streaming_gb
     tp = str(table_precision).strip().lower()
     if tp not in ("auto", "single", "double"):
         raise ValueError("table_precision must be 'auto', 'single', or 'double'.")
@@ -2556,7 +2625,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     # Streamed blocks and detailed multi-surface estimates already include
     # bounded build workspace and must not receive this multiplier again.
     assembly_peak_gb = (
-        est_held
+        est_held + BOR_STREAM_TILE_BUDGET_GB
         if use_streaming
         else BOR_TABLE_BUILD_PEAK_FACTOR * est_held
     )
@@ -2571,7 +2640,8 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                 mm, efie=alpha > 0.0, mfie=alpha < 1.0,
                 ibc_zs_pt=zs_pt if (zs_pt is not None and alpha > 0.0) else None,
                 single_blocks=use_single, workers=workers,
-                mode_block=mode_block)
+                mode_block=mode_block,
+                tile_budget_gb=BOR_STREAM_TILE_BUDGET_GB)
         solver.prepare_operators(mm, efie=alpha > 0.0, mfie=alpha < 1.0,
                                  ibc=zs_pt is not None and alpha > 0.0,
                                  workers=workers)

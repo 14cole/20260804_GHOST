@@ -51,8 +51,8 @@ class TestIsarPhysics(unittest.TestCase):
         ones = np.ones((self.theta.size, self.frequency.size), dtype=np.complex64)
         _, q, v = isar_mode._pfa_regrid_cartesian(ones, self.theta, self.frequency)
         _, x_axis, y_axis = self._image(ones, theta=q, frequency=v)
-        x0 = float(x_axis[np.abs(x_axis - 2.0).argmin()])
-        y0 = float(y_axis[np.abs(y_axis - 3.0).argmin()])
+        x0 = float(x_axis[np.abs(x_axis - 2.13).argmin()])
+        y0 = float(y_axis[np.abs(y_axis - 3.07).argmin()])
         phase_history = np.exp(
             -1j * 4.0 * np.pi / C0 * self.frequency[None, :]
             * (x0 * np.sin(self.theta[:, None]) + y0 * np.cos(self.theta[:, None]))
@@ -74,6 +74,26 @@ class TestIsarPhysics(unittest.TestCase):
         fast_concentration = float(np.max(np.abs(fast_image)) ** 2 / np.sum(np.abs(fast_image) ** 2))
         self.assertGreater(accurate_concentration, 0.85)
         self.assertGreater(accurate_concentration, 10.0 * fast_concentration)
+
+    def test_cartesian_pfa_axis_preserves_true_u_spacing(self):
+        ones = np.ones((self.theta.size, self.frequency.size), dtype=np.complex64)
+        _, axis_q, v = isar_mode._pfa_regrid_cartesian(
+            ones, self.theta, self.frequency
+        )
+        fc = float(np.mean(self.frequency))
+        psi = self.theta - float(np.mean(self.theta))
+        ratio_min = float(self.frequency[0] / fc)
+        raw_q = np.linspace(
+            ratio_min * np.sin(psi[0]),
+            ratio_min * np.sin(psi[-1]),
+            self.theta.size,
+        )
+        np.testing.assert_allclose(
+            float(np.mean(v) * np.mean(np.diff(axis_q))),
+            float(fc * np.mean(np.diff(raw_q))),
+            rtol=2.0e-15,
+            atol=0.0,
+        )
 
     def test_elevation_projects_horizontal_image_axes(self):
         samples = np.ones((self.theta.size, self.frequency.size), dtype=np.complex64)

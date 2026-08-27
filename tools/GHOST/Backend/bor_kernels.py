@@ -152,11 +152,12 @@ def gauss_on_generatrix(gen: 'Generatrix', order: 'int' = 4) -> 'GaussData':
 # costs O(pairs * n_xi * intermediates) and has OOM-killed whole validation
 # batteries.  Chunking is exact -- results are bit-identical to one-shot.
 FFT_BUILD_BUDGET = 256e6
+N_XI_SAFETY_CAP = 8192
 
 
 def n_xi_for_pairs(k, rho_max: 'float', m_max: 'int', d_min: 'float' = 0.0,
                    bracket: 'bool' = False, pts_per_peak: 'float' = 8.0,
-                   cap: 'int' = 8192) -> 'int':
+                   cap: 'int' = N_XI_SAFETY_CAP) -> 'int':
     """Azimuthal FFT grid size that resolves BOTH the modal/oscillation
     content (the original criterion) AND the sharpest pair integrand.
 
@@ -189,9 +190,11 @@ def n_xi_for_pairs(k, rho_max: 'float', m_max: 'int', d_min: 'float' = 0.0,
             f"{required} samples but the safety cap is {int(cap)}"
             f"{gap_note} (rho_max {rho_max:.6g} m, |k| {abs(k):.6g} 1/m, "
             f"m_max {int(m_max)}). The previous capped result would be "
-            "under-resolved. Reduce frequency/mode count, refine or revise "
-            "a close-fold geometry so the interaction can be treated as "
-            "near, or raise the internal cap only after checking memory."
+            "under-resolved. Reduce frequency/mode count, route the closest "
+            "pair through direct near integration or revise a close-fold "
+            "geometry, or raise the internal cap only after checking memory. "
+            "Do not refine solely to address this error: refinement usually "
+            "shrinks the far-pair gap and increases the sample requirement."
         )
     return required
 

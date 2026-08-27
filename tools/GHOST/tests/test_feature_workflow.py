@@ -1457,9 +1457,15 @@ class ApplicabilityGeometryTests(unittest.TestCase):
             "max_piece_length_m": 0.1,
         }
         look = np.asarray([[0.0, 0.0, 1.0]])
-        metrics = feature_workflow._line_applicability_metrics(
-            placement, look, requested_frequencies_ghz=[1.0, 10.0]
-        )
+        with mock.patch.object(
+            feature_workflow,
+            "prepare_perimeter_frame",
+            wraps=feature_workflow.prepare_perimeter_frame,
+        ) as prepare:
+            metrics = feature_workflow._line_applicability_metrics(
+                placement, look, requested_frequencies_ghz=[1.0, 10.0]
+            )
+        self.assertEqual(prepare.call_count, 1)
         self.assertAlmostEqual(
             metrics["estimated_min_along_line_normal_turn_radius_m"],
             1.0,

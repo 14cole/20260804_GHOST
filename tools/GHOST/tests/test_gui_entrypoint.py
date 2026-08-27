@@ -64,6 +64,24 @@ class TestGuiEntrypoint(unittest.TestCase):
         finally:
             workspace.close()
 
+    def test_geometry_edit_marks_last_tab_result_stale_and_blocks_export(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            solver.last_result = {"samples": []}
+            solver.last_solve_context = {"uses_geometry_tab": True}
+            solver._last_result_stale = False
+            solver._sync_export_state()
+            self.assertTrue(solver.btn_export.isEnabled())
+
+            workspace.geometry_tab.dirty_changed.emit(True)
+
+            self.assertTrue(solver._last_result_stale)
+            self.assertFalse(solver.btn_export.isEnabled())
+            self.assertIn("Stale", solver.btn_export.text())
+        finally:
+            workspace.close()
+
     def test_workspace_forwards_typed_freddy_artifact_to_geometry(self):
         workspace = GhostWorkspace()
         try:

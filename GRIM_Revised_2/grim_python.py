@@ -777,74 +777,25 @@ def medianize_azimuth(dataset: RcsGrid, *, window_degrees: float, slide_degrees:
     )
 
 
-def _wedge_coordinates(phi_degrees, tau_degrees):
-    phi = np.deg2rad(np.asarray(phi_degrees, dtype=float))
-    tau = np.deg2rad(np.asarray(tau_degrees, dtype=float))
-    x = np.cos(tau) * np.cos(phi)
-    y = -np.sin(phi)
-    z = np.clip(np.sin(tau) * np.cos(phi), -1.0, 1.0)
-    longitude = np.rad2deg(np.arctan2(y, x))
-    latitude = np.rad2deg(np.arcsin(z))
-    return longitude, latitude
-
-
-def wedge_to_conic(dataset: RcsGrid, *, mode: str = "relabel") -> RcsGrid:
-    """Replay the GUI Wedge-to-Conic relabel or scattered regrid."""
+def wedge_to_conic(
+    dataset: RcsGrid,
+    *,
+    mode: str = "regrid",
+    assume_missing_cross_pol_zero: bool = False,
+) -> RcsGrid:
+    """Replay the GUI's physical wedge-to-normal-conic conversion."""
 
     mode_key = str(mode).strip().lower()
-    azimuth = np.asarray(dataset.azimuths, dtype=float)
-    elevation = np.asarray(dataset.elevations, dtype=float)
-    phi, tau = np.meshgrid(azimuth, elevation, indexing="ij")
-    longitude, latitude = _wedge_coordinates(phi.ravel(), tau.ravel())
-    n_az, n_el = azimuth.size, elevation.size
     if mode_key == "relabel":
-        order = np.argsort(longitude, kind="stable")
-        power = dataset.rcs_power.reshape(n_az * n_el, *dataset.rcs_power.shape[2:])
-        phase = dataset.rcs_phase.reshape(n_az * n_el, *dataset.rcs_phase.shape[2:])
-        return RcsGrid(
-            longitude[order],
-            np.asarray([0.0]),
-            dataset.frequencies,
-            dataset.polarizations,
-            rcs=None,
-            rcs_power=power[order, None, ...],
-            rcs_phase=phase[order, None, ...],
-            rcs_domain=dataset.rcs_domain,
-            units=dict(dataset.units or {}),
+        raise ValueError(
+            "Wedge relabel is not physically representable as a rectangular "
+            "RcsGrid; use mode='regrid'."
         )
     if mode_key != "regrid":
-        raise ValueError("mode must be 'relabel' or 'regrid'")
-    from scipy.interpolate import LinearNDInterpolator
-
-    lon_axis = np.linspace(float(longitude.min()), float(longitude.max()), max(n_az, 2))
-    lat_axis = np.linspace(float(latitude.min()), float(latitude.max()), max(n_el, 2))
-    lon_mesh, lat_mesh = np.meshgrid(lon_axis, lat_axis, indexing="ij")
-    points = np.column_stack((longitude, latitude))
-    query = np.column_stack((lon_mesh.ravel(), lat_mesh.ravel()))
-    tail = dataset.rcs_power.shape[2:]
-    phase_complete = not np.any(np.isfinite(dataset.rcs_power) & ~np.isfinite(dataset.rcs_phase))
-    if phase_complete:
-        values = dataset.rcs.reshape(n_az * n_el, -1)
-        real = LinearNDInterpolator(points, values.real, fill_value=np.nan)(query)
-        imag = LinearNDInterpolator(points, values.imag, fill_value=np.nan)(query)
-        complex_values = real + 1j * imag
-        power = np.abs(complex_values) ** 2
-        phase = np.angle(complex_values)
-    else:
-        values = dataset.rcs_power.reshape(n_az * n_el, -1)
-        power = LinearNDInterpolator(points, values, fill_value=np.nan)(query)
-        phase = np.full_like(power, np.nan)
-    shape = (lon_axis.size, lat_axis.size) + tail
-    return RcsGrid(
-        lon_axis,
-        lat_axis,
-        dataset.frequencies,
-        dataset.polarizations,
-        rcs=None,
-        rcs_power=power.reshape(shape),
-        rcs_phase=phase.reshape(shape),
-        rcs_domain=dataset.rcs_domain,
-        units=dict(dataset.units or {}),
+        raise ValueError("mode must be 'regrid'")
+    return dataset.convert_wedge_to_conic(
+        attest_wedge_axes=True,
+        assume_missing_cross_pol_zero=assume_missing_cross_pol_zero,
     )
 
 

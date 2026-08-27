@@ -208,6 +208,35 @@ class TestCsvExport(unittest.TestCase):
                     float(loaded.rcs_power.ravel()[0]), 1.0, places=5
                 )
 
+    def test_export_refuses_log_units_that_mislabel_physical_quantity(self):
+        sigma_3d = RcsGrid(
+            [0.0], [0.0], [3.0], ["VV"],
+            rcs_power=np.ones((1, 1, 1, 1)),
+            units={
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be labeled dBke"):
+            _write_dataset_csv(sigma_3d, self.path, scale="dbke")
+
+        sigma_2d = RcsGrid(
+            [0.0], [0.0], [3.0], ["VV"],
+            rcs_power=np.ones((1, 1, 1, 1)),
+            units={
+                "frequency": "GHz",
+                "rcs_log_unit": "dBke",
+                "rcs_linear_quantity": "sigma_2d",
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be labeled dBsm"):
+            _write_dataset_csv(sigma_2d, self.path, scale="dbsm")
+        _write_dataset_csv(sigma_2d, self.path, scale="both")
+        row = self._rows()[0]
+        self.assertIn("magnitude_dbke", row)
+        self.assertNotIn("magnitude_dbsm", row)
+
     def test_legacy_csv_without_unit_column_is_still_supported(self):
         with open(self.path, "w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)

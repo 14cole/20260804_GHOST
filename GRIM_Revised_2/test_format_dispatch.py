@@ -86,6 +86,29 @@ class DatasetFormatDispatchTest(unittest.TestCase):
         )
         self.assertEqual(grid.angular_frame_orientation_deg(), (12.5, -1.0))
 
+    def test_headless_flat_csv_rejects_negative_and_conflicting_duplicates(self) -> None:
+        header = [
+            "azimuth", "elevation", "frequency", "frequency_unit",
+            "polarization", "rcs_log_unit", "magnitude_linear", "phase_deg",
+        ]
+        cases = {
+            "negative": [[0.0, 0.0, 10.0, "GHz", "VV", "dBsm", -1.0, 0.0]],
+            "duplicate": [
+                [0.0, 0.0, 10.0, "GHz", "VV", "dBsm", 1.0, 0.0],
+                [0.0, 0.0, 10.0, "GHz", "VV", "dBsm", 2.0, 0.0],
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, rows in cases.items():
+                with self.subTest(name=name):
+                    path = os.path.join(tmp, f"{name}.csv")
+                    with open(path, "w", newline="", encoding="utf-8") as stream:
+                        writer = csv.writer(stream)
+                        writer.writerow(header)
+                        writer.writerows(rows)
+                    with self.assertRaises(ValueError):
+                        load_flat_csv(path)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

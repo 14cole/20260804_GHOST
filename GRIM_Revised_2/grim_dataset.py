@@ -18,6 +18,166 @@ C0 = 299_792_458.0
 GRIM_GC_CONVENTION = "grim_gc_v1"
 LEGACY_PTM_GC_CONVENTION = "legacy_ptm_unspecified"
 _PTM_GRIM_GC_MARKER = "GRIM_GC_V1"
+WEDGE_TURNTABLE_CONVENTION = "grim_vertical_turntable_body_y_pitch_v1"
+CONIC_VH_BASIS_CONVENTION = "grim_conic_spherical_vh_v1"
+
+
+def wedge_to_conic_geometry_deg(phi_deg, tau_deg):
+    """Map vertical-turntable/body-wedge coordinates to conic directions.
+
+    ``phi`` is rotation about the fixed world ``+z`` turntable axis. ``tau``
+    is a body pitch about body ``+y`` applied before that rotation, so the
+    body-to-world attitude is ``Rz(phi) @ Ry(tau)``.  The returned longitude
+    and latitude describe the same world line of sight in body coordinates.
+    """
+
+    phi = np.deg2rad(np.asarray(phi_deg, dtype=float))
+    tau = np.deg2rad(np.asarray(tau_deg, dtype=float))
+    phi, tau = np.broadcast_arrays(phi, tau)
+    direction = np.stack(
+        (
+            np.cos(tau) * np.cos(phi),
+            -np.sin(phi),
+            np.sin(tau) * np.cos(phi),
+        ),
+        axis=-1,
+    )
+    longitude = np.arctan2(direction[..., 1], direction[..., 0])
+    latitude = np.arcsin(np.clip(direction[..., 2], -1.0, 1.0))
+    return np.rad2deg(longitude), np.rad2deg(latitude)
+
+
+def conic_to_wedge_geometry_deg(longitude_deg, latitude_deg):
+    """Inverse of :func:`wedge_to_conic_geometry_deg` for |tau| <= 90 deg."""
+
+    longitude = np.deg2rad(np.asarray(longitude_deg, dtype=float))
+    latitude = np.deg2rad(np.asarray(latitude_deg, dtype=float))
+    longitude, latitude = np.broadcast_arrays(longitude, latitude)
+    x = np.cos(latitude) * np.cos(longitude)
+    y = np.cos(latitude) * np.sin(longitude)
+    z = np.sin(latitude)
+    sin_phi = np.clip(-y, -1.0, 1.0)
+    cos_phi_magnitude = np.sqrt(np.maximum(0.0, 1.0 - sin_phi * sin_phi))
+    # cos(tau) is nonnegative on the supported wedge interval, so x fixes the
+    # branch of cos(phi). At x=0 choose the + branch; tau then correctly tends
+    # to +/-90 degrees for non-equatorial side looks.
+    cos_phi = np.where(x < 0.0, -cos_phi_magnitude, cos_phi_magnitude)
+    phi = np.arctan2(sin_phi, cos_phi)
+    branch = np.where(cos_phi < 0.0, -1.0, 1.0)
+    tau = np.arctan2(branch * z, branch * x)
+    return np.rad2deg(phi), np.rad2deg(tau)
+
+
+def wedge_to_conic_basis_change(phi_deg, tau_deg):
+    """Return old-basis coordinates of the conic ``(V,H)`` basis.
+
+    If ``S_w`` is a monostatic Jones matrix in the range's vertical/horizontal
+    basis for the vertical-turntable wedge setup, the normal conic-range
+    matrix is ``C.T @ S_w @ C``.  The last two axes of the result are ordered
+    old ``(V,H)`` by new ``(V,H)``.
+    """
+
+    phi = np.deg2rad(np.asarray(phi_deg, dtype=float))
+    tau = np.deg2rad(np.asarray(tau_deg, dtype=float))
+    phi, tau = np.broadcast_arrays(phi, tau)
+    longitude_deg, latitude_deg = wedge_to_conic_geometry_deg(
+        np.rad2deg(phi), np.rad2deg(tau)
+    )
+    longitude = np.deg2rad(longitude_deg)
+    latitude = np.deg2rad(latitude_deg)
+
+    wedge_v = np.stack(
+        (-np.sin(tau), np.zeros_like(tau), np.cos(tau)), axis=-1
+    )
+    wedge_h = np.stack(
+        (
+            np.cos(tau) * np.sin(phi),
+            np.cos(phi),
+            np.sin(tau) * np.sin(phi),
+        ),
+        axis=-1,
+    )
+    conic_v = np.stack(
+        (
+            -np.sin(latitude) * np.cos(longitude),
+            -np.sin(latitude) * np.sin(longitude),
+            np.cos(latitude),
+        ),
+        axis=-1,
+    )
+    conic_h = np.stack(
+        (-np.sin(longitude), np.cos(longitude), np.zeros_like(longitude)),
+        axis=-1,
+    )
+    old_basis = np.stack((wedge_v, wedge_h), axis=-2)
+    new_basis = np.stack((conic_v, conic_h), axis=-2)
+    return np.einsum("...ia,...ja->...ij", old_basis, new_basis)
+
+
+def rotate_wedge_jones_to_conic(jones, phi_deg, tau_deg):
+    """Rotate monostatic Jones matrices from wedge-range to conic V/H."""
+
+    matrix = np.asarray(jones)
+    if matrix.shape[-2:] != (2, 2):
+        raise ValueError("Jones data must end with a 2x2 (receive, transmit) matrix")
+    change = wedge_to_conic_basis_change(phi_deg, tau_deg)
+    return np.einsum("...ia,...ij,...jb->...ab", change, matrix, change)
+
+
+def _jones_from_polarization_channels(
+    field, polarizations, *, assume_missing_cross_pol_zero=False
+):
+    """Build ``[..., receive(V,H), transmit(V,H)]`` from named channels."""
+
+    labels = [str(value).strip().upper() for value in polarizations]
+    if len(set(labels)) != len(labels):
+        raise ValueError("Wedge-to-Conic requires unique polarization labels")
+    unsupported = sorted(set(labels) - {"VV", "VH", "HV", "HH"})
+    if unsupported:
+        raise ValueError(
+            "Wedge-to-Conic Jones rotation supports VV/VH/HV/HH labels only; got "
+            + ", ".join(unsupported)
+        )
+    index = {label: position for position, label in enumerate(labels)}
+    if "VV" not in index or "HH" not in index:
+        raise ValueError(
+            "Wedge-to-Conic Jones rotation requires both VV and HH channels"
+        )
+    values = np.asarray(field)
+    matrix = np.empty(values.shape[:-1] + (2, 2), dtype=values.dtype)
+    matrix[..., 0, 0] = values[..., index["VV"]]
+    matrix[..., 1, 1] = values[..., index["HH"]]
+    if "VH" in index and "HV" in index:
+        matrix[..., 0, 1] = values[..., index["VH"]]
+        matrix[..., 1, 0] = values[..., index["HV"]]
+        cross_note = "measured VH and HV"
+    elif "VH" in index:
+        matrix[..., 0, 1] = values[..., index["VH"]]
+        matrix[..., 1, 0] = values[..., index["VH"]]
+        cross_note = "monostatic reciprocity: HV=VH"
+    elif "HV" in index:
+        matrix[..., 1, 0] = values[..., index["HV"]]
+        matrix[..., 0, 1] = values[..., index["HV"]]
+        cross_note = "monostatic reciprocity: VH=HV"
+    elif assume_missing_cross_pol_zero:
+        matrix[..., 0, 1] = 0.0
+        matrix[..., 1, 0] = 0.0
+        cross_note = "explicit assumption: missing VH=HV=0"
+    else:
+        raise ValueError(
+            "Wedge-to-Conic changes the V/H basis and cannot rotate VV/HH "
+            "alone. Supply VH or HV (monostatic reciprocity supplies the "
+            "other channel), or explicitly assume missing cross-pol is zero."
+        )
+    return matrix, labels, cross_note
+
+
+def _polarization_channels_from_jones(matrix, labels):
+    channel = {"VV": (0, 0), "VH": (0, 1), "HV": (1, 0), "HH": (1, 1)}
+    return np.stack(
+        [matrix[..., channel[label][0], channel[label][1]] for label in labels],
+        axis=-1,
+    )
 
 
 def _ptm_configuration_has_grim_gc_marker(value):
@@ -749,6 +909,214 @@ class RcsGrid:
             "unspecified": LEGACY_PTM_GC_CONVENTION,
         }
         return aliases.get(text, text)
+
+    def convert_wedge_to_conic(
+        self,
+        *,
+        attest_wedge_axes=False,
+        assume_missing_cross_pol_zero=False,
+    ):
+        """Convert a vertical-turntable/body-wedge acquisition to conic V/H.
+
+        This produces the normal-range grid for a pylon/article assembly that
+        is tilted together and then rotated.  Direction queries are inverse-
+        mapped into the measured ``(turntable phi, body wedge tau)`` grid,
+        interpolated as a full complex Jones matrix, and congruence-rotated
+        into the conic spherical V/H basis. Unsupported parts of the normal
+        conic grid remain NaN; they are never extrapolated.
+
+        A single wedge tilt is only a curved one-dimensional cut and cannot
+        determine a constant-elevation normal azimuth cut, so at least two
+        measured wedge tilts and a complete turntable revolution are required.
+        """
+
+        source_system = self.angular_coordinate_system()
+        if source_system == "great_circle":
+            raise ValueError(
+                "Wedge-to-Conic requires turntable-angle/wedge-tilt axes, not "
+                "a great-circle dataset"
+            )
+        if source_system != "wedge_turntable" and not attest_wedge_axes:
+            raise ValueError(
+                "The source is not tagged wedge_turntable. Explicitly attest "
+                "that azimuth is fixed-world-z turntable angle phi and "
+                "elevation is body-y wedge pitch tau."
+            )
+
+        az_unit = self._canonical_unit(
+            (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
+        )
+        el_unit = self._canonical_unit(
+            (self.units or {}).get("elevation"), _ANGLE_UNITS, "deg"
+        )
+        if az_unit not in {"deg", "rad"} or el_unit not in {"deg", "rad"}:
+            raise ValueError(
+                "Wedge-to-Conic requires degree or radian angle axes; got "
+                f"azimuth={az_unit!r}, elevation={el_unit!r}"
+            )
+        phi = np.asarray(self.azimuths, dtype=float)
+        tau = np.asarray(self.elevations, dtype=float)
+        if phi.size < 4 or not np.all(np.isfinite(phi)):
+            raise ValueError(
+                "Wedge-to-Conic requires at least four finite turntable angles"
+            )
+        if tau.size < 2 or not np.all(np.isfinite(tau)):
+            raise ValueError(
+                "One fixed wedge tilt traces a curved cut and cannot be "
+                "converted into a normal constant-elevation azimuth sweep. "
+                "Supply at least two measured wedge tilts."
+            )
+        phi_deg = np.rad2deg(phi) if az_unit == "rad" else phi
+        tau_deg = np.rad2deg(tau) if el_unit == "rad" else tau
+        if np.any(np.abs(tau_deg) >= 90.0 - 1.0e-9):
+            raise ValueError(
+                "Wedge-to-Conic requires body wedge tilts strictly between "
+                "-90 and +90 degrees"
+            )
+
+        wrapped_phi = np.mod(phi_deg + 180.0, 360.0) - 180.0
+        wrapped_phi[np.abs(wrapped_phi) <= 1.0e-12] = 0.0
+        phi_order = np.argsort(wrapped_phi, kind="stable")
+        wrapped_phi = wrapped_phi[phi_order]
+        if np.any(np.diff(wrapped_phi) <= 1.0e-9):
+            raise ValueError(
+                "Wedge turntable axis contains duplicate or seam-alias angles"
+            )
+        circular_gaps = np.diff(
+            np.concatenate((wrapped_phi, [wrapped_phi[0] + 360.0]))
+        )
+        typical_gap = float(np.median(circular_gaps))
+        if (
+            not np.isfinite(typical_gap)
+            or typical_gap <= 0.0
+            or float(np.max(circular_gaps)) > 2.5 * typical_gap + 1.0e-7
+        ):
+            raise ValueError(
+                "Wedge-to-Conic normal-azimuth conversion requires a complete "
+                "turntable revolution without a large unmeasured angular gap"
+            )
+
+        tau_order = np.argsort(tau_deg, kind="stable")
+        tau_sorted = tau_deg[tau_order]
+        if np.any(np.diff(tau_sorted) <= 1.0e-9):
+            raise ValueError("Wedge tilt axis contains duplicate coordinates")
+        if np.any(
+            np.isfinite(self.rcs_power) & ~np.isfinite(self.rcs_phase)
+        ):
+            raise ValueError(
+                "Wedge-to-Conic Jones rotation requires finite phase for every "
+                "finite polarization sample; power-only data cannot be rotated"
+            )
+
+        source_field = np.asarray(self.rcs)[phi_order, ...][:, tau_order, ...]
+        source_jones, labels, cross_note = _jones_from_polarization_channels(
+            source_field,
+            self.polarizations,
+            assume_missing_cross_pol_zero=assume_missing_cross_pol_zero,
+        )
+
+        # Periodic interpolation in measured wedge coordinates.  The first
+        # turntable slice is repeated at +360; no unmeasured sector is bridged
+        # because the complete-revolution gate above has already passed.
+        from scipy.interpolate import RegularGridInterpolator
+
+        phi_interp = np.concatenate((wrapped_phi, [wrapped_phi[0] + 360.0]))
+        jones_interp = np.concatenate(
+            (source_jones, source_jones[:1, ...]), axis=0
+        )
+        interpolator = RegularGridInterpolator(
+            (phi_interp, tau_sorted),
+            jones_interp,
+            method="linear",
+            bounds_error=False,
+            fill_value=np.nan,
+        )
+
+        target_lon = np.mod(-wrapped_phi + 180.0, 360.0) - 180.0
+        target_lon[np.abs(target_lon) <= 1.0e-12] = 0.0
+        target_lon = np.sort(target_lon, kind="stable")
+        target_lat = np.array(tau_sorted, copy=True)
+        lon_mesh, lat_mesh = np.meshgrid(target_lon, target_lat, indexing="ij")
+        query_phi, query_tau = conic_to_wedge_geometry_deg(lon_mesh, lat_mesh)
+        query_phi = (
+            np.mod(query_phi - wrapped_phi[0], 360.0) + wrapped_phi[0]
+        )
+        query = np.column_stack((query_phi.ravel(), query_tau.ravel()))
+        wedge_jones = interpolator(query)
+        change = wedge_to_conic_basis_change(query[:, 0], query[:, 1])
+        conic_jones = np.einsum(
+            "qia,qfij,qjb->qfab", change, wedge_jones, change
+        )
+        conic_channels = _polarization_channels_from_jones(
+            conic_jones, labels
+        )
+        output_shape = (
+            target_lon.size,
+            target_lat.size,
+            self.frequencies.size,
+            self.polarizations.size,
+        )
+        conic_channels = conic_channels.reshape(output_shape)
+
+        converted_units = copy.deepcopy(self.units or {})
+        converted_units["angular_coordinate_system"] = "conic"
+        converted_units["polarization_basis"] = CONIC_VH_BASIS_CONVENTION
+        converted_units.pop("wedge_coordinate_convention", None)
+        output_lon = np.deg2rad(target_lon) if az_unit == "rad" else target_lon
+        output_lat = np.deg2rad(target_lat) if el_unit == "rad" else target_lat
+
+        converted_extra = {}
+        original_shape = tuple(self.rcs_power.shape)
+        stale = {
+            "solver_metadata_json",
+            "production_mesh_certification_json",
+            "source_body_mesh_certification_json",
+            "requested_radar_grid_json",
+            "rcs_amp_real",
+            "rcs_amp_imag",
+        }
+        for key, value in (self.extra or {}).items():
+            if key in stale:
+                continue
+            array = np.asarray(value)
+            if array.ndim >= 4 and tuple(array.shape[:4]) == original_shape:
+                continue
+            converted_extra[key] = copy.deepcopy(value)
+        converted_extra.update(
+            {
+                "source_angular_coordinate_system": "wedge_turntable",
+                "wedge_coordinate_convention": WEDGE_TURNTABLE_CONVENTION,
+                "polarization_basis": CONIC_VH_BASIS_CONVENTION,
+                "wedge_to_conic_cross_pol_treatment": cross_note,
+            }
+        )
+        geometric_supported = (
+            (query_tau >= tau_sorted[0] - 1.0e-9)
+            & (query_tau <= tau_sorted[-1] + 1.0e-9)
+        )
+        coverage = 100.0 * float(np.count_nonzero(geometric_supported)) / float(
+            geometric_supported.size
+        )
+        history_entry = (
+            "Wedge->Conic physical regrid: inverse direction map; complex "
+            f"Jones C^T*S*C rotation ({cross_note}); no extrapolation; "
+            f"normal-grid geometric coverage {coverage:.1f}%"
+        )
+        history = (
+            f"{self.history}\n{history_entry}" if self.history else history_entry
+        )
+        return RcsGrid(
+            output_lon,
+            output_lat,
+            self.frequencies,
+            self.polarizations,
+            rcs=conic_channels,
+            rcs_domain=self.rcs_domain,
+            source_path=self.source_path,
+            history=history,
+            units=converted_units,
+            extra=converted_extra,
+        )
 
     def convert_equatorial_conic_gc(
         self,
@@ -2609,6 +2977,15 @@ class RcsGrid:
         hi_target_idx = self._indices_for_axis_values(az_merged, az_hi, tol=tol)
         if lo_target_idx is None or hi_target_idx is None:
             raise ValueError("failed to align azimuth bins during elevation combine")
+        if (
+            len(lo_target_idx) != az_lo.size
+            or len(hi_target_idx) != az_hi.size
+        ):
+            raise ValueError(
+                "cannot combine elevation cuts: the input azimuth axis contains "
+                f"coordinates closer than the matching tolerance ({tol:g}); "
+                "deduplicate the azimuth axis or use a smaller tolerance"
+            )
 
         lo_power = self.rcs_power[:, lo_idx, :, :]
         lo_phase = self.rcs_phase[:, lo_idx, :, :]
@@ -2703,6 +3080,19 @@ class RcsGrid:
             p_idx = cls._indices_for_axis_values(p_union, grid.polarizations, tol=0.0)
             if az_idx is None or el_idx is None or f_idx is None or p_idx is None:
                 raise ValueError("failed to align a dataset during join")
+            for axis_name, indices, source_axis, axis_tol in (
+                ("azimuth", az_idx, grid.azimuths, tol),
+                ("elevation", el_idx, grid.elevations, tol),
+                ("frequency", f_idx, grid.frequencies, tol),
+                ("polarization", p_idx, grid.polarizations, 0.0),
+            ):
+                if len(indices) != np.asarray(source_axis).size:
+                    raise ValueError(
+                        f"cannot join: an input {axis_name} axis contains "
+                        "coordinates that collapse within the matching "
+                        f"tolerance ({axis_tol:g}); deduplicate that axis or "
+                        "use a smaller tolerance"
+                    )
             # Keep source dtypes as views. NumPy promotes only the bounded block
             # expressions below; casting an entire lower-precision grid here
             # would reintroduce two input-sized peak allocations.
@@ -3234,6 +3624,18 @@ class RcsGrid:
                 for tag in ("rcs_domain", "power_domain"):
                     if tag in self.extra:
                         payload[tag] = self.extra[tag]
+                object_keys = [
+                    str(key)
+                    for key, value in payload.items()
+                    if np.asarray(value).dtype.hasobject
+                ]
+                if object_keys:
+                    raise ValueError(
+                        "cannot save a pickle-free .grim archive because metadata "
+                        "contains object-typed value(s): "
+                        + ", ".join(sorted(object_keys))
+                        + ". Convert those values to numeric/string arrays or JSON text."
+                    )
                 np.savez(f, **payload)
                 f.flush()
                 os.fsync(f.fileno())
@@ -3290,10 +3692,17 @@ class RcsGrid:
                 if isinstance(raw_units, str) and raw_units:
                     try:
                         units = json.loads(raw_units)
-                    except json.JSONDecodeError:
-                        units = {}
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            f"{path} contains corrupt units metadata; refusing to "
+                            "guess frequency, RCS, or angular conventions"
+                        ) from exc
                 elif isinstance(raw_units, dict):
                     units = raw_units
+                if not isinstance(units, dict):
+                    raise ValueError(
+                        f"{path} contains invalid units metadata (expected a JSON object)"
+                    )
 
             source_path_raw = data["source_path"].item() if "source_path" in data else None
             source_path = source_path_raw if source_path_raw else None
@@ -5410,6 +5819,12 @@ class RcsGrid:
                 "save_pio: Pioneer azimuth/elevation output cannot represent "
                 f"{self.angular_coordinate_system()!r} angular coordinates; "
                 "retain .grim or use PTM for a great-circle cut"
+            )
+        if self.linear_quantity() != "sigma_3d":
+            raise ValueError(
+                "save_pio: Pioneer output requires a sigma_3d RCS dataset; "
+                f"got {self.linear_quantity()!r}. Convert 2-D sigma_2d/dBke "
+                "data to a physically defined 3-D quantity before export."
             )
         if el_idx is None:
             if len(self.elevations) == 1:

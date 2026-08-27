@@ -7,7 +7,7 @@ module keeps the FFT-over-azimuth amortization (one xi sweep yields every
 mode) but contracts BOTH Galerkin sides immediately, tile by tile, so the
 persistent storage is per-mode NODAL blocks:
 
-    EFIE   4 * (m_max + 1) * Nn^2   (m >= 0; ztt/zff even in m, ztf/zft odd)
+    EFIE   9 * (m_max + 2) * Nn^2   (order primitives through m_max + 1)
     MFIE   4 * (2 m_max + 1) * Nn^2 (brackets have mixed parity)
     IBC    4 * (2 m_max + 1) * Nn^2 (source Z_s baked into the contraction)
 
@@ -129,6 +129,9 @@ def _dp(a: 'np.ndarray'):
 from bor_kernels import n_xi_for_pairs
 
 
+BOR_STREAM_TILE_BUDGET_GB = 1.0
+
+
 def _n_xi_efie(k: 'complex', rho_max: 'float', m_max: 'int', d_min: 'float' = 0.0) -> 'int':
     return n_xi_for_pairs(k, rho_max, m_max, d_min, bracket=False)
 
@@ -148,7 +151,8 @@ class StreamingFarBlocks:
 
     def __init__(self, solver, m_max: 'int', efie: 'bool' = True,
                  mfie: 'bool' = False, ibc_zs_pt: 'Optional[np.ndarray]' = None,
-                 dtype=np.complex128, tile_budget_gb: 'float' = 1.0,
+                 dtype=np.complex128,
+                 tile_budget_gb: 'float' = BOR_STREAM_TILE_BUDGET_GB,
                  workers: 'int' = 1, mode_block: 'Optional[int]' = None):
         self.solver = solver
         self.m_max = int(m_max)
@@ -281,15 +285,17 @@ class StreamingFarBlocks:
                 self._zero_near(Gn, e0, e1)
                 self._accumulate_efie(Gn, rows, e0, re, k)
             if self._mfie:
-                Fs = self._sample_brackets("mfie", rows, re, k, self._nx_b)
+                Fs = self._sample_brackets(
+                    "mfie", rows, re, k, self._nx_b, bins_b, ph_b
+                )
                 self._accumulate_brackets(Fs, self.K, self._lv["1"],
-                                          self._lv["1"], rows, e0, re,
-                                          bins_b, ph_b)
+                                          self._lv["1"], rows, e0, re)
             if self._has_ibc:
-                Fs = self._sample_brackets("ibc", rows, re, k, self._nx_b)
+                Fs = self._sample_brackets(
+                    "ibc", rows, re, k, self._nx_b, bins_b, ph_b
+                )
                 self._accumulate_brackets(Fs, self.B, self._lv["1"],
-                                          self._rv_ibc, rows, e0, re,
-                                          bins_b, ph_b)
+                                          self._rv_ibc, rows, e0, re)
 
         starts = list(range(0, ne, self._te))
         if self._workers <= 1:
@@ -301,86 +307,108 @@ class StreamingFarBlocks:
         self.lo, self.hi = lo, hi
         self.n_sweeps += 1
 
-    def _sample_brackets(self, which: 'str', rows, re: 'int', k, nx_b: 'int'):
-        """The four bracket integrand tiles [rows, P, nx_b] (native kernel
-        when available, NumPy fallback otherwise)."""
+    def _sample_brackets(self, which: 'str', rows, re: 'int', k, nx_b: 'int',
+                         bins, phase):
+        """Return four kept-mode bracket tiles while bounding raw FFT memory.
+
+        Source columns are independent.  Sample and transform at most
+        ``self._cols`` columns at a time, then retain only the requested modal
+        bins in the full-width output used by the Galerkin contraction.
+        """
         g = self.solver.g
         P = self.solver.P
         go = self.go
         nr = re * go
         xi = 2.0 * np.pi * np.arange(nx_b) / nx_b - np.pi
-        if self._native is not None:
-            rho_q, z_q, tr_q, tz_q = self._q
-            rp = np.ascontiguousarray(g.rho[rows])
-            zp = np.ascontiguousarray(g.z[rows])
-            trp = np.ascontiguousarray(g.trho[rows])
-            tzp = np.ascontiguousarray(g.tz[rows])
-            cx = np.ascontiguousarray(np.cos(xi))
-            sx = np.ascontiguousarray(np.sin(xi))
-            Fs = tuple(np.empty((nr, P, nx_b), dtype=np.complex128)
-                       for _ in range(4))
-            fn = self._native.sample_mfie if which == "mfie" else self._native.sample_ibc
-            fn(nr, P, nx_b, _dp(rp), _dp(zp), _dp(trp), _dp(tzp),
-               _dp(rho_q), _dp(z_q), _dp(tr_q), _dp(tz_q),
-               float(np.real(k)), _dp(cx), _dp(sx),
-               _dp(Fs[0]), _dp(Fs[1]), _dp(Fs[2]), _dp(Fs[3]))
-            return Fs
-        if which == "mfie":
-            return _mfie_brackets(
-                g.rho[rows][:, None],
-                g.z[rows][:, None],
-                g.trho[rows][:, None],
-                g.tz[rows][:, None],
-                g.rho[None, :],
-                g.z[None, :],
-                g.trho[None, :],
-                g.tz[None, :],
-                k, xi)
-        pair_shape = (nr, P)
-        Fs = _ibc_brackets_grid(
-            np.broadcast_to(g.rho[rows][:, None], pair_shape).ravel(),
-            np.broadcast_to(g.z[rows][:, None], pair_shape).ravel(),
-            np.broadcast_to(g.trho[rows][:, None], pair_shape).ravel(),
-            np.broadcast_to(g.tz[rows][:, None], pair_shape).ravel(),
-            np.broadcast_to(g.rho[None, :], pair_shape).ravel(),
-            np.broadcast_to(g.z[None, :], pair_shape).ravel(),
-            np.broadcast_to(g.trho[None, :], pair_shape).ravel(),
-            np.broadcast_to(g.tz[None, :], pair_shape).ravel(),
-            k, np.broadcast_to(xi, (nr * P, nx_b)))
-        return tuple(F.reshape(nr, P, nx_b) for F in Fs)
+        kept = tuple(np.empty((nr, P, len(bins)), dtype=np.complex128)
+                     for _ in range(4))
+        rp = np.ascontiguousarray(g.rho[rows])
+        zp = np.ascontiguousarray(g.z[rows])
+        trp = np.ascontiguousarray(g.trho[rows])
+        tzp = np.ascontiguousarray(g.tz[rows])
+        cx = np.ascontiguousarray(np.cos(xi))
+        sx = np.ascontiguousarray(np.sin(xi))
+        for c0 in range(0, P, self._cols):
+            c1 = min(c0 + self._cols, P)
+            cols = slice(c0, c1)
+            nc = c1 - c0
+            if self._native is not None:
+                rho_q, z_q, tr_q, tz_q = (
+                    np.ascontiguousarray(value[cols]) for value in self._q
+                )
+                sampled = tuple(np.empty((nr, nc, nx_b), dtype=np.complex128)
+                                for _ in range(4))
+                fn = (self._native.sample_mfie if which == "mfie"
+                      else self._native.sample_ibc)
+                fn(nr, nc, nx_b, _dp(rp), _dp(zp), _dp(trp), _dp(tzp),
+                   _dp(rho_q), _dp(z_q), _dp(tr_q), _dp(tz_q),
+                   float(np.real(k)), _dp(cx), _dp(sx),
+                   _dp(sampled[0]), _dp(sampled[1]),
+                   _dp(sampled[2]), _dp(sampled[3]))
+            elif which == "mfie":
+                sampled = _mfie_brackets(
+                    rp[:, None], zp[:, None], trp[:, None], tzp[:, None],
+                    g.rho[None, cols], g.z[None, cols],
+                    g.trho[None, cols], g.tz[None, cols], k, xi)
+            else:
+                pair_shape = (nr, nc)
+                sampled = _ibc_brackets_grid(
+                    np.broadcast_to(rp[:, None], pair_shape).ravel(),
+                    np.broadcast_to(zp[:, None], pair_shape).ravel(),
+                    np.broadcast_to(trp[:, None], pair_shape).ravel(),
+                    np.broadcast_to(tzp[:, None], pair_shape).ravel(),
+                    np.broadcast_to(g.rho[None, cols], pair_shape).ravel(),
+                    np.broadcast_to(g.z[None, cols], pair_shape).ravel(),
+                    np.broadcast_to(g.trho[None, cols], pair_shape).ravel(),
+                    np.broadcast_to(g.tz[None, cols], pair_shape).ravel(),
+                    k, np.broadcast_to(xi, (nr * nc, nx_b)))
+                sampled = tuple(F.reshape(nr, nc, nx_b) for F in sampled)
+            for uv, values in enumerate(sampled):
+                spectrum = np.fft.fft(values, axis=-1)
+                kept[uv][:, cols] = (
+                    spectrum[..., bins] * (2.0 * np.pi * phase)
+                )
+        return kept
 
     # -- sampling / masking --
     def _sample_G(self, rows, k, n_xi, phase, ord_lo, hi):
         g = self.solver.g
         xi = 2.0 * np.pi * np.arange(n_xi) / n_xi - np.pi
-        if self._native is not None:
-            rp = np.ascontiguousarray(g.rho[rows])
-            zp = np.ascontiguousarray(g.z[rows])
-            sin2 = np.ascontiguousarray(np.sin(0.5 * xi) ** 2)
-            gk = np.empty((len(rp), self.solver.P, n_xi), dtype=np.complex128)
-            self._native.sample_g(len(rp), self.solver.P, n_xi,
-                                  _dp(rp), _dp(zp), _dp(self._q[0]),
-                                  _dp(self._q[1]), float(np.real(k)),
-                                  _dp(sin2), _dp(gk))
-        else:
-            sin2 = np.sin(0.5 * xi) ** 2
-            d2 = (g.rho[rows][:, None] - g.rho[None, :]) ** 2 + \
-                 (g.z[rows][:, None] - g.z[None, :]) ** 2
-            rr4 = 4.0 * g.rho[rows][:, None] * g.rho[None, :]
-            R = np.sqrt(d2[..., None] + rr4[..., None] * sin2)
-            R = np.maximum(R, 1e-300)
-            gk = np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R)
-        spec = np.fft.fft(gk, axis=-1)
-        return spec[..., ord_lo:hi + 2] * phase
+        rp = np.ascontiguousarray(g.rho[rows])
+        zp = np.ascontiguousarray(g.z[rows])
+        sin2 = np.ascontiguousarray(np.sin(0.5 * xi) ** 2)
+        P = self.solver.P
+        kept = np.empty((len(rp), P, hi + 2 - ord_lo),
+                        dtype=np.complex128)
+        for c0 in range(0, P, self._cols):
+            c1 = min(c0 + self._cols, P)
+            cols = slice(c0, c1)
+            nc = c1 - c0
+            if self._native is not None:
+                rho_q = np.ascontiguousarray(self._q[0][cols])
+                z_q = np.ascontiguousarray(self._q[1][cols])
+                gk = np.empty((len(rp), nc, n_xi), dtype=np.complex128)
+                self._native.sample_g(len(rp), nc, n_xi,
+                                      _dp(rp), _dp(zp), _dp(rho_q),
+                                      _dp(z_q), float(np.real(k)),
+                                      _dp(sin2), _dp(gk))
+            else:
+                d2 = (rp[:, None] - g.rho[None, cols]) ** 2 + \
+                     (zp[:, None] - g.z[None, cols]) ** 2
+                rr4 = 4.0 * rp[:, None] * g.rho[None, cols]
+                R = np.sqrt(d2[..., None] + rr4[..., None] * sin2)
+                R = np.maximum(R, 1e-300)
+                gk = np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R)
+            spectrum = np.fft.fft(gk, axis=-1)
+            kept[:, cols] = spectrum[..., ord_lo:hi + 2] * phase
+        return kept
 
     def _zero_near(self, Kt, e0, e1):
-        ne = self.solver.gen.n_elems
         go = self.go
-        span = self.solver.near_span
         for e in range(e0, e1):
-            c0 = max(0, e - span) * go
-            c1 = min(ne, e + span + 1) * go
-            Kt[(e - e0) * go:(e - e0 + 1) * go, c0:c1] = 0.0
+            row = slice((e - e0) * go, (e - e0 + 1) * go)
+            for f in self.solver._near_sources_by_element[e]:
+                Kt[row, f * go:(f + 1) * go] = 0.0
 
     # -- contraction: ALL modes/orders in one einsum per weight pair --
     def _contract_all(self, Kn, lv_rows, rv, e0, re, out):
@@ -409,12 +437,9 @@ class StreamingFarBlocks:
             self._contract_all(Gn, self._lv[lx][:, rows], self._lv[rx],
                                e0, re, self.Z[ci])
 
-    def _accumulate_brackets(self, Fs, store, lv_full, rv, rows, e0, re,
-                             bins, phase):
+    def _accumulate_brackets(self, Fs, store, lv_full, rv, rows, e0, re):
         lv_rows = lv_full[:, rows]
-        for uv, F in enumerate(Fs):
-            spec = np.fft.fft(F, axis=-1)
-            Km_all = spec[..., bins] * (2.0 * np.pi * phase)
+        for uv, Km_all in enumerate(Fs):
             self._zero_near(Km_all, e0, e0 + re)
             self._contract_all(Km_all, lv_rows, rv, e0, re, store[uv])
 
@@ -461,7 +486,10 @@ def estimate_streaming_gb(n_elems: 'int', m_max: 'int', formulation: 'str' = "cf
     """Persistent per-mode nodal block memory (GB) for the streaming path."""
     Nn = float(n_elems + 1)
     per = 8.0 if single_blocks else 16.0
-    total = 4.0 * Nn * Nn * (m_max + 1) * per
+    # _build_range stores nine EFIE order primitives through m_max + 1
+    # inclusive. This estimate drives the memory gate, precision choice, and
+    # mode-block sizing, so it must mirror that allocation exactly.
+    total = 9.0 * Nn * Nn * (m_max + 2) * per
     if formulation in ("cfie", "mfie"):
         total += 4.0 * Nn * Nn * (2 * m_max + 1) * per
     if has_ibc:

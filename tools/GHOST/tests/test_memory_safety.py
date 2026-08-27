@@ -16,6 +16,7 @@ BACKEND = ROOT / "Backend"
 sys.path.insert(0, str(BACKEND))
 
 import bor_solver  # noqa: E402
+import bor_streaming  # noqa: E402
 import rcs_solver as rcs  # noqa: E402
 
 
@@ -116,6 +117,18 @@ class AvailableMemoryDetectionTests(unittest.TestCase):
 
 
 class BorMemoryGateTests(unittest.TestCase):
+    def test_streaming_estimator_counts_all_nine_efie_primitives(self):
+        n_elems = 24
+        m_max = 12
+        nodes = float(n_elems + 1)
+        expected_efie = 9.0 * nodes * nodes * (m_max + 2) * 16.0 / 1.0e9
+        self.assertAlmostEqual(
+            bor_streaming.estimate_streaming_gb(
+                n_elems, m_max, formulation="efie"
+            ),
+            expected_efie,
+        )
+
     def test_total_peak_adds_the_same_scheduler_margin_once(self):
         self.assertAlmostEqual(
             bor_solver.estimate_bor_total_peak_gb(7.0, 0.25),

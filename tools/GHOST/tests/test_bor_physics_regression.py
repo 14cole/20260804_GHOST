@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
 import bor_dispatch  # noqa: E402
+import bor_streaming  # noqa: E402
 import feature_sum  # noqa: E402
 import grim_io  # noqa: E402
 import hpc_common  # noqa: E402
@@ -27,7 +28,12 @@ import run_hpc_bor_monostatic  # noqa: E402
 import run_local_bor  # noqa: E402
 import surface_mesh  # noqa: E402
 import validate_feature_reconstruction  # noqa: E402
-from bor_kernels import C0, ETA0  # noqa: E402
+from bor_kernels import (  # noqa: E402
+    C0,
+    ETA0,
+    N_XI_SAFETY_CAP,
+    n_xi_for_pairs,
+)
 from bor_solver import (  # noqa: E402
     BOR_LINEAR_BACKWARD_ERROR_MAX,
     BOR_LINEAR_RESIDUAL_MAX,
@@ -1080,6 +1086,38 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 np.asarray(stream[key]), np.asarray(table[key]),
                 rtol=2.0e-10, atol=2.0e-12,
             )
+
+    def test_streaming_source_column_chunks_match_full_width_sampling(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        solver = BorPecSolver(_sphere(radius, 10), FREQUENCY_HZ)
+        full = bor_streaming.StreamingFarBlocks(
+            solver, 2, efie=True, mfie=True, tile_budget_gb=1.0
+        )
+        chunked = bor_streaming.StreamingFarBlocks(
+            solver, 2, efie=True, mfie=True, tile_budget_gb=1.0e-6
+        )
+        self.assertEqual(full._cols, solver.P)
+        self.assertLess(chunked._cols, solver.P)
+        np.testing.assert_allclose(chunked.Z, full.Z, rtol=2.0e-14, atol=2.0e-14)
+        np.testing.assert_allclose(chunked.K, full.K, rtol=2.0e-14, atol=2.0e-14)
+
+    def test_large_smooth_body_routes_sharp_far_pairs_to_direct_path(self):
+        wavelength = C0 / FREQUENCY_HZ
+        radius = 20.0 * wavelength
+        solver = BorPecSolver(_sphere(radius, 1257), FREQUENCY_HZ)
+
+        self.assertTrue(any(
+            abs(e - f) > solver.near_span
+            for e, sources in enumerate(solver._near_sources_by_element)
+            for f in sources
+        ))
+        required = n_xi_for_pairs(
+            solver.k,
+            float(np.max(solver.gen.nodes[:, 0])),
+            0,
+            solver._far_gap(),
+        )
+        self.assertLessEqual(required, N_XI_SAFETY_CAP)
 
     def test_batched_rhs_and_farfield_match_scalar_paths(self):
         radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)

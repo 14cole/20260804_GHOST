@@ -339,6 +339,18 @@ def _grid_to_b64(grid) -> str:
     for tag in ("rcs_domain", "power_domain"):
         if tag in grid.extra:
             payload[tag] = grid.extra[tag]
+    object_keys = [
+        str(key)
+        for key, value in payload.items()
+        if np.asarray(value).dtype.hasobject
+    ]
+    if object_keys:
+        raise ValueError(
+            "cannot embed this dataset in a pickle-free .asy file because metadata "
+            "contains object-typed value(s): "
+            + ", ".join(sorted(object_keys))
+            + ". Convert those values to numeric/string arrays or JSON text."
+        )
     np.savez(buf, **payload)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
@@ -359,8 +371,13 @@ def _b64_to_grid(b64: str):
         if isinstance(raw, str) and raw:
             try:
                 units = json.loads(raw)
-            except json.JSONDecodeError:
-                units = {}
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "embedded dataset contains corrupt units metadata; refusing "
+                    "to guess its physical conventions"
+                ) from exc
+        if not isinstance(units, dict):
+            raise ValueError("embedded dataset units metadata must be a JSON object")
 
     source_path_raw = data["source_path"].item() if "source_path" in data else None
     source_path     = source_path_raw if source_path_raw else None
@@ -1010,7 +1027,7 @@ class AssemblyTree(QTreeWidget):
         # ── internal branch reparent ─────────────────────────────────────────
         if mime.hasFormat(MIME_BRANCH) and event.source() is self:
             item = self._branch_drag_item
-            if item is None or item is target or _is_ancestor(target, item):
+            if _branch_drop_would_create_cycle(item, target):
                 event.ignore()
                 return
             old_parent = item.parent()
@@ -1171,6 +1188,35 @@ class AssemblyTree(QTreeWidget):
         self.content_changed.emit()
         return clone
 
+    def confirm_remove_item(self, item: QTreeWidgetItem) -> bool:
+        """Require confirmation before deleting loaded data or a subtree."""
+
+        def _counts(node: QTreeWidgetItem) -> tuple[int, int]:
+            nodes = 1
+            loaded = int(
+                node.data(0, _ROLE_TYPE) == _TYPE_LEAF
+                and node.data(0, _ROLE_GRID) is not None
+            )
+            for child_index in range(node.childCount()):
+                child_nodes, child_loaded = _counts(node.child(child_index))
+                nodes += child_nodes
+                loaded += child_loaded
+            return nodes, loaded
+
+        node_count, loaded_count = _counts(item)
+        if node_count == 1 and loaded_count == 0:
+            return True
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        answer = QMessageBox.question(
+            self,
+            "Delete Response Data?",
+            f"Delete '{item.text(0)}' and its {node_count - 1} descendant(s)?\n\n"
+            f"This removes {loaded_count} embedded dataset(s) and cannot be undone.",
+            buttons.Yes | buttons.No,
+            buttons.No,
+        )
+        return answer == buttons.Yes
+
     def _remove_item(self, item: QTreeWidgetItem) -> None:
         parent = item.parent()
         response_item = not _is_preview_item(item)
@@ -1259,7 +1305,8 @@ class AssemblyTree(QTreeWidget):
         elif chosen == act_duplicate and item is not None:
             self.duplicate_response_subtree(item)
         elif chosen == act_del and item is not None:
-            self._remove_item(item)
+            if self.confirm_remove_item(item):
+                self._remove_item(item)
         elif chosen == act_expand and item is not None:
             self.expandItem(item)
             for i in range(item.childCount()):
@@ -1322,6 +1369,19 @@ def _is_ancestor(candidate: QTreeWidgetItem | None, item: QTreeWidgetItem) -> bo
             return True
         p = p.parent()
     return False
+
+
+def _branch_drop_would_create_cycle(
+    item: QTreeWidgetItem | None,
+    target: QTreeWidgetItem | None,
+) -> bool:
+    """Whether reparenting ``item`` beneath ``target`` would form a cycle."""
+
+    return bool(
+        item is None
+        or target is item
+        or (target is not None and _is_ancestor(item, target))
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1533,7 +1593,8 @@ class AssemblyTreePanel(QWidget):
                 "are replaced when its inputs are validated."
             )
             return
-        self.tree._remove_item(item)
+        if self.tree.confirm_remove_item(item):
+            self.tree._remove_item(item)
 
     def _duplicate_selected(self) -> None:
         item = self.tree.currentItem()
@@ -1803,7 +1864,9 @@ def _interp_target_axes(grids) -> tuple:
         lo = max(np.asarray(getattr(g, axis_name), dtype=float).min() for g in grids)
         hi = min(np.asarray(getattr(g, axis_name), dtype=float).max() for g in grids)
         mask = (ref_axis >= lo - 1e-9) & (ref_axis <= hi + 1e-9)
-        return ref_axis[mask]
+        # Values admitted by the round-off tolerance must still be placed
+        # strictly inside every source grid's support before align_to().
+        return np.unique(np.clip(ref_axis[mask], lo, hi))
 
     az = _clipped("azimuths")
     el = _clipped("elevations")
@@ -1868,7 +1931,16 @@ def _align_grids_for_assembly(grids, axis_mode: str) -> list:
                 "interp: parts have no overlapping axis range across all parts"
             )
         target = _axes_only_grid(az, el, f, pol, ref)
-        return [g.align_to(target, mode="interp") for g in grids]
+        # Numeric interpolation requires identical categorical axes. Subset
+        # and reorder polarization first without discarding the source numeric
+        # samples needed to support interpolation.
+        prepared = [
+            g
+            if np.array_equal(g.polarizations, pol)
+            else g.axis_crop(polarizations=pol)
+            for g in grids
+        ]
+        return [g.align_to(target, mode="interp") for g in prepared]
 
     raise ValueError(f"unknown axis_mode {axis_mode!r}")
 

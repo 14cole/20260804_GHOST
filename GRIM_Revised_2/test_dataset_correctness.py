@@ -57,6 +57,33 @@ class DatasetCorrectnessTests(unittest.TestCase):
                 )
                 self.assertAlmostEqual(float(displayed.item()), expected, places=10)
 
+    def test_save_rejects_object_metadata_before_publishing_archive(self):
+        grid = self._single_sample()
+        grid.extra["placement"] = {"offset": [1.0, 2.0, 3.0]}
+        with tempfile.TemporaryDirectory() as folder:
+            target = os.path.join(folder, "unsafe.grim")
+            with self.assertRaisesRegex(ValueError, "object-typed.*placement"):
+                grid.save(target)
+            self.assertFalse(os.path.exists(target))
+
+    def test_load_rejects_corrupt_units_instead_of_guessing_defaults(self):
+        grid = self._single_sample()
+        with tempfile.TemporaryDirectory() as folder:
+            target = os.path.join(folder, "corrupt.grim")
+            with open(target, "wb") as stream:
+                np.savez(
+                    stream,
+                    azimuths=grid.azimuths,
+                    elevations=grid.elevations,
+                    frequencies=grid.frequencies,
+                    polarizations=grid.polarizations,
+                    rcs_power=grid.rcs_power,
+                    rcs_phase=grid.rcs_phase,
+                    units="{not-json",
+                )
+            with self.assertRaisesRegex(ValueError, "corrupt units metadata"):
+                RcsGrid.load(target)
+
     def test_join_fills_complementary_phase_independent_of_input_order(self):
         missing = self._single_sample(phase=np.nan)
         known = self._single_sample(phase=0.75)
@@ -132,6 +159,27 @@ class DatasetCorrectnessTests(unittest.TestCase):
                             joined.rcs_phase[oi, oj, ok],
                             source.rcs_phase[ai, ei, fi],
                         )
+
+    def test_join_rejects_coordinate_aliases_instead_of_misplacing_samples(self):
+        aliased = self._indexed_grid(
+            [0.0, 5.0e-7, 1.0], [0.0], [1.0], ["VV"], 10.0
+        )
+        separate = self._indexed_grid(
+            [2.0], [0.0], [1.0], ["VV"], 40.0
+        )
+        with self.assertRaisesRegex(
+            ValueError, "input azimuth axis.*collapse.*tolerance"
+        ):
+            RcsGrid.join_many(aliased, separate)
+
+    def test_elevation_pair_combine_rejects_azimuth_aliases(self):
+        grid = self._indexed_grid(
+            [0.0, 5.0e-7, 90.0], [-1.0, 1.0], [1.0], ["VV"], 1.0
+        )
+        with self.assertRaisesRegex(
+            ValueError, "input azimuth axis contains coordinates closer"
+        ):
+            grid.combine_elevation_pair_to_azimuth_360()
 
     def test_join_tiles_polarization_and_reserves_ownership_bypass(self):
         polarizations = [f"P{i}" for i in range(5)]
@@ -372,6 +420,17 @@ class DatasetCorrectnessTests(unittest.TestCase):
                         stream.write(bad_payload)
                     with self.assertRaisesRegex(ValueError, message):
                         RcsGrid.load_pio(path)
+
+    def test_pio_rejects_sigma_2d_instead_of_relabeling_it_sigma_3d(self):
+        source = self._single_sample()
+        source.units.update(
+            {"rcs_log_unit": "dBke", "rcs_linear_quantity": "sigma_2d"}
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "invalid-2d.pio")
+            with self.assertRaisesRegex(ValueError, "requires a sigma_3d"):
+                source.save_pio(path)
+            self.assertFalse(os.path.exists(path))
 
     def test_pio_failed_publication_preserves_existing_file(self):
         source = self._single_sample()

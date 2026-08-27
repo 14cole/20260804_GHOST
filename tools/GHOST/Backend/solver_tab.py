@@ -531,6 +531,7 @@ class SolverTab(QWidget):
         self._is_solving: 'bool' = False
         self._abort_event: 'Optional[threading.Event]' = None
         self._plot_theme: 'Optional[Dict[str, str]]' = None
+        self._last_result_stale: 'bool' = False
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._build_left_panel())
@@ -541,6 +542,37 @@ class SolverTab(QWidget):
         root.addWidget(splitter)
 
         self._update_mode_enables()
+        self._sync_export_state()
+        dirty_signal = getattr(self.geometry_tab, "dirty_changed", None)
+        if dirty_signal is not None:
+            dirty_signal.connect(self._on_geometry_dirty_changed)
+
+    @Slot(bool)
+    def _on_geometry_dirty_changed(self, dirty: 'bool') -> 'None':
+        if not dirty:
+            return
+        pending = self._pending_solve_context
+        if pending is not None and bool(pending.get("uses_geometry_tab", False)):
+            pending["geometry_stale"] = True
+        if (
+            self.last_result is not None
+            and self.last_solve_context is not None
+            and bool(self.last_solve_context.get("uses_geometry_tab", False))
+        ):
+            self._last_result_stale = True
+            self._sync_export_state()
+            self.lbl_status.setText(
+                "Geometry changed after the last solve. Run the solver again before export."
+            )
+
+    def _sync_export_state(self) -> 'None':
+        stale = bool(self._last_result_stale)
+        self.btn_export.setText(
+            "Export Last Result (Stale)" if stale else "Export Last Result"
+        )
+        self.btn_export.setEnabled(
+            not self._is_solving and self.last_result is not None and not stale
+        )
 
     def apply_plot_theme(
         self, *, background: 'str', text: 'str', grid: 'str'
@@ -1019,7 +1051,7 @@ class SolverTab(QWidget):
         is_bor = (self.cmb_solver_kind.currentData() == "bor")
         enable_2d_quality_thresholds = not solving and not is_bor
         self.btn_run.setEnabled(not solving)
-        self.btn_export.setEnabled(not solving)
+        self._sync_export_state()
         self.btn_currents.setEnabled(not solving and not is_bor)
         self.btn_browse_geo.setEnabled(not solving)
         self.btn_use_tab.setEnabled(not solving)
@@ -1161,7 +1193,11 @@ class SolverTab(QWidget):
         self.last_result = result
         self.last_source_path = source_path
         self.last_solve_context = self._pending_solve_context
+        self._last_result_stale = bool(
+            (self.last_solve_context or {}).get("geometry_stale", False)
+        )
         self._pending_solve_context = None
+        self._sync_export_state()
         self._populate_results_table(result)
         self._plot_results(result)
 
@@ -1189,8 +1225,15 @@ class SolverTab(QWidget):
 
         self.progress.setValue(100)
         self.lbl_status.setText(write_summary + quality_suffix + mesh_suffix)
+        if self._last_result_stale:
+            self.lbl_status.setText(
+                write_summary
+                + quality_suffix
+                + mesh_suffix
+                + " Geometry changed during the solve; result is stale and was not exported."
+            )
 
-        if self.chk_export_after_solve.isChecked():
+        if self.chk_export_after_solve.isChecked() and not self._last_result_stale:
             try:
                 requested_output = self.edit_output.text()
                 out_text = self._resolve_output_path(
@@ -1288,8 +1331,10 @@ class SolverTab(QWidget):
                 float(cfie_text) if solver_kind == "bor" and cfie_text
                 else 0.0
             )
-            if not math.isfinite(cfie_alpha) or cfie_alpha < 0.0:
-                raise ValueError("CFIE alpha must be a non-negative finite number.")
+            if solver_kind == "bor" and (
+                not math.isfinite(cfie_alpha) or not (0.0 < cfie_alpha <= 1.0)
+            ):
+                raise ValueError("BoR CFIE alpha must satisfy 0 < alpha <= 1.")
 
             # Scattering mode and observation angles.
             scatter_mode = str(self.cmb_scatter_mode.currentData() or "monostatic")
@@ -1314,6 +1359,8 @@ class SolverTab(QWidget):
             "solver_kind": solver_kind,
             "units": str(units),
             "aspects_deg": list(elevations),
+            "uses_geometry_tab": not bool(self.edit_geo_path.text().strip()),
+            "geometry_stale": False,
         }
 
         thread = QThread(self)
@@ -1405,6 +1452,14 @@ class SolverTab(QWidget):
             return
         if not self.last_result:
             QMessageBox.information(self, "Export", "No solver result exists yet. Run the solver first.")
+            return
+        if self._last_result_stale:
+            QMessageBox.warning(
+                self,
+                "Stale Solver Result",
+                "Geometry changed after this result was computed. Run the solver "
+                "again before exporting.",
+            )
             return
         out_text = self._resolve_output_path(
             self.edit_output.text(),

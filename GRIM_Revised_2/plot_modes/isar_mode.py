@@ -497,7 +497,12 @@ def _pfa_regrid_cartesian(
         out[start:stop] = _interp_uniform_axis0(
             az_grid[start:stop].T, coordinates.T
         ).T
-    return out, q, v
+    # _scene_axes derives cross-range spacing from mean(frequency)*dtheta.
+    # The Cartesian grid's true U spacing is fc*dq while its returned
+    # frequency coordinate is V, whose mean is lower than fc. Scale the
+    # coordinate supplied to _scene_axes so mean(V)*dtheta remains fc*dq.
+    axis_q = q * fc / float(np.mean(v))
+    return out, axis_q, v
 
 
 def _soft_threshold_complex(x: np.ndarray, t: float) -> np.ndarray:

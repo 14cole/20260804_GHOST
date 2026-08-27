@@ -510,6 +510,16 @@ def build_geometry_text(
 ) -> 'str':
     lines: 'List[str]' = [f"Title: {title}"]
     for seg in segments:
+        segment_name = str(seg.name).strip()
+        if not segment_name or any(char.isspace() for char in segment_name):
+            raise ValueError(
+                f"Segment name {seg.name!r} is not representable in .geo files; "
+                "use a non-empty name without whitespace."
+            )
+        if ":" in segment_name or "#" in segment_name:
+            raise ValueError(
+                f"Segment name {seg.name!r} contains reserved .geo punctuation."
+            )
         props = list(seg.properties)
         # Prefer the segment's declared type; fall back to properties[0] only if
         # seg_type is missing. This keeps load -> save idempotent when the Segment:
@@ -518,9 +528,9 @@ def build_geometry_text(
         if not effective_type and props and str(props[0]).strip():
             effective_type = props[0]
         if effective_type:
-            lines.append(f"Segment: {seg.name} {effective_type}")
+            lines.append(f"Segment: {segment_name} {effective_type}")
         else:
-            lines.append(f"Segment: {seg.name}")
+            lines.append(f"Segment: {segment_name}")
 
         if len(props) < 5:
             props.extend([""] * (5 - len(props)))

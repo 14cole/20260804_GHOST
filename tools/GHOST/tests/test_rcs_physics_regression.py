@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
 import rcs_solver as rcs  # noqa: E402
+import fmm_helmholtz_2d as fmm  # noqa: E402
 from mie_reference import (  # noqa: E402
     pec_cylinder_backscatter_amplitude,
     sigma_coated_pec_cylinder,
@@ -196,6 +197,53 @@ class NearPairQuadratureTests(unittest.TestCase):
             )
         self.assertTrue(np.all(np.isfinite(s_block)))
         self.assertTrue(np.all(np.isfinite(k_block)))
+
+    def test_fmm_close_parallel_pair_uses_dense_adaptive_quadrature(self):
+        obs = _linear_element(0.0, 0)
+        src = _linear_element(0.02, 1)
+        mesh = rcs.LinearMesh(nodes=[None] * 4, elements=[obs, src])
+        k0 = 2.0 * np.pi
+
+        with mock.patch.object(fmm.FMMOperator, "_load_native", return_value=None):
+            operator = fmm.FMMOperator(
+                mesh,
+                k0,
+                obs_normal_deriv=True,
+                max_leaf=40,
+                near_quad_order=16,
+            )
+
+        _, expected = rcs._sk_blocks_near_linear(
+            obs,
+            src,
+            k0,
+            True,
+            16,
+            16,
+            compute_single_layer=False,
+            compute_double_layer=True,
+        )
+        actual = operator._near_mat.toarray()[np.ix_([0, 1], [2, 3])]
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+    def test_fmm_translation_matrices_are_cached_per_operator(self):
+        operator = object.__new__(fmm.FMMOperator)
+        operator.k = complex(2.0 * np.pi)
+        operator._translation_matrices = {"m2m": {}, "m2l": {}, "l2l": {}}
+        displacement = np.asarray([0.25, -0.5])
+
+        builders = {
+            "m2m": "_translation_matrix_J",
+            "m2l": "_translation_matrix_H",
+            "l2l": "_translation_matrix_L2L",
+        }
+        for kind, builder_name in builders.items():
+            builder = getattr(fmm, builder_name)
+            with mock.patch.object(fmm, builder_name, wraps=builder) as wrapped:
+                first = operator._translation_matrix(kind, displacement, 4)
+                second = operator._translation_matrix(kind, displacement, 4)
+            self.assertIs(first, second)
+            self.assertEqual(wrapped.call_count, 1)
 
 
 class WeightedGalerkinTests(unittest.TestCase):

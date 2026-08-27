@@ -20,6 +20,9 @@ from assembly_tree import (
     _TYPE_BRANCH,
     _TYPE_ROOT,
     _attach,
+    _align_grids_for_assembly,
+    _grid_to_b64,
+    _interp_target_axes,
     _dict_to_item,
     _item_to_dict,
     build_assembly_grid,
@@ -59,6 +62,58 @@ class AssemblyVisibilityTest(unittest.TestCase):
         _attach(tree, first, branch)
         _attach(tree, second, branch)
         return tree, root, branch, first, second
+
+    def test_interp_subsets_polarizations_before_numeric_resampling(self):
+        units = {
+            "azimuth": "deg",
+            "elevation": "deg",
+            "frequency": "GHz",
+            "rcs_log_unit": "dBsm",
+            "rcs_linear_quantity": "sigma_3d",
+        }
+        first = RcsGrid(
+            [0.0, 2.0], [0.0], [10.0], ["VV", "HH"],
+            rcs=np.ones((2, 1, 1, 2), dtype=np.complex128),
+            units=units,
+        )
+        second = RcsGrid(
+            [0.0, 1.0, 2.0], [0.0], [10.0], ["VV"],
+            rcs=2.0 * np.ones((3, 1, 1, 1), dtype=np.complex128),
+            units=units,
+        )
+
+        aligned = _align_grids_for_assembly([first, second], "interp")
+
+        for grid in aligned:
+            np.testing.assert_array_equal(grid.azimuths, [0.0, 2.0])
+            np.testing.assert_array_equal(grid.polarizations, ["VV"])
+        np.testing.assert_allclose(aligned[0].rcs, 1.0)
+        np.testing.assert_allclose(aligned[1].rcs, 2.0)
+
+    def test_interp_roundoff_endpoints_are_clamped_inside_common_support(self):
+        first = RcsGrid(
+            [-5e-10, 1.0, 2.0], [0.0], [10.0], ["VV"],
+            rcs=np.ones((3, 1, 1, 1), dtype=np.complex128),
+            units={"frequency": "GHz"},
+        )
+        second = RcsGrid(
+            [0.0, 1.0, 2.0], [0.0], [10.0], ["VV"],
+            rcs=np.ones((3, 1, 1, 1), dtype=np.complex128),
+            units={"frequency": "GHz"},
+        )
+        azimuths, _elevations, _frequencies, _polarizations = (
+            _interp_target_axes([first, second])
+        )
+        np.testing.assert_array_equal(azimuths, [0.0, 1.0, 2.0])
+        aligned = _align_grids_for_assembly([first, second], "interp")
+        for grid in aligned:
+            np.testing.assert_array_equal(grid.azimuths, [0.0, 1.0, 2.0])
+
+    def test_asy_embedding_rejects_unloadable_object_metadata(self):
+        grid = _grid(1.0)
+        grid.extra["placement"] = {"offset": [1.0, 2.0, 3.0]}
+        with self.assertRaisesRegex(ValueError, "pickle-free .asy.*placement"):
+            _grid_to_b64(grid)
 
     def test_visibility_column_defaults_checked_and_cascades(self) -> None:
         tree, root, branch, first, second = self._tree_with_two_leaves()

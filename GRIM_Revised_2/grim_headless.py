@@ -154,6 +154,10 @@ def load_flat_csv(path: str) -> RcsGrid:
             linear = None
             if "magnitude_linear" in fields and cell(row, "magnitude_linear"):
                 linear = float(cell(row, "magnitude_linear"))
+                if not np.isfinite(linear) or linear < 0.0:
+                    raise ValueError(
+                        f"line {line_no}: magnitude_linear must be finite and >= 0"
+                    )
             if linear is None and "magnitude_dbsm" in fields and cell(row, "magnitude_dbsm"):
                 linear = 10.0 ** (float(cell(row, "magnitude_dbsm")) / 10.0)
             if linear is None and "magnitude_db" in fields and cell(row, "magnitude_db"):
@@ -164,7 +168,7 @@ def load_flat_csv(path: str) -> RcsGrid:
             phase = np.nan
             if "phase_deg" in fields and cell(row, "phase_deg"):
                 phase = np.deg2rad(float(cell(row, "phase_deg")))
-            records.append((az, el, freq, pol, linear, dbke, phase))
+            records.append((az, el, freq, pol, linear, dbke, phase, line_no))
 
     if not records:
         raise ValueError("CSV contains no data rows")
@@ -207,12 +211,35 @@ def load_flat_csv(path: str) -> RcsGrid:
     ei = {v: i for i, v in enumerate(el_axis)}
     fi = {v: i for i, v in enumerate(freq_axis)}
     pi = {v: i for i, v in enumerate(pol_axis)}
-    for az, el, freq, pol, linear, dbke, phase_value in records:
+    seen: dict[tuple[int, int, int, int], tuple[float, float, int]] = {}
+    for az, el, freq, pol, linear, dbke, phase_value, line_no in records:
         if linear is None and dbke is not None:
             freq_hz = freq * _FREQUENCY_FACTORS[freq_unit]
             linear = (C0 / (2.0 * np.pi * freq_hz)) * 10.0 ** (dbke / 10.0)
         idx = (ai[az], ei[el], fi[freq], pi[pol])
-        power[idx] = np.nan if linear is None else max(float(linear), 0.0)
+        sample_power = np.nan if linear is None else float(linear)
+        if idx in seen:
+            previous_power, previous_phase, previous_line = seen[idx]
+            same_power = bool(np.isclose(
+                sample_power, previous_power, rtol=1e-12, atol=0.0, equal_nan=True
+            ))
+            zero_power = same_power and sample_power == 0.0
+            same_phase = zero_power or (
+                (np.isnan(phase_value) and np.isnan(previous_phase))
+                or (
+                    np.isfinite(phase_value)
+                    and np.isfinite(previous_phase)
+                    and abs(np.angle(np.exp(1j * (phase_value - previous_phase)))) <= 1e-12
+                )
+            )
+            if not (same_power and same_phase):
+                raise ValueError(
+                    f"line {line_no}: conflicting duplicate CSV sample; "
+                    f"first defined on line {previous_line}"
+                )
+            continue
+        seen[idx] = (sample_power, phase_value, line_no)
+        power[idx] = sample_power
         phase[idx] = phase_value
     if not np.isfinite(power).any():
         raise ValueError("CSV contains no finite magnitude values")
