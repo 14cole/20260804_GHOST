@@ -202,7 +202,7 @@ class TestSsParsing(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "truncated EOF"):
                 R.read_ss(path, verbose=False)
 
-    def test_rejects_header_c_count_mismatch_instead_of_scanning_a_collision(self):
+    def test_rejects_header_c_maxfreq_mismatch_instead_of_scanning_a_collision(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "bad-header.ss")
             meta = build_ss(
@@ -210,12 +210,32 @@ class TestSsParsing(unittest.TestCase):
                 dict(edge_diff=True, iqmatrix=False, ibspsave=1), "incident",
             )
             header_c = R._table_bytes(R.HDRA) + meta["hdrbsize"]
-            nfreq_offset = R._field_offset(R.HDRC, "nfreq")
+            maxfreq_offset = R._field_offset(R.HDRC, "maxfreq")
             with open(path, "r+b") as stream:
-                stream.seek(header_c + nfreq_offset)
+                stream.seek(header_c + maxfreq_offset)
                 stream.write(_be_i4(99))
             with self.assertRaisesRegex(ValueError, "header-C validation failed"):
                 R.read_ss(path, verbose=False)
+
+    def test_accepts_nfreq_as_advisory_step_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "step-count.ss")
+            meta = build_ss(
+                path, 2, 4, 1, 9.0, 10.0,
+                dict(edge_diff=False, iqmatrix=False, ibspsave=1), "incident",
+            )
+            header_c = R._table_bytes(R.HDRA) + meta["hdrbsize"]
+            nfreq_offset = R._field_offset(R.HDRC, "nfreq")
+            record_size = meta["nbytesb"] + meta["nbytesd"]
+            with open(path, "r+b") as stream:
+                for record in range(2):
+                    stream.seek(record * record_size + header_c + nfreq_offset)
+                    stream.write(_be_i4(3))  # four samples span three intervals
+
+            parsed = R.read_ss(path, verbose=False)
+            self.assertEqual(parsed["num_freqs"], 4)
+            self.assertEqual(int(parsed["header_c"]["nfreq"][0]), 3)
+            np.testing.assert_allclose(parsed["freq"], np.linspace(9.0, 10.0, 4))
 
     def test_accepts_variable_blocks_between_header_c_and_frequency_data(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,7 +265,7 @@ class TestSsParsing(unittest.TestCase):
                 valid_header = stream.read(size_c)
                 stream.seek(header_c + size_c + 8)
                 stream.write(valid_header)
-                stream.seek(header_c + R._field_offset(R.HDRC, "nfreq"))
+                stream.seek(header_c + R._field_offset(R.HDRC, "maxfreq"))
                 stream.write(_be_i4(99))
             with self.assertRaisesRegex(ValueError, "header-C validation failed"):
                 R.read_ss(path, verbose=False)

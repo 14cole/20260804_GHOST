@@ -24,10 +24,14 @@ frequency axis). Its offset depends on the *variable-length* header-B, whose
 size we compute from the header-A flags (edge_diff/iqmatrix/ibspsave) exactly as
 ssread.m's readheaderb does -- header-B is 256 bytes per enabled CAD-file slot
 (0/256/512/768 total), NOT a fixed 256. We then cross-check header-C by requiring
-maxfreq/nfreq == framing num_freqs and validate the load-bearing flags. If the
-flag-derived location fails, we try only the four structurally legal header-B
-slot offsets and require one exact candidate; arbitrary payload bytes are never
-scanned. az/el/data stay correct because they are pinned by the framing ints.
+``maxfreq`` to equal the framing-derived sample count and validate the
+load-bearing flags. Xpatch documents ``nfreq`` as a step count, while MATLAB
+``ssread`` sizes both uniform and discrete arrays from ``maxfreq``; ``nfreq`` is
+therefore retained only as diagnostic metadata, not treated as a second sample
+count. If the flag-derived location fails, we try only the four structurally
+legal header-B slot offsets and require one exact candidate; arbitrary payload
+bytes are never scanned. az/el/data stay correct because they are pinned by the
+framing ints.
 
 Az/el: header-D carries incident (azinc/elinc) AND observation (azobs/elobs)
 angles. ssread.m returns incident, which is right for monostatic data but stays
@@ -267,7 +271,6 @@ def read_ss(path, verbose=True):
     # variable-length, so derive its size from the header-A flags rather than
     # guessing -- this is what places header-C (and the freq axis) correctly.
     rel_maxfreq = _field_offset(HDRC, "maxfreq")
-    rel_nfreq = _field_offset(HDRC, "nfreq")
     rel_ifreq = _field_offset(HDRC, "ifreq")
     rel_imono = _field_offset(HDRC, "imono")
 
@@ -275,8 +278,6 @@ def read_ss(path, verbose=True):
         if off < size_a or off + size_c > nbytesb0:
             return False
         if _i4(raw, off + rel_maxfreq) != num_freqs0:   # maxfreq must == framing count
-            return False
-        if _i4(raw, off + rel_nfreq) != num_freqs0:
             return False
         ifreq_value = _i4(raw, off + rel_ifreq)
         if ifreq_value not in (1, 2):
@@ -304,9 +305,20 @@ def read_ss(path, verbose=True):
                   f"failed validation; scan candidates={cands[:8]}")
         if len(cands) != 1:
             detail = "no exact candidate" if not cands else f"ambiguous candidates {cands[:8]}"
+            probes = []
+            for off in (size_a + slots * HDRB_SLOT for slots in range(4)):
+                if off + size_c <= nbytesb0:
+                    probes.append(
+                        f"{off}:maxfreq={_i4(raw, off + rel_maxfreq)},"
+                        f"nfreq={_i4(raw, off + _field_offset(HDRC, 'nfreq'))},"
+                        f"ifreq={_i4(raw, off + rel_ifreq)},"
+                        f"imono={_i4(raw, off + rel_imono)}"
+                    )
+            inspected = "; ".join(probes) if probes else "none fit before header-D"
             raise ValueError(
                 f"{path}: header-C validation failed at byte {hdrc_off}; {detail}. "
-                "Refusing a guessed header collision because it would corrupt the frequency axis."
+                "Refusing a guessed header collision because it would corrupt the frequency axis. "
+                f"Legal-offset fields inspected: {inspected}"
             )
         hdrc_off = cands[0]
 
@@ -318,10 +330,10 @@ def read_ss(path, verbose=True):
     freq1 = float(hdrc["freq1"][0])
     freq2 = float(hdrc["freq2"][0])
     imono = int(hdrc["imono"][0])              # 1: mono-static, 2: bistatic
-    if maxfreq != num_freqs0 or nfreq_header != num_freqs0:
+    if maxfreq != num_freqs0:
         raise ValueError(
-            f"{path}: header-C frequency counts maxfreq={maxfreq}, "
-            f"nfreq={nfreq_header} do not match framing count {num_freqs0}"
+            f"{path}: header-C maxfreq={maxfreq} does not match framing count "
+            f"{num_freqs0} (advisory nfreq={nfreq_header})"
         )
     if ifreq not in (1, 2) or imono not in (1, 2):
         raise ValueError(
