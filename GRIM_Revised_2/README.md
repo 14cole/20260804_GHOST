@@ -686,11 +686,12 @@ Helper crop/regrid coordinates are in each dataset's native axis units. These
 helpers return derived grids in memory; call `.save(...)` explicitly when an
 artifact should be published.
 
-Runnable examples for strict folder joins, Cartesian azimuth sweeps, frequency
-sweeps with optional azimuth-band percentiles, and unit-aware coordinate/index
-queries are in [`examples/`](examples/README.md). Each example uses the same
-validated loaders and numerical paths as GRIM rather than duplicating file or
-plot parsing logic.
+Edit-and-run examples for strict folder joins, Cartesian azimuth sweeps,
+frequency sweeps with optional azimuth-band percentiles, and unit-aware
+coordinate/index queries are in [`examples/`](examples/README.md). Each script
+has a hard-coded settings block near the top and takes no command-line options.
+The examples use the same validated loaders and numerical paths as GRIM rather
+than duplicating file or plot parsing logic.
 
 ## Tests
 

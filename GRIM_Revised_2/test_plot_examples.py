@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 import io
 from pathlib import Path
 import tempfile
@@ -70,20 +70,6 @@ class FolderPlotExampleTests(unittest.TestCase):
 
     def test_cartesian_azimuth_example_builds_overlay_and_avoids_overwrite(self):
         output_dir = self.root / "azimuth plots"
-        parser = azimuth_example.build_parser()
-        arguments = [
-            str(self.root),
-            "--output-dir",
-            str(output_dir),
-            "--frequency",
-            "2",
-            "--elevation",
-            "0",
-            "--polarization",
-            "VV",
-            "--dpi",
-            "72",
-        ]
         captured = []
         with mock.patch.object(
             azimuth_example,
@@ -91,10 +77,20 @@ class FolderPlotExampleTests(unittest.TestCase):
             side_effect=_fake_renderer(captured),
         ), redirect_stdout(io.StringIO()):
             first_paths = azimuth_example.run(
-                parser.parse_args(arguments), parser=parser
+                self.root,
+                output_folder=output_dir,
+                frequencies=(2.0,),
+                elevation=0.0,
+                polarizations=("VV",),
+                dpi=72,
             )
             second_paths = azimuth_example.run(
-                parser.parse_args(arguments), parser=parser
+                self.root,
+                output_folder=output_dir,
+                frequencies=(2.0,),
+                elevation=0.0,
+                polarizations=("VV",),
+                dpi=72,
             )
 
         self.assertEqual(len(captured), 2)
@@ -108,32 +104,21 @@ class FolderPlotExampleTests(unittest.TestCase):
 
     def test_frequency_example_calculates_optional_display_domain_percentile(self):
         output_dir = self.root / "frequency plots"
-        parser = frequency_example.build_parser()
-        args = parser.parse_args(
-            [
-                str(self.root),
-                "--output-dir",
-                str(output_dir),
-                "--azimuth-band",
-                "-10",
-                "10",
-                "--percentile",
-                "90",
-                "--elevation",
-                "0",
-                "--polarization",
-                "VV",
-                "--dpi",
-                "72",
-            ]
-        )
         captured = []
         with mock.patch.object(
             frequency_example,
             "render_plot_png",
             side_effect=_fake_renderer(captured),
         ), redirect_stdout(io.StringIO()):
-            rendered = frequency_example.run(args, parser=parser)
+            rendered = frequency_example.run(
+                self.root,
+                output_folder=output_dir,
+                azimuth_band=(-10.0, 10.0),
+                percentile=90.0,
+                elevation=0.0,
+                polarizations=("VV",),
+                dpi=72,
+            )
 
         self.assertEqual(len(rendered), 1)
         self.assertEqual(len(captured), 1)
@@ -145,33 +130,29 @@ class FolderPlotExampleTests(unittest.TestCase):
 
     def test_cartesian_example_runs_through_real_headless_png_renderer(self):
         output_dir = self.root / "rendered"
-        parser = azimuth_example.build_parser()
-        args = parser.parse_args(
-            [
-                str(self.root),
-                "--output-dir",
-                str(output_dir),
-                "--frequency",
-                "1",
-                "--dpi",
-                "72",
-                "--width",
-                "3",
-                "--height",
-                "2",
-            ]
-        )
         with redirect_stdout(io.StringIO()):
-            rendered = azimuth_example.run(args, parser=parser)
+            rendered = azimuth_example.run(
+                self.root,
+                output_folder=output_dir,
+                frequencies=(1.0,),
+                dpi=72,
+                width_inches=3.0,
+                height_inches=2.0,
+            )
         self.assertEqual(len(rendered), 1)
         self.assertEqual(rendered[0].read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
-    def test_percentile_without_band_exits_with_actionable_error(self):
-        with redirect_stderr(io.StringIO()) as errors:
-            with self.assertRaises(SystemExit) as raised:
-                frequency_example.main([str(self.root), "--percentile", "90"])
-        self.assertEqual(raised.exception.code, 2)
-        self.assertIn("--percentile requires --azimuth-band", errors.getvalue())
+    def test_percentile_without_band_has_actionable_error(self):
+        with self.assertRaisesRegex(
+            ValueError, "AZIMUTH_PERCENTILE requires AZIMUTH_BAND"
+        ):
+            frequency_example.run(self.root, percentile=90.0)
+
+    def test_examples_expose_editable_configuration_without_cli_parsers(self):
+        for module in (azimuth_example, frequency_example):
+            self.assertIsInstance(module.INPUT_FOLDER, Path)
+            self.assertTrue(hasattr(module, "INPUT_PATTERN"))
+            self.assertFalse(hasattr(module, "build_parser"))
 
 
 if __name__ == "__main__":

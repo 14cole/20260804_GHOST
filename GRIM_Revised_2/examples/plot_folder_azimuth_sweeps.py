@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """Render Cartesian azimuth sweeps from every supported dataset in a folder.
 
-Examples
---------
-Render every common frequency at the first common elevation/polarization::
+Edit the clearly marked configuration block below, then run this file directly::
 
-    python plot_folder_azimuth_sweeps.py C:\\data\\trade_study
-
-Select two frequencies (in the files' stored frequency unit) and overlay HH::
-
-    python plot_folder_azimuth_sweeps.py C:\\data\\trade_study \
-        --frequency 8 --frequency 10 --elevation 0 --polarization HH
+    python plot_folder_azimuth_sweeps.py
 
 The script uses the same exact-axis matching, unit conversion, logarithmic RCS
 conversion, and headless Matplotlib renderer as GRIM's PowerPoint workflow.
@@ -19,7 +12,6 @@ It never imports Qt and does not modify its input datasets.
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 import re
 import sys
@@ -38,6 +30,34 @@ from ppt_plot_data import build_azimuth_specs, get_plot_availability
 from ppt_report import render_plot_png
 
 
+# =============================================================================
+# EDIT THESE SETTINGS, THEN RUN THIS SCRIPT. No command-line arguments are used.
+# =============================================================================
+INPUT_FOLDER = Path(r"C:\data\trade_study")
+INPUT_PATTERN = "*"                 # Example: "*.grim" or "*.csv"
+SEARCH_SUBFOLDERS = False
+OUTPUT_FOLDER: Path | None = None    # None -> <INPUT_FOLDER>/grim_azimuth_plots
+
+# Values below are in each dataset's stored/native units. None selects every
+# common frequency or the first common elevation/polarization, respectively.
+FREQUENCIES: tuple[float, ...] | None = None
+ELEVATION: float | None = None
+POLARIZATIONS: tuple[str, ...] | None = None
+
+QUANTITY = "magnitude"              # "magnitude" or "phase"
+ANGLE_DISPLAY_UNIT = "deg"          # "deg" or "rad"
+FREQUENCY_DISPLAY_UNIT = "GHz"      # "Hz", "kHz", "MHz", or "GHz"
+Y_LIMITS: tuple[float, float] | None = None
+FIGURE_WIDTH_INCHES = 10.0
+FIGURE_HEIGHT_INCHES = 6.0
+DPI = 160
+AXIS_MATCH_TOLERANCE = 1.0e-6
+SHOW_LEGEND = True
+SKIP_LOAD_ERRORS = False
+OVERWRITE_EXISTING = False
+# =============================================================================
+
+
 def discover_dataset_paths(
     folder: str | Path,
     *,
@@ -51,7 +71,9 @@ def discover_dataset_paths(
         raise ValueError(f"Input folder does not exist or is not a directory: {root}")
     pattern_path = Path(pattern)
     if pattern_path.is_absolute() or ".." in pattern_path.parts:
-        raise ValueError("--pattern must be a relative glob that stays inside the input folder")
+        raise ValueError(
+            "INPUT_PATTERN must be a relative glob that stays inside INPUT_FOLDER"
+        )
     candidates = root.rglob(pattern) if recursive else root.glob(pattern)
     paths = {
         candidate.resolve()
@@ -93,12 +115,19 @@ def load_named_datasets(
     return loaded
 
 
-def _axis_limits(parser: argparse.ArgumentParser, low, high):
-    if (low is None) != (high is None):
-        parser.error("--y-min and --y-max must be supplied together")
-    if low is not None and low >= high:
-        parser.error("--y-min must be less than --y-max")
-    return None if low is None else (float(low), float(high))
+def _validated_axis_limits(
+    limits: tuple[float, float] | None,
+) -> tuple[float, float] | None:
+    if limits is None:
+        return None
+    if len(limits) != 2:
+        raise ValueError("Y_LIMITS must contain exactly (minimum, maximum)")
+    low, high = (float(value) for value in limits)
+    if not np.isfinite(low) or not np.isfinite(high):
+        raise ValueError("Y_LIMITS values must be finite")
+    if low >= high:
+        raise ValueError("Y_LIMITS minimum must be less than its maximum")
+    return low, high
 
 
 def _safe_destination(
@@ -121,84 +150,53 @@ def _safe_destination(
         suffix += 1
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Overlay all supported datasets in a folder and render one Cartesian "
-            "azimuth sweep PNG per selected frequency and polarization."
-        ),
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("folder", help="folder containing .grim/.csv/.ptm/etc. datasets")
-    parser.add_argument("--pattern", default="*", help="relative input filename glob")
-    parser.add_argument("--recursive", action="store_true", help="search subfolders")
-    parser.add_argument(
-        "--output-dir",
-        help="PNG destination (default: <folder>/grim_azimuth_plots)",
-    )
-    parser.add_argument(
-        "--frequency",
-        type=float,
-        action="append",
-        help=(
-            "exact common frequency in the datasets' stored unit; repeat for more "
-            "frequencies (default: every common frequency)"
-        ),
-    )
-    parser.add_argument(
-        "--elevation",
-        type=float,
-        help="exact common elevation/pitch in its stored unit (default: first common value)",
-    )
-    parser.add_argument(
-        "--polarization",
-        action="append",
-        help="common polarization; repeat to create separate plots (default: first common value)",
-    )
-    parser.add_argument("--quantity", choices=("magnitude", "phase"), default="magnitude")
-    parser.add_argument(
-        "--angle-unit",
-        choices=("deg", "rad"),
-        default="deg",
-        help=(
-            "output-axis display unit; --elevation remains in the stored "
-            "angle unit"
-        ),
-    )
-    parser.add_argument(
-        "--frequency-unit",
-        choices=("Hz", "kHz", "MHz", "GHz"),
-        default="GHz",
-        help="display unit only; --frequency remains in the stored unit",
-    )
-    parser.add_argument("--y-min", type=float, help="fixed lower response-axis limit")
-    parser.add_argument("--y-max", type=float, help="fixed upper response-axis limit")
-    parser.add_argument("--width", type=float, default=10.0, help="image width in inches")
-    parser.add_argument("--height", type=float, default=6.0, help="image height in inches")
-    parser.add_argument("--dpi", type=int, default=160)
-    parser.add_argument("--tol", type=float, default=1.0e-6, help="native-axis match tolerance")
-    parser.add_argument("--no-legend", action="store_true")
-    parser.add_argument(
-        "--skip-errors",
-        action="store_true",
-        help="report unreadable matching files and continue with the rest",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="replace same-named PNGs instead of adding a numeric suffix",
-    )
-    return parser
+def run(
+    folder: str | Path,
+    *,
+    pattern: str = "*",
+    recursive: bool = False,
+    output_folder: str | Path | None = None,
+    frequencies: Sequence[float] | None = None,
+    elevation: float | None = None,
+    polarizations: Sequence[str] | None = None,
+    quantity: str = "magnitude",
+    angle_display_unit: str = "deg",
+    frequency_display_unit: str = "GHz",
+    y_limits: tuple[float, float] | None = None,
+    width_inches: float = 10.0,
+    height_inches: float = 6.0,
+    dpi: int = 160,
+    tol: float = 1.0e-6,
+    show_legend: bool = True,
+    skip_errors: bool = False,
+    overwrite: bool = False,
+) -> tuple[Path, ...]:
+    """Render the selected sweeps; arguments use dataset-native axis units."""
 
+    if quantity not in {"magnitude", "phase"}:
+        raise ValueError("QUANTITY must be 'magnitude' or 'phase'")
+    if angle_display_unit not in {"deg", "rad"}:
+        raise ValueError("ANGLE_DISPLAY_UNIT must be 'deg' or 'rad'")
+    if frequency_display_unit not in {"Hz", "kHz", "MHz", "GHz"}:
+        raise ValueError(
+            "FREQUENCY_DISPLAY_UNIT must be 'Hz', 'kHz', 'MHz', or 'GHz'"
+        )
+    if not np.isfinite(width_inches) or not np.isfinite(height_inches):
+        raise ValueError("Figure width and height must be finite")
+    if width_inches <= 0.0 or height_inches <= 0.0:
+        raise ValueError("Figure width and height must be positive")
+    if dpi < 72:
+        raise ValueError("DPI must be at least 72")
+    if not np.isfinite(tol) or tol < 0.0:
+        raise ValueError("AXIS_MATCH_TOLERANCE must be finite and nonnegative")
 
-def run(args: argparse.Namespace, *, parser: argparse.ArgumentParser) -> tuple[Path, ...]:
-    root = Path(args.folder).expanduser().resolve()
-    paths = discover_dataset_paths(root, pattern=args.pattern, recursive=args.recursive)
-    datasets = load_named_datasets(paths, root=root, skip_errors=args.skip_errors)
+    root = Path(folder).expanduser().resolve()
+    paths = discover_dataset_paths(root, pattern=pattern, recursive=recursive)
+    datasets = load_named_datasets(paths, root=root, skip_errors=skip_errors)
     availability = get_plot_availability(
         datasets,
-        tol=args.tol,
-        evaluate_phase=args.quantity == "phase",
+        tol=tol,
+        evaluate_phase=quantity == "phase",
     )
     if not availability.elevations:
         raise ValueError("Loaded datasets have no common elevation/pitch sample")
@@ -207,67 +205,83 @@ def run(args: argparse.Namespace, *, parser: argparse.ArgumentParser) -> tuple[P
     if not availability.polarizations:
         raise ValueError("Loaded datasets have no common polarization")
 
-    frequencies = args.frequency or list(availability.frequencies)
-    elevation = (
-        float(args.elevation)
-        if args.elevation is not None
+    selected_frequencies = (
+        [float(value) for value in frequencies]
+        if frequencies
+        else list(availability.frequencies)
+    )
+    selected_elevation = (
+        float(elevation)
+        if elevation is not None
         else float(availability.elevations[0])
     )
-    polarizations = args.polarization or [availability.polarizations[0]]
-    y_limits = _axis_limits(parser, args.y_min, args.y_max)
-    if not np.isfinite(args.width) or not np.isfinite(args.height):
-        parser.error("--width and --height must be finite")
-    if args.width <= 0.0 or args.height <= 0.0:
-        parser.error("--width and --height must be positive")
-    if args.dpi < 72:
-        parser.error("--dpi must be at least 72")
-    if not np.isfinite(args.tol) or args.tol < 0.0:
-        parser.error("--tol must be finite and nonnegative")
+    selected_polarizations = (
+        list(polarizations) if polarizations else [availability.polarizations[0]]
+    )
+    validated_y_limits = _validated_axis_limits(y_limits)
 
     specs = build_azimuth_specs(
         datasets,
-        frequencies=frequencies,
-        elevation=elevation,
-        polarization=polarizations,
+        frequencies=selected_frequencies,
+        elevation=selected_elevation,
+        polarization=selected_polarizations,
         kind="azimuth_rect",
-        quantity=args.quantity,
-        angle_display_unit=args.angle_unit,
-        frequency_display_unit=args.frequency_unit,
-        y_limits=y_limits,
-        show_legend=not args.no_legend,
-        tol=args.tol,
+        quantity=quantity,
+        angle_display_unit=angle_display_unit,
+        frequency_display_unit=frequency_display_unit,
+        y_limits=validated_y_limits,
+        show_legend=show_legend,
+        tol=tol,
     )
     output_dir = (
-        Path(args.output_dir).expanduser().resolve()
-        if args.output_dir
+        Path(output_folder).expanduser().resolve()
+        if output_folder is not None
         else root / "grim_azimuth_plots"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     rendered = []
     for spec in specs:
         destination = _safe_destination(
-            output_dir, spec.plot_id, overwrite=args.overwrite
+            output_dir, spec.plot_id, overwrite=overwrite
         )
         rendered.append(
             render_plot_png(
                 spec,
                 destination,
-                width_points=args.width * 72.0,
-                height_points=args.height * 72.0,
-                dpi=args.dpi,
+                width_points=width_inches * 72.0,
+                height_points=height_inches * 72.0,
+                dpi=dpi,
             )
         )
     print(f"Loaded {len(datasets)} dataset(s); wrote {len(rendered)} plot(s) to {output_dir}")
     return tuple(rendered)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+def main() -> int:
     try:
-        run(args, parser=parser)
+        run(
+            INPUT_FOLDER,
+            pattern=INPUT_PATTERN,
+            recursive=SEARCH_SUBFOLDERS,
+            output_folder=OUTPUT_FOLDER,
+            frequencies=FREQUENCIES,
+            elevation=ELEVATION,
+            polarizations=POLARIZATIONS,
+            quantity=QUANTITY,
+            angle_display_unit=ANGLE_DISPLAY_UNIT,
+            frequency_display_unit=FREQUENCY_DISPLAY_UNIT,
+            y_limits=Y_LIMITS,
+            width_inches=FIGURE_WIDTH_INCHES,
+            height_inches=FIGURE_HEIGHT_INCHES,
+            dpi=DPI,
+            tol=AXIS_MATCH_TOLERANCE,
+            show_legend=SHOW_LEGEND,
+            skip_errors=SKIP_LOAD_ERRORS,
+            overwrite=OVERWRITE_EXISTING,
+        )
     except (OSError, RuntimeError, ValueError) as exc:
-        parser.exit(2, f"error: {exc}\n")
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

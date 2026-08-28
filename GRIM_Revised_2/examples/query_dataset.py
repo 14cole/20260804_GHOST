@@ -9,23 +9,16 @@ This example shows the normal four-axis access pattern:
 4. index ``rcs_power``/``rcs_phase`` and request the corresponding complex
    value without allocating a complex copy of the full dataset.
 
-Example::
-
-    python query_dataset.py example.grim \
-        --azimuth 45 --elevation 0 --frequency 10 --polarization VV
-    python query_dataset.py example.grim \
-        --azimuth 0.5 --elevation 0 --angle-unit rad \
-        --frequency 9500 --frequency-unit MHz --polarization HH --nearest
+Edit the clearly marked configuration block below, then run this file.  The
+reusable :func:`query_sample` function can also be imported by another script.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import sys
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 
@@ -39,6 +32,34 @@ from plot_modes.common import (
     axis_unit,
     convert_axis_values,
 )
+
+
+# =============================================================================
+# EDIT THESE SETTINGS, THEN RUN THIS SCRIPT
+# =============================================================================
+DATASET_PATH = Path(r"C:\path\to\dataset.grim")
+
+QUERY_AZIMUTH = 45.0
+QUERY_ELEVATION = 0.0
+QUERY_FREQUENCY = 10.0
+QUERY_POLARIZATION = "VV"
+
+# Angles may use "deg" or "rad". Frequency may use "Hz", "kHz", "MHz",
+# or "GHz"; these are the units of the requested values above, not necessarily
+# the dataset's stored units.
+QUERY_ANGLE_UNIT = "deg"
+QUERY_FREQUENCY_UNIT = "GHz"
+
+# False requires a unique match within tolerance. True deliberately selects
+# the closest stored coordinate. None uses GRIM's scale-aware default tolerance.
+NEAREST_MATCH = False
+ANGLE_TOLERANCE: float | None = None
+FREQUENCY_TOLERANCE: float | None = None
+
+# The result is always printed. Set this to a Path to also save JSON.
+JSON_OUTPUT_PATH: Path | None = None
+OVERWRITE_JSON = False
+# =============================================================================
 
 
 def _finite_or_none(value: float) -> float | None:
@@ -98,7 +119,8 @@ def find_numeric_index(
                     f"{axis_name} {query:g} {requested_unit} was not found within "
                     f"{float(tolerance) if tolerance is not None else 'the default'} "
                     f"tolerance; closest is {closest_requested:g} {requested_unit} "
-                    f"at index {closest}. Use --nearest to select it explicitly."
+                    f"at index {closest}. Call with nearest=True to select it "
+                    "explicitly."
                 )
             raise ValueError(
                 f"{axis_name} {query:g} {requested_unit} matches multiple axis "
@@ -241,85 +263,36 @@ def query_sample(
     }
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Resolve azimuth/elevation/frequency/polarization values to GRIM "
-            "indices and print the selected sample as JSON."
-        )
-    )
-    parser.add_argument("dataset", help="any dataset format supported by GRIM")
-    parser.add_argument("--azimuth", required=True, type=float)
-    parser.add_argument("--elevation", required=True, type=float)
-    parser.add_argument("--frequency", required=True, type=float)
-    parser.add_argument("--polarization", required=True)
-    parser.add_argument(
-        "--angle-unit",
-        choices=("deg", "rad"),
-        default="deg",
-        help="unit of --azimuth/--elevation: deg or rad (default: deg)",
-    )
-    parser.add_argument(
-        "--frequency-unit",
-        choices=("Hz", "kHz", "MHz", "GHz"),
-        default="GHz",
-        help="unit of --frequency: Hz, kHz, MHz, or GHz (default: GHz)",
-    )
-    parser.add_argument(
-        "--nearest",
-        action="store_true",
-        help="select the nearest coordinate instead of requiring a tolerance match",
-    )
-    parser.add_argument(
-        "--angle-tolerance",
-        type=float,
-        default=None,
-        help="matching tolerance in --angle-unit (strict mode only)",
-    )
-    parser.add_argument(
-        "--frequency-tolerance",
-        type=float,
-        default=None,
-        help="matching tolerance in --frequency-unit (strict mode only)",
-    )
-    parser.add_argument(
-        "--output", help="optional JSON output path; stdout is always populated"
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="replace an existing JSON output file",
-    )
-    return parser
+def main() -> int:
+    """Run the query using the editable constants at the top of this file."""
 
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    dataset_path = Path(DATASET_PATH).expanduser().resolve()
     try:
-        dataset = load_dataset(args.dataset)
+        dataset = load_dataset(str(dataset_path))
         result = query_sample(
             dataset,
-            azimuth=args.azimuth,
-            elevation=args.elevation,
-            frequency=args.frequency,
-            polarization=args.polarization,
-            angle_unit=args.angle_unit,
-            frequency_unit=args.frequency_unit,
-            nearest=args.nearest,
-            angle_tolerance=args.angle_tolerance,
-            frequency_tolerance=args.frequency_tolerance,
+            azimuth=QUERY_AZIMUTH,
+            elevation=QUERY_ELEVATION,
+            frequency=QUERY_FREQUENCY,
+            polarization=QUERY_POLARIZATION,
+            angle_unit=QUERY_ANGLE_UNIT,
+            frequency_unit=QUERY_FREQUENCY_UNIT,
+            nearest=NEAREST_MATCH,
+            angle_tolerance=ANGLE_TOLERANCE,
+            frequency_tolerance=FREQUENCY_TOLERANCE,
         )
     except (OSError, TypeError, ValueError) as exc:
         raise SystemExit(f"query failed: {exc}") from exc
 
     rendered = json.dumps(result, indent=2, sort_keys=True, allow_nan=False)
-    if args.output:
-        output = Path(args.output).expanduser().resolve()
-        if output.exists() and output.samefile(Path(args.dataset).resolve()):
-            raise SystemExit("--output must not overwrite the input dataset")
-        if output.exists() and not args.overwrite:
+    if JSON_OUTPUT_PATH is not None:
+        output = Path(JSON_OUTPUT_PATH).expanduser().resolve()
+        if output.exists() and output.samefile(dataset_path):
+            raise SystemExit("JSON_OUTPUT_PATH must not overwrite DATASET_PATH")
+        if output.exists() and not OVERWRITE_JSON:
             raise SystemExit(
-                f"JSON output already exists: {output}; pass --overwrite to replace it"
+                f"JSON output already exists: {output}; set OVERWRITE_JSON = True "
+                "to replace it"
             )
         if not output.parent.is_dir():
             raise SystemExit(f"JSON output directory does not exist: {output.parent}")

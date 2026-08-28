@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 """Join every supported GRIM dataset in a folder into one ``.grim`` file.
 
-The default overlap policy is deliberately strict: equal finite samples may
-overlap, but conflicting finite samples stop the operation.  Use
-``--overlap first`` or ``--overlap last`` only when pathname-order priority is
-intentional.  Input files are always sorted by their full path, so priority is
-repeatable.
-
-Example::
-
-    python join_folder.py ./cuts ./combined.grim --pattern "*.csv"
-    python join_folder.py ./cuts ./combined.grim --recursive --workers 4
+Edit the clearly marked configuration block below, then run this file.  The
+default overlap policy is deliberately strict: equal finite samples may
+overlap, but conflicting finite samples stop the operation.  Input files are
+always sorted by full path, so ``first``/``last`` priority is repeatable.
 """
 
 from __future__ import annotations
 
-import argparse
+import math
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +23,29 @@ if __package__ in {None, ""}:
 
 from grim_dataset import RcsGrid
 from grim_headless import is_supported_path, load_dataset
+
+
+# =============================================================================
+# EDIT THESE SETTINGS, THEN RUN THIS SCRIPT
+# =============================================================================
+INPUT_FOLDER = Path(r"C:\path\to\dataset_folder")
+OUTPUT_FILE = Path(r"C:\path\to\combined.grim")
+
+# Use "*" for every supported dataset or, for example, "*.csv".
+FILE_PATTERN = "*"
+SEARCH_SUBFOLDERS = False
+PARALLEL_LOADERS = 1
+
+# "error" is safest. "first" and "last" resolve conflicts using sorted
+# full-path order and should only be used when that priority is intentional.
+OVERLAP_POLICY = "error"
+COORDINATE_TOLERANCE = 1.0e-6
+
+# Set a positive value to cap GRIM's estimated peak join allocation, or None
+# for no explicit cap.  Existing output is protected unless this is True.
+MAX_OUTPUT_GIB: float | None = None
+OVERWRITE_OUTPUT = False
+# =============================================================================
 
 
 def normalized_grim_path(path: str | os.PathLike[str]) -> Path:
@@ -108,7 +125,7 @@ def join_folder(
     output_path = normalized_grim_path(output)
     if output_path.exists() and not overwrite:
         raise FileExistsError(
-            f"output already exists: {output_path}; pass --overwrite to replace it"
+            f"output already exists: {output_path}; set overwrite=True to replace it"
         )
     if not output_path.parent.is_dir():
         raise ValueError(f"output directory does not exist: {output_path.parent}")
@@ -137,74 +154,30 @@ def join_folder(
     return joined, written, paths
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Join supported datasets from a folder into one GRIM file.",
-        epilog=(
-            "Strict --overlap error is safest. first/last use sorted full-path "
-            "order and should only be selected when that priority is intended."
-        ),
-    )
-    parser.add_argument("folder", help="folder containing input datasets")
-    parser.add_argument("output", help="output .grim file")
-    parser.add_argument(
-        "--pattern", default="*", help="filename glob within the folder (default: *)"
-    )
-    parser.add_argument(
-        "--recursive", action="store_true", help="search matching subfolders too"
-    )
-    parser.add_argument(
-        "--workers", type=int, default=1, help="parallel file loaders (default: 1)"
-    )
-    parser.add_argument(
-        "--overlap",
-        choices=("error", "first", "last"),
-        default="error",
-        help="finite-overlap policy (default: error)",
-    )
-    parser.add_argument(
-        "--tolerance",
-        type=float,
-        default=1.0e-6,
-        help=(
-            "same numeric coordinate matching tolerance on each native axis "
-            "(default: 1e-6)"
-        ),
-    )
-    parser.add_argument(
-        "--max-output-gib",
-        type=float,
-        default=None,
-        help="optional upper bound for GRIM's estimated peak join allocation",
-    )
-    parser.add_argument(
-        "--overwrite", action="store_true", help="replace an existing output file"
-    )
-    return parser
+def main() -> int:
+    """Run the join using the editable constants at the top of this file."""
 
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if args.workers < 1:
-        raise SystemExit("--workers must be at least 1")
-    if args.max_output_gib is not None and args.max_output_gib <= 0.0:
-        raise SystemExit("--max-output-gib must be positive")
-    maximum = (
-        None
-        if args.max_output_gib is None
-        else int(float(args.max_output_gib) * 1024**3)
-    )
+    workers = int(PARALLEL_LOADERS)
+    if workers < 1:
+        raise SystemExit("PARALLEL_LOADERS must be at least 1")
+    if MAX_OUTPUT_GIB is None:
+        maximum = None
+    else:
+        maximum_gib = float(MAX_OUTPUT_GIB)
+        if not math.isfinite(maximum_gib) or maximum_gib <= 0.0:
+            raise SystemExit("MAX_OUTPUT_GIB must be a finite positive number")
+        maximum = int(maximum_gib * 1024**3)
     try:
         joined, written, paths = join_folder(
-            args.folder,
-            args.output,
-            pattern=args.pattern,
-            recursive=args.recursive,
-            workers=args.workers,
-            overlap=args.overlap,
-            tolerance=args.tolerance,
+            INPUT_FOLDER,
+            OUTPUT_FILE,
+            pattern=FILE_PATTERN,
+            recursive=SEARCH_SUBFOLDERS,
+            workers=workers,
+            overlap=OVERLAP_POLICY,
+            tolerance=COORDINATE_TOLERANCE,
             max_output_bytes=maximum,
-            overwrite=args.overwrite,
+            overwrite=OVERWRITE_OUTPUT,
         )
     except (OSError, TypeError, ValueError, MemoryError) as exc:
         raise SystemExit(f"join failed: {exc}") from exc
@@ -212,7 +185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Loaded {len(paths)} dataset(s) in sorted pathname order:")
     for path in paths:
         print(f"  {path}")
-    print(f"Overlap policy: {args.overlap}")
+    print(f"Overlap policy: {OVERLAP_POLICY}")
     print(f"Joined shape: {joined.rcs_power.shape}")
     print(f"Wrote: {written}")
     return 0

@@ -9,11 +9,13 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
+from examples import join_folder as join_example
+from examples import query_dataset as query_example
 from examples.join_folder import discover_dataset_files, join_folder
-from examples.query_dataset import main as query_main
 from examples.query_dataset import query_sample
 from grim_dataset import RcsGrid
 
@@ -77,6 +79,36 @@ class JoinFolderExampleTests(unittest.TestCase):
                 [path.name for path in discover_dataset_files(folder)], ["cut.grim"]
             )
 
+    def test_main_uses_editable_configuration_constants(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            self._cut(0.0, 1.0).save(folder / "a.grim")
+            self._cut(1.0, 2.0).save(folder / "b.grim")
+            output = folder / "configured.grim"
+
+            with patch.multiple(
+                join_example,
+                INPUT_FOLDER=folder,
+                OUTPUT_FILE=output,
+                FILE_PATTERN="*.grim",
+                SEARCH_SUBFOLDERS=False,
+                PARALLEL_LOADERS=1,
+                OVERLAP_POLICY="error",
+                COORDINATE_TOLERANCE=1.0e-6,
+                MAX_OUTPUT_GIB=None,
+                OVERWRITE_OUTPUT=False,
+            ):
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    status = join_example.main()
+
+            self.assertEqual(status, 0)
+            self.assertTrue(output.exists())
+            self.assertIn("Loaded 2 dataset(s)", stdout.getvalue())
+            np.testing.assert_allclose(
+                RcsGrid.load(output).rcs_power[:, 0, 0, 0], [1.0, 2.0]
+            )
+
 
 class QueryDatasetExampleTests(unittest.TestCase):
     @staticmethod
@@ -131,7 +163,7 @@ class QueryDatasetExampleTests(unittest.TestCase):
         self.assertAlmostEqual(sample["complex"]["imag"], 2.0 * math.sin(math.radians(350.0)))
 
     def test_strict_query_explains_miss_and_nearest_is_explicit(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Use --nearest"):
+        with self.assertRaisesRegex(ValueError, "nearest=True"):
             query_sample(
                 self._dataset(),
                 azimuth=80.0,
@@ -156,59 +188,66 @@ class QueryDatasetExampleTests(unittest.TestCase):
             nearest["matches"]["azimuth"]["difference_in_requested_unit"], 10.0
         )
 
-    def test_cli_emits_strict_json_without_nan_tokens(self) -> None:
+    def test_main_uses_configuration_and_emits_strict_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "query.grim"
             self._dataset().save(path)
             stdout = StringIO()
-            with redirect_stdout(stdout):
-                status = query_main(
-                    [
-                        str(path),
-                        "--azimuth",
-                        "90",
-                        "--elevation",
-                        "0",
-                        "--frequency",
-                        "2",
-                        "--frequency-unit",
-                        "GHz",
-                        "--polarization",
-                        "VV",
-                    ]
-                )
+            with patch.multiple(
+                query_example,
+                DATASET_PATH=path,
+                QUERY_AZIMUTH=90.0,
+                QUERY_ELEVATION=0.0,
+                QUERY_FREQUENCY=2.0,
+                QUERY_POLARIZATION="VV",
+                QUERY_ANGLE_UNIT="deg",
+                QUERY_FREQUENCY_UNIT="GHz",
+                NEAREST_MATCH=False,
+                ANGLE_TOLERANCE=None,
+                FREQUENCY_TOLERANCE=None,
+                JSON_OUTPUT_PATH=None,
+                OVERWRITE_JSON=False,
+            ):
+                with redirect_stdout(stdout):
+                    status = query_example.main()
             self.assertEqual(status, 0)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload["indices"]["frequency"], 1)
             self.assertNotIn("NaN", stdout.getvalue())
 
-    def test_cli_preserves_existing_json_without_explicit_overwrite(self) -> None:
+    def test_main_preserves_existing_json_without_configured_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
             dataset_path = folder / "query.grim"
             output_path = folder / "sample.json"
             self._dataset().save(dataset_path)
             output_path.write_text("keep me\n", encoding="utf-8")
-            arguments = [
-                str(dataset_path),
-                "--azimuth",
-                "90",
-                "--elevation",
-                "0",
-                "--frequency",
-                "2",
-                "--polarization",
-                "VV",
-                "--output",
-                str(output_path),
-            ]
+            configured = {
+                "DATASET_PATH": dataset_path,
+                "QUERY_AZIMUTH": 90.0,
+                "QUERY_ELEVATION": 0.0,
+                "QUERY_FREQUENCY": 2.0,
+                "QUERY_POLARIZATION": "VV",
+                "QUERY_ANGLE_UNIT": "deg",
+                "QUERY_FREQUENCY_UNIT": "GHz",
+                "NEAREST_MATCH": False,
+                "ANGLE_TOLERANCE": None,
+                "FREQUENCY_TOLERANCE": None,
+                "JSON_OUTPUT_PATH": output_path,
+                "OVERWRITE_JSON": False,
+            }
 
-            with self.assertRaisesRegex(SystemExit, "pass --overwrite"):
-                query_main(arguments)
-            self.assertEqual(output_path.read_text(encoding="utf-8"), "keep me\n")
+            with patch.multiple(query_example, **configured):
+                with self.assertRaisesRegex(SystemExit, "OVERWRITE_JSON = True"):
+                    query_example.main()
+                self.assertEqual(
+                    output_path.read_text(encoding="utf-8"), "keep me\n"
+                )
 
-            with redirect_stdout(StringIO()):
-                self.assertEqual(query_main([*arguments, "--overwrite"]), 0)
+            configured["OVERWRITE_JSON"] = True
+            with patch.multiple(query_example, **configured):
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(query_example.main(), 0)
             self.assertEqual(
                 json.loads(output_path.read_text(encoding="utf-8"))["indices"][
                     "frequency"
