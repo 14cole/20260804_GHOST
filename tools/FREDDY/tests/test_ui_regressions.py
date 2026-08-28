@@ -89,6 +89,50 @@ class MaterialMixUiTests(unittest.TestCase):
             workspace.deleteLater()
             self.app.processEvents()
 
+    def test_host_theme_override_is_presentation_only_and_reversible(self) -> None:
+        from matplotlib.colors import to_hex
+
+        workspace = ImpedanceGui()
+        try:
+            host_theme = dict(DARK_THEME)
+            host_theme.update(
+                {
+                    "window_bg": "#102030",
+                    "panel_bg": "#203040",
+                    "plot_bg": "#203040",
+                    "plot_axes_bg": "#304050",
+                    "accent": "#40c0ff",
+                }
+            )
+            was_dirty = workspace.is_dirty()
+            dark_value = workspace.dark_mode_var.get()
+
+            workspace.apply_host_theme(host_theme)
+
+            self.assertEqual(workspace._colors, host_theme)
+            self.assertEqual(workspace.dark_mode_var.get(), dark_value)
+            self.assertEqual(workspace.is_dirty(), was_dirty)
+            self.assertFalse(workspace.dark_mode_action.isVisible())
+            self.assertFalse(workspace.view_menu.menuAction().isVisible())
+            self.assertIn("#102030", workspace.styleSheet().lower())
+            self.assertEqual(
+                to_hex(workspace.fig.get_facecolor()), "#203040"
+            )
+            self.assertEqual(
+                to_hex(workspace.ax_heatmap.get_facecolor()), "#304050"
+            )
+
+            workspace.clear_host_theme()
+
+            self.assertIsNone(workspace._host_theme_override)
+            self.assertEqual(workspace._colors, DARK_THEME)
+            self.assertTrue(workspace.dark_mode_action.isVisible())
+            self.assertTrue(workspace.view_menu.menuAction().isVisible())
+            self.assertEqual(workspace.is_dirty(), was_dirty)
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
     def test_workspace_exposes_background_job_close_contract(self) -> None:
         class WorkspaceState:
             _task_running = False

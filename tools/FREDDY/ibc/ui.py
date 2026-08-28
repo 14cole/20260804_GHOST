@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 import math
 import os
 import queue
@@ -1288,6 +1289,7 @@ class ImpedanceGui(QMainWindow):
         self._clean_project_state: dict[str, object] | None = None
         self.inverse_candidates: list[InverseCandidate] = []
         self._colors = DARK_THEME
+        self._host_theme_override: dict[str, object] | None = None
 
         # Plot objects are created in _build_ui(). Initialize here so early callbacks are safe.
         self.fig = None
@@ -1307,6 +1309,7 @@ class ImpedanceGui(QMainWindow):
         self.mode_stack = None
         self.nav_group = None
         self.dark_mode_action = None
+        self.view_menu = None
         self._mode_labels: list[str] = []
         self.material_explorer: MaterialExplorerWidget | None = None
         self.layers_group = None
@@ -1526,14 +1529,14 @@ class ImpedanceGui(QMainWindow):
         save_action = QAction("Save Project…", self)
         save_action.triggered.connect(self._save_project)
         file_menu.addAction(save_action)
-        view_menu = menubar.addMenu("View")
+        self.view_menu = menubar.addMenu("View")
         self.dark_mode_action = QAction("Dark mode", self)
         self.dark_mode_action.setCheckable(True)
         self.dark_mode_action.setChecked(self.dark_mode_var.get())
         self.dark_mode_action.toggled.connect(self.dark_mode_var.set)
         self.dark_mode_var.valueChanged.connect(self.dark_mode_action.setChecked)
         self.dark_mode_var.valueChanged.connect(lambda _v: self._apply_theme())
-        view_menu.addAction(self.dark_mode_action)
+        self.view_menu.addAction(self.dark_mode_action)
         help_menu = menubar.addMenu("Help")
         about_action = QAction("About", self)
         about_action.triggered.connect(self._show_about)
@@ -2468,7 +2471,39 @@ class ImpedanceGui(QMainWindow):
         self._apply_theme()
 
     def _theme_colors(self) -> dict[str, object]:
+        if self._host_theme_override is not None:
+            return self._host_theme_override
         return DARK_THEME if self.dark_mode_var.get() else LIGHT_THEME
+
+    def apply_host_theme(self, colors: Mapping[str, object]) -> None:
+        """Let an embedding application own FREDDY's complete appearance.
+
+        This deliberately does not change ``dark_mode_var`` because that value
+        belongs to standalone FREDDY project state. Embedded GRIM palette
+        changes are presentation-only and must not dirty or rewrite a project.
+        """
+
+        missing = sorted(set(DARK_THEME).difference(colors))
+        if missing:
+            raise ValueError(
+                "FREDDY host theme is missing roles: " + ", ".join(missing)
+            )
+        self._host_theme_override = copy.deepcopy(dict(colors))
+        if self.dark_mode_action is not None:
+            self.dark_mode_action.setVisible(False)
+        if self.view_menu is not None:
+            self.view_menu.menuAction().setVisible(False)
+        self._apply_theme()
+
+    def clear_host_theme(self) -> None:
+        """Return a standalone workspace to its saved light/dark preference."""
+
+        self._host_theme_override = None
+        if self.dark_mode_action is not None:
+            self.dark_mode_action.setVisible(True)
+        if self.view_menu is not None:
+            self.view_menu.menuAction().setVisible(True)
+        self._apply_theme()
 
     def _style_plot_axis(self, axis: object) -> None:
         style_axis(axis, self._colors)

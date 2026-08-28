@@ -92,6 +92,33 @@ class GhostBackendDiscoveryTests(unittest.TestCase):
 
 
 class GhostMaterialDelegateTests(unittest.TestCase):
+    def test_application_palette_reaches_both_ghost_plot_tabs(self):
+        geometry_theme = mock.Mock()
+        solver_theme = mock.Mock()
+        host = SimpleNamespace(
+            workspace=SimpleNamespace(
+                geometry_tab=SimpleNamespace(apply_plot_theme=geometry_theme),
+                solver_tab=SimpleNamespace(apply_plot_theme=solver_theme),
+            )
+        )
+        palette = {
+            "panel_bg": "#102030",
+            "text": "#f0f4f8",
+            "grid": "#506070",
+        }
+
+        result = ghost_integration.GhostIntegrationWidget.apply_application_palette(
+            host, palette
+        )
+
+        self.assertTrue(result)
+        for theme in (geometry_theme, solver_theme):
+            theme.assert_called_once_with(
+                background="#102030",
+                text="#f0f4f8",
+                grid="#506070",
+            )
+
     def test_material_delegate_forwards_typed_artifact_to_workspace(self):
         attach = mock.Mock(return_value=True)
         host = SimpleNamespace(

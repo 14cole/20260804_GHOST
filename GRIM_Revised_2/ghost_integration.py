@@ -9,6 +9,7 @@ sibling checkout or whatever flat modules happen to be on ``sys.path``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import importlib
 import os
 from pathlib import Path
@@ -223,6 +224,27 @@ class GhostIntegrationWidget(QWidget):
     def focus_solver(self) -> None:
         if self.workspace is not None:
             self.workspace.setCurrentWidget(self.workspace.solver_tab)
+
+    def apply_application_palette(
+        self,
+        palette: Mapping[str, object],
+    ) -> bool:
+        """Apply host colors to GHOST's Matplotlib geometry/solver canvases."""
+
+        if self.workspace is None:
+            return False
+        applied = False
+        for tab_name in ("geometry_tab", "solver_tab"):
+            plot_tab = getattr(self.workspace, tab_name, None)
+            apply_plot_theme = getattr(plot_tab, "apply_plot_theme", None)
+            if callable(apply_plot_theme):
+                apply_plot_theme(
+                    background=str(palette["panel_bg"]),
+                    text=str(palette["text"]),
+                    grid=str(palette["grid"]),
+                )
+                applied = True
+        return applied
 
     def attach_material_artifact(
         self,

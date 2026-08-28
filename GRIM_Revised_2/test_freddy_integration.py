@@ -16,7 +16,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 import freddy_integration
-from grim_cut_gui import BLUE_PALETTE
+from grim_cut_gui import APPLICATION_PALETTES, BLUE_PALETTE
 
 
 class _FocusProbe(QWidget):
@@ -36,10 +36,14 @@ class _FakeImpedanceGui(QMainWindow):
         super().__init__(parent)
         self.running = False
         self.focus_probe = _FocusProbe()
+        self.host_themes: list[dict[str, object]] = []
         self.setCentralWidget(self.focus_probe)
 
     def job_is_running(self) -> bool:
         return self.running
+
+    def apply_host_theme(self, theme) -> None:
+        self.host_themes.append(dict(theme))
 
 
 class FreddyIntegrationTest(unittest.TestCase):
@@ -120,6 +124,19 @@ class FreddyIntegrationTest(unittest.TestCase):
             self.assertTrue(widget.job_is_running())
             widget.focus_workspace()
             self.assertTrue(workspace.focus_probe.called)
+            self.assertTrue(
+                widget.apply_application_palette(
+                    APPLICATION_PALETTES["Colorful"]
+                )
+            )
+            self.assertEqual(
+                workspace.host_themes[-1]["window_bg"],
+                APPLICATION_PALETTES["Colorful"]["win_bg"],
+            )
+            self.assertEqual(
+                workspace.host_themes[-1]["plot_line_angle"],
+                APPLICATION_PALETTES["Colorful"]["plot_line_angle"],
+            )
         finally:
             widget.deleteLater()
             self.app.processEvents()

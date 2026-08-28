@@ -1,7 +1,7 @@
 # GRIM application
 
 GRIM is the host application for this distribution. Its desktop tabs are
-**Plotting | ISAR | PPT | Assembly | GHOST | FREDDY | Runs | Python**. GHOST and FREDDY remain
+**Plotting | ISAR | FREDDY | GHOST | Assembly | PPT | Runs | Python**. GHOST and FREDDY remain
 self-contained tools under `tools/`; GRIM embeds their authoritative user
 interfaces instead of copying their numerical implementations into the
 plotting code.
@@ -12,6 +12,21 @@ Run GRIM from the repository root after an editable installation:
 py -m pip install -e .
 grim
 ```
+
+## Appearance
+
+Choose **View → Application Palette** to switch the complete integrated GUI
+between **Colorful**, **Light**, **Dark**, and **Raytheon-inspired** chrome.
+The choice is saved for the next GRIM session and is applied immediately to
+GRIM controls, both plot canvases, GHOST geometry/solver views, FREDDY controls
+and plots, and the Assembly 3-D preview. Changing appearance never changes a
+dataset, solver input, FREDDY project, or assembly geometry. PowerPoint's white
+slide preview remains output-faithful rather than following application chrome.
+
+The **Plot Colormap** control under Plot/ISAR Settings is independent and
+affects only heatmap-style data rendering. Explicit Plot Colors background,
+grid, or text overrides also remain in effect when the application palette
+changes.
 
 ## Assembly
 

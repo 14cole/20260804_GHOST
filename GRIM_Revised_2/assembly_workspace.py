@@ -17,6 +17,7 @@ usable in headless tests even when GUI packages are absent.
 """
 
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Protocol, Sequence
 from urllib.parse import quote
@@ -1106,6 +1107,16 @@ if GUI_AVAILABLE:
             self._scene_update_depth = 0
             self._scene_draw_pending = False
             self._scene_feedback_pending = False
+            self._theme: dict[str, str] = {
+                "background": "#0b1222",
+                "foreground": "#dbeafe",
+                "grid": "#475569",
+                "border": "#1e3a8a",
+                "head_bg": "#172554",
+                "muted": "#94a3b8",
+                "accent": "#3b82f6",
+            }
+            self._is_dark_theme = True
             self.model.add_listener(self._on_model_change)
             self._model_listener_attached = True
             self.destroyed.connect(self._detach_model_listener)
@@ -1118,13 +1129,13 @@ if GUI_AVAILABLE:
                 transform=self.axes.transAxes,
                 ha="center",
                 va="center",
-                color="#dbeafe",
+                color=self._theme["foreground"],
                 fontsize=11,
                 linespacing=1.5,
                 bbox={
                     "boxstyle": "round,pad=0.8",
-                    "facecolor": "#172554",
-                    "edgecolor": "#3b82f6",
+                    "facecolor": self._theme["head_bg"],
+                    "edgecolor": self._theme["accent"],
                     "alpha": 0.94,
                 },
                 zorder=20,
@@ -1136,13 +1147,13 @@ if GUI_AVAILABLE:
                 transform=self.axes.transAxes,
                 ha="left",
                 va="top",
-                color="#bfdbfe",
+                color=self._theme["foreground"],
                 fontsize=9,
                 fontweight="bold",
                 bbox={
                     "boxstyle": "round,pad=0.45",
-                    "facecolor": "#172554",
-                    "edgecolor": "#3b82f6",
+                    "facecolor": self._theme["head_bg"],
+                    "edgecolor": self._theme["accent"],
                     "alpha": 0.92,
                 },
                 zorder=21,
@@ -1159,7 +1170,7 @@ if GUI_AVAILABLE:
                 fontweight="bold",
                 bbox={
                     "boxstyle": "round,pad=0.4",
-                    "facecolor": "#172554",
+                    "facecolor": self._theme["head_bg"],
                     "edgecolor": "#f59e0b",
                     "alpha": 0.92,
                 },
@@ -1222,21 +1233,27 @@ if GUI_AVAILABLE:
                 # refresh_scene_feedback() also requests the artist redraw.
                 self.refresh_scene_feedback()
 
-        def _style_axes(self) -> None:
-            background = "#0b1222"
-            foreground = "#dbeafe"
-            grid_color = "#475569"
-            axis_color = "#64748b"
+        def _style_axes(self, *, reset_view: bool = True) -> None:
+            background = self._theme["background"]
+            foreground = self._theme["foreground"]
+            grid_color = self._theme["grid"]
+            axis_color = self._theme["muted"]
             self.figure.patch.set_facecolor(background)
             self.axes.set_facecolor(background)
-            self.axes.set_title(
-                "3-D placement preview (display only)", color=foreground
-            )
-            self.axes.set_xlabel("X right (m)", color=foreground)
-            self.axes.set_ylabel("Y nose (m)", color=foreground)
-            self.axes.set_zlabel("Z up (m)", color=foreground)
+            if reset_view:
+                self.axes.set_title(
+                    "3-D placement preview (display only)", color=foreground
+                )
+                self.axes.set_xlabel("X right (m)", color=foreground)
+                self.axes.set_ylabel("Y nose (m)", color=foreground)
+                self.axes.set_zlabel("Z up (m)", color=foreground)
+            else:
+                self.axes.title.set_color(foreground)
+                self.axes.xaxis.label.set_color(foreground)
+                self.axes.yaxis.label.set_color(foreground)
+                self.axes.zaxis.label.set_color(foreground)
             self.axes.tick_params(colors=foreground)
-            pane_rgba = (11.0 / 255.0, 18.0 / 255.0, 34.0 / 255.0, 0.72)
+            pane_rgba = to_rgba(background, alpha=0.72)
             for axis in (self.axes.xaxis, self.axes.yaxis, self.axes.zaxis):
                 axis.pane.set_facecolor(pane_rgba)
                 axis.pane.set_edgecolor(grid_color)
@@ -1248,8 +1265,49 @@ if GUI_AVAILABLE:
                     linewidth=0.6,
                     linestyle="-",
                 )
-            self.axes.view_init(elev=24.0, azim=-58.0)
+            if reset_view:
+                self.axes.view_init(elev=24.0, azim=-58.0)
             self.axes.grid(True)
+
+        def apply_theme(self, palette: Mapping[str, object]) -> None:
+            """Restyle the display-only canvas without moving its camera/data."""
+
+            required = {
+                "panel_bg", "text", "grid", "border", "head_bg",
+                "muted", "checked_border",
+            }
+            missing = sorted(required.difference(palette))
+            if missing:
+                raise ValueError(
+                    "Assembly theme is missing roles: " + ", ".join(missing)
+                )
+            self._theme = {
+                "background": str(palette["panel_bg"]),
+                "foreground": str(palette["text"]),
+                "grid": str(palette["grid"]),
+                "border": str(palette["border"]),
+                "head_bg": str(palette["head_bg"]),
+                "muted": str(palette["muted"]),
+                "accent": str(palette["checked_border"]),
+            }
+            self._is_dark_theme = bool(palette.get("is_dark", True))
+            self._style_axes(reset_view=False)
+            for artist in (
+                self._feedback_artist,
+                self._stage_artist,
+                self._lod_artist,
+            ):
+                artist.get_bbox_patch().set_facecolor(self._theme["head_bg"])
+            self._lod_artist.set_color(
+                "#fde68a" if self._is_dark_theme else "#92400e"
+            )
+            self._lod_artist.get_bbox_patch().set_edgecolor(
+                "#f59e0b" if self._is_dark_theme else "#b45309"
+            )
+            current_feedback = self.feedback_text
+            self.set_preview_stage(self._preview_stage)
+            self.set_feedback(self._preview_state, current_feedback)
+            self._request_draw()
 
         def _remove_artist(self, group_id: str) -> None:
             stored = self._artists.pop(group_id, None)
@@ -1579,21 +1637,25 @@ if GUI_AVAILABLE:
 
             normalized = str(stage).strip().lower()
             labels = {
-                "none": ("", "#bfdbfe", "#3b82f6"),
+                "none": (
+                    "",
+                    self._theme["foreground"],
+                    self._theme["accent"],
+                ),
                 "input": (
                     "INPUT PREVIEW \u2022 NOT PHYSICS-VALIDATED",
-                    "#fde68a",
-                    "#f59e0b",
+                    "#fde68a" if self._is_dark_theme else "#92400e",
+                    "#f59e0b" if self._is_dark_theme else "#b45309",
                 ),
                 "validated": (
                     "PLACEMENTS VALIDATED",
-                    "#bae6fd",
-                    "#38bdf8",
+                    self._theme["foreground"],
+                    self._theme["accent"],
                 ),
                 "stale": (
                     "STALE PREVIEW \u2022 INPUTS CHANGED",
-                    "#fed7aa",
-                    "#f97316",
+                    "#fed7aa" if self._is_dark_theme else "#9a3412",
+                    "#f97316" if self._is_dark_theme else "#c2410c",
                 ),
             }
             if normalized not in labels:
@@ -1630,11 +1692,17 @@ if GUI_AVAILABLE:
             self._feedback_artist.set_text(text)
             self._feedback_artist.set_visible(normalized != "ready")
             if normalized == "error":
-                self._feedback_artist.set_color("#fecaca")
-                self._feedback_artist.get_bbox_patch().set_edgecolor("#f87171")
+                self._feedback_artist.set_color(
+                    "#fecaca" if self._is_dark_theme else "#991b1b"
+                )
+                self._feedback_artist.get_bbox_patch().set_edgecolor(
+                    "#f87171" if self._is_dark_theme else "#dc2626"
+                )
             else:
-                self._feedback_artist.set_color("#dbeafe")
-                self._feedback_artist.get_bbox_patch().set_edgecolor("#3b82f6")
+                self._feedback_artist.set_color(self._theme["foreground"])
+                self._feedback_artist.get_bbox_patch().set_edgecolor(
+                    self._theme["accent"]
+                )
             self._request_draw()
 
         def refresh_scene_feedback(self) -> None:
@@ -1790,15 +1858,7 @@ if GUI_AVAILABLE:
                 "Open the dataset tree, where Show boxes control body, point, "
                 "line, and frame visibility without changing the RCS build."
             )
-            self.lbl_legend = QLabel(
-                '<span style="color:#94a3b8">\u25a0 Body</span>&nbsp;&nbsp;'
-                '<span style="color:#38bdf8">\u25cf Points</span>&nbsp;&nbsp;'
-                '<span style="color:#f59e0b">\u2501 Lines</span>&nbsp;&nbsp;'
-                '<span style="color:#f472b6">\u2197 Normals</span>&nbsp;&nbsp;'
-                '<span style="color:#c084fc">\u2197 Point +x</span>&nbsp;&nbsp;'
-                '<span style="color:#67e8f9">\u2197 Line +t</span>&nbsp;&nbsp;'
-                '<span style="color:#818cf8">\u2197 Line +b</span>'
-            )
+            self.lbl_legend = QLabel(self._legend_html("#94a3b8"))
             self.lbl_status = QLabel(
                 "Preview is empty. Choose an optional STL/facet or BoR body, then "
                 "add point or line placements. The tree Show boxes control only the "
@@ -2011,6 +2071,31 @@ if GUI_AVAILABLE:
         @property
         def group_ids(self) -> tuple[str, ...]:
             return self.scene_model.group_ids
+
+        def apply_application_palette(
+            self,
+            palette: Mapping[str, object],
+        ) -> None:
+            """Apply host presentation colors to the 3-D preview canvas."""
+
+            self.scene_canvas.apply_theme(palette)
+            self.lbl_legend.setText(
+                self._legend_html(str(palette.get("muted", "#94a3b8")))
+            )
+
+        @staticmethod
+        def _legend_html(body_color: str) -> str:
+            """Build the semantic preview legend with readable body text."""
+
+            return (
+                f'<span style="color:{body_color}">\u25a0 Body</span>&nbsp;&nbsp;'
+                '<span style="color:#38bdf8">\u25cf Points</span>&nbsp;&nbsp;'
+                '<span style="color:#f59e0b">\u2501 Lines</span>&nbsp;&nbsp;'
+                '<span style="color:#f472b6">\u2197 Normals</span>&nbsp;&nbsp;'
+                '<span style="color:#c084fc">\u2197 Point +x</span>&nbsp;&nbsp;'
+                '<span style="color:#67e8f9">\u2197 Line +t</span>&nbsp;&nbsp;'
+                '<span style="color:#818cf8">\u2197 Line +b</span>'
+            )
 
         def _surface_group_ids(self) -> tuple[str, ...]:
             return tuple(

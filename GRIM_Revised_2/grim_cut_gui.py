@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 import os
 from pathlib import Path
 import sys
@@ -9,12 +10,18 @@ import uuid
 
 import numpy as np
 
-from matplotlib import colormaps
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, QByteArray, QMimeData, QTimer, Signal
-from PySide6.QtGui import QColor, QDrag, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import Qt, QByteArray, QMimeData, QSettings, QTimer, Signal
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QDrag,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -66,35 +73,97 @@ from ppt_workspace import DatasetCatalogEntry, PptWorkspace
 from plot_models import PlotContext
 from runs_workspace import RunsWorkspace
 
-BLUE_PALETTE = {
-    "is_dark": True,
-    "win_bg": "#0f172a",
-    "panel_bg": "#0b1222",
-    "text": "#dbeafe",
-    "head_bg": "#172554",
-    "border": "#1e3a8a",
-    "hover": "#1d4ed8",
-    "checked_bg": "#2563eb",
-    "checked_border": "#3b82f6",
-    "grid": "#475569",
-    "muted": "#94a3b8",
-    "fg": "#dbeafe",
+APPLICATION_PALETTES: dict[str, dict[str, object]] = {
+    "Colorful": {
+        "is_dark": True,
+        "win_bg": "#111827",
+        "panel_bg": "#19162f",
+        "text": "#f8fafc",
+        "head_bg": "#312e81",
+        "border": "#6d28d9",
+        "hover": "#0e7490",
+        "checked_bg": "#7c3aed",
+        "checked_border": "#22d3ee",
+        "grid": "#475569",
+        "muted": "#c4b5fd",
+        "fg": "#f8fafc",
+        "plot_line_freq": "#22d3ee",
+        "plot_line_angle": "#f472b6",
+        "plot_worst": "#fbbf24",
+        "layer_colors": (
+            "#7c3aed", "#0891b2", "#db2777", "#d97706",
+            "#4f46e5", "#0e7490", "#9333ea", "#0284c7",
+        ),
+    },
+    "Light": {
+        "is_dark": False,
+        "win_bg": "#f1f5f9",
+        "panel_bg": "#ffffff",
+        "text": "#0f172a",
+        "head_bg": "#dbeafe",
+        "border": "#94a3b8",
+        "hover": "#bfdbfe",
+        "checked_bg": "#2563eb",
+        "checked_border": "#1d4ed8",
+        "grid": "#cbd5e1",
+        "muted": "#475569",
+        "fg": "#0f172a",
+        "plot_line_freq": "#0369a1",
+        "plot_line_angle": "#6d28d9",
+        "plot_worst": "#b45309",
+        "layer_colors": (
+            "#1d4ed8", "#0369a1", "#4f46e5", "#0e7490",
+            "#2563eb", "#475569", "#7c3aed", "#0284c7",
+        ),
+    },
+    "Dark": {
+        "is_dark": True,
+        "win_bg": "#0f172a",
+        "panel_bg": "#0b1222",
+        "text": "#dbeafe",
+        "head_bg": "#172554",
+        "border": "#1e3a8a",
+        "hover": "#1d4ed8",
+        "checked_bg": "#2563eb",
+        "checked_border": "#3b82f6",
+        "grid": "#475569",
+        "muted": "#94a3b8",
+        "fg": "#dbeafe",
+        "plot_line_freq": "#38bdf8",
+        "plot_line_angle": "#a78bfa",
+        "plot_worst": "#fbbf24",
+        "layer_colors": (
+            "#1e3a8a", "#1d4ed8", "#172554", "#2563eb",
+            "#1e40af", "#3b82f6", "#334155", "#0284c7",
+        ),
+    },
+    "Raytheon-inspired": {
+        "is_dark": True,
+        "win_bg": "#061522",
+        "panel_bg": "#0b2438",
+        "text": "#f4f7fa",
+        "head_bg": "#123a5a",
+        "border": "#2b668f",
+        "hover": "#006fa6",
+        "checked_bg": "#006fa6",
+        "checked_border": "#6bd5f5",
+        "grid": "#456b83",
+        "muted": "#9eb6c7",
+        "fg": "#f4f7fa",
+        "plot_line_freq": "#6bd5f5",
+        "plot_line_angle": "#c4b5fd",
+        "plot_worst": "#fbbf24",
+        "layer_colors": (
+            "#006fa6", "#00a3e0", "#2b668f", "#6bd5f5",
+            "#3b82f6", "#64748b", "#7c3aed", "#0e7490",
+        ),
+    },
 }
-RAYTHEON_COLORMAP = "grim_raytheon"
-
-
-def _register_grim_colormaps() -> None:
-    """Register branded plot palettes once, including their reversed forms."""
-    raytheon = LinearSegmentedColormap.from_list(
-        RAYTHEON_COLORMAP,
-        ["#050b14", "#183b61", "#00a3e0", "#f4f7fa", "#c8102e"],
-    )
-    for cmap in (raytheon, raytheon.reversed(name=f"{RAYTHEON_COLORMAP}_r")):
-        if cmap.name not in colormaps:
-            colormaps.register(cmap)
-
-
-_register_grim_colormaps()
+DEFAULT_APPLICATION_PALETTE = "Dark"
+APPLICATION_PALETTE_SETTINGS_KEY = "appearance/application_palette"
+# Compatibility export for extensions/tests that used GRIM's former one fixed
+# palette. It remains the exact default Dark palette.
+BLUE_PALETTE = APPLICATION_PALETTES[DEFAULT_APPLICATION_PALETTE]
 SPLASH_DURATION_MS = 4000
 
 # Plot-operation buttons, per tab: (row1_specs, row2_specs). Each spec is
@@ -154,11 +223,28 @@ def _branch_arrow_uri(points: str, fill: str) -> str:
     return "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
 
 
-def build_qss(palette: dict[str, str]) -> str:
-    arrow_right = _branch_arrow_uri("2,1 6,4 2,7", palette["text"])   # collapsed
-    arrow_down  = _branch_arrow_uri("1,2 7,2 4,6", palette["text"])   # expanded
+def build_qss(palette: Mapping[str, object]) -> str:
+    arrow_right = _branch_arrow_uri(
+        "2,1 6,4 2,7", str(palette["text"])
+    )
+    arrow_down = _branch_arrow_uri(
+        "1,2 7,2 4,6", str(palette["text"])
+    )
     return f"""
     QMainWindow {{ background: {palette['win_bg']}; }}
+    QMenuBar {{ background: {palette['panel_bg']}; color: {palette['text']}; }}
+    QMenuBar::item {{ background: transparent; padding: 5px 10px; }}
+    QMenuBar::item:selected {{ background: {palette['hover']}; }}
+    QMenu {{
+        background: {palette['panel_bg']}; color: {palette['text']};
+        border: 1px solid {palette['border']};
+    }}
+    QMenu::item {{ padding: 6px 28px 6px 24px; }}
+    QMenu::item:selected {{ background: {palette['checked_bg']}; color: white; }}
+    QMenu::indicator:checked {{ background: {palette['checked_border']}; }}
+    QStatusBar {{ background: {palette['panel_bg']}; color: {palette['muted']}; }}
+    QWidget {{ color: {palette['text']}; }}
+    QDialog {{ background: {palette['win_bg']}; color: {palette['text']}; }}
     QFrame {{ background: {palette['panel_bg']}; border: 1px solid {palette['border']}; border-radius: 8px; }}
     QFrame#paramSeparator {{
         background: {palette['border']}; min-width: 2px; max-width: 2px; border: none; border-radius: 0px;
@@ -168,9 +254,10 @@ def build_qss(palette: dict[str, str]) -> str:
     QLabel {{ color: {palette['text']}; }}
     QTableWidget {{
         background: {palette['panel_bg']}; color: {palette['text']};
+        alternate-background-color: {palette['head_bg']};
         border: 1px solid {palette['border']}; gridline-color: {palette['grid']};
     }}
-    QPlainTextEdit {{
+    QPlainTextEdit, QTextEdit {{
         background: {palette['panel_bg']}; color: {palette['text']};
         border: 1px solid {palette['border']}; border-radius: 6px;
         selection-background-color: {palette['checked_bg']};
@@ -181,7 +268,11 @@ def build_qss(palette: dict[str, str]) -> str:
     QTabBar::tab {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; border-bottom: 0; padding: 6px 12px; margin-right: 2px; border-top-left-radius: 6px; border-top-right-radius: 6px; }}
     QTabBar::tab:selected {{ background: {palette['head_bg']}; color: {palette['text']}; border-color: {palette['checked_border']}; }}
     QTabBar::tab:hover {{ background: {palette['hover']}; }}
-    QListWidget {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; }}
+    QListWidget {{
+        background: {palette['panel_bg']}; color: {palette['text']};
+        alternate-background-color: {palette['head_bg']};
+        border: 1px solid {palette['border']};
+    }}
     QTreeWidget {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; }}
     QTreeWidget::item {{ border-bottom: 1px solid {palette['grid']}; padding: 3px 4px; }}
     QTreeWidget::item:selected {{ background: {palette['checked_bg']}; color: white; }}
@@ -197,7 +288,8 @@ def build_qss(palette: dict[str, str]) -> str:
     QListWidget::item:selected {{
         background: {palette['checked_bg']}; color: white; border-bottom: 1px solid {palette['grid']};
     }}
-    QToolButton, QPushButton, QDoubleSpinBox, QCheckBox, QLineEdit, QComboBox {{
+    QToolButton, QPushButton, QDoubleSpinBox, QSpinBox, QCheckBox,
+    QRadioButton, QLineEdit, QComboBox {{
         background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']};
         border-radius: 6px; padding: 6px;
     }}
@@ -212,10 +304,27 @@ def build_qss(palette: dict[str, str]) -> str:
         border-color: {palette['checked_border']};
     }}
     QToolButton:hover, QPushButton:hover {{ border-color: {palette['hover']}; }}
-    QPushButton:disabled {{ color: {palette['grid']}; border-color: {palette['grid']}; }}
+    QToolButton:disabled, QPushButton:disabled, QLineEdit:disabled,
+    QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled {{
+        color: {palette['muted']}; border-color: {palette['grid']};
+        background: {palette['head_bg']};
+    }}
     QToolButton:checked {{ background: {palette['checked_bg']}; color: white; border-color: {palette['checked_border']}; }}
     QComboBox QAbstractItemView {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; }}
     QTableWidget::item:selected {{ background: {palette['checked_bg']}; color: white; }}
+    QProgressBar {{
+        background: {palette['head_bg']}; color: {palette['text']};
+        border: 1px solid {palette['border']}; border-radius: 5px;
+        text-align: center;
+    }}
+    QProgressBar::chunk {{ background: {palette['checked_bg']}; }}
+    QSlider::groove:horizontal {{
+        height: 6px; background: {palette['grid']}; border-radius: 3px;
+    }}
+    QSlider::handle:horizontal {{
+        width: 14px; margin: -5px 0; background: {palette['checked_border']};
+        border: 1px solid {palette['border']}; border-radius: 7px;
+    }}
     QLabel#hoverReadout {{
         background: {palette['head_bg']}; color: {palette['text']}; border: 1px solid {palette['border']};
         border-radius: 4px; padding: 2px 6px; font-family: "Consolas","Courier New",monospace; font-size: 11px;
@@ -618,14 +727,177 @@ class CollapsibleSection(QWidget):
 
 
 class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
-    def __init__(self) -> None:
+    def _build_application_palette_menu(self) -> None:
+        """Expose one discoverable, exclusive application-theme selector."""
+
+        view_menu = self.menuBar().addMenu("View")
+        self.application_palette_menu = view_menu.addMenu(
+            "Application Palette"
+        )
+        self.application_palette_menu.setObjectName(
+            "applicationPaletteMenu"
+        )
+        self.application_palette_group = QActionGroup(self)
+        self.application_palette_group.setExclusive(True)
+        descriptions = {
+            "Colorful": "Purple, cyan, and magenta dark application chrome",
+            "Light": "Bright neutral application chrome with blue accents",
+            "Dark": "GRIM blue/slate dark application chrome",
+            "Raytheon-inspired": "Deep navy and cyan application chrome",
+        }
+        for palette_name in APPLICATION_PALETTES:
+            action = QAction(palette_name, self)
+            action.setCheckable(True)
+            action.setData(palette_name)
+            action.setStatusTip(descriptions[palette_name])
+            action.setChecked(
+                palette_name == self.application_palette_name
+            )
+            action.triggered.connect(
+                lambda checked=False, name=palette_name: (
+                    self._apply_application_palette(name)
+                    if checked
+                    else None
+                )
+            )
+            self.application_palette_group.addAction(action)
+            self.application_palette_menu.addAction(action)
+            self._application_palette_actions[palette_name] = action
+
+    def _apply_application_palette(
+        self,
+        palette_name: str,
+        *,
+        persist: bool = True,
+    ) -> None:
+        """Apply one palette to GRIM and every embedded workspace."""
+
+        normalized = str(palette_name).strip()
+        if normalized not in APPLICATION_PALETTES:
+            normalized = DEFAULT_APPLICATION_PALETTE
+        self.application_palette_name = normalized
+        self.application_palette = dict(APPLICATION_PALETTES[normalized])
+
+        for name, action in self._application_palette_actions.items():
+            previous = action.blockSignals(True)
+            action.setChecked(name == normalized)
+            action.blockSignals(previous)
+
+        self.setStyleSheet(build_qss(self.application_palette))
+
+        ghost = getattr(self, "ghost_integration", None)
+        apply_ghost_palette = getattr(
+            ghost, "apply_application_palette", None
+        )
+        if callable(apply_ghost_palette):
+            apply_ghost_palette(self.application_palette)
+
+        assembly_workspace = getattr(self, "assembly_workspace", None)
+        apply_assembly_palette = getattr(
+            assembly_workspace, "apply_application_palette", None
+        )
+        if callable(apply_assembly_palette):
+            apply_assembly_palette(self.application_palette)
+
+        freddy = getattr(self, "freddy_integration", None)
+        apply_freddy_palette = getattr(
+            freddy, "apply_application_palette", None
+        )
+        if callable(apply_freddy_palette):
+            apply_freddy_palette(self.application_palette)
+
+        # Plot background/grid/text follow the application palette unless the
+        # user explicitly chose an override with the three Plot Colors buttons.
+        for context in getattr(self, "_plot_contexts", {}).values():
+            self._apply_palette_to_plot_context(context)
+
+        if persist:
+            self._settings.setValue(
+                APPLICATION_PALETTE_SETTINGS_KEY,
+                normalized,
+            )
+            sync = getattr(self._settings, "sync", None)
+            if callable(sync):
+                sync()
+            status = getattr(self, "status", None)
+            if status is not None:
+                status.showMessage(f"Application palette: {normalized}")
+
+    def _apply_palette_to_plot_context(self, context: PlotContext) -> None:
+        """Restyle one plot context without changing tabs or popup state."""
+
+        background = str(
+            context.plot_bg_color or self.application_palette["panel_bg"]
+        )
+        grid = str(
+            context.plot_grid_color or self.application_palette["grid"]
+        )
+        text = str(
+            context.plot_text_color or self.application_palette["text"]
+        )
+        context.plot_figure.set_facecolor(background)
+        for figure_text in context.plot_figure.texts:
+            figure_text.set_color(text)
+        figure_title = getattr(context.plot_figure, "_suptitle", None)
+        if figure_title is not None:
+            figure_title.set_color(text)
+        axes = context.plot_axes or [context.plot_ax]
+        for axis in axes:
+            axis.set_facecolor(background)
+            if context.chk_plot_grid_visible.isChecked():
+                axis.grid(True, color=grid, alpha=0.35)
+            else:
+                axis.grid(False)
+            axis.tick_params(colors=text)
+            axis.title.set_color(text)
+            axis.xaxis.label.set_color(text)
+            axis.yaxis.label.set_color(text)
+            if hasattr(axis, "zaxis") and axis.zaxis is not None:
+                axis.zaxis.label.set_color(text)
+            for spine in getattr(axis, "spines", {}).values():
+                spine.set_color(str(self.application_palette["border"]))
+            for annotation in axis.texts:
+                annotation.set_color(text)
+            legend = axis.get_legend()
+            if legend is not None:
+                for label in legend.get_texts():
+                    label.set_color(text)
+                legend.get_title().set_color(text)
+                legend.get_frame().set_facecolor(background)
+                legend.get_frame().set_edgecolor(grid)
+        for colorbar in context.plot_colorbars:
+            colorbar.ax.set_facecolor(background)
+            colorbar.ax.tick_params(colors=text)
+            colorbar.ax.yaxis.label.set_color(text)
+            colorbar.ax.xaxis.label.set_color(text)
+            colorbar.outline.set_edgecolor(grid)
+        context.btn_plot_bg.setStyleSheet(f"background: {background};")
+        context.btn_plot_grid.setStyleSheet(f"background: {grid};")
+        context.btn_plot_text.setStyleSheet(f"background: {text};")
+        context.plot_canvas.draw_idle()
+
+    def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setAcceptDrops(True)
-        self.palette = BLUE_PALETTE
+        self._settings = settings if settings is not None else QSettings(
+            "GRIM", "GRIM"
+        )
+        saved_palette = str(
+            self._settings.value(
+                APPLICATION_PALETTE_SETTINGS_KEY,
+                DEFAULT_APPLICATION_PALETTE,
+            )
+        )
+        if saved_palette not in APPLICATION_PALETTES:
+            saved_palette = DEFAULT_APPLICATION_PALETTE
+        self.application_palette_name = saved_palette
+        self.application_palette = dict(APPLICATION_PALETTES[saved_palette])
+        self._application_palette_actions: dict[str, QAction] = {}
 
         self.setWindowTitle("GRIM Cut")
         self.resize(1550, 900)
         self._dock_width = 480
+        self._build_application_palette_menu()
 
         right = QWidget()
         self.setCentralWidget(right)
@@ -1027,17 +1299,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.pbp_fill_gray = "#7a7a7a"
         self.pbp_heatmap_samples = 80
 
-        self.setStyleSheet(build_qss(BLUE_PALETTE))
-        ghost_workspace = getattr(self.ghost_integration, "workspace", None)
-        for ghost_plot_tab_name in ("geometry_tab", "solver_tab"):
-            ghost_plot_tab = getattr(ghost_workspace, ghost_plot_tab_name, None)
-            apply_ghost_theme = getattr(ghost_plot_tab, "apply_plot_theme", None)
-            if callable(apply_ghost_theme):
-                apply_ghost_theme(
-                    background=BLUE_PALETTE["panel_bg"],
-                    text=BLUE_PALETTE["text"],
-                    grid=BLUE_PALETTE["grid"],
-                )
         self.table.files_dropped.connect(self._handle_files_dropped)
         self.table.assembly_branch_dropped.connect(self._on_assembly_branch_dropped)
         self.table.rows_reordered.connect(self._on_dataset_rows_reordered)
@@ -1265,6 +1526,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             context.chk_colormap_invert.toggled.connect(self._on_colormap_changed)
 
         self._activate_plot_tab("plotting")
+        self._apply_application_palette(
+            self.application_palette_name,
+            persist=False,
+        )
         self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
         self._notify_dataset_catalog_changed()
         self._update_plot_color_buttons()
@@ -1531,18 +1796,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(combo_polar_zero, row, 1, 1, 5)
         row += 1
 
-        settings_layout.addWidget(QLabel("Colormap"), row, 0)
+        settings_layout.addWidget(QLabel("Plot Colormap"), row, 0)
         combo_colormap = QComboBox()
         for name in ("viridis", "plasma", "inferno", "magma", "cividis", "turbo"):
             combo_colormap.addItem(name, name)
-        combo_colormap.insertSeparator(combo_colormap.count())
-        for label, cmap_name in (
-            ("Colorful", "turbo"),
-            ("Light", "YlGnBu"),
-            ("Dark", "magma"),
-            ("Raytheon-inspired", RAYTHEON_COLORMAP),
-        ):
-            combo_colormap.addItem(label, cmap_name)
         settings_layout.addWidget(combo_colormap, row, 1)
         chk_colorbar = QCheckBox("Show Colorbar")
         chk_colorbar.setChecked(True)
@@ -1829,18 +2086,19 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         plot_layout.setContentsMargins(20, 20, 20, 20)
         plot_layout.setSpacing(12)
 
-        plot_figure = Figure(facecolor=BLUE_PALETTE["panel_bg"])
+        palette = getattr(self, "application_palette", BLUE_PALETTE)
+        plot_figure = Figure(facecolor=palette["panel_bg"])
         plot_canvas = FigureCanvas(plot_figure)
         plot_canvas.setMinimumSize(320, 240)
         plot_canvas.setStyleSheet("background: transparent;")
         plot_ax = plot_figure.add_subplot(111)
-        plot_ax.set_facecolor(BLUE_PALETTE["panel_bg"])
-        plot_ax.grid(True, color=BLUE_PALETTE["grid"], alpha=0.35)
-        plot_ax.tick_params(colors=BLUE_PALETTE["text"])
-        plot_ax.xaxis.label.set_color(BLUE_PALETTE["text"])
-        plot_ax.yaxis.label.set_color(BLUE_PALETTE["text"])
+        plot_ax.set_facecolor(palette["panel_bg"])
+        plot_ax.grid(True, color=palette["grid"], alpha=0.35)
+        plot_ax.tick_params(colors=palette["text"])
+        plot_ax.xaxis.label.set_color(palette["text"])
+        plot_ax.yaxis.label.set_color(palette["text"])
         for spine in plot_ax.spines.values():
-            spine.set_color(BLUE_PALETTE["border"])
+            spine.set_color(palette["border"])
         plot_canvas.draw_idle()
         plot_layout.addWidget(plot_canvas, 1)
         hover_readout = QLabel("x: --   y: --")

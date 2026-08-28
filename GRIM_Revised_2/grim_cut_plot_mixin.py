@@ -368,7 +368,7 @@ class PlotOpsMixin:
             ax.zaxis.label.set_color(text)
         if hasattr(ax, "spines"):
             for spine in ax.spines.values():
-                spine.set_color(self.palette["border"])
+                spine.set_color(self.application_palette["border"])
         if ax.name == "polar":
             self._apply_polar_orientation(ax)
 
@@ -383,13 +383,13 @@ class PlotOpsMixin:
         return bool(checkbox.isChecked())
 
     def _current_plot_bg(self) -> str:
-        return self.plot_bg_color or self.palette["panel_bg"]
+        return self.plot_bg_color or self.application_palette["panel_bg"]
 
     def _current_plot_grid(self) -> str:
-        return self.plot_grid_color or self.palette["grid"]
+        return self.plot_grid_color or self.application_palette["grid"]
 
     def _current_plot_text(self) -> str:
-        return self.plot_text_color or self.palette["text"]
+        return self.plot_text_color or self.application_palette["text"]
 
     def _apply_plot_theme(self) -> None:
         self.plot_figure.set_facecolor(self._current_plot_bg())

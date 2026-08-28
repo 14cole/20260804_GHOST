@@ -14,6 +14,7 @@ import zipfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+from matplotlib.colors import to_hex
 from PySide6.QtCore import QMimeData, QUrl, Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
@@ -56,6 +57,7 @@ class _FakeGhostIntegration(QWidget):
         self.running = False
         self.focus_called = False
         self.attached_artifacts: list[tuple[str, str]] = []
+        self.palette_calls: list[dict[str, object]] = []
         self.setLayout(QVBoxLayout())
 
     def solve_is_running(self) -> bool:
@@ -66,6 +68,10 @@ class _FakeGhostIntegration(QWidget):
 
     def attach_material_artifact(self, kind: str, path: str) -> None:
         self.attached_artifacts.append((kind, path))
+
+    def apply_application_palette(self, palette) -> bool:
+        self.palette_calls.append(dict(palette))
+        return True
 
 
 class _FakeFreddyIntegration(QWidget):
@@ -78,6 +84,7 @@ class _FakeFreddyIntegration(QWidget):
         super().__init__(parent)
         self.running = False
         self.focus_called = False
+        self.palette_calls: list[dict[str, object]] = []
         self.setLayout(QVBoxLayout())
 
     def job_is_running(self) -> bool:
@@ -85,6 +92,10 @@ class _FakeFreddyIntegration(QWidget):
 
     def focus_workspace(self) -> None:
         self.focus_called = True
+
+    def apply_application_palette(self, palette) -> bool:
+        self.palette_calls.append(dict(palette))
+        return True
 
 
 class _FakeRunsWorkspace(QWidget):
@@ -111,10 +122,25 @@ class _FakeRunsWorkspace(QWidget):
         self.save_count += 1
 
 
+class _MemorySettings:
+    def __init__(self, values=None) -> None:
+        self.values = dict(values or {})
+        self.sync_count = 0
+
+    def value(self, key, default=None):
+        return self.values.get(str(key), default)
+
+    def setValue(self, key, value) -> None:
+        self.values[str(key)] = value
+
+    def sync(self) -> None:
+        self.sync_count += 1
+
+
 class _RecordingWindow(grim_cut_gui.GrimCutWindow):
-    def __init__(self) -> None:
+    def __init__(self, *, settings=None) -> None:
         self.loaded_path_batches: list[list[str]] = []
-        super().__init__()
+        super().__init__(settings=settings)
 
     def _handle_files_dropped(self, paths) -> None:
         self.loaded_path_batches.append([os.fspath(path) for path in paths])
@@ -159,23 +185,73 @@ class UnifiedGuiShellTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_friendly_colormap_presets_include_raytheon_and_reverse(self) -> None:
-        from matplotlib import colormaps
-
+    def test_application_palette_choices_are_not_plot_colormaps(self) -> None:
         context = self.window._plot_contexts["plotting"]
-        expected = {
-            "Colorful": "turbo",
-            "Light": "YlGnBu",
-            "Dark": "magma",
-            "Raytheon-inspired": grim_cut_gui.RAYTHEON_COLORMAP,
-        }
-        for label, cmap_name in expected.items():
-            with self.subTest(label=label):
-                index = context.combo_colormap.findText(label)
-                self.assertGreaterEqual(index, 0)
-                self.assertEqual(context.combo_colormap.itemData(index), cmap_name)
-        self.assertIn(grim_cut_gui.RAYTHEON_COLORMAP, colormaps)
-        self.assertIn(grim_cut_gui.RAYTHEON_COLORMAP + "_r", colormaps)
+        palette_names = list(grim_cut_gui.APPLICATION_PALETTES)
+        view_action = next(
+            action
+            for action in self.window.menuBar().actions()
+            if action.text().replace("&", "") == "View"
+        )
+        self.assertIsNotNone(view_action.menu())
+        self.assertTrue(
+            any(
+                action.menu() is self.window.application_palette_menu
+                for action in view_action.menu().actions()
+            )
+        )
+        self.assertEqual(
+            [action.text() for action in self.window.application_palette_menu.actions()],
+            palette_names,
+        )
+        self.assertTrue(self.window.application_palette_group.isExclusive())
+        for name in palette_names:
+            self.assertEqual(context.combo_colormap.findText(name), -1)
+        self.assertEqual(
+            [
+                context.combo_colormap.itemText(index)
+                for index in range(context.combo_colormap.count())
+            ],
+            ["viridis", "plasma", "inferno", "magma", "cividis", "turbo"],
+        )
+        for name, palette in grim_cut_gui.APPLICATION_PALETTES.items():
+            with self.subTest(palette=name):
+                qss = grim_cut_gui.build_qss(palette)
+                self.assertIn(str(palette["panel_bg"]), qss)
+                freddy_theme = (
+                    freddy_integration.freddy_theme_from_application_palette(
+                        palette
+                    )
+                )
+                self.assertEqual(
+                    freddy_theme["window_bg"], palette["win_bg"]
+                )
+                self.assertEqual(
+                    freddy_theme["plot_grid"], palette["grid"]
+                )
+
+    def test_invalid_saved_application_palette_falls_back_to_dark(self) -> None:
+        settings = _MemorySettings(
+            {
+                grim_cut_gui.APPLICATION_PALETTE_SETTINGS_KEY:
+                    "removed-palette"
+            }
+        )
+        window = _RecordingWindow(settings=settings)
+        try:
+            self.assertEqual(
+                window.application_palette_name,
+                grim_cut_gui.DEFAULT_APPLICATION_PALETTE,
+            )
+            self.assertTrue(
+                window._application_palette_actions[
+                    grim_cut_gui.DEFAULT_APPLICATION_PALETTE
+                ].isChecked()
+            )
+            self.assertEqual(settings.sync_count, 0)
+        finally:
+            window.deleteLater()
+            self.app.processEvents()
 
     def setUp(self) -> None:
         self.feature_service = _FakeFeatureWorkflow()
@@ -197,7 +273,8 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.feature_patch.start()
         self.freddy_patch.start()
         self.runs_patch.start()
-        self.window = _RecordingWindow()
+        self.app_settings = _MemorySettings()
+        self.window = _RecordingWindow(settings=self.app_settings)
 
     def tearDown(self) -> None:
         self.window.ghost_integration.running = False
@@ -299,6 +376,76 @@ class UnifiedGuiShellTest(unittest.TestCase):
             self.window.ppt_workspace.controls_content.objectName(),
             "pptControlsContent",
         )
+
+    def test_application_palette_switch_is_global_persistent_and_nonintrusive(self) -> None:
+        plotting = self.window._plot_contexts["plotting"]
+        isar = self.window._plot_contexts["isar"]
+        plotting.combo_colormap.setCurrentText("plasma")
+        isar.combo_colormap.setCurrentText("cividis")
+        isar.plot_bg_color = "#123456"
+
+        self.window.main_tabs.setCurrentWidget(self.window.tab_simple_plots)
+        active_index = self.window.main_tabs.currentIndex()
+        plotting.settings_frame.show()
+        plotting.settings_frame.filter_edit.setText("plot color")
+        self.app.processEvents()
+
+        self.window._application_palette_actions["Light"].trigger()
+        self.app.processEvents()
+
+        light = grim_cut_gui.APPLICATION_PALETTES["Light"]
+        self.assertEqual(self.window.application_palette_name, "Light")
+        self.assertEqual(
+            self.app_settings.values[
+                grim_cut_gui.APPLICATION_PALETTE_SETTINGS_KEY
+            ],
+            "Light",
+        )
+        self.assertEqual(self.app_settings.sync_count, 1)
+        self.assertTrue(
+            self.window._application_palette_actions["Light"].isChecked()
+        )
+        self.assertEqual(self.window.main_tabs.currentIndex(), active_index)
+        self.assertTrue(plotting.settings_frame.isVisible())
+        self.assertEqual(
+            plotting.settings_frame.filter_edit.text(), "plot color"
+        )
+        self.assertEqual(plotting.combo_colormap.currentText(), "plasma")
+        self.assertEqual(isar.combo_colormap.currentText(), "cividis")
+        self.assertEqual(
+            to_hex(plotting.plot_figure.get_facecolor()),
+            light["panel_bg"],
+        )
+        self.assertEqual(
+            to_hex(isar.plot_figure.get_facecolor()),
+            "#123456",
+        )
+        self.assertEqual(
+            to_hex(
+                self.window.assembly_workspace.scene_canvas.figure.get_facecolor()
+            ),
+            light["panel_bg"],
+        )
+        self.assertEqual(
+            self.window.ghost_integration.palette_calls[-1]["panel_bg"],
+            light["panel_bg"],
+        )
+        self.assertEqual(
+            self.window.freddy_integration.palette_calls[-1]["panel_bg"],
+            light["panel_bg"],
+        )
+        self.assertIn(f"background: {light['panel_bg']}", self.window.styleSheet())
+
+        restored = _RecordingWindow(settings=self.app_settings)
+        try:
+            self.assertEqual(restored.application_palette_name, "Light")
+            self.assertTrue(
+                restored._application_palette_actions["Light"].isChecked()
+            )
+            self.assertEqual(self.app_settings.sync_count, 1)
+        finally:
+            restored.deleteLater()
+            self.app.processEvents()
 
     def test_python_clear_confirms_and_resets_dirty_state(self) -> None:
         self.window.python_recorder._lines.extend(["answer = 42", ""])

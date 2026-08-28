@@ -462,6 +462,50 @@ class AssemblyGuiTests(unittest.TestCase):
         canvas.model.add_points("points:detached", [[0.0, 0.0, 0.0]])
         self.assertNotIn("points:detached", canvas._artists)
 
+    def test_application_theme_changes_colors_without_moving_preview(self):
+        from matplotlib.colors import to_hex
+
+        canvas = AssemblySceneCanvas()
+        canvas.add_points("points:a", [[1.0, 2.0, 3.0]])
+        canvas.set_display_units("Inches")
+        camera = (canvas.axes.elev, canvas.axes.azim)
+        limits = (
+            canvas.axes.get_xlim(),
+            canvas.axes.get_ylim(),
+            canvas.axes.get_zlim(),
+        )
+        palette = {
+            "is_dark": False,
+            "panel_bg": "#ffffff",
+            "text": "#102030",
+            "grid": "#c0c8d0",
+            "border": "#8090a0",
+            "head_bg": "#dbeafe",
+            "muted": "#506070",
+            "checked_border": "#2060a0",
+        }
+
+        canvas.apply_theme(palette)
+
+        self.assertEqual(to_hex(canvas.figure.get_facecolor()), "#ffffff")
+        self.assertEqual(canvas.axes.xaxis.label.get_text(), "X right (in)")
+        self.assertEqual(canvas.axes.xaxis.label.get_color(), "#102030")
+        self.assertEqual((canvas.axes.elev, canvas.axes.azim), camera)
+        for actual, expected in zip(
+            (
+                canvas.axes.get_xlim(),
+                canvas.axes.get_ylim(),
+                canvas.axes.get_zlim(),
+            ),
+            limits,
+        ):
+            np.testing.assert_allclose(actual, expected)
+        self.assertEqual(canvas._feedback_artist.get_color(), "#102030")
+        self.assertEqual(
+            to_hex(canvas._feedback_artist.get_bbox_patch().get_facecolor()),
+            "#dbeafe",
+        )
+
     def test_orientation_controls_redraw_frames_without_mutating_geometry(self):
         canvas = AssemblySceneCanvas()
         path = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
@@ -513,6 +557,31 @@ class AssemblyGuiTests(unittest.TestCase):
             workspace.clear_feature_preview()
         self.assertEqual(draw_idle.call_count, 1)
         self.assertEqual(workspace.scene_canvas.preview_state, "empty")
+
+    def test_workspace_application_palette_updates_canvas_and_body_legend(self):
+        from matplotlib.colors import to_hex
+
+        from assembly_tree import AssemblyTreePanel
+
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+        workspace.apply_application_palette(
+            {
+                "is_dark": False,
+                "panel_bg": "#ffffff",
+                "text": "#102030",
+                "grid": "#c0c8d0",
+                "border": "#8090a0",
+                "head_bg": "#dbeafe",
+                "muted": "#506070",
+                "checked_border": "#2060a0",
+            }
+        )
+
+        self.assertEqual(
+            to_hex(workspace.scene_canvas.figure.get_facecolor()),
+            "#ffffff",
+        )
+        self.assertIn("color:#506070", workspace.lbl_legend.text())
 
     def test_drag_lod_restores_selected_surface_proxy(self):
         source = np.zeros((4_100, 3, 3), dtype=float)

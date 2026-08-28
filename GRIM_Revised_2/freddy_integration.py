@@ -8,6 +8,7 @@ package in the user's Python environment.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import importlib
 import importlib.util
 import os
@@ -142,6 +143,82 @@ def _load_impedance_gui_class(root: Path | None):
     return gui_class
 
 
+def freddy_theme_from_application_palette(
+    palette: Mapping[str, object],
+) -> dict[str, object]:
+    """Translate GRIM application roles into FREDDY's richer theme contract."""
+
+    required = {
+        "win_bg",
+        "panel_bg",
+        "head_bg",
+        "text",
+        "muted",
+        "border",
+        "hover",
+        "checked_bg",
+        "checked_border",
+        "grid",
+    }
+    missing = sorted(required.difference(palette))
+    if missing:
+        raise ValueError(
+            "Application palette is missing FREDDY roles: "
+            + ", ".join(missing)
+        )
+
+    def color(role: str) -> str:
+        return str(palette[role])
+
+    layer_colors = tuple(palette.get("layer_colors", ()))
+    if not layer_colors:
+        layer_colors = (
+            color("checked_bg"),
+            color("checked_border"),
+            color("border"),
+            color("hover"),
+        )
+    return {
+        "window_bg": color("win_bg"),
+        "panel_bg": color("panel_bg"),
+        "head_bg": color("head_bg"),
+        "text": color("text"),
+        "muted_text": color("muted"),
+        "field_bg": color("panel_bg"),
+        "field_fg": color("text"),
+        "field_disabled_bg": color("head_bg"),
+        "field_disabled_fg": color("muted"),
+        "button_bg": color("panel_bg"),
+        "button_active_bg": color("hover"),
+        "selection_bg": color("checked_bg"),
+        "selection_fg": "#ffffff",
+        "accent": color("checked_border"),
+        "preview_bg": color("panel_bg"),
+        "preview_border": color("border"),
+        "preview_outline": color("grid"),
+        "preview_text": color("text"),
+        "preview_empty": color("muted"),
+        "preview_layer_text": "#ffffff",
+        "preview_layer_border": color("panel_bg"),
+        "layer_colors": [str(value) for value in layer_colors],
+        "plot_bg": color("panel_bg"),
+        "plot_axes_bg": color("panel_bg"),
+        "plot_text": color("text"),
+        "plot_spine": color("border"),
+        "plot_grid": color("grid"),
+        "plot_line_freq": str(
+            palette.get("plot_line_freq", palette["checked_border"])
+        ),
+        "plot_line_angle": str(
+            palette.get("plot_line_angle", palette["hover"])
+        ),
+        "plot_worst": str(
+            palette.get("plot_worst", "#fbbf24")
+        ),
+        "plot_crosshair": color("text"),
+    }
+
+
 class FreddyIntegrationWidget(QWidget):
     """Host the authoritative FREDDY workspace inside GRIM."""
 
@@ -274,6 +351,20 @@ class FreddyIntegrationWidget(QWidget):
             return False
         checker = getattr(self.workspace, "job_is_running", None)
         return bool(checker()) if callable(checker) else False
+
+    def apply_application_palette(
+        self,
+        palette: Mapping[str, object],
+    ) -> bool:
+        """Apply the host palette to FREDDY chrome, previews, and plots."""
+
+        if self.workspace is None:
+            return False
+        apply_host_theme = getattr(self.workspace, "apply_host_theme", None)
+        if not callable(apply_host_theme):
+            return False
+        apply_host_theme(freddy_theme_from_application_palette(palette))
+        return True
 
     def focus_workspace(self) -> None:
         """Give keyboard focus to FREDDY after selecting its GRIM tab."""
