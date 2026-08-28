@@ -287,6 +287,7 @@ _ANGLE_UNITS = {
 # their already-sanitized output into RcsGrid. The singleton prevents callers
 # from bypassing constructor sanitation with a public-looking boolean switch.
 _JOIN_MERGE_BLOCK_CELLS = 262_144
+_PIO_WRITE_BLOCK_CELLS = 262_144
 _ADOPT_CLEAN_ARRAYS_TOKEN = object()
 
 
@@ -569,6 +570,28 @@ class RcsGrid:
         self.units = dict(units or {})
         self.extra = dict(extra or {})
 
+        # A declared phase-wrap marker describes the stored phase
+        # representation, not merely a plotting preference.  Normalize here
+        # so every constructor path (including _new_grid derivatives whose
+        # complex interpolation naturally returns np.angle's signed range)
+        # remains internally consistent without changing the complex field.
+        phase_wrap = str(self.units.get("phase_wrap", "")).strip()
+        if phase_wrap:
+            if phase_wrap not in {"0_360", "-180_180"}:
+                raise ValueError(
+                    "phase_wrap must be '0_360' or '-180_180' when declared"
+                )
+            # Work entirely in place.  _clean_phase has already converted
+            # nonfinite values to NaN, and NumPy modulo preserves NaN, so a
+            # grid-sized finite mask and masked-value temporary are unnecessary.
+            with np.errstate(invalid="ignore"):
+                if phase_wrap == "0_360":
+                    np.remainder(self.rcs_phase, 2.0 * np.pi, out=self.rcs_phase)
+                else:
+                    np.add(self.rcs_phase, np.pi, out=self.rcs_phase)
+                    np.remainder(self.rcs_phase, 2.0 * np.pi, out=self.rcs_phase)
+                    np.subtract(self.rcs_phase, np.pi, out=self.rcs_phase)
+
         # Migrate supported legacy/fallback angular metadata into the modeled
         # units dictionary.  Derived grids copy units, whereas arbitrary extra
         # arrays are intentionally not propagated, so leaving physical tags
@@ -726,6 +749,639 @@ class RcsGrid:
             "elevations": self.elevations,
             "frequencies": self.frequencies,
             "polarizations": self.polarizations,
+        }
+
+    def audit(self):
+        """Return a non-mutating, JSON-serializable dataset health report.
+
+        The report always contains ``status``, ``errors``, ``warnings``,
+        ``info``, and ``metrics``.  Grid samples are scanned in bounded blocks;
+        the audit never constructs a second full-size power, phase, or complex
+        grid.  This method is deliberately diagnostic: it reports malformed
+        public mutations instead of repairing them.
+        """
+
+        errors = []
+        warnings_out = []
+        info = []
+        metrics = {
+            "axes": {},
+            "grid": {},
+            "metadata": {},
+            "phase": {},
+            "seam": {},
+            "frequency_uniformity": {},
+            "readiness": {},
+        }
+
+        def add_issue(target, code, message, **details):
+            issue = {"code": str(code), "message": str(message)}
+            for key, value in details.items():
+                if isinstance(value, np.generic):
+                    value = value.item()
+                if isinstance(value, float) and not np.isfinite(value):
+                    value = None
+                issue[str(key)] = value
+            target.append(issue)
+
+        def finite_number(value):
+            value = float(value)
+            return value if np.isfinite(value) else None
+
+        def iter_blocks(*arrays):
+            iterator = np.nditer(
+                tuple(np.asarray(array) for array in arrays),
+                flags=["external_loop", "buffered", "zerosize_ok"],
+                op_flags=[["readonly"] for _ in arrays],
+                order="K",
+                buffersize=_JOIN_MERGE_BLOCK_CELLS,
+            )
+            for block in iterator:
+                if len(arrays) == 1:
+                    yield (np.asarray(block),)
+                else:
+                    yield tuple(np.asarray(value) for value in block)
+
+        numeric_axes = {}
+        axes_well_formed = True
+        axes_strictly_increasing = True
+        for axis_name, raw_axis in (
+            ("azimuth", self.azimuths),
+            ("elevation", self.elevations),
+            ("frequency", self.frequencies),
+        ):
+            axis = np.asarray(raw_axis)
+            axis_metric = {
+                "count": int(axis.size),
+                "shape": [int(value) for value in axis.shape],
+                "dtype": str(axis.dtype),
+                "finite_count": 0,
+                "nonfinite_count": 0,
+                "duplicate_count": 0,
+                "strictly_increasing": False,
+                "minimum": None,
+                "maximum": None,
+            }
+            metrics["axes"][axis_name] = axis_metric
+            if axis.ndim != 1 or axis.size == 0 or axis.dtype.kind not in "iuf":
+                axes_well_formed = False
+                axes_strictly_increasing = False
+                add_issue(
+                    errors,
+                    f"invalid_{axis_name}_axis",
+                    f"{axis_name} must be a nonempty one-dimensional real numeric axis",
+                )
+                continue
+            numeric = axis.astype(np.float64, copy=False)
+            numeric_axes[axis_name] = numeric
+            finite_mask = np.isfinite(numeric)
+            finite_count = int(np.count_nonzero(finite_mask))
+            axis_metric["finite_count"] = finite_count
+            axis_metric["nonfinite_count"] = int(numeric.size - finite_count)
+            if finite_count:
+                axis_metric["minimum"] = finite_number(np.min(numeric[finite_mask]))
+                axis_metric["maximum"] = finite_number(np.max(numeric[finite_mask]))
+            if finite_count != numeric.size:
+                axes_well_formed = False
+                axes_strictly_increasing = False
+                add_issue(
+                    errors,
+                    f"nonfinite_{axis_name}_coordinate",
+                    f"{axis_name} contains nonfinite coordinates",
+                    count=int(numeric.size - finite_count),
+                )
+                continue
+            unique_count = int(np.unique(numeric).size)
+            axis_metric["duplicate_count"] = int(numeric.size - unique_count)
+            if unique_count != numeric.size:
+                axes_well_formed = False
+                axes_strictly_increasing = False
+                add_issue(
+                    errors,
+                    f"duplicate_{axis_name}_coordinate",
+                    f"{axis_name} contains duplicate coordinates",
+                    count=int(numeric.size - unique_count),
+                )
+            increasing = bool(
+                numeric.size <= 1 or np.all(np.diff(numeric) > 0.0)
+            )
+            axis_metric["strictly_increasing"] = increasing
+            axes_strictly_increasing &= increasing
+            if not increasing and unique_count == numeric.size:
+                add_issue(
+                    warnings_out,
+                    f"unsorted_{axis_name}_axis",
+                    f"{axis_name} is not strictly increasing; interpolation is not ready",
+                )
+            if axis_name == "frequency" and np.any(numeric <= 0.0):
+                axes_well_formed = False
+                add_issue(
+                    errors,
+                    "nonpositive_frequency",
+                    "frequency contains nonpositive coordinates",
+                    count=int(np.count_nonzero(numeric <= 0.0)),
+                )
+
+        polarizations = np.asarray(self.polarizations)
+        pol_metric = {
+            "count": int(polarizations.size),
+            "shape": [int(value) for value in polarizations.shape],
+            "dtype": str(polarizations.dtype),
+            "blank_count": 0,
+            "duplicate_count": 0,
+        }
+        metrics["axes"]["polarization"] = pol_metric
+        if polarizations.ndim != 1 or polarizations.size == 0:
+            axes_well_formed = False
+            add_issue(
+                errors,
+                "invalid_polarization_axis",
+                "polarization must be a nonempty one-dimensional string axis",
+            )
+        else:
+            labels = [str(value).strip() for value in polarizations.tolist()]
+            blank_count = sum(not label for label in labels)
+            folded = [label.casefold() for label in labels]
+            duplicate_count = len(folded) - len(set(folded))
+            pol_metric["blank_count"] = int(blank_count)
+            pol_metric["duplicate_count"] = int(duplicate_count)
+            if blank_count:
+                axes_well_formed = False
+                add_issue(
+                    errors,
+                    "blank_polarization",
+                    "polarization contains blank labels",
+                    count=int(blank_count),
+                )
+            if duplicate_count:
+                axes_well_formed = False
+                add_issue(
+                    errors,
+                    "duplicate_polarization",
+                    "polarization contains duplicate labels after normalization",
+                    count=int(duplicate_count),
+                )
+
+        expected_shape = (
+            int(np.asarray(self.azimuths).size),
+            int(np.asarray(self.elevations).size),
+            int(np.asarray(self.frequencies).size),
+            int(np.asarray(self.polarizations).size),
+        )
+        power = np.asarray(self.rcs_power)
+        phase = np.asarray(self.rcs_phase)
+        grid_metric = metrics["grid"]
+        grid_metric.update(
+            {
+                "expected_shape": list(expected_shape),
+                "power_shape": [int(value) for value in power.shape],
+                "phase_shape": [int(value) for value in phase.shape],
+                "power_dtype": str(power.dtype),
+                "phase_dtype": str(phase.dtype),
+                "cell_count": int(np.prod(expected_shape, dtype=np.int64)),
+                "finite_power_count": 0,
+                "missing_power_count": 0,
+                "infinite_power_count": 0,
+                "negative_power_count": 0,
+                "zero_power_count": 0,
+                "minimum_finite_power": None,
+                "maximum_finite_power": None,
+            }
+        )
+        shapes_valid = power.shape == expected_shape and phase.shape == expected_shape
+        if power.shape != expected_shape:
+            add_issue(
+                errors,
+                "power_shape_mismatch",
+                f"rcs_power shape {power.shape} does not match axes {expected_shape}",
+            )
+        if phase.shape != expected_shape:
+            add_issue(
+                errors,
+                "phase_shape_mismatch",
+                f"rcs_phase shape {phase.shape} does not match axes {expected_shape}",
+            )
+
+        power_numeric = power.dtype.kind in "iuf"
+        phase_numeric = phase.dtype.kind in "iuf"
+        if not power_numeric:
+            add_issue(errors, "non_numeric_power", "rcs_power must be real numeric")
+        if not phase_numeric:
+            add_issue(errors, "non_numeric_phase", "rcs_phase must be real numeric")
+
+        if power_numeric:
+            finite_power_count = 0
+            missing_power_count = 0
+            infinite_power_count = 0
+            negative_power_count = 0
+            zero_power_count = 0
+            minimum_power = None
+            maximum_power = None
+            for (power_block,) in iter_blocks(power):
+                finite = np.isfinite(power_block)
+                finite_values = power_block[finite]
+                finite_power_count += int(finite_values.size)
+                missing_power_count += int(np.count_nonzero(np.isnan(power_block)))
+                infinite_power_count += int(np.count_nonzero(np.isinf(power_block)))
+                negative_power_count += int(np.count_nonzero(finite_values < 0.0))
+                zero_power_count += int(np.count_nonzero(finite_values == 0.0))
+                if finite_values.size:
+                    block_min = float(np.min(finite_values))
+                    block_max = float(np.max(finite_values))
+                    minimum_power = block_min if minimum_power is None else min(minimum_power, block_min)
+                    maximum_power = block_max if maximum_power is None else max(maximum_power, block_max)
+            grid_metric.update(
+                {
+                    "finite_power_count": finite_power_count,
+                    "missing_power_count": missing_power_count,
+                    "infinite_power_count": infinite_power_count,
+                    "negative_power_count": negative_power_count,
+                    "zero_power_count": zero_power_count,
+                    "minimum_finite_power": finite_number(minimum_power) if minimum_power is not None else None,
+                    "maximum_finite_power": finite_number(maximum_power) if maximum_power is not None else None,
+                    "sparsity_fraction": (
+                        float(missing_power_count / power.size) if power.size else None
+                    ),
+                }
+            )
+            if infinite_power_count:
+                add_issue(
+                    errors,
+                    "infinite_power",
+                    "rcs_power contains infinite samples",
+                    count=infinite_power_count,
+                )
+            if negative_power_count:
+                add_issue(
+                    errors,
+                    "negative_power",
+                    "rcs_power contains negative finite samples",
+                    count=negative_power_count,
+                    minimum=grid_metric["minimum_finite_power"],
+                )
+
+        phase_metric = metrics["phase"]
+        raw_phase_wrap = str((self.units or {}).get("phase_wrap", "")).strip()
+        declared_phase_wrap = raw_phase_wrap or None
+        valid_phase_wrap = declared_phase_wrap in {None, "0_360", "-180_180"}
+        if not valid_phase_wrap:
+            add_issue(
+                errors,
+                "unsupported_phase_wrap",
+                "phase_wrap must be '0_360' or '-180_180' when declared",
+                value=declared_phase_wrap,
+            )
+        phase_metric.update(
+            {
+                "declared_wrap": declared_phase_wrap,
+                "finite_phase_count": 0,
+                "missing_phase_count": 0,
+                "infinite_phase_count": 0,
+                "power_without_phase_count": 0,
+                "phase_without_power_count": 0,
+                "finite_complex_count": 0,
+                "outside_minus_pi_pi_count": 0,
+                "outside_declared_wrap_count": 0,
+            }
+        )
+        if phase_numeric:
+            for (phase_block,) in iter_blocks(phase):
+                finite_phase = np.isfinite(phase_block)
+                phase_metric["finite_phase_count"] += int(np.count_nonzero(finite_phase))
+                phase_metric["missing_phase_count"] += int(np.count_nonzero(np.isnan(phase_block)))
+                phase_metric["infinite_phase_count"] += int(np.count_nonzero(np.isinf(phase_block)))
+                phase_metric["outside_minus_pi_pi_count"] += int(
+                    np.count_nonzero(
+                        finite_phase & ((phase_block < -np.pi) | (phase_block >= np.pi))
+                    )
+                )
+                if declared_phase_wrap == "0_360":
+                    phase_metric["outside_declared_wrap_count"] += int(
+                        np.count_nonzero(
+                            finite_phase
+                            & ((phase_block < 0.0) | (phase_block >= 2.0 * np.pi))
+                        )
+                    )
+                elif declared_phase_wrap == "-180_180":
+                    phase_metric["outside_declared_wrap_count"] += int(
+                        np.count_nonzero(
+                            finite_phase
+                            & ((phase_block < -np.pi) | (phase_block >= np.pi))
+                        )
+                    )
+            if phase_metric["infinite_phase_count"]:
+                add_issue(
+                    errors,
+                    "infinite_phase",
+                    "rcs_phase contains infinite samples",
+                    count=phase_metric["infinite_phase_count"],
+                )
+            if valid_phase_wrap and phase_metric["outside_declared_wrap_count"]:
+                add_issue(
+                    errors,
+                    "phase_outside_declared_wrap",
+                    "finite phase samples fall outside the declared phase_wrap interval",
+                    count=phase_metric["outside_declared_wrap_count"],
+                    phase_wrap=declared_phase_wrap,
+                )
+
+        if power_numeric and phase_numeric and power.shape == phase.shape:
+            for power_block, phase_block in iter_blocks(power, phase):
+                finite_power = np.isfinite(power_block)
+                finite_phase = np.isfinite(phase_block)
+                phase_metric["power_without_phase_count"] += int(
+                    np.count_nonzero(finite_power & ~finite_phase)
+                )
+                phase_metric["phase_without_power_count"] += int(
+                    np.count_nonzero(~finite_power & finite_phase)
+                )
+                phase_metric["finite_complex_count"] += int(
+                    np.count_nonzero(finite_power & finite_phase)
+                )
+            finite_power_count = grid_metric["finite_power_count"]
+            phase_metric["finite_power_phase_coverage_fraction"] = (
+                float(phase_metric["finite_complex_count"] / finite_power_count)
+                if finite_power_count
+                else None
+            )
+            if phase_metric["power_without_phase_count"]:
+                add_issue(
+                    warnings_out,
+                    "missing_coherent_phase",
+                    "finite power samples with missing phase block coherent operations",
+                    count=phase_metric["power_without_phase_count"],
+                )
+            if phase_metric["phase_without_power_count"]:
+                add_issue(
+                    warnings_out,
+                    "orphan_phase",
+                    "phase is finite where power is missing",
+                    count=phase_metric["phase_without_power_count"],
+                )
+
+        metadata_metric = metrics["metadata"]
+        supported_units = True
+        physical_metadata_valid = True
+        for key, aliases, default in (
+            ("azimuth", _ANGLE_UNITS, "deg"),
+            ("elevation", _ANGLE_UNITS, "deg"),
+            ("frequency", _FREQUENCY_UNITS, "GHz"),
+        ):
+            try:
+                metadata_metric[f"{key}_unit"] = self._supported_unit(
+                    key, aliases, default
+                )
+            except (TypeError, ValueError) as exc:
+                supported_units = False
+                metadata_metric[f"{key}_unit"] = None
+                add_issue(errors, f"unsupported_{key}_unit", str(exc))
+
+        coherent_metadata_complete = True
+        for key in ("phase_reference", "time_convention", "polarization_basis"):
+            try:
+                value = self._declared_scalar_metadata(key)
+            except (TypeError, ValueError) as exc:
+                value = ""
+                add_issue(errors, f"invalid_{key}_metadata", str(exc))
+            declared = bool(value)
+            metadata_metric[key] = value or None
+            metadata_metric[f"{key}_declared"] = declared
+            coherent_metadata_complete &= declared
+            if not declared:
+                add_issue(
+                    warnings_out,
+                    f"missing_{key}",
+                    f"{key.replace('_', ' ')} is not declared",
+                )
+        try:
+            metadata_metric["linear_quantity"] = self.linear_quantity()
+            metadata_metric["log_unit"] = self.default_log_unit()
+            metadata_metric["angular_coordinate_system"] = self.angular_coordinate_system()
+            if metadata_metric["linear_quantity"] not in {
+                "sigma_3d", "sigma_2d", "power_ratio"
+            }:
+                physical_metadata_valid = False
+                add_issue(
+                    errors,
+                    "unsupported_linear_quantity",
+                    "rcs_linear_quantity is not sigma_3d, sigma_2d, or power_ratio",
+                    value=metadata_metric["linear_quantity"],
+                )
+            raw_log_unit = str(
+                (self.units or {}).get("rcs_log_unit", "dBsm")
+            ).strip().casefold()
+            if raw_log_unit not in {"dbsm", "dbke", "db"}:
+                physical_metadata_valid = False
+                add_issue(
+                    errors,
+                    "unsupported_log_unit",
+                    "rcs_log_unit is not dBsm, dBke, or dB",
+                    value=str((self.units or {}).get("rcs_log_unit")),
+                )
+            expected_log_unit = {
+                "sigma_3d": "dBsm",
+                "sigma_2d": "dBke",
+                "power_ratio": "dB",
+            }.get(metadata_metric["linear_quantity"])
+            if (
+                expected_log_unit is not None
+                and metadata_metric["log_unit"] != expected_log_unit
+            ):
+                physical_metadata_valid = False
+                add_issue(
+                    errors,
+                    "quantity_log_unit_mismatch",
+                    "rcs_linear_quantity and rcs_log_unit describe different physical quantities",
+                    linear_quantity=metadata_metric["linear_quantity"],
+                    log_unit=metadata_metric["log_unit"],
+                )
+        except (TypeError, ValueError) as exc:
+            physical_metadata_valid = False
+            add_issue(errors, "invalid_physical_metadata", str(exc))
+
+        frequency_metric = metrics["frequency_uniformity"]
+        frequency = numeric_axes.get("frequency")
+        frequency_uniform = None
+        if frequency is None or frequency.size < 2 or np.any(~np.isfinite(frequency)):
+            frequency_metric.update(
+                {
+                    "applicable": False,
+                    "uniform": None,
+                    "nominal_step": None,
+                    "maximum_absolute_step_error": None,
+                    "maximum_relative_step_error": None,
+                }
+            )
+        else:
+            differences = np.diff(frequency)
+            nominal_step = float(np.median(differences))
+            absolute_error = np.abs(differences - nominal_step)
+            max_absolute_error = float(np.max(absolute_error))
+            scale = max(abs(nominal_step), np.finfo(np.float64).tiny)
+            max_relative_error = float(max_absolute_error / scale)
+            frequency_uniform = bool(
+                nominal_step > 0.0
+                and np.allclose(
+                    differences,
+                    nominal_step,
+                    rtol=1.0e-6,
+                    atol=np.finfo(np.float64).eps * max(abs(nominal_step), 1.0),
+                )
+            )
+            frequency_metric.update(
+                {
+                    "applicable": True,
+                    "uniform": frequency_uniform,
+                    "nominal_step": finite_number(nominal_step),
+                    "maximum_absolute_step_error": finite_number(max_absolute_error),
+                    "maximum_relative_step_error": finite_number(max_relative_error),
+                    "unit": metadata_metric.get("frequency_unit"),
+                }
+            )
+            if not frequency_uniform:
+                add_issue(
+                    warnings_out,
+                    "nonuniform_frequency",
+                    "frequency samples are not uniformly spaced",
+                    maximum_relative_step_error=frequency_metric[
+                        "maximum_relative_step_error"
+                    ],
+                )
+
+        seam_metric = metrics["seam"]
+        seam_metric.update(
+            {
+                "applicable": False,
+                "equivalent_endpoint_pair": False,
+                "equal_cell_count": 0,
+                "conflict_cell_count": 0,
+                "complementary_cell_count": 0,
+            }
+        )
+        azimuth = numeric_axes.get("azimuth")
+        if (
+            azimuth is not None
+            and azimuth.size >= 2
+            and np.all(np.isfinite(azimuth))
+            and shapes_valid
+            and power_numeric
+            and phase_numeric
+        ):
+            azimuth_unit = metadata_metric.get("azimuth_unit")
+            period = 2.0 * np.pi if azimuth_unit == "rad" else 360.0
+            seam_tolerance = (
+                float(np.deg2rad(1.0e-9)) if azimuth_unit == "rad" else 1.0e-9
+            )
+            endpoint_pair = bool(
+                np.isclose(
+                    abs(float(azimuth[-1] - azimuth[0])),
+                    period,
+                    rtol=0.0,
+                    atol=seam_tolerance,
+                )
+            )
+            seam_metric["applicable"] = True
+            seam_metric["equivalent_endpoint_pair"] = endpoint_pair
+            if endpoint_pair:
+                first_power = power[0, ...]
+                last_power = power[-1, ...]
+                first_phase = phase[0, ...]
+                last_phase = phase[-1, ...]
+                for p_left, p_right, ph_left, ph_right in iter_blocks(
+                    first_power, last_power, first_phase, last_phase
+                ):
+                    left_finite = np.isfinite(p_left)
+                    right_finite = np.isfinite(p_right)
+                    both = left_finite & right_finite
+                    power_equal = both & np.isclose(
+                        p_left, p_right, rtol=1.0e-6, atol=1.0e-12
+                    )
+                    both_phase = (
+                        power_equal & np.isfinite(ph_left) & np.isfinite(ph_right)
+                    )
+                    zero_power = power_equal & (p_left == 0.0) & (p_right == 0.0)
+                    phase_conflict = (
+                        both_phase
+                        & ~zero_power
+                        & (
+                            np.abs(
+                                np.angle(np.exp(1j * (ph_left - ph_right)))
+                            )
+                            > 1.0e-5
+                        )
+                    )
+                    conflict = (both & ~power_equal) | phase_conflict
+                    equal = both & power_equal & ~phase_conflict
+                    complementary = left_finite ^ right_finite
+                    seam_metric["conflict_cell_count"] += int(
+                        np.count_nonzero(conflict)
+                    )
+                    seam_metric["equal_cell_count"] += int(np.count_nonzero(equal))
+                    seam_metric["complementary_cell_count"] += int(
+                        np.count_nonzero(complementary)
+                    )
+                if seam_metric["conflict_cell_count"]:
+                    add_issue(
+                        warnings_out,
+                        "conflicting_azimuth_seam",
+                        "equivalent azimuth endpoints contain conflicting finite samples",
+                        count=seam_metric["conflict_cell_count"],
+                    )
+                else:
+                    add_issue(
+                        info,
+                        "closed_azimuth_seam",
+                        "azimuth contains equivalent closed-sweep endpoints",
+                    )
+
+        structural_ready = bool(
+            axes_well_formed
+            and shapes_valid
+            and power_numeric
+            and phase_numeric
+            and supported_units
+            and physical_metadata_valid
+            and not grid_metric.get("infinite_power_count", 0)
+            and not grid_metric.get("negative_power_count", 0)
+            and not phase_metric.get("infinite_phase_count", 0)
+            and valid_phase_wrap
+            and not phase_metric.get("outside_declared_wrap_count", 0)
+        )
+        coherent_phase_ready = bool(
+            structural_ready and phase_metric.get("power_without_phase_count", 0) == 0
+        )
+        metrics["readiness"].update(
+            {
+                "incoherent_arithmetic": structural_ready,
+                "strict_join": structural_ready,
+                "coherent_arithmetic": bool(
+                    coherent_phase_ready and coherent_metadata_complete
+                ),
+                "interpolation": bool(
+                    structural_ready and axes_strictly_increasing
+                ),
+                "frequency_transform": bool(
+                    coherent_phase_ready
+                    and frequency_uniform is True
+                    and frequency is not None
+                    and frequency.size >= 2
+                ),
+            }
+        )
+        add_issue(
+            info,
+            "audit_summary",
+            "dataset audit completed without modifying samples",
+            cell_count=grid_metric["cell_count"],
+        )
+
+        status = "error" if errors else ("warning" if warnings_out else "ok")
+        return {
+            "status": status,
+            "errors": errors,
+            "warnings": warnings_out,
+            "info": info,
+            "metrics": metrics,
         }
 
     def edit_axis_value(self, name, index, value):
@@ -893,6 +1549,82 @@ class RcsGrid:
         text = str(value or default).strip().lower()
         return aliases.get(text, text)
 
+    def _supported_unit(self, axis_name, aliases, default):
+        """Return one canonical modeled unit, rejecting explicit unknowns.
+
+        Older GRIM files omitted unit metadata and historically used degrees
+        and GHz, so a missing/blank value still receives that documented
+        default.  A present but unknown unit must not quietly take the same
+        conversion path as the default.
+        """
+
+        raw = (self.units or {}).get(axis_name)
+        canonical = self._canonical_unit(raw, aliases, default)
+        supported = set(aliases.values())
+        if canonical not in supported:
+            raise ValueError(
+                f"unsupported {axis_name} unit {raw!r}; expected one of "
+                + ", ".join(sorted(supported))
+            )
+        return canonical
+
+    def _angle_value_from_degrees(self, value, axis_name):
+        """Convert a degree-valued operation argument to an axis's unit."""
+
+        numeric = float(value)
+        if not np.isfinite(numeric):
+            raise ValueError(f"{axis_name} angle must be finite")
+        unit = self._supported_unit(axis_name, _ANGLE_UNITS, "deg")
+        return float(np.deg2rad(numeric)) if unit == "rad" else numeric
+
+    def _declared_scalar_metadata(self, key):
+        """Return consistent nonblank scalar metadata from units/extra.
+
+        A producer may place convention tags in either container.  Conflicting
+        declarations inside one dataset are an error rather than an arbitrary
+        units-first choice.
+        """
+
+        declared = []
+        for container in (self.units or {}, self.extra or {}):
+            if key not in container:
+                continue
+            raw = np.asarray(container[key])
+            if raw.size != 1:
+                raise ValueError(f"metadata {key!r} must be scalar")
+            value = raw.reshape(-1)[0]
+            if isinstance(value, np.generic):
+                value = value.item()
+            text = str(value or "").strip()
+            if text:
+                declared.append(text)
+        if key == "time_convention":
+            normalized = {
+                self._canonical_time_convention(value) for value in declared
+            }
+        else:
+            normalized = {
+                " ".join(value.split()).casefold() for value in declared
+            }
+        if len(normalized) > 1:
+            raise ValueError(f"dataset contains contradictory {key} metadata")
+        return declared[0] if declared else ""
+
+    @staticmethod
+    def _canonical_time_convention(value):
+        text = str(value or "").strip()
+        compact = (
+            text.casefold()
+            .replace("ω", "omega")
+            .replace("*", "")
+            .replace(" ", "")
+        )
+        if re.search(r"exp\(\+?j(?:omega|w)t\)", compact):
+            return "+jwt"
+        if re.search(r"exp\(-j(?:omega|w)t\)", compact):
+            return "-jwt"
+        return compact
+
     def linear_quantity(self):
         """Physical meaning of ``rcs_power`` (sigma_2d, sigma_3d, or ratio)."""
         raw = str((self.units or {}).get("rcs_linear_quantity", "")).strip().lower()
@@ -901,10 +1633,7 @@ class RcsGrid:
         return "sigma_2d" if self.default_log_unit().lower() == "dbke" else "sigma_3d"
 
     def _phase_reference(self):
-        raw = self.extra.get("phase_reference", "")
-        if isinstance(raw, np.ndarray) and raw.size == 1:
-            raw = raw.reshape(-1)[0]
-        return str(raw or "").strip()
+        return self._declared_scalar_metadata("phase_reference")
 
     def angular_coordinate_system(self):
         """Return the physical angular convention used by the two angle axes.
@@ -1367,8 +2096,8 @@ class RcsGrid:
             ("elevation", _ANGLE_UNITS, "deg"),
             ("frequency", _FREQUENCY_UNITS, "GHz"),
         ):
-            left = self._canonical_unit((self.units or {}).get(key), aliases, default)
-            right = self._canonical_unit((other.units or {}).get(key), aliases, default)
+            left = self._supported_unit(key, aliases, default)
+            right = other._supported_unit(key, aliases, default)
             if left != right:
                 raise ValueError(f"{key} unit mismatch: {left} != {right}")
         if self.linear_quantity() != other.linear_quantity():
@@ -1406,7 +2135,169 @@ class RcsGrid:
                     f"roll/tilt {left_orientation} != {right_orientation} deg"
                 )
 
-    def _assert_compatible(self, other, *, coherent=False):
+    def _assert_coherent_metadata_compatible(
+        self, other, *, metadata_attested=False
+    ):
+        """Validate convention metadata needed for field-level arithmetic.
+
+        Explicitly contradictory declarations are never overridable.  A
+        one-sided declaration is blocked by default because an unspecified
+        convention is not proof of compatibility; a GUI confirmation can pass
+        ``metadata_attested=True`` after the user verifies the sources.  Phase
+        references are stricter: two blank legacy references also require that
+        explicit attestation.
+        """
+
+        if not isinstance(metadata_attested, (bool, np.bool_)):
+            raise TypeError("metadata_attested must be True or False")
+        fields = (
+            (
+                "phase_reference",
+                "phase references",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "time_convention",
+                "time conventions",
+                self._canonical_time_convention,
+            ),
+            (
+                "polarization_basis",
+                "polarization bases",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+        )
+        for key, label, canonicalize in fields:
+            left_raw = self._declared_scalar_metadata(key)
+            right_raw = other._declared_scalar_metadata(key)
+            if left_raw and right_raw:
+                if canonicalize(left_raw) != canonicalize(right_raw):
+                    raise ValueError(
+                        f"coherent operation requires matching {label}; got "
+                        f"{left_raw!r} and {right_raw!r}"
+                    )
+                continue
+            if (left_raw or right_raw) and not metadata_attested:
+                raise ValueError(
+                    f"coherent operation requires matching {label}; got "
+                    f"{left_raw or '<unspecified>'!r} and "
+                    f"{right_raw or '<unspecified>'!r}. Confirm the unspecified "
+                    "dataset convention explicitly before overriding this check"
+                )
+            if (
+                key == "phase_reference"
+                and not left_raw
+                and not right_raw
+                and not metadata_attested
+            ):
+                raise ValueError(
+                    "coherent operation requires a nonblank phase reference "
+                    "for both datasets, or explicit confirmation that their "
+                    "phase centers and conventions are compatible"
+                )
+
+    def _coherent_attestation_provenance(
+        self,
+        others,
+        *,
+        operation,
+        metadata_attested,
+    ):
+        """Return durable metadata for one explicit coherent attestation.
+
+        The record captures the user's compatibility statement, not guessed
+        convention values. Any declarations copied to the result already
+        existed on the left input.
+        """
+
+        if not isinstance(metadata_attested, (bool, np.bool_)):
+            raise TypeError("metadata_attested must be True or False")
+        if not metadata_attested:
+            return None, None
+
+        inputs = (self, *tuple(others))
+        fields = (
+            "phase_reference",
+            "time_convention",
+            "polarization_basis",
+        )
+        missing = {}
+        for key in fields:
+            missing_indices = [
+                index
+                for index, grid in enumerate(inputs, start=1)
+                if not grid._declared_scalar_metadata(key)
+            ]
+            if missing_indices:
+                missing[key] = missing_indices
+
+        operation_name = str(operation).strip().lower().replace("_", "-")
+        record = {
+            "schema": "grim.coherent-metadata-attestation.v1",
+            "operation": operation_name,
+            "input_count": len(inputs),
+            "user_attested": True,
+            "attested_scope": [
+                "phase_reference_or_center",
+                "phasor_time_convention",
+                "polarization_basis",
+            ],
+            "missing_declarations_by_input": missing,
+            "declarations_inferred": False,
+        }
+        history_entry = (
+            f"User-attested coherent metadata compatibility ({operation_name}, "
+            f"{len(inputs)} inputs): compatible phase reference/center, phasor "
+            "time convention, and polarization basis where declarations were "
+            "unspecified; no convention values inferred"
+        )
+        prior_history = str(self.history or "").strip()
+        history = (
+            f"{prior_history}\n{history_entry}" if prior_history else history_entry
+        )
+
+        extra = {}
+        for key in fields:
+            declared_values = []
+            for grid in inputs:
+                declared = grid._declared_scalar_metadata(key)
+                if declared:
+                    declared_values.append(declared)
+            if key == "time_convention":
+                normalized = {
+                    self._canonical_time_convention(value)
+                    for value in declared_values
+                }
+            else:
+                normalized = {
+                    " ".join(value.split()).casefold()
+                    for value in declared_values
+                }
+            if len(normalized) > 1:
+                raise ValueError(
+                    f"coherent operation requires matching {key.replace('_', ' ')} "
+                    "declarations across every input"
+                )
+            if declared_values:
+                # This is an exact declaration from an input, not a value
+                # manufactured by the attestation. Carrying it forward also
+                # prevents a later chained operation from hiding a conflict.
+                extra[key] = declared_values[0]
+        extra["coherent_metadata_attestation_json"] = json.dumps(
+            record,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return history, extra
+
+    def _assert_compatible(
+        self,
+        other,
+        *,
+        coherent=False,
+        coherent_metadata_attested=False,
+    ):
         """Validate another grid for element-wise operations.
 
         Use before coherent/incoherent add/subtract operations.
@@ -1440,14 +2331,9 @@ class RcsGrid:
                         f"{int(np.count_nonzero(missing))} finite-power sample(s) "
                         "with unknown phase"
                     )
-            left_ref = self._phase_reference()
-            right_ref = other._phase_reference()
-            if left_ref != right_ref and (left_ref or right_ref):
-                raise ValueError(
-                    "coherent operation requires matching phase references; "
-                    f"got {left_ref or '<unspecified>'!r} and "
-                    f"{right_ref or '<unspecified>'!r}"
-                )
+            self._assert_coherent_metadata_compatible(
+                other, metadata_attested=coherent_metadata_attested
+            )
 
     def range_calibrate(
         self,
@@ -1479,13 +2365,22 @@ class RcsGrid:
         measured_calibration, exact_reference = self._ensure_grids(
             (measured_calibration, exact_reference)
         )
+        for option_name, option_value in (
+            ("convention_attested", convention_attested),
+            (
+                "allow_singleton_angular_broadcast",
+                allow_singleton_angular_broadcast,
+            ),
+        ):
+            if not isinstance(option_value, (bool, np.bool_)):
+                raise TypeError(f"{option_name} must be True or False")
         try:
             offset_m = float(range_offset_m)
         except (TypeError, ValueError) as exc:
             raise ValueError("range offset must be a finite distance in meters") from exc
         if not np.isfinite(offset_m):
             raise ValueError("range offset must be a finite distance in meters")
-        if not convention_attested:
+        if not bool(convention_attested):
             raise ValueError(
                 "range calibration requires confirmation that DUT/measured-cal "
                 "share one acquisition and phase convention and that the exact "
@@ -1654,7 +2549,9 @@ class RcsGrid:
                 )
             if np.array_equal(dut_axis, measured_axis):
                 continue
-            if len(measured_axis) == 1 and allow_singleton_angular_broadcast:
+            if len(measured_axis) == 1 and bool(
+                allow_singleton_angular_broadcast
+            ):
                 continue
             if len(measured_axis) == 1:
                 raise ValueError(
@@ -1681,46 +2578,86 @@ class RcsGrid:
             exact_reference.rcs[..., exact_pol_index], dtype=np.complex128
         )
         dut_amp = np.asarray(self.rcs, dtype=np.complex128)
+        measured_power = np.asarray(
+            measured_calibration.rcs_power[..., measured_pol_index]
+        )
+        exact_power = np.asarray(exact_reference.rcs_power[..., exact_pol_index])
+        dut_power = np.asarray(self.rcs_power)
 
-        if np.any(~np.isfinite(dut_amp)):
-            raise ValueError(
-                "DUT contains missing/nonfinite complex samples; trim or repair it first"
-            )
-        for label, values in (
-            ("measured calibration", measured_amp),
-            ("exact reference", exact_amp),
-        ):
-            if np.any(~np.isfinite(values)):
-                raise ValueError(
-                    f"{label} contains missing/nonfinite complex samples"
-                )
-            if np.any(np.abs(values) == 0.0):
-                raise ValueError(
-                    f"{label} contains a zero/null sample and cannot define a "
-                    "complex calibration factor"
-                )
+        # Phase is immaterial for an exact zero field. Reconstruct zero from
+        # power only when there is no finite authoritative raw amplitude.  A
+        # GHOST raw field can remain finite and nonzero after float32 power has
+        # underflowed to zero, and that field must remain authoritative.
+        exact_zero_power = np.isfinite(exact_power) & (exact_power == 0.0)
+        dut_zero_power = np.isfinite(dut_power) & (dut_power == 0.0)
+        exact_amp = np.array(exact_amp, copy=True)
+        dut_amp = np.array(dut_amp, copy=True)
+        exact_amp[exact_zero_power & ~np.isfinite(exact_amp)] = 0.0 + 0.0j
+        dut_amp[dut_zero_power & ~np.isfinite(dut_amp)] = 0.0 + 0.0j
+
+        # A measured zero cannot define a correction denominator.  Synthesize
+        # an explicit zero for magnitude-only nulls, but preserve a finite
+        # authoritative raw field even if its separately stored power rounded
+        # or underflowed to zero.
+        measured_amp = np.array(measured_amp, copy=True)
+        measured_zero_power = np.isfinite(measured_power) & (
+            measured_power == 0.0
+        )
+        measured_amp[
+            measured_zero_power & ~np.isfinite(measured_amp)
+        ] = 0.0 + 0.0j
 
         range_phase = np.exp(
             -1j * (4.0 * np.pi * frequency_hz * offset_m / C0)
         ).reshape(1, 1, -1, 1)
-        correction = exact_amp * range_phase / measured_amp
-        if np.any(~np.isfinite(correction)):
-            raise ValueError("range calibration factor is nonfinite")
-        correction_gain_db = 20.0 * np.log10(np.abs(correction))
-        if np.any(~np.isfinite(correction_gain_db)):
-            raise ValueError("range calibration gain is nonfinite")
+        measured_finite = np.isfinite(measured_amp)
+        exact_finite = np.isfinite(exact_amp)
+        dut_finite = np.isfinite(dut_amp)
+        measured_zero = np.isfinite(measured_amp) & (np.abs(measured_amp) == 0.0)
+        if np.any(measured_zero):
+            raise ValueError(
+                "measured calibration contains a zero/null sample and cannot "
+                "define a complex calibration factor"
+            )
+
+        # A zero exact response is valid: it means the calibrated field is
+        # exactly zero at that bin. Missing DUT/reference bins remain sparse
+        # NaNs rather than aborting an otherwise usable calibration grid.
+        valid_reference = measured_finite & exact_finite
+        correction = np.full(
+            np.broadcast_shapes(exact_amp.shape, measured_amp.shape),
+            np.nan + 1j * np.nan,
+            dtype=np.complex128,
+        )
+        correction_numerator = exact_amp * range_phase
+        np.divide(
+            correction_numerator,
+            measured_amp,
+            out=correction,
+            where=valid_reference & ~measured_zero,
+        )
+        valid_correction = np.isfinite(correction)
+        correction_magnitude = np.abs(correction)
+        positive_correction = valid_correction & (correction_magnitude > 0.0)
+        correction_gain_db = np.full(correction.shape, np.nan, dtype=np.float64)
+        correction_gain_db[positive_correction] = (
+            20.0 * np.log10(correction_magnitude[positive_correction])
+        )
         if gain_limit_db is not None and np.any(
             correction_gain_db > gain_limit_db
         ):
-            count = int(np.count_nonzero(correction_gain_db > gain_limit_db))
-            observed = float(np.max(correction_gain_db))
+            excessive = correction_gain_db > gain_limit_db
+            count = int(np.count_nonzero(excessive))
+            observed = float(np.nanmax(correction_gain_db))
             raise ValueError(
                 f"{count} calibration factor(s) exceed the user limit of "
                 f"{gain_limit_db:g} dB (maximum {observed:g} dB); inspect the "
                 "measured-calibration noise floor/nulls or raise the limit explicitly"
             )
         try:
-            output_amp = dut_amp * correction
+            correction_for_dut = np.broadcast_to(correction, dut_amp.shape)
+            with np.errstate(over="ignore", invalid="ignore"):
+                output_amp = dut_amp * correction_for_dut
         except ValueError as exc:
             raise ValueError(
                 "calibration angular axes cannot broadcast to the DUT grid"
@@ -1729,24 +2666,42 @@ class RcsGrid:
             raise ValueError(
                 f"calibration produced shape {output_amp.shape}, expected {dut_amp.shape}"
             )
-        if np.any(~np.isfinite(output_amp)):
-            raise ValueError("range calibration produced a nonfinite complex sample")
+        valid_output = dut_finite & np.isfinite(correction_for_dut)
+        if not np.any(valid_output):
+            raise ValueError(
+                "range calibration has no calibratable bins after masking "
+                "missing DUT/measured/exact complex samples"
+            )
+        unexpected_nonfinite = valid_output & ~np.isfinite(output_amp)
+        if np.any(unexpected_nonfinite):
+            raise ValueError(
+                "range calibration overflowed a valid complex output sample"
+            )
         try:
             with np.errstate(over="raise", invalid="raise"):
-                output_power = np.abs(output_amp) ** 2
+                output_power = np.full(output_amp.shape, np.nan, dtype=np.float64)
+                output_power[valid_output] = np.abs(output_amp[valid_output]) ** 2
         except FloatingPointError as exc:
             raise ValueError(
                 "range calibration magnitude overflows finite sigma_3d power"
             ) from exc
-        if np.any(~np.isfinite(output_power)):
+        if np.any(valid_output & ~np.isfinite(output_power)):
             raise ValueError(
                 "range calibration magnitude does not produce finite sigma_3d power"
             )
 
+        finite_gain = correction_gain_db[np.isfinite(correction_gain_db)]
         gain_summary = {
-            "minimum": float(np.min(correction_gain_db)),
-            "median": float(np.median(correction_gain_db)),
-            "maximum": float(np.max(correction_gain_db)),
+            "minimum": float(np.min(finite_gain)) if finite_gain.size else None,
+            "median": float(np.median(finite_gain)) if finite_gain.size else None,
+            "maximum": float(np.max(finite_gain)) if finite_gain.size else None,
+            "zero_factor_count": int(
+                np.count_nonzero(valid_correction & (correction_magnitude == 0.0))
+            ),
+            "missing_reference_bin_count": int(
+                np.count_nonzero(~valid_reference)
+            ),
+            "masked_output_bin_count": int(np.count_nonzero(~valid_output)),
         }
         measured_name = str(
             measured_label or measured_calibration.source_path or "measured calibration"
@@ -1756,8 +2711,17 @@ class RcsGrid:
         )
 
         def _grid_content_sha256(grid):
+            """Bind provenance to the physical complex field Range Cal uses."""
+
             digest = hashlib.sha256()
-            digest.update(b"grim.range-calibration-grid-id.v1\0")
+            digest.update(b"grim.range-calibration-grid-id.v2\0")
+
+            def _update_array(label, values):
+                contiguous = np.ascontiguousarray(values)
+                digest.update(label.encode("ascii") + b"\0")
+                digest.update(str(contiguous.shape).encode("ascii") + b"\0")
+                digest.update(contiguous.tobytes(order="C"))
+
             for values in (
                 np.asarray(grid.azimuths, dtype=np.float64),
                 np.asarray(grid.elevations, dtype=np.float64),
@@ -1765,9 +2729,30 @@ class RcsGrid:
                 np.asarray(grid.rcs_power, dtype=np.float64),
                 np.asarray(grid.rcs_phase, dtype=np.float64),
             ):
-                contiguous = np.ascontiguousarray(values)
-                digest.update(str(contiguous.shape).encode("ascii"))
-                digest.update(contiguous.tobytes(order="C"))
+                _update_array("modeled-array", values)
+
+            # Hash the authoritative complex field in bounded azimuth chunks.
+            # This distinguishes files whose modeled power/phase match but
+            # whose GHOST raw fields differ, without allocating another whole
+            # complex128 grid solely for provenance.
+            cells_per_azimuth = int(np.prod(grid.rcs_power.shape[1:]))
+            azimuth_block = max(1, 262_144 // max(1, cells_per_azimuth))
+            digest.update(b"authoritative-complex-field\0")
+            digest.update(str(grid.rcs_power.shape).encode("ascii") + b"\0")
+            for start in range(0, len(grid.azimuths), azimuth_block):
+                field = np.asarray(
+                    grid.rcs_slice(
+                        (
+                            slice(start, start + azimuth_block),
+                            slice(None),
+                            slice(None),
+                            slice(None),
+                        )
+                    ),
+                    dtype=np.complex128,
+                )
+                _update_array("field-real", field.real)
+                _update_array("field-imag", field.imag)
             digest.update(
                 json.dumps(
                     [str(value) for value in grid.polarizations.tolist()],
@@ -1782,7 +2767,22 @@ class RcsGrid:
                     default=str,
                 ).encode("utf-8")
             )
-            digest.update(grid._phase_reference().encode("utf-8"))
+            convention_metadata = {
+                key: grid._declared_scalar_metadata(key)
+                for key in (
+                    "phase_reference",
+                    "time_convention",
+                    "polarization_basis",
+                    "amplitude_convention",
+                )
+            }
+            digest.update(
+                json.dumps(
+                    convention_metadata,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
             return digest.hexdigest()
 
         measured_sha256 = _grid_content_sha256(measured_calibration)
@@ -1801,7 +2801,7 @@ class RcsGrid:
                 "broadcast_angular_axes; no_interpolation"
             ),
             "singleton_angular_broadcast": bool(
-                allow_singleton_angular_broadcast
+                bool(allow_singleton_angular_broadcast)
             ),
             "user_convention_attested": True,
             "measured_calibration": measured_name,
@@ -1839,7 +2839,8 @@ class RcsGrid:
         history_entry = (
             f"Range Cal complex substitution: measured={measured_name}; "
             f"exact={exact_name}; delta_R={offset_m:.12g} m positive away "
-            "from radar; no interpolation"
+            "from radar; no interpolation; "
+            f"masked_output_bins={gain_summary['masked_output_bin_count']}"
         )
         history = (
             f"{self.history}\n{history_entry}" if self.history else history_entry
@@ -1851,7 +2852,7 @@ class RcsGrid:
             self.polarizations,
             rcs=output_amp,
             rcs_power=output_power,
-            rcs_phase=np.angle(output_amp),
+            rcs_phase=np.where(valid_output, np.angle(output_amp), np.nan),
             rcs_domain="complex_amplitude",
             source_path=None,
             history=history,
@@ -1859,19 +2860,30 @@ class RcsGrid:
             extra=extra,
         )
 
-    def coherent_add(self, other):
+    def coherent_add(self, other, *, metadata_attested=False):
         """Coherently add two grids (complex sum).
 
         Use when phases are aligned and you want field-level addition.
 
         Args:
             other: Another RcsGrid with identical axes.
+            metadata_attested: Explicit confirmation for missing/unspecified
+                field-convention metadata. Never overrides explicit conflicts.
 
         Returns:
             New RcsGrid with rcs = self.rcs + other.rcs.
         """
-        self._assert_compatible(other, coherent=True)
+        self._assert_compatible(
+            other,
+            coherent=True,
+            coherent_metadata_attested=metadata_attested,
+        )
         rcs_out = self.rcs + other.rcs
+        history, extra = self._coherent_attestation_provenance(
+            (other,),
+            operation="coherent-add",
+            metadata_attested=metadata_attested,
+        )
         return self._new_grid(
             self.azimuths,
             self.elevations,
@@ -1879,15 +2891,19 @@ class RcsGrid:
             self.polarizations,
             rcs_out,
             rcs_domain="power_phase",
+            history=history,
+            extra=extra,
         )
 
-    def coherent_add_many(self, *grids):
+    def coherent_add_many(self, *grids, metadata_attested=False):
         """Coherently add multiple grids (complex sum).
 
         Use when phases are aligned and you want field-level addition.
 
         Args:
             *grids: One or more RcsGrid instances.
+            metadata_attested: Explicit confirmation for missing/unspecified
+                field-convention metadata. Never overrides explicit conflicts.
 
         Returns:
             New RcsGrid with rcs = self.rcs + sum(grid.rcs).
@@ -1896,8 +2912,17 @@ class RcsGrid:
             return self
         total = np.array(self.rcs, copy=True)
         for grid in grids:
-            self._assert_compatible(grid, coherent=True)
+            self._assert_compatible(
+                grid,
+                coherent=True,
+                coherent_metadata_attested=metadata_attested,
+            )
             total = total + grid.rcs
+        history, extra = self._coherent_attestation_provenance(
+            grids,
+            operation="coherent-add-many",
+            metadata_attested=metadata_attested,
+        )
         return self._new_grid(
             self.azimuths,
             self.elevations,
@@ -1905,21 +2930,34 @@ class RcsGrid:
             self.polarizations,
             total,
             rcs_domain="power_phase",
+            history=history,
+            extra=extra,
         )
 
-    def coherent_subtract(self, other):
+    def coherent_subtract(self, other, *, metadata_attested=False):
         """Coherently subtract two grids (complex difference).
 
         Use when phases are aligned and you want field-level subtraction.
 
         Args:
             other: Another RcsGrid with identical axes.
+            metadata_attested: Explicit confirmation for missing/unspecified
+                field-convention metadata. Never overrides explicit conflicts.
 
         Returns:
             New RcsGrid with rcs = self.rcs - other.rcs.
         """
-        self._assert_compatible(other, coherent=True)
+        self._assert_compatible(
+            other,
+            coherent=True,
+            coherent_metadata_attested=metadata_attested,
+        )
         rcs_out = self.rcs - other.rcs
+        history, extra = self._coherent_attestation_provenance(
+            (other,),
+            operation="coherent-subtract",
+            metadata_attested=metadata_attested,
+        )
         return self._new_grid(
             self.azimuths,
             self.elevations,
@@ -1927,6 +2965,8 @@ class RcsGrid:
             self.polarizations,
             rcs_out,
             rcs_domain="power_phase",
+            history=history,
+            extra=extra,
         )
 
     def incoherent_add(self, other):
@@ -1988,11 +3028,45 @@ class RcsGrid:
             other: Another RcsGrid with identical axes.
 
         Returns:
-            New RcsGrid with linear power = max(self.rcs_power - other.rcs_power, 0).
+            New RcsGrid with linear power = self.rcs_power - other.rcs_power.
+
+        A physically negative power result is rejected.  Only a negative
+        residual consistent with floating-point subtraction roundoff is
+        replaced by exact zero; this prevents a materially invalid
+        subtraction from being silently clipped into a plausible dataset.
         """
         self._assert_compatible(other)
-        power_diff = self.rcs_power - other.rcs_power
-        power_diff = np.maximum(power_diff, 0.0)
+        left = np.asarray(self.rcs_power)
+        right = np.asarray(other.rcs_power)
+        calculation_dtype = np.result_type(left.dtype, right.dtype, np.float64)
+        left_calc = left.astype(calculation_dtype, copy=False)
+        right_calc = right.astype(calculation_dtype, copy=False)
+        power_diff = left_calc - right_calc
+
+        # The least precise input bounds the significance of the subtraction,
+        # even though the calculation itself is promoted to float64.  Eight
+        # ulps comfortably covers one subtraction plus ordinary upstream
+        # representation noise without introducing an arbitrary absolute
+        # floor that could erase meaningful low-power negatives.
+        input_epsilons = [
+            np.finfo(dtype).eps
+            for dtype in (left.dtype, right.dtype)
+            if np.issubdtype(dtype, np.floating)
+        ]
+        input_epsilon = max(input_epsilons, default=np.finfo(np.float64).eps)
+        scale = np.maximum(np.abs(left_calc), np.abs(right_calc))
+        roundoff_limit = 8.0 * float(input_epsilon) * scale
+        finite_negative = np.isfinite(power_diff) & (power_diff < 0.0)
+        material_negative = finite_negative & (power_diff < -roundoff_limit)
+        if np.any(material_negative):
+            count = int(np.count_nonzero(material_negative))
+            minimum = float(np.min(power_diff[material_negative]))
+            raise ValueError(
+                "incoherent subtraction would produce materially negative "
+                f"linear power in {count} cell(s); minimum difference is "
+                f"{minimum:.17g}"
+            )
+        power_diff[finite_negative] = 0.0
         return self._new_grid(
             self.azimuths,
             self.elevations,
@@ -2020,16 +3094,30 @@ class RcsGrid:
                 f"dB arithmetic requires matching log units; got {unit_a} vs {unit_b}"
             )
 
-        freq_bcast = None
-        if unit_a.lower() == "dbke":
-            # rcs_power shape is (az, el, freq, pol); reshape freq so it
-            # broadcasts across the freq axis only.
-            freq_bcast = np.asarray(self.frequencies, dtype=float)[None, None, :, None]
-
-        db_a = self.linear_to_default_db(self.rcs_power, frequency_value=freq_bcast)
-        db_b = other.linear_to_default_db(other.rcs_power, frequency_value=freq_bcast)
-        diff_db = db_a - db_b
-        output_power = np.power(10.0, np.asarray(diff_db, dtype=float) / 10.0)
+        # For matching physical units, dB subtraction is exactly the linear
+        # power ratio.  Computing it in the dB display domain used to apply the
+        # plotting floor to zero, turning 0/0 into a plausible 0 dB and 1/0
+        # into an arbitrary finite 120 dB.  Undefined denominators remain NaN;
+        # an exact zero numerator over a positive denominator remains zero.
+        numerator = np.asarray(self.rcs_power)
+        denominator = np.asarray(other.rcs_power)
+        # Always divide in at least float64.  A representable ratio such as
+        # float32(1e30) / float32(1e-30) is 1e60; performing that division in
+        # float32 first would overflow and incorrectly turn it into NaN.
+        output_dtype = np.result_type(
+            numerator.dtype, denominator.dtype, np.float64
+        )
+        numerator = numerator.astype(output_dtype, copy=False)
+        denominator = denominator.astype(output_dtype, copy=False)
+        output_power = np.full(numerator.shape, np.nan, dtype=output_dtype)
+        valid = (
+            np.isfinite(numerator)
+            & np.isfinite(denominator)
+            & (denominator > 0.0)
+        )
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            np.divide(numerator, denominator, out=output_power, where=valid)
+        output_power[~np.isfinite(output_power)] = np.nan
         ratio_units = dict(self.units)
         ratio_units["rcs_log_unit"] = "dB"
         ratio_units["rcs_linear_quantity"] = "power_ratio"
@@ -2072,44 +3160,51 @@ class RcsGrid:
 
         if mode == "intersect":
             def _match_axis(axis_self, axis_other, tol=1e-6):
-                axis_self = np.asarray(axis_self)
-                axis_other = np.asarray(axis_other)
-                is_numeric = np.issubdtype(axis_self.dtype, np.number) and np.issubdtype(
-                    axis_other.dtype, np.number
+                axis_self = np.asarray(axis_self).ravel()
+                axis_other = np.asarray(axis_other).ravel()
+                _common, matched = self._common_axis_alignment(
+                    (axis_self, axis_other), tol=tol
                 )
-                if is_numeric and axis_self.size and axis_other.size:
-                    self_f = axis_self.astype(float, copy=False).ravel()
-                    other_f = axis_other.astype(float, copy=False).ravel()
-                    order = np.argsort(self_f, kind="stable")
-                    sorted_self = self_f[order]
-                    pos = np.searchsorted(sorted_self, other_f)
-                    n = sorted_self.size
-                    left = np.clip(pos - 1, 0, n - 1)
-                    right = np.clip(pos, 0, n - 1)
-                    d_left = np.abs(sorted_self[left] - other_f)
-                    d_right = np.abs(sorted_self[right] - other_f)
-                    use_right = d_right <= d_left
-                    sorted_idx = np.where(use_right, right, left)
-                    dist = np.where(use_right, d_right, d_left)
-                    keep_mask = dist <= tol
-                    keep_other = axis_other[keep_mask]
-                    indices_self = order[sorted_idx[keep_mask]].astype(int).tolist()
-                else:
-                    keep_other_list = []
-                    indices_self = []
-                    for value in axis_other:
-                        matches = np.where(axis_self == value)[0]
-                        if matches.size > 0:
-                            keep_other_list.append(value)
-                            indices_self.append(int(matches[0]))
-                    keep_other = np.asarray(keep_other_list)
+                indices_self = [int(value) for value in matched[0]]
+                indices_other = [int(value) for value in matched[1]]
                 if not indices_self:
                     raise ValueError("no overlapping axis values for intersect")
-                return keep_other, indices_self
+                # Preserve the target grid's physical coordinates while using
+                # the one-to-one matcher.  A source sample can no longer be
+                # duplicated into two nearby target bins.  The symmetric
+                # matcher emits numeric matches in value order, so reorder the
+                # pairs back into the target grid's original axis order.
+                target_source_pairs = sorted(
+                    zip(indices_other, indices_self), key=lambda pair: pair[0]
+                )
+                target_indices = [pair[0] for pair in target_source_pairs]
+                source_indices = [pair[1] for pair in target_source_pairs]
+                return axis_other[target_indices], source_indices
 
-            az_new, az_idx = _match_axis(self.azimuths, other.azimuths)
-            el_new, el_idx = _match_axis(self.elevations, other.elevations)
-            f_new, f_idx = _match_axis(self.frequencies, other.frequencies)
+            az_unit = self._supported_unit("azimuth", _ANGLE_UNITS, "deg")
+            el_unit = self._supported_unit("elevation", _ANGLE_UNITS, "deg")
+            frequency_unit = self._supported_unit(
+                "frequency", _FREQUENCY_UNITS, "GHz"
+            )
+            az_tol = float(np.deg2rad(1.0e-6)) if az_unit == "rad" else 1.0e-6
+            el_tol = float(np.deg2rad(1.0e-6)) if el_unit == "rad" else 1.0e-6
+            # Preserve the historical 1e-6-GHz (1 kHz) physical tolerance
+            # across every supported native frequency unit.
+            f_tol = {
+                "Hz": 1.0e3,
+                "kHz": 1.0,
+                "MHz": 1.0e-3,
+                "GHz": 1.0e-6,
+            }[frequency_unit]
+            az_new, az_idx = _match_axis(
+                self.azimuths, other.azimuths, tol=az_tol
+            )
+            el_new, el_idx = _match_axis(
+                self.elevations, other.elevations, tol=el_tol
+            )
+            f_new, f_idx = _match_axis(
+                self.frequencies, other.frequencies, tol=f_tol
+            )
             pol_new, pol_idx = _match_axis(self.polarizations, other.polarizations, tol=0.0)
             pwr_new = self.rcs_power[np.ix_(az_idx, el_idx, f_idx, pol_idx)]
             phs_new = self.rcs_phase[np.ix_(az_idx, el_idx, f_idx, pol_idx)]
@@ -2502,11 +3597,17 @@ class RcsGrid:
         extra=None,
     ):
         if extra is None:
-            # Preserve scalar phase-reference metadata across derived grids, but
-            # never carry shape-dependent raw amplitudes through a transform.
+            # Preserve scalar field-convention metadata across derived grids,
+            # but never carry shape-dependent raw amplitudes through a
+            # transform.
             extra = {}
-            if "phase_reference" in self.extra:
-                extra["phase_reference"] = self.extra["phase_reference"]
+            for key in (
+                "phase_reference",
+                "time_convention",
+                "polarization_basis",
+            ):
+                if key in self.extra:
+                    extra[key] = self.extra[key]
         return RcsGrid(
             azimuths,
             elevations,
@@ -2553,14 +3654,16 @@ class RcsGrid:
 
     def _frequency_value_to_hz(self, frequency_value):
         freq = np.asarray(frequency_value, dtype=float)
-        unit = str((self.units or {}).get("frequency", "GHz")).strip().lower()
-        if unit == "hz":
+        unit = self._supported_unit("frequency", _FREQUENCY_UNITS, "GHz")
+        if unit == "Hz":
             return freq
-        if unit == "mhz":
+        if unit == "MHz":
             return freq * 1.0e6
-        if unit == "khz":
+        if unit == "kHz":
             return freq * 1.0e3
-        return freq * 1.0e9
+        if unit == "GHz":
+            return freq * 1.0e9
+        raise AssertionError(f"unhandled canonical frequency unit: {unit}")
 
     def linear_to_dbke(self, linear_value, frequency_value, eps=1e-12):
         linear = np.asarray(linear_value, dtype=float)
@@ -2684,15 +3787,66 @@ class RcsGrid:
             rcs_phase=self.rcs_phase[np.ix_(az_idx, el_idx, f_idx, p_idx)],
         )
 
+    @staticmethod
+    def _merge_equivalent_sample_blocks(
+        existing_power,
+        existing_phase,
+        incoming_power,
+        incoming_phase,
+        *,
+        context,
+    ):
+        """Merge complementary/equivalent samples or reject a seam conflict."""
+
+        existing_power = np.asarray(existing_power)
+        existing_phase = np.asarray(existing_phase)
+        incoming_power = np.asarray(incoming_power)
+        incoming_phase = np.asarray(incoming_phase)
+        existing_finite = np.isfinite(existing_power)
+        incoming_finite = np.isfinite(incoming_power)
+        both = existing_finite & incoming_finite
+        power_equal = both & np.isclose(
+            existing_power, incoming_power, rtol=1.0e-6, atol=1.0e-12
+        )
+        power_conflict = both & ~power_equal
+
+        both_phase = (
+            power_equal
+            & np.isfinite(existing_phase)
+            & np.isfinite(incoming_phase)
+        )
+        both_zero = both & (existing_power == 0.0) & (incoming_power == 0.0)
+        phase_delta = np.abs(
+            np.angle(np.exp(1j * (existing_phase - incoming_phase)))
+        )
+        phase_conflict = both_phase & ~both_zero & (phase_delta > 1.0e-5)
+        if np.any(power_conflict) or np.any(phase_conflict):
+            raise ValueError(
+                f"{context}: conflicting finite seam samples would overlap"
+            )
+
+        take_power = ~existing_finite & incoming_finite
+        if np.any(take_power):
+            existing_power[take_power] = incoming_power[take_power]
+            existing_phase[take_power] = np.where(
+                np.isfinite(incoming_phase[take_power]),
+                incoming_phase[take_power],
+                np.nan,
+            )
+        fill_phase = (
+            power_equal
+            & ~np.isfinite(existing_phase)
+            & np.isfinite(incoming_phase)
+        )
+        existing_phase[fill_phase] = incoming_phase[fill_phase]
+
     def mirror_about_azimuth(self, azimuth_deg: float):
         """Mirror azimuth axis about a reference angle and return a new grid.
 
         The transformed axis is `az' = 2*azimuth_deg - az`. Output azimuths are
         sorted ascending, with samples reordered to match.
         """
-        about = float(azimuth_deg)
-        if not np.isfinite(about):
-            raise ValueError("mirror azimuth must be finite")
+        about = self._angle_value_from_degrees(azimuth_deg, "azimuth")
 
         az = np.asarray(self.azimuths, dtype=float)
         mirrored_az = (2.0 * about) - az
@@ -2710,6 +3864,11 @@ class RcsGrid:
 
     def swap_elevation_azimuth(self):
         """Swap the elevation and azimuth axes and return a new grid."""
+        swapped_units = copy.deepcopy(self.units)
+        azimuth_unit = self._supported_unit("azimuth", _ANGLE_UNITS, "deg")
+        elevation_unit = self._supported_unit("elevation", _ANGLE_UNITS, "deg")
+        swapped_units["azimuth"] = elevation_unit
+        swapped_units["elevation"] = azimuth_unit
         return self._new_grid(
             np.array(self.elevations, copy=True),
             np.array(self.azimuths, copy=True),
@@ -2718,13 +3877,12 @@ class RcsGrid:
             rcs_power=np.swapaxes(self.rcs_power, 0, 1).copy(),
             rcs_phase=np.swapaxes(self.rcs_phase, 0, 1).copy(),
             rcs_domain="power_phase",
+            units=swapped_units,
         )
 
     def shift_azimuth(self, delta_deg: float):
         """Shift azimuth axis by a constant offset and return a new grid."""
-        delta = float(delta_deg)
-        if not np.isfinite(delta):
-            raise ValueError("azimuth shift must be finite")
+        delta = self._angle_value_from_degrees(delta_deg, "azimuth")
         shifted_az = np.asarray(self.azimuths, dtype=float) + delta
         return self._new_grid(
             shifted_az,
@@ -2741,30 +3899,107 @@ class RcsGrid:
 
         ``mode`` is ``"0_360"`` for [0, 360) or ``"-180_180"`` for [-180, 180).
         Output azimuths are sorted ascending; samples are reordered to match.
-        If wrapping collapses distinct input azimuths onto the same value
-        (e.g. 0° and 360° both map to 0° in "0_360"), only the first
-        occurrence in the original azimuth order is kept.
+        Degree axes use 360/180 and radian axes use 2*pi/pi.  If wrapping
+        collapses distinct inputs onto one seam coordinate, complementary or
+        equivalent samples are merged; conflicting finite samples are rejected
+        instead of silently discarding one.
         """
         az = np.asarray(self.azimuths, dtype=float)
+        unit = self._supported_unit("azimuth", _ANGLE_UNITS, "deg")
+        period = (2.0 * np.pi) if unit == "rad" else 360.0
+        half_period = 0.5 * period
+        seam_tol = float(np.deg2rad(1.0e-9)) if unit == "rad" else 1.0e-9
         if mode == "0_360":
-            wrapped = np.mod(az, 360.0)
+            wrapped = np.mod(az, period)
+            wrapped[np.isclose(wrapped, period, atol=seam_tol, rtol=0.0)] = 0.0
+            wrapped[np.isclose(wrapped, 0.0, atol=seam_tol, rtol=0.0)] = 0.0
         elif mode == "-180_180":
-            wrapped = np.mod(az + 180.0, 360.0) - 180.0
+            wrapped = np.mod(az + half_period, period) - half_period
+            wrapped[
+                np.isclose(wrapped, half_period, atol=seam_tol, rtol=0.0)
+                | np.isclose(wrapped, -half_period, atol=seam_tol, rtol=0.0)
+            ] = -half_period
         else:
             raise ValueError(f"unknown wrap mode: {mode!r}")
 
-        # np.unique returns sorted unique values and the index of the first
-        # occurrence of each in the original array — exactly the "drop dupes,
-        # keep first, sort ascending" behaviour we want.
-        unique_vals, keep_idx = np.unique(wrapped, return_index=True)
+        order = np.argsort(wrapped, kind="stable")
+        groups = []
+        for source_index in order.tolist():
+            if not groups or (
+                wrapped[source_index] - wrapped[groups[-1][0]] > seam_tol
+            ):
+                groups.append([source_index])
+            else:
+                groups[-1].append(source_index)
+        unique_vals = np.asarray(
+            [wrapped[group[0]] for group in groups], dtype=float
+        )
+        output_shape = (len(groups),) + self.rcs_power.shape[1:]
+        output_power = np.full(output_shape, np.nan, dtype=self.rcs_power.dtype)
+        output_phase = np.full(output_shape, np.nan, dtype=self.rcs_phase.dtype)
+        for output_index, group in enumerate(groups):
+            for source_index in group:
+                self._merge_equivalent_sample_blocks(
+                    output_power[output_index],
+                    output_phase[output_index],
+                    self.rcs_power[source_index],
+                    self.rcs_phase[source_index],
+                    context=(
+                        f"azimuth wrap at {unique_vals[output_index]:.12g} {unit}"
+                    ),
+                )
         return self._new_grid(
             unique_vals,
             np.array(self.elevations, copy=True),
             np.array(self.frequencies, copy=True),
             np.array(self.polarizations, copy=True),
-            rcs_power=self.rcs_power[keep_idx, :, :, :],
-            rcs_phase=self.rcs_phase[keep_idx, :, :, :],
+            rcs_power=output_power,
+            rcs_phase=output_phase,
             rcs_domain="power_phase",
+        )
+
+    def wrap_phase(self, mode: str):
+        """Wrap stored phase while preserving power and the complex field.
+
+        ``mode`` is ``"0_360"`` for [0, 360) degrees or ``"-180_180"``
+        for [-180, 180) degrees.  Phase is stored in radians, so only a
+        modulo-2*pi representation change is made.  Missing phase remains
+        missing and power samples are copied without modification.
+        """
+
+        if mode not in {"0_360", "-180_180"}:
+            raise ValueError(
+                "phase wrap mode must be '0_360' or '-180_180'"
+            )
+
+        wrapped_phase = np.array(self.rcs_phase, copy=True)
+        period = 2.0 * np.pi
+        with np.errstate(invalid="ignore"):
+            if mode == "0_360":
+                np.remainder(wrapped_phase, period, out=wrapped_phase)
+                range_label = "[0, 360) deg"
+            else:
+                np.add(wrapped_phase, np.pi, out=wrapped_phase)
+                np.remainder(wrapped_phase, period, out=wrapped_phase)
+                np.subtract(wrapped_phase, np.pi, out=wrapped_phase)
+                range_label = "[-180, 180) deg"
+
+        history_entry = f"Wrap phase to {range_label}; complex field unchanged"
+        prior_history = str(self.history or "").strip()
+        history = (
+            f"{prior_history}\n{history_entry}" if prior_history else history_entry
+        )
+        wrapped_units = dict(self.units)
+        wrapped_units["phase_wrap"] = mode
+        return self._new_grid(
+            np.array(self.azimuths, copy=True),
+            np.array(self.elevations, copy=True),
+            np.array(self.frequencies, copy=True),
+            np.array(self.polarizations, copy=True),
+            rcs_power=np.array(self.rcs_power, copy=True),
+            rcs_phase=wrapped_phase,
+            history=history,
+            units=wrapped_units,
         )
 
     def round_azimuths(self, decimals: int):
@@ -2830,9 +4065,7 @@ class RcsGrid:
 
     def shift_elevation(self, delta_deg: float):
         """Shift elevation axis by a constant offset and return a new grid."""
-        delta = float(delta_deg)
-        if not np.isfinite(delta):
-            raise ValueError("elevation shift must be finite")
+        delta = self._angle_value_from_degrees(delta_deg, "elevation")
         shifted_el = np.asarray(self.elevations, dtype=float) + delta
         return self._new_grid(
             np.array(self.azimuths, copy=True),
@@ -2983,8 +4216,10 @@ class RcsGrid:
         """Stitch two elevation cuts into one 0-360 azimuth cut.
 
         The lower-elevation cut keeps its original azimuth values. The higher
-        cut is shifted by `azimuth_shift_deg` and merged onto the same output
-        elevation plane. Overlap bins keep the lower-elevation data.
+        cut is shifted by the degree-valued `azimuth_shift_deg` and merged onto
+        the same output elevation plane. On radian-native data the shift and
+        tolerance are converted internally. Equivalent/complementary overlap
+        bins merge; conflicting finite seam samples are rejected.
         """
 
         el_axis = np.asarray(self.elevations, dtype=float)
@@ -3003,19 +4238,43 @@ class RcsGrid:
 
         if not np.isfinite(lo_value) or not np.isfinite(hi_value):
             raise ValueError("elevation pair values must be finite")
-        if np.isclose(lo_value, hi_value, atol=tol, rtol=0.0):
+        try:
+            tolerance_deg = float(tol)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("combine tolerance must be finite and nonnegative") from exc
+        if not np.isfinite(tolerance_deg) or tolerance_deg < 0.0:
+            raise ValueError("combine tolerance must be finite and nonnegative")
+        elevation_unit = self._supported_unit(
+            "elevation", _ANGLE_UNITS, "deg"
+        )
+        azimuth_unit = self._supported_unit("azimuth", _ANGLE_UNITS, "deg")
+        elevation_tol = (
+            float(np.deg2rad(tolerance_deg))
+            if elevation_unit == "rad"
+            else tolerance_deg
+        )
+        azimuth_tol = (
+            float(np.deg2rad(tolerance_deg))
+            if azimuth_unit == "rad"
+            else tolerance_deg
+        )
+        if np.isclose(lo_value, hi_value, atol=elevation_tol, rtol=0.0):
             raise ValueError("elevation pair values must be distinct")
 
-        lo_matches = self._axis_value_match(self.elevations, lo_value, tol=tol)
-        hi_matches = self._axis_value_match(self.elevations, hi_value, tol=tol)
+        lo_matches = self._axis_value_match(
+            self.elevations, lo_value, tol=elevation_tol
+        )
+        hi_matches = self._axis_value_match(
+            self.elevations, hi_value, tol=elevation_tol
+        )
         if lo_matches.size == 0 or hi_matches.size == 0:
             raise ValueError("requested elevation pair not found in dataset")
 
         lo_idx = int(lo_matches[0])
         hi_idx = int(hi_matches[0])
-        az_shift = float(azimuth_shift_deg)
-        if not np.isfinite(az_shift):
-            raise ValueError("azimuth shift must be finite")
+        az_shift = self._angle_value_from_degrees(
+            azimuth_shift_deg, "azimuth"
+        )
 
         az_base = np.asarray(self.azimuths, dtype=float)
         if az_base.size == 0:
@@ -3023,7 +4282,7 @@ class RcsGrid:
 
         az_lo = np.array(az_base, copy=True)
         az_hi = np.array(az_base, copy=True) + az_shift
-        az_merged = self._axis_union([az_lo, az_hi], tol=tol)
+        az_merged = self._axis_union([az_lo, az_hi], tol=azimuth_tol)
         if az_merged.size == 0:
             raise ValueError("combined azimuth axis is empty")
 
@@ -3031,8 +4290,12 @@ class RcsGrid:
         out_power = np.full(out_shape, np.nan, dtype=self.rcs_power.dtype)
         out_phase = np.full(out_shape, np.nan, dtype=self.rcs_phase.dtype)
 
-        lo_target_idx = self._indices_for_axis_values(az_merged, az_lo, tol=tol)
-        hi_target_idx = self._indices_for_axis_values(az_merged, az_hi, tol=tol)
+        lo_target_idx = self._indices_for_axis_values(
+            az_merged, az_lo, tol=azimuth_tol
+        )
+        hi_target_idx = self._indices_for_axis_values(
+            az_merged, az_hi, tol=azimuth_tol
+        )
         if lo_target_idx is None or hi_target_idx is None:
             raise ValueError("failed to align azimuth bins during elevation combine")
         if (
@@ -3041,7 +4304,8 @@ class RcsGrid:
         ):
             raise ValueError(
                 "cannot combine elevation cuts: the input azimuth axis contains "
-                f"coordinates closer than the matching tolerance ({tol:g}); "
+                "coordinates closer than the matching tolerance "
+                f"({tolerance_deg:g} deg); "
                 "deduplicate the azimuth axis or use a smaller tolerance"
             )
 
@@ -3050,23 +4314,21 @@ class RcsGrid:
         hi_power = self.rcs_power[:, hi_idx, :, :]
         hi_phase = self.rcs_phase[:, hi_idx, :, :]
 
-        for src_idx, dst_idx in enumerate(lo_target_idx):
-            out_power[dst_idx, 0, :, :] = lo_power[src_idx, :, :]
-            out_phase[dst_idx, 0, :, :] = lo_phase[src_idx, :, :]
-
-        for src_idx, dst_idx in enumerate(hi_target_idx):
-            existing_power = out_power[dst_idx, 0, :, :]
-            existing_phase = out_phase[dst_idx, 0, :, :]
-            incoming_power = hi_power[src_idx, :, :]
-            incoming_phase = hi_phase[src_idx, :, :]
-
-            take_power = (~np.isfinite(existing_power)) & np.isfinite(incoming_power)
-            existing_power[take_power] = incoming_power[take_power]
-
-            take_phase = np.isfinite(incoming_phase) & (
-                (~np.isfinite(existing_phase)) | take_power
-            )
-            existing_phase[take_phase] = incoming_phase[take_phase]
+        for label, target_indices, source_power, source_phase in (
+            ("lower elevation", lo_target_idx, lo_power, lo_phase),
+            ("shifted higher elevation", hi_target_idx, hi_power, hi_phase),
+        ):
+            for src_idx, dst_idx in enumerate(target_indices):
+                self._merge_equivalent_sample_blocks(
+                    out_power[dst_idx, 0, :, :],
+                    out_phase[dst_idx, 0, :, :],
+                    source_power[src_idx, :, :],
+                    source_phase[src_idx, :, :],
+                    context=(
+                        f"El->Az360 {label} at azimuth "
+                        f"{az_merged[dst_idx]:.12g} {azimuth_unit}"
+                    ),
+                )
 
         return self._new_grid(
             az_merged,
@@ -3077,6 +4339,678 @@ class RcsGrid:
             rcs_phase=out_phase,
             rcs_domain="power_phase",
         )
+
+    @classmethod
+    def stitch_many(
+        cls,
+        *grids,
+        policy="priority-first",
+        tol=1e-6,
+        metadata_attested=False,
+        max_output_bytes=None,
+        return_report=False,
+    ):
+        """Stitch union-grid samples using one explicit overlap policy.
+
+        Policies are ``"priority-first"``, ``"priority-last"``,
+        ``"power-mean"``, and ``"coherent-mean"``.  Priority policies choose
+        an entire power/phase sample atomically in input order. ``power-mean``
+        averages finite linear power and makes phase unknown only at cells
+        with multiple contributors. ``coherent-mean`` averages complex fields
+        and therefore requires finite phase plus compatible coherent metadata.
+
+        This is intentionally separate from :meth:`join_many`: strict Join
+        continues to reject conflicting finite overlaps.  Stitch resolves
+        them only under the caller-selected policy and records a durable
+        report.  Processing uses bounded source/target blocks and
+        ``max_output_bytes`` caps the estimated peak retained/working memory.
+
+        When ``return_report`` is true, return ``(grid, report)``; otherwise
+        return only the stitched grid.  Report counts are union-grid cell
+        counts except ``contributing_count``, which counts all finite input
+        contributions.
+        """
+
+        policies = {
+            "priority-first",
+            "priority-last",
+            "power-mean",
+            "coherent-mean",
+        }
+        policy = str(policy).strip().lower().replace("_", "-")
+        if policy not in policies:
+            raise ValueError(
+                "policy must be 'priority-first', 'priority-last', "
+                "'power-mean', or 'coherent-mean'"
+            )
+        if not isinstance(metadata_attested, (bool, np.bool_)):
+            raise TypeError("metadata_attested must be True or False")
+        if not isinstance(return_report, (bool, np.bool_)):
+            raise TypeError("return_report must be True or False")
+        try:
+            tolerance = float(tol)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("tol must be a finite nonnegative number") from exc
+        if not np.isfinite(tolerance) or tolerance < 0.0:
+            raise ValueError("tol must be a finite nonnegative number")
+        if max_output_bytes is not None:
+            try:
+                memory_limit = int(max_output_bytes)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise TypeError("max_output_bytes must be a nonnegative integer") from exc
+            if memory_limit < 0:
+                raise ValueError("max_output_bytes must be nonnegative")
+        else:
+            memory_limit = None
+
+        grids = cls._ensure_grids(grids)
+        if len(grids) > np.iinfo(np.uint32).max:
+            raise ValueError("too many input grids for stitch contributor counts")
+        ref = grids[0]
+
+        def scalar_convention_extra(grid):
+            return {
+                key: grid.extra[key]
+                for key in (
+                    "phase_reference",
+                    "time_convention",
+                    "polarization_basis",
+                )
+                if key in grid.extra
+            }
+
+        # Stitch creates one physical dataset, so even the priority and power
+        # policies require the same convention compatibility as strict Join.
+        for grid in grids[1:]:
+            ref._assert_physical_metadata_compatible(grid)
+            left_ref = ref._phase_reference()
+            right_ref = grid._phase_reference()
+            if left_ref != right_ref and (left_ref or right_ref):
+                if policy != "coherent-mean" or not bool(metadata_attested):
+                    raise ValueError(
+                        "cannot stitch grids with different phase references"
+                    )
+            for key, label, canonicalize in (
+                (
+                    "time_convention",
+                    "time conventions",
+                    ref._canonical_time_convention,
+                ),
+                (
+                    "polarization_basis",
+                    "polarization bases",
+                    lambda value: " ".join(value.split()).casefold(),
+                ),
+            ):
+                left_value = ref._declared_scalar_metadata(key)
+                right_value = grid._declared_scalar_metadata(key)
+                if (
+                    (left_value or right_value)
+                    and canonicalize(left_value) != canonicalize(right_value)
+                    and (policy != "coherent-mean" or not bool(metadata_attested))
+                ):
+                    raise ValueError(
+                        f"cannot stitch grids with different {label}: "
+                        f"{left_value or '<unspecified>'!r} != "
+                        f"{right_value or '<unspecified>'!r}"
+                    )
+
+        if policy == "coherent-mean":
+            missing_declarations = {}
+            for input_index, grid in enumerate(grids, start=1):
+                for key in (
+                    "phase_reference",
+                    "time_convention",
+                    "polarization_basis",
+                ):
+                    if not grid._declared_scalar_metadata(key):
+                        missing_declarations.setdefault(key, []).append(input_index)
+            if missing_declarations and not bool(metadata_attested):
+                rendered = ", ".join(
+                    key.replace("_", " ") for key in missing_declarations
+                )
+                raise ValueError(
+                    "coherent-mean stitch requires declared coherent metadata "
+                    f"({rendered}) or metadata_attested=True"
+                )
+            for grid in grids[1:]:
+                ref._assert_coherent_metadata_compatible(
+                    grid, metadata_attested=bool(metadata_attested)
+                )
+
+        expected_shapes = []
+        for input_index, grid in enumerate(grids, start=1):
+            input_phase_wrap = str(
+                (grid.units or {}).get("phase_wrap", "")
+            ).strip()
+            if input_phase_wrap not in {"", "0_360", "-180_180"}:
+                raise ValueError(
+                    f"stitch input {input_index} has unsupported phase_wrap "
+                    f"{input_phase_wrap!r}"
+                )
+            numeric_axes = (
+                ("azimuth", np.asarray(grid.azimuths)),
+                ("elevation", np.asarray(grid.elevations)),
+                ("frequency", np.asarray(grid.frequencies)),
+            )
+            for axis_name, axis in numeric_axes:
+                if (
+                    axis.ndim != 1
+                    or axis.size == 0
+                    or axis.dtype.kind not in "iuf"
+                    or np.any(~np.isfinite(axis))
+                    or np.unique(axis).size != axis.size
+                ):
+                    raise ValueError(
+                        f"stitch input {input_index} has an invalid {axis_name} axis"
+                    )
+                if axis_name == "frequency" and np.any(axis <= 0.0):
+                    raise ValueError(
+                        f"stitch input {input_index} has nonpositive frequencies"
+                    )
+            polarizations = np.asarray(grid.polarizations)
+            labels = [str(value).strip() for value in polarizations.tolist()]
+            if (
+                polarizations.ndim != 1
+                or polarizations.size == 0
+                or any(not label for label in labels)
+                or len({label.casefold() for label in labels}) != len(labels)
+            ):
+                raise ValueError(
+                    f"stitch input {input_index} has an invalid polarization axis"
+                )
+            expected = tuple(len(axis) for _name, axis in numeric_axes) + (
+                len(polarizations),
+            )
+            expected_shapes.append(expected)
+            power = np.asarray(grid.rcs_power)
+            phase = np.asarray(grid.rcs_phase)
+            if power.shape != expected or phase.shape != expected:
+                raise ValueError(
+                    f"stitch input {input_index} sample shape does not match its axes"
+                )
+            if power.dtype.kind not in "iuf" or phase.dtype.kind not in "iuf":
+                raise ValueError(
+                    f"stitch input {input_index} power and phase must be real numeric"
+                )
+
+            infinite_power_count = 0
+            negative_power_count = 0
+            minimum_negative = None
+            infinite_phase_count = 0
+            missing_coherent_phase_count = 0
+            iterator = np.nditer(
+                (power, phase),
+                flags=["external_loop", "buffered", "zerosize_ok"],
+                op_flags=[["readonly"], ["readonly"]],
+                order="K",
+                buffersize=_JOIN_MERGE_BLOCK_CELLS,
+            )
+            for power_block, phase_block in iterator:
+                power_block = np.asarray(power_block)
+                phase_block = np.asarray(phase_block)
+                infinite_power_count += int(np.count_nonzero(np.isinf(power_block)))
+                finite_negative = np.isfinite(power_block) & (power_block < 0.0)
+                negative_power_count += int(np.count_nonzero(finite_negative))
+                if np.any(finite_negative):
+                    block_minimum = float(np.min(power_block[finite_negative]))
+                    minimum_negative = (
+                        block_minimum
+                        if minimum_negative is None
+                        else min(minimum_negative, block_minimum)
+                    )
+                infinite_phase_count += int(np.count_nonzero(np.isinf(phase_block)))
+                if policy == "coherent-mean":
+                    missing_coherent_phase_count += int(
+                        np.count_nonzero(
+                            np.isfinite(power_block) & ~np.isfinite(phase_block)
+                        )
+                    )
+            if infinite_power_count or infinite_phase_count:
+                raise ValueError(
+                    f"stitch input {input_index} contains infinite samples "
+                    f"(power={infinite_power_count}, phase={infinite_phase_count})"
+                )
+            if negative_power_count:
+                raise ValueError(
+                    f"stitch input {input_index} contains {negative_power_count} "
+                    "negative power sample(s); minimum is "
+                    f"{minimum_negative:.17g}"
+                )
+            if missing_coherent_phase_count:
+                raise ValueError(
+                    f"coherent-mean stitch requires finite phase; input "
+                    f"{input_index} has {missing_coherent_phase_count} finite-power "
+                    "sample(s) with missing phase"
+                )
+
+        if len(grids) == 1:
+            az_union = np.array(ref.azimuths, copy=True)
+            el_union = np.array(ref.elevations, copy=True)
+            f_union = np.array(ref.frequencies, copy=True)
+            p_union = np.array(ref.polarizations, copy=True)
+        else:
+            az_union = cls._axis_union(
+                [grid.azimuths for grid in grids], tol=tolerance
+            )
+            el_union = cls._axis_union(
+                [grid.elevations for grid in grids], tol=tolerance
+            )
+            f_union = cls._axis_union(
+                [grid.frequencies for grid in grids], tol=tolerance
+            )
+            p_union = cls._axis_union(
+                [grid.polarizations for grid in grids], tol=0.0
+            )
+
+        shape = (len(az_union), len(el_union), len(f_union), len(p_union))
+        cell_count = 1
+        for dimension in shape:
+            cell_count *= int(dimension)
+        if policy in {"power-mean", "coherent-mean"}:
+            output_dtype = np.result_type(
+                *[grid.rcs_power.dtype for grid in grids], np.float64
+            )
+        else:
+            output_dtype = np.result_type(
+                *[grid.rcs_power.dtype for grid in grids]
+            )
+        itemsize = np.dtype(output_dtype).itemsize
+        output_bytes = cell_count * itemsize * 2
+        state_bytes = cell_count * (
+            np.dtype(np.uint32).itemsize + np.dtype(np.bool_).itemsize
+        )
+        merge_block_cells = min(cell_count, _JOIN_MERGE_BLOCK_CELLS)
+        merge_scratch_bytes = merge_block_cells * (12 * itemsize + 64)
+        estimated_peak_bytes = output_bytes + state_bytes + merge_scratch_bytes
+        if memory_limit is not None and estimated_peak_bytes > memory_limit:
+            raise MemoryError(
+                "dense stitched grid needs about "
+                f"{estimated_peak_bytes / (1024**3):.2f} GiB peak "
+                f"({(output_bytes + state_bytes) / (1024**3):.2f} GiB retained "
+                "during construction), above the configured limit of "
+                f"{memory_limit / (1024**3):.2f} GiB"
+            )
+
+        stitched_power = np.full(shape, np.nan, dtype=output_dtype)
+        stitched_phase = np.full(shape, np.nan, dtype=output_dtype)
+        contributor_counts = np.zeros(shape, dtype=np.uint32)
+        conflict_flags = np.zeros(shape, dtype=bool)
+
+        mapped_indices = []
+        for grid in grids:
+            indices = (
+                cls._indices_for_axis_values(
+                    az_union, grid.azimuths, tol=tolerance
+                ),
+                cls._indices_for_axis_values(
+                    el_union, grid.elevations, tol=tolerance
+                ),
+                cls._indices_for_axis_values(
+                    f_union, grid.frequencies, tol=tolerance
+                ),
+                cls._indices_for_axis_values(
+                    p_union, grid.polarizations, tol=0.0
+                ),
+            )
+            if any(value is None for value in indices):
+                raise ValueError("failed to align a dataset during stitch")
+            for axis_name, axis_indices, source_axis, axis_tol in (
+                ("azimuth", indices[0], grid.azimuths, tolerance),
+                ("elevation", indices[1], grid.elevations, tolerance),
+                ("frequency", indices[2], grid.frequencies, tolerance),
+                ("polarization", indices[3], grid.polarizations, 0.0),
+            ):
+                if len(axis_indices) != np.asarray(source_axis).size:
+                    raise ValueError(
+                        f"cannot stitch: an input {axis_name} axis contains "
+                        "coordinates that collapse within the matching "
+                        f"tolerance ({axis_tol:g}); deduplicate that axis or "
+                        "use a smaller tolerance"
+                    )
+            mapped_indices.append(indices)
+
+        for grid, indices in zip(grids, mapped_indices):
+            az_idx, el_idx, f_idx, p_idx = indices
+            incoming_power = np.asarray(grid.rcs_power)
+            incoming_phase = np.asarray(grid.rcs_phase)
+            pol_block = max(1, min(len(p_idx), _JOIN_MERGE_BLOCK_CELLS))
+            freq_block = max(
+                1, min(len(f_idx), _JOIN_MERGE_BLOCK_CELLS // pol_block)
+            )
+            remaining = max(
+                1, _JOIN_MERGE_BLOCK_CELLS // (pol_block * freq_block)
+            )
+            elev_block = max(1, min(len(el_idx), remaining))
+            remaining = max(
+                1,
+                _JOIN_MERGE_BLOCK_CELLS
+                // (pol_block * freq_block * elev_block),
+            )
+            az_block = max(1, min(len(az_idx), remaining))
+            for a_start in range(0, len(az_idx), az_block):
+                a_stop = min(a_start + az_block, len(az_idx))
+                union_a = az_idx[a_start:a_stop]
+                for e_start in range(0, len(el_idx), elev_block):
+                    e_stop = min(e_start + elev_block, len(el_idx))
+                    union_e = el_idx[e_start:e_stop]
+                    for f_start in range(0, len(f_idx), freq_block):
+                        f_stop = min(f_start + freq_block, len(f_idx))
+                        union_f = f_idx[f_start:f_stop]
+                        for p_start in range(0, len(p_idx), pol_block):
+                            p_stop = min(p_start + pol_block, len(p_idx))
+                            union_p = p_idx[p_start:p_stop]
+                            target = np.ix_(union_a, union_e, union_f, union_p)
+                            source = (
+                                slice(a_start, a_stop),
+                                slice(e_start, e_stop),
+                                slice(f_start, f_stop),
+                                slice(p_start, p_stop),
+                            )
+                            block_power = incoming_power[source]
+                            block_phase = incoming_phase[source]
+                            valid = np.isfinite(block_power)
+                            if not np.any(valid):
+                                continue
+
+                            existing_power = stitched_power[target]
+                            existing_phase = stitched_phase[target]
+                            count_block = contributor_counts[target]
+                            conflict_block = conflict_flags[target]
+                            overlap = valid & (count_block > 0)
+
+                            incoming_field = None
+                            if policy == "coherent-mean":
+                                incoming_field = np.asarray(grid.rcs_slice(source))
+                                invalid_field = valid & (
+                                    ~np.isfinite(incoming_field.real)
+                                    | ~np.isfinite(incoming_field.imag)
+                                )
+                                if np.any(invalid_field):
+                                    raise ValueError(
+                                        "coherent-mean stitch encountered a nonfinite "
+                                        "authoritative complex field for finite power"
+                                    )
+
+                            if np.any(overlap):
+                                if policy == "power-mean":
+                                    reference_power = np.divide(
+                                        existing_power,
+                                        count_block,
+                                        out=np.full_like(existing_power, np.nan),
+                                        where=count_block > 0,
+                                    )
+                                    power_equal = overlap & np.isclose(
+                                        reference_power,
+                                        block_power,
+                                        rtol=1.0e-6,
+                                        atol=1.0e-12,
+                                    )
+                                    conflict_block |= overlap & ~power_equal
+                                elif policy == "coherent-mean":
+                                    reference_field = np.divide(
+                                        existing_power + 1j * existing_phase,
+                                        count_block,
+                                        out=np.full(
+                                            existing_power.shape,
+                                            np.nan + 1j * np.nan,
+                                            dtype=np.complex128,
+                                        ),
+                                        where=count_block > 0,
+                                    )
+                                    reference_power = np.abs(reference_field) ** 2
+                                    incoming_field_power = np.abs(incoming_field) ** 2
+                                    power_equal = overlap & np.isclose(
+                                        reference_power,
+                                        incoming_field_power,
+                                        rtol=1.0e-6,
+                                        atol=1.0e-12,
+                                    )
+                                    both_zero = (
+                                        power_equal
+                                        & (reference_power == 0.0)
+                                        & (incoming_field_power == 0.0)
+                                    )
+                                    phase_delta = np.abs(
+                                        np.angle(reference_field / incoming_field)
+                                    )
+                                    phase_conflict = (
+                                        overlap
+                                        & power_equal
+                                        & ~both_zero
+                                        & (phase_delta > 1.0e-5)
+                                    )
+                                    conflict_block |= (
+                                        (overlap & ~power_equal) | phase_conflict
+                                    )
+                                else:
+                                    power_equal = overlap & np.isclose(
+                                        existing_power,
+                                        block_power,
+                                        rtol=1.0e-6,
+                                        atol=1.0e-12,
+                                    )
+                                    both_phase = (
+                                        power_equal
+                                        & np.isfinite(existing_phase)
+                                        & np.isfinite(block_phase)
+                                    )
+                                    both_zero = (
+                                        power_equal
+                                        & (existing_power == 0.0)
+                                        & (block_power == 0.0)
+                                    )
+                                    phase_delta = np.abs(
+                                        np.angle(
+                                            np.exp(1j * (existing_phase - block_phase))
+                                        )
+                                    )
+                                    phase_conflict = (
+                                        both_phase
+                                        & ~both_zero
+                                        & (phase_delta > 1.0e-5)
+                                    )
+                                    conflict_block |= (
+                                        (overlap & ~power_equal) | phase_conflict
+                                    )
+
+                            first_contribution = valid & (count_block == 0)
+                            repeated_contribution = valid & (count_block > 0)
+                            if policy == "priority-first":
+                                existing_power[first_contribution] = block_power[
+                                    first_contribution
+                                ]
+                                existing_phase[first_contribution] = block_phase[
+                                    first_contribution
+                                ]
+                            elif policy == "priority-last":
+                                existing_power[valid] = block_power[valid]
+                                existing_phase[valid] = block_phase[valid]
+                            elif policy == "power-mean":
+                                existing_power[first_contribution] = block_power[
+                                    first_contribution
+                                ]
+                                existing_phase[first_contribution] = block_phase[
+                                    first_contribution
+                                ]
+                                existing_power[repeated_contribution] += block_power[
+                                    repeated_contribution
+                                ]
+                                existing_phase[repeated_contribution] = np.nan
+                            else:
+                                field_real = incoming_field.real
+                                field_imag = incoming_field.imag
+                                existing_power[first_contribution] = field_real[
+                                    first_contribution
+                                ]
+                                existing_phase[first_contribution] = field_imag[
+                                    first_contribution
+                                ]
+                                existing_power[repeated_contribution] += field_real[
+                                    repeated_contribution
+                                ]
+                                existing_phase[repeated_contribution] += field_imag[
+                                    repeated_contribution
+                                ]
+
+                            count_block[valid] += np.uint32(1)
+                            stitched_power[target] = existing_power
+                            stitched_phase[target] = existing_phase
+                            contributor_counts[target] = count_block
+                            conflict_flags[target] = conflict_block
+
+        flat_power = stitched_power.reshape(-1)
+        flat_phase = stitched_phase.reshape(-1)
+        flat_counts = contributor_counts.reshape(-1)
+        if policy in {"power-mean", "coherent-mean"}:
+            for start in range(0, cell_count, _JOIN_MERGE_BLOCK_CELLS):
+                stop = min(start + _JOIN_MERGE_BLOCK_CELLS, cell_count)
+                counts_block = flat_counts[start:stop]
+                valid = counts_block > 0
+                if policy == "power-mean":
+                    power_block = flat_power[start:stop]
+                    power_block[valid] /= counts_block[valid]
+                    if np.any(~np.isfinite(power_block[valid])):
+                        raise ValueError(
+                            "power-mean stitch produced nonfinite output power"
+                        )
+                else:
+                    real_block = flat_power[start:stop]
+                    imag_block = flat_phase[start:stop]
+                    mean_real = real_block[valid] / counts_block[valid]
+                    mean_imag = imag_block[valid] / counts_block[valid]
+                    result_power = mean_real * mean_real + mean_imag * mean_imag
+                    if np.any(~np.isfinite(result_power)):
+                        raise ValueError(
+                            "coherent-mean stitch produced nonfinite output power"
+                        )
+                    real_block[valid] = result_power
+                    result_phase = np.arctan2(mean_imag, mean_real)
+                    result_phase[result_power == 0.0] = np.nan
+                    imag_block[valid] = result_phase
+                flat_power[start:stop][~valid] = np.nan
+                flat_phase[start:stop][~valid] = np.nan
+
+        output_phase_wrap = str(
+            (ref.units or {}).get("phase_wrap", "")
+        ).strip() or "-180_180"
+        for start in range(0, cell_count, _JOIN_MERGE_BLOCK_CELLS):
+            stop = min(start + _JOIN_MERGE_BLOCK_CELLS, cell_count)
+            phase_block = flat_phase[start:stop]
+            finite_phase = np.isfinite(phase_block)
+            if output_phase_wrap == "0_360":
+                phase_block[finite_phase] = np.mod(
+                    phase_block[finite_phase], 2.0 * np.pi
+                )
+            else:
+                phase_block[finite_phase] = (
+                    np.mod(phase_block[finite_phase] + np.pi, 2.0 * np.pi)
+                    - np.pi
+                )
+
+        contributing_count = 0
+        output_finite_count = 0
+        overlap_count = 0
+        conflict_count = 0
+        max_contributors = 0
+        flat_conflicts = conflict_flags.reshape(-1)
+        for start in range(0, cell_count, _JOIN_MERGE_BLOCK_CELLS):
+            stop = min(start + _JOIN_MERGE_BLOCK_CELLS, cell_count)
+            counts_block = flat_counts[start:stop]
+            conflicts_block = flat_conflicts[start:stop]
+            contributing_count += int(np.sum(counts_block, dtype=np.uint64))
+            output_finite_count += int(np.count_nonzero(counts_block > 0))
+            overlap_count += int(np.count_nonzero(counts_block > 1))
+            conflict_count += int(
+                np.count_nonzero((counts_block > 1) & conflicts_block)
+            )
+            if counts_block.size:
+                max_contributors = max(
+                    max_contributors, int(np.max(counts_block))
+                )
+        equal_count = int(overlap_count - conflict_count)
+        report = {
+            "schema": "grim.stitch-report.v1",
+            "policy": policy,
+            "selected_policy": policy,
+            "input_count": int(len(grids)),
+            "output_cell_count": int(cell_count),
+            "output_finite_count": int(output_finite_count),
+            "missing_count": int(cell_count - output_finite_count),
+            "single_source_count": int(output_finite_count - overlap_count),
+            "contributing_count": int(contributing_count),
+            "overlap_count": int(overlap_count),
+            "equal_count": int(equal_count),
+            "conflict_count": int(conflict_count),
+            "max_contributors": int(max_contributors),
+            "tolerance": float(tolerance),
+            "estimated_peak_bytes": int(estimated_peak_bytes),
+            "count_semantics": (
+                "union-grid cells; contributing_count is finite input samples"
+            ),
+        }
+
+        if policy == "coherent-mean":
+            attested_history, attested_extra = ref._coherent_attestation_provenance(
+                grids[1:],
+                operation="coherent-mean-stitch",
+                metadata_attested=bool(metadata_attested),
+            )
+            base_history = (
+                attested_history
+                if attested_history is not None
+                else str(ref.history or "").strip()
+            )
+            output_extra = (
+                dict(attested_extra)
+                if attested_extra is not None
+                else scalar_convention_extra(ref)
+            )
+        else:
+            base_history = str(ref.history or "").strip()
+            output_extra = scalar_convention_extra(ref)
+        history_entry = (
+            f"Stitch ({policy}, inputs={len(grids)}): "
+            f"overlap={overlap_count}, equal={equal_count}, "
+            f"conflict={conflict_count}, contributors={contributing_count}"
+        )
+        history = (
+            f"{base_history}\n{history_entry}" if base_history else history_entry
+        )
+        provenance = dict(report)
+        provenance.update(
+            {
+                "schema": "grim.stitch-provenance.v1",
+                "metadata_attested": bool(metadata_attested),
+                "input_sources": [str(grid.source_path or "") for grid in grids],
+            }
+        )
+        output_extra["stitch_provenance_json"] = json.dumps(
+            provenance,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+        output_units = dict(ref.units)
+        output_units["phase_wrap"] = output_phase_wrap
+        stitched = cls(
+            az_union,
+            el_union,
+            f_union,
+            p_union,
+            rcs_power=stitched_power,
+            rcs_phase=stitched_phase,
+            rcs_domain="power_phase",
+            source_path=ref.source_path,
+            history=history,
+            units=output_units,
+            extra=output_extra,
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
+        )
+        if bool(return_report):
+            return stitched, report
+        return stitched
 
     @classmethod
     def join_many(cls, *grids, tol=1e-6, overlap="error", max_output_bytes=None):
@@ -3096,6 +5030,29 @@ class RcsGrid:
             right_ref = grid._phase_reference()
             if left_ref != right_ref and (left_ref or right_ref):
                 raise ValueError("cannot join grids with different phase references")
+            for key, label, canonicalize in (
+                (
+                    "time_convention",
+                    "time conventions",
+                    ref._canonical_time_convention,
+                ),
+                (
+                    "polarization_basis",
+                    "polarization bases",
+                    lambda value: " ".join(value.split()).casefold(),
+                ),
+            ):
+                left_value = ref._declared_scalar_metadata(key)
+                right_value = grid._declared_scalar_metadata(key)
+                if (
+                    (left_value or right_value)
+                    and canonicalize(left_value) != canonicalize(right_value)
+                ):
+                    raise ValueError(
+                        f"cannot join grids with different {label}: "
+                        f"{left_value or '<unspecified>'!r} != "
+                        f"{right_value or '<unspecified>'!r}"
+                    )
         if len(grids) == 1:
             # Preserve clone semantics, including original axis order, while
             # still using the bounded allocation/ownership-transfer path.
@@ -3211,7 +5168,19 @@ class RcsGrid:
                             phase_delta = np.abs(
                                 np.angle(np.exp(1j * (existing_phase - block_phase)))
                             )
-                            phase_conflict = both_phase & (phase_delta > 1e-5)
+                            both_zero = (
+                                both
+                                & (existing_power == 0.0)
+                                & (block_power == 0.0)
+                            )
+                            # Phase is undefined at an exact zero field, so
+                            # arbitrary exporter phase fillers there cannot be
+                            # a physically meaningful overlap conflict.
+                            phase_conflict = (
+                                both_phase
+                                & ~both_zero
+                                & (phase_delta > 1e-5)
+                            )
                             if overlap == "error" and (
                                 np.any(power_conflict) or np.any(phase_conflict)
                             ):
@@ -3231,6 +5200,7 @@ class RcsGrid:
                                 # phase is complementary data, not a replacement.
                                 fill_phase = (
                                     both
+                                    & ~power_conflict
                                     & ~np.isfinite(existing_phase)
                                     & np.isfinite(block_phase)
                                 )
@@ -3268,9 +5238,13 @@ class RcsGrid:
             history=ref.history,
             units=dict(ref.units),
             extra={
-                "phase_reference": ref.extra["phase_reference"]
-                for _ in (0,)
-                if "phase_reference" in ref.extra
+                key: ref.extra[key]
+                for key in (
+                    "phase_reference",
+                    "time_convention",
+                    "polarization_basis",
+                )
+                if key in ref.extra
             },
             _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
@@ -3366,9 +5340,13 @@ class RcsGrid:
                     history=grid.history,
                     units=dict(grid.units),
                     extra={
-                        "phase_reference": grid.extra["phase_reference"]
-                        for _ in (0,)
-                        if "phase_reference" in grid.extra
+                        key: grid.extra[key]
+                        for key in (
+                            "phase_reference",
+                            "time_convention",
+                            "polarization_basis",
+                        )
+                        if key in grid.extra
                     },
                 )
             )
@@ -3519,7 +5497,8 @@ class RcsGrid:
         Args:
             axis: 1D array to search.
             value: Value to find.
-            tol: Absolute tolerance for numeric matching.
+            tol: Absolute tolerance for numeric matching. Text axes such as
+                polarization are always matched exactly.
 
         Returns:
             Integer index of the first match.
@@ -3528,7 +5507,7 @@ class RcsGrid:
             ValueError: if no match is found.
         """
         axis_arr = np.asarray(axis)
-        if tol > 0.0:
+        if tol > 0.0 and axis_arr.dtype.kind in "biufc":
             matches = np.where(np.isclose(axis_arr, value, atol=tol, rtol=0.0))[0]
         else:
             matches = np.where(axis_arr == value)[0]
@@ -3618,8 +5597,10 @@ class RcsGrid:
 
         An array sized to the grid (e.g. rcs_amp_real) is only still valid if the
         grid has not been cropped, joined or interpolated since it was read, so a
-        mismatched shape is dropped instead of written stale.  Scalars/strings
-        (provenance flags, domain tags) always survive.
+        mismatched four-dimensional shape is dropped instead of written stale.
+        Lower-dimensional arrays are independent ancillary models, not partial
+        RCS grids: GHOST's BoR profiles, body-model amplitudes, and surface
+        triangles must survive an unchanged load/save round-trip.
         """
         expected = (len(self.azimuths), len(self.elevations),
                     len(self.frequencies), len(self.polarizations))
@@ -3628,12 +5609,12 @@ class RcsGrid:
             if key in self._RESERVED_KEYS:
                 continue
             arr = np.asarray(value)
-            if arr.ndim >= 2 and arr.shape[:4] != expected:
+            if arr.ndim >= 4 and arr.shape[:4] != expected:
                 continue
             out[key] = value
         return out
 
-    def save(self, path):
+    def save(self, path, *, compressed=True):
         """Save the grid to a .grim (npz) file.
 
         Passthrough metadata from ``extra`` is written first (so the grid's own
@@ -3645,13 +5626,28 @@ class RcsGrid:
 
         Args:
             path: Output path, with or without .grim.
+            compressed: ``True`` (default) writes a compact ZIP-compressed
+                archive for distribution/storage. ``False`` uses the faster
+                uncompressed NPZ path for temporary high-throughput work.
 
         Returns:
             The actual path written (always ends with .grim).
         """
+        if not isinstance(compressed, (bool, np.bool_)):
+            raise TypeError("compressed must be True or False")
         path = os.fspath(path)
         if not path.casefold().endswith(".grim"):
             path = f"{path}.grim"
+        self._validate_native_payload(
+            path=path,
+            azimuths=self.azimuths,
+            elevations=self.elevations,
+            frequencies=self.frequencies,
+            polarizations=self.polarizations,
+            rcs_power=self.rcs_power,
+            rcs_phase=self.rcs_phase,
+            units=self.units,
+        )
         directory = os.path.dirname(os.path.abspath(path)) or os.curdir
         fd, stage_path = tempfile.mkstemp(
             prefix=".grim-write-",
@@ -3694,7 +5690,8 @@ class RcsGrid:
                         + ", ".join(sorted(object_keys))
                         + ". Convert those values to numeric/string arrays or JSON text."
                     )
-                np.savez(f, **payload)
+                writer = np.savez_compressed if bool(compressed) else np.savez
+                writer(f, **payload)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(stage_path, path)
@@ -3707,6 +5704,136 @@ class RcsGrid:
                 except OSError:
                     pass
         return path
+
+    @classmethod
+    def _validate_native_payload(
+        cls,
+        *,
+        path,
+        azimuths,
+        elevations,
+        frequencies,
+        polarizations,
+        rcs_power,
+        rcs_phase,
+        units,
+    ):
+        """Validate the native archive before constructor sanitation.
+
+        NaN RCS cells are intentional sparse-grid markers and are retained.
+        Infinities, negative finite power, malformed axes, and ambiguous unit
+        declarations are rejected rather than silently repaired.
+        """
+
+        numeric_axes = {}
+        for name, raw_values in (
+            ("azimuth", azimuths),
+            ("elevation", elevations),
+            ("frequency", frequencies),
+        ):
+            values = np.asarray(raw_values)
+            if (
+                values.ndim != 1
+                or values.size == 0
+                or values.dtype.kind not in "iuf"
+            ):
+                raise ValueError(
+                    f"{path} contains an invalid {name} axis; expected a "
+                    "nonempty one-dimensional real numeric array"
+                )
+            checked_values = values.astype(np.float64, copy=False)
+            if np.any(~np.isfinite(checked_values)):
+                raise ValueError(f"{path} contains a nonfinite {name} coordinate")
+            if np.unique(checked_values).size != checked_values.size:
+                raise ValueError(f"{path} contains duplicate {name} coordinates")
+            if name == "frequency" and np.any(checked_values <= 0.0):
+                raise ValueError(
+                    f"{path} contains a nonpositive frequency coordinate"
+                )
+            # Preserve constructor normalization for float32 axes: values such
+            # as float32(0.1) represent the user's decimal 0.1, not its binary
+            # quantization noise widened verbatim into float64.
+            numeric_axes[name] = cls._clean_axis(values)
+
+        raw_polarizations = np.asarray(polarizations)
+        if raw_polarizations.ndim != 1 or raw_polarizations.size == 0:
+            raise ValueError(
+                f"{path} contains an invalid polarization axis; expected a "
+                "nonempty one-dimensional string array"
+            )
+        labels = []
+        for raw_label in raw_polarizations.tolist():
+            if isinstance(raw_label, bytes):
+                try:
+                    label = raw_label.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        f"{path} contains a non-UTF-8 polarization label"
+                    ) from exc
+            elif isinstance(raw_label, (str, np.str_)):
+                label = str(raw_label)
+            else:
+                raise ValueError(
+                    f"{path} contains a non-string polarization label "
+                    f"{raw_label!r}"
+                )
+            label = label.strip()
+            if not label:
+                raise ValueError(f"{path} contains a blank polarization label")
+            labels.append(label)
+        normalized_labels = [label.casefold() for label in labels]
+        if len(set(normalized_labels)) != len(normalized_labels):
+            raise ValueError(
+                f"{path} contains duplicate polarization labels after normalization"
+            )
+
+        expected = (
+            len(numeric_axes["azimuth"]),
+            len(numeric_axes["elevation"]),
+            len(numeric_axes["frequency"]),
+            len(labels),
+        )
+        power = np.asarray(rcs_power)
+        phase = np.asarray(rcs_phase)
+        for name, values in (("rcs_power", power), ("rcs_phase", phase)):
+            if values.shape != expected:
+                raise ValueError(
+                    f"{path} contains {name} shape {values.shape}; expected {expected}"
+                )
+            if values.dtype.kind not in "iuf":
+                raise ValueError(f"{path} contains non-real-numeric {name}")
+            if np.any(np.isinf(values)):
+                raise ValueError(f"{path} contains infinite {name} samples")
+        # NaN compares false, so this catches every finite negative without
+        # materialising a second advanced-index copy of a potentially huge
+        # sparse grid. Negative infinity was already rejected above.
+        if np.any(power < 0.0):
+            raise ValueError(f"{path} contains negative finite rcs_power samples")
+
+        normalized_units = dict(units or {})
+        for key, aliases, default in (
+            ("azimuth", _ANGLE_UNITS, "deg"),
+            ("elevation", _ANGLE_UNITS, "deg"),
+            ("frequency", _FREQUENCY_UNITS, "GHz"),
+        ):
+            raw_unit = normalized_units.get(key)
+            canonical = cls._canonical_unit(raw_unit, aliases, default)
+            if canonical not in set(aliases.values()):
+                raise ValueError(
+                    f"{path} contains unsupported {key} unit {raw_unit!r}"
+                )
+            if raw_unit is not None and str(raw_unit).strip():
+                normalized_units[key] = canonical
+
+        return (
+            numeric_axes["azimuth"],
+            numeric_axes["elevation"],
+            numeric_axes["frequency"],
+            np.asarray(labels, dtype=str),
+            power,
+            phase,
+            normalized_units,
+        )
 
     @classmethod
     def load(
@@ -3773,6 +5900,25 @@ class RcsGrid:
                     f"{path} is not a supported .grim file (missing keys: {', '.join(missing)})"
                 )
 
+            (
+                azimuths,
+                elevations,
+                frequencies,
+                polarizations,
+                rcs_power,
+                rcs_phase,
+                units,
+            ) = cls._validate_native_payload(
+                path=path,
+                azimuths=data["azimuths"],
+                elevations=data["elevations"],
+                frequencies=data["frequencies"],
+                polarizations=data["polarizations"],
+                rcs_power=data["rcs_power"],
+                rcs_phase=data["rcs_phase"],
+                units=units,
+            )
+
             # keys this class does not model (e.g. the raw complex amplitude and
             # provenance flags written by solver exports) ride along
             # in `extra` so save() can put them back -- see _extra_to_write
@@ -3780,12 +5926,12 @@ class RcsGrid:
                      if k not in cls._RESERVED_KEYS}
 
             return cls(
-                data["azimuths"],
-                data["elevations"],
-                data["frequencies"],
-                data["polarizations"],
-                rcs_power=data["rcs_power"],
-                rcs_phase=data["rcs_phase"],
+                azimuths,
+                elevations,
+                frequencies,
+                polarizations,
+                rcs_power=rcs_power,
+                rcs_phase=rcs_phase,
                 rcs_domain="power_phase",
                 source_path=source_path,
                 history=history,
@@ -3818,18 +5964,14 @@ class RcsGrid:
 
         file_name = os.path.basename(str(path))
         stem_upper = os.path.splitext(file_name)[0].upper()
-        pol_match = re.search(r"(?<![A-Z0-9])(HH|VV)(?![A-Z0-9])", stem_upper)
-        if pol_match is not None:
-            pol_label = pol_match.group(1)
-        else:
-            idx_hh = stem_upper.find("HH")
-            idx_vv = stem_upper.find("VV")
-            if idx_hh < 0 and idx_vv < 0:
-                pol_label = "NA"
-            elif idx_hh >= 0 and (idx_vv < 0 or idx_hh <= idx_vv):
-                pol_label = "HH"
-            else:
-                pol_label = "VV"
+        pol_matches = set(
+            re.findall(r"(?<![A-Z0-9])(HH|VV)(?![A-Z0-9])", stem_upper)
+        )
+        if len(pol_matches) > 1:
+            raise ValueError(
+                f"OUT filename {file_name!r} ambiguously declares both HH and VV"
+            )
+        pol_label = next(iter(pol_matches)) if pol_matches else "NA"
 
         records: list[tuple[float, float, float, float]] = []
         with open(path, "r", encoding="utf-8-sig") as f:
@@ -3838,9 +5980,9 @@ class RcsGrid:
                 if not line:
                     continue
                 parts = line.split()
-                if len(parts) < 4:
+                if len(parts) != 4:
                     raise ValueError(
-                        f"line {line_no}: expected 4 columns "
+                        f"line {line_no}: expected exactly 4 columns "
                         "(frequency_ghz azimuth_deg rcs_dbke phase_deg)"
                     )
                 try:
@@ -3851,8 +5993,22 @@ class RcsGrid:
                 except ValueError as exc:
                     raise ValueError(f"line {line_no}: invalid numeric value ({exc})") from exc
 
-                if not (np.isfinite(freq_ghz) and np.isfinite(azimuth_deg)):
-                    continue
+                if not np.isfinite(freq_ghz) or freq_ghz <= 0.0:
+                    raise ValueError(
+                        f"line {line_no}: frequency_ghz must be positive and finite"
+                    )
+                if not np.isfinite(azimuth_deg):
+                    raise ValueError(
+                        f"line {line_no}: azimuth_deg must be finite"
+                    )
+                if np.isnan(rcs_dbke) or np.isposinf(rcs_dbke):
+                    raise ValueError(
+                        f"line {line_no}: rcs_dbke must be finite or -Inf"
+                    )
+                if np.isinf(phase_deg):
+                    raise ValueError(
+                        f"line {line_no}: phase_deg must be finite or NaN"
+                    )
                 records.append((freq_ghz, azimuth_deg, rcs_dbke, phase_deg))
 
         if not records:
@@ -3867,22 +6023,53 @@ class RcsGrid:
         az_idx = {float(v): i for i, v in enumerate(azimuths.tolist())}
 
         shape = (len(azimuths), 1, len(frequencies), 1)
-        power = np.full(shape, np.nan, dtype=np.float32)
-        phase = np.full(shape, np.nan, dtype=np.float32)
+        power = np.full(shape, np.nan, dtype=np.float64)
+        phase = np.full(shape, np.nan, dtype=np.float64)
 
         for freq_ghz, azimuth_deg, rcs_dbke, phase_deg in records:
             ai = az_idx[float(azimuth_deg)]
             fi = f_idx[float(freq_ghz)]
-            if np.isfinite(rcs_dbke):
-                lambda_m = C0 / (float(freq_ghz) * 1.0e9) if float(freq_ghz) > 0.0 else float("nan")
-                sigma_2d = (lambda_m / (2.0 * np.pi)) * (10.0 ** (rcs_dbke / 10.0)) if np.isfinite(lambda_m) else float("nan")
-                power[ai, 0, fi, 0] = np.float32(sigma_2d)
+            lambda_m = C0 / (float(freq_ghz) * 1.0e9)
+            if np.isneginf(rcs_dbke):
+                sigma_2d = 0.0
             else:
-                power[ai, 0, fi, 0] = np.nan
-            if np.isfinite(phase_deg):
-                phase[ai, 0, fi, 0] = np.float32(np.deg2rad(phase_deg))
-            else:
-                phase[ai, 0, fi, 0] = np.nan
+                with np.errstate(over="raise", invalid="raise"):
+                    try:
+                        sigma_2d = (lambda_m / (2.0 * np.pi)) * (
+                            10.0 ** (rcs_dbke / 10.0)
+                        )
+                    except (FloatingPointError, OverflowError) as exc:
+                        raise ValueError(
+                            "OUT dBke magnitude overflows finite linear power at "
+                            f"frequency={freq_ghz:g} GHz, azimuth={azimuth_deg:g} deg"
+                        ) from exc
+            incoming_power = float(sigma_2d)
+            if not np.isfinite(incoming_power):
+                raise ValueError(
+                    "OUT dBke magnitude does not produce finite linear power at "
+                    f"frequency={freq_ghz:g} GHz, azimuth={azimuth_deg:g} deg"
+                )
+            incoming_phase = (
+                float(np.deg2rad(phase_deg)) if np.isfinite(phase_deg) else np.nan
+            )
+            existing_power = float(power[ai, 0, fi, 0])
+            if np.isfinite(existing_power):
+                existing_phase = float(phase[ai, 0, fi, 0])
+                if not _cst_samples_equivalent(
+                    existing_power,
+                    existing_phase,
+                    incoming_power,
+                    incoming_phase,
+                ):
+                    raise ValueError(
+                        "conflicting duplicate OUT sample at "
+                        f"frequency={freq_ghz:g} GHz, azimuth={azimuth_deg:g} deg"
+                    )
+                if not np.isfinite(existing_phase) and np.isfinite(incoming_phase):
+                    phase[ai, 0, fi, 0] = incoming_phase
+                continue
+            power[ai, 0, fi, 0] = incoming_power
+            phase[ai, 0, fi, 0] = incoming_phase
 
         if not np.isfinite(power).any():
             raise ValueError("OUT parsed, but no finite RCS magnitude values were found")
@@ -5983,15 +8170,6 @@ class RcsGrid:
                 "save_pio: complex PIO export requires phase for every finite-power "
                 f"sample; {int(np.count_nonzero(phase_missing))} sample(s) lack phase"
             )
-        complex_slice = np.asarray(
-            self.rcs_slice((slice(None), el_idx, slice(None), pol_idx)),
-            dtype=np.complex128,
-        )
-        if complex_slice.shape != (xsize, ysize):
-            raise ValueError(
-                f"save_pio: slice shape {complex_slice.shape} != ({xsize}, {ysize})"
-            )
-
         xunits = self._canonical_unit(
             (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
         )
@@ -6090,13 +8268,6 @@ class RcsGrid:
                 f"save_pio: offset line width drift ({len(offset_line)} != {offset_line_bytes})"
             )
 
-        # Loader does reshape((xsize, ysize), order='F'), so we flatten the
-        # same way: column-major over (azimuth, frequency).
-        flat = complex_slice.flatten(order="F")
-        interleaved = np.empty(2 * flat.size, dtype=dtype)
-        interleaved[0::2] = flat.real.astype(dtype, copy=False)
-        interleaved[1::2] = flat.imag.astype(dtype, copy=False)
-
         directory = os.path.dirname(os.path.abspath(path)) or os.curdir
         fd, stage_path = tempfile.mkstemp(
             prefix=".pio-write-", suffix=".staging", dir=directory
@@ -6106,7 +8277,40 @@ class RcsGrid:
                 fd = -1
                 f.write(header_blob)
                 f.write(offset_line)
-                f.write(interleaved.tobytes(order="C"))
+                # PIO stores the (azimuth, frequency) matrix in Fortran order:
+                # every azimuth for frequency 0, then frequency 1, and so on.
+                # Stream frequency tiles directly in the requested real
+                # precision.  This bounds scratch memory instead of forming a
+                # whole complex128 slice, a Fortran-order copy, and then a
+                # third interleaved array.
+                frequency_block = max(
+                    1, _PIO_WRITE_BLOCK_CELLS // max(1, xsize)
+                )
+                for start in range(0, ysize, frequency_block):
+                    stop = min(ysize, start + frequency_block)
+                    complex_block = np.asarray(
+                        self.rcs_slice(
+                            (
+                                slice(None),
+                                el_idx,
+                                slice(start, stop),
+                                pol_idx,
+                            )
+                        )
+                    )
+                    expected_block_shape = (xsize, stop - start)
+                    if complex_block.shape != expected_block_shape:
+                        raise ValueError(
+                            "save_pio: slice block shape "
+                            f"{complex_block.shape} != {expected_block_shape}"
+                        )
+                    interleaved = np.empty(
+                        (stop - start, xsize, 2), dtype=dtype
+                    )
+                    transposed = complex_block.T
+                    interleaved[..., 0] = transposed.real
+                    interleaved[..., 1] = transposed.imag
+                    f.write(interleaved)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(stage_path, path)

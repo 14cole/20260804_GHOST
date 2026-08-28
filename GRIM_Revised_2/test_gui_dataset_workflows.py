@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -13,12 +15,19 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QDialog, QMessageBox
 
 import grim_cut_gui
+import grim_cut_dataset_mixin
 from grim_cut_dataset_mixin import (
+    CropDialog,
     DATASET_DIRTY_ROLE,
     DATASET_ID_ROLE,
     DATASET_PATH_ROLE,
+    DatasetAuditDialog,
+    RegridDialog,
+    StitchDialog,
+    WrapDialog,
 )
 from grim_dataset import RcsGrid
 from grim_python import DatasetReference, PythonScriptRecorder
@@ -45,6 +54,34 @@ def _axis_grid(azimuths: list[float], value: float) -> RcsGrid:
             "frequency": "GHz",
             "rcs_log_unit": "dBsm",
             "rcs_linear_quantity": "sigma_3d",
+        },
+    )
+
+
+def _mixed_unit_grid(*, radians: bool, frequency_hz: bool) -> RcsGrid:
+    azimuth_deg = np.asarray([0.0, 90.0, 180.0])
+    elevation_deg = np.asarray([-10.0, 0.0, 10.0])
+    frequency_ghz = np.asarray([8.0, 9.0, 10.0])
+    azimuths = np.deg2rad(azimuth_deg) if radians else azimuth_deg
+    elevations = np.deg2rad(elevation_deg) if radians else elevation_deg
+    frequencies = frequency_ghz * 1.0e9 if frequency_hz else frequency_ghz
+    shape = (3, 3, 3, 1)
+    amplitude = (
+        np.arange(np.prod(shape), dtype=np.float64).reshape(shape) + 1.0
+    ).astype(np.complex128)
+    return RcsGrid(
+        azimuths,
+        elevations,
+        frequencies,
+        ["VV"],
+        rcs=amplitude,
+        units={
+            "azimuth": "rad" if radians else "deg",
+            "elevation": "rad" if radians else "deg",
+            "frequency": "Hz" if frequency_hz else "GHz",
+            "rcs_log_unit": "dBsm",
+            "rcs_linear_quantity": "sigma_3d",
+            "angular_coordinate_system": "conic",
         },
     )
 
@@ -205,6 +242,74 @@ class AxisEditTransactionTest(unittest.TestCase):
         )
 
 
+class DatasetOperationDialogTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_audit_statuses_use_one_pass_warn_fail_vocabulary(self) -> None:
+        rendered = DatasetAuditDialog._format_reports(
+            [
+                ("healthy", {"status": "ok"}),
+                ("review", {"status": "warning"}),
+                ("invalid", {"status": "error"}),
+                ("legacy", {"status": "fail"}),
+                ("unknown", {"status": "unexpected"}),
+            ]
+        )
+        self.assertIn("healthy\nStatus: PASS", rendered)
+        self.assertIn("review\nStatus: WARN", rendered)
+        self.assertIn("invalid\nStatus: FAIL", rendered)
+        self.assertIn("legacy\nStatus: FAIL", rendered)
+        self.assertIn("unknown\nStatus: WARN", rendered)
+
+    def test_dialogs_expose_physical_units_frames_and_half_open_wraps(self) -> None:
+        reference = _mixed_unit_grid(radians=True, frequency_hz=False)
+        crop = CropDialog(reference, has_selected_values=True)
+        regrid = RegridDialog(reference)
+        stitch = StitchDialog(["first", "second"])
+        wrap = WrapDialog()
+        self.addCleanup(crop.deleteLater)
+        self.addCleanup(regrid.deleteLater)
+        self.addCleanup(stitch.deleteLater)
+        self.addCleanup(wrap.deleteLater)
+
+        self.assertEqual(crop._range_controls["azimuth"][0].text(), "Azimuth (deg)")
+        self.assertEqual(crop._range_controls["frequency"][0].text(), "Frequency (GHz)")
+        self.assertAlmostEqual(crop._range_controls["azimuth"][1].value(), 0.0)
+        self.assertAlmostEqual(crop._range_controls["azimuth"][2].value(), 180.0)
+        self.assertEqual(regrid._axis.itemText(0), "Azimuth")
+        self.assertEqual(regrid.get_params()["unit"], "deg")
+        self.assertIn("overlap phase removed", stitch._policy.itemText(2))
+        self.assertIn("declared native axis units", stitch._tolerance_help.text())
+        self.assertIn("same units", stitch._tolerance_help.text())
+        self.assertEqual(wrap._rb_0_360.text(), "[0°, 360°)")
+        self.assertEqual(wrap._rb_pm180.text(), "[-180°, 180°)")
+
+        great_circle_units = dict(reference.units)
+        great_circle_units.update(
+            angular_coordinate_system="great_circle",
+            great_circle_coordinate_convention="GRIM_GC_V1",
+        )
+        great_circle = RcsGrid(
+            reference.azimuths,
+            reference.elevations,
+            reference.frequencies,
+            reference.polarizations,
+            rcs_power=reference.rcs_power,
+            rcs_phase=reference.rcs_phase,
+            units=great_circle_units,
+        )
+        gc_crop = CropDialog(great_circle, has_selected_values=True)
+        gc_regrid = RegridDialog(great_circle)
+        self.addCleanup(gc_crop.deleteLater)
+        self.addCleanup(gc_regrid.deleteLater)
+        self.assertEqual(gc_crop._range_controls["azimuth"][0].text(), "Aspect (deg)")
+        self.assertEqual(gc_crop._range_controls["elevation"][0].text(), "Pitch (deg)")
+        self.assertEqual(gc_regrid._axis.itemText(0), "Aspect")
+        self.assertEqual(gc_regrid._axis.itemText(1), "Pitch")
+
+
 class GuiDatasetWorkflowTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -259,6 +364,447 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             table.selectionModel().select(table.model().index(row, 0), flags)
             self.app.processEvents()
         self.assertEqual(self.window._dataset_selection_order, list(rows))
+
+    def _wait_for_background(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        while self.window._background_job_active() and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.app.processEvents()
+        self.assertFalse(self.window._background_job_active())
+
+    @staticmethod
+    def _select_parameter_row(widget, row: int) -> None:
+        widget.clearSelection()
+        item = widget.item(int(row))
+        if item is None:
+            raise AssertionError(f"parameter row {row} does not exist")
+        item.setSelected(True)
+        widget.setCurrentItem(item)
+
+    def test_audit_publishes_core_statuses_and_matching_summary_counts(self) -> None:
+        healthy = _axis_grid([0.0], 1.0)
+        healthy.units.update(
+            phase_reference="origin",
+            time_convention="exp(-jwt)",
+            polarization_basis="V/H",
+        )
+        warning = _axis_grid([0.0], 2.0)
+        invalid = _axis_grid([0.0], 3.0)
+        invalid.rcs_power.flat[0] = -1.0
+        for name, dataset in (
+            ("Healthy", healthy),
+            ("Review", warning),
+            ("Invalid", invalid),
+        ):
+            self.window._add_dataset_row(dataset, name, "Loaded", "")
+        self._select_rows_in_order(0, 1, 2)
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.DatasetAuditDialog"
+        ) as dialog_type:
+            self.window._audit_selected_datasets()
+            self._wait_for_background()
+
+        reports = dialog_type.call_args.args[0]
+        self.assertEqual(
+            [report["status"] for _name, report in reports],
+            ["ok", "warning", "error"],
+        )
+        self.assertEqual(
+            self.window.status.currentMessage(),
+            "Dataset audit complete: 1 pass, 1 warning, 1 fail.",
+        )
+
+    def test_stitch_review_uses_exact_core_report_counts(self) -> None:
+        self.window._add_dataset_row(
+            _axis_grid([0.0, 1.0], 1.0), "First", "Loaded", ""
+        )
+        self.window._add_dataset_row(
+            _axis_grid([1.0, 2.0], 2.0), "Second", "Loaded", ""
+        )
+        self._select_rows_in_order(0, 1)
+
+        with (
+            mock.patch("grim_cut_dataset_mixin.StitchDialog") as dialog_type,
+            mock.patch(
+                "grim_cut_dataset_mixin.QMessageBox.question",
+                return_value=QMessageBox.Yes,
+            ) as question,
+        ):
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {
+                "policy": "priority-first",
+                "tol": 1.0e-6,
+            }
+            self.window._stitch_selected_datasets()
+            self._wait_for_background()
+
+        review = question.call_args.args[2]
+        for expected in (
+            "Contributing finite samples: 4",
+            "Finite stitched output cells: 3",
+            "Missing union-grid cells: 0",
+            "Overlapping output cells: 1",
+            "Equivalent overlaps: 0",
+            "Conflicting overlaps resolved by policy: 1",
+            "Maximum contributors to one cell: 2",
+        ):
+            self.assertIn(expected, review)
+        self.assertEqual(self.window.table.rowCount(), 3)
+        stitched = self.window.table.item(2, 0).data(Qt.UserRole)
+        np.testing.assert_array_equal(stitched.azimuths, [0.0, 1.0, 2.0])
+        np.testing.assert_array_equal(stitched.rcs_power.ravel(), [1.0, 1.0, 4.0])
+
+    def test_crop_selected_reference_values_convert_for_each_native_unit(self) -> None:
+        self.window._add_dataset_row(
+            _mixed_unit_grid(radians=False, frequency_hz=True),
+            "Degrees Hz",
+            "Loaded",
+            "",
+        )
+        self.window._add_dataset_row(
+            _mixed_unit_grid(radians=True, frequency_hz=False),
+            "Radians GHz reference",
+            "Loaded",
+            "",
+        )
+        self._select_rows_in_order(0, 1)
+        self._select_parameter_row(self.window.list_az, 1)
+        self._select_parameter_row(self.window.list_elev, 1)
+        self._select_parameter_row(self.window.list_freq, 1)
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.CropDialog"
+        ) as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {
+                "mode": "selected",
+                "ranges": {
+                    "azimuth": None,
+                    "elevation": None,
+                    "frequency": None,
+                },
+                "strides": {
+                    "azimuth": 1,
+                    "elevation": 1,
+                    "frequency": 1,
+                },
+                "selected_polarizations": False,
+            }
+            self.window._slice_selected()
+            self._wait_for_background()
+
+        self.assertEqual(self.window.table.rowCount(), 4)
+        degrees_hz = self.window.table.item(2, 0).data(Qt.UserRole)
+        radians_ghz = self.window.table.item(3, 0).data(Qt.UserRole)
+        np.testing.assert_allclose(degrees_hz.azimuths, [90.0])
+        np.testing.assert_allclose(degrees_hz.elevations, [0.0])
+        np.testing.assert_allclose(degrees_hz.frequencies, [9.0e9])
+        np.testing.assert_allclose(radians_ghz.azimuths, [np.pi / 2.0])
+        np.testing.assert_allclose(radians_ghz.elevations, [0.0])
+        np.testing.assert_allclose(radians_ghz.frequencies, [9.0])
+
+    def test_crop_rejects_cross_frame_reference_value_transfer_atomically(self) -> None:
+        conic = _mixed_unit_grid(radians=False, frequency_hz=False)
+        great_circle = _mixed_unit_grid(radians=False, frequency_hz=False)
+        great_circle.units.update(
+            angular_coordinate_system="great_circle",
+            great_circle_coordinate_convention="GRIM_GC_V1",
+        )
+        self.window._add_dataset_row(conic, "Conic", "Loaded", "")
+        self.window._add_dataset_row(great_circle, "GC reference", "Loaded", "")
+        self._select_rows_in_order(0, 1)
+        self._select_parameter_row(self.window.list_az, 1)
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.CropDialog"
+        ) as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {
+                "mode": "selected",
+                "ranges": {
+                    "azimuth": None,
+                    "elevation": None,
+                    "frequency": None,
+                },
+                "strides": {
+                    "azimuth": 1,
+                    "elevation": 1,
+                    "frequency": 1,
+                },
+                "selected_polarizations": False,
+            }
+            self.window._slice_selected()
+
+        self.assertEqual(self.window.table.rowCount(), 2)
+        self.assertIn(
+            "angular coordinate system differs",
+            self.window.status.currentMessage(),
+        )
+
+    def test_regrid_all_axes_converts_active_reference_to_native_units(self) -> None:
+        self.window._add_dataset_row(
+            _mixed_unit_grid(radians=False, frequency_hz=True),
+            "Degrees Hz",
+            "Loaded",
+            "",
+        )
+        self.window._add_dataset_row(
+            _mixed_unit_grid(radians=True, frequency_hz=False),
+            "Radians GHz reference",
+            "Loaded",
+            "",
+        )
+        cases = (
+            (
+                "azimuth",
+                0.0,
+                180.0,
+                45.0,
+                "deg",
+                np.asarray([0.0, 45.0, 90.0, 135.0, 180.0]),
+                np.deg2rad([0.0, 45.0, 90.0, 135.0, 180.0]),
+            ),
+            (
+                "elevation",
+                -10.0,
+                10.0,
+                5.0,
+                "deg",
+                np.asarray([-10.0, -5.0, 0.0, 5.0, 10.0]),
+                np.deg2rad([-10.0, -5.0, 0.0, 5.0, 10.0]),
+            ),
+            (
+                "frequency",
+                8.0,
+                10.0,
+                0.5,
+                "GHz",
+                np.asarray([8.0, 8.5, 9.0, 9.5, 10.0]) * 1.0e9,
+                np.asarray([8.0, 8.5, 9.0, 9.5, 10.0]),
+            ),
+        )
+        for axis, start, stop, step, unit, expected_first, expected_second in cases:
+            with self.subTest(axis=axis):
+                self._select_rows_in_order(0, 1)
+                row_before = self.window.table.rowCount()
+                with mock.patch(
+                    "grim_cut_dataset_mixin.RegridDialog"
+                ) as dialog_type:
+                    dialog = dialog_type.return_value
+                    dialog.exec.return_value = QDialog.Accepted
+                    dialog.get_params.return_value = {
+                        "axis": axis,
+                        "start": start,
+                        "stop": stop,
+                        "step": step,
+                        "unit": unit,
+                    }
+                    self.window._interpolate_selected()
+                    self._wait_for_background()
+
+                first = self.window.table.item(row_before, 0).data(Qt.UserRole)
+                second = self.window.table.item(row_before + 1, 0).data(Qt.UserRole)
+                np.testing.assert_allclose(first.get_axis(axis), expected_first)
+                np.testing.assert_allclose(second.get_axis(axis), expected_second)
+
+    def test_regrid_recorder_uses_compact_grid_expression(self) -> None:
+        source_path = os.path.abspath("regrid_source.grim")
+        self.window._add_dataset_row(
+            _mixed_unit_grid(radians=False, frequency_hz=False),
+            "Regrid source",
+            "Loaded",
+            source_path,
+        )
+        self._select_rows_in_order(0)
+        with mock.patch(
+            "grim_cut_dataset_mixin.RegridDialog"
+        ) as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {
+                "axis": "azimuth",
+                "start": 0.0,
+                "stop": 180.0,
+                "step": 0.09,
+                "unit": "deg",
+            }
+            self.window._interpolate_selected()
+            self._wait_for_background()
+
+        script = self.window.python_recorder.script
+        self.assertIn("np.arange(2001, dtype=float)", script)
+        self.assertIn("regrid_axis(", script)
+        self.assertLess(len(script), 10_000)
+        result = self.window.table.item(1, 0).data(Qt.UserRole)
+        self.assertEqual(len(result.azimuths), 2001)
+
+    def test_wrap_phase_only_preserves_missing_phase_and_declares_interval(self) -> None:
+        grid = RcsGrid(
+            [0.0],
+            [0.0],
+            [10.0],
+            ["VV"],
+            rcs_power=np.ones((1, 1, 1, 1)),
+            rcs_phase=np.full((1, 1, 1, 1), np.nan),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+            },
+        )
+        self.window._add_dataset_row(grid, "Magnitude only", "Loaded", "")
+        self._select_rows_in_order(0)
+        with mock.patch("grim_cut_dataset_mixin.WrapDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {
+                "azimuth": False,
+                "phase": True,
+                "mode": "0_360",
+            }
+            self.window._wrap_selected()
+            self._wait_for_background()
+
+        wrapped = self.window.table.item(1, 0).data(Qt.UserRole)
+        np.testing.assert_array_equal(wrapped.rcs_power, grid.rcs_power)
+        self.assertTrue(np.isnan(wrapped.rcs_phase).all())
+        self.assertEqual(wrapped.units["phase_wrap"], "0_360")
+
+    def test_wrap_azimuth_only_honors_radian_axis_without_touching_phase(self) -> None:
+        field = np.asarray([1.0 + 1.0j, 2.0 + 2.0j]).reshape(2, 1, 1, 1)
+        grid = RcsGrid(
+            [-np.pi, 0.0],
+            [0.0],
+            [10.0],
+            ["VV"],
+            rcs=field,
+            units={
+                "azimuth": "rad",
+                "elevation": "rad",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+            },
+        )
+        self.window._add_dataset_row(grid, "Radians", "Loaded", "")
+        self._select_rows_in_order(0)
+        with mock.patch("grim_cut_dataset_mixin.WrapDialog") as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {
+                "azimuth": True,
+                "phase": False,
+                "mode": "0_360",
+            }
+            self.window._wrap_selected()
+            self._wait_for_background()
+
+        wrapped = self.window.table.item(1, 0).data(Qt.UserRole)
+        np.testing.assert_allclose(wrapped.azimuths, [0.0, np.pi])
+        np.testing.assert_allclose(wrapped.rcs_power.ravel(), [8.0, 2.0])
+        np.testing.assert_allclose(wrapped.rcs_phase.ravel(), [np.pi / 4.0] * 2)
+        self.assertNotIn("phase_wrap", wrapped.units)
+
+    def test_delta_db_requires_exactly_two_operands(self) -> None:
+        for index, amplitude in enumerate((1.0, 2.0, 3.0), start=1):
+            self.window._add_dataset_row(
+                _axis_grid([0.0], amplitude), f"Dataset {index}", "Loaded"
+            )
+        self._select_rows_in_order(0, 1, 2)
+        row_count = self.window.table.rowCount()
+
+        self.window._dbdiff_selected()
+
+        self.assertEqual(self.window.table.rowCount(), row_count)
+        self.assertIn("select exactly 2", self.window.status.currentMessage())
+
+    def test_async_statistics_keeps_launch_time_recorder_reference(self) -> None:
+        dataset = _axis_grid([0.0, 1.0], 2.0)
+        source_path = os.path.abspath("statistics_source.grim")
+        dataset_id = self.window._add_dataset_row(
+            dataset, "Statistics source", "Loaded", source_path
+        )
+        self.window.python_recorder.bind_loaded(
+            DatasetReference(dataset_id, "Statistics source", source_path)
+        )
+        self._select_rows_in_order(0)
+        started = threading.Event()
+        release = threading.Event()
+        real_statistics = RcsGrid.statistics_dataset
+
+        def delayed_statistics(source, *args, **kwargs):
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test did not release statistics worker")
+            return real_statistics(source, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                RcsGrid,
+                "statistics_dataset",
+                autospec=True,
+                side_effect=delayed_statistics,
+            ),
+            mock.patch(
+                "grim_cut_dataset_mixin.StatisticsDialog"
+            ) as dialog_type,
+        ):
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = (
+                "mean",
+                50.0,
+                ["azimuth"],
+                False,
+            )
+            self.window._statistics_selected()
+            self.assertTrue(started.wait(2.0))
+            self.window.table.removeRow(0)
+            release.set()
+            self._wait_for_background()
+
+        self.assertEqual(self.window.table.rowCount(), 1)
+        self.assertIn("statistics_dataset", self.window.python_recorder.script)
+        self.assertIn("statistics_source.grim", self.window.python_recorder.script)
+
+    def test_statistics_broadcast_is_memory_guarded_before_worker_start(self) -> None:
+        self.window._add_dataset_row(
+            _axis_grid([0.0, 1.0, 2.0], 1.0), "Large broadcast", "Loaded"
+        )
+        self._select_rows_in_order(0)
+        with (
+            mock.patch(
+                "grim_cut_dataset_mixin.StatisticsDialog"
+            ) as dialog_type,
+            mock.patch.object(
+                grim_cut_dataset_mixin,
+                "_derived_grid_memory_limit",
+                return_value=1,
+            ),
+        ):
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = (
+                "percentile",
+                90.0,
+                ["azimuth"],
+                True,
+            )
+            self.window._statistics_selected()
+
+        self.assertFalse(self.window._background_job_active())
+        self.assertEqual(self.window.table.rowCount(), 1)
+        self.assertIn(
+            "Statistics blocked before allocation",
+            self.window.status.currentMessage(),
+        )
 
     def test_polarization_edit_uses_stored_index_and_updates_workflow_state(self) -> None:
         power = np.asarray([10.0, 20.0, 30.0]).reshape(1, 1, 1, 3)
@@ -474,6 +1020,7 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             self.window.python_recorder, "record_multi_function"
         ) as record:
             self.window._overlap_selected_datasets()
+            self._wait_for_background()
 
         self.assertEqual(self.window.table.rowCount(), 6)
         self.assertEqual(
@@ -521,12 +1068,13 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             self.window.python_recorder, "record_multi_function"
         ) as record:
             self.window._overlap_selected_datasets()
+            self._wait_for_background()
 
         self.assertEqual(self.window.table.rowCount(), 3)
         record.assert_not_called()
         self.assertEqual(
             self.window.status.currentMessage(),
-            "no overlap across one or more axes",
+            "Dataset overlap failed: no overlap across one or more axes",
         )
 
 

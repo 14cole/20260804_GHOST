@@ -91,6 +91,13 @@ omitted.
   and `.ss`. Outputs are `.grim`, `.pio`, `.cmplx_di`, `.csv`, `.txt`, and
   `.out`. `.ss` remains read-only because the referenced GRIM library has no
   supported writer.
+- CSV/TXT output uses the same `grim.flat-rcs.v1` schema as GRIM Plotting.
+  `magnitude_power_linear` is authoritative linear power—not field amplitude—
+  and the rows retain angular/frequency units, RCS quantity/log unit, angular
+  convention, polarization basis, time convention, and phase reference. The
+  shared reader still recognizes old CEM tables whose unit-suffixed axes use
+  `magnitude_linear` as field amplitude, and squares that legacy value only.
+  See `GRIM_Revised_2/README.md` for the complete column contract.
 - PIO and OUT formats only represent one elevation/polarization slice, so a
   multi-slice input produces explicitly suffixed output files.
 - OUT output is allowed only for datasets tagged as 2D `sigma_2d`/`dBke`.

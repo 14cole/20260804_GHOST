@@ -1019,6 +1019,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.setMinimumHeight(160)
         sec_datasets.addWidget(self.table, 1)
+        self.lbl_dataset_selection_summary = QLabel(
+            "Active dataset: none | Operand order: none"
+        )
+        self.lbl_dataset_selection_summary.setObjectName("secondaryText")
+        self.lbl_dataset_selection_summary.setWordWrap(True)
+        self.lbl_dataset_selection_summary.setToolTip(
+            "The active row drives the parameter lists and plotting. For ordered "
+            "operations, operands are evaluated in the order shown here."
+        )
+        sec_datasets.addWidget(self.lbl_dataset_selection_summary)
 
         # ---------- Parameters section (single 4-column strip) ----------
         sec_params = CollapsibleSection("Parameters")
@@ -1079,10 +1089,26 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         ops_panel_title.setObjectName("plotTitle")
         ops_panel_layout.addWidget(ops_panel_title)
 
+        ops_scroll = QScrollArea()
+        ops_scroll.setWidgetResizable(True)
+        ops_scroll.setFrameShape(QFrame.NoFrame)
+        ops_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        ops_scroll.setToolTip(
+            "Scroll to reach every dataset operation when the application window "
+            "or display is short."
+        )
+        ops_content = QWidget()
+        ops_content_layout = QVBoxLayout(ops_content)
+        ops_content_layout.setContentsMargins(0, 0, 0, 0)
+        ops_content_layout.setSpacing(6)
+        ops_scroll.setWidget(ops_content)
+        ops_panel_layout.addWidget(ops_scroll, 1)
+        self._dataset_ops_scroll = ops_scroll
+
         def _ops_pad(title: str, specs: tuple[tuple[str, str], ...], cols: int = 2) -> None:
             cap = QLabel(title)
             cap.setObjectName("opsCategory")
-            ops_panel_layout.addWidget(cap)
+            ops_content_layout.addWidget(cap)
             grid = QGridLayout()
             grid.setHorizontalSpacing(4)
             grid.setVerticalSpacing(4)
@@ -1093,8 +1119,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 grid.addWidget(btn, i // cols, i % cols)
             for c in range(cols):
                 grid.setColumnStretch(c, 1)
-            ops_panel_layout.addLayout(grid)
+            ops_content_layout.addLayout(grid)
 
+        _ops_pad("Inspect", (
+            ("Audit / QA", "btn_audit"),
+        ), cols=1)
         _ops_pad("Combine", (
             ("Coherent +", "btn_coherent_add"),
             ("Coherent -", "btn_coherent_sub"),
@@ -1103,13 +1132,14 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Incoherent -", "btn_incoherent_sub"),
             ("Δ dB", "btn_dbdiff"),
             ("Join", "btn_join"),
+            ("Stitch", "btn_stitch"),
             ("Overlap", "btn_overlap"),
         ))
         _ops_pad("Transform", (
-            ("Slice", "btn_slice"),
+            ("Crop / Slice", "btn_slice"),
             ("Stats", "btn_stats"),
             ("Align", "btn_align"),
-            ("Interpolate", "btn_interpolate"),
+            ("Regrid", "btn_interpolate"),
             ("Mirror", "btn_mirror"),
             ("Wrap", "btn_wrap"),
             ("Shift", "btn_shift"),
@@ -1159,10 +1189,100 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "plus VH or HV unless zero cross-pol is explicitly assumed. "
             "Unsupported side-aspect/elevation combinations remain NaN."
         )
+        operation_tooltips = {
+            "btn_coherent_add": (
+                "Add complex fields in the displayed operand order. Axes, units, "
+                "polarization basis, time convention, and phase reference must agree."
+            ),
+            "btn_coherent_sub": (
+                "Subtract complex fields in the displayed operand order: first minus "
+                "second, then minus each remaining dataset."
+            ),
+            "btn_coherent_div": (
+                "Divide two complex fields: first selected operand is the numerator and "
+                "second is the denominator. Zero or missing denominators remain missing."
+            ),
+            "btn_incoherent_add": (
+                "Add linear powers. Phase is intentionally discarded because the result "
+                "is not a coherent field."
+            ),
+            "btn_incoherent_sub": (
+                "Subtract linear powers in operand order. Physically negative results "
+                "are rejected instead of being silently clipped."
+            ),
+            "btn_dbdiff": (
+                "Using exactly two datasets, compute first-minus-second logarithmic "
+                "level differences. Zero power is represented by the mathematically "
+                "correct infinities, not a floor."
+            ),
+            "btn_join": (
+                "Build one union grid from all selected datasets. Equal or complementary "
+                "samples merge; conflicting finite samples stop the operation."
+            ),
+            "btn_stitch": (
+                "Build a union grid using an explicit overlap policy. GRIM reports equal "
+                "and conflicting overlaps for review before adding the result."
+            ),
+            "btn_audit": (
+                "Run a read-only dataset quality report covering axes, units, missing "
+                "samples, phase readiness, seams, and frequency-grid uniformity."
+            ),
+            "btn_slice": (
+                "Crop using selected parameter values or numeric min/max/stride controls. "
+                "The active row supplies reference values; GRIM converts compatible "
+                "angle/frequency units for every selected dataset. Stride retains exact "
+                "source samples and performs no interpolation."
+            ),
+            "btn_stats": (
+                "Reduce selected axes using a statistic on linear power (not dB). "
+                "Compact output is the default; broadcast only when a full-size "
+                "repeated grid is explicitly needed."
+            ),
+            "btn_align": (
+                "Align every later operand to the first operand's coordinates. Matching "
+                "is one-to-one so a source sample cannot be reused."
+            ),
+            "btn_interpolate": (
+                "Interpolate complex samples onto an explicit azimuth, elevation, or "
+                "frequency grid from the active row's physical coordinates without "
+                "extrapolation. Compatible native units are preserved."
+            ),
+            "btn_mirror": "Mirror azimuth about a user-entered angle in degrees.",
+            "btn_wrap": (
+                "Wrap azimuth coordinates, stored phase values, or both into [0°, 360°) "
+                "or [−180°, 180°). Missing phase remains missing, and azimuth seam "
+                "conflicts are never silently discarded."
+            ),
+            "btn_shift": "Shift azimuth by a user-entered number of degrees.",
+            "btn_round": "Round coordinate axes without changing sample values.",
+            "btn_offset": "Apply an additive level offset without inventing coherent phase.",
+            "btn_medianize": (
+                "Create sliding azimuth-window medians of linear power. The statistical "
+                "result has unknown phase and cannot be used as a coherent field."
+            ),
+            "btn_duplicate": "Create an independent editable copy of each selected dataset.",
+            "btn_el_to_az360": (
+                "Convert a compatible elevation cut into a 0–360° azimuth cut. Seam "
+                "conflicts are rejected."
+            ),
+            "btn_swap_el_az": (
+                "Transpose elevation and azimuth axes, samples, and their unit metadata."
+            ),
+            "btn_to_dbke": (
+                "Convert 3-D sigma (dBsm) to 2-D extrusion width (dBke) using frequency. "
+                "Dimensionless power ratios are not accepted."
+            ),
+            "btn_to_dbsm": (
+                "Convert 2-D extrusion width (dBke) to 3-D sigma (dBsm) using frequency. "
+                "Dimensionless power ratios are not accepted."
+            ),
+        }
+        for attr, tooltip in operation_tooltips.items():
+            getattr(self, attr).setToolTip(tooltip)
 
         dock_layout.addWidget(sec_datasets, 1)
         dock_layout.addWidget(sec_params)
-        ops_panel_layout.addStretch(1)
+        ops_content_layout.addStretch(1)
 
         # Dock the shared Dataset Operations panel between the control dock and
         # the plot, so it appears right next to the datasets table when shown.
@@ -1467,8 +1587,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_incoherent_sub.clicked.connect(self._incoherent_sub_selected)
         self.btn_dbdiff.clicked.connect(self._dbdiff_selected)
         self.btn_slice.clicked.connect(self._slice_selected)
+        self.btn_audit.clicked.connect(self._audit_selected_datasets)
         self.btn_stats.clicked.connect(self._statistics_selected)
         self.btn_join.clicked.connect(self._join_selected_datasets)
+        self.btn_stitch.clicked.connect(self._stitch_selected_datasets)
         self.btn_overlap.clicked.connect(self._overlap_selected_datasets)
         self.btn_align.clicked.connect(self._align_selected)
         self.btn_interpolate.clicked.connect(self._interpolate_selected)
@@ -1499,7 +1621,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         # Ctrl++ also bound to Ctrl+= so users don't have to hold shift on US layouts.
         shortcut_specs = (
             ("Ctrl+J", self._join_selected_datasets),
-            ("Ctrl+O", self._overlap_selected_datasets),
+            ("Ctrl+O", self._load_dataset_files),
+            ("Ctrl+Shift+O", self._overlap_selected_datasets),
             ("Ctrl+-", self._coherent_sub_selected),
             ("Ctrl++", self._coherent_add_selected),
             ("Ctrl+=", self._coherent_add_selected),
@@ -1799,10 +1922,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(spin_plot_zstep, row, 5)
         row += 1
 
-        scale_label = "Image Scale" if tab_key == "isar" else "Plot Scale"
+        scale_label = "Image dB" if tab_key == "isar" else "Dataset dB unit"
         settings_layout.addWidget(QLabel(scale_label), row, 0)
         combo_plot_scale = QComboBox()
-        combo_plot_scale.addItem("dBsm", "dbsm")
+        combo_plot_scale.addItem(
+            "dB" if tab_key == "isar" else "Dataset default (dBsm / dBke / dB)",
+            "dbsm",
+        )
         combo_plot_scale.addItem("Linear", "linear")
         default_index = combo_plot_scale.findData("dbsm")
         if default_index >= 0:
@@ -2091,7 +2217,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             # X/Y limits are managed by the ISAR Fit/Zoom/Pan tools and polar-
             # zero direction does not participate in ISAR formation.  Keep
             # the backing widgets for PlotContext API compatibility, but do
-            # not present those inert Plotting-only rows.  Image Scale remains
+            # not present those inert Plotting-only rows. Image dB remains
             # visible because ISAR honors its dBsm/linear selection on Apply.
             for plotting_only_row in plotting_only_rows:
                 seen: set[int] = set()
@@ -2471,8 +2597,16 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             return
         name_list = [n for n, _ in datasets]
         base = datasets[0][1]
+        attestation = self._confirm_coherent_metadata(
+            datasets, "Assembly coherent sum"
+        )
+        if attestation is None:
+            return
         try:
-            result = base.coherent_add_many(*[g for _, g in datasets[1:]])
+            result = base.coherent_add_many(
+                *[g for _, g in datasets[1:]],
+                metadata_attested=bool(attestation),
+            )
         except (ValueError, TypeError) as exc:
             self.status.showMessage(f"Assembly coherent sum failed: {exc}")
             return

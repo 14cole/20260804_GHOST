@@ -1,105 +1,174 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+
+from . import common
 
 
 def render(self) -> None:
     self.last_plot_mode = "elevation_sweep"
+    self._start_plot_render()
     datasets = self._selected_datasets()
     if not datasets:
         self.status.showMessage("Select a dataset before plotting.")
         return
-
-    elev_values_sel = self._selected_values(self.list_elev)
-    if not elev_values_sel:
-        self.status.showMessage("Select one or more elevations to plot.")
+    reference = self._preflight_plot_datasets(datasets)
+    if reference is None:
         return
 
-    az_values_sel = self._selected_values(self.list_az)
-    if not az_values_sel:
-        self.status.showMessage("Select one or more azimuths to plot.")
+    elev_values = np.asarray(sorted(self._selected_values(self.list_elev)), dtype=float)
+    if elev_values.size == 0:
+        self.status.showMessage("Select one or more elevations/pitches to plot.")
         return
-
-    freq_values_sel = self._selected_values(self.list_freq)
-    if not freq_values_sel:
+    az_values = np.asarray(sorted(self._selected_values(self.list_az)), dtype=float)
+    if az_values.size == 0:
+        self.status.showMessage("Select one or more azimuths/aspects to plot.")
+        return
+    freq_values = np.asarray(sorted(self._selected_values(self.list_freq)), dtype=float)
+    if freq_values.size == 0:
         self.status.showMessage("Select one or more frequencies to plot.")
         return
-
-    pol_value_sel = self._single_selection_value(self.list_pol, "polarization")
-    if pol_value_sel is None:
+    polarization = self._single_selection_value(self.list_pol, "polarization")
+    if polarization is None:
         return
 
-    elev_values = np.asarray(elev_values_sel, dtype=float)
-    order = np.argsort(elev_values)
-    elev_values = elev_values[order]
-    emin = float(elev_values.min())
-    emax = float(elev_values.max())
-
-    p50_mode = len(az_values_sel) > 1
-    az_min = float(np.min(az_values_sel))
-    az_max = float(np.max(az_values_sel))
-
-    self._ensure_axes("rectilinear")
-    if not self._button_checked(self.btn_hold):
-        self.plot_ax.clear()
-        self._style_plot_axes()
-
-    skipped = []
+    p50_mode = az_values.size > 1
+    skipped: list[str] = []
+    plans = []
+    peak_slice_cells = 0
+    total_cells = 0
     for name, dataset in datasets:
-        freq_indices = self._indices_for_values(dataset.frequencies, freq_values_sel)
-        az_indices = self._indices_for_values(dataset.azimuths, az_values_sel)
-        elev_indices = self._indices_for_values(dataset.elevations, elev_values_sel)
-        pol_indices = self._indices_for_values(dataset.polarizations, [pol_value_sel], tol=0.0)
-        if (
-            freq_indices is None
-            or az_indices is None
-            or elev_indices is None
-            or pol_indices is None
-        ):
+        freq_indices = self._axis_selection_for_dataset(
+            reference, dataset, "frequency", freq_values
+        )
+        az_indices = self._axis_selection_for_dataset(
+            reference, dataset, "azimuth", az_values
+        )
+        elev_indices = self._axis_selection_for_dataset(
+            reference, dataset, "elevation", elev_values
+        )
+        pol_indices = self._indices_for_values(
+            dataset.polarizations, [polarization], tol=0.0
+        )
+        if any(value is None for value in (freq_indices, az_indices, elev_indices, pol_indices)):
             skipped.append(name)
             continue
+        slice_cells = len(az_indices) * len(elev_indices)
+        peak_slice_cells = max(peak_slice_cells, slice_cells)
+        total_cells += slice_cells * len(freq_indices)
+        plans.append(
+            (name, dataset, freq_indices, az_indices, elev_indices, pol_indices)
+        )
 
+    if not plans:
+        detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
+        self.status.showMessage(
+            "No compatible data for the selected elevation/pitch, azimuth/aspect, "
+            f"frequency, and polarization values.{detail}"
+        )
+        return
+    try:
+        common.validate_synchronous_plot_workload(
+            operation="Elevation/Pitch sweep",
+            peak_slice_cells=peak_slice_cells,
+            total_cells=total_cells,
+        )
+    except ValueError as exc:
+        self.status.showMessage(f"Plot blocked: {exc}.")
+        return
+    if not self._prepare_line_plot_axes(
+        "elevation_sweep", "rectilinear", reference, datasets
+    ):
+        return
+
+    rendered = 0
+    omitted = 0
+    freq_unit = self._plot_axis_unit(reference, "frequency")
+    az_unit = self._plot_axis_unit(reference, "azimuth")
+    az_name = self._plot_axis_name(reference, "azimuth")
+    az_min, az_max = float(az_values[0]), float(az_values[-1])
+
+    for name, dataset, freq_indices, az_indices, elev_indices, pol_indices in plans:
+        x_values = self._plot_axis_values(
+            reference, dataset, "elevation", dataset.elevations[elev_indices]
+        )
         pol_value = dataset.polarizations[pol_indices[0]]
-        frequency_unit = str((dataset.units or {}).get("frequency", "GHz"))
-        for f_idx in freq_indices:
-            freq_value = float(dataset.frequencies[f_idx])
+        for freq_idx in freq_indices:
+            native_frequency = float(dataset.frequencies[freq_idx])
+            frequency = float(
+                self._plot_axis_values(reference, dataset, "frequency", [native_frequency])[0]
+            )
             if self._button_checked(self.btn_phase):
-                rcs_slice = dataset.rcs_slice(np.ix_(az_indices, elev_indices, [f_idx], [pol_indices[0]]))
-                rcs_slice = rcs_slice[:, :, 0, 0]  # (az, elev)
-                phase_deg = np.degrees(np.angle(rcs_slice))
-                phase_deg = np.where(np.isfinite(phase_deg), phase_deg, np.nan)
-                y_values = np.nanmedian(phase_deg, axis=0) if p50_mode else phase_deg[0]
+                raw = dataset.rcs_slice(
+                    np.ix_(az_indices, elev_indices, [freq_idx], [pol_indices[0]])
+                )[:, :, 0, 0]
+                phase_degrees = self._phase_display_degrees(dataset, raw)
+                display = (
+                    self._wrap_phase_degrees(
+                        dataset, self._phase_p50(phase_degrees, axis=0)
+                    )
+                    if p50_mode else phase_degrees[0]
+                )
             else:
-                pwr_slice = dataset.rcs_power[np.ix_(az_indices, elev_indices, [f_idx], [pol_indices[0]])]
-                pwr_slice = pwr_slice[:, :, 0, 0]  # (az, elev)
-                pwr_slice = np.where(np.isfinite(pwr_slice), pwr_slice, np.nan)
-                y_lin = np.nanmedian(pwr_slice, axis=0) if p50_mode else pwr_slice[0]
-                y_values = self._display_from_linear(dataset, y_lin, freq_value)
-            y_values = np.asarray(y_values)[order]
+                power = dataset.rcs_power[
+                    np.ix_(az_indices, elev_indices, [freq_idx], [pol_indices[0]])
+                ][:, :, 0, 0]
+                power = np.where(np.isfinite(power), power, np.nan)
+                if p50_mode:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", category=RuntimeWarning)
+                        linear = np.nanmedian(power, axis=0)
+                else:
+                    linear = power[0]
+                display = self._display_from_linear(
+                    dataset, linear, frequency_value=native_frequency
+                )
             if p50_mode:
                 label = (
-                    f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, "
-                    f"P50 over az ({az_min:g},{az_max:g})"
+                    f"{name} | Pol {pol_value}, Freq {frequency:g} {freq_unit}, "
+                    f"P50 over {az_name} ({az_min:g},{az_max:g}) {az_unit}"
                 )
             else:
                 label = (
-                    f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, "
-                    f"Az {az_min:g} deg"
+                    f"{name} | Pol {pol_value}, Freq {frequency:g} {freq_unit}, "
+                    f"{az_name} {az_min:g} {az_unit}"
                 )
-            self.plot_ax.plot(elev_values, y_values, label=label)
+            if not np.any(np.isfinite(display)):
+                continue
+            if rendered < common.MAX_LINE_SERIES:
+                self._plot_bounded_line(self.plot_ax, x_values, display, label=label)
+                rendered += 1
+            else:
+                omitted += 1
 
-    self.plot_ax.set_xlabel("Elevation (deg)")
-    self.plot_ax.set_ylabel(self._display_axis_label(datasets, tag=" P50" if p50_mode else ""))
+    if rendered == 0:
+        detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
+        self.status.showMessage(
+            "No compatible data for the selected elevation/pitch, azimuth/aspect, "
+            f"frequency, and polarization values.{detail}"
+        )
+        return
+    if omitted:
+        self._note_plot_render(
+            f"Displayed {common.MAX_LINE_SERIES} of {common.MAX_LINE_SERIES + omitted} "
+            "series; narrow frequency selections to show the rest."
+        )
+
+    self.plot_ax.set_xlabel(self._plot_axis_label(reference, "elevation"))
+    self.plot_ax.set_ylabel(
+        self._display_axis_label(datasets, tag=" P50" if p50_mode else "")
+    )
     self._update_legend_visibility()
     self.spin_plot_xmin.blockSignals(True)
     self.spin_plot_xmax.blockSignals(True)
-    self.spin_plot_xmin.setValue(emin)
-    self.spin_plot_xmax.setValue(emax)
+    self.spin_plot_xmin.setValue(float(elev_values[0]))
+    self.spin_plot_xmax.setValue(float(elev_values[-1]))
     self.spin_plot_xmin.blockSignals(False)
     self.spin_plot_xmax.blockSignals(False)
     self._apply_plot_limits()
+    status = "Elevation/Pitch sweep plot updated."
     if skipped:
-        skipped_list = ", ".join(skipped)
-        self.status.showMessage(f"Elevation sweep updated. Skipped: {skipped_list}.")
-    else:
-        self.status.showMessage("Elevation sweep plot updated.")
+        status = f"{status[:-1]} Skipped: {', '.join(skipped)}."
+    self._show_plot_status(status)

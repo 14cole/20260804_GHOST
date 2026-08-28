@@ -50,6 +50,32 @@ def _grid(
 
 
 class RangeCalibrationTest(unittest.TestCase):
+    @staticmethod
+    def _grid_with_authoritative_raw(stored_power, raw_field):
+        shape = (1, 1, 2, 2)
+        raw_field = np.broadcast_to(
+            np.asarray(raw_field, dtype=np.complex128), shape
+        ).copy()
+        # sigma_3d raw GHOST amplitudes are converted by sqrt(4*pi) in
+        # RcsGrid.rcs. Store the inverse-scaled values so raw_field is the
+        # exact authoritative physical amplitude used by Range Cal.
+        ghost_raw = raw_field / np.sqrt(4.0 * np.pi)
+        return RcsGrid(
+            [0.0],
+            [0.0],
+            [9.0, 10.0],
+            ["VV", "HH"],
+            rcs_power=np.broadcast_to(
+                np.asarray(stored_power, dtype=np.float32), shape
+            ).copy(),
+            rcs_phase=np.zeros(shape, dtype=np.float32),
+            units=dict(_grid(1.0 + 0.0j).units),
+            extra={
+                "rcs_amp_real": ghost_raw.real,
+                "rcs_amp_imag": ghost_raw.imag,
+            },
+        )
+
     def test_recovers_known_complex_dut_with_signed_range_offset(self) -> None:
         frequencies = np.asarray([9.0, 10.0])
         frequency_hz = frequencies * 1.0e9
@@ -144,7 +170,21 @@ class RangeCalibrationTest(unittest.TestCase):
                 measured, exact, 0.0, convention_attested=True
             )
 
-    def test_rejects_wrong_quantity_missing_phase_null_and_axis_mismatch(self) -> None:
+        for option_name, options in (
+            ("convention_attested", {"convention_attested": "false"}),
+            (
+                "allow_singleton_angular_broadcast",
+                {
+                    "convention_attested": True,
+                    "allow_singleton_angular_broadcast": "false",
+                },
+            ),
+        ):
+            with self.subTest(option_name=option_name):
+                with self.assertRaisesRegex(TypeError, option_name):
+                    dut.range_calibrate(measured, exact, 0.0, **options)
+
+    def test_rejects_wrong_quantity_measured_null_and_axis_mismatch(self) -> None:
         dut = _grid(1.0 + 0.0j)
         measured = _grid(1.0 + 0.0j)
         exact = _grid(1.0 + 0.0j)
@@ -158,23 +198,77 @@ class RangeCalibrationTest(unittest.TestCase):
         missing_phase = RcsGrid(
             [0.0], [0.0], [9.0, 10.0], ["VV", "HH"],
             rcs_power=np.ones((1, 1, 2, 2)),
+            rcs_phase=np.zeros((1, 1, 2, 2)),
             units=dict(measured.units),
         )
-        with self.assertRaisesRegex(ValueError, "missing/nonfinite"):
+        missing_phase.rcs_phase[0, 0, 0, 0] = np.nan
+        masked = dut.range_calibrate(
+            missing_phase, exact, 0.0, convention_attested=True
+        )
+        self.assertTrue(np.isnan(masked.rcs_power[0, 0, 0, 0]))
+        self.assertEqual(int(np.isfinite(masked.rcs_power).sum()), 3)
+        self.assertEqual(
+            json.loads(masked.extra["range_calibration_json"])[
+                "correction_gain_db"
+            ]["masked_output_bin_count"],
+            1,
+        )
+
+        all_missing_phase = RcsGrid(
+            [0.0], [0.0], [9.0, 10.0], ["VV", "HH"],
+            rcs_power=np.ones((1, 1, 2, 2)),
+            units=dict(measured.units),
+        )
+        with self.assertRaisesRegex(ValueError, "no calibratable bins"):
             dut.range_calibrate(
-                missing_phase, exact, 0.0, convention_attested=True
+                all_missing_phase, exact, 0.0, convention_attested=True
             )
 
-        null_reference = _grid(0.0 + 0.0j)
+        # A magnitude-only exact null has no meaningful phase, but the zero
+        # field is still an exact and valid calibration response.
+        null_reference = RcsGrid(
+            [0.0],
+            [0.0],
+            [9.0, 10.0],
+            ["VV", "HH"],
+            rcs_power=np.zeros((1, 1, 2, 2)),
+            units=dict(exact.units),
+        )
+        zeroed = dut.range_calibrate(
+            measured, null_reference, 0.0, convention_attested=True
+        )
+        np.testing.assert_array_equal(zeroed.rcs_power, 0.0)
+
+        null_measured = _grid(0.0 + 0.0j)
         with self.assertRaisesRegex(ValueError, "zero/null"):
             dut.range_calibrate(
-                measured, null_reference, 0.0, convention_attested=True
+                null_measured, exact, 0.0, convention_attested=True
             )
 
         wrong_frequency = _grid(1.0 + 0.0j, frequencies=(8.0, 10.0))
         with self.assertRaisesRegex(ValueError, "frequency axes differ"):
             dut.range_calibrate(
                 measured, wrong_frequency, 0.0, convention_attested=True
+            )
+
+    def test_authoritative_raw_field_controls_zero_semantics(self) -> None:
+        # The separately stored float32 power can underflow or disagree with a
+        # finite GHOST raw field. Do not replace a finite authoritative DUT or
+        # exact amplitude merely because stored power is zero.
+        dut = self._grid_with_authoritative_raw(0.0, 3.0 + 0.0j)
+        exact = self._grid_with_authoritative_raw(0.0, 2.0 + 0.0j)
+        measured = _grid(1.0 + 0.0j)
+        result = dut.range_calibrate(
+            measured, exact, 0.0, convention_attested=True
+        )
+        np.testing.assert_allclose(result.rcs, 6.0 + 0.0j)
+
+        # Conversely, an actual raw denominator zero remains invalid even if
+        # the stored power array incorrectly says it is positive.
+        measured_raw_zero = self._grid_with_authoritative_raw(1.0, 0.0 + 0.0j)
+        with self.assertRaisesRegex(ValueError, "zero/null"):
+            dut.range_calibrate(
+                measured_raw_zero, exact, 0.0, convention_attested=True
             )
 
     def test_rejects_declared_opposite_time_sign_and_excessive_gain(self) -> None:
@@ -274,6 +368,25 @@ class RangeCalibrationTest(unittest.TestCase):
         self.assertNotEqual(result_a._phase_reference(), result_b._phase_reference())
         metadata_a = json.loads(result_a.extra["range_calibration_json"])
         self.assertIn("exact_reference_content_sha256", metadata_a)
+
+    def test_content_hash_binds_authoritative_raw_amplitude(self) -> None:
+        dut = _grid(1.0 + 0.0j)
+        measured = _grid(1.0 + 0.0j)
+        exact_a = self._grid_with_authoritative_raw(1.0, 1.0 + 0.0j)
+        exact_b = self._grid_with_authoritative_raw(1.0, 2.0 + 0.0j)
+        result_a = dut.range_calibrate(
+            measured, exact_a, 0.0, convention_attested=True
+        )
+        result_b = dut.range_calibrate(
+            measured, exact_b, 0.0, convention_attested=True
+        )
+        hash_a = json.loads(result_a.extra["range_calibration_json"])[
+            "exact_reference_content_sha256"
+        ]
+        hash_b = json.loads(result_b.extra["range_calibration_json"])[
+            "exact_reference_content_sha256"
+        ]
+        self.assertNotEqual(hash_a, hash_b)
 
 
 if __name__ == "__main__":

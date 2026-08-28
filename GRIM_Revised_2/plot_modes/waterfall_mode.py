@@ -2,96 +2,164 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import common
+
 
 def render(self) -> None:
     self.last_plot_mode = "waterfall"
+    self._start_plot_render()
     datasets = self._selected_datasets()
     if not datasets:
         self.status.showMessage("Select a dataset before plotting.")
         return
-
-    az_values_sel = self._selected_values(self.list_az)
-    if not az_values_sel:
-        self.status.showMessage("Select one or more azimuths to plot.")
+    reference = self._preflight_plot_datasets(datasets)
+    if reference is None:
         return
 
-    freq_values_sel = self._selected_values(self.list_freq)
-    if not freq_values_sel:
+    az_values = np.asarray(sorted(self._selected_values(self.list_az)), dtype=float)
+    if az_values.size == 0:
+        self.status.showMessage("Select one or more azimuths/aspects to plot.")
+        return
+    freq_values = np.asarray(sorted(self._selected_values(self.list_freq)), dtype=float)
+    if freq_values.size == 0:
         self.status.showMessage("Select one or more frequencies to plot.")
         return
-
-    elev_values_sel = self._selected_values(self.list_elev)
-    if not elev_values_sel:
-        self.status.showMessage("Select one or more elevations to plot.")
+    elev_values = np.asarray(sorted(self._selected_values(self.list_elev)), dtype=float)
+    if elev_values.size == 0:
+        self.status.showMessage("Select one or more elevations/pitches to plot.")
+        return
+    polarization = self._single_selection_value(self.list_pol, "polarization")
+    if polarization is None:
         return
 
-    pol_value_sel = self._single_selection_value(self.list_pol, "polarization")
-    if pol_value_sel is None:
+    phase_mode = self._button_checked(self.btn_phase)
+    skipped: list[str] = []
+    plans = []
+    panel_count = 0
+    peak_slice_cells = 0
+    total_source_cells = 0
+    total_display_cells = 0
+    for dataset_name, dataset in datasets:
+        az_indices = self._axis_selection_for_dataset(
+            reference, dataset, "azimuth", az_values
+        )
+        freq_indices = self._axis_selection_for_dataset(
+            reference, dataset, "frequency", freq_values
+        )
+        elev_indices = self._axis_selection_for_dataset(
+            reference, dataset, "elevation", elev_values
+        )
+        pol_indices = self._indices_for_values(dataset.polarizations, [polarization], tol=0.0)
+        if any(value is None for value in (az_indices, freq_indices, elev_indices, pol_indices)):
+            skipped.append(dataset_name)
+            continue
+        panel_count += len(elev_indices)
+        if panel_count > common.MAX_WATERFALL_PANELS:
+            self.status.showMessage(
+                f"Waterfall blocked: selection would create more than "
+                f"{common.MAX_WATERFALL_PANELS} panels. Select fewer datasets or "
+                "elevations/pitches."
+            )
+            return
+        slice_cells = len(az_indices) * len(freq_indices)
+        peak_slice_cells = max(peak_slice_cells, slice_cells)
+        total_source_cells += slice_cells * len(elev_indices)
+        panel_display_cells = common.bounded_image_cell_count(
+            len(az_indices), len(freq_indices)
+        )
+        total_display_cells += panel_display_cells * len(elev_indices)
+        if phase_mode and common.image_requires_decimation(
+            len(az_indices), len(freq_indices)
+        ):
+            self.status.showMessage(
+                "Phase waterfall blocked: the selected image exceeds the interactive "
+                "display limit, and scalar peak decimation would distort wrapped phase. "
+                "Narrow the selected azimuth/aspect or frequency axes and plot again."
+            )
+            return
+        plans.append(
+            (dataset_name, dataset, az_indices, freq_indices, elev_indices, pol_indices)
+        )
+
+    if not plans:
+        detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
+        self.status.showMessage(
+            "No compatible data for the selected waterfall axes and polarization."
+            f"{detail}"
+        )
+        return
+    try:
+        common.validate_synchronous_plot_workload(
+            operation="Waterfall plot",
+            peak_slice_cells=peak_slice_cells,
+            total_cells=total_source_cells,
+        )
+        common.validate_aggregate_image_cells(
+            total_display_cells,
+            panel_count=panel_count,
+            operation="Waterfall plot",
+        )
+    except ValueError as exc:
+        self.status.showMessage(f"Plot blocked: {exc}.")
         return
 
     panel_data: list[dict[str, object]] = []
-    skipped: list[str] = []
-
-    for dataset_name, dataset in datasets:
-        az_indices = self._indices_for_values(dataset.azimuths, az_values_sel)
-        freq_indices = self._indices_for_values(dataset.frequencies, freq_values_sel)
-        elev_indices = self._indices_for_values(dataset.elevations, elev_values_sel)
-        pol_indices = self._indices_for_values(dataset.polarizations, [pol_value_sel], tol=0.0)
-        if (
-            az_indices is None
-            or freq_indices is None
-            or elev_indices is None
-            or pol_indices is None
-        ):
-            skipped.append(dataset_name)
-            continue
-
-        az_values = dataset.azimuths[az_indices]
-        freq_values = dataset.frequencies[freq_indices]
-        az_order = np.argsort(az_values)
-        freq_order = np.argsort(freq_values)
-        az_values = az_values[az_order]
-        freq_values = freq_values[freq_order]
-
+    for dataset_name, dataset, az_indices, freq_indices, elev_indices, pol_indices in plans:
+        display_azimuths = self._plot_axis_values(
+            reference, dataset, "azimuth", dataset.azimuths[az_indices]
+        )
+        native_frequencies = np.asarray(dataset.frequencies[freq_indices], dtype=float)
+        display_frequencies = self._plot_axis_values(
+            reference, dataset, "frequency", native_frequencies
+        )
         for elev_idx in elev_indices:
-            elev_value = dataset.elevations[elev_idx]
-            if self._button_checked(self.btn_phase):
-                raw_values = dataset.rcs_slice(np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]]))
-            else:
-                raw_values = dataset.rcs_power[np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]])]
-            raw_values = raw_values[:, 0, :, 0]
-            raw_values = raw_values[np.ix_(az_order, freq_order)]
-            rcs_display = self._display_from_values(
-                dataset, raw_values,
-                frequency_value=np.asarray(freq_values, dtype=float).reshape(1, -1),
+            native_elevation = float(dataset.elevations[elev_idx])
+            display_elevation = float(
+                self._plot_axis_values(
+                    reference, dataset, "elevation", [native_elevation]
+                )[0]
             )
-            rcs_display = np.where(np.isfinite(rcs_display), rcs_display, np.nan)
+            if phase_mode:
+                raw = dataset.rcs_slice(
+                    np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]])
+                )[:, 0, :, 0]
+            else:
+                raw = dataset.rcs_power[
+                    np.ix_(az_indices, [elev_idx], freq_indices, [pol_indices[0]])
+                ][:, 0, :, 0]
+            display = self._display_from_values(
+                dataset,
+                raw,
+                frequency_value=native_frequencies.reshape(1, -1),
+            )
+            display = np.where(np.isfinite(display), display, np.nan)
+            if not np.any(np.isfinite(display)):
+                continue
+            bounded_az, bounded_freq, bounded_display = self._bounded_plot_image(
+                display_azimuths, display_frequencies, display
+            )
             panel_data.append(
                 {
                     "dataset_name": dataset_name,
-                    "dataset": dataset,
-                    "elev_value": elev_value,
-                    "az_values": az_values,
-                    "freq_values": freq_values,
-                    "rcs_display": rcs_display,
+                    "elevation": display_elevation,
+                    "azimuths": bounded_az,
+                    "frequencies": bounded_freq,
+                    "display": bounded_display,
                 }
             )
 
     if not panel_data:
-        if skipped:
-            skipped_list = ", ".join(skipped)
-            self.status.showMessage(f"No compatible datasets for waterfall. Skipped: {skipped_list}.")
-        else:
-            self.status.showMessage("No compatible selections for waterfall plot.")
+        detail = f" Skipped: {', '.join(skipped)}." if skipped else ""
+        self.status.showMessage(
+            "No compatible data for the selected waterfall axes and polarization."
+            f"{detail}"
+        )
         return
 
     self._remove_colorbar()
     self.plot_figure.clear()
     axes = self.plot_figure.subplots(
-        nrows=len(panel_data),
-        ncols=1,
-        sharex=False,
-        sharey=False,
+        nrows=len(panel_data), ncols=1, sharex=False, sharey=False
     )
     if len(panel_data) == 1:
         axes = [axes]
@@ -101,75 +169,93 @@ def render(self) -> None:
     for ax in self.plot_axes:
         self._style_axes(ax)
 
-    meshes = []
     cmap = self._effective_colormap()
     zmin = self.spin_plot_zmin.value()
     zmax = self.spin_plot_zmax.value()
     use_clamp = zmin < zmax
-
+    shared_scale = bool(self.chk_colorbar_shared.isChecked())
+    shared_limits = (
+        common.finite_data_limits(panel["display"] for panel in panel_data)
+        if shared_scale and not use_clamp
+        else None
+    )
+    plot_vmin = zmin if use_clamp else (
+        shared_limits[0] if shared_limits is not None else None
+    )
+    plot_vmax = zmax if use_clamp else (
+        shared_limits[1] if shared_limits is not None else None
+    )
+    elev_name = self._plot_axis_name(reference, "elevation")
+    elev_unit = self._plot_axis_unit(reference, "elevation")
+    meshes = []
     xmins: list[float] = []
     xmaxs: list[float] = []
     ymins: list[float] = []
     ymaxs: list[float] = []
-
     for ax, panel in zip(self.plot_axes, panel_data):
-        az_values = panel["az_values"]
-        freq_values = panel["freq_values"]
-        rcs_display = panel["rcs_display"]
-        dataset_name = panel["dataset_name"]
-        elev_value = panel["elev_value"]
-
+        panel_az = panel["azimuths"]
+        panel_freq = panel["frequencies"]
+        display = panel["display"]
         mesh = ax.pcolormesh(
-            az_values,
-            freq_values,
-            rcs_display.T,
+            panel_az,
+            panel_freq,
+            display.T,
             shading="auto",
             cmap=cmap,
-            vmin=zmin if use_clamp else None,
-            vmax=zmax if use_clamp else None,
+            vmin=plot_vmin,
+            vmax=plot_vmax,
         )
         meshes.append(mesh)
-        ax.set_title(f"{dataset_name} | Elevation {elev_value} deg", color=self._current_plot_text())
-        ax.set_xlabel("Azimuth (deg)")
-        frequency_unit = str((panel["dataset"].units or {}).get("frequency", "GHz"))
-        ax.set_ylabel(f"Frequency ({frequency_unit})")
-
-        xmins.append(float(np.min(az_values)))
-        xmaxs.append(float(np.max(az_values)))
-        ymins.append(float(np.min(freq_values)))
-        ymaxs.append(float(np.max(freq_values)))
+        ax.set_title(
+            f"{panel['dataset_name']} | {elev_name} {panel['elevation']:g} {elev_unit}",
+            color=self._current_plot_text(),
+        )
+        ax.set_xlabel(self._plot_axis_label(reference, "azimuth"))
+        ax.set_ylabel(self._plot_axis_label(reference, "frequency"))
+        xmins.append(float(np.min(panel_az)))
+        xmaxs.append(float(np.max(panel_az)))
+        ymins.append(float(np.min(panel_freq)))
+        ymaxs.append(float(np.max(panel_freq)))
 
     if self.chk_colorbar.isChecked():
-        if self.chk_colorbar_shared.isChecked():
+        if shared_scale:
             colorbar = self.plot_figure.colorbar(meshes[-1], ax=self.plot_axes)
             self.plot_colorbars = [colorbar]
         else:
-            self.plot_colorbars = []
-            for ax, mesh in zip(self.plot_axes, meshes):
-                self.plot_colorbars.append(self.plot_figure.colorbar(mesh, ax=ax))
+            self.plot_colorbars = [
+                self.plot_figure.colorbar(mesh, ax=ax)
+                for ax, mesh in zip(self.plot_axes, meshes)
+            ]
         for colorbar in self.plot_colorbars:
             self._apply_colorbar_ticks(colorbar)
-            colorbar.set_label(self._display_axis_label(datasets), color=self._current_plot_text())
+            colorbar.set_label(
+                self._display_axis_label(datasets), color=self._current_plot_text()
+            )
             colorbar.ax.tick_params(colors=self._current_plot_text())
             for label in colorbar.ax.get_yticklabels():
                 label.set_color(self._current_plot_text())
 
-    self.spin_plot_xmin.blockSignals(True)
-    self.spin_plot_xmax.blockSignals(True)
-    self.spin_plot_ymin.blockSignals(True)
-    self.spin_plot_ymax.blockSignals(True)
+    for spin in (
+        self.spin_plot_xmin,
+        self.spin_plot_xmax,
+        self.spin_plot_ymin,
+        self.spin_plot_ymax,
+    ):
+        spin.blockSignals(True)
     self.spin_plot_xmin.setValue(min(xmins))
     self.spin_plot_xmax.setValue(max(xmaxs))
     self.spin_plot_ymin.setValue(min(ymins))
     self.spin_plot_ymax.setValue(max(ymaxs))
-    self.spin_plot_xmin.blockSignals(False)
-    self.spin_plot_xmax.blockSignals(False)
-    self.spin_plot_ymin.blockSignals(False)
-    self.spin_plot_ymax.blockSignals(False)
+    for spin in (
+        self.spin_plot_xmin,
+        self.spin_plot_xmax,
+        self.spin_plot_ymin,
+        self.spin_plot_ymax,
+    ):
+        spin.blockSignals(False)
 
     self._apply_plot_limits()
+    status = "Waterfall plot updated."
     if skipped:
-        skipped_list = ", ".join(skipped)
-        self.status.showMessage(f"Waterfall plot updated. Skipped: {skipped_list}.")
-    else:
-        self.status.showMessage("Waterfall plot updated.")
+        status = f"{status[:-1]} Skipped: {', '.join(skipped)}."
+    self._show_plot_status(status)

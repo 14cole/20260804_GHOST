@@ -56,7 +56,7 @@ class TestPhysicsAndIo(unittest.TestCase):
     def test_float64_coherent_cancellation_is_preserved(self):
         left = self._grid(1.0 + 0.0j)
         right = self._grid(-1.0 + 1.0e-9j)
-        result = left.coherent_add(right)
+        result = left.coherent_add(right, metadata_attested=True)
         self.assertEqual(result.rcs_power.dtype, np.float64)
         self.assertAlmostEqual(float(result.rcs_power.item()), 1.0e-18, delta=1.0e-24)
 
@@ -117,7 +117,7 @@ class TestPhysicsAndIo(unittest.TestCase):
 
             with mock.patch.object(
                 grim_dataset.np,
-                "savez",
+                "savez_compressed",
                 side_effect=RuntimeError("simulated write failure"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "simulated write failure"):

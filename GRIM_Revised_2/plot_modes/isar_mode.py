@@ -7,6 +7,8 @@ import time
 
 import numpy as np
 
+from . import common
+
 try:  # scipy.fft is multithreaded and preserves single precision
     from scipy import fft as _sp_fft
 except ImportError:  # pragma: no cover - scipy is normally present
@@ -61,7 +63,17 @@ def _unit_to_hz_scale(unit: str) -> float:
         return 1e6
     if unit == "ghz":
         return 1e9
-    return 1e9
+    raise ValueError(
+        f"unsupported frequency unit {unit!r}; expected Hz, kHz, MHz, or GHz"
+    )
+
+
+def _angle_values_to_degrees(dataset, axis: str, values) -> np.ndarray:
+    """Normalize native degree/radian axes before ISAR trigonometry."""
+
+    return common.convert_axis_values(
+        values, axis, common.axis_unit(dataset, axis), "deg"
+    )
 
 
 _LENGTH_UNIT_FACTORS = {
@@ -759,7 +771,9 @@ def _compute_band(
     elevation_deg: float = 0.0,
     cancel_check=None,
 ):
-    band_az_values = np.asarray(dataset.azimuths[band_az_indices], dtype=float)
+    band_az_values = _angle_values_to_degrees(
+        dataset, "azimuth", dataset.azimuths[band_az_indices]
+    )
     if az_center_deg is not None:
         band_az_values = _unwrap_degrees(band_az_values, az_center_deg)
     order = np.argsort(band_az_values)
@@ -810,7 +824,8 @@ def _compute_band(
         else:
             theta_native = np.deg2rad(az_values)
             if not np.all(np.isfinite(theta_native)) or np.any(np.diff(theta_native) <= 0):
-                return "Azimuth samples must be strictly increasing within a band."
+                axis_name = common.angular_axis_name(dataset, "azimuth")
+                return f"{axis_name} samples must be strictly increasing within a band."
             az_uniform, rcs_slice, az_nonuniformity = _resample_complex_uniform(
                 az_values, rcs_slice, axis=0
             )
@@ -939,6 +954,49 @@ def _compute_band(
 # switch to the sub-aperture composite that wide-angle ISAR tools use.
 _COMPOSITE_SPAN_DEG = 20.0
 _COMPOSITE_SUB_DEG = 10.0
+_MAX_INTERP_AZIMUTH_SAMPLES = 1_000_000
+_MAX_INTERP_COMPLEX_CELLS = 16_000_000
+
+
+def _bounded_uniform_azimuth_grid(
+    start: float,
+    stop: float,
+    step: float,
+    *,
+    frequency_count: int,
+) -> np.ndarray:
+    """Build an inclusive-when-exact target grid after allocation preflight."""
+
+    start = float(start)
+    stop = float(stop)
+    step = float(step)
+    if not np.all(np.isfinite([start, stop, step])):
+        raise ValueError("limits/step must be finite")
+    if step <= 0.0:
+        raise ValueError("step must be positive")
+    if stop <= start:
+        raise ValueError("max must exceed min")
+    frequency_count = int(frequency_count)
+    if frequency_count < 1:
+        raise ValueError("at least one frequency sample is required")
+
+    span = stop - start
+    tolerance = np.finfo(float).eps * max(span, step, 1.0) * 16.0
+    count = int(np.floor((span + tolerance) / step)) + 1
+    cells = count * frequency_count
+    if count > _MAX_INTERP_AZIMUTH_SAMPLES:
+        raise ValueError(
+            f"requested {count:,} azimuth samples exceeds the safety limit "
+            f"{_MAX_INTERP_AZIMUTH_SAMPLES:,}; increase the azimuth step"
+        )
+    if cells > _MAX_INTERP_COMPLEX_CELLS:
+        raise ValueError(
+            f"requested {count:,} azimuth samples x {frequency_count:,} "
+            f"frequencies ({cells:,} complex cells) exceeds the working-set "
+            f"limit {_MAX_INTERP_COMPLEX_CELLS:,}; increase the azimuth step "
+            "or select fewer frequencies"
+        )
+    return start + step * np.arange(count, dtype=float)
 
 
 def _compute_band_composite(
@@ -967,7 +1025,7 @@ def _compute_band_composite(
     rotates every look into the common body frame (the θ=0 radar frame:
     +Y = down-range at 0° azimuth), and max-combines magnitudes so each
     pixel keeps its brightest look."""
-    az_all = np.asarray(dataset.azimuths, dtype=float)
+    az_all = _angle_values_to_degrees(dataset, "azimuth", dataset.azimuths)
     az_vals = az_all[band_az_indices]
     if az_center_deg is not None:
         az_vals = _unwrap_degrees(az_vals, az_center_deg)
@@ -1069,7 +1127,11 @@ def compute_bands(params: dict):
     for band_az_indices in params["bands"]:
         if cancel_check is not None and cancel_check():
             return "ISAR computation superseded."
-        az_band = np.asarray(params["dataset"].azimuths, dtype=float)[band_az_indices]
+        az_band = _angle_values_to_degrees(
+            params["dataset"],
+            "azimuth",
+            np.asarray(params["dataset"].azimuths, dtype=float)[band_az_indices],
+        )
         if params.get("az_center_deg") is not None:
             az_band = _unwrap_degrees(az_band, params["az_center_deg"])
         span = float(az_band.max() - az_band.min())
@@ -1129,7 +1191,12 @@ def compute_bands(params: dict):
         # GUI rendering can reduce oversized images after formation; headless
         # callers keep the full numerical grid by disabling this parameter.
         if params.get("decimate_display", True):
-            result["magnitude"] = _decimate_display_max(result["magnitude"])
+            max_side = min(common.MAX_IMAGE_SIDE, int(np.sqrt(common.MAX_IMAGE_CELLS)))
+            original_shape = result["magnitude"].shape
+            result["magnitude"] = _decimate_display_max(
+                result["magnitude"], max_side=max_side
+            )
+            result["display_decimated"] = result["magnitude"].shape != original_shape
         band_results.append(result)
     return band_results, time.perf_counter() - t_start
 
@@ -1163,7 +1230,10 @@ def form_isar(
         int(i) for i in frequency_indices
     )
     if len(az_indices) < 2 or len(freq_indices) < 2:
-        raise ValueError("ISAR requires at least two azimuth and two frequency samples")
+        axis_name = common.angular_axis_name(dataset, "azimuth").lower()
+        raise ValueError(
+            f"ISAR requires at least two {axis_name} and two frequency samples"
+        )
     if not (0 <= elevation_index < len(dataset.elevations)):
         raise IndexError("elevation_index is out of range")
     if not (0 <= polarization_index < len(dataset.polarizations)):
@@ -1198,7 +1268,11 @@ def form_isar(
         "bands": bands,
         "freq_indices_sorted": freq_indices,
         "elev_idx": int(elevation_index),
-        "elevation_deg": float(dataset.elevations[elevation_index]),
+        "elevation_deg": float(
+            _angle_values_to_degrees(
+                dataset, "elevation", [dataset.elevations[elevation_index]]
+            )[0]
+        ),
         "pol_idx": int(polarization_index),
         "freq_hz": frequency_hz,
         "df": float(np.mean(np.diff(frequency_hz))),
@@ -1225,13 +1299,16 @@ def render(self) -> None:
     needs into a params dict, and hand off to the mixin's async submit. The
     finished computation comes back through `display_results`."""
     self.last_plot_mode = "isar_image"
+    self._start_plot_render()
     if self.active_dataset is None:
         self.status.showMessage("Select a dataset before plotting.")
+        return
+    if self._preflight_plot_datasets([("Dataset", self.active_dataset)]) is None:
         return
 
     az_indices = sorted(self._selected_indices(self.list_az))
     if not az_indices:
-        self.status.showMessage("Select one or more azimuths to plot.")
+        self.status.showMessage("Select one or more azimuths/aspects to plot.")
         return
 
     # Optional aperture window (the scrub workflow): keep only selected
@@ -1244,7 +1321,11 @@ def render(self) -> None:
         if not np.isfinite(ap_center) or not np.isfinite(ap_width) or ap_width <= 0.0:
             self.status.showMessage("ISAR aperture: center/width must be finite and width positive.")
             return
-        az_arr = np.asarray(self.active_dataset.azimuths, dtype=float)[az_indices]
+        az_arr = _angle_values_to_degrees(
+            self.active_dataset,
+            "azimuth",
+            np.asarray(self.active_dataset.azimuths, dtype=float)[az_indices],
+        )
         dist = np.abs(np.mod(az_arr - ap_center + 180.0, 360.0) - 180.0)
         keep = dist <= ap_width / 2.0 + 1e-9
         az_indices = [i for i, k in zip(az_indices, keep) if k]
@@ -1289,7 +1370,13 @@ def render(self) -> None:
     elev_idx = self._single_selection_index(self.list_elev, "elevation")
     if elev_idx is None:
         return
-    elevation_deg = float(self.active_dataset.elevations[elev_idx])
+    elevation_deg = float(
+        _angle_values_to_degrees(
+            self.active_dataset,
+            "elevation",
+            [self.active_dataset.elevations[elev_idx]],
+        )[0]
+    )
     if abs(float(np.cos(np.deg2rad(elevation_deg)))) < 1.0e-6:
         self.status.showMessage(
             "Azimuth ISAR is degenerate at elevation ±90° for the horizontal image plane."
@@ -1303,18 +1390,16 @@ def render(self) -> None:
         az_min = float(self.spin_isar_az_min.value())
         az_max = float(self.spin_isar_az_max.value())
         az_step = float(self.spin_isar_az_step.value())
-        if not np.isfinite(az_min) or not np.isfinite(az_max) or not np.isfinite(az_step):
-            self.status.showMessage("ISAR azimuth interp: limits/step must be finite.")
+        try:
+            az_target_deg = _bounded_uniform_azimuth_grid(
+                az_min,
+                az_max,
+                az_step,
+                frequency_count=len(freq_indices),
+            )
+        except ValueError as exc:
+            self.status.showMessage(f"ISAR azimuth interp blocked: {exc}.")
             return
-        if az_step <= 0.0:
-            self.status.showMessage("ISAR azimuth interp: step must be positive.")
-            return
-        if az_max <= az_min:
-            self.status.showMessage("ISAR azimuth interp: max must exceed min.")
-            return
-        # arange-with-half-step so the inclusive upper bound lands on the grid
-        # when (max-min) is an integer multiple of step (the common case).
-        az_target_deg = np.arange(az_min, az_max + az_step * 0.5, az_step, dtype=float)
         if az_target_deg.size < 2:
             self.status.showMessage("ISAR azimuth interp grid needs ≥2 samples.")
             return
@@ -1328,8 +1413,45 @@ def render(self) -> None:
         bands = [b for b in bands if len(b) >= 2]
     if not bands:
         self.status.showMessage(
-            "Each azimuth band needs at least 2 contiguous samples for ISAR imaging."
+            "Each azimuth/aspect band needs at least 2 contiguous samples for ISAR imaging."
         )
+        return
+    if len(bands) > common.MAX_WATERFALL_PANELS:
+        self.status.showMessage(
+            f"ISAR blocked: selection would create {len(bands)} panels (limit "
+            f"{common.MAX_WATERFALL_PANELS}). Select contiguous azimuth/aspect "
+            "samples or enable one aperture/interpolation window."
+        )
+        return
+
+    # The per-image reducer is not an aggregate memory limit: several allowed
+    # panels can otherwise retain tens of millions of pixels at once. Estimate
+    # each post-decimation image before launching the worker and apply one
+    # figure-wide budget. Wide-aperture composites use their fixed 1024² grid.
+    n_freq_fft_estimate = _next_fast_len(max(len(freq_indices), 256))
+    total_display_cells = 0
+    for band in bands:
+        band_degrees = _angle_values_to_degrees(
+            self.active_dataset,
+            "azimuth",
+            np.asarray(self.active_dataset.azimuths, dtype=float)[band],
+        )
+        if float(np.max(band_degrees) - np.min(band_degrees)) > _COMPOSITE_SPAN_DEG:
+            total_display_cells += 1024 * 1024
+            continue
+        az_count = az_target_deg.size if az_target_deg is not None else len(band)
+        n_az_fft_estimate = _next_fast_len(max(int(az_count), 256))
+        total_display_cells += common.bounded_image_cell_count(
+            n_az_fft_estimate, n_freq_fft_estimate
+        )
+    try:
+        common.validate_aggregate_image_cells(
+            total_display_cells,
+            panel_count=len(bands),
+            operation="ISAR image",
+        )
+    except ValueError as exc:
+        self.status.showMessage(f"ISAR blocked: {exc}.")
         return
 
     freq_values_full = self.active_dataset.frequencies[freq_indices]
@@ -1376,6 +1498,7 @@ def render(self) -> None:
         # switched tabs), the finished result is dropped instead of being
         # painted onto whatever tab is now in front.
         "figure_token": self.plot_figure,
+        "render_generation": getattr(self, "_plot_render_generation", 0),
         "bands": bands,
         "freq_indices_sorted": freq_indices_sorted,
         "elev_idx": elev_idx,
@@ -1403,18 +1526,16 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     unit_name = params["unit_name"]
     az_target_deg = params["az_target_deg"]
 
-    # Convert linear magnitudes to display values. ISAR image intensity is
-    # 10·log₁₀(|I|²) = 20·log₁₀(|I|) — feed *power* (|I|²) to the dB converter,
-    # not magnitude. `rcs_to_dbsm` interprets real inputs as already-linear
-    # power, so passing the bare magnitude would give 10·log₁₀(|I|) (half the
-    # correct dB value). Labelled "dB" rather than "dBsm" because the linear
-    # value isn't necessarily in m². (The magnitude was already max-pool
-    # decimated on the worker; block-max commutes with log.)
+    # Convert coherent magnitude to generic image intensity. Image formation
+    # does not guarantee an absolute square-metre normalization, so neither
+    # branch claims dBsm/dBke. (Magnitude was already max-pool decimated on the
+    # worker; block-max commutes with squaring and log.)
     for br in band_results:
+        intensity = np.asarray(br["magnitude"], dtype=float) ** 2
         if self._plot_scale_is_linear():
-            br["isar_display"] = br["magnitude"]
+            br["isar_display"] = intensity
         else:
-            br["isar_display"] = dataset.rcs_to_dbsm(br["magnitude"] ** 2)
+            br["isar_display"] = 10.0 * np.log10(np.maximum(intensity, 1.0e-12))
 
     n_bands = len(band_results)
 
@@ -1437,6 +1558,18 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     zmin = self.spin_plot_zmin.value()
     zmax = self.spin_plot_zmax.value()
     use_clamp = zmin < zmax
+    shared_scale = bool(self.chk_colorbar_shared.isChecked())
+    shared_limits = (
+        common.finite_data_limits(br["isar_display"] for br in band_results)
+        if shared_scale and not use_clamp
+        else None
+    )
+    plot_vmin = zmin if use_clamp else (
+        shared_limits[0] if shared_limits is not None else None
+    )
+    plot_vmax = zmax if use_clamp else (
+        shared_limits[1] if shared_limits is not None else None
+    )
 
     square_widget = getattr(self, "chk_isar_square", None)
     square_aspect = bool(square_widget.isChecked()) if square_widget is not None else False
@@ -1461,8 +1594,8 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
             aspect="auto",
             interpolation="nearest",
             cmap=cmap,
-            vmin=zmin if use_clamp else None,
-            vmax=zmax if use_clamp else None,
+            vmin=plot_vmin,
+            vmax=plot_vmax,
         )
         if square_aspect:
             # adjustable="datalim" keeps the plot box at its current size and
@@ -1482,7 +1615,8 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
                 color=self._current_plot_text(),
             )
 
-    elev_value = dataset.elevations[params["elev_idx"]]
+    elev_value = float(params["elevation_deg"])
+    elev_name = common.angular_axis_name(dataset, "elevation")
     pol_value = dataset.polarizations[params["pol_idx"]]
     if params.get("recon") == "sparse":
         recon_label = " | Sparse L1"
@@ -1493,7 +1627,9 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     composite_subs = max((br.get("composite", 0) for br in band_results), default=0)
     if composite_subs:
         recon_label += f" | Wide-Aperture Composite ({composite_subs} looks)"
-    fig_title = f"ISAR Image | Elevation {elev_value} deg | Pol {pol_value}{recon_label}"
+    fig_title = (
+        f"ISAR Image | {elev_name} {elev_value:g} deg | Pol {pol_value}{recon_label}"
+    )
     if n_bands > 1:
         self.plot_figure.suptitle(fig_title, color=self._current_plot_text())
     else:
@@ -1516,16 +1652,28 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     active_axes[0].set_ylabel(y_label)
 
     if self.chk_colorbar.isChecked() and last_mesh is not None:
-        colorbar = self.plot_figure.colorbar(last_mesh, ax=active_axes)
-        self.plot_colorbars = [colorbar]
-        self._apply_colorbar_ticks(colorbar)
-        if self._plot_scale_is_linear():
-            colorbar.set_label("Image Intensity (linear)", color=self._current_plot_text())
+        if shared_scale:
+            self.plot_colorbars = [
+                self.plot_figure.colorbar(last_mesh, ax=active_axes)
+            ]
         else:
-            colorbar.set_label("Image Intensity (dB)", color=self._current_plot_text())
-        colorbar.ax.tick_params(colors=self._current_plot_text())
-        for label in colorbar.ax.get_yticklabels():
-            label.set_color(self._current_plot_text())
+            self.plot_colorbars = [
+                self.plot_figure.colorbar(mesh, ax=ax)
+                for ax, mesh in zip(active_axes, self._isar_meshes)
+            ]
+        for colorbar in self.plot_colorbars:
+            self._apply_colorbar_ticks(colorbar)
+            if self._plot_scale_is_linear():
+                colorbar.set_label(
+                    "Image Intensity (linear)", color=self._current_plot_text()
+                )
+            else:
+                colorbar.set_label(
+                    "Image Intensity (dB)", color=self._current_plot_text()
+                )
+            colorbar.ax.tick_params(colors=self._current_plot_text())
+            for label in colorbar.ax.get_yticklabels():
+                label.set_color(self._current_plot_text())
 
     self.spin_plot_xmin.blockSignals(True)
     self.spin_plot_xmax.blockSignals(True)
@@ -1607,6 +1755,11 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
         notes.append(f"weighted phase coverage {coverage*100:.1f}%")
     if any(br.get("preprocess_cache_hit", False) for br in band_results):
         notes.append("reused gridded phase history")
+    if any(br.get("display_decimated", False) for br in band_results):
+        notes.append(
+            "peak-preserving display decimation applied; narrow the aperture/band "
+            "for full display resolution"
+        )
     sparse_used = [br.get("sparse_iterations") for br in band_results
                    if br.get("sparse_iterations") is not None]
     if sparse_used:
@@ -1622,4 +1775,4 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
             )
     if notes:
         parts.append(" — " + ", ".join(notes))
-    self.status.showMessage("".join(parts))
+    self._show_plot_status("".join(parts))

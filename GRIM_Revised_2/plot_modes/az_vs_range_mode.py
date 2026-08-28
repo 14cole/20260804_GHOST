@@ -13,24 +13,40 @@ from __future__ import annotations
 
 import numpy as np
 
-from .isar_mode import _resample_complex_uniform, _length_unit, _unit_to_hz_scale
+from . import common
+from .isar_mode import (
+    _decimate_display_max,
+    _resample_complex_uniform,
+    _length_unit,
+    _unit_to_hz_scale,
+)
 
 
 def _range_display_values(dataset, magnitude: np.ndarray, *, linear: bool) -> np.ndarray:
-    """Convert range-image amplitude to the selected display domain."""
+    """Convert coherent range amplitude to generic image intensity.
 
-    magnitude = np.asarray(magnitude)
+    A frequency IFFT does not, by itself, preserve a calibrated physical RCS
+    normalization. Keep the familiar amplitude-dB scaling without claiming
+    the result is dBsm/dBke.
+    """
+
+    del dataset  # retained in the public helper signature for compatibility
+    magnitude = np.asarray(magnitude, dtype=float)
+    intensity = magnitude ** 2
     if linear:
-        return magnitude
-    # The IFFT result is a coherent amplitude. rcs_to_dbsm treats real input as
-    # power, so square the magnitude to retain the required 20*log10 scaling.
-    return dataset.rcs_to_dbsm(magnitude ** 2)
+        return intensity
+    intensity = np.where(np.isfinite(intensity), intensity, np.nan)
+    return 10.0 * np.log10(np.maximum(intensity, 1.0e-12))
 
 
 def render(self) -> None:
     self.last_plot_mode = "az_vs_range"
+    self._start_plot_render()
     if self.active_dataset is None:
         self.status.showMessage("Select a dataset before plotting.")
+        return
+    reference = self._preflight_plot_datasets([("Dataset", self.active_dataset)])
+    if reference is None:
         return
 
     az_indices = sorted(self._selected_indices(self.list_az))
@@ -58,7 +74,9 @@ def render(self) -> None:
     sorted_az_indices = [az_indices[i] for i in az_order]
     az_values = az_values[az_order]
     if not np.all(np.isfinite(az_values)) or np.any(np.diff(az_values) <= 0):
-        self.status.showMessage("Azimuth samples must be strictly increasing.")
+        self.status.showMessage(
+            f"{self._plot_axis_name(reference, 'azimuth')} samples must be strictly increasing."
+        )
         return
 
     freq_values = self.active_dataset.frequencies[freq_indices].astype(float)
@@ -72,6 +90,12 @@ def render(self) -> None:
     rcs_slice = self.active_dataset.rcs_slice(
         np.ix_(sorted_az_indices, [elev_idx], sorted_freq_indices, [pol_idx])
     )[:, 0, :, 0]
+    if not np.any(np.isfinite(rcs_slice)):
+        self.status.showMessage(
+            "No compatible phase-aware data for the selected azimuth/aspect, "
+            "elevation/pitch, frequency, and polarization values."
+        )
+        return
     rcs_slice = np.where(np.isfinite(rcs_slice), rcs_slice, 0.0)
 
     # IFFT along freq requires uniform freq spacing — match what ISAR does.
@@ -91,9 +115,9 @@ def render(self) -> None:
     range_image = np.fft.ifft(rcs_windowed, axis=1)
     range_image = np.fft.fftshift(range_image, axes=1)
 
-    # Coherent-gain normalisation so a unit-amplitude scatterer reads near
-    # 0 dBsm — matches the ISAR magnitude convention so users can re-use
-    # the same z-clamp range.
+    # Coherent-gain normalisation keeps a unit-amplitude point response near
+    # 0 dB re 1. It is deliberately not labeled dBsm/dBke: the IFFT image is
+    # a processing product, not an RCS sample on the source grid.
     coh = float(np.mean(win_freq))
     if coh > 0.0:
         range_image = range_image / coh
@@ -122,6 +146,13 @@ def render(self) -> None:
         magnitude,
         linear=self._plot_scale_is_linear(),
     )
+    max_side = min(common.MAX_IMAGE_SIDE, int(np.sqrt(common.MAX_IMAGE_CELLS)))
+    display_for_plot = _decimate_display_max(display.T, max_side=max_side)
+    if display_for_plot.shape != display.T.shape:
+        self._note_plot_render(
+            "Large range image was peak-preserving display-decimated for responsive "
+            "interaction; narrow the selected axes for full display resolution."
+        )
 
     # Build the figure.
     self._remove_colorbar()
@@ -137,7 +168,7 @@ def render(self) -> None:
 
     # display shape: (n_az, n_freq). imshow wants (n_y, n_x), so transpose.
     mesh = self.plot_ax.imshow(
-        display.T,
+        display_for_plot,
         extent=[
             float(az_values[0]),
             float(az_values[-1]),
@@ -152,12 +183,15 @@ def render(self) -> None:
         vmax=zmax if use_clamp else None,
     )
 
-    self.plot_ax.set_xlabel("Azimuth (deg)")
+    self.plot_ax.set_xlabel(self._plot_axis_label(reference, "azimuth"))
     self.plot_ax.set_ylabel(f"Down-Range ({unit_name})")
     elev_value = self.active_dataset.elevations[elev_idx]
+    elev_name = self._plot_axis_name(reference, "elevation")
+    elev_unit = self._plot_axis_unit(reference, "elevation")
     pol_value = self.active_dataset.polarizations[pol_idx]
     self.plot_ax.set_title(
-        f"Az vs Down-Range | Elevation {elev_value} deg | Pol {pol_value}",
+        f"{self._plot_axis_name(reference, 'azimuth')} vs Down-Range | "
+        f"{elev_name} {elev_value:g} {elev_unit} | Pol {pol_value}",
         color=self._current_plot_text(),
     )
 
@@ -166,9 +200,15 @@ def render(self) -> None:
         self.plot_colorbars = [colorbar]
         self._apply_colorbar_ticks(colorbar)
         if self._plot_scale_is_linear():
-            colorbar.set_label("RCS (Linear)", color=self._current_plot_text())
+            colorbar.set_label(
+                "Range image intensity (linear, a.u.)",
+                color=self._current_plot_text(),
+            )
         else:
-            colorbar.set_label("RCS (dBsm)", color=self._current_plot_text())
+            colorbar.set_label(
+                "Range image intensity (dB re 1 a.u.)",
+                color=self._current_plot_text(),
+            )
         colorbar.ax.tick_params(colors=self._current_plot_text())
         for label in colorbar.ax.get_yticklabels():
             label.set_color(self._current_plot_text())
@@ -192,4 +232,4 @@ def render(self) -> None:
     note = ""
     if fr_nonuniformity >= 1e-3:
         note = f" — resampled frequency (Δ-spread {fr_nonuniformity*100:.1f}%)"
-    self.status.showMessage(f"Az vs Down-Range updated{note}.")
+    self._show_plot_status(f"Az vs Down-Range updated{note}.")

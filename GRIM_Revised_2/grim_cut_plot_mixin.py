@@ -25,6 +25,7 @@ from plot_modes import (
     isar_mode,
     waterfall_mode,
 )
+from plot_modes import common as plot_common
 
 
 class _IsarComputeSignals(QObject):
@@ -88,6 +89,11 @@ class PlotOpsMixin:
 
     def _maybe_autoplot(self) -> None:
         if not self._button_checked(self.btn_auto_plot):
+            return
+        # Hold is an explicit overlay workflow. Selection bursts under Auto
+        # Plot would otherwise append transient/intermediate series as the user
+        # ctrl-clicks a new cut, even though they never requested those traces.
+        if self._button_checked(getattr(self, "btn_hold", None)):
             return
         if self.last_plot_mode is None:
             return
@@ -161,23 +167,52 @@ class PlotOpsMixin:
             self._plot_isar_image()
 
     def _on_colormap_changed(self) -> None:
+        # A colormap switch is a style-only change. Reuse the ScalarMappables
+        # already on the canvas instead of repeating FFTs, gridding, or large
+        # dataset selections. Fall back to a render only when no live mapped
+        # artist exists (for example, before the first image was drawn).
+        cmap = self._effective_colormap()
+        updated = False
+        seen: set[int] = set()
+        for ax in self.plot_figure.axes:
+            for artist in [*ax.images, *ax.collections]:
+                if id(artist) in seen or not hasattr(artist, "set_cmap"):
+                    continue
+                seen.add(id(artist))
+                try:
+                    values = artist.get_array()
+                except Exception:
+                    values = None
+                if values is None:
+                    continue
+                artist.set_cmap(cmap)
+                updated = True
+        for colorbar in self.plot_colorbars:
+            mappable = getattr(colorbar, "mappable", None)
+            if mappable is not None and hasattr(mappable, "set_cmap"):
+                mappable.set_cmap(cmap)
+                try:
+                    colorbar.update_normal(mappable)
+                except Exception:
+                    pass
+                updated = True
+        if updated:
+            self.plot_canvas.draw_idle()
+            return
+
         if self.last_plot_mode == "waterfall":
             self._plot_waterfall()
-            return
-        if self.last_plot_mode == "isar_image":
+        elif self.last_plot_mode == "isar_image":
             self._plot_isar_image()
-            return
-        if self.last_plot_mode == "az_vs_range":
+        elif self.last_plot_mode == "az_vs_range":
             self._plot_az_vs_range()
-            return
-        if self.pbp_fill_mode not in ("heatmap_rcs", "heatmap_density"):
-            return
-        if self.last_plot_mode == "azimuth_rect":
-            self._plot_azimuth_rect()
-        elif self.last_plot_mode == "azimuth_polar":
-            self._plot_azimuth_polar()
-        elif self.last_plot_mode == "frequency":
-            self._plot_frequency()
+        elif self.pbp_fill_mode in ("heatmap_rcs", "heatmap_density"):
+            if self.last_plot_mode == "azimuth_rect":
+                self._plot_azimuth_rect()
+            elif self.last_plot_mode == "azimuth_polar":
+                self._plot_azimuth_polar()
+            elif self.last_plot_mode == "frequency":
+                self._plot_frequency()
 
     def _on_plot_scale_changed(self) -> None:
         if self.last_plot_mode is None:
@@ -211,9 +246,29 @@ class PlotOpsMixin:
     def _plot_scale_is_linear(self) -> bool:
         return self._plot_scale_mode() == "linear"
 
+    @staticmethod
+    def _phase_wrap_mode(dataset: RcsGrid) -> str:
+        mode = str((dataset.units or {}).get("phase_wrap", "-180_180")).strip()
+        return "0_360" if mode == "0_360" else "-180_180"
+
+    def _wrap_phase_degrees(self, dataset: RcsGrid, values):
+        phase = np.asarray(values, dtype=float)
+        finite = np.isfinite(phase)
+        wrapped = np.full(phase.shape, np.nan, dtype=float)
+        if self._phase_wrap_mode(dataset) == "0_360":
+            wrapped[finite] = np.mod(phase[finite], 360.0)
+        else:
+            wrapped[finite] = np.mod(phase[finite] + 180.0, 360.0) - 180.0
+        return wrapped
+
+    def _phase_display_degrees(self, dataset: RcsGrid, values):
+        raw = np.asarray(values)
+        phase_radians = np.angle(raw) if np.iscomplexobj(raw) else raw.astype(float)
+        return self._wrap_phase_degrees(dataset, np.degrees(phase_radians))
+
     def _rcs_display_values(self, dataset: RcsGrid, rcs_values, frequency_value=None):
         if self._button_checked(self.btn_phase):
-            return np.degrees(np.angle(rcs_values))
+            return self._phase_display_degrees(dataset, rcs_values)
         if self._plot_scale_is_linear():
             return dataset.rcs_to_linear(rcs_values)
         return dataset.rcs_to_display_db(rcs_values, frequency_value=frequency_value)
@@ -221,16 +276,24 @@ class PlotOpsMixin:
     def _rcs_axis_label(self) -> str:
         if self._button_checked(self.btn_phase):
             return "Phase (deg)"
+        dataset = getattr(self, "active_dataset", None)
+        quantity = dataset.linear_quantity() if isinstance(dataset, RcsGrid) else "sigma_3d"
+        quantity_name, linear_unit = self._linear_quantity_label_and_unit(quantity)
         if self._plot_scale_is_linear():
-            return "RCS (Linear)"
-        return "RCS (dBsm)"
+            return f"{quantity_name} ({linear_unit})"
+        unit = dataset.default_log_unit() if isinstance(dataset, RcsGrid) else "dBsm"
+        return f"{quantity_name} ({unit})"
 
     def _rcs_p50_axis_label(self) -> str:
         if self._button_checked(self.btn_phase):
             return "Phase P50 (deg)"
+        dataset = getattr(self, "active_dataset", None)
+        quantity = dataset.linear_quantity() if isinstance(dataset, RcsGrid) else "sigma_3d"
+        quantity_name, linear_unit = self._linear_quantity_label_and_unit(quantity)
         if self._plot_scale_is_linear():
-            return "RCS P50 (Linear)"
-        return "RCS P50 (dBsm)"
+            return f"{quantity_name} P50 ({linear_unit})"
+        unit = dataset.default_log_unit() if isinstance(dataset, RcsGrid) else "dBsm"
+        return f"{quantity_name} P50 ({unit})"
 
     def _polar_zero_location(self) -> str:
         loc = self.combo_polar_zero.currentData()
@@ -246,9 +309,20 @@ class PlotOpsMixin:
         ax.set_theta_direction(-1)
         # Label tick marks in (-180, 180] so -90 shows on the left (W) under
         # the default N-up/CW orientation, matching the compass grid.
-        tick_deg = np.arange(0, 360, 30)
-        labels = [str(int(t if t <= 180 else t - 360)) for t in tick_deg]
-        ax.set_thetagrids(tick_deg, labels=labels)
+        self._set_polar_thetagrids(ax, np.arange(0.0, 360.0, 30.0))
+
+    def _set_polar_thetagrids(self, ax, tick_degrees) -> None:
+        tick_degrees = np.asarray(tick_degrees, dtype=float)
+        signed_degrees = np.where(tick_degrees <= 180.0, tick_degrees, tick_degrees - 360.0)
+        display_unit = str(getattr(self, "_polar_display_unit", "deg"))
+        labels_values = plot_common.convert_axis_values(
+            signed_degrees, "azimuth", "deg", display_unit
+        )
+        if display_unit == "rad":
+            labels = [f"{value:.3g}" for value in labels_values]
+        else:
+            labels = [f"{value:g}" for value in labels_values]
+        ax.set_thetagrids(tick_degrees, labels=labels)
 
     def _apply_polar_zero_direction(self) -> None:
         axes = self.plot_axes or [self.plot_ax]
@@ -423,9 +497,13 @@ class PlotOpsMixin:
             return
         if vmin > vmax:
             vmin, vmax = vmax, vmin
-        ticks = np.arange(vmin, vmax + zstep * 0.5, zstep)
-        if ticks.size == 0:
-            return
+        ticks = plot_common.bounded_ticks(vmin, vmax, zstep)
+        if ticks is None:
+            ticks = np.linspace(vmin, vmax, plot_common.MAX_EXPLICIT_TICKS)
+            self._note_plot_render(
+                f"Colorbar tick step requested over {plot_common.MAX_EXPLICIT_TICKS} ticks; "
+                "increase the Z tick step."
+            )
         colorbar.set_ticks(ticks)
 
     def _choose_plot_color(self, which: str) -> None:
@@ -480,8 +558,12 @@ class PlotOpsMixin:
         self._style_plot_axes()
 
     def _clear_plot(self) -> None:
+        self._plot_render_generation = (
+            int(getattr(self, "_plot_render_generation", 0)) + 1
+        )
         self._remove_colorbar()
         self.plot_figure.clear()
+        self.plot_figure._grim_line_plot_signature = None
         self.plot_ax = self.plot_figure.add_subplot(111)
         self.plot_axes = None
         self._style_plot_axes()
@@ -527,8 +609,7 @@ class PlotOpsMixin:
         the plot-scale combo. `frequency_value` may be scalar or an array
         broadcastable against `values` (frequency-dependent dB conversions)."""
         if self._button_checked(self.btn_phase):
-            phase_deg = np.degrees(np.angle(values))
-            return np.where(np.isfinite(phase_deg), phase_deg, np.nan)
+            return self._phase_display_degrees(dataset, values)
         linear = dataset.rcs_to_linear(values)
         if self._plot_scale_is_linear():
             return linear
@@ -542,22 +623,271 @@ class PlotOpsMixin:
         return dataset.linear_to_default_db(linear_values, frequency_value=frequency_value)
 
     def _display_unit(self, datasets) -> str:
-        """Unit string for the current display quantity: deg / Linear / dB unit."""
+        """Unit string for the current display quantity."""
         if self._button_checked(self.btn_phase):
             return "deg"
         if self._plot_scale_is_linear():
-            return "Linear"
+            quantity = datasets[0][1].linear_quantity()
+            return self._linear_quantity_label_and_unit(quantity)[1]
         units = {str(ds.default_log_unit()) for _, ds in datasets}
         return next(iter(units)) if len(units) == 1 else "dB"
+
+    @staticmethod
+    def _linear_quantity_label_and_unit(quantity) -> tuple[str, str]:
+        """Return the physical name and SI unit of stored linear power."""
+
+        key = str(quantity).strip().lower()
+        return {
+            "sigma_3d": ("RCS", "m²"),
+            "sigma_2d": ("Scattering Width", "m"),
+            "power_ratio": ("Power Ratio", "dimensionless"),
+            "ratio": ("Power Ratio", "dimensionless"),
+        }.get(key, ("Value", "linear"))
 
     def _display_axis_label(self, datasets, tag: str = "") -> str:
         """Axis/colorbar label for the current display quantity; `tag` is an
         optional qualifier inserted after the quantity name (e.g. " P50")."""
         if self._button_checked(self.btn_phase):
             return f"Phase{tag} (deg)"
+        quantity = str(datasets[0][1].linear_quantity()).strip().lower()
+        quantity_name, linear_unit = self._linear_quantity_label_and_unit(quantity)
         if self._plot_scale_is_linear():
-            return f"RCS{tag} (Linear)"
-        return f"RCS{tag} ({self._display_unit(datasets)})"
+            return f"{quantity_name}{tag} ({linear_unit})"
+        return f"{quantity_name}{tag} ({self._display_unit(datasets)})"
+
+    # --- renderer preflight, unit conversion, and display bounding ----------
+
+    def _start_plot_render(self) -> None:
+        self._plot_render_notes = []
+        self._plot_render_generation = (
+            int(getattr(self, "_plot_render_generation", 0)) + 1
+        )
+
+    def _note_plot_render(self, note: str) -> None:
+        notes = getattr(self, "_plot_render_notes", None)
+        if notes is None:
+            notes = self._plot_render_notes = []
+        if note and note not in notes:
+            notes.append(note)
+
+    def _show_plot_status(self, message: str) -> None:
+        notes = list(getattr(self, "_plot_render_notes", []))
+        if notes:
+            message = f"{message} " + " ".join(notes)
+        self.status.showMessage(message)
+
+    def _preflight_plot_datasets(self, datasets):
+        try:
+            plot_common.validate_plot_datasets(
+                datasets,
+                phase=self._button_checked(self.btn_phase),
+                linear=self._plot_scale_is_linear(),
+            )
+        except ValueError as exc:
+            self.status.showMessage(f"Plot blocked: {exc}.")
+            return None
+        return plot_common.reference_dataset(datasets, self.active_dataset)
+
+    def _line_plot_signature(self, mode: str, projection: str, reference, datasets):
+        """Describe the coordinate/ordinate contract of a line-plot canvas."""
+
+        phase = self._button_checked(self.btn_phase)
+        if phase:
+            coherent_metadata = []
+            for key in ("phase_reference", "time_convention", "polarization_basis"):
+                declared = set()
+                for _name, dataset in datasets:
+                    getter = getattr(dataset, "_declared_scalar_metadata", None)
+                    raw = getter(key) if callable(getter) else (dataset.units or {}).get(
+                        key, (dataset.extra or {}).get(key, "")
+                    )
+                    text = str(raw or "").strip()
+                    if key == "time_convention" and text:
+                        canonicalizer = getattr(dataset, "_canonical_time_convention", None)
+                        text = (
+                            canonicalizer(text)
+                            if callable(canonicalizer)
+                            else text.casefold()
+                        )
+                    else:
+                        text = " ".join(text.split()).casefold()
+                    declared.add(text)
+                coherent_metadata.append((key, tuple(sorted(declared))))
+            ordinate = ("phase", "deg", tuple(coherent_metadata))
+        else:
+            quantity = str(datasets[0][1].linear_quantity()).strip().lower()
+            display_unit = (
+                self._linear_quantity_label_and_unit(quantity)[1]
+                if self._plot_scale_is_linear()
+                else str(datasets[0][1].default_log_unit())
+            )
+            ordinate = (quantity, display_unit)
+        orientation = tuple(
+            float(value) for value in reference.angular_frame_orientation_deg()
+        )
+        return (
+            str(mode),
+            str(projection),
+            reference.angular_coordinate_system(),
+            reference.great_circle_coordinate_convention()
+            if reference.angular_coordinate_system() == "great_circle"
+            else "",
+            orientation,
+            self._plot_axis_unit(reference, {
+                "azimuth_rect": "azimuth",
+                "azimuth_polar": "azimuth",
+                "frequency": "frequency",
+                "elevation_sweep": "elevation",
+            }[mode]),
+            ordinate,
+        )
+
+    def _prepare_line_plot_axes(
+        self,
+        mode: str,
+        projection: str,
+        reference,
+        datasets,
+        *,
+        pbp_active: bool = False,
+    ) -> bool:
+        """Clear or validate a line canvas before honoring the Hold toggle.
+
+        Hold is an overlay operation, so it may retain only a line plot with
+        the same x-coordinate and ordinate contract.  Images, multi-panel
+        layouts, phase/scale changes, and unlike physical quantities must be
+        cleared rather than silently sharing mislabeled axes.
+        """
+
+        hold = self._button_checked(self.btn_hold)
+        signature = self._line_plot_signature(mode, projection, reference, datasets)
+        desired_projection = "polar" if projection == "polar" else "rectilinear"
+        figure = self.plot_figure
+        axes = list(figure.axes)
+        has_images_or_collections = any(ax.images or ax.collections for ax in axes)
+        has_lines = any(ax.lines for ax in axes)
+        has_content = has_images_or_collections or has_lines
+        prior_signature = getattr(figure, "_grim_line_plot_signature", None)
+
+        if hold and pbp_active:
+            self.status.showMessage(
+                "Hold blocked: PBP already combines the selected series into one band. "
+                "Turn off Hold before plotting PBP."
+            )
+            return False
+        if hold and has_content:
+            compatible_layout = (
+                self.plot_axes is None
+                and getattr(self.plot_ax, "name", "") == desired_projection
+                and not has_images_or_collections
+            )
+            if not compatible_layout or prior_signature != signature:
+                self.status.showMessage(
+                    "Hold blocked: the existing canvas uses a different plot axis, "
+                    "coordinate/unit system, scale, or physical quantity. Turn off "
+                    "Hold or Clear the plot before continuing."
+                )
+                return False
+
+        self._ensure_axes(projection)
+        if not hold:
+            self.plot_ax.clear()
+            self._style_plot_axes()
+        figure._grim_line_plot_signature = signature
+        return True
+
+    def _axis_selection_for_dataset(self, reference, dataset, axis: str, values):
+        converted, tolerance = plot_common.selection_for_dataset(
+            reference, dataset, axis, values
+        )
+        axis_values = {
+            "azimuth": dataset.azimuths,
+            "elevation": dataset.elevations,
+            "frequency": dataset.frequencies,
+        }[axis]
+        return self._indices_for_values(axis_values, converted, tol=tolerance)
+
+    def _plot_axis_values(self, reference, dataset, axis: str, values):
+        return plot_common.values_for_display(reference, dataset, axis, values)
+
+    def _plot_axis_label(self, reference, axis: str) -> str:
+        return plot_common.axis_label(reference, axis)
+
+    def _plot_axis_name(self, reference, axis: str) -> str:
+        if axis == "frequency":
+            return "Frequency"
+        return plot_common.angular_axis_name(reference, axis)
+
+    def _plot_axis_unit(self, reference, axis: str) -> str:
+        return plot_common.axis_unit(reference, axis)
+
+    def _phase_p50(self, phase_degrees, axis=0):
+        return plot_common.circular_median_degrees(phase_degrees, axis=axis)
+
+    def _new_pbp_envelope(self):
+        return plot_common.StreamingEnvelope(
+            phase_degrees=self._button_checked(self.btn_phase)
+        )
+
+    def _plot_bounded_line(self, ax, x_values, y_values, *args, **kwargs):
+        x_display, y_display, decimated = plot_common.decimate_line(x_values, y_values)
+        if decimated:
+            self._note_plot_render(
+                f"Lines over {plot_common.MAX_LINE_POINTS:,} samples were display-decimated; "
+                "exported data remains unchanged."
+            )
+        label = kwargs.get("label")
+        if (
+            self._button_checked(getattr(self, "btn_hold", None))
+            and isinstance(label, str)
+            and label
+            and not label.startswith("_")
+        ):
+            # Automatic refreshes and repeated clicks should replace the same
+            # semantic series, not pile identical artists onto a held canvas.
+            removed = False
+            for existing in list(ax.lines):
+                if existing.get_label() == label:
+                    existing.remove()
+                    removed = True
+            if removed:
+                legend = ax.get_legend()
+                if legend is not None:
+                    legend.remove()
+            held_series = sum(
+                1
+                for existing in ax.lines
+                if isinstance(existing.get_label(), str)
+                and not existing.get_label().startswith("_")
+            )
+            if held_series >= plot_common.MAX_LINE_SERIES:
+                self._note_plot_render(
+                    f"Hold is capped at {plot_common.MAX_LINE_SERIES} visible series; "
+                    "Clear the plot before adding different cuts."
+                )
+                return []
+        return ax.plot(x_display, y_display, *args, **kwargs)
+
+    def _bounded_plot_envelope(self, x_values, lower, upper, count=None):
+        result = plot_common.decimate_envelope(x_values, lower, upper, count)
+        x_display, lower_display, upper_display, count_display, decimated = result
+        if decimated:
+            self._note_plot_render(
+                f"Bands over {plot_common.MAX_LINE_POINTS:,} samples were display-decimated; "
+                "exported data remains unchanged."
+            )
+        return x_display, lower_display, upper_display, count_display
+
+    def _bounded_plot_image(self, x_values, y_values, image):
+        x_display, y_display, image_display, decimated = plot_common.decimate_image(
+            x_values, y_values, image
+        )
+        if decimated:
+            self._note_plot_render(
+                "Large image was display-decimated for responsive interaction; "
+                "narrow the selected axes for full display resolution."
+            )
+        return x_display, y_display, image_display
 
     def _zoom_target_axes(self) -> list:
         axes = self.plot_axes or [self.plot_ax]
@@ -920,15 +1250,47 @@ class PlotOpsMixin:
                 # which azimuths get plotted, never a visible wedge.
                 ax.set_thetamin(0.0)
                 ax.set_thetamax(360.0)
-                theta_step = xstep if xstep > 0.0 else 45.0
-                ax.set_thetagrids(np.arange(0.0, 360.0, theta_step))
+                display_unit = str(getattr(self, "_polar_display_unit", "deg"))
+                default_step = float(
+                    plot_common.convert_axis_values(
+                        [45.0], "azimuth", "deg", display_unit
+                    )[0]
+                )
+                theta_step_display = xstep if xstep > 0.0 else default_step
+                theta_step = float(
+                    plot_common.convert_axis_values(
+                        [theta_step_display], "azimuth", display_unit, "deg"
+                    )[0]
+                )
+                ticks = plot_common.bounded_ticks(0.0, 360.0 - theta_step, theta_step)
+                if ticks is None:
+                    ticks = np.linspace(0.0, 360.0, plot_common.MAX_EXPLICIT_TICKS, endpoint=False)
+                    self._note_plot_render(
+                        f"Polar tick step requested over {plot_common.MAX_EXPLICIT_TICKS} ticks; "
+                        "increase the X tick step."
+                    )
+                self._set_polar_thetagrids(ax, ticks)
             else:
                 ax.set_xlim(xmin, xmax)
                 if xstep > 0.0:
-                    ax.set_xticks(np.arange(xmin, xmax + xstep * 0.5, xstep))
+                    ticks = plot_common.bounded_ticks(xmin, xmax, xstep)
+                    if ticks is None:
+                        ticks = np.linspace(xmin, xmax, plot_common.MAX_EXPLICIT_TICKS)
+                        self._note_plot_render(
+                            f"X tick step requested over {plot_common.MAX_EXPLICIT_TICKS} ticks; "
+                            "increase the X tick step."
+                        )
+                    ax.set_xticks(ticks)
             ax.set_ylim(ymin, ymax)
             if ystep > 0.0:
-                ax.set_yticks(np.arange(ymin, ymax + ystep * 0.5, ystep))
+                ticks = plot_common.bounded_ticks(ymin, ymax, ystep)
+                if ticks is None:
+                    ticks = np.linspace(ymin, ymax, plot_common.MAX_EXPLICIT_TICKS)
+                    self._note_plot_render(
+                        f"Y tick step requested over {plot_common.MAX_EXPLICIT_TICKS} ticks; "
+                        "increase the Y tick step."
+                    )
+                ax.set_yticks(ticks)
         self.plot_canvas.draw_idle()
 
     def _fit_both(self) -> None:
@@ -973,6 +1335,13 @@ class PlotOpsMixin:
             params["_cancel_event"] = cancel_event
             self._isar_pending = params
             return
+        dataset_job_active = getattr(self, "_background_job_active", None)
+        if callable(dataset_job_active) and dataset_job_active():
+            self.status.showMessage(
+                "A dataset import, operation, save, or export is still running. "
+                "Wait for it to finish before starting ISAR reconstruction."
+            )
+            return
         self._isar_busy = True
         self._isar_cancel_event = cancel_event
         params["_cancel_event"] = cancel_event
@@ -1006,6 +1375,8 @@ class PlotOpsMixin:
         elif (
             params.get("dataset") is not self.active_dataset
             or params.get("figure_token") is not self.plot_figure
+            or params.get("render_generation")
+            != getattr(self, "_plot_render_generation", 0)
         ):
             self.status.showMessage("ISAR result discarded (view changed while computing).")
             ok = False
@@ -1021,6 +1392,18 @@ class PlotOpsMixin:
                 emit=bool(getattr(self, "_python_record_pending_isar", False)),
             )
             self._python_record_pending_isar = False
+        drain_import = getattr(self, "_start_next_pending_import_batch", None)
+        if callable(drain_import) and drain_import():
+            if pending is not None:
+                # Dataset imports take priority once the current reconstruction
+                # reaches a safe boundary. Resume the latest coalesced ISAR
+                # request after the queued import batches have drained.
+                self._isar_pending = pending
+            else:
+                play_btn = getattr(self, "btn_isar_ap_play", None)
+                if play_btn is not None and play_btn.isChecked():
+                    play_btn.setChecked(False)
+            return
         if pending is not None:
             self._isar_submit(pending)
             return
@@ -1090,8 +1473,9 @@ class PlotOpsMixin:
             return
         drop = float(self.spin_isar_peak_drop.value())
         if self._plot_scale_is_linear():
-            # Linear display shows |I| (amplitude): N dB down = 10^(-N/20).
-            zmin = peak * 10.0 ** (-drop / 20.0)
+            # Linear display is image intensity |I|^2, so an N dB intensity
+            # drop is a power ratio of 10^(-N/10).
+            zmin = peak * 10.0 ** (-drop / 10.0)
         else:
             zmin = peak - drop
         self.spin_plot_zmin.blockSignals(True)
@@ -1584,9 +1968,11 @@ class PlotOpsMixin:
                     legend.remove()
                 legend = ax.legend(handles, labels, **self._legend_kwargs())
             self._configure_legend(legend, ax)
-        # A synchronous draw makes toolbar clicks deterministic even when the
-        # Qt event queue is busy loading or replotting a large dataset.
-        self.plot_canvas.draw()
+        # Rendering paths call _apply_plot_limits immediately afterward, which
+        # already schedules one draw. A direct toolbar toggle still needs a
+        # repaint, but draw_idle coalesces it with any pending canvas work.
+        if checked is not None:
+            self.plot_canvas.draw_idle()
 
     def _on_explicit_plot_clicked(self, mode: str) -> None:
         """Track the one async plot; synchronous renders capture themselves."""
@@ -1693,6 +2079,17 @@ class PlotOpsMixin:
             "elevations": list(elevations),
             "frequencies": list(frequencies),
             "polarization": polarization,
+            # The parameter-list values live in the active/reference
+            # dataset's units.  Table selection order is independent of the
+            # active row, so replay must not assume datasets[0] is that frame.
+            "reference_index": next(
+                (
+                    index
+                    for index, (_name, dataset) in enumerate(datasets)
+                    if dataset is self.active_dataset
+                ),
+                0,
+            ),
             "phase": self._button_checked(getattr(self, "btn_phase", None)),
             "scale": self._plot_scale_mode(),
             "colormap": self._effective_colormap(),

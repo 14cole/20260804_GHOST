@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import copy
-import csv
 import ctypes
 import math
 import os
 import re
+import shutil
 import tempfile
 import uuid
 import zipfile
@@ -35,8 +35,10 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QTableWidgetItem,
     QVBoxLayout,
 )
@@ -50,9 +52,19 @@ from grim_dataset import (
 from grim_headless import (
     SUPPORTED_EXTENSIONS,
     is_supported_path,
+    load_flat_csv as load_flat_csv_headless,
     load_dataset as load_dataset_headless,
 )
-from grim_python import DatasetReference
+from grim_csv_schema import write_flat_csv
+from grim_python import (
+    DatasetReference,
+    _derived_response_extra,
+    coherent_divide,
+    convert_extrusion,
+    crop_dataset,
+    medianize_azimuth,
+    regrid_axis,
+)
 
 # Characters forbidden in filenames on Windows (and `/` on POSIX). Replaced
 # with `_` so dataset names with op symbols like `|`, `÷`, etc. still save.
@@ -64,6 +76,142 @@ _BAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 DATASET_ID_ROLE = Qt.UserRole + 32
 DATASET_DIRTY_ROLE = Qt.UserRole + 33
 DATASET_PATH_ROLE = Qt.UserRole + 34
+
+# Explicit output limits keep a typo such as a 1e-9 degree step from allocating
+# an axis (and then a dense four-dimensional result) before the user can react.
+# The byte preflight below normally trips first; this independent count limit
+# also protects small grids and Python-recorder script generation.
+_MAX_EXPLICIT_AXIS_POINTS = 1_000_000
+_MAX_DERIVED_PEAK_BYTES_FALLBACK = 2 * 1024**3
+
+
+def _canonical_angle_unit(value: object, *, default: str = "deg") -> str:
+    text = str(value or default).strip().lower()
+    aliases = {
+        "degree": "deg",
+        "degrees": "deg",
+        "deg": "deg",
+        "radian": "rad",
+        "radians": "rad",
+        "rad": "rad",
+    }
+    try:
+        return aliases[text]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported angular unit {value!r}; use deg or rad"
+        ) from exc
+
+
+def _angle_axis_degrees(dataset: "RcsGrid", axis_name: str) -> np.ndarray:
+    values = np.asarray(dataset.get_axis(axis_name), dtype=float)
+    unit = _canonical_angle_unit((dataset.units or {}).get(axis_name, "deg"))
+    return np.rad2deg(values) if unit == "rad" else values
+
+
+def _degrees_to_angle_axis(
+    dataset: "RcsGrid", axis_name: str, values_degrees
+) -> np.ndarray:
+    values = np.asarray(values_degrees, dtype=float)
+    unit = _canonical_angle_unit((dataset.units or {}).get(axis_name, "deg"))
+    return np.deg2rad(values) if unit == "rad" else values
+
+
+_FREQUENCY_TO_HZ = {
+    "hz": 1.0,
+    "khz": 1.0e3,
+    "mhz": 1.0e6,
+    "ghz": 1.0e9,
+}
+
+
+def _canonical_frequency_unit(value: object, *, default: str = "GHz") -> str:
+    text = str(value or default).strip().lower()
+    if text not in _FREQUENCY_TO_HZ:
+        raise ValueError(
+            f"unsupported frequency unit {value!r}; use Hz, kHz, MHz, or GHz"
+        )
+    return {"hz": "Hz", "khz": "kHz", "mhz": "MHz", "ghz": "GHz"}[text]
+
+
+def _frequency_axis_hz(dataset: "RcsGrid", values=None) -> np.ndarray:
+    native = dataset.frequencies if values is None else values
+    unit = _canonical_frequency_unit((dataset.units or {}).get("frequency", "GHz"))
+    return np.asarray(native, dtype=float) * _FREQUENCY_TO_HZ[unit.lower()]
+
+
+def _hz_to_frequency_axis(dataset: "RcsGrid", values_hz) -> np.ndarray:
+    unit = _canonical_frequency_unit((dataset.units or {}).get("frequency", "GHz"))
+    return np.asarray(values_hz, dtype=float) / _FREQUENCY_TO_HZ[unit.lower()]
+
+
+def _assert_same_angular_frame(reference: "RcsGrid", dataset: "RcsGrid") -> None:
+    """Reject transferring angle coordinates between different frames."""
+
+    reference_system = reference.angular_coordinate_system()
+    dataset_system = dataset.angular_coordinate_system()
+    if reference_system != dataset_system:
+        raise ValueError(
+            "angular coordinate system differs from the active reference "
+            f"({dataset_system} != {reference_system})"
+        )
+    if reference_system != "great_circle":
+        return
+    reference_convention = reference.great_circle_coordinate_convention()
+    dataset_convention = dataset.great_circle_coordinate_convention()
+    if reference_convention != dataset_convention:
+        raise ValueError(
+            "great-circle convention differs from the active reference "
+            f"({dataset_convention} != {reference_convention})"
+        )
+    if not np.allclose(
+        reference.angular_frame_orientation_deg(),
+        dataset.angular_frame_orientation_deg(),
+        rtol=0.0,
+        atol=1.0e-7,
+    ):
+        raise ValueError(
+            "great-circle roll/tilt differs from the active reference"
+        )
+
+
+def _derived_grid_peak_bytes(dataset: "RcsGrid", shape) -> int:
+    cells = math.prod(int(value) for value in shape)
+    itemsize = max(
+        np.dtype(dataset.rcs_power.dtype).itemsize,
+        np.dtype(dataset.rcs_phase.dtype).itemsize,
+    )
+    # Retained power+phase plus interpolation/constructor scratch.  This is a
+    # deliberately conservative guard, not an exact allocator model.
+    return int(cells * itemsize * 6)
+
+
+def _derived_grid_memory_limit() -> int:
+    available = _available_memory_bytes()
+    if available is None:
+        return _MAX_DERIVED_PEAK_BYTES_FALLBACK
+    return max(64 * 1024**2, int(available * 0.5))
+
+
+def _format_bytes(value: int) -> str:
+    size = float(max(0, int(value)))
+    for suffix in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024.0 or suffix == "TiB":
+            return f"{size:.1f} {suffix}"
+        size /= 1024.0
+    return f"{size:.1f} TiB"
+
+
+def _compact_item_summary(items, *, limit: int = 5) -> str:
+    """Keep status-bar text bounded while still reporting the total count."""
+
+    values = [str(item) for item in items]
+    shown = values[: max(0, int(limit))]
+    text = ", ".join(shown)
+    remaining = len(values) - len(shown)
+    if remaining:
+        text += f", …and {remaining} more"
+    return text
 
 
 def _target_path_key(path: str | os.PathLike) -> str:
@@ -150,21 +298,21 @@ def _stage_and_publish_grim_batch(
                 dir=directory,
             )
             os.close(fd)
-            prior_history = dataset.history
             try:
                 # A single RcsGrid may intentionally appear in multiple rows.
-                # Serialize the provenance belonging to this row, then restore
-                # the shared in-memory object before moving to the next entry.
-                dataset.history = str(row_history or "").strip()
-                dataset.save(stage_path)
+                # Serialize the provenance belonging to this row from a shallow
+                # snapshot.  The large numerical arrays remain shared/read-only
+                # for the duration of the save, while the live GUI object's
+                # history is never mutated from the worker thread.
+                snapshot = copy.copy(dataset)
+                snapshot.history = str(row_history or "").strip()
+                snapshot.save(stage_path)
             except Exception:
                 try:
                     os.unlink(stage_path)
                 except OSError:
                     pass
                 raise
-            finally:
-                dataset.history = prior_history
             staged.append((stage_path, target))
 
         for stage_path, target in staged:
@@ -301,52 +449,221 @@ class AlignDialog(QDialog):
         return "interp" if self._radio_interp.isChecked() else "intersect"
 
 
-class InterpolateDialog(QDialog):
-    """Pick a target azimuth grid (start/stop/step) for interpolation."""
+class CropDialog(QDialog):
+    """Choose selected-value slicing or physical ranges with exact strides."""
 
-    def __init__(self, hint: str | None = None, parent=None) -> None:
+    def __init__(self, reference: "RcsGrid", *, has_selected_values: bool, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Interpolate")
+        self.setWindowTitle("Crop / Slice")
+        self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Create a smaller dataset without interpolation. Use parameter-list "
+            "selections, or crop physical ranges and retain every Nth source sample."
+        ))
 
-        layout.addWidget(QLabel("Resample selected dataset(s) onto a new azimuth grid."))
-        if hint:
-            hint_label = QLabel(hint)
-            hint_label.setStyleSheet("color: gray;")
-            layout.addWidget(hint_label)
+        self._rb_selected = QRadioButton("Use values selected in the parameter lists")
+        self._rb_ranges = QRadioButton("Use numeric ranges and exact source-sample strides")
+        self._rb_selected.setEnabled(bool(has_selected_values))
+        self._rb_selected.setChecked(bool(has_selected_values))
+        self._rb_ranges.setChecked(not bool(has_selected_values))
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self._rb_selected)
+        mode_group.addButton(self._rb_ranges)
+        layout.addWidget(self._rb_selected)
+        layout.addWidget(self._rb_ranges)
+
+        range_group = QGroupBox("Ranges")
+        range_layout = QGridLayout(range_group)
+        range_layout.addWidget(QLabel("Axis"), 0, 0)
+        range_layout.addWidget(QLabel("Minimum"), 0, 1)
+        range_layout.addWidget(QLabel("Maximum"), 0, 2)
+        range_layout.addWidget(QLabel("Stride"), 0, 3)
+        self._range_controls: dict[str, tuple[QCheckBox, QDoubleSpinBox, QDoubleSpinBox, QSpinBox]] = {}
+
+        az = _angle_axis_degrees(reference, "azimuth")
+        el = _angle_axis_degrees(reference, "elevation")
+        freq = np.asarray(reference.frequencies, dtype=float)
+        frequency_unit = _canonical_frequency_unit(
+            (reference.units or {}).get("frequency", "GHz")
+        )
+        if reference.angular_coordinate_system() == "great_circle":
+            azimuth_label, elevation_label = "Aspect", "Pitch"
+        else:
+            azimuth_label, elevation_label = "Azimuth", "Elevation"
+        specs = (
+            ("azimuth", f"{azimuth_label} (deg)", az),
+            ("elevation", f"{elevation_label} (deg)", el),
+            ("frequency", f"Frequency ({frequency_unit})", freq),
+        )
+        for row, (axis, label, values) in enumerate(specs, start=1):
+            enabled = QCheckBox(label)
+            enabled.setChecked(True)
+            minimum = QDoubleSpinBox()
+            maximum = QDoubleSpinBox()
+            for spin in (minimum, maximum):
+                spin.setDecimals(9)
+                spin.setRange(-1.0e300, 1.0e300)
+                spin.setKeyboardTracking(False)
+            minimum.setValue(float(np.min(values)))
+            maximum.setValue(float(np.max(values)))
+            stride = QSpinBox()
+            stride.setRange(1, max(1, int(values.size)))
+            stride.setValue(1)
+            enabled.toggled.connect(minimum.setEnabled)
+            enabled.toggled.connect(maximum.setEnabled)
+            enabled.toggled.connect(stride.setEnabled)
+            range_layout.addWidget(enabled, row, 0)
+            range_layout.addWidget(minimum, row, 1)
+            range_layout.addWidget(maximum, row, 2)
+            range_layout.addWidget(stride, row, 3)
+            self._range_controls[axis] = (enabled, minimum, maximum, stride)
+
+        self._selected_polarizations = QCheckBox(
+            "Limit output to polarizations selected in the parameter list"
+        )
+        self._selected_polarizations.setChecked(False)
+        range_layout.addWidget(self._selected_polarizations, 4, 0, 1, 4)
+        layout.addWidget(range_group)
+        self._range_group = range_group
+        range_group.setEnabled(self._rb_ranges.isChecked())
+        self._rb_ranges.toggled.connect(range_group.setEnabled)
+
+        note = QLabel(
+            "Stride selects existing samples; it does not filter or invent values. "
+            "Use Regrid when a specific coordinate grid is required."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_params(self) -> dict[str, object]:
+        ranges: dict[str, tuple[float, float] | None] = {}
+        strides: dict[str, int] = {}
+        for axis, (enabled, minimum, maximum, stride) in self._range_controls.items():
+            ranges[axis] = (
+                (float(minimum.value()), float(maximum.value()))
+                if enabled.isChecked()
+                else None
+            )
+            strides[axis] = int(stride.value()) if enabled.isChecked() else 1
+        return {
+            "mode": "selected" if self._rb_selected.isChecked() else "ranges",
+            "ranges": ranges,
+            "strides": strides,
+            "selected_polarizations": self._selected_polarizations.isChecked(),
+        }
+
+
+class RegridDialog(QDialog):
+    """Pick one numeric axis and an explicit, uniformly spaced target grid."""
+
+    _AXIS_LABELS = {
+        "azimuth": "Azimuth",
+        "elevation": "Elevation",
+        "frequency": "Frequency",
+    }
+
+    def __init__(self, reference: "RcsGrid", parent=None) -> None:
+        super().__init__(parent)
+        self._reference = reference
+        self.setWindowTitle("Regrid")
+        self.setMinimumWidth(500)
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Linearly interpolate the complex field onto one new axis. GRIM never "
+            "extrapolates; every selected dataset must cover the requested range."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
 
         grid = QGridLayout()
-        grid.addWidget(QLabel("Start (°):"), 0, 0)
+        grid.addWidget(QLabel("Axis:"), 0, 0)
+        self._axis = QComboBox()
+        axis_labels = dict(self._AXIS_LABELS)
+        if reference.angular_coordinate_system() == "great_circle":
+            axis_labels.update(azimuth="Aspect", elevation="Pitch")
+        for key in ("azimuth", "elevation", "frequency"):
+            self._axis.addItem(axis_labels[key], key)
+        grid.addWidget(self._axis, 0, 1)
+
+        self._label_start = QLabel()
+        self._label_stop = QLabel()
+        self._label_step = QLabel()
         self._spin_start = QDoubleSpinBox()
-        self._spin_start.setDecimals(6)
-        self._spin_start.setRange(-1e9, 1e9)
-        self._spin_start.setValue(0.0)
-        grid.addWidget(self._spin_start, 0, 1)
-
-        grid.addWidget(QLabel("Stop (°):"), 1, 0)
         self._spin_stop = QDoubleSpinBox()
-        self._spin_stop.setDecimals(6)
-        self._spin_stop.setRange(-1e9, 1e9)
-        self._spin_stop.setValue(0.0)
-        grid.addWidget(self._spin_stop, 1, 1)
-
-        grid.addWidget(QLabel("Step (°):"), 2, 0)
         self._spin_step = QDoubleSpinBox()
-        self._spin_step.setDecimals(6)
-        self._spin_step.setRange(1e-6, 1e6)
-        self._spin_step.setValue(1.0)
-        grid.addWidget(self._spin_step, 2, 1)
+        for spin in (self._spin_start, self._spin_stop, self._spin_step):
+            spin.setDecimals(9)
+            spin.setRange(-1.0e300, 1.0e300)
+            spin.setKeyboardTracking(False)
+        self._spin_step.setMinimum(1.0e-12)
+        grid.addWidget(self._label_start, 1, 0)
+        grid.addWidget(self._spin_start, 1, 1)
+        grid.addWidget(self._label_stop, 2, 0)
+        grid.addWidget(self._spin_stop, 2, 1)
+        grid.addWidget(self._label_step, 3, 0)
+        grid.addWidget(self._spin_step, 3, 1)
         layout.addLayout(grid)
 
-        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btn_box.accepted.connect(self.accept)
-        btn_box.rejected.connect(self.reject)
-        layout.addWidget(btn_box)
+        self._summary = QLabel()
+        self._summary.setWordWrap(True)
+        self._summary.setStyleSheet("color: gray;")
+        layout.addWidget(self._summary)
+        self._axis.currentIndexChanged.connect(self._load_axis_defaults)
+        for spin in (self._spin_start, self._spin_stop, self._spin_step):
+            spin.valueChanged.connect(self._update_summary)
+        self._load_axis_defaults()
 
-    def set_defaults(self, start: float, stop: float, step: float) -> None:
-        self._spin_start.setValue(float(start))
-        self._spin_stop.setValue(float(stop))
-        self._spin_step.setValue(float(step))
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _axis_values_and_unit(self, axis: str) -> tuple[np.ndarray, str]:
+        if axis in {"azimuth", "elevation"}:
+            return _angle_axis_degrees(self._reference, axis), "deg"
+        unit = _canonical_frequency_unit(
+            (self._reference.units or {}).get("frequency", "GHz")
+        )
+        return np.asarray(self._reference.frequencies, dtype=float), unit
+
+    def _load_axis_defaults(self, *_args) -> None:
+        axis = str(self._axis.currentData())
+        values, unit = self._axis_values_and_unit(axis)
+        step = float(np.median(np.diff(values))) if values.size > 1 else 1.0
+        step = abs(step) if np.isfinite(step) and step != 0.0 else 1.0
+        for label, stem in (
+            (self._label_start, "Start"),
+            (self._label_stop, "Stop"),
+            (self._label_step, "Step"),
+        ):
+            label.setText(f"{stem} ({unit}):")
+        for spin in (self._spin_start, self._spin_stop, self._spin_step):
+            spin.blockSignals(True)
+        self._spin_start.setValue(float(np.min(values)))
+        self._spin_stop.setValue(float(np.max(values)))
+        self._spin_step.setValue(step)
+        for spin in (self._spin_start, self._spin_stop, self._spin_step):
+            spin.blockSignals(False)
+        self._update_summary()
+
+    def _update_summary(self, *_args) -> None:
+        start, stop, step = self.get_values()
+        if step <= 0.0 or stop < start:
+            self._summary.setText("Enter an increasing finite range and positive step.")
+            return
+        count = int(np.floor((stop - start) / step + 1.0e-9)) + 1
+        resolved = start + max(0, count - 1) * step
+        self._summary.setText(
+            f"Resolved grid: {count:,} samples; final coordinate {resolved:.9g}. "
+            "The stop value is not exceeded."
+        )
 
     def get_values(self) -> tuple[float, float, float]:
         return (
@@ -354,6 +671,207 @@ class InterpolateDialog(QDialog):
             float(self._spin_stop.value()),
             float(self._spin_step.value()),
         )
+
+    def get_params(self) -> dict[str, object]:
+        start, stop, step = self.get_values()
+        return {
+            "axis": str(self._axis.currentData()),
+            "start": start,
+            "stop": stop,
+            "step": step,
+            "unit": self._axis_values_and_unit(str(self._axis.currentData()))[1],
+        }
+
+
+# Compatibility alias for extensions that imported the former dialog class.
+InterpolateDialog = RegridDialog
+
+
+class StitchDialog(QDialog):
+    """Choose an explicit overlap policy for a union-grid stitch."""
+
+    def __init__(self, operand_names, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Stitch Datasets")
+        self.setMinimumWidth(560)
+        layout = QVBoxLayout(self)
+        operands = QLabel("Operand order: " + " → ".join(map(str, operand_names)))
+        operands.setWordWrap(True)
+        layout.addWidget(operands)
+        layout.addWidget(QLabel("When finite samples share the same grid cell:"))
+
+        self._policy = QComboBox()
+        self._policy.addItem("Priority: first operand wins", "priority-first")
+        self._policy.addItem("Priority: last operand wins", "priority-last")
+        self._policy.addItem(
+            "Average linear power (overlap phase removed)", "power-mean"
+        )
+        self._policy.addItem("Average coherent complex field", "coherent-mean")
+        layout.addWidget(self._policy)
+
+        self._policy_help = QLabel()
+        self._policy_help.setWordWrap(True)
+        self._policy_help.setStyleSheet("color: gray;")
+        layout.addWidget(self._policy_help)
+        self._policy.currentIndexChanged.connect(self._update_help)
+        self._update_help()
+
+        tolerance_row = QHBoxLayout()
+        tolerance_row.addWidget(QLabel("Native-axis matching tolerance:"))
+        self._tolerance = QDoubleSpinBox()
+        self._tolerance.setDecimals(12)
+        self._tolerance.setRange(0.0, 1.0)
+        self._tolerance.setValue(1.0e-6)
+        self._tolerance.setSingleStep(1.0e-6)
+        tolerance_row.addWidget(self._tolerance)
+        tolerance_row.addStretch(1)
+        layout.addLayout(tolerance_row)
+
+        tolerance_help = QLabel(
+            "One unitless number is applied independently to azimuth, elevation, "
+            "and frequency in their declared native axis units. Selected datasets "
+            "must therefore use the same units (for example, all degrees and GHz)."
+        )
+        tolerance_help.setWordWrap(True)
+        tolerance_help.setStyleSheet("color: gray;")
+        layout.addWidget(tolerance_help)
+        self._tolerance_help = tolerance_help
+
+        preview = QLabel(
+            "GRIM computes the stitched result and overlap report in the background, "
+            "then shows the resolved/equal/conflicting counts before adding it."
+        )
+        preview.setWordWrap(True)
+        layout.addWidget(preview)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_help(self, *_args) -> None:
+        policy = str(self._policy.currentData())
+        descriptions = {
+            "priority-first": (
+                "Conflicting overlaps use the first selected operand. Missing cells "
+                "are still filled by later operands."
+            ),
+            "priority-last": (
+                "Conflicting overlaps use the last selected operand. Selection order "
+                "is therefore physically significant."
+            ),
+            "power-mean": (
+                "Repeated measurements are averaged in linear power. Phase remains "
+                "available in single-source cells and is marked unknown wherever "
+                "multiple contributors were averaged."
+            ),
+            "coherent-mean": (
+                "Complex fields are averaged. Axes and all declared phase, time, and "
+                "polarization conventions must agree."
+            ),
+        }
+        self._policy_help.setText(descriptions[policy])
+
+    def get_params(self) -> dict[str, object]:
+        return {
+            "policy": str(self._policy.currentData()),
+            "tol": float(self._tolerance.value()),
+        }
+
+
+class DatasetAuditDialog(QDialog):
+    """Scrollable, copyable presentation of one or more audit reports."""
+
+    def __init__(self, reports, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Dataset Audit")
+        self.resize(760, 600)
+        layout = QVBoxLayout(self)
+        summary = QLabel(
+            "Read-only audit: no samples or metadata were changed. FAIL indicates an "
+            "invalid dataset; WARN identifies a condition worth reviewing."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        text.setPlainText(self._format_reports(reports))
+        layout.addWidget(text, 1)
+        self.report_text = text
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _format_reports(reports) -> str:
+        status_labels = {
+            "ok": "PASS",
+            "pass": "PASS",
+            "warning": "WARN",
+            "warn": "WARN",
+            "error": "FAIL",
+            "fail": "FAIL",
+        }
+
+        def render_value(value) -> str:
+            if isinstance(value, float):
+                return f"{value:.9g}"
+            if isinstance(value, bool):
+                return "yes" if value else "no"
+            if value is None:
+                return "not available"
+            return str(value)
+
+        def append_mapping(lines, mapping, indent: int) -> None:
+            prefix = " " * indent
+            for key in sorted(mapping):
+                value = mapping[key]
+                label = str(key).replace("_", " ")
+                if isinstance(value, dict):
+                    lines.append(f"{prefix}{label}:")
+                    append_mapping(lines, value, indent + 2)
+                else:
+                    lines.append(f"{prefix}{label}: {render_value(value)}")
+
+        blocks: list[str] = []
+        for name, report in reports:
+            raw_status = str(report.get("status", "unknown")).strip().lower()
+            status = status_labels.get(raw_status, "WARN")
+            lines = [f"{name}", f"Status: {status}"]
+            for key, heading in (
+                ("errors", "Errors"),
+                ("warnings", "Warnings"),
+                ("info", "Information"),
+            ):
+                values = report.get(key) or []
+                if values:
+                    lines.append(f"{heading}:")
+                    for value in values:
+                        if not isinstance(value, dict):
+                            lines.append(f"  - {value}")
+                            continue
+                        code = str(value.get("code", "issue")).replace("_", " ")
+                        message = str(value.get("message", ""))
+                        details = {
+                            detail_key: detail_value
+                            for detail_key, detail_value in value.items()
+                            if detail_key not in {"code", "message"}
+                        }
+                        suffix = ""
+                        if details:
+                            suffix = "; " + ", ".join(
+                                f"{str(detail_key).replace('_', ' ')}="
+                                f"{render_value(detail_value)}"
+                                for detail_key, detail_value in sorted(details.items())
+                            )
+                        lines.append(f"  - [{code}] {message}{suffix}")
+            metrics = report.get("metrics") or {}
+            if metrics:
+                lines.append("Metrics:")
+                append_mapping(lines, metrics, 2)
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
 
 
 class ShiftDialog(QDialog):
@@ -599,16 +1117,25 @@ class RoundDialog(QDialog):
 
 
 class WrapDialog(QDialog):
-    """Pick the azimuth wrap range: [0, 360) or [-180, 180)."""
+    """Wrap the azimuth coordinate, stored phase, or both."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Wrap Azimuth")
+        self.setWindowTitle("Wrap")
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Wrap azimuth axis into:"))
+        layout.addWidget(QLabel("Choose what to wrap:"))
 
-        self._rb_0_360 = QRadioButton("0° to 360°")
-        self._rb_pm180 = QRadioButton("-180° to 180°")
+        self._wrap_azimuth = QCheckBox("Azimuth axis")
+        self._wrap_phase = QCheckBox("Phase values")
+        self._wrap_azimuth.setChecked(True)
+        self._wrap_phase.setChecked(False)
+        layout.addWidget(self._wrap_azimuth)
+        layout.addWidget(self._wrap_phase)
+
+        layout.addWidget(QLabel("Target interval:"))
+
+        self._rb_0_360 = QRadioButton("[0°, 360°)")
+        self._rb_pm180 = QRadioButton("[-180°, 180°)")
         self._rb_0_360.setChecked(True)
         layout.addWidget(self._rb_0_360)
         layout.addWidget(self._rb_pm180)
@@ -624,6 +1151,13 @@ class WrapDialog(QDialog):
 
     def get_mode(self) -> str:
         return "0_360" if self._rb_0_360.isChecked() else "-180_180"
+
+    def get_params(self) -> dict[str, object]:
+        return {
+            "azimuth": self._wrap_azimuth.isChecked(),
+            "phase": self._wrap_phase.isChecked(),
+            "mode": self.get_mode(),
+        }
 
 
 class MedianizeDialog(QDialog):
@@ -900,13 +1434,14 @@ class ExportCsvDialog(QDialog):
         layout.addLayout(grid)
 
         self._chk_phase = QCheckBox("Include phase column (degrees)")
-        self._chk_phase.setChecked(False)
+        self._chk_phase.setChecked(True)
         layout.addWidget(self._chk_phase)
 
         layout.addWidget(QLabel(
-            "Columns: azimuth, elevation, frequency, polarization, [magnitude], [phase].\n"
+            "Writes versioned GRIM flat RCS CSV with explicit axis units, physical "
+            "quantity, coordinate convention, and coherent metadata.\n"
             "For dBke export, frequency-dependent conversion uses the dataset frequency axis.\n"
-            "One row per sample — all combinations of selected axes."
+            "One row per sample — all combinations of dataset axes."
         ))
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -964,6 +1499,28 @@ class StatisticsDialog(QDialog):
         axes_row.addStretch(1)
         layout.addWidget(axes_group)
 
+        domain_note = QLabel(
+            "Statistics are computed on linear power, not on displayed dB values. "
+            "The reduced result has undefined coherent phase."
+        )
+        domain_note.setWordWrap(True)
+        domain_note.setToolTip(
+            "For example, converting the mean linear power to dB is generally not "
+            "the same as averaging sample values after converting each one to dB."
+        )
+        layout.addWidget(domain_note)
+
+        self.chk_broadcast = QCheckBox(
+            "Repeat the reduced value across the original grid (larger file)"
+        )
+        self.chk_broadcast.setChecked(False)
+        self.chk_broadcast.setToolTip(
+            "Normally a reduction produces singleton axes and a compact dataset. "
+            "Enable this only when a downstream workflow requires the statistic "
+            "to be repeated at every original coordinate."
+        )
+        layout.addWidget(self.chk_broadcast)
+
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
@@ -973,8 +1530,8 @@ class StatisticsDialog(QDialog):
             lambda t: self.spin_pct.setEnabled(t == "percentile")
         )
 
-    def get_params(self) -> tuple[str, float, list[str]]:
-        """Return (statistic, percentile, axes)."""
+    def get_params(self) -> tuple[str, float, list[str], bool]:
+        """Return (statistic, percentile, axes, broadcast_reduced)."""
         statistic = self.combo_stat.currentText()
         percentile = self.spin_pct.value()
         axes = [
@@ -987,7 +1544,7 @@ class StatisticsDialog(QDialog):
             )
             if chk.isChecked()
         ]
-        return statistic, percentile, axes
+        return statistic, percentile, axes, self.chk_broadcast.isChecked()
 
 
 
@@ -1006,80 +1563,11 @@ def _dataset_with_rcs(
         rcs,
         rcs_power=rcs_power,
         rcs_domain=(dataset.rcs_domain if rcs_domain is None else rcs_domain),
-        units=dataset.units,
-        extra={
-            "phase_reference": dataset.extra["phase_reference"]
-            for _ in (0,)
-            if "phase_reference" in dataset.extra
-        },
+        source_path=dataset.source_path,
+        history=dataset.history,
+        units=dict(dataset.units or {}),
+        extra=_derived_response_extra(dataset),
     )
-
-
-_FREQUENCY_UNIT_FACTORS = {
-    "Hz": 1.0,
-    "kHz": 1.0e3,
-    "MHz": 1.0e6,
-    "GHz": 1.0e9,
-}
-
-
-def _canonical_frequency_unit(value: object, *, default: str = "GHz") -> str:
-    """Return a CSV-safe frequency unit understood by :class:`RcsGrid`."""
-
-    text = str(value or "").strip()
-    if not text:
-        return default
-    aliases = {
-        "hz": "Hz",
-        "khz": "kHz",
-        "mhz": "MHz",
-        "ghz": "GHz",
-    }
-    canonical = aliases.get(text.lower())
-    if canonical is None:
-        raise ValueError(
-            f"unsupported frequency unit {value!r}; use Hz, kHz, MHz, or GHz"
-        )
-    return canonical
-
-
-def _canonical_rcs_log_unit(value: object, *, default: str = "dBsm") -> str:
-    """Return the preferred logarithmic RCS unit for CSV round trips."""
-
-    text = str(value or "").strip().lower()
-    if not text:
-        return default
-    if text == "dbsm":
-        return "dBsm"
-    if text == "dbke":
-        return "dBke"
-    if text == "db":
-        return "dB"
-    raise ValueError(
-        f"unsupported RCS log unit {value!r}; use dBsm, dBke, or dB"
-    )
-
-
-def _infer_legacy_frequency_unit(values) -> str:
-    """Infer units for older CSVs that predate the frequency_unit column."""
-
-    finite = np.asarray(values, dtype=float)
-    finite = finite[np.isfinite(finite)]
-    typical = float(np.nanmedian(np.abs(finite))) if finite.size else 0.0
-    if typical >= 1.0e6:
-        return "Hz"
-    if typical >= 1.0e3:
-        return "MHz"
-    return "GHz"
-
-
-def _csv_number(value: object, format_spec: str) -> str:
-    """Format a finite number, leaving missing data blank for spreadsheets."""
-
-    number = float(value)
-    if not np.isfinite(number):
-        return ""
-    return format(number, format_spec)
 
 
 def _write_dataset_csv(
@@ -1088,453 +1576,139 @@ def _write_dataset_csv(
     *,
     scale: str = "linear",
     sep: str = ",",
-    include_phase: bool = False,
+    include_phase: bool = True,
 ) -> None:
-    """Write a flat az×el×freq×pol CSV from a dataset.
+    """Atomically write the authoritative versioned flat-RCS interchange."""
 
-    Magnitude is authoritative linear power and does not require phase. This
-    matters for statistics, incoherent arithmetic, and magnitude-only imports,
-    whose phase is intentionally unknown.
-    """
+    output_path = os.path.abspath(os.fspath(path))
+    directory = os.path.dirname(output_path) or os.curdir
+    fd, stage_path = tempfile.mkstemp(
+        prefix=".grim-csv-", suffix=".staging", dir=directory
+    )
+    os.close(fd)
+    try:
+        write_flat_csv(
+            dataset,
+            stage_path,
+            scale=scale,
+            delimiter=sep,
+            include_phase=bool(include_phase),
+        )
+        os.replace(stage_path, output_path)
+    finally:
+        if os.path.lexists(stage_path):
+            try:
+                os.unlink(stage_path)
+            except OSError:
+                pass
 
-    scale = str(scale).strip().lower()
-    if scale not in {"linear", "db", "dbsm", "dbke", "both"}:
-        raise ValueError(
-            "CSV magnitude scale must be linear, db, dbsm, dbke, or both"
-        )
-    quantity = dataset.linear_quantity()
-    is_ratio = quantity == "power_ratio"
-    if is_ratio and scale not in {"linear", "db"}:
-        raise ValueError("dimensionless power ratios can be exported only as Linear or dB")
-    if not is_ratio and scale == "db":
-        raise ValueError("dimensionless dB export is only valid for power-ratio datasets")
-    if quantity == "sigma_3d" and scale == "dbke":
-        raise ValueError("sigma_3d datasets cannot be labeled dBke; convert to sigma_2d first")
-    if quantity == "sigma_2d" and scale == "dbsm":
-        raise ValueError("sigma_2d datasets cannot be labeled dBsm; convert to sigma_3d first")
-    if quantity not in {"sigma_3d", "sigma_2d", "power_ratio"} and scale != "linear":
-        raise ValueError(
-            f"dataset quantity {quantity!r} has no supported logarithmic CSV unit"
-        )
-    az = dataset.azimuths
-    el = dataset.elevations
-    fr = dataset.frequencies
-    pol = dataset.polarizations
-    power = dataset.rcs_power
-    phase = dataset.rcs_phase
-    frequency_unit = _canonical_frequency_unit(
-        (dataset.units or {}).get("frequency", "GHz")
-    )
-    rcs_log_unit = _canonical_rcs_log_unit(
-        (dataset.units or {}).get("rcs_log_unit", dataset.default_log_unit())
-    )
-    expected_log_unit = {
-        "sigma_3d": "dBsm",
-        "sigma_2d": "dBke",
-        "power_ratio": "dB",
-    }.get(quantity)
-    if expected_log_unit is not None and rcs_log_unit != expected_log_unit:
-        raise ValueError(
-            f"dataset metadata is inconsistent: {quantity} requires "
-            f"rcs_log_unit={expected_log_unit}, not {rcs_log_unit}"
-        )
-    angular_coordinate_system = dataset.angular_coordinate_system()
-    great_circle_convention = (
-        dataset.great_circle_coordinate_convention()
-        if angular_coordinate_system == "great_circle" else ""
-    )
-    angular_roll_deg, angular_tilt_deg = dataset.angular_frame_orientation_deg()
-    header = [
-        "azimuth",
-        "elevation",
-        "frequency",
-        "frequency_unit",
-        "polarization",
-        "rcs_log_unit",
-        "angular_coordinate_system",
-        "great_circle_coordinate_convention",
-        "angular_roll_deg",
-        "angular_tilt_deg",
-    ]
-    if scale in ("linear", "both"):
-        header.append("magnitude_linear")
-    if scale == "db":
-        header.append("magnitude_db")
-    write_dbsm = scale == "dbsm" or (scale == "both" and quantity == "sigma_3d")
-    write_dbke = scale == "dbke" or (scale == "both" and quantity == "sigma_2d")
-    if write_dbsm:
-        header.append("magnitude_dbsm")
-    if write_dbke:
-        header.append("magnitude_dbke")
-    if include_phase:
-        header.append("phase_deg")
 
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f, delimiter=sep)
-        writer.writerow(header)
-        for ai, az_v in enumerate(az):
-            for ei, el_v in enumerate(el):
-                for fi, fr_v in enumerate(fr):
-                    for pi, pol_v in enumerate(pol):
-                        mag = float(power[ai, ei, fi, pi])
-                        phase_rad = float(phase[ai, ei, fi, pi])
-                        row = [
-                            str(az_v),
-                            str(el_v),
-                            str(fr_v),
-                            frequency_unit,
-                            str(pol_v),
-                            rcs_log_unit,
-                            angular_coordinate_system,
-                            great_circle_convention,
-                            format(angular_roll_deg, ".10g"),
-                            format(angular_tilt_deg, ".10g"),
-                        ]
-                        if scale in ("linear", "both"):
-                            row.append(_csv_number(mag, ".10g"))
-                        if scale == "db":
-                            row.append(_csv_number(dataset.linear_to_dbsm(mag), ".6f"))
-                        if write_dbsm:
-                            row.append(_csv_number(
-                                dataset.linear_to_dbsm(mag), ".6f"
-                            ))
-                        if write_dbke:
-                            row.append(_csv_number(
-                                dataset.linear_to_dbke(mag, fr_v), ".6f"
-                            ))
-                        if include_phase:
-                            phase_deg = (
-                                np.degrees(np.angle(np.exp(1j * phase_rad)))
-                                if np.isfinite(phase_rad)
-                                else np.nan
-                            )
-                            row.append(_csv_number(phase_deg, ".6f"))
-                        writer.writerow(row)
+class _CsvBatchRollbackError(RuntimeError):
+    """CSV publication failed and at least one prior target was not restored."""
+
+
+def _stage_and_publish_csv_batch(
+    entries: list[tuple["RcsGrid", str]],
+    *,
+    scale: str,
+    include_phase: bool,
+) -> list[str]:
+    """Write every CSV first, then transactionally publish the whole batch."""
+
+    targets = [os.path.abspath(os.fspath(path)) for _dataset, path in entries]
+    duplicates = _duplicate_target_groups(targets)
+    if duplicates:
+        names = ", ".join(os.path.basename(group[0]) for group in duplicates)
+        raise ValueError(f"multiple datasets resolve to the same CSV output: {names}")
+
+    staged: list[tuple[str, str]] = []
+    backups: dict[str, str | None] = {}
+    publication_complete = False
+    try:
+        for (dataset, _raw_target), target in zip(entries, targets):
+            directory = os.path.dirname(target) or os.curdir
+            if os.path.lexists(target) and not os.path.isfile(target):
+                raise OSError(f"CSV output target is not a regular file: {target}")
+            fd, stage_path = tempfile.mkstemp(
+                prefix=".grim-csv-stage-", suffix=".csv", dir=directory
+            )
+            os.close(fd)
+            try:
+                write_flat_csv(
+                    dataset,
+                    stage_path,
+                    scale=scale,
+                    delimiter=",",
+                    include_phase=include_phase,
+                )
+            except Exception:
+                try:
+                    os.unlink(stage_path)
+                except OSError:
+                    pass
+                raise
+            staged.append((stage_path, target))
+
+        for stage_path, target in staged:
+            backup_path: str | None = None
+            if os.path.lexists(target):
+                directory = os.path.dirname(target) or os.curdir
+                fd, backup_path = tempfile.mkstemp(
+                    prefix=".grim-csv-backup-", suffix=".backup", dir=directory
+                )
+                os.close(fd)
+                try:
+                    os.replace(target, backup_path)
+                except BaseException:
+                    try:
+                        os.unlink(backup_path)
+                    except OSError:
+                        pass
+                    raise
+            backups[target] = backup_path
+            os.replace(stage_path, target)
+        publication_complete = True
+    except Exception as original_error:
+        rollback_errors: list[str] = []
+        for target in reversed(list(backups)):
+            backup_path = backups[target]
+            try:
+                if backup_path and os.path.lexists(backup_path):
+                    os.replace(backup_path, target)
+                    backups[target] = None
+                elif backup_path is None and os.path.lexists(target):
+                    os.unlink(target)
+            except OSError as exc:
+                rollback_errors.append(f"{target}: {exc}")
+        if rollback_errors:
+            raise _CsvBatchRollbackError(
+                "CSV publication failed and rollback could not restore every "
+                "prior target. Retained backup file(s): "
+                + "; ".join(rollback_errors)
+            ) from original_error
+        raise
+    finally:
+        for stage_path, _target in staged:
+            if os.path.lexists(stage_path):
+                try:
+                    os.unlink(stage_path)
+                except OSError:
+                    pass
+
+    if publication_complete:
+        for backup_path in backups.values():
+            if backup_path and os.path.lexists(backup_path):
+                try:
+                    os.unlink(backup_path)
+                except OSError:
+                    pass
+    return targets
 
 
 def _load_dataset_csv(path: str) -> "RcsGrid":
-    """Load a dataset from a delimited text file exported by _write_dataset_csv()."""
-    with open(path, "r", newline="", encoding="utf-8-sig") as f:
-        sample = f.read(4096)
-        f.seek(0)
-        delimiter = "\t" if sample.count("\t") > sample.count(",") else ","
-        reader = csv.DictReader(f, delimiter=delimiter)
-        if not reader.fieldnames:
-            raise ValueError("missing CSV header row")
+    """Compatibility name for the one authoritative flat-CSV parser."""
 
-        field_map: dict[str, str] = {}
-        for raw_name in reader.fieldnames:
-            if raw_name is None:
-                continue
-            key = str(raw_name).strip().lower()
-            if key and key not in field_map:
-                field_map[key] = raw_name
-
-        required = ["azimuth", "elevation", "frequency", "polarization"]
-        missing = [name for name in required if name not in field_map]
-        if missing:
-            raise ValueError(f"missing required column(s): {', '.join(missing)}")
-
-        has_linear = "magnitude_linear" in field_map
-        has_db = "magnitude_db" in field_map
-        has_dbsm = "magnitude_dbsm" in field_map
-        has_dbke = "magnitude_dbke" in field_map
-        if not has_linear and not has_db and not has_dbsm and not has_dbke:
-            raise ValueError("missing magnitude column (need magnitude_linear, magnitude_db, magnitude_dbsm, or magnitude_dbke)")
-        has_phase = "phase_deg" in field_map
-        has_frequency_unit = "frequency_unit" in field_map
-        has_rcs_log_unit = "rcs_log_unit" in field_map
-        has_angular_coordinates = "angular_coordinate_system" in field_map
-        has_gc_convention = "great_circle_coordinate_convention" in field_map
-        has_angular_roll = "angular_roll_deg" in field_map
-        has_angular_tilt = "angular_tilt_deg" in field_map
-
-        def _cell(row: dict[str, str], key: str) -> str:
-            source = field_map[key]
-            raw = row.get(source, "")
-            return str(raw).strip() if raw is not None else ""
-
-        records: list[
-            tuple[float, float, float, str, float | None, float | None, float]
-        ] = []
-        frequency_units_seen: set[str] = set()
-        rcs_log_units_seen: set[str] = set()
-        angular_coordinates_seen: set[str] = set()
-        gc_conventions_seen: set[str] = set()
-        angular_rolls_seen: set[float] = set()
-        angular_tilts_seen: set[float] = set()
-        pol_order: list[str] = []
-        for line_no, row in enumerate(reader, start=2):
-            az_text = _cell(row, "azimuth")
-            el_text = _cell(row, "elevation")
-            fr_text = _cell(row, "frequency")
-            pol_text = _cell(row, "polarization")
-            if not (az_text or el_text or fr_text or pol_text):
-                continue
-            if not pol_text:
-                raise ValueError(f"line {line_no}: polarization is blank")
-            try:
-                az = float(az_text)
-                el = float(el_text)
-                fr = float(fr_text)
-            except ValueError as exc:
-                raise ValueError(f"line {line_no}: invalid axis value ({exc})") from exc
-            if not all(np.isfinite(value) for value in (az, el, fr)):
-                raise ValueError(f"line {line_no}: axis values must be finite")
-            if has_frequency_unit:
-                unit_text = _cell(row, "frequency_unit")
-                if not unit_text:
-                    raise ValueError(
-                        f"line {line_no}: frequency_unit is blank"
-                    )
-                try:
-                    frequency_units_seen.add(
-                        _canonical_frequency_unit(unit_text)
-                    )
-                except ValueError as exc:
-                    raise ValueError(f"line {line_no}: {exc}") from exc
-            if has_rcs_log_unit:
-                log_unit_text = _cell(row, "rcs_log_unit")
-                if not log_unit_text:
-                    raise ValueError(
-                        f"line {line_no}: rcs_log_unit is blank"
-                    )
-                try:
-                    rcs_log_units_seen.add(
-                        _canonical_rcs_log_unit(log_unit_text)
-                    )
-                except ValueError as exc:
-                    raise ValueError(f"line {line_no}: {exc}") from exc
-            if has_angular_coordinates:
-                angular_text = _cell(row, "angular_coordinate_system")
-                if not angular_text:
-                    raise ValueError(
-                        f"line {line_no}: angular_coordinate_system is blank"
-                    )
-                angular_coordinates_seen.add(
-                    canonical_angular_coordinate_system(angular_text)
-                )
-                if has_gc_convention:
-                    convention_text = _cell(
-                        row, "great_circle_coordinate_convention"
-                    )
-                    if angular_text and canonical_angular_coordinate_system(
-                        angular_text
-                    ) == "great_circle":
-                        gc_conventions_seen.add(
-                            convention_text or "legacy_ptm_unspecified"
-                        )
-            for present, key, target in (
-                (has_angular_roll, "angular_roll_deg", angular_rolls_seen),
-                (has_angular_tilt, "angular_tilt_deg", angular_tilts_seen),
-            ):
-                if not present:
-                    continue
-                value_text = _cell(row, key)
-                if not value_text:
-                    raise ValueError(f"line {line_no}: {key} is blank")
-                try:
-                    value = float(value_text)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"line {line_no}: invalid {key} ({exc})"
-                    ) from exc
-                if not np.isfinite(value):
-                    raise ValueError(f"line {line_no}: {key} must be finite")
-                target.add(value)
-
-            lin_value: float | None = None
-            dbke_value: float | None = None
-            if has_linear:
-                linear_text = _cell(row, "magnitude_linear")
-                if linear_text:
-                    try:
-                        lin_value = float(linear_text)
-                    except ValueError as exc:
-                        raise ValueError(f"line {line_no}: invalid magnitude_linear ({exc})") from exc
-                    if not np.isfinite(lin_value):
-                        lin_value = None
-                    elif lin_value < 0.0:
-                        raise ValueError(
-                            f"line {line_no}: magnitude_linear must be >= 0"
-                        )
-            if lin_value is None and has_dbsm:
-                db_text = _cell(row, "magnitude_dbsm")
-                if db_text:
-                    try:
-                        db_value = float(db_text)
-                    except ValueError as exc:
-                        raise ValueError(f"line {line_no}: invalid magnitude_dbsm ({exc})") from exc
-                    if np.isfinite(db_value):
-                        lin_value = float(10.0 ** (db_value / 10.0))
-            if lin_value is None and has_db:
-                db_text = _cell(row, "magnitude_db")
-                if db_text:
-                    try:
-                        db_value = float(db_text)
-                    except ValueError as exc:
-                        raise ValueError(f"line {line_no}: invalid magnitude_db ({exc})") from exc
-                    if np.isfinite(db_value):
-                        lin_value = float(10.0 ** (db_value / 10.0))
-            if lin_value is None and has_dbke:
-                db_text = _cell(row, "magnitude_dbke")
-                if db_text:
-                    try:
-                        dbke_value = float(db_text)
-                    except ValueError as exc:
-                        raise ValueError(f"line {line_no}: invalid magnitude_dbke ({exc})") from exc
-                    if not np.isfinite(dbke_value):
-                        dbke_value = None
-
-            phase_rad = float("nan")
-            if has_phase:
-                phase_text = _cell(row, "phase_deg")
-                if phase_text:
-                    try:
-                        phase_rad = float(np.deg2rad(float(phase_text)))
-                    except ValueError as exc:
-                        raise ValueError(f"line {line_no}: invalid phase_deg ({exc})") from exc
-
-            if pol_text not in pol_order:
-                pol_order.append(pol_text)
-            records.append((
-                az, el, fr, pol_text, lin_value, dbke_value, phase_rad, line_no
-            ))
-
-    if not records:
-        raise ValueError("CSV contains no data rows")
-    if len(frequency_units_seen) > 1:
-        raise ValueError(
-            "CSV contains multiple frequency units; one RCS grid requires "
-            "a single frequency unit"
-        )
-    frequency_unit = (
-        next(iter(frequency_units_seen))
-        if frequency_units_seen
-        else _infer_legacy_frequency_unit([record[2] for record in records])
-    )
-    if len(rcs_log_units_seen) > 1:
-        raise ValueError(
-            "CSV contains multiple RCS log units; one RCS grid requires "
-            "a single preferred log unit"
-        )
-    rcs_log_unit = (
-        next(iter(rcs_log_units_seen))
-        if rcs_log_units_seen
-        else "dB" if has_db and not has_dbsm and not has_dbke
-        else "dBke" if has_dbke and not has_dbsm else "dBsm"
-    )
-    if len(angular_coordinates_seen) > 1:
-        raise ValueError(
-            "CSV contains multiple angular coordinate systems; one RCS grid "
-            "requires a single convention"
-        )
-    angular_coordinate_system = (
-        next(iter(angular_coordinates_seen))
-        if angular_coordinates_seen else "conic"
-    )
-    if len(gc_conventions_seen) > 1:
-        raise ValueError(
-            "CSV contains multiple great-circle coordinate conventions"
-        )
-    gc_convention = (
-        next(iter(gc_conventions_seen))
-        if gc_conventions_seen else "legacy_ptm_unspecified"
-    )
-    if len(angular_rolls_seen) > 1 or len(angular_tilts_seen) > 1:
-        raise ValueError(
-            "CSV contains multiple angular frame orientations; one RCS grid "
-            "requires one roll/tilt pair"
-        )
-    angular_roll_deg = next(iter(angular_rolls_seen)) if angular_rolls_seen else 0.0
-    angular_tilt_deg = next(iter(angular_tilts_seen)) if angular_tilts_seen else 0.0
-
-    az_values = np.asarray(sorted({r[0] for r in records}), dtype=float)
-    el_values = np.asarray(sorted({r[1] for r in records}), dtype=float)
-    fr_values = np.asarray(sorted({r[2] for r in records}), dtype=float)
-    pol_values = np.asarray(pol_order, dtype=object)
-
-    az_index = {float(v): i for i, v in enumerate(az_values.tolist())}
-    el_index = {float(v): i for i, v in enumerate(el_values.tolist())}
-    fr_index = {float(v): i for i, v in enumerate(fr_values.tolist())}
-    pol_index = {str(v): i for i, v in enumerate(pol_values.tolist())}
-
-    shape = (len(az_values), len(el_values), len(fr_values), len(pol_values))
-    power = np.full(shape, np.nan, dtype=np.float32)
-    phase = np.full(shape, np.nan, dtype=np.float32)
-
-    seen_samples: dict[tuple[int, int, int, int], tuple[float, float, int]] = {}
-    for az, el, fr, pol, lin_value, dbke_value, phase_rad, line_no in records:
-        if lin_value is None and dbke_value is not None:
-            freq_hz = (
-                float(fr) * _FREQUENCY_UNIT_FACTORS[frequency_unit]
-            )
-            if np.isfinite(freq_hz) and freq_hz > 0.0:
-                lin_value = float(
-                    (C0 / (2.0 * np.pi * freq_hz))
-                    * (10.0 ** (dbke_value / 10.0))
-                )
-        if lin_value is None:
-            lin_value = float("nan")
-        ai = az_index[float(az)]
-        ei = el_index[float(el)]
-        fi = fr_index[float(fr)]
-        pi = pol_index[str(pol)]
-        idx = (ai, ei, fi, pi)
-        if idx in seen_samples:
-            prior_power, prior_phase, prior_line = seen_samples[idx]
-            same_power = bool(np.isclose(
-                lin_value, prior_power, rtol=1e-12, atol=0.0, equal_nan=True
-            ))
-            zero_power = same_power and lin_value == 0.0
-            same_phase = zero_power or (
-                (np.isnan(phase_rad) and np.isnan(prior_phase))
-                or (
-                    np.isfinite(phase_rad)
-                    and np.isfinite(prior_phase)
-                    and abs(np.angle(np.exp(1j * (phase_rad - prior_phase)))) <= 1e-12
-                )
-            )
-            if not (same_power and same_phase):
-                raise ValueError(
-                    f"line {line_no}: conflicting duplicate CSV sample; "
-                    f"first defined on line {prior_line}"
-                )
-            continue
-        seen_samples[idx] = (lin_value, phase_rad, line_no)
-        power[ai, ei, fi, pi] = np.float32(lin_value)
-        phase[ai, ei, fi, pi] = np.float32(phase_rad)
-
-    if not np.isfinite(power).any():
-        raise ValueError("CSV contains no finite magnitude values")
-
-    units = {
-        "azimuth": "deg",
-        "elevation": "deg",
-        "frequency": frequency_unit,
-        "rcs_log_unit": rcs_log_unit,
-        "angular_coordinate_system": angular_coordinate_system,
-        "angular_roll_deg": angular_roll_deg,
-        "angular_tilt_deg": angular_tilt_deg,
-        "rcs_linear_quantity": (
-            "power_ratio" if rcs_log_unit == "dB"
-            else "sigma_2d" if rcs_log_unit == "dBke"
-            else "sigma_3d"
-        ),
-    }
-    if angular_coordinate_system == "great_circle":
-        units["great_circle_coordinate_convention"] = gc_convention
-    return RcsGrid(
-        az_values,
-        el_values,
-        fr_values,
-        pol_values,
-        rcs_power=power,
-        rcs_phase=phase,
-        rcs_domain="power_phase",
-        source_path=path,
-        units=units,
-    )
+    return load_flat_csv_headless(path)
 
 
 def _load_dataset_from_dropped_text(path: str) -> tuple["RcsGrid", str]:
@@ -1596,6 +1770,7 @@ def _available_memory_bytes() -> int | None:
 _LOADER_MIN_WORKING_BYTES = 64 * 1024**2
 _LOADER_UNKNOWN_MEMORY_BUDGET_BYTES = 512 * 1024**2
 _GRIM_LOAD_PEAK_FACTOR = 3.5
+_TEXT_LOADER_EXTENSIONS = (".csv", ".txt", ".cst_data", ".out", ".ss")
 
 
 def _grim_archive_uncompressed_bytes(path: str) -> int | None:
@@ -1635,11 +1810,24 @@ def _dataset_load_memory_estimate(path: str) -> tuple[int, int]:
         )
         return retained, peak
 
-    # Text/binary importers materialize parser records and final NumPy arrays.
-    # The historical 4x allowance is retained for formats without inspectable
-    # archive metadata, with a minimum workspace for parser/runtime overhead.
-    retained = stored_bytes
-    peak = max(_LOADER_MIN_WORKING_BYTES, 4 * stored_bytes)
+    lower = str(path).casefold()
+    # Delimited readers create Python strings/dicts, coordinate-key maps, dense
+    # output arrays, and duplicate-validation state concurrently. Real SENTRi
+    # imports have measured around 77x their file size at peak, so the old 4x
+    # rule was unsafe by more than an order of magnitude.
+    if lower.endswith((".csv", ".txt")):
+        retained = max(stored_bytes, 16 * stored_bytes)
+        peak = max(_LOADER_MIN_WORKING_BYTES, 96 * stored_bytes)
+        return retained, peak
+    if lower.endswith((".cst_data", ".out", ".ss")):
+        retained = max(stored_bytes, 8 * stored_bytes)
+        peak = max(_LOADER_MIN_WORKING_BYTES, 40 * stored_bytes)
+        return retained, peak
+
+    # Binary single-cut formats still materialize complex, power, and phase
+    # arrays but avoid the large per-cell Python parser overhead.
+    retained = max(stored_bytes, 2 * stored_bytes)
+    peak = max(_LOADER_MIN_WORKING_BYTES, 6 * stored_bytes)
     return retained, peak
 
 
@@ -1696,8 +1884,12 @@ def _recommended_loader_workers(tasks) -> int:
         raise MemoryError(
             f"This dataset batch needs an estimated {required_mib:.0f} MiB "
             f"but only {budget_mib:.0f} MiB of {source} is reserved for "
-            "loading. Load fewer .grim files at a time."
+            "loading. Load fewer or smaller dataset files at a time."
         )
+    # Python's delimited parsers are memory-heavy and mostly GIL-bound. Running
+    # several simultaneously increases peak memory without a reliable speedup.
+    if any(path.casefold().endswith(_TEXT_LOADER_EXTENSIONS) for path in paths):
+        return 1
     return safe_workers
 
 
@@ -1785,10 +1977,10 @@ class _DatasetLoadWorker(QObject):
             self.progress.emit(done_count, total, f"Failed {file_name}")
 
         try:
+            worker_count = _recommended_loader_workers(self._tasks) if total else 1
             if total == 1:
                 _consume(_load_dataset_path_task(self._tasks[0]), 1)
             elif total > 1:
-                worker_count = _recommended_loader_workers(self._tasks)
                 with ThreadPoolExecutor(max_workers=worker_count) as pool:
                     futures = {
                         pool.submit(_load_dataset_path_task, task): task
@@ -1815,6 +2007,59 @@ class _DatasetLoadWorker(QObject):
                     "total_supported": total,
                 }
             )
+
+
+class _CsvExportWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+
+    def __init__(
+        self,
+        entries: list[tuple[RcsGrid, str]],
+        *,
+        scale: str,
+        include_phase: bool,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._entries = list(entries)
+        self._scale = str(scale)
+        self._include_phase = bool(include_phase)
+
+    def run(self) -> None:
+        total = len(self._entries)
+        try:
+            self.progress.emit(0, total, "Writing staged CSV files")
+            paths = _stage_and_publish_csv_batch(
+                self._entries,
+                scale=self._scale,
+                include_phase=self._include_phase,
+            )
+        except Exception as exc:
+            self.finished.emit({"ok": False, "error": str(exc), "total": total})
+            return
+        self.progress.emit(total, total, "Published CSV files")
+        self.finished.emit({"ok": True, "paths": paths, "total": total})
+
+
+class _BackgroundCallableWorker(QObject):
+    """Run one pure-Python/NumPy callable away from Qt's GUI thread."""
+
+    finished = Signal(object)
+
+    def __init__(self, function, parent=None) -> None:
+        super().__init__(parent)
+        self._function = function
+
+    def run(self) -> None:
+        try:
+            result = self._function()
+        except Exception as exc:
+            self.finished.emit(
+                {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
+            )
+            return
+        self.finished.emit({"ok": True, "result": result})
 
 
 class _JoinDatasetsWorker(QObject):
@@ -1937,6 +2182,7 @@ class DatasetOpsMixin:
         self._pending_join_names: list[str] | None = None
         self._pending_join_references: list[DatasetReference] | None = None
         self._pending_range_record: dict[str, object] | None = None
+        self._pending_callable_completion = None
         self._pending_import_batches: list[tuple[tuple[str, ...], int]] = []
         self._queued_import_keys: set[str] = set()
         self._active_import_keys: set[str] = set()
@@ -1950,6 +2196,12 @@ class DatasetOpsMixin:
 
     def _try_start_background_job(self, job_name: str, worker: QObject) -> bool:
         self._ensure_background_worker_state()
+        if bool(getattr(self, "_isar_busy", False)):
+            self.status.showMessage(
+                "An ISAR reconstruction is still running. Please wait before "
+                f"starting {job_name.lower()}."
+            )
+            return False
         if self._background_job_active():
             active_name = self._background_worker_name or "Another background job"
             self.status.showMessage(f"{active_name} is still running. Please wait.")
@@ -1969,6 +2221,39 @@ class DatasetOpsMixin:
         thread.start()
         return True
 
+    def _start_background_callable(
+        self,
+        job_name: str,
+        function,
+        completion,
+    ) -> bool:
+        """Run computation off-thread and publish its result on Qt's thread."""
+
+        self._ensure_background_worker_state()
+        if self._background_job_active():
+            active_name = self._background_worker_name or "Another background job"
+            self.status.showMessage(f"{active_name} is still running. Please wait.")
+            return False
+        worker = _BackgroundCallableWorker(function)
+        worker.finished.connect(self._on_background_callable_finished)
+        self._pending_callable_completion = completion
+        if not self._try_start_background_job(job_name, worker):
+            self._pending_callable_completion = None
+            return False
+        return True
+
+    def _on_background_callable_finished(self, payload: dict[str, object]) -> None:
+        completion = self._pending_callable_completion
+        self._pending_callable_completion = None
+        if not bool(payload.get("ok", False)):
+            self.status.showMessage(
+                f"{self._background_worker_name or 'Dataset operation'} failed: "
+                + str(payload.get("error", "Unknown error"))
+            )
+            return
+        if callable(completion):
+            completion(payload.get("result"))
+
     def _on_background_thread_finished(self) -> None:
         completed_import = bool(self._active_import_keys)
         self._background_worker_thread = None
@@ -1976,15 +2261,16 @@ class DatasetOpsMixin:
         self._background_worker_name = ""
         self._active_import_keys.clear()
 
-        if self._pending_import_batches:
-            paths, ignored = self._pending_import_batches.pop(0)
-            for path in paths:
-                self._queued_import_keys.discard(_target_path_key(path))
-            self._start_dataset_import_batch(list(paths), ignored_count=ignored)
+        if self._start_next_pending_import_batch():
             return
 
         if completed_import and self._import_cycle_results:
-            details = " ".join(message for message, _failed in self._import_cycle_results)
+            cycle_messages = [
+                message for message, _failed in self._import_cycle_results
+            ]
+            details = " ".join(cycle_messages[:3])
+            if len(cycle_messages) > 3:
+                details += f" …and {len(cycle_messages) - 3} more import batches."
             prefix = (
                 "Dataset imports completed with errors."
                 if any(failed for _message, failed in self._import_cycle_results)
@@ -1995,6 +2281,34 @@ class DatasetOpsMixin:
             self.status.setToolTip(summary)
             self.status.showMessage(summary)
             self._import_cycle_results.clear()
+
+        pending_isar = getattr(self, "_isar_pending", None)
+        if pending_isar is not None and not bool(getattr(self, "_isar_busy", False)):
+            self._isar_pending = None
+            submit = getattr(self, "_isar_submit", None)
+            if callable(submit):
+                submit(pending_isar)
+
+    def _start_next_pending_import_batch(self) -> bool:
+        """Drain one queued import when both dataset and ISAR workers are idle."""
+
+        self._ensure_background_worker_state()
+        if (
+            self._background_job_active()
+            or bool(getattr(self, "_isar_busy", False))
+            or not self._pending_import_batches
+        ):
+            return False
+        paths, ignored = self._pending_import_batches.pop(0)
+        for path in paths:
+            self._queued_import_keys.discard(_target_path_key(path))
+        if self._start_dataset_import_batch(list(paths), ignored_count=ignored):
+            return True
+        # Preserve the user's request if another operation started in the
+        # narrow window between the idle check and QThread creation.
+        self._pending_import_batches.insert(0, (paths, ignored))
+        self._queued_import_keys.update(_target_path_key(path) for path in paths)
+        return False
 
     def _on_load_worker_progress(self, done_count: int, total_count: int, detail: str) -> None:
         detail_text = str(detail).strip()
@@ -2049,7 +2363,7 @@ class DatasetOpsMixin:
 
         if failed:
             msg = f"Loaded {loaded} dataset(s)." if loaded else "No datasets loaded."
-            msg += f" Failed: {', '.join(failed)}"
+            msg += f" Failed: {_compact_item_summary(failed, limit=5)}"
         elif loaded:
             msg = f"Loaded {loaded} dataset(s)."
         else:
@@ -2061,8 +2375,33 @@ class DatasetOpsMixin:
             msg += " Loaded in parallel."
         self._import_cycle_results.append((msg, bool(failed)))
         self._last_import_summary = msg
-        self.status.setToolTip(msg)
+        if failed:
+            tooltip_failures = _compact_item_summary(failed, limit=20)
+            self.status.setToolTip(
+                (f"Loaded {loaded} dataset(s)." if loaded else "No datasets loaded.")
+                + f" Failed: {tooltip_failures}"
+            )
+        else:
+            self.status.setToolTip(msg)
         self.status.showMessage(msg)
+
+    def _on_csv_export_progress(
+        self, done_count: int, total_count: int, detail: str
+    ) -> None:
+        suffix = f" ({str(detail).strip()})" if str(detail).strip() else ""
+        self.status.showMessage(
+            f"Exporting CSV... {done_count}/{total_count}{suffix}"
+        )
+
+    def _on_csv_export_finished(self, payload: dict[str, object]) -> None:
+        if not bool(payload.get("ok", False)):
+            self.status.showMessage(
+                "CSV export failed; no partial batch was kept. "
+                + str(payload.get("error", "Unknown error"))
+            )
+            return
+        paths = [str(path) for path in payload.get("paths", [])]
+        self.status.showMessage(f"Exported {len(paths)} dataset(s) to CSV.")
 
     def _on_join_worker_progress(self, done_count: int, total_count: int, _: str) -> None:
         self.status.showMessage(f"Joining datasets... {done_count}/{total_count}")
@@ -2086,7 +2425,7 @@ class DatasetOpsMixin:
         if not names:
             names = ["Dataset"]
         new_name = " | ".join(names)
-        history = f"Join (last selected wins overlap): {new_name}"
+        history = f"Join (equal/complementary overlaps merged; conflicts rejected): {new_name}"
         output_name = f"Join[{new_name}]"
         output_id = self._add_dataset_row(merged, output_name, history, file_name="")
         recorder = getattr(self, "python_recorder", None)
@@ -2098,7 +2437,10 @@ class DatasetOpsMixin:
                 kwargs={"tol": 1.0e-6},
                 comment="Join datasets on their union axes",
             )
-        self.status.showMessage(f"Join created. Overlap winner: {names[-1]}.")
+        self.status.showMessage(
+            "Join created. Equal or complementary overlaps were merged; "
+            "conflicting finite samples would have stopped the operation."
+        )
 
     def _on_range_cal_worker_progress(
         self, done_count: int, total_count: int, detail: str
@@ -2417,11 +2759,22 @@ class DatasetOpsMixin:
     def _on_dataset_selection_changed(self) -> None:
         selected = self.table.selectionModel().selectedRows()
         self._update_dataset_selection_order([idx.row() for idx in selected])
+        summary_label = getattr(self, "lbl_dataset_selection_summary", None)
         if not selected:
             self.active_dataset = None
             self._clear_param_lists()
+            if summary_label is not None:
+                summary_label.setText(
+                    "Select a row to inspect it. Ctrl-click rows in operand order."
+                )
             return
-        row = selected[0].row()
+
+        selected_rows = {idx.row() for idx in selected}
+        current_row = int(self.table.currentRow())
+        # The current row is what Qt visually presents as active.  Using the
+        # first selected row made the parameter lists silently describe a
+        # different dataset after Ctrl-clicking another selected row.
+        row = current_row if current_row in selected_rows else selected[0].row()
         item = self.table.item(row, 0)
         dataset = item.data(Qt.UserRole) if item else None
         if not isinstance(dataset, RcsGrid):
@@ -2430,6 +2783,43 @@ class DatasetOpsMixin:
             return
         self.active_dataset = dataset
         self._populate_params(dataset)
+        if summary_label is not None:
+            active_name = item.text() if item is not None else f"Row {row + 1}"
+            shown_active_name = (
+                active_name if len(active_name) <= 80 else active_name[:77] + "…"
+            )
+            order = [
+                operand_row
+                for operand_row in getattr(self, "_dataset_selection_order", [])
+                if operand_row in selected_rows
+            ]
+            operand_names = []
+            for operand_index, operand_row in enumerate(order, start=1):
+                operand_item = self.table.item(operand_row, 0)
+                operand_name = (
+                    operand_item.text()
+                    if operand_item is not None
+                    else f"Row {operand_row + 1}"
+                )
+                operand_names.append(f"{operand_index}: {operand_name}")
+            order_text = "  →  ".join(operand_names)
+            if len(operand_names) > 1:
+                shown_names = [
+                    value if len(value) <= 56 else value[:53] + "…"
+                    for value in operand_names[:4]
+                ]
+                shown_order = "  →  ".join(shown_names)
+                if len(operand_names) > len(shown_names):
+                    shown_order += f"  →  … +{len(operand_names) - len(shown_names)} more"
+                summary_label.setText(
+                    f"Active parameters: {shown_active_name}    Operand order: {shown_order}"
+                )
+                summary_label.setToolTip(
+                    f"Active parameters: {active_name}\nOperand order: {order_text}"
+                )
+            else:
+                summary_label.setText(f"Active parameters: {shown_active_name}")
+                summary_label.setToolTip(f"Active parameters: {active_name}")
 
     def _update_dataset_selection_order(self, selected_rows: list[int]) -> None:
         selected_set = set(selected_rows)
@@ -2753,12 +3143,69 @@ class DatasetOpsMixin:
             datasets.append((item.text(), dataset))
         return datasets
 
+    def _confirm_coherent_metadata(
+        self,
+        datasets: list[tuple[str, RcsGrid]],
+        operation_name: str,
+    ) -> bool | None:
+        """Return whether unknown coherent metadata was explicitly attested.
+
+        ``False`` means all required metadata was already declared. ``True``
+        means the user explicitly attested the missing declarations. ``None``
+        means the operation was cancelled. Explicit metadata conflicts are
+        still rejected by :class:`RcsGrid`, regardless of this attestation.
+        """
+
+        labels = {
+            "phase_reference": "phase reference / phase center",
+            "time_convention": "phasor time convention",
+            "polarization_basis": "polarization basis",
+        }
+        missing: set[str] = set()
+        for _name, dataset in datasets:
+            getter = getattr(dataset, "_declared_scalar_metadata", None)
+            for key in labels:
+                if callable(getter):
+                    value = getter(key)
+                else:
+                    value = (dataset.extra or {}).get(
+                        key, (dataset.units or {}).get(key, "")
+                    )
+                if not str(value or "").strip():
+                    missing.add(key)
+
+        if not missing:
+            return False
+
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        missing_text = "\n".join(f"• {labels[key]}" for key in labels if key in missing)
+        answer = QMessageBox.question(
+            self,
+            "Confirm Coherent Metadata",
+            f"{operation_name} requires a common physical phase definition, but "
+            "the selected datasets do not declare:\n\n"
+            f"{missing_text}\n\n"
+            "Continue only if you know these datasets use the same phase center, "
+            "time convention, and polarization basis. This attestation will be "
+            "recorded in the output dataset history and Python script.",
+            buttons.Yes | buttons.No,
+            buttons.No,
+        )
+        if answer != buttons.Yes:
+            self.status.showMessage(
+                f"{operation_name} cancelled: coherent metadata was not attested."
+            )
+            return None
+        return True
+
     def _combine_datasets_add(
         self,
         op_label: str,
         op_symbol: str,
         func_add: str,
         func_add_many: str,
+        *,
+        coherent: bool = False,
     ) -> None:
         datasets = self._selected_datasets_ordered()
         if datasets is None:
@@ -2766,14 +3213,24 @@ class DatasetOpsMixin:
         if len(datasets) < 2:
             self.status.showMessage("Select at least 2 datasets to combine.")
             return
+        metadata_attested = False
+        if coherent:
+            attestation = self._confirm_coherent_metadata(datasets, op_label)
+            if attestation is None:
+                return
+            metadata_attested = attestation
         names = [name for name, _ in datasets]
         base = datasets[0][1]
         try:
             if len(datasets) == 2:
-                result = getattr(base, func_add)(datasets[1][1])
+                result = getattr(base, func_add)(
+                    datasets[1][1], metadata_attested=metadata_attested
+                ) if coherent else getattr(base, func_add)(datasets[1][1])
             else:
                 others = [ds for _, ds in datasets[1:]]
-                result = getattr(base, func_add_many)(*others)
+                result = getattr(base, func_add_many)(
+                    *others, metadata_attested=metadata_attested
+                ) if coherent else getattr(base, func_add_many)(*others)
         except (ValueError, TypeError) as exc:
             self.status.showMessage(str(exc))
             return
@@ -2788,25 +3245,48 @@ class DatasetOpsMixin:
             recorder.record_expression(
                 self._python_output_reference(output_id, new_name),
                 input_refs,
-                lambda variables, method=method: (
-                    f"{variables[0]}.{method}({', '.join(variables[1:])})"
+                lambda variables, method=method, attested=metadata_attested: (
+                    f"{variables[0]}.{method}({', '.join(variables[1:])}"
+                    + (", metadata_attested=True" if attested else "")
+                    + ")"
                 ),
                 comment=op_label,
             )
         self.status.showMessage(f"{op_label} created: {new_name}")
 
-    def _combine_datasets_sub(self, op_label: str, op_symbol: str, func_sub: str) -> None:
+    def _combine_datasets_sub(
+        self,
+        op_label: str,
+        op_symbol: str,
+        func_sub: str,
+        *,
+        coherent: bool = False,
+        required_count: int | None = None,
+    ) -> None:
         datasets = self._selected_datasets_ordered(use_selection_order=True)
         if datasets is None:
             return
         if len(datasets) < 2:
             self.status.showMessage("Select at least 2 datasets to combine.")
             return
+        if required_count is not None and len(datasets) != int(required_count):
+            self.status.showMessage(
+                f"{op_label}: select exactly {int(required_count)} datasets."
+            )
+            return
+        metadata_attested = False
+        if coherent:
+            attestation = self._confirm_coherent_metadata(datasets, op_label)
+            if attestation is None:
+                return
+            metadata_attested = attestation
         names = [name for name, _ in datasets]
         result = datasets[0][1]
         try:
             for _, ds in datasets[1:]:
-                result = getattr(result, func_sub)(ds)
+                result = getattr(result, func_sub)(
+                    ds, metadata_attested=metadata_attested
+                ) if coherent else getattr(result, func_sub)(ds)
         except (ValueError, TypeError) as exc:
             self.status.showMessage(str(exc))
             return
@@ -2820,10 +3300,15 @@ class DatasetOpsMixin:
             recorder.record_expression(
                 self._python_output_reference(output_id, new_name),
                 input_refs,
-                lambda variables, method=func_sub: (
+                lambda variables, method=func_sub, attested=metadata_attested: (
                     ".".join(
                         [variables[0]]
-                        + [f"{method}({variable})" for variable in variables[1:]]
+                        + [
+                            f"{method}({variable}"
+                            + (", metadata_attested=True" if attested else "")
+                            + ")"
+                            for variable in variables[1:]
+                        ]
                     )
                 ),
                 comment=op_label,
@@ -2831,10 +3316,18 @@ class DatasetOpsMixin:
         self.status.showMessage(f"{op_label} created: {new_name}")
 
     def _coherent_add_selected(self) -> None:
-        self._combine_datasets_add("Coherent +", "+", "coherent_add", "coherent_add_many")
+        self._combine_datasets_add(
+            "Coherent +",
+            "+",
+            "coherent_add",
+            "coherent_add_many",
+            coherent=True,
+        )
 
     def _coherent_sub_selected(self) -> None:
-        self._combine_datasets_sub("Coherent -", "-", "coherent_subtract")
+        self._combine_datasets_sub(
+            "Coherent -", "-", "coherent_subtract", coherent=True
+        )
 
     def _incoherent_add_selected(self) -> None:
         self._combine_datasets_add("Incoherent +", "+", "incoherent_add", "incoherent_add_many")
@@ -2843,7 +3336,57 @@ class DatasetOpsMixin:
         self._combine_datasets_sub("Incoherent -", "-", "incoherent_subtract")
 
     def _dbdiff_selected(self) -> None:
-        self._combine_datasets_sub("Δ dB", "Δ", "arithmetic_db_subtract")
+        self._combine_datasets_sub(
+            "Δ dB", "Δ", "arithmetic_db_subtract", required_count=2
+        )
+
+    def _audit_selected_datasets(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select one or more datasets to audit.",
+        )
+        if datasets is None:
+            return
+
+        def compute():
+            reports = []
+            for name, dataset in datasets:
+                try:
+                    report = dataset.audit()
+                except Exception as exc:
+                    report = {
+                        "status": "error",
+                        "errors": [f"audit could not inspect this dataset: {exc}"],
+                        "warnings": [],
+                        "info": [],
+                        "metrics": {},
+                    }
+                reports.append((name, report))
+            return reports
+
+        def publish(reports) -> None:
+            dialog = DatasetAuditDialog(reports, parent=self)
+            dialog.exec()
+            dialog.deleteLater()
+            counts = {"pass": 0, "warn": 0, "fail": 0}
+            status_keys = {
+                "ok": "pass",
+                "pass": "pass",
+                "warning": "warn",
+                "warn": "warn",
+                "error": "fail",
+                "fail": "fail",
+            }
+            for _name, report in reports:
+                status = str(report.get("status", "error")).strip().lower()
+                counts[status_keys.get(status, "warn")] += 1
+            self.status.showMessage(
+                "Dataset audit complete: "
+                f"{counts['pass']} pass, {counts['warn']} warning, {counts['fail']} fail."
+            )
+
+        if self._start_background_callable("Dataset audit", compute, publish):
+            self.status.showMessage(f"Auditing {len(datasets)} dataset(s)...")
 
     def _join_selected_datasets(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -2867,6 +3410,110 @@ class DatasetOpsMixin:
         self._pending_join_references = self._python_input_references(datasets)
         self.status.showMessage(f"Joining datasets... 0/{len(grids)}")
 
+    def _stitch_selected_datasets(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select two or more datasets to stitch.",
+        )
+        if datasets is None:
+            return
+        if len(datasets) < 2:
+            self.status.showMessage("Select at least 2 datasets to stitch.")
+            return
+
+        dialog = StitchDialog([name for name, _dataset in datasets], parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            dialog.deleteLater()
+            return
+        params = dialog.get_params()
+        dialog.deleteLater()
+        policy = str(params["policy"])
+        tolerance = float(params["tol"])
+        metadata_attested = False
+        if policy == "coherent-mean":
+            attestation = self._confirm_coherent_metadata(datasets, "Coherent Stitch")
+            if attestation is None:
+                return
+            metadata_attested = bool(attestation)
+
+        names = [name for name, _dataset in datasets]
+        grids = [dataset for _name, dataset in datasets]
+        references = self._python_input_references(datasets)
+        memory_limit = _derived_grid_memory_limit()
+
+        def compute():
+            return RcsGrid.stitch_many(
+                *grids,
+                policy=policy,
+                tol=tolerance,
+                metadata_attested=metadata_attested,
+                max_output_bytes=memory_limit,
+                return_report=True,
+            )
+
+        def publish(payload) -> None:
+            stitched, report = payload
+            overlap = int(report.get("overlap_count", 0) or 0)
+            equal = int(report.get("equal_count", 0) or 0)
+            conflicting = int(report.get("conflict_count", 0) or 0)
+            contributors = int(report.get("contributing_count", 0) or 0)
+            finite_output = int(report.get("output_finite_count", 0) or 0)
+            missing_output = int(report.get("missing_count", 0) or 0)
+            max_contributors = int(report.get("max_contributors", 0) or 0)
+            review = (
+                f"Policy: {policy}\n"
+                f"Contributing finite samples: {contributors:,}\n"
+                f"Finite stitched output cells: {finite_output:,}\n"
+                f"Missing union-grid cells: {missing_output:,}\n"
+                f"Overlapping output cells: {overlap:,}\n"
+                f"Equivalent overlaps: {equal:,}\n"
+                f"Conflicting overlaps resolved by policy: {conflicting:,}\n"
+                f"Maximum contributors to one cell: {max_contributors:,}\n\n"
+                "Add this stitched dataset?"
+            )
+            answer = QMessageBox.question(
+                self,
+                "Review Stitch",
+                review,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self.status.showMessage(
+                    "Stitch reviewed and cancelled; no dataset was added."
+                )
+                return
+            output_name = " ⊕ ".join(names) + f" [Stitch {policy}]"
+            history = (
+                f"Stitch ({policy}, tol={tolerance:g}, overlap={overlap}, "
+                f"conflicts={conflicting}): " + " -> ".join(names)
+            )
+            output_id = self._add_dataset_row(
+                stitched, output_name, history, file_name=""
+            )
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and references is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, output_name),
+                    "stitch_datasets",
+                    references,
+                    kwargs={
+                        "policy": policy,
+                        "tol": tolerance,
+                        "metadata_attested": metadata_attested,
+                    },
+                    comment=f"Stitch {len(datasets)} datasets using {policy}",
+                )
+            self.status.showMessage(
+                f"Stitch created 1 dataset from {len(datasets)} operands; "
+                f"reviewed {overlap:,} overlap cell(s)."
+            )
+
+        if self._start_background_callable("Dataset stitch", compute, publish):
+            self.status.showMessage(
+                f"Stitching {len(datasets)} datasets and analyzing overlaps..."
+            )
+
     def _overlap_selected_datasets(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
@@ -2880,11 +3527,39 @@ class DatasetOpsMixin:
 
         names = [name for name, _ in datasets]
         grids = [grid for _, grid in datasets]
-        try:
-            overlap_grids = RcsGrid.overlap_many(*grids, tol=1e-6)
-            produced = 0
+        input_refs = self._python_input_references(datasets)
+
+        upper_shape = tuple(
+            min(len(grid.get_axis(axis_name)) for grid in grids)
+            for axis_name in (
+                "azimuth",
+                "elevation",
+                "frequency",
+                "polarization",
+            )
+        )
+        overlap_peak = sum(
+            _derived_grid_peak_bytes(grid, upper_shape) for grid in grids
+        ) + math.prod(upper_shape)
+        memory_limit = _derived_grid_memory_limit()
+        if overlap_peak > memory_limit:
+            self.status.showMessage(
+                "Overlap blocked before allocation: the common-grid upper-bound "
+                f"working set {_format_bytes(overlap_peak)} exceeds the current "
+                f"safety limit {_format_bytes(memory_limit)}. Select fewer or "
+                "smaller datasets."
+            )
+            return
+
+        def publish(overlap_grids) -> None:
+            if not isinstance(overlap_grids, (tuple, list)) or len(overlap_grids) != len(datasets):
+                self.status.showMessage("Overlap failed: worker returned invalid outputs.")
+                return
             output_refs: list[DatasetReference] = []
             for (name, _), overlap_grid in zip(datasets, overlap_grids):
+                if not isinstance(overlap_grid, RcsGrid):
+                    self.status.showMessage("Overlap failed: worker returned an invalid grid.")
+                    return
                 history = f"Overlap with [{', '.join(names)}]: {name}"
                 output_name = f"{name} [Overlap]"
                 output_id = self._add_dataset_row(
@@ -2893,25 +3568,28 @@ class DatasetOpsMixin:
                 output_refs.append(
                     self._python_output_reference(output_id, output_name)
                 )
-                produced += 1
-        except (ValueError, TypeError) as exc:
-            self.status.showMessage(str(exc))
-            return
-
-        if produced == 0:
-            self.status.showMessage("No overlap outputs were created.")
-            return
-        input_refs = self._python_input_references(datasets)
-        recorder = getattr(self, "python_recorder", None)
-        if recorder is not None and input_refs is not None:
-            recorder.record_multi_function(
-                output_refs,
-                "RcsGrid.overlap_many",
-                input_refs,
-                kwargs={"tol": 1.0e-6},
-                comment="Crop datasets to their common finite overlap",
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and input_refs is not None:
+                recorder.record_multi_function(
+                    output_refs,
+                    "RcsGrid.overlap_many",
+                    input_refs,
+                    kwargs={"tol": 1.0e-6},
+                    comment="Crop datasets to their common finite overlap",
+                )
+            self.status.showMessage(
+                f"Overlap created {len(output_refs)} dataset(s)."
             )
-        self.status.showMessage(f"Overlap created {produced} dataset(s).")
+
+        if self._start_background_callable(
+            "Dataset overlap",
+            lambda: RcsGrid.overlap_many(*grids, tol=1.0e-6),
+            publish,
+        ):
+            self.status.showMessage(
+                f"Finding the common finite overlap for {len(grids)} datasets..."
+            )
+
 
     def _prompt_choice(self, title: str, label: str, choices: list[str], default_idx: int = 0) -> str | None:
         value, ok = QInputDialog.getItem(self, title, label, choices, default_idx, False)
@@ -2922,67 +3600,258 @@ class DatasetOpsMixin:
     def _slice_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
-            empty_message="Select one or more datasets to slice.",
+            empty_message="Select one or more datasets to crop or slice.",
         )
         if datasets is None:
             return
 
+        reference = (
+            self.active_dataset
+            if isinstance(getattr(self, "active_dataset", None), RcsGrid)
+            else datasets[0][1]
+        )
         sel_az = self._selected_values(self.list_az)
         sel_el = self._selected_values(self.list_elev)
         sel_freq = self._selected_values(self.list_freq)
         sel_pol = self._selected_values(self.list_pol)
-
-        if not (sel_az or sel_el or sel_freq or sel_pol):
+        has_selected = bool(sel_az or sel_el or sel_freq or sel_pol)
+        try:
+            dialog = CropDialog(
+                reference,
+                has_selected_values=has_selected,
+                parent=self,
+            )
+        except (TypeError, ValueError) as exc:
             self.status.showMessage(
-                "Select parameter values (azimuth/elevation/frequency/polarization) to slice."
+                f"Crop / Slice blocked: active reference metadata is invalid ({exc})"
+            )
+            return
+        if dialog.exec() != QDialog.Accepted:
+            dialog.deleteLater()
+            return
+        params = dialog.get_params()
+        dialog.deleteLater()
+        mode = str(params["mode"])
+        if mode == "selected" and not has_selected:
+            self.status.showMessage(
+                "Crop / Slice: select at least one parameter value or use numeric ranges."
             )
             return
 
-        crop_params = {
-            "azimuths": sel_az or None,
-            "elevations": sel_el or None,
-            "frequencies": sel_freq or None,
-            "polarizations": sel_pol or None,
-        }
+        range_params = params["ranges"]
+        stride_params = params["strides"]
+        try:
+            selected_az_values = np.asarray(sel_az, dtype=float)
+            selected_el_values = np.asarray(sel_el, dtype=float)
+            if _canonical_angle_unit(
+                (reference.units or {}).get("azimuth", "deg")
+            ) == "rad":
+                selected_az_values = np.rad2deg(selected_az_values)
+            if _canonical_angle_unit(
+                (reference.units or {}).get("elevation", "deg")
+            ) == "rad":
+                selected_el_values = np.rad2deg(selected_el_values)
+            selected_az_deg = selected_az_values.tolist()
+            selected_el_deg = selected_el_values.tolist()
+            selected_freq_hz = (
+                _frequency_axis_hz(reference, sel_freq).tolist()
+                if sel_freq
+                else []
+            )
+            ref_frequency_unit = _canonical_frequency_unit(
+                (reference.units or {}).get("frequency", "GHz")
+            )
+            ref_frequency_scale = _FREQUENCY_TO_HZ[ref_frequency_unit.lower()]
+            frequency_range_ref = range_params.get("frequency")
+            frequency_range_hz = (
+                tuple(
+                    float(value) * ref_frequency_scale
+                    for value in frequency_range_ref
+                )
+                if frequency_range_ref is not None
+                else None
+            )
+        except (TypeError, ValueError, IndexError) as exc:
+            self.status.showMessage(
+                f"Crop / Slice blocked: selected reference values are invalid ({exc})"
+            )
+            return
+        selected_pols = (
+            list(sel_pol) if params.get("selected_polarizations") else None
+        )
+        if params.get("selected_polarizations") and not selected_pols:
+            self.status.showMessage(
+                "Crop / Slice: select at least one polarization or disable the "
+                "polarization limit."
+            )
+            return
 
-        produced = 0
-        skipped: list[str] = []
+        plans: list[tuple[str, RcsGrid, dict[str, object], tuple[int, int, int, int]]] = []
+        plan_errors: list[str] = []
+        estimated_peak = 0
         for name, dataset in datasets:
             try:
-                sliced = dataset.axis_crop(**crop_params)
-            except (ValueError, TypeError) as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = (
-                "Slice (selected params): "
-                f"{name} | az={len(sliced.azimuths)}, el={len(sliced.elevations)}, "
-                f"freq={len(sliced.frequencies)}, pol={len(sliced.polarizations)}"
-            )
-            output_name = f"{name} [Slice]"
-            output_id = self._add_dataset_row(
-                sliced, output_name, history, file_name=""
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "axis_crop",
-                    kwargs=crop_params,
-                    comment=f"Slice {name} by selected physical values",
+                transfers_angular_values = (
+                    bool(selected_az_deg or selected_el_deg)
+                    if mode == "selected"
+                    else bool(
+                        range_params.get("azimuth") is not None
+                        or range_params.get("elevation") is not None
+                    )
                 )
-            produced += 1
+                if transfers_angular_values:
+                    _assert_same_angular_frame(reference, dataset)
+                if mode == "selected":
+                    kwargs = {
+                        "azimuths": (
+                            _degrees_to_angle_axis(dataset, "azimuth", selected_az_deg).tolist()
+                            if selected_az_deg else None
+                        ),
+                        "elevations": (
+                            _degrees_to_angle_axis(dataset, "elevation", selected_el_deg).tolist()
+                            if selected_el_deg else None
+                        ),
+                        "frequencies": (
+                            _hz_to_frequency_axis(dataset, selected_freq_hz).tolist()
+                            if selected_freq_hz else None
+                        ),
+                        "polarizations": list(sel_pol) if sel_pol else None,
+                        "azimuth_stride": 1,
+                        "elevation_stride": 1,
+                        "frequency_stride": 1,
+                    }
+                    shape = (
+                        len(selected_az_deg) if selected_az_deg else len(dataset.azimuths),
+                        len(selected_el_deg) if selected_el_deg else len(dataset.elevations),
+                        len(selected_freq_hz) if selected_freq_hz else len(dataset.frequencies),
+                        len(sel_pol) if sel_pol else len(dataset.polarizations),
+                    )
+                else:
+                    az_range = range_params.get("azimuth")
+                    el_range = range_params.get("elevation")
+                    native_az_range = (
+                        tuple(_degrees_to_angle_axis(dataset, "azimuth", az_range).tolist())
+                        if az_range is not None else None
+                    )
+                    native_el_range = (
+                        tuple(_degrees_to_angle_axis(dataset, "elevation", el_range).tolist())
+                        if el_range is not None else None
+                    )
+                    native_freq_range = (
+                        tuple(_hz_to_frequency_axis(dataset, frequency_range_hz).tolist())
+                        if frequency_range_hz is not None else None
+                    )
+                    kwargs = {
+                        "azimuth_range": native_az_range,
+                        "elevation_range": native_el_range,
+                        "frequency_range": native_freq_range,
+                        "azimuth_stride": int(stride_params["azimuth"]),
+                        "elevation_stride": int(stride_params["elevation"]),
+                        "frequency_stride": int(stride_params["frequency"]),
+                        "polarizations": selected_pols,
+                    }
 
-        if produced == 0:
-            self.status.showMessage("Slice created 0 datasets.")
-            return
-        if skipped:
+                    def retained(axis_values, bounds, stride):
+                        values = np.asarray(axis_values, dtype=float)
+                        if bounds is None:
+                            count = values.size
+                        else:
+                            lo, hi = sorted(map(float, bounds))
+                            # Match RcsGrid.axis_crop's native-axis tolerance
+                            # so the memory plan cannot reject a boundary bin
+                            # that the actual crop would retain.
+                            count = int(
+                                np.count_nonzero(
+                                    (values >= lo - 1.0e-6)
+                                    & (values <= hi + 1.0e-6)
+                                )
+                            )
+                        return (count + int(stride) - 1) // int(stride)
+
+                    shape = (
+                        retained(dataset.azimuths, native_az_range, kwargs["azimuth_stride"]),
+                        retained(dataset.elevations, native_el_range, kwargs["elevation_stride"]),
+                        retained(dataset.frequencies, native_freq_range, kwargs["frequency_stride"]),
+                        len(selected_pols) if selected_pols else len(dataset.polarizations),
+                    )
+                if any(int(size) < 1 for size in shape):
+                    raise ValueError("requested crop leaves an empty axis")
+                estimated_peak += _derived_grid_peak_bytes(dataset, shape)
+                plans.append((name, dataset, kwargs, shape))
+            except (TypeError, ValueError) as exc:
+                plan_errors.append(f"{name} ({exc})")
+
+        if plan_errors:
             self.status.showMessage(
-                f"Slice created {produced} dataset(s). Skipped: {', '.join(skipped)}"
+                "Crop / Slice blocked: " + _compact_item_summary(plan_errors)
             )
             return
-        self.status.showMessage(f"Slice created {produced} dataset(s).")
+        memory_limit = _derived_grid_memory_limit()
+        if estimated_peak > memory_limit:
+            self.status.showMessage(
+                "Crop / Slice blocked before allocation: estimated working set "
+                f"{_format_bytes(estimated_peak)} exceeds the current safety limit "
+                f"{_format_bytes(memory_limit)}. Tighten the ranges, increase stride, "
+                "or process fewer datasets."
+            )
+            return
+
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset, _kwargs, _shape in plans
+        ]
+
+        def compute():
+            results = []
+            skipped = []
+            for plan_index, (name, dataset, kwargs, _shape) in enumerate(plans):
+                try:
+                    result = crop_dataset(dataset, **kwargs)
+                except (TypeError, ValueError) as exc:
+                    skipped.append(f"{name} ({exc})")
+                    continue
+                results.append((plan_index, name, result, kwargs))
+            return results, skipped
+
+        def publish(payload) -> None:
+            results, skipped = payload
+            recorder = getattr(self, "python_recorder", None)
+            for plan_index, name, result, kwargs in results:
+                history = (
+                    f"Crop / Slice ({mode}): {name} | az={len(result.azimuths)}, "
+                    f"el={len(result.elevations)}, freq={len(result.frequencies)}, "
+                    f"pol={len(result.polarizations)}"
+                )
+                output_name = f"{name} [Crop]"
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
+                )
+                source_ref = source_references[plan_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "crop_dataset",
+                        [source_ref],
+                        kwargs=kwargs,
+                        comment=f"Crop / Slice {name}",
+                    )
+            produced = len(results)
+            if produced == 0:
+                self.status.showMessage("Crop / Slice created 0 datasets.")
+            elif skipped:
+                self.status.showMessage(
+                    f"Crop / Slice created {produced} dataset(s). Skipped: "
+                    + _compact_item_summary(skipped)
+                )
+            else:
+                self.status.showMessage(
+                    f"Crop / Slice created {produced} dataset(s)."
+                )
+
+        if self._start_background_callable("Dataset crop", compute, publish):
+            self.status.showMessage(
+                f"Cropping {len(plans)} dataset(s) in the background..."
+            )
 
     def _statistics_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -2995,63 +3864,143 @@ class DatasetOpsMixin:
         dlg = StatisticsDialog(parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
-
-        statistic, percentile, axes = dlg.get_params()
+        params = dlg.get_params()
+        if len(params) == 3:
+            statistic, percentile, axes = params
+            broadcast_reduced = False
+        else:
+            statistic, percentile, axes, broadcast_reduced = params
         if not axes:
             self.status.showMessage("Select at least one axis for statistics reduction.")
             return
+        stat_label = f"p{percentile:g}" if statistic == "percentile" else statistic
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                stat_grid = dataset.statistics_dataset(
-                    statistic=statistic,
-                    axes=axes,
-                    domain="magnitude",
-                    percentile=percentile,
-                    broadcast_reduced=True,
+        axis_numbers = {
+            "azimuth": 0,
+            "elevation": 1,
+            "frequency": 2,
+            "polarization": 3,
+        }
+        reduce_indices = {axis_numbers[name] for name in axes}
+        retained_output_bytes = 0
+        per_dataset_workspace_bytes = 0
+        for _name, dataset in datasets:
+            source_shape = tuple(int(value) for value in dataset.rcs_power.shape)
+            output_shape = (
+                source_shape
+                if broadcast_reduced
+                else tuple(
+                    1 if index in reduce_indices else length
+                    for index, length in enumerate(source_shape)
                 )
-            except (ValueError, TypeError) as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-
-            if statistic == "percentile":
-                stat_label = f"p{percentile:g}"
-            else:
-                stat_label = statistic
-            history = f"Statistics ({stat_label}, axes={axes}): {name}"
-            output_name = f"{name} [{stat_label}]"
-            output_id = self._add_dataset_row(
-                stat_grid, output_name, history, file_name=""
             )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "statistics_dataset",
-                    kwargs={
-                        "statistic": statistic,
-                        "axes": axes,
-                        "domain": "magnitude",
-                        "percentile": percentile,
-                        "broadcast_reduced": True,
-                    },
-                    comment=f"Reduce {name} to {stat_label} statistics",
-                )
-            produced += 1
-
-        if produced == 0:
-            self.status.showMessage("Statistics created 0 datasets.")
-            return
-        if skipped:
+            output_cells = math.prod(output_shape)
+            source_cells = math.prod(source_shape)
+            working_itemsize = max(
+                8,
+                np.dtype(dataset.rcs_power.dtype).itemsize,
+                np.dtype(dataset.rcs_phase.dtype).itemsize,
+            )
+            # Final power and phase arrays from earlier datasets remain in the
+            # result list. Median/percentile may partition several input-sized
+            # buffers; output construction may simultaneously hold a broadcast
+            # value plus sanitized power/phase arrays. Those phases are not
+            # concurrent, so use their maximum rather than double-counting.
+            retained_output_bytes += int(output_cells * working_itemsize * 2)
+            reduction_workspace = int(
+                source_cells
+                * working_itemsize
+                * (4 if statistic in {"median", "percentile"} else 2)
+            )
+            construction_workspace = int(output_cells * working_itemsize * 4)
+            per_dataset_workspace_bytes = max(
+                per_dataset_workspace_bytes,
+                reduction_workspace,
+                construction_workspace,
+            )
+        estimated_peak = retained_output_bytes + per_dataset_workspace_bytes
+        memory_limit = _derived_grid_memory_limit()
+        if estimated_peak > memory_limit:
             self.status.showMessage(
-                f"Statistics created {produced} dataset(s). Skipped: {', '.join(skipped)}"
+                "Statistics blocked before allocation: estimated working set "
+                f"{_format_bytes(estimated_peak)} exceeds the current safety "
+                f"limit {_format_bytes(memory_limit)}. Reduce fewer datasets at "
+                "once or keep compact output enabled."
             )
             return
-        self.status.showMessage(f"Statistics created {produced} dataset(s).")
+
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
+
+        def compute():
+            results = []
+            skipped = []
+            for dataset_index, (name, dataset) in enumerate(datasets):
+                try:
+                    result = dataset.statistics_dataset(
+                        statistic=statistic,
+                        axes=axes,
+                        domain="magnitude",
+                        percentile=percentile,
+                        broadcast_reduced=bool(broadcast_reduced),
+                    )
+                except (ValueError, TypeError) as exc:
+                    skipped.append(f"{name} ({exc})")
+                    continue
+                results.append((dataset_index, name, result))
+            return results, skipped
+
+        def publish(payload) -> None:
+            results, skipped = payload
+            for dataset_index, name, stat_grid in results:
+                history = (
+                    f"Statistics ({stat_label}, linear power, axes={axes}): {name}"
+                )
+                output_name = f"{name} [{stat_label}]"
+                output_id = self._add_dataset_row(
+                    stat_grid, output_name, history, file_name=""
+                )
+                source_ref = source_references[dataset_index]
+                recorder = getattr(self, "python_recorder", None)
+                if recorder is not None and source_ref is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        source_ref,
+                        "statistics_dataset",
+                        kwargs={
+                            "statistic": statistic,
+                            "axes": axes,
+                            "domain": "magnitude",
+                            "percentile": percentile,
+                            "broadcast_reduced": bool(broadcast_reduced),
+                        },
+                        comment=(
+                            f"Reduce {name} to {stat_label} statistics on linear power"
+                        ),
+                    )
+            produced = len(results)
+            if produced == 0:
+                self.status.showMessage("Statistics created 0 datasets.")
+            elif skipped:
+                self.status.showMessage(
+                    f"Statistics created {produced} dataset(s). Skipped: "
+                    + ", ".join(skipped)
+                )
+            else:
+                self.status.showMessage(
+                    f"Statistics created {produced} dataset(s)."
+                )
+
+        if self._start_background_callable(
+            "Dataset statistics", compute, publish
+        ):
+            self.status.showMessage(
+                f"Computing {stat_label} linear-power statistics for "
+                f"{len(datasets)} dataset(s)..."
+            )
+
 
     def _delete_selected_datasets(self) -> None:
         selected = self.table.selectionModel().selectedRows()
@@ -3214,59 +4163,124 @@ class DatasetOpsMixin:
                 self.status.showMessage("Save cancelled; no files were changed.")
                 return False
 
-        try:
-            published = _stage_and_publish_grim_batch(
-                [
-                    (
-                        dataset,
-                        target,
-                        (
-                            self.table.item(row, 2).text()
-                            if self.table.item(row, 2) is not None
-                            else str(dataset.history or "")
-                        ),
-                    )
-                    for row, dataset, target in plan
-                ]
-            )
-        except Exception as exc:
-            if isinstance(exc, _GrimBatchRollbackError):
-                failure_text = str(exc)
-            else:
-                failure_text = "No partial batch was kept. " + str(exc)
-            QMessageBox.critical(
-                self,
-                f"{dialog_title} Failed",
-                failure_text,
-            )
-            self.status.showMessage(f"Save failed: {exc}")
-            return False
-
-        recorded_saves: list[tuple[DatasetReference, str]] = []
-        for (row, _dataset, _target), output_path in zip(plan, published):
-            self._set_dataset_row_saved(row, output_path)
+        save_entries: list[tuple[RcsGrid, str, str]] = []
+        row_snapshots: list[tuple[str, RcsGrid, str]] = []
+        for (row, dataset, _raw_target), target in zip(plan, targets):
             name_item = self.table.item(row, 0)
-            if name_item is not None:
+            if name_item is None:
+                self.status.showMessage(
+                    "Save cancelled: a planned dataset row is no longer available."
+                )
+                return False
+            dataset_id = str(name_item.data(DATASET_ID_ROLE) or "")
+            if not dataset_id:
+                dataset_id = uuid.uuid4().hex
+                name_item.setData(DATASET_ID_ROLE, dataset_id)
+            history_item = self.table.item(row, 2)
+            row_history = (
+                history_item.text()
+                if history_item is not None
+                else str(dataset.history or "")
+            )
+            save_entries.append((dataset, target, row_history))
+            row_snapshots.append((dataset_id, dataset, target))
+
+        def compute_save():
+            try:
+                return {
+                    "published": _stage_and_publish_grim_batch(save_entries),
+                    "error": None,
+                }
+            except Exception as exc:
+                return {"published": [], "error": exc}
+
+        def publish_save(payload) -> None:
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if error is not None:
+                failure_text = (
+                    str(error)
+                    if isinstance(error, _GrimBatchRollbackError)
+                    else "No partial batch was kept. " + str(error)
+                )
+                QMessageBox.critical(
+                    self,
+                    f"{dialog_title} Failed",
+                    failure_text,
+                )
+                self.status.showMessage(f"Save failed: {error}")
+                return
+
+            published = list(payload.get("published", []))
+            if len(published) != len(row_snapshots):
+                self.status.showMessage(
+                    "Save failed: worker returned an incomplete publication list."
+                )
+                return
+
+            recorded_saves: list[tuple[DatasetReference, str]] = []
+            rows_not_marked = 0
+            for (dataset_id, saved_dataset, _target), output_path in zip(
+                row_snapshots, published
+            ):
+                found_row = None
+                for candidate in range(self.table.rowCount()):
+                    candidate_item = self.table.item(candidate, 0)
+                    if (
+                        candidate_item is not None
+                        and str(candidate_item.data(DATASET_ID_ROLE) or "")
+                        == dataset_id
+                    ):
+                        found_row = candidate
+                        break
+                if found_row is None:
+                    rows_not_marked += 1
+                    continue
+                name_item = self.table.item(found_row, 0)
+                if (
+                    name_item is None
+                    or name_item.data(Qt.UserRole) is not saved_dataset
+                ):
+                    # The user edited/replaced this row while compression was
+                    # running. The published file is the launch-time snapshot,
+                    # so the newer in-memory row must remain visibly unsaved.
+                    rows_not_marked += 1
+                    continue
+                self._set_dataset_row_saved(found_row, output_path)
                 recorded_saves.append(
                     (
                         DatasetReference(
-                            str(name_item.data(DATASET_ID_ROLE) or ""),
+                            dataset_id,
                             name_item.text(),
                             output_path,
                         ),
                         output_path,
                     )
                 )
-        recorder = getattr(self, "python_recorder", None)
-        if recorder is not None and len(recorded_saves) == 1:
-            recorder.record_save(*recorded_saves[0])
-        elif recorder is not None and recorded_saves:
-            recorder.record_save_batch(recorded_saves)
-        self.status.showMessage(
-            f"Saved {len(published)} dataset(s) to "
-            f"{os.path.dirname(os.path.abspath(published[0]))}."
+
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and len(recorded_saves) == 1:
+                recorder.record_save(*recorded_saves[0])
+            elif recorder is not None and recorded_saves:
+                recorder.record_save_batch(recorded_saves)
+            message = (
+                f"Saved {len(published)} dataset(s) to "
+                f"{os.path.dirname(os.path.abspath(published[0]))}."
+            )
+            if rows_not_marked:
+                message += (
+                    f" {rows_not_marked} row(s) changed or were removed while "
+                    "saving and remain unsaved in the GUI."
+                )
+            self.status.showMessage(message)
+
+        started = self._start_background_callable(
+            "Native dataset save", compute_save, publish_save
         )
-        return True
+        if started:
+            self.status.showMessage(
+                f"Saving {len(save_entries)} dataset(s) in the background…"
+            )
+        return started
 
     def _export_plot(self) -> None:
         path, selected_filter = QFileDialog.getSaveFileName(
@@ -3462,75 +4476,233 @@ class DatasetOpsMixin:
     def _interpolate_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
-            empty_message="Select one or more datasets to interpolate.",
+            empty_message="Select one or more datasets to regrid.",
         )
         if datasets is None:
             return
 
-        hint = None
-        default_start, default_stop, default_step = -180.0, 179.0, 1.0
-        if len(datasets) == 1:
-            az = np.asarray(datasets[0][1].azimuths, dtype=float)
-            if az.size:
-                az_min, az_max = float(az.min()), float(az.max())
-                az_step = float(np.median(np.diff(az))) if az.size > 1 else 1.0
-                hint = f"Current azimuths: {az_min:g}° to {az_max:g}° ({az.size} samples, ~{az_step:g}° step)"
-                default_start, default_stop, default_step = az_min, az_max, az_step
-
-        dlg = InterpolateDialog(hint=hint, parent=self)
-        dlg.set_defaults(default_start, default_stop, default_step)
+        reference = (
+            self.active_dataset
+            if isinstance(getattr(self, "active_dataset", None), RcsGrid)
+            else datasets[0][1]
+        )
+        try:
+            dlg = RegridDialog(reference, parent=self)
+        except (TypeError, ValueError) as exc:
+            self.status.showMessage(
+                f"Regrid blocked: active reference metadata is invalid ({exc})"
+            )
+            return
         if dlg.exec() != QDialog.Accepted:
+            dlg.deleteLater()
+            return
+        params = dlg.get_params()
+        dlg.deleteLater()
+        axis = str(params["axis"])
+        start = float(params["start"])
+        stop = float(params["stop"])
+        step = float(params["step"])
+        display_unit = str(params["unit"])
+        if not all(np.isfinite(value) for value in (start, stop, step)):
+            self.status.showMessage("Regrid: start, stop, and step must be finite.")
+            return
+        if step <= 0.0 or stop < start:
+            self.status.showMessage(
+                "Regrid: step must be positive and stop must be greater than or equal to start."
+            )
             return
 
-        start, stop, step = dlg.get_values()
-        if step <= 0.0:
-            self.status.showMessage("Step must be positive.")
+        n_float = np.floor((stop - start) / step + 1e-9) + 1.0
+        if not np.isfinite(n_float) or n_float < 1.0:
+            self.status.showMessage("Regrid: the requested grid is not finite.")
             return
-        if stop < start:
-            self.status.showMessage("Stop must be ≥ start.")
+        if n_float > _MAX_EXPLICIT_AXIS_POINTS:
+            self.status.showMessage(
+                "Regrid blocked before allocation: the requested grid has "
+                f"{int(n_float):,} points; the safety limit is "
+                f"{_MAX_EXPLICIT_AXIS_POINTS:,}. Increase the step size."
+            )
+            return
+        n = int(n_float)
+        resolved_stop = float(start + step * max(0, n - 1))
+
+        axis_index = {"azimuth": 0, "elevation": 1, "frequency": 2}[axis]
+        estimated_peak = 0
+        for _name, dataset in datasets:
+            shape = list(dataset.rcs_power.shape)
+            shape[axis_index] = n
+            estimated_peak += _derived_grid_peak_bytes(dataset, shape)
+        memory_limit = _derived_grid_memory_limit()
+        if estimated_peak > memory_limit:
+            self.status.showMessage(
+                "Regrid blocked before allocation: estimated working set "
+                f"{_format_bytes(estimated_peak)} exceeds the current safety "
+                f"limit {_format_bytes(memory_limit)}. Increase the step size "
+                "or process fewer datasets at once."
+            )
             return
 
-        n = int(np.floor((stop - start) / step + 1e-9)) + 1
-        new_az = start + step * np.arange(n, dtype=float)
+        # Keep one compact native-unit start/step pair per dataset. The full
+        # n-point target is constructed only while that dataset is processed
+        # in the worker, rather than retaining one large array per selection.
+        native_specs: list[tuple[float, float]] = []
+        downsampled: list[str] = []
+        if axis == "frequency":
+            try:
+                ref_frequency_unit = _canonical_frequency_unit(
+                    (reference.units or {}).get("frequency", "GHz")
+                )
+            except (TypeError, ValueError) as exc:
+                self.status.showMessage(
+                    f"Regrid blocked: active reference metadata is invalid ({exc})"
+                )
+                return
+            reference_frequency_scale = _FREQUENCY_TO_HZ[
+                ref_frequency_unit.lower()
+            ]
+            physical_step = step * reference_frequency_scale
+        else:
+            reference_frequency_scale = None
+            physical_step = step
 
-        produced = 0
-        skipped: list[str] = []
         for name, dataset in datasets:
             try:
-                interpolated = dataset.interpolate_axis("azimuth", new_az)
-            except (ValueError, TypeError) as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = (
-                f"Interpolate azimuth [{start:g}°..{stop:g}° step {step:g}°]: {name}"
-            )
-            output_name = f"{name} [Interp]"
-            output_id = self._add_dataset_row(
-                interpolated, output_name, history, file_name=""
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "interpolate_axis",
-                    args=("azimuth", new_az.tolist()),
-                    comment=f"Interpolate {name} on a resolved azimuth grid",
+                if axis in {"azimuth", "elevation"}:
+                    _assert_same_angular_frame(reference, dataset)
+                    angle_unit = _canonical_angle_unit(
+                        (dataset.units or {}).get(axis, "deg")
+                    )
+                    native_scale = np.pi / 180.0 if angle_unit == "rad" else 1.0
+                    native_start = start * native_scale
+                    native_step = step * native_scale
+                    source_physical = _angle_axis_degrees(dataset, axis)
+                else:
+                    dataset_frequency_unit = _canonical_frequency_unit(
+                        (dataset.units or {}).get("frequency", "GHz")
+                    )
+                    dataset_frequency_scale = _FREQUENCY_TO_HZ[
+                        dataset_frequency_unit.lower()
+                    ]
+                    conversion = reference_frequency_scale / dataset_frequency_scale
+                    native_start = start * conversion
+                    native_step = step * conversion
+                    source_physical = _frequency_axis_hz(dataset)
+                source_step = (
+                    float(np.median(np.diff(source_physical)))
+                    if source_physical.size > 1 else float("inf")
                 )
-            produced += 1
+                if (
+                    np.isfinite(source_step)
+                    and source_step > 0.0
+                    and physical_step > source_step * 1.01
+                ):
+                    downsampled.append(name)
+                native_specs.append((float(native_start), float(native_step)))
+            except (TypeError, ValueError) as exc:
+                self.status.showMessage(f"Regrid blocked: {name} ({exc})")
+                return
 
-        if produced == 0:
-            self.status.showMessage(
-                f"Interpolate created 0 datasets. Skipped: {', '.join(skipped)}"
-                if skipped
-                else "Interpolate created 0 datasets."
+        if downsampled:
+            answer = QMessageBox.question(
+                self,
+                "Review Regrid Downsampling",
+                "The requested step is coarser than the source spacing for: "
+                + _compact_item_summary(downsampled)
+                + "\n\nRegrid performs complex linear interpolation, not an anti-alias "
+                "low-pass filter. Continue only when retaining values on this coarser "
+                "grid is intentional.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
-            return
-        msg = f"Interpolate created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+            if answer != QMessageBox.Yes:
+                self.status.showMessage("Regrid cancelled before downsampling.")
+                return
+
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
+
+        def compute():
+            results = []
+            skipped = []
+            for dataset_index, ((name, dataset), native_spec) in enumerate(
+                zip(datasets, native_specs)
+            ):
+                native_start, native_step = native_spec
+                try:
+                    native_values = (
+                        native_start
+                        + native_step * np.arange(n, dtype=float)
+                    )
+                    interpolated = regrid_axis(
+                        dataset,
+                        axis,
+                        values=native_values,
+                    )
+                except (ValueError, TypeError) as exc:
+                    skipped.append(f"{name} ({exc})")
+                    continue
+                results.append(
+                    (
+                        dataset_index,
+                        name,
+                        interpolated,
+                        native_start,
+                        native_step,
+                    )
+                )
+            return results, skipped
+
+        def publish(payload) -> None:
+            results, skipped = payload
+            for (
+                dataset_index,
+                name,
+                interpolated,
+                native_start,
+                native_step,
+            ) in results:
+                history = (
+                    f"Regrid {axis} [{start:g}..{resolved_stop:g} {display_unit}, "
+                    f"step {step:g} {display_unit}, no extrapolation]: {name}"
+                )
+                output_name = f"{name} [Regrid {axis}]"
+                output_id = self._add_dataset_row(
+                    interpolated, output_name, history, file_name=""
+                )
+                source_ref = source_references[dataset_index]
+                recorder = getattr(self, "python_recorder", None)
+                if recorder is not None and source_ref is not None:
+                    recorder.record_expression(
+                        self._python_output_reference(output_id, output_name),
+                        [source_ref],
+                        lambda variables, selected_axis=axis, first=native_start, increment=native_step, count=n: (
+                            f"regrid_axis({variables[0]}, {selected_axis!r}, "
+                            f"values={first!r} + {increment!r} * "
+                            f"np.arange({count}, dtype=float))"
+                        ),
+                        comment=f"Regrid {name} on a resolved {axis} grid",
+                    )
+            produced = len(results)
+            if produced == 0:
+                self.status.showMessage(
+                    f"Regrid created 0 datasets. Skipped: {_compact_item_summary(skipped)}"
+                    if skipped else "Regrid created 0 datasets."
+                )
+                return
+            message = f"Regrid created {produced} dataset(s) on {axis}."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        if self._start_background_callable(
+            "Dataset regrid", compute, publish
+        ):
+            self.status.showMessage(
+                f"Regridding {len(datasets)} dataset(s) onto {n:,} {axis} samples..."
+            )
+
 
     def _mirror_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -3606,51 +4778,103 @@ class DatasetOpsMixin:
 
         dlg = WrapDialog(parent=self)
         if dlg.exec() != QDialog.Accepted:
+            dlg.deleteLater()
             return
-        mode = dlg.get_mode()
+        params = dlg.get_params()
+        dlg.deleteLater()
+        mode = str(params["mode"])
+        wrap_azimuth = bool(params["azimuth"])
+        wrap_phase_values = bool(params["phase"])
+        if not (wrap_azimuth or wrap_phase_values):
+            self.status.showMessage("Wrap: select azimuth, phase, or both.")
+            return
         suffix = "0–360°" if mode == "0_360" else "-180–180°"
+        target_label = (
+            "azimuth and phase" if wrap_azimuth and wrap_phase_values
+            else "azimuth" if wrap_azimuth else "phase"
+        )
 
-        produced = 0
-        dropped_total = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                wrapped = dataset.wrap_azimuth(mode)
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            dropped = len(dataset.azimuths) - len(wrapped.azimuths)
-            dropped_total += dropped
-            drop_note = f" (dropped {dropped} duplicate az)" if dropped else ""
-            history = f"Wrap az to {suffix}{drop_note}: {name}"
-            output_name = f"{name} [Wrap {suffix}]"
-            output_id = self._add_dataset_row(
-                wrapped,
-                output_name,
-                history,
-                file_name="",
+        estimated_peak = sum(
+            _derived_grid_peak_bytes(dataset, dataset.rcs_power.shape)
+            for _name, dataset in datasets
+        )
+        memory_limit = _derived_grid_memory_limit()
+        if estimated_peak > memory_limit:
+            self.status.showMessage(
+                "Wrap blocked before allocation: estimated working set "
+                f"{_format_bytes(estimated_peak)} exceeds the current safety limit "
+                f"{_format_bytes(memory_limit)}. Process fewer datasets at once."
             )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "wrap_azimuth",
-                    args=(mode,),
-                    comment=f"Wrap {name} to {suffix}",
-                )
-            produced += 1
-
-        if produced == 0:
-            self.status.showMessage("Wrap created 0 datasets.")
             return
-        msg = f"Wrap created {produced} dataset(s)."
-        if dropped_total:
-            msg += f" Dropped {dropped_total} duplicate azimuth sample(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
+
+        def compute():
+            results = []
+            skipped = []
+            for dataset_index, (name, dataset) in enumerate(datasets):
+                try:
+                    wrapped = dataset
+                    if wrap_azimuth:
+                        wrapped = wrapped.wrap_azimuth(mode)
+                    if wrap_phase_values:
+                        wrapped = wrapped.wrap_phase(mode)
+                except (TypeError, ValueError) as exc:
+                    skipped.append(f"{name} ({exc})")
+                    continue
+                dropped = len(dataset.azimuths) - len(wrapped.azimuths)
+                results.append((dataset_index, name, wrapped, dropped))
+            return results, skipped
+
+        def publish(payload) -> None:
+            results, skipped = payload
+            dropped_total = 0
+            recorder = getattr(self, "python_recorder", None)
+            for dataset_index, name, wrapped, dropped in results:
+                dropped_total += int(dropped)
+                drop_note = (
+                    f" (merged {dropped} seam-alias azimuth coordinate(s))"
+                    if dropped else ""
+                )
+                history = f"Wrap {target_label} to {suffix}{drop_note}: {name}"
+                output_name = f"{name} [Wrap {target_label} {suffix}]"
+                output_id = self._add_dataset_row(
+                    wrapped, output_name, history, file_name=""
+                )
+                source_ref = source_references[dataset_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_expression(
+                        self._python_output_reference(output_id, output_name),
+                        [source_ref],
+                        lambda variables, az=wrap_azimuth, phase=wrap_phase_values, selected_mode=mode: (
+                            variables[0]
+                            + (f".wrap_azimuth({selected_mode!r})" if az else "")
+                            + (f".wrap_phase({selected_mode!r})" if phase else "")
+                        ),
+                        comment=f"Wrap {name} {target_label} to {suffix}",
+                    )
+            produced = len(results)
+            if produced == 0:
+                self.status.showMessage(
+                    "Wrap created 0 datasets."
+                    + (f" Skipped: {_compact_item_summary(skipped)}" if skipped else "")
+                )
+                return
+            message = f"Wrap created {produced} dataset(s)."
+            if dropped_total:
+                message += (
+                    f" Merged {dropped_total} equivalent duplicate azimuth sample(s)."
+                )
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        if self._start_background_callable("Dataset wrap", compute, publish):
+            self.status.showMessage(
+                f"Wrapping {target_label} for {len(datasets)} dataset(s)..."
+            )
 
     def _shift_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -4142,56 +5366,13 @@ class DatasetOpsMixin:
             self.status.showMessage("Convert to dBke: length must be positive.")
             return
 
-        c0 = 299_792_458.0
         produced = 0
         skipped: list[str] = []
         for name, dataset in datasets:
-            current_unit = str((dataset.units or {}).get("rcs_log_unit", "dBsm")).strip().lower()
-            if current_unit == "dbke":
-                skipped.append(f"{name} (already dBke)")
-                continue
             try:
-                # Per-frequency extrusion conversion: σ_2D = σ_3D · λ_f / (2 L²)
-                # = σ_3D · c / (2 L² f).  Shape the (n_freq,) factor so it
-                # broadcasts over (n_az, n_el, n_freq, n_pol).
-                freq_hz = np.asarray(
-                    dataset._frequency_value_to_hz(dataset.frequencies), dtype=float
+                result = convert_extrusion(
+                    dataset, to="dbke", length_m=float(length_m)
                 )
-                scale_per_f = np.where(
-                    np.isfinite(freq_hz) & (freq_hz > 0.0),
-                    c0 / (2.0 * length_m * length_m * freq_hz),
-                    np.nan,
-                )
-                scale_4d = scale_per_f.reshape(1, 1, -1, 1)
-                new_power = dataset.rcs_power * scale_4d
-                new_units = dict(dataset.units or {})
-                new_units["rcs_log_unit"] = "dBke"
-                new_units["rcs_linear_quantity"] = "sigma_2d"
-                if dataset.rcs_domain == "complex_amplitude":
-                    amp_scale_4d = np.sqrt(np.maximum(scale_4d, 0.0))
-                    new_rcs = dataset.rcs * amp_scale_4d
-                    result = RcsGrid(
-                        dataset.azimuths,
-                        dataset.elevations,
-                        dataset.frequencies,
-                        dataset.polarizations,
-                        new_rcs,
-                        rcs_power=new_power,
-                        rcs_domain=dataset.rcs_domain,
-                        units=new_units,
-                    )
-                else:
-                    result = RcsGrid(
-                        dataset.azimuths,
-                        dataset.elevations,
-                        dataset.frequencies,
-                        dataset.polarizations,
-                        rcs=None,
-                        rcs_power=new_power,
-                        rcs_phase=dataset.rcs_phase,
-                        rcs_domain=dataset.rcs_domain,
-                        units=new_units,
-                    )
             except Exception as exc:
                 skipped.append(f"{name} ({exc})")
                 continue
@@ -4252,56 +5433,13 @@ class DatasetOpsMixin:
             self.status.showMessage("Convert to dBsm: length must be positive.")
             return
 
-        c0 = 299_792_458.0
         produced = 0
         skipped: list[str] = []
         for name, dataset in datasets:
-            current_unit = str((dataset.units or {}).get("rcs_log_unit", "dBsm")).strip().lower()
-            if current_unit == "dbsm":
-                skipped.append(f"{name} (already dBsm)")
-                continue
             try:
-                # Inverse of the dBke conversion: σ_3D = σ_2D · 2L²/λ
-                # = σ_2D · 2L²·f/c. Per-frequency factor broadcast over
-                # (n_az, n_el, n_freq, n_pol).
-                freq_hz = np.asarray(
-                    dataset._frequency_value_to_hz(dataset.frequencies), dtype=float
+                result = convert_extrusion(
+                    dataset, to="dbsm", length_m=float(length_m)
                 )
-                scale_per_f = np.where(
-                    np.isfinite(freq_hz) & (freq_hz > 0.0),
-                    2.0 * length_m * length_m * freq_hz / c0,
-                    np.nan,
-                )
-                scale_4d = scale_per_f.reshape(1, 1, -1, 1)
-                new_power = dataset.rcs_power * scale_4d
-                new_units = dict(dataset.units or {})
-                new_units["rcs_log_unit"] = "dBsm"
-                new_units["rcs_linear_quantity"] = "sigma_3d"
-                if dataset.rcs_domain == "complex_amplitude":
-                    amp_scale_4d = np.sqrt(np.maximum(scale_4d, 0.0))
-                    new_rcs = dataset.rcs * amp_scale_4d
-                    result = RcsGrid(
-                        dataset.azimuths,
-                        dataset.elevations,
-                        dataset.frequencies,
-                        dataset.polarizations,
-                        new_rcs,
-                        rcs_power=new_power,
-                        rcs_domain=dataset.rcs_domain,
-                        units=new_units,
-                    )
-                else:
-                    result = RcsGrid(
-                        dataset.azimuths,
-                        dataset.elevations,
-                        dataset.frequencies,
-                        dataset.polarizations,
-                        rcs=None,
-                        rcs_power=new_power,
-                        rcs_phase=dataset.rcs_phase,
-                        rcs_domain=dataset.rcs_domain,
-                        units=new_units,
-                    )
             except Exception as exc:
                 skipped.append(f"{name} ({exc})")
                 continue
@@ -4543,104 +5681,117 @@ class DatasetOpsMixin:
             self.status.showMessage("Medianize: window and slide must be positive.")
             return
 
-        produced = 0
-        skipped: list[str] = []
+        preflight_errors: list[str] = []
+        peak_estimate = 0
         for name, dataset in datasets:
             try:
-                az = np.asarray(dataset.azimuths, dtype=float)
-                if az.size < 2:
-                    skipped.append(f"{name} (need ≥2 azimuth samples)")
-                    continue
-                az_min = float(az.min())
-                az_max = float(az.max())
-                if az_max - az_min < window_deg * 0.5:
-                    skipped.append(f"{name} (az span < window/2)")
-                    continue
-
-                # Output azimuth grid: window centres stepped by `slide`,
-                # restricted to centres whose full window stays inside the
-                # data so each output sample is supported by real samples
-                # on both sides.
-                half_w = window_deg * 0.5
-                first_centre = az_min + half_w
-                last_centre = az_max - half_w
-                if last_centre < first_centre:
-                    # Window wider than the data — fall back to a single
-                    # centre at the midpoint so the user still gets one row.
-                    centres = np.array([0.5 * (az_min + az_max)], dtype=float)
+                az_deg = _angle_axis_degrees(dataset, "azimuth")
+                if az_deg.size < 2:
+                    raise ValueError("need at least two azimuth samples")
+                typical_step = float(np.median(np.diff(az_deg)))
+                span = float(az_deg[-1] - az_deg[0])
+                periodic = span >= 360.0 - max(1.5 * typical_step, 1.0e-6)
+                if periodic:
+                    count = int(np.ceil(360.0 / slide_deg - 1.0e-12))
+                elif span < window_deg:
+                    count = 1
                 else:
-                    n_steps = int(np.floor((last_centre - first_centre) / slide_deg + 1e-9)) + 1
-                    centres = first_centre + np.arange(n_steps, dtype=float) * slide_deg
-
-                # Compute the median of the linear power in each window and
-                # A power median has no physically defined coherent phase. Mark
-                # it unknown so this statistical result cannot later be added
-                # as if it were a measured complex field.
-                n_el = dataset.elevations.size
-                n_f = dataset.frequencies.size
-                n_pol = dataset.polarizations.size
-                new_power = np.empty(
-                    (centres.size, n_el, n_f, n_pol), dtype=dataset.rcs_power.dtype
+                    count = int(np.floor((span - window_deg) / slide_deg + 1e-9)) + 1
+                if count > _MAX_EXPLICIT_AXIS_POINTS:
+                    raise ValueError(
+                        f"would create {count:,} azimuths; safety limit is "
+                        f"{_MAX_EXPLICIT_AXIS_POINTS:,}"
+                    )
+                shape = (
+                    count,
+                    len(dataset.elevations),
+                    len(dataset.frequencies),
+                    len(dataset.polarizations),
                 )
-                new_phase = np.full_like(new_power, np.nan)
-                for i, c in enumerate(centres):
-                    in_window = np.where(np.abs(az - c) <= half_w)[0]
-                    if in_window.size == 0:
-                        # Fall back to nearest single sample.
-                        in_window = np.array([int(np.argmin(np.abs(az - c)))])
-                    window_power = dataset.rcs_power[in_window, :, :, :]
-                    new_power[i] = np.nanmedian(window_power, axis=0)
-
-                result = RcsGrid(
-                    centres,
-                    dataset.elevations,
-                    dataset.frequencies,
-                    dataset.polarizations,
-                    rcs=None,
-                    rcs_power=new_power,
-                    rcs_phase=new_phase,
-                    rcs_domain=dataset.rcs_domain,
-                    units=dict(dataset.units or {}),
-                )
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-
-            history = (
-                f"Medianize (window={window_deg:g}°, slide={slide_deg:g}°): {name}"
+                peak_estimate += _derived_grid_peak_bytes(dataset, shape)
+            except (TypeError, ValueError) as exc:
+                preflight_errors.append(f"{name} ({exc})")
+        if preflight_errors:
+            self.status.showMessage(
+                "Medianize blocked before allocation: " + "; ".join(preflight_errors)
             )
-            output_name = f"{name} [Median w={window_deg:g}° s={slide_deg:g}°]"
-            output_id = self._add_dataset_row(
-                result,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_function(
-                    self._python_output_reference(output_id, output_name),
-                    "medianize_azimuth",
-                    [source_ref],
-                    kwargs={
-                        "window_degrees": float(window_deg),
-                        "slide_degrees": float(slide_deg),
-                    },
-                    comment=f"Medianize {name} over azimuth",
-                )
-            produced += 1
-
-        if produced == 0:
-            self.status.showMessage("Medianize created 0 datasets.")
             return
-        msg = (
-            f"Medianize created {produced} dataset(s) "
-            f"(window={window_deg:g}°, slide={slide_deg:g}°)."
-        )
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        memory_limit = _derived_grid_memory_limit()
+        if peak_estimate > memory_limit:
+            self.status.showMessage(
+                "Medianize blocked before allocation: estimated working set "
+                f"{_format_bytes(peak_estimate)} exceeds the current safety "
+                f"limit {_format_bytes(memory_limit)}. Increase the slide size "
+                "or process fewer datasets at once."
+            )
+            return
+
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
+
+        def compute():
+            results = []
+            skipped = []
+            for dataset_index, (name, dataset) in enumerate(datasets):
+                try:
+                    result = medianize_azimuth(
+                        dataset,
+                        window_degrees=float(window_deg),
+                        slide_degrees=float(slide_deg),
+                    )
+                except Exception as exc:
+                    skipped.append(f"{name} ({exc})")
+                    continue
+                results.append((dataset_index, name, result))
+            return results, skipped
+
+        def publish(payload) -> None:
+            results, skipped = payload
+            for dataset_index, name, result in results:
+                history = (
+                    f"Medianize (window={window_deg:g}°, "
+                    f"slide={slide_deg:g}°): {name}"
+                )
+                output_name = (
+                    f"{name} [Median w={window_deg:g}° s={slide_deg:g}°]"
+                )
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
+                )
+                source_ref = source_references[dataset_index]
+                recorder = getattr(self, "python_recorder", None)
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "medianize_azimuth",
+                        [source_ref],
+                        kwargs={
+                            "window_degrees": float(window_deg),
+                            "slide_degrees": float(slide_deg),
+                        },
+                        comment=f"Medianize {name} over azimuth",
+                    )
+            produced = len(results)
+            if produced == 0:
+                self.status.showMessage("Medianize created 0 datasets.")
+                return
+            message = (
+                f"Medianize created {produced} dataset(s) "
+                f"(window={window_deg:g}°, slide={slide_deg:g}°)."
+            )
+            if skipped:
+                message += f" Skipped: {', '.join(skipped)}"
+            self.status.showMessage(message)
+
+        if self._start_background_callable(
+            "Dataset medianization", compute, publish
+        ):
+            self.status.showMessage(
+                f"Medianizing {len(datasets)} dataset(s) in the background..."
+            )
+
 
     def _duplicate_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -4695,10 +5846,71 @@ class DatasetOpsMixin:
                 parts = [safe]
                 if n_pol > 1:
                     pol_label = str(dataset.polarizations[pi]).strip() or f"pol{pi}"
-                    parts.append(pol_label)
+                    parts.append(f"p{pi:03d}_{_sanitize_filename(pol_label)}")
                 if n_el > 1:
-                    parts.append(f"el{float(dataset.elevations[ei]):g}")
+                    # The index guarantees uniqueness even when formatted
+                    # floating values are identical or the axis uses radians.
+                    parts.append(f"el{ei:04d}_{float(dataset.elevations[ei]):.12g}")
                 yield "_".join(parts), ei, pi
+
+    @staticmethod
+    def _write_pio_batch(directory: str, plans, *, precision: str = "single") -> int:
+        """Validate and stage a Pioneer fan-out before publishing any target."""
+
+        prepared = []
+        seen_targets: dict[str, str] = {}
+        for name, dataset, stem, el_idx, pol_idx in plans:
+            target = os.path.abspath(os.path.join(directory, f"{stem}.pio"))
+            target_key = _target_path_key(target)
+            prior = seen_targets.get(target_key)
+            if prior is not None:
+                raise ValueError(
+                    "Pioneer export would create the same file more than once: "
+                    f"{os.path.basename(target)} (from {prior!r} and {name!r})"
+                )
+            if os.path.lexists(target):
+                raise FileExistsError(
+                    f"Pioneer target already exists: {target}. Choose an empty "
+                    "folder or rename/remove the existing file."
+                )
+            seen_targets[target_key] = str(name)
+            prepared.append((dataset, stem, int(el_idx), int(pol_idx), target))
+
+        with tempfile.TemporaryDirectory(prefix=".grim_pio_", dir=directory) as stage:
+            staged = []
+            for dataset, stem, el_idx, pol_idx, target in prepared:
+                stage_path = os.path.join(stage, f"{stem}.pio")
+                saved = dataset.save_pio(
+                    stage_path,
+                    el_idx=el_idx,
+                    pol_idx=pol_idx,
+                    precision=precision,
+                )
+                staged.append((saved, target))
+            published: list[str] = []
+            try:
+                for stage_path, target in staged:
+                    if os.path.lexists(target):
+                        raise FileExistsError(
+                            f"Pioneer target appeared during export: {target}"
+                        )
+                    os.replace(stage_path, target)
+                    published.append(target)
+            except BaseException as original_error:
+                cleanup_errors = []
+                for target in reversed(published):
+                    try:
+                        if os.path.lexists(target):
+                            os.unlink(target)
+                    except OSError as exc:
+                        cleanup_errors.append(f"{target}: {exc}")
+                if cleanup_errors:
+                    raise RuntimeError(
+                        "Pioneer publication failed and rollback could not remove "
+                        "every newly published file: " + "; ".join(cleanup_errors)
+                    ) from original_error
+                raise
+        return len(prepared)
 
     def _export_pio_selected(self) -> None:
         try:
@@ -4736,14 +5948,8 @@ class DatasetOpsMixin:
             )
             if not directory:
                 return
-            produced = 0
-            for stem, el_idx, pol_idx in slices:
-                dataset.save_pio(
-                    os.path.join(directory, f"{stem}.pio"),
-                    el_idx=el_idx,
-                    pol_idx=pol_idx,
-                )
-                produced += 1
+            plans = [(name, dataset, *item) for item in slices]
+            produced = self._write_pio_batch(directory, plans)
             self.status.showMessage(
                 f"Exported {produced} .pio file(s) to {directory}."
             )
@@ -4754,15 +5960,14 @@ class DatasetOpsMixin:
         )
         if not directory:
             return
-        produced = 0
-        for name, dataset in datasets:
-            for stem, el_idx, pol_idx in self._iter_pio_slices(dataset, name):
-                dataset.save_pio(
-                    os.path.join(directory, f"{stem}.pio"),
-                    el_idx=el_idx,
-                    pol_idx=pol_idx,
-                )
-                produced += 1
+        plans = [
+            (name, dataset, stem, el_idx, pol_idx)
+            for dataset_index, (name, dataset) in enumerate(datasets, start=1)
+            for stem, el_idx, pol_idx in self._iter_pio_slices(
+                dataset, f"d{dataset_index:03d}_{name}"
+            )
+        ]
+        produced = self._write_pio_batch(directory, plans)
         self.status.showMessage(f"Exported {produced} .pio file(s) to {directory}.")
 
     @staticmethod
@@ -4788,10 +5993,9 @@ class DatasetOpsMixin:
             seen_targets[target_key] = str(_name)
             prepared.append((dataset, stem, int(el_idx), int(pol_idx), target))
 
-        # Validate/write every slice into a sibling staging folder first, so a
-        # format/validation failure publishes nothing. Final filesystem moves
-        # are necessarily sequential; a rare move failure can leave a partial
-        # published set and is reported to the user.
+        # Validate/write every slice into a sibling staging folder first. A
+        # publication failure removes every new target already moved, so this
+        # empty-folder fan-out is all-or-nothing.
         with tempfile.TemporaryDirectory(prefix=".grim_ptm_", dir=directory) as stage:
             staged = []
             for dataset, stem, el_idx, pol_idx, target in prepared:
@@ -4800,8 +6004,29 @@ class DatasetOpsMixin:
                     stage_path, el_idx=el_idx, pol_idx=pol_idx
                 )
                 staged.append((saved, target))
-            for stage_path, target in staged:
-                os.replace(stage_path, target)
+            published: list[str] = []
+            try:
+                for stage_path, target in staged:
+                    if os.path.lexists(target):
+                        raise FileExistsError(
+                            f"PTM target appeared during export: {target}"
+                        )
+                    os.replace(stage_path, target)
+                    published.append(target)
+            except BaseException as original_error:
+                cleanup_errors = []
+                for target in reversed(published):
+                    try:
+                        if os.path.lexists(target):
+                            os.unlink(target)
+                    except OSError as exc:
+                        cleanup_errors.append(f"{target}: {exc}")
+                if cleanup_errors:
+                    raise RuntimeError(
+                        "PTM publication failed and rollback could not remove "
+                        "every newly published file: " + "; ".join(cleanup_errors)
+                    ) from original_error
+                raise
         return len(prepared)
 
     def _export_ptm_selected(self) -> None:
@@ -4849,8 +6074,10 @@ class DatasetOpsMixin:
                     return
                 plans = [
                     (name, dataset, stem, el_idx, pol_idx)
-                    for name, dataset in datasets
-                    for stem, el_idx, pol_idx in self._iter_pio_slices(dataset, name)
+                    for dataset_index, (name, dataset) in enumerate(datasets, start=1)
+                    for stem, el_idx, pol_idx in self._iter_pio_slices(
+                        dataset, f"d{dataset_index:03d}_{name}"
+                    )
                 ]
 
             produced = self._write_ptm_batch(directory, plans)
@@ -4871,10 +6098,11 @@ class DatasetOpsMixin:
         dlg = ExportCsvDialog(parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
-
         scale, include_phase = dlg.get_options()
-        produced = 0
-        for name, dataset in datasets:
+
+        entries: list[tuple[RcsGrid, str]] = []
+        if len(datasets) == 1:
+            name, dataset = datasets[0]
             safe_name = _sanitize_filename(name)
             path, _ = QFileDialog.getSaveFileName(
                 self,
@@ -4883,16 +6111,129 @@ class DatasetOpsMixin:
                 "CSV Files (*.csv);;All Files (*)",
             )
             if not path:
-                continue
-            if not path.lower().endswith(".csv"):
-                path = f"{path}.csv"
-            _write_dataset_csv(dataset, path, scale=scale, sep=",", include_phase=include_phase)
-            produced += 1
-
-        if produced:
-            self.status.showMessage(f"Exported {produced} dataset(s) to CSV.")
+                return
+            if not path.casefold().endswith(".csv"):
+                path += ".csv"
+            entries.append((dataset, os.path.abspath(path)))
         else:
-            self.status.showMessage("Export cancelled.")
+            directory = QFileDialog.getExistingDirectory(
+                self, "Export Selected Datasets as CSV"
+            )
+            if not directory:
+                return
+            for dataset_index, (name, dataset) in enumerate(datasets, start=1):
+                filename = f"d{dataset_index:03d}_{_sanitize_filename(name)}.csv"
+                entries.append((dataset, os.path.abspath(os.path.join(directory, filename))))
+
+        targets = [path for _dataset, path in entries]
+        duplicate_groups = _duplicate_target_groups(targets)
+        if duplicate_groups:
+            self.status.showMessage(
+                "CSV export cancelled: multiple datasets resolve to the same filename."
+            )
+            return
+        invalid_targets = [path for path in targets if os.path.isdir(path)]
+        if invalid_targets:
+            self.status.showMessage(
+                "CSV export cancelled: an output target is an existing directory."
+            )
+            return
+
+        existing = [path for path in targets if os.path.lexists(path)]
+        if existing:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            shown = "\n".join(f"• {os.path.basename(path)}" for path in existing[:12])
+            if len(existing) > 12:
+                shown += f"\n• …and {len(existing) - 12} more"
+            answer = QMessageBox.question(
+                self,
+                "Replace Existing CSV Files?",
+                f"{len(existing)} existing file(s) will be replaced:\n\n{shown}\n\n"
+                "Replace all listed files transactionally?",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                self.status.showMessage("CSV export cancelled; no files were changed.")
+                return
+
+        row_counts = [math.prod(dataset.rcs_power.shape) for dataset, _ in entries]
+        total_rows = sum(row_counts)
+        # V1 repeats explicit physical metadata per row for robust standalone
+        # interchange. This conservative estimate is used only for time/disk UI.
+        entry_estimated_bytes = []
+        try:
+            for (dataset, _target), count in zip(entries, row_counts):
+                metadata_chars = sum(
+                    len(str(dataset._declared_scalar_metadata(key) or ""))
+                    for key in (
+                        "phase_reference",
+                        "time_convention",
+                        "polarization_basis",
+                    )
+                )
+                entry_estimated_bytes.append(
+                    count
+                    * (
+                        300
+                        + max(
+                            (len(str(value)) for value in dataset.polarizations),
+                            default=0,
+                        )
+                        + metadata_chars
+                    )
+                )
+        except (TypeError, ValueError) as exc:
+            self.status.showMessage(f"CSV export blocked: {exc}")
+            return
+        estimated_bytes = sum(entry_estimated_bytes)
+        if total_rows > 5_000_000 or estimated_bytes > 1024**3:
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            answer = QMessageBox.question(
+                self,
+                "Large CSV Export",
+                f"This export contains {total_rows:,} rows and may use about "
+                f"{_format_bytes(estimated_bytes)}. CSV is portable but much larger "
+                "and slower than .grim. Continue in the background?",
+                buttons.Yes | buttons.No,
+                buttons.No,
+            )
+            if answer != buttons.Yes:
+                self.status.showMessage("Large CSV export cancelled.")
+                return
+
+        estimates_by_directory: dict[str, int] = {}
+        for (_dataset, target), estimate in zip(entries, entry_estimated_bytes):
+            directory = os.path.dirname(target) or os.curdir
+            estimates_by_directory[directory] = (
+                estimates_by_directory.get(directory, 0) + estimate
+            )
+        for directory, estimate in estimates_by_directory.items():
+            try:
+                free = int(shutil.disk_usage(directory).free)
+            except OSError:
+                continue
+            if estimate > int(free * 0.9):
+                self.status.showMessage(
+                    "CSV export blocked before writing: estimated staged output "
+                    f"{_format_bytes(estimate)} exceeds safe free space "
+                    f"{_format_bytes(free)} in {directory}."
+                )
+                return
+
+        worker = _CsvExportWorker(
+            entries,
+            scale=scale,
+            include_phase=include_phase,
+        )
+        worker.progress.connect(self._on_csv_export_progress)
+        worker.finished.connect(self._on_csv_export_finished)
+        if not self._try_start_background_job("CSV export", worker):
+            return
+        self.status.showMessage(
+            f"Exporting {len(entries)} dataset(s) to CSV in the background..."
+        )
+
 
     def _reselect_indices(self, widget: QListWidget, indices: set[int]) -> None:
         if not indices:
@@ -4921,30 +6262,16 @@ class DatasetOpsMixin:
         name_a, ds_a = datasets[0]
         name_b, ds_b = datasets[1]
 
+        attestation = self._confirm_coherent_metadata(datasets, "Coherent ÷")
+        if attestation is None:
+            return
         try:
-            ds_a._assert_compatible(ds_b, coherent=True)
+            result = coherent_divide(
+                ds_a, ds_b, metadata_attested=bool(attestation)
+            )
         except (ValueError, TypeError) as exc:
             self.status.showMessage(f"Coherent ÷: {exc}")
             return
-
-        denom = ds_b.rcs.copy()
-        numerator = ds_a.rcs
-        result_rcs = np.full(
-            numerator.shape, np.nan + 1j * np.nan,
-            dtype=np.result_type(numerator.dtype, denom.dtype),
-        )
-        valid = np.isfinite(numerator) & np.isfinite(denom) & (denom != 0)
-        np.divide(numerator, denom, out=result_rcs, where=valid)
-        ratio_units = dict(ds_a.units or {})
-        ratio_units["rcs_log_unit"] = "dB"
-        ratio_units["rcs_linear_quantity"] = "power_ratio"
-        result = RcsGrid(
-            ds_a.azimuths, ds_a.elevations, ds_a.frequencies,
-            ds_a.polarizations, result_rcs,
-            rcs_power=np.abs(result_rcs) ** 2,
-            rcs_domain="complex_amplitude",
-            units=ratio_units,
-        )
         out_name = f"{name_a} ÷ {name_b}"
         output_id = self._add_dataset_row(
             result, out_name, f"Coherent ÷: {name_a} / {name_b}", file_name=""
@@ -4956,6 +6283,7 @@ class DatasetOpsMixin:
                 self._python_output_reference(output_id, out_name),
                 "coherent_divide",
                 input_refs,
+                kwargs={"metadata_attested": True} if attestation else None,
                 comment=f"Coherently divide {name_a} by {name_b}",
             )
         self.status.showMessage(f"Coherent ÷ produced: {out_name}")

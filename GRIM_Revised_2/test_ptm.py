@@ -129,7 +129,7 @@ class PtmReadTests(unittest.TestCase):
             ):
                 grid.coherent_add(different_frame)
 
-            derived = grid.coherent_add(grid)
+            derived = grid.coherent_add(grid, metadata_attested=True)
             self.assertEqual(derived.angular_coordinate_system(), "great_circle")
             self.assertEqual(
                 derived.angular_frame_orientation_deg(), (1.25, -2.5)

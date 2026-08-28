@@ -32,6 +32,163 @@ affects only heatmap-style data rendering. Explicit Plot Colors background,
 grid, or text overrides also remain in effect when the application palette
 changes.
 
+## Flat RCS CSV interchange
+
+GRIM and CEM Tools share the versioned `grim.flat-rcs.v1` CSV/TXT contract.
+It is the supported human-readable interchange format; use `.grim` when every
+solver-specific ancillary array and provenance field must remain lossless.
+Native `.grim` saves are compressed and atomically published by default, so
+they are normally much smaller and faster to reload than a dense text table;
+CSV is intended for inspected or cross-tool interchange, not bulk working-set
+storage. Multi-file saves/exports stage the full batch and roll back a late
+publication failure instead of presenting a partial result as complete.
+Version 1 repeats metadata on every data row so filtering or concatenating
+rows cannot detach the samples from their units. Its columns are:
+
+```text
+grim_csv_schema,azimuth,azimuth_unit,elevation,elevation_unit,frequency,
+frequency_unit,polarization,rcs_linear_quantity,rcs_log_unit,
+angular_coordinate_system,great_circle_coordinate_convention,
+angular_roll_deg,angular_tilt_deg,polarization_basis,time_convention,
+phase_reference,phase_wrap,[magnitude column(s)],[phase_deg]
+```
+
+The selected magnitude columns are `magnitude_power_linear`, `magnitude_dbsm`,
+`magnitude_dbke`, and/or `magnitude_db`; their names are never overloaded.
+`magnitude_power_linear` is always the stored nonnegative linear power: 3-D
+sigma for `sigma_3d`, 2-D sigma for `sigma_2d`, or a dimensionless power ratio
+for `power_ratio`. It is never field amplitude. The only valid quantity/log
+pairs are `sigma_3d`/`dBsm`, `sigma_2d`/`dBke`, and `power_ratio`/`dB`.
+`azimuth_unit` and `elevation_unit` are independently `deg` or `rad`;
+frequency is explicitly `Hz`, `kHz`, `MHz`, or `GHz`. `phase_deg` may be blank
+for a magnitude-only sample. A nonblank phase is useful for coherent work only
+when `phase_reference`, the polarization basis, and the time convention are
+also physically meaningful. `phase_wrap` is `-180_180` or `0_360` and declares
+the interval used for `phase_deg`. The current versioned writer emits that
+declaration on every row and normalizes exported phase into the declared
+interval; the reader restores it to the dataset's units metadata. Older tables
+without the column retain the signed `-180_180` default. This is representation
+metadata only: phase values separated by 360 degrees describe the same complex
+field.
+
+The reader also deliberately supports two older unversioned layouts:
+
+- GRIM tables with plain `azimuth,elevation,frequency` axes interpret
+  `magnitude_linear` as linear power. Missing frequency units retain the old
+  magnitude-based inference, but the loaded dataset history and metadata now
+  flag that inference instead of silently presenting it as authoritative.
+- CEM Tools tables with `azimuth_deg,elevation_deg,frequency_GHz` interpret
+  their legacy `magnitude_linear` as field amplitude and square it. New CEM
+  exports always write the versioned power column.
+
+Versioned files reject the ambiguous `magnitude_linear` name. When a file
+contains both linear and logarithmic magnitude columns, GRIM converts and
+cross-checks them rather than arbitrarily trusting the first. Before creating
+power and phase arrays, the loader evaluates the Cartesian axis product and
+available RAM. It scans large tables twice instead of retaining a Python
+dictionary for every row. `GRIM_MAX_CSV_GRID_GB` can declare an intentional
+per-process limit after an unusually large grid has been reviewed.
+
+## Plotting and dataset operations
+
+The current row is the active dataset: its parameter lists and axis units are
+the display reference. Other selected datasets may use compatible Hz/kHz/MHz/
+GHz or degree/radian storage; GRIM converts selections and labels without
+changing their files. Conic and great-circle charts, different great-circle
+frames, different physical quantities (`sigma_3d`, `sigma_2d`, or ratio), and
+different logarithmic conventions cannot be overlaid as though they were the
+same ordinate. Compare uses one explicit sweep per dataset, matches coordinates
+one-to-one, and computes residual statistics from every common finite sample.
+Phase medians and residuals use circular arithmetic at the ±180° seam. A phase
+comparison with undeclared phase-center/time/basis metadata remains viewable
+for legacy data, but the status message states the physical assumption.
+
+Rendering caps the number of visible lines, points, image cells, waterfall
+panels, and explicit ticks. Line and magnitude-image reduction retain bucket
+extrema; oversized phase images stop with a request to narrow the axes rather
+than applying a nonphysical scalar phase reduction. These display limits do not
+change stored samples or reported full-resolution statistics. Overlap,
+statistics, interpolation, medianization, Range Cal, native `.grim` saves,
+dataset loading, and CSV export run in the dataset worker so large jobs do not
+freeze the GUI. High-memory dataset work and ISAR reconstruction are serialized
+to protect process memory; files dropped during ISAR are queued and load when
+the reconstruction reaches an idle boundary. Interpolation and medianization
+accept physical degrees while retaining each dataset's native angle unit and
+preflight output axes/RAM before allocation. Statistics operates on linear
+power—not on already-logarithmic dB samples—and creates compact reduced grids by
+default; repeating a statistic across the original grid is an explicit,
+memory-preflighted opt-in.
+
+The selection summary below the dataset table shows the active row and operand
+order. Long selections are abbreviated in the panel while the full order stays
+available in its tooltip, and the operations panel scrolls on shorter displays.
+`Ctrl+O` opens datasets, `Ctrl+Shift+O` performs Overlap, and ordered
+subtraction/division use the displayed operand order. Delta-dB and coherent
+division require exactly two operands. Join merges equal or
+complementary finite overlaps and rejects conflicts; it never silently applies
+a hidden first/last-wins rule.
+
+### Audit / QA
+
+**Audit / QA** is read-only. It reports an overall status plus errors, warnings,
+information, and metrics for axis validity, array shape, missing power and
+phase, metadata declarations, azimuth seam consistency, frequency uniformity,
+and coherent-operation readiness. It neither repairs nor normalizes the source
+dataset, and a passing structural audit is not a solver-accuracy or physical
+validation certificate. Select multiple rows to inspect them independently.
+
+### Crop / Slice and Regrid
+
+**Crop / Slice** creates an exact subset without interpolation. It can use the
+values selected in the parameter lists or inclusive numeric ranges, optionally
+retaining every Nth azimuth, elevation, or frequency sample after the range is
+applied. A stride is source-sample selection: it performs no averaging,
+low-pass filtering, or anti-aliasing. Polarization can also be sliced. The GUI
+shows angular ranges in degrees and frequency in the active dataset's display
+unit, then converts the request for each selected dataset.
+
+**Regrid** linearly interpolates one of azimuth, elevation, or frequency onto a
+strictly increasing target grid. The GUI's start/stop/step form resolves the
+largest grid point that does not exceed stop. Every target coordinate must be
+inside the source extent; GRIM does not extrapolate. Cells with usable phase
+are interpolated as a complex field, while magnitude-only cells use linear
+power interpolation and keep phase unknown. Regridding to a coarser spacing is
+not an anti-alias filter, so the GUI asks for confirmation before that form of
+downsampling.
+
+### Stitch
+
+**Stitch** forms the union of all four axes and fills finite samples according
+to one named overlap policy. Unlike strict **Join**, it may resolve conflicting
+finite overlaps, but only under the policy shown in the dialog and recorded in
+provenance. Input order is significant for the priority policies:
+
+- `priority-first` keeps the first finite power/phase sample as one atomic
+  sample; later inputs still fill missing cells.
+- `priority-last` keeps the last finite power/phase sample as one atomic sample.
+- `power-mean` averages repeated finite samples in linear power. Phase remains
+  available in single-source cells and becomes unknown in cells with multiple
+  contributors.
+- `coherent-mean` averages the complex fields. It requires finite phase and
+  compatible phase-reference, time-convention, and polarization-basis metadata;
+  legacy missing declarations require an explicit attestation.
+
+Before the GUI adds the result, it reports contributing samples, overlapping
+cells, equivalent overlaps, and conflicts resolved by the policy. The result's
+history and `grim.stitch-provenance.v1` record retain the policy, tolerance,
+counts, attestation state, and input sources.
+
+### Phase and azimuth wrapping
+
+**Wrap** can place phase values, azimuth coordinates, or both into `0_360` or
+`-180_180`. Phase wrapping is a modulo-360 representation change only: stored
+linear power, missing-phase cells, and the physical complex field are
+unchanged. The resulting dataset records the choice as `units["phase_wrap"]`;
+native `.grim` and versioned flat CSV preserve it. Azimuth wrapping is a
+coordinate operation instead: it reorders the grid and may merge physically
+equivalent seam aliases, but rejects conflicting finite samples that would
+collapse onto the same wrapped coordinate.
+
 ## Assembly
 
 Assembly keeps spatial feature placement under **Place Features** and
@@ -348,6 +505,14 @@ are noted in a comment rather than emitted as falsely equivalent code. Use **Cop
 **Save As…** to run the same work headlessly. The recorder ignores selection
 gestures, tab changes, zoom/pan, and non-dataset tool workflows.
 
+Crop / Slice, Regrid, Stitch, and phase wrapping are replayed with explicit
+`crop_dataset`, `regrid_axis`, `stitch_datasets`, and `wrap_phase`/`RcsGrid`
+calls. Recorded crop ranges, explicit regrid coordinates, stitch operand order
+and policy, metadata attestation, and wrap interval are therefore visible in
+the script. Audit is diagnostic rather than a dataset mutation, so it is not
+added to the manipulation chain; use the headless `--audit` report when a
+machine-readable replay check is required.
+
 ## Dataset files
 
 Files can be dropped onto the main dataset table or the Assembly tree. The
@@ -473,13 +638,59 @@ the complex result and provenance but drop stale solver/certification metadata.
 
 ```powershell
 grim-headless a.grim b.grim --operation coherent-add -o sum.grim
+grim-headless a.grim b.grim --operation coherent-add --attest-coherent-metadata -o sum.grim
 grim-headless --folder results --pattern "*.grim" --operation join -o joined.grim
+grim-headless first.grim second.grim --operation stitch --stitch-policy priority-first --tol 1e-6 -o stitched.grim
+grim-headless repeated-1.grim repeated-2.grim --operation stitch --stitch-policy coherent-mean --attest-coherent-metadata -o coherent-mean.grim
+grim-headless a.grim b.grim --audit
+grim-headless --folder results --pattern "*.grim" --audit -o audit.json
 ```
 
 Coherent operations require compatible axes, units, phase reference,
 polarizations, and dimensional RCS quantity. A 2-D `sigma_2d` field cannot be
 coherently added directly to a 3-D `sigma_3d` body; it must first go through
-the line-expansion placement workflow.
+the line-expansion placement workflow. When legacy inputs do not declare a
+phase center, time convention, or polarization basis, headless coherent work
+fails closed unless `--attest-coherent-metadata` is supplied. That switch is an
+explicit statement that the missing declarations are physically common; it
+never overrides a declared mismatch. Attested outputs retain a structured
+attestation record and history entry without fabricating phase-center, time, or
+polarization-basis values that were absent from the inputs.
+
+Headless stitch accepts the same `priority-first`, `priority-last`,
+`power-mean`, and `coherent-mean` policies as the GUI. `--tol` controls numeric
+coordinate matching and `--max-gib` caps the estimated dense working
+allocation. `--audit` takes precedence over combination: it loads and audits
+each raw input independently, creates no derived dataset, and writes JSON to
+stdout unless `--output` names a separate report file.
+
+The recorder's helpers can also be used directly without Qt:
+
+```python
+from grim_headless import load_dataset
+from grim_python import crop_dataset, regrid_axis, stitch_datasets, wrap_phase
+
+source = load_dataset("source.grim")
+cropped = crop_dataset(source, frequency_range=(8.0, 12.0), frequency_stride=2)
+regridded = regrid_axis(cropped, "frequency", start=8.0, stop=12.0, step=0.25)
+wrapped = wrap_phase(regridded, mode="0_360")
+stitched, report = stitch_datasets(
+    wrapped,
+    load_dataset("extension.grim"),
+    policy="priority-first",
+    return_report=True,
+)
+```
+
+Helper crop/regrid coordinates are in each dataset's native axis units. These
+helpers return derived grids in memory; call `.save(...)` explicitly when an
+artifact should be published.
+
+Runnable examples for strict folder joins, Cartesian azimuth sweeps, frequency
+sweeps with optional azimuth-band percentiles, and unit-aware coordinate/index
+queries are in [`examples/`](examples/README.md). Each example uses the same
+validated loaders and numerical paths as GRIM rather than duplicating file or
+plot parsing logic.
 
 ## Tests
 

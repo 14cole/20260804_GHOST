@@ -4,6 +4,7 @@ import csv
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -41,7 +42,7 @@ class TestCsvExport(unittest.TestCase):
         rows = self._rows()
 
         self.assertEqual(
-            [float(row["magnitude_linear"]) for row in rows], [1.0, 4.0]
+            [float(row["magnitude_power_linear"]) for row in rows], [1.0, 4.0]
         )
         self.assertAlmostEqual(float(rows[0]["magnitude_dbsm"]), 0.0, places=6)
         self.assertAlmostEqual(
@@ -124,7 +125,7 @@ class TestCsvExport(unittest.TestCase):
 
         _write_dataset_csv(statistic, self.path, scale="linear")
         values = [
-            float(row["magnitude_linear"]) for row in self._rows()
+            float(row["magnitude_power_linear"]) for row in self._rows()
         ]
         self.assertEqual(values, [2.5, 2.5])
 
@@ -170,8 +171,8 @@ class TestCsvExport(unittest.TestCase):
 
         _write_dataset_csv(dataset, self.path, scale="linear")
         rows = self._rows()
-        self.assertEqual(rows[0]["magnitude_linear"], "1")
-        self.assertEqual(rows[1]["magnitude_linear"], "")
+        self.assertEqual(rows[0]["magnitude_power_linear"], "1")
+        self.assertEqual(rows[1]["magnitude_power_linear"], "")
 
         loaded = _load_dataset_csv(self.path)
         self.assertEqual(float(loaded.rcs_power.ravel()[0]), 1.0)
@@ -252,6 +253,36 @@ class TestCsvExport(unittest.TestCase):
         loaded = _load_dataset_csv(self.path)
         self.assertEqual(loaded.units["frequency"], "Hz")
         self.assertEqual(float(loaded.rcs_power.ravel()[0]), 2.0)
+
+    def test_failed_csv_write_keeps_existing_target_intact(self):
+        with open(self.path, "w", encoding="utf-8") as stream:
+            stream.write("existing artifact\n")
+        dataset = RcsGrid(
+            [0.0], [0.0], [3.0], ["VV"],
+            rcs_power=np.ones((1, 1, 1, 1)),
+            units={"frequency": "GHz"},
+        )
+
+        def fail_after_partial(_dataset, stage_path, **_kwargs):
+            with open(stage_path, "w", encoding="utf-8") as stream:
+                stream.write("partial replacement\n")
+            raise OSError("simulated CSV failure")
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.write_flat_csv",
+            side_effect=fail_after_partial,
+        ):
+            with self.assertRaisesRegex(OSError, "simulated CSV failure"):
+                _write_dataset_csv(dataset, self.path)
+
+        with open(self.path, encoding="utf-8") as stream:
+            self.assertEqual(stream.read(), "existing artifact\n")
+        self.assertFalse(
+            any(
+                name.startswith(".grim-csv-")
+                for name in os.listdir(os.path.dirname(self.path))
+            )
+        )
 
 
 if __name__ == "__main__":

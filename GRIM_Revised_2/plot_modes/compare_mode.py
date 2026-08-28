@@ -2,219 +2,276 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import common
 
-# When more than one axis has multiple values selected, pick the sweep axis
-# by this priority. Azimuth wins first so the original (az-only) compare
-# behaviour is preserved for users with existing workflows.
+
 _SWEEP_PRIORITY = ("azimuth", "elevation", "frequency")
-_AXIS_LABEL = {
-    "azimuth": "Azimuth (deg)",
-    "elevation": "Elevation (deg)",
-    "frequency": "Frequency (GHz)",
-}
 
 
-def _determine_sweep_axis(az_sel, elev_sel, freq_sel) -> str | None:
-    has_multi = {
-        "azimuth": len(az_sel) >= 2,
-        "elevation": len(elev_sel) >= 2,
-        "frequency": len(freq_sel) >= 2,
+def _determine_sweep_axis(azimuths, elevations, frequencies) -> str | None:
+    selections = {
+        "azimuth": azimuths,
+        "elevation": elevations,
+        "frequency": frequencies,
     }
     for axis in _SWEEP_PRIORITY:
-        if has_multi[axis]:
+        if len(selections[axis]) >= 2:
             return axis
     return None
 
 
-def _collect_series(self, dataset, name, sweep_axis,
-                    az_sel, elev_sel, freq_sel, pol_value_sel):
-    az_values = np.asarray(sorted(az_sel), dtype=float)
-    elev_values = np.asarray(sorted(elev_sel, key=float), dtype=float)
-    freq_values = np.asarray(sorted(freq_sel, key=float), dtype=float)
-    az_indices = self._indices_for_values(dataset.azimuths, az_values, tol=1e-6)
-    elev_indices = self._indices_for_values(dataset.elevations, elev_values, tol=1e-6)
-    freq_indices = self._indices_for_values(dataset.frequencies, freq_values, tol=1e-6)
-    pol_indices = self._indices_for_values(dataset.polarizations, [pol_value_sel], tol=0.0)
-    if (
-        az_indices is None
-        or elev_indices is None
-        or freq_indices is None
-        or pol_indices is None
-    ):
+def _collect_single_series(
+    self,
+    reference,
+    dataset,
+    name,
+    sweep_axis,
+    azimuths,
+    elevations,
+    frequencies,
+    polarization,
+):
+    selections = {
+        "azimuth": np.asarray(sorted(azimuths), dtype=float),
+        "elevation": np.asarray(sorted(elevations), dtype=float),
+        "frequency": np.asarray(sorted(frequencies), dtype=float),
+    }
+    indices = {
+        axis: self._axis_selection_for_dataset(reference, dataset, axis, values)
+        for axis, values in selections.items()
+    }
+    pol_indices = self._indices_for_values(dataset.polarizations, [polarization], tol=0.0)
+    if any(value is None for value in indices.values()) or pol_indices is None:
         return None
 
-    pol_value = dataset.polarizations[pol_indices[0]]
-    frequency_unit = str((dataset.units or {}).get("frequency", "GHz"))
+    az_indices = indices["azimuth"]
+    elev_indices = indices["elevation"]
+    freq_indices = indices["frequency"]
     pol_idx = pol_indices[0]
-    use_complex = self._button_checked(self.btn_phase)
-    def _values(selection):
-        return dataset.rcs_slice(selection) if use_complex else dataset.rcs_power[selection]
-
-    series: list[tuple[np.ndarray, str]] = []
     if sweep_axis == "azimuth":
-        sweep_values = az_values
-        for f_idx in freq_indices:
-            freq_value = float(dataset.frequencies[f_idx])
-            for e_idx in elev_indices:
-                elev_value = dataset.elevations[e_idx]
-                raw = _values((az_indices, e_idx, f_idx, pol_idx))
-                rcs_display = self._display_from_values(dataset, raw, frequency_value=freq_value)
-                label = f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, El {elev_value:g} deg"
-                series.append((rcs_display, label))
-    elif sweep_axis == "elevation":
-        sweep_values = elev_values
-        for f_idx in freq_indices:
-            freq_value = float(dataset.frequencies[f_idx])
-            for a_idx in az_indices:
-                az_value = dataset.azimuths[a_idx]
-                raw = _values((a_idx, elev_indices, f_idx, pol_idx))
-                rcs_display = self._display_from_values(dataset, raw, frequency_value=freq_value)
-                label = f"{name} | Pol {pol_value}, Freq {freq_value:g} {frequency_unit}, Az {az_value:g} deg"
-                series.append((rcs_display, label))
-    else:  # frequency
-        sweep_values = freq_values
-        # For frequency sweep, dB conversion needs the per-bin freq, so pass
-        # the full freq vector (matches frequency_mode's convention).
-        freq_axis_values = np.asarray(
-            [float(dataset.frequencies[idx]) for idx in freq_indices], dtype=float
+        native_x = dataset.azimuths[az_indices]
+        native_frequency = float(dataset.frequencies[freq_indices[0]])
+        raw_selection = (az_indices, elev_indices[0], freq_indices[0], pol_idx)
+        fixed = (
+            f"Freq {float(self._plot_axis_values(reference, dataset, 'frequency', [native_frequency])[0]):g} "
+            f"{self._plot_axis_unit(reference, 'frequency')}, "
+            f"{self._plot_axis_name(reference, 'elevation')} "
+            f"{float(self._plot_axis_values(reference, dataset, 'elevation', [dataset.elevations[elev_indices[0]]])[0]):g} "
+            f"{self._plot_axis_unit(reference, 'elevation')}"
         )
-        for e_idx in elev_indices:
-            elev_value = dataset.elevations[e_idx]
-            for a_idx in az_indices:
-                az_value = dataset.azimuths[a_idx]
-                raw = _values((a_idx, e_idx, freq_indices, pol_idx))
-                rcs_display = self._display_from_values(
-                    dataset, raw, frequency_value=freq_axis_values
-                )
-                label = f"{name} | Pol {pol_value}, El {elev_value:g} deg, Az {az_value:g} deg"
-                series.append((rcs_display, label))
-    return sweep_values, series
+        frequency_value = native_frequency
+    elif sweep_axis == "elevation":
+        native_x = dataset.elevations[elev_indices]
+        native_frequency = float(dataset.frequencies[freq_indices[0]])
+        raw_selection = (az_indices[0], elev_indices, freq_indices[0], pol_idx)
+        fixed = (
+            f"Freq {float(self._plot_axis_values(reference, dataset, 'frequency', [native_frequency])[0]):g} "
+            f"{self._plot_axis_unit(reference, 'frequency')}, "
+            f"{self._plot_axis_name(reference, 'azimuth')} "
+            f"{float(self._plot_axis_values(reference, dataset, 'azimuth', [dataset.azimuths[az_indices[0]]])[0]):g} "
+            f"{self._plot_axis_unit(reference, 'azimuth')}"
+        )
+        frequency_value = native_frequency
+    else:
+        native_x = dataset.frequencies[freq_indices]
+        native_frequencies = np.asarray(native_x, dtype=float)
+        raw_selection = (az_indices[0], elev_indices[0], freq_indices, pol_idx)
+        fixed = (
+            f"{self._plot_axis_name(reference, 'azimuth')} "
+            f"{float(self._plot_axis_values(reference, dataset, 'azimuth', [dataset.azimuths[az_indices[0]]])[0]):g} "
+            f"{self._plot_axis_unit(reference, 'azimuth')}, "
+            f"{self._plot_axis_name(reference, 'elevation')} "
+            f"{float(self._plot_axis_values(reference, dataset, 'elevation', [dataset.elevations[elev_indices[0]]])[0]):g} "
+            f"{self._plot_axis_unit(reference, 'elevation')}"
+        )
+        frequency_value = native_frequencies
+
+    if self._button_checked(self.btn_phase):
+        raw = dataset.rcs_slice(raw_selection)
+    else:
+        raw = dataset.rcs_power[raw_selection]
+    display = self._display_from_values(
+        dataset, raw, frequency_value=frequency_value
+    )
+    x_values = self._plot_axis_values(reference, dataset, sweep_axis, native_x)
+    label = f"{name} | Pol {dataset.polarizations[pol_idx]}, {fixed}"
+    return np.asarray(x_values), np.asarray(display), label
 
 
 def render(self) -> None:
     self.last_plot_mode = "compare"
+    self._start_plot_render()
     datasets = self._selected_datasets()
     if len(datasets) != 2:
         self.status.showMessage("Compare: select exactly 2 datasets.")
         return
+    reference = self._preflight_plot_datasets(datasets)
+    if reference is None:
+        return
+    if self._button_checked(self.btn_phase):
+        missing_metadata = common.missing_coherent_metadata(datasets)
+        if missing_metadata:
+            rendered = ", ".join(value.replace("_", " ") for value in missing_metadata)
+            self._note_plot_render(
+                "Phase residual assumes a common reference because these declarations "
+                f"are missing: {rendered}."
+            )
 
-    az_values_sel = self._selected_values(self.list_az)
-    if not az_values_sel:
-        self.status.showMessage("Select one or more azimuths to plot.")
+    azimuths = self._selected_values(self.list_az)
+    elevations = self._selected_values(self.list_elev)
+    frequencies = self._selected_values(self.list_freq)
+    if not azimuths:
+        self.status.showMessage("Compare: select one or more azimuths/aspects.")
         return
-    freq_values_sel = self._selected_values(self.list_freq)
-    if not freq_values_sel:
-        self.status.showMessage("Select one or more frequencies to plot.")
+    if not elevations:
+        self.status.showMessage("Compare: select one or more elevations/pitches.")
         return
-    elev_values_sel = self._selected_values(self.list_elev)
-    if not elev_values_sel:
-        self.status.showMessage("Select one or more elevations to plot.")
+    if not frequencies:
+        self.status.showMessage("Compare: select one or more frequencies.")
         return
-    pol_value_sel = self._single_selection_value(self.list_pol, "polarization")
-    if pol_value_sel is None:
+    polarization = self._single_selection_value(self.list_pol, "polarization")
+    if polarization is None:
         return
 
-    sweep_axis = _determine_sweep_axis(az_values_sel, elev_values_sel, freq_values_sel)
+    sweep_axis = _determine_sweep_axis(azimuths, elevations, frequencies)
     if sweep_axis is None:
         self.status.showMessage(
-            "Compare: select 2+ azimuths, elevations, or frequencies to sweep over."
+            "Compare: select 2+ azimuths/aspects, elevations/pitches, or frequencies "
+            "for the sweep."
+        )
+        return
+    selections = {
+        "azimuth": azimuths,
+        "elevation": elevations,
+        "frequency": frequencies,
+    }
+    extra_sweeps = [
+        axis for axis, values in selections.items()
+        if axis != sweep_axis and len(values) != 1
+    ]
+    if extra_sweeps:
+        fixed_names = ", ".join(self._plot_axis_name(reference, axis) for axis in extra_sweeps)
+        self.status.showMessage(
+            f"Compare requires exactly one series per dataset. Select exactly one "
+            f"{fixed_names} value, or make it the only sweep axis."
         )
         return
 
-    name_a, ds_a = datasets[0]
-    name_b, ds_b = datasets[1]
+    collected = []
+    for name, dataset in datasets:
+        series = _collect_single_series(
+            self,
+            reference,
+            dataset,
+            name,
+            sweep_axis,
+            azimuths,
+            elevations,
+            frequencies,
+            polarization,
+        )
+        if series is None:
+            self.status.showMessage(
+                f"No compatible data in '{name}' for the selected comparison parameters."
+            )
+            return
+        collected.append(series)
 
-    collected_a = _collect_series(
-        self, ds_a, name_a, sweep_axis,
-        az_values_sel, elev_values_sel, freq_values_sel, pol_value_sel,
+    (x_a, y_a, label_a), (x_b, y_b, label_b) = collected
+    left_indices, right_indices = common.common_axis_indices(
+        x_a,
+        x_b,
+        tolerance=common.axis_matching_tolerance(reference, sweep_axis),
     )
-    collected_b = _collect_series(
-        self, ds_b, name_b, sweep_axis,
-        az_values_sel, elev_values_sel, freq_values_sel, pol_value_sel,
-    )
-    if collected_a is None:
-        self.status.showMessage(f"Compare: '{name_a}' missing selected parameters.")
+    if left_indices.size < 2:
+        self.status.showMessage(
+            f"No compatible data: datasets have fewer than 2 common "
+            f"{self._plot_axis_name(reference, sweep_axis).lower()} samples."
+        )
         return
-    if collected_b is None:
-        self.status.showMessage(f"Compare: '{name_b}' missing selected parameters.")
+    x_common = x_a[left_indices]
+    left_values = y_a[left_indices]
+    right_values = y_b[right_indices]
+    finite_common = np.isfinite(left_values) & np.isfinite(right_values)
+    if np.count_nonzero(finite_common) < 2:
+        self.status.showMessage(
+            "No compatible data: datasets have fewer than 2 common finite samples "
+            "for the residual."
+        )
         return
 
-    x_a, series_a = collected_a
-    x_b, series_b = collected_b
-
-    top_ax, res_ax = self._ensure_compare_axes()
+    top_ax, residual_ax = self._ensure_compare_axes()
     top_ax.clear()
-    res_ax.clear()
+    residual_ax.clear()
     self._style_axes(top_ax)
-    self._style_axes(res_ax)
-
-    text_color = self._current_plot_text()
-    grid_color = self._current_plot_grid()
-
-    color_a = "#4fc3f7"
-    color_b = "#ff8a65"
-    for rcs_disp, label in series_a:
-        top_ax.plot(x_a, rcs_disp, color=color_a, linewidth=1.5, label=label)
-    for rcs_disp, label in series_b:
-        top_ax.plot(x_b, rcs_disp, color=color_b, linewidth=1.5, linestyle="--", label=label)
-
+    self._style_axes(residual_ax)
+    self._plot_bounded_line(
+        top_ax, x_a, y_a, color="#4fc3f7", linewidth=1.5, label=label_a
+    )
+    self._plot_bounded_line(
+        top_ax, x_b, y_b, color="#ff8a65", linewidth=1.5,
+        linestyle="--", label=label_b,
+    )
     top_ax.set_ylabel(self._display_axis_label(datasets))
     self._update_legend_visibility()
 
-    rcs_a0 = series_a[0][0]
-    rcs_b0 = series_b[0][0]
-
-    x_a_r = np.round(x_a, 8)
-    x_b_r = np.round(x_b, 8)
-    mask_a = np.isin(x_a_r, x_b_r)
-    mask_b = np.isin(x_b_r, x_a_r)
-
-    if mask_a.sum() < 2:
-        res_ax.text(
-            0.5, 0.5,
-            f"No common {sweep_axis} points for residual",
-            transform=res_ax.transAxes, ha="center", va="center",
-            color=text_color, fontsize=8,
+    residual = left_values - right_values
+    phase_mode = self._button_checked(self.btn_phase)
+    if phase_mode:
+        residual = common.wrap_phase_degrees(residual)
+    x_display, residual_display, decimated = common.decimate_line(x_common, residual)
+    if decimated:
+        self._note_plot_render(
+            f"Residual over {common.MAX_LINE_POINTS:,} samples was display-decimated; "
+            "statistics still use all common samples."
         )
-    else:
-        x_common = x_a[mask_a]
-        y_a = rcs_a0[mask_a]
-        y_b = rcs_b0[mask_b]
-        residual = y_a - y_b
+    grid_color = self._current_plot_grid()
+    residual_ax.axhline(0, color=grid_color, linewidth=0.8, linestyle="--")
+    residual_ax.plot(
+        x_display,
+        residual_display,
+        color="#a5d6a7",
+        linewidth=1.2,
+        label=f"{datasets[0][0]} - {datasets[1][0]}",
+    )
+    residual_ax.fill_between(
+        x_display, residual_display, 0, alpha=0.15, color="#a5d6a7"
+    )
+    residual_unit = self._display_unit(datasets)
+    residual_ax.set_ylabel(f"Residual ({residual_unit})", fontsize=8)
+    residual_ax.set_xlabel(self._plot_axis_label(reference, sweep_axis))
 
-        res_ax.axhline(0, color=grid_color, linewidth=0.8, linestyle="--")
-        res_ax.plot(x_common, residual, color="#a5d6a7", linewidth=1.2, label=f"{name_a} − {name_b}")
-        res_ax.fill_between(x_common, residual, 0, alpha=0.15, color="#a5d6a7")
-        residual_unit = self._display_unit(datasets)
-        res_ax.set_ylabel(f"Residual ({residual_unit})", fontsize=8)
-
-        finite = np.isfinite(residual)
-        if finite.sum() > 1:
-            res_fin = residual[finite]
-            mean_err = float(np.mean(res_fin))
-            rms_err = float(np.sqrt(np.mean(res_fin ** 2)))
-            max_err = float(np.max(np.abs(res_fin)))
-
-            fin_both = finite & np.isfinite(y_a) & np.isfinite(y_b)
-            if fin_both.sum() > 1:
-                corr = float(np.corrcoef(y_a[fin_both], y_b[fin_both])[0, 1])
-                corr_str = f"   Corr: {corr:.4f}"
-            else:
-                corr_str = ""
-
-            stats_text = (
-                f"Mean: {mean_err:+.2f} {residual_unit}   "
-                f"RMS: {rms_err:.2f} {residual_unit}   "
-                f"Max|err|: {max_err:.2f} {residual_unit}"
-                + corr_str
+    finite = np.isfinite(residual)
+    if np.count_nonzero(finite) > 1:
+        finite_residual = residual[finite]
+        if phase_mode:
+            mean_error = float(
+                np.degrees(np.angle(np.mean(np.exp(1j * np.deg2rad(finite_residual)))))
             )
-            top_ax.set_title(stats_text, fontsize=8, color=text_color, pad=4)
+        else:
+            mean_error = float(np.mean(finite_residual))
+        rms_error = float(np.sqrt(np.mean(finite_residual ** 2)))
+        max_error = float(np.max(np.abs(finite_residual)))
+        correlation = ""
+        both = finite & np.isfinite(left_values) & np.isfinite(right_values)
+        if not phase_mode and np.count_nonzero(both) > 1:
+            corr_value = float(np.corrcoef(left_values[both], right_values[both])[0, 1])
+            if np.isfinite(corr_value):
+                correlation = f"   Corr: {corr_value:.4f}"
+        top_ax.set_title(
+            f"Mean: {mean_error:+.2f} {residual_unit}   "
+            f"RMS: {rms_error:.2f} {residual_unit}   "
+            f"Max|err|: {max_error:.2f} {residual_unit}{correlation}",
+            fontsize=8,
+            color=self._current_plot_text(),
+            pad=4,
+        )
 
-    if sweep_axis == "frequency":
-        frequency_units = {str((dataset.units or {}).get("frequency", "GHz")) for _, dataset in datasets}
-        frequency_unit = next(iter(frequency_units)) if len(frequency_units) == 1 else "mixed units"
-        res_ax.set_xlabel(f"Frequency ({frequency_unit})")
-    else:
-        res_ax.set_xlabel(_AXIS_LABEL[sweep_axis])
+    self.spin_plot_xmin.blockSignals(True)
+    self.spin_plot_xmax.blockSignals(True)
+    self.spin_plot_xmin.setValue(float(min(np.min(x_a), np.min(x_b))))
+    self.spin_plot_xmax.setValue(float(max(np.max(x_a), np.max(x_b))))
+    self.spin_plot_xmin.blockSignals(False)
+    self.spin_plot_xmax.blockSignals(False)
     self._apply_plot_limits()
-    self.status.showMessage(f"Compare plot updated ({sweep_axis} sweep).")
+    self._show_plot_status(f"Compare plot updated ({sweep_axis} sweep).")

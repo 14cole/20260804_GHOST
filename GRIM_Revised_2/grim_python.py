@@ -22,6 +22,9 @@ import numpy as np
 from grim_dataset import RcsGrid
 
 
+_MAX_EXPLICIT_AXIS_POINTS = 1_000_000
+
+
 @dataclass(frozen=True)
 class DatasetReference:
     """Stable recorder identity plus the best durable source for one GUI row."""
@@ -125,6 +128,7 @@ try:
     from grim_dataset import RcsGrid
     from grim_headless import load_dataset
     from grim_python import (
+        crop_dataset,
         coherent_divide,
         convert_extrusion,
         duplicate_dataset,
@@ -132,9 +136,12 @@ try:
         medianize_azimuth,
         offset_db,
         plot_datasets,
+        regrid_axis,
         save_dataset_batch,
         shift_dataset,
+        stitch_datasets,
         wedge_to_conic,
+        wrap_phase,
     )
 except ModuleNotFoundError as exc:
     if exc.name in {{"grim_dataset", "grim_headless", "grim_python"}}:
@@ -453,6 +460,54 @@ except ModuleNotFoundError as exc:
         return True
 
 
+def _minimal_physics_extra(dataset: RcsGrid, *, include_phase_reference=True) -> dict:
+    extra = {}
+    keys = ["time_convention", "polarization_basis"]
+    if include_phase_reference:
+        keys.insert(0, "phase_reference")
+    for key in keys:
+        value = dataset._declared_scalar_metadata(key)
+        if value:
+            extra[key] = value
+    return extra
+
+
+def _derived_response_extra(dataset: RcsGrid) -> dict:
+    """Keep response-independent ancillary models, dropping stale grid claims."""
+
+    stale = {
+        "amplitude_convention",
+        "power_domain",
+        "rcs_domain",
+        "solver_metadata_json",
+        "solver_certification",
+        "production_mesh_certification_json",
+        "source_body_mesh_certification_json",
+        "requested_radar_grid_json",
+        "rcs_amp_real",
+        "rcs_amp_imag",
+    }
+    original_shape = tuple(dataset.rcs_power.shape)
+    extra = {}
+    for key, value in (dataset.extra or {}).items():
+        if key in stale:
+            continue
+        array = np.asarray(value)
+        if array.ndim >= 4 and tuple(array.shape[:4]) == original_shape:
+            continue
+        if isinstance(value, np.ndarray):
+            # Response-independent body/geometry models can be much larger
+            # than the plotted grid.  A derived dataset does not mutate them,
+            # so share storage through a read-only view instead of copying the
+            # whole model for every offset or phase edit.
+            shared = value.view()
+            shared.setflags(write=False)
+            extra[key] = shared
+        else:
+            extra[key] = copy.deepcopy(value)
+    return extra
+
+
 def _copy_grid(dataset: RcsGrid, *, rcs, rcs_power, rcs_domain=None, units=None) -> RcsGrid:
     return RcsGrid(
         dataset.azimuths,
@@ -463,12 +518,10 @@ def _copy_grid(dataset: RcsGrid, *, rcs, rcs_power, rcs_domain=None, units=None)
         rcs_power=rcs_power,
         rcs_phase=None if rcs is not None else dataset.rcs_phase,
         rcs_domain=rcs_domain or dataset.rcs_domain,
+        source_path=dataset.source_path,
+        history=dataset.history,
         units=dict(dataset.units or {}) if units is None else dict(units),
-        extra={
-            "phase_reference": dataset.extra["phase_reference"]
-            for _ in (0,)
-            if "phase_reference" in dataset.extra
-        },
+        extra=_derived_response_extra(dataset),
     )
 
 
@@ -490,6 +543,138 @@ def duplicate_dataset(dataset: RcsGrid) -> RcsGrid:
     )
 
 
+def _positive_stride(value, name: str) -> int:
+    """Validate a replayed physical-axis stride without silently rounding it."""
+
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, np.integer)
+    ):
+        raise TypeError(f"{name} must be a positive integer")
+    stride = int(value)
+    if stride <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return stride
+
+
+def crop_dataset(
+    dataset: RcsGrid,
+    *,
+    azimuths=None,
+    elevations=None,
+    frequencies=None,
+    azimuth_range=None,
+    elevation_range=None,
+    frequency_range=None,
+    azimuth_stride: int = 1,
+    elevation_stride: int = 1,
+    frequency_stride: int = 1,
+    polarizations=None,
+) -> RcsGrid:
+    """Select values or crop numeric ranges, then retain every Nth sample.
+
+    Ranges and output coordinates use the dataset's native axis units.  The
+    helper deliberately delegates both selections to :meth:`RcsGrid.axis_crop`
+    so unit metadata, field-convention metadata, history, and source provenance
+    follow the same rules as an interactively recorded crop.  A stride is
+    sample selection, not an anti-aliasing resample or statistical average.
+    """
+
+    strides = {
+        "azimuth": _positive_stride(azimuth_stride, "azimuth_stride"),
+        "elevation": _positive_stride(elevation_stride, "elevation_stride"),
+        "frequency": _positive_stride(frequency_stride, "frequency_stride"),
+    }
+    ranged = dataset.axis_crop(
+        azimuths=azimuths,
+        elevations=elevations,
+        frequencies=frequencies,
+        azimuth_range=azimuth_range,
+        elevation_range=elevation_range,
+        frequency_range=frequency_range,
+        polarizations=polarizations,
+    )
+    if all(value == 1 for value in strides.values()):
+        return ranged
+    return ranged.axis_crop(
+        azimuths=np.asarray(ranged.azimuths)[:: strides["azimuth"]],
+        elevations=np.asarray(ranged.elevations)[:: strides["elevation"]],
+        frequencies=np.asarray(ranged.frequencies)[:: strides["frequency"]],
+        polarizations=np.asarray(ranged.polarizations),
+    )
+
+
+def regrid_axis(
+    dataset: RcsGrid,
+    axis: str,
+    *,
+    start: float | None = None,
+    stop: float | None = None,
+    step: float | None = None,
+    values=None,
+) -> RcsGrid:
+    """Interpolate one numeric axis onto an explicit, replayable target grid.
+
+    Supply either ``values`` or all of ``start``, ``stop``, and ``step``.
+    Values are expressed in the source dataset's native unit and extrapolation
+    remains prohibited by :meth:`RcsGrid.interpolate_axis`.  This is the core
+    complex/linear interpolation policy; it does not invent an anti-alias
+    filter when the requested grid is coarser than the source.
+    """
+
+    aliases = {
+        "az": "azimuth",
+        "azimuths": "azimuth",
+        "el": "elevation",
+        "elevations": "elevation",
+        "freq": "frequency",
+        "frequencies": "frequency",
+    }
+    axis_name = str(axis).strip().lower()
+    axis_name = aliases.get(axis_name, axis_name)
+    if axis_name not in {"azimuth", "elevation", "frequency"}:
+        raise ValueError("axis must be 'azimuth', 'elevation', or 'frequency'")
+
+    bounds_supplied = any(item is not None for item in (start, stop, step))
+    if values is not None and bounds_supplied:
+        raise ValueError("provide either values or start/stop/step, not both")
+    if values is None:
+        if any(item is None for item in (start, stop, step)):
+            raise ValueError("start, stop, and step are required when values is omitted")
+        start_value = float(start)
+        stop_value = float(stop)
+        step_value = float(step)
+        if not all(math.isfinite(item) for item in (start_value, stop_value, step_value)):
+            raise ValueError("start, stop, and step must be finite")
+        if step_value <= 0.0:
+            raise ValueError("step must be positive")
+        if stop_value < start_value:
+            raise ValueError("stop must be greater than or equal to start")
+        count_float = math.floor(
+            (stop_value - start_value) / step_value + 1.0e-12
+        ) + 1
+        if count_float > _MAX_EXPLICIT_AXIS_POINTS:
+            raise ValueError(
+                f"requested grid has {count_float:,} points; the safety limit is "
+                f"{_MAX_EXPLICIT_AXIS_POINTS:,}"
+            )
+        target = start_value + step_value * np.arange(count_float, dtype=float)
+    else:
+        target = np.asarray(values, dtype=float).ravel()
+        if target.size > _MAX_EXPLICIT_AXIS_POINTS:
+            raise ValueError(
+                f"requested grid has {target.size:,} points; the safety limit is "
+                f"{_MAX_EXPLICIT_AXIS_POINTS:,}"
+            )
+
+    if target.size == 0:
+        raise ValueError("target grid must contain at least one value")
+    if not np.all(np.isfinite(target)):
+        raise ValueError("target grid values must be finite")
+    if target.size > 1 and np.any(np.diff(target) <= 0.0):
+        raise ValueError("target grid values must be strictly increasing")
+    return dataset.interpolate_axis(axis_name, target)
+
+
 def join_datasets(*datasets: RcsGrid, tol: float = 1.0e-6) -> RcsGrid:
     """Join grids with the GUI's conflict and available-memory policies."""
 
@@ -505,6 +690,30 @@ def join_datasets(*datasets: RcsGrid, tol: float = 1.0e-6) -> RcsGrid:
         tol=float(tol),
         overlap="error",
         max_output_bytes=maximum,
+    )
+
+
+def stitch_datasets(
+    *datasets: RcsGrid,
+    policy: str = "priority-first",
+    tol: float = 1.0e-6,
+    metadata_attested: bool = False,
+    max_output_bytes=None,
+    return_report: bool = False,
+):
+    """Stitch compatible datasets using the core method and its provenance.
+
+    The return value is an :class:`RcsGrid` unless ``return_report`` is true,
+    in which case it is the exact ``RcsGrid.stitch_many`` result.
+    """
+
+    return RcsGrid.stitch_many(
+        *datasets,
+        policy=policy,
+        tol=float(tol),
+        metadata_attested=metadata_attested,
+        max_output_bytes=max_output_bytes,
+        return_report=return_report,
     )
 
 
@@ -650,6 +859,15 @@ def shift_dataset(
     return result
 
 
+def wrap_phase(dataset: RcsGrid, mode: str = "-180_180") -> RcsGrid:
+    """Wrap stored phase using the user-facing degree interval names."""
+
+    mode_name = str(mode).strip()
+    if mode_name not in {"-180_180", "0_360"}:
+        raise ValueError("mode must be '-180_180' or '0_360'")
+    return dataset.wrap_phase(mode=mode_name)
+
+
 def offset_db(dataset: RcsGrid, value_db: float) -> RcsGrid:
     """Shift all displayed RCS values by a constant number of decibels."""
 
@@ -663,10 +881,21 @@ def offset_db(dataset: RcsGrid, value_db: float) -> RcsGrid:
     )
 
 
-def coherent_divide(numerator: RcsGrid, denominator: RcsGrid) -> RcsGrid:
+def coherent_divide(
+    numerator: RcsGrid,
+    denominator: RcsGrid,
+    *,
+    metadata_attested: bool = False,
+) -> RcsGrid:
     """Complex element-wise division using the GUI's finite/nonzero policy."""
 
-    numerator._assert_compatible(denominator, coherent=True)
+    if not isinstance(metadata_attested, (bool, np.bool_)):
+        raise TypeError("metadata_attested must be True or False")
+    numerator._assert_compatible(
+        denominator,
+        coherent=True,
+        coherent_metadata_attested=metadata_attested,
+    )
     left = numerator.rcs
     right = denominator.rcs
     result_rcs = np.full(
@@ -679,6 +908,28 @@ def coherent_divide(numerator: RcsGrid, denominator: RcsGrid) -> RcsGrid:
     units = dict(numerator.units or {})
     units["rcs_log_unit"] = "dB"
     units["rcs_linear_quantity"] = "power_ratio"
+    # A field ratio is a new dimensionless observable. Do not carry source
+    # solver payloads, raw amplitudes, body-model arrays, or certifications
+    # that describe the numerator rather than this derived result.
+    extra = {}
+    for key in ("time_convention", "polarization_basis"):
+        value = numerator._declared_scalar_metadata(key)
+        if value:
+            extra[key] = value
+    history, attestation_extra = numerator._coherent_attestation_provenance(
+        (denominator,),
+        operation="coherent-divide",
+        metadata_attested=metadata_attested,
+    )
+    if history is None:
+        history = numerator.history
+    if attestation_extra:
+        # A field ratio's phase is relative; a source phase-center label does
+        # not remain the result's phase reference. The separate attestation
+        # record captures compatibility without manufacturing a replacement.
+        attestation_extra.pop("phase_reference", None)
+        extra.update(attestation_extra)
+    extra["amplitude_convention"] = "complex field ratio"
     return RcsGrid(
         numerator.azimuths,
         numerator.elevations,
@@ -687,7 +938,10 @@ def coherent_divide(numerator: RcsGrid, denominator: RcsGrid) -> RcsGrid:
         result_rcs,
         rcs_power=np.abs(result_rcs) ** 2,
         rcs_domain="complex_amplitude",
+        source_path=numerator.source_path,
+        history=history,
         units=units,
+        extra=extra,
     )
 
 
@@ -700,6 +954,19 @@ def convert_extrusion(dataset: RcsGrid, *, to: str, length_m: float) -> RcsGrid:
     length = float(length_m)
     if not math.isfinite(length) or length <= 0.0:
         raise ValueError("length_m must be positive and finite")
+    source_quantity = str(dataset.linear_quantity()).strip().lower()
+    source_log_unit = str(dataset.default_log_unit()).strip().lower()
+    if destination == "dbke":
+        if source_quantity != "sigma_3d" or source_log_unit != "dbsm":
+            raise ValueError(
+                "dBsm→dBke requires a sigma_3d/dBsm dataset; "
+                f"received {source_quantity or 'unknown'}/{source_log_unit or 'unknown'}"
+            )
+    elif source_quantity != "sigma_2d" or source_log_unit != "dbke":
+        raise ValueError(
+            "dBke→dBsm requires a sigma_2d/dBke dataset; "
+            f"received {source_quantity or 'unknown'}/{source_log_unit or 'unknown'}"
+        )
     frequency_hz = np.asarray(dataset._frequency_value_to_hz(dataset.frequencies), dtype=float)
     c0 = 299_792_458.0
     if destination == "dbke":
@@ -724,7 +991,10 @@ def convert_extrusion(dataset: RcsGrid, *, to: str, length_m: float) -> RcsGrid:
             rcs,
             rcs_power=power,
             rcs_domain=dataset.rcs_domain,
+            source_path=dataset.source_path,
+            history=dataset.history,
             units=units,
+            extra=_derived_response_extra(dataset),
         )
     return RcsGrid(
         dataset.azimuths,
@@ -735,37 +1005,134 @@ def convert_extrusion(dataset: RcsGrid, *, to: str, length_m: float) -> RcsGrid:
         rcs_power=power,
         rcs_phase=dataset.rcs_phase,
         rcs_domain=dataset.rcs_domain,
+        source_path=dataset.source_path,
+        history=dataset.history,
         units=units,
+        extra=_derived_response_extra(dataset),
     )
 
 
-def medianize_azimuth(dataset: RcsGrid, *, window_degrees: float, slide_degrees: float) -> RcsGrid:
-    """Medianize linear power over sliding azimuth windows."""
+def medianize_azimuth(
+    dataset: RcsGrid,
+    *,
+    window_degrees: float,
+    slide_degrees: float,
+    periodic: bool | None = None,
+) -> RcsGrid:
+    """Medianize linear power over sliding physical-azimuth windows.
+
+    The public parameters are always degrees. The returned coordinate retains
+    the source dataset's native angular unit. A nearly complete 360-degree cut
+    is treated as periodic by default, allowing windows to cross its seam.
+    """
 
     window = float(window_degrees)
     slide = float(slide_degrees)
-    if window <= 0.0 or slide <= 0.0:
-        raise ValueError("window_degrees and slide_degrees must be positive")
-    azimuth = np.asarray(dataset.azimuths, dtype=float)
+    if not math.isfinite(window) or not math.isfinite(slide) or window <= 0.0 or slide <= 0.0:
+        raise ValueError("window_degrees and slide_degrees must be positive and finite")
+    unit_raw = str((dataset.units or {}).get("azimuth", "deg")).strip().lower()
+    if unit_raw in {"deg", "degree", "degrees"}:
+        angle_unit = "deg"
+    elif unit_raw in {"rad", "radian", "radians"}:
+        angle_unit = "rad"
+    else:
+        raise ValueError(f"unsupported azimuth unit {unit_raw!r}; use deg or rad")
+    native_azimuth = np.asarray(dataset.azimuths, dtype=float)
+    azimuth = np.rad2deg(native_azimuth) if angle_unit == "rad" else native_azimuth.copy()
     if azimuth.size < 2:
         raise ValueError("medianize requires at least two azimuth samples")
+    if not np.all(np.isfinite(azimuth)) or np.any(np.diff(azimuth) <= 0.0):
+        raise ValueError("medianize requires a finite, strictly increasing azimuth axis")
+
+    typical_step = float(np.median(np.diff(azimuth)))
+    span = float(azimuth[-1] - azimuth[0])
+    if periodic is None:
+        periodic = span >= 360.0 - max(1.5 * typical_step, 1.0e-6)
+    periodic = bool(periodic)
+    if periodic and window > 360.0 + 1.0e-9:
+        raise ValueError("a periodic median window cannot exceed 360 degrees")
+
     half = window * 0.5
-    first = float(azimuth.min()) + half
-    last = float(azimuth.max()) - half
-    if last < first:
-        centers = np.asarray([(float(azimuth.min()) + float(azimuth.max())) * 0.5])
+    sample_azimuth = azimuth
+    merged_seam_power = None
+    if periodic and np.isclose(span, 360.0, rtol=0.0, atol=1.0e-7):
+        # A closed sweep often stores both endpoints (0/360 or -180/180).
+        # They are one physical direction and must carry one statistical
+        # weight.  Merge complementary sparse data and reject genuinely
+        # inconsistent finite endpoint samples before dropping the duplicate.
+        merged_seam_power = np.array(dataset.rcs_power[0], copy=True)
+        merged_seam_phase = np.array(dataset.rcs_phase[0], copy=True)
+        RcsGrid._merge_equivalent_sample_blocks(
+            merged_seam_power,
+            merged_seam_phase,
+            dataset.rcs_power[-1],
+            dataset.rcs_phase[-1],
+            context="medianize periodic endpoint",
+        )
+        sample_azimuth = azimuth[:-1]
+    if periodic:
+        count_float = np.ceil(360.0 / slide - 1.0e-12)
+        if count_float > _MAX_EXPLICIT_AXIS_POINTS:
+            raise ValueError(
+                f"medianize would create {int(count_float):,} azimuths; "
+                f"the safety limit is {_MAX_EXPLICIT_AXIS_POINTS:,}"
+            )
+        centers = float(azimuth[0]) + np.arange(int(count_float), dtype=float) * slide
+        centers = centers[centers < float(azimuth[0]) + 360.0 - 1.0e-10]
+        source_indices = np.arange(sample_azimuth.size, dtype=np.int64)
+        augmented_azimuth = np.concatenate(
+            (sample_azimuth - 360.0, sample_azimuth, sample_azimuth + 360.0)
+        )
+        augmented_indices = np.tile(source_indices, 3)
     else:
-        count = int(np.floor((last - first) / slide + 1e-9)) + 1
-        centers = first + np.arange(count, dtype=float) * slide
+        first = float(azimuth[0]) + half
+        last = float(azimuth[-1]) - half
+        if last < first:
+            centers = np.asarray([(float(azimuth[0]) + float(azimuth[-1])) * 0.5])
+        else:
+            count_float = np.floor((last - first) / slide + 1e-9) + 1.0
+            if count_float > _MAX_EXPLICIT_AXIS_POINTS:
+                raise ValueError(
+                    f"medianize would create {int(count_float):,} azimuths; "
+                    f"the safety limit is {_MAX_EXPLICIT_AXIS_POINTS:,}"
+                )
+            centers = first + np.arange(int(count_float), dtype=float) * slide
     shape = (centers.size,) + dataset.rcs_power.shape[1:]
     power = np.empty(shape, dtype=dataset.rcs_power.dtype)
     for index, center in enumerate(centers):
-        samples = np.flatnonzero(np.abs(azimuth - center) <= half)
+        if periodic:
+            left = int(np.searchsorted(augmented_azimuth, center - half, side="left"))
+            right = int(np.searchsorted(augmented_azimuth, center + half, side="right"))
+            samples = np.unique(augmented_indices[left:right])
+        else:
+            left = int(np.searchsorted(azimuth, center - half, side="left"))
+            right = int(np.searchsorted(azimuth, center + half, side="right"))
+            samples = np.arange(left, right, dtype=np.int64)
         if samples.size == 0:
-            samples = np.asarray([int(np.argmin(np.abs(azimuth - center)))])
-        power[index] = np.nanmedian(dataset.rcs_power[samples], axis=0)
+            if periodic:
+                distance = np.abs(
+                    (sample_azimuth - center + 180.0) % 360.0 - 180.0
+                )
+            else:
+                distance = np.abs(azimuth - center)
+            samples = np.asarray([int(np.argmin(distance))])
+        sample_power = dataset.rcs_power[samples]
+        if merged_seam_power is not None and np.any(samples == 0):
+            # Advanced indexing above owns this compact window, so replacing
+            # its seam row cannot mutate the source dataset.
+            sample_power[np.flatnonzero(samples == 0)] = merged_seam_power
+        power[index] = np.nanmedian(sample_power, axis=0)
+    output_centers = np.deg2rad(centers) if angle_unit == "rad" else centers
+    extra = {}
+    for key in ("time_convention", "polarization_basis"):
+        value = dataset._declared_scalar_metadata(key)
+        if value:
+            extra[key] = value
+    extra["amplitude_convention"] = (
+        "sliding median of linear power; coherent phase is undefined"
+    )
     return RcsGrid(
-        centers,
+        output_centers,
         dataset.elevations,
         dataset.frequencies,
         dataset.polarizations,
@@ -773,7 +1140,10 @@ def medianize_azimuth(dataset: RcsGrid, *, window_degrees: float, slide_degrees:
         rcs_power=power,
         rcs_phase=np.full_like(power, np.nan),
         rcs_domain=dataset.rcs_domain,
+        source_path=dataset.source_path,
+        history=dataset.history,
         units=dict(dataset.units or {}),
+        extra=extra,
     )
 
 
@@ -817,30 +1187,89 @@ def _indices(axis, selected, *, text=False, tolerance=1.0e-6) -> list[int]:
 
 def _display_values(dataset: RcsGrid, values, *, frequency, phase: bool, scale: str):
     if phase:
-        return np.rad2deg(np.angle(values))
+        phase_degrees = np.rad2deg(np.angle(values))
+        finite = np.isfinite(phase_degrees)
+        display = np.full(np.asarray(phase_degrees).shape, np.nan, dtype=float)
+        phase_wrap = str(
+            (dataset.units or {}).get("phase_wrap", "-180_180")
+        ).strip()
+        if phase_wrap == "0_360":
+            display[finite] = np.mod(phase_degrees[finite], 360.0)
+        else:
+            display[finite] = (
+                np.mod(phase_degrees[finite] + 180.0, 360.0) - 180.0
+            )
+        return display
     if str(scale).lower() == "linear":
         return dataset.rcs_to_linear(values)
     return dataset.rcs_to_display_db(values, frequency_value=frequency)
 
 
 def _plot_selection_indices(
+    reference: RcsGrid,
     dataset: RcsGrid,
     azimuths,
     elevations,
     frequencies,
     polarization,
 ):
-    """Return exact requested indices, or ``None`` like the GUI skip policy."""
+    """Return converted requested indices, or ``None`` like the GUI policy."""
+
+    from plot_modes import common as plot_common
 
     try:
+        native_azimuths, azimuth_tolerance = plot_common.selection_for_dataset(
+            reference, dataset, "azimuth", azimuths
+        )
+        native_elevations, elevation_tolerance = plot_common.selection_for_dataset(
+            reference, dataset, "elevation", elevations
+        )
+        native_frequencies, frequency_tolerance = plot_common.selection_for_dataset(
+            reference, dataset, "frequency", frequencies
+        )
         return (
-            _indices(dataset.azimuths, azimuths),
-            _indices(dataset.elevations, elevations),
-            _indices(dataset.frequencies, frequencies),
+            _indices(
+                dataset.azimuths,
+                native_azimuths,
+                tolerance=azimuth_tolerance,
+            ),
+            _indices(
+                dataset.elevations,
+                native_elevations,
+                tolerance=elevation_tolerance,
+            ),
+            _indices(
+                dataset.frequencies,
+                native_frequencies,
+                tolerance=frequency_tolerance,
+            ),
             _indices(dataset.polarizations, [polarization], text=True)[0],
         )
     except (TypeError, ValueError):
         return None
+
+
+def _plot_response_label(
+    reference: RcsGrid,
+    *,
+    phase: bool,
+    scale: str,
+    p50: bool = False,
+) -> str:
+    """Match the GUI's response-quantity labels in generated plots."""
+
+    if phase:
+        return "Phase P50 (deg)" if p50 else "Phase (deg)"
+    quantity_name, linear_unit = {
+        "sigma_3d": ("RCS", "m²"),
+        "sigma_2d": ("Scattering Width", "m"),
+        "power_ratio": ("Power Ratio", "dimensionless"),
+        "ratio": ("Power Ratio", "dimensionless"),
+    }.get(str(reference.linear_quantity()).strip().lower(), ("Value", "linear"))
+    suffix = " P50" if p50 else ""
+    if str(scale).strip().lower() == "linear":
+        return f"{quantity_name}{suffix} ({linear_unit})"
+    return f"{quantity_name}{suffix} ({reference.default_log_unit()})"
 
 
 def plot_datasets(
@@ -857,6 +1286,7 @@ def plot_datasets(
     show_grid: bool = True,
     show_legend: bool = True,
     polar_zero: str = "N",
+    reference_index: int = 0,
     waterfall_style: str = "Surface",
     isar_options: dict[str, object] | None = None,
 ):
@@ -885,6 +1315,21 @@ def plot_datasets(
             f"Unsupported headless plot mode {mode!r}; supported modes are "
             "azimuth_rect, azimuth_polar, frequency, and elevation_sweep"
         )
+    try:
+        reference_position = int(reference_index)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("reference_index must identify one selected dataset") from exc
+    if reference_position < 0 or reference_position >= len(selected):
+        raise ValueError("reference_index must identify one selected dataset")
+    reference = selected[reference_position][1]
+
+    from plot_modes import common as plot_common
+
+    plot_common.validate_plot_datasets(
+        selected,
+        phase=bool(phase),
+        linear=str(scale).strip().lower() == "linear",
+    )
     az_values = [float(value) for value in azimuths]
     el_values = [float(value) for value in elevations]
     freq_values = [float(value) for value in frequencies]
@@ -910,16 +1355,30 @@ def plot_datasets(
     if mode_key in {"azimuth_rect", "azimuth_polar"}:
         for name, dataset in selected:
             indices = _plot_selection_indices(
-                dataset, az_values, el_values, freq_values, polarization
+                reference,
+                dataset,
+                az_values,
+                el_values,
+                freq_values,
+                polarization,
             )
             if indices is None:
                 continue
             az_idx, el_idx, fr_idx, pol_idx = indices
             compatible_count += 1
-            order = np.argsort(np.asarray(dataset.azimuths)[az_idx])
-            x = np.asarray(dataset.azimuths)[az_idx][order]
+            native_x = np.asarray(dataset.azimuths)[az_idx]
+            x = plot_common.values_for_display(
+                reference, dataset, "azimuth", native_x
+            )
+            order = np.argsort(x)
+            x = np.asarray(x)[order]
             if mode_key == "azimuth_polar":
-                x = np.deg2rad(x)
+                x = plot_common.convert_axis_values(
+                    x,
+                    "azimuth",
+                    plot_common.axis_unit(reference, "azimuth"),
+                    "rad",
+                )
             for fi in fr_idx:
                 for ei in el_idx:
                     raw = (
@@ -938,59 +1397,138 @@ def plot_datasets(
                         x,
                         y,
                         label=(
-                            f"{name} | {polarization}, {float(dataset.frequencies[fi]):g} "
-                            f"{dataset.units.get('frequency', 'GHz')}, El {float(dataset.elevations[ei]):g}°"
+                            f"{name} | {polarization}, "
+                            f"{float(plot_common.values_for_display(reference, dataset, 'frequency', [dataset.frequencies[fi]])[0]):g} "
+                            f"{plot_common.axis_unit(reference, 'frequency')}, "
+                            f"{plot_common.angular_axis_name(reference, 'elevation')} "
+                            f"{float(plot_common.values_for_display(reference, dataset, 'elevation', [dataset.elevations[ei]])[0]):g} "
+                            f"{plot_common.axis_unit(reference, 'elevation')}"
                         ),
                     )
-        if mode_key == "azimuth_rect":
-            axes.set_xlabel("Azimuth (deg)")
-        axes.set_ylabel("Phase (deg)" if phase else ("RCS (Linear)" if scale == "linear" else "RCS (dB)"))
+        axes.set_xlabel(plot_common.axis_label(reference, "azimuth"))
+        axes.set_ylabel(
+            _plot_response_label(reference, phase=phase, scale=scale)
+        )
 
     elif mode_key == "frequency":
         for name, dataset in selected:
             indices = _plot_selection_indices(
-                dataset, az_values, el_values, freq_values, polarization
+                reference,
+                dataset,
+                az_values,
+                el_values,
+                freq_values,
+                polarization,
             )
             if indices is None:
                 continue
             az_idx, el_idx, fr_idx, pol_idx = indices
             compatible_count += 1
-            x = np.asarray(dataset.frequencies)[fr_idx]
+            native_x = np.asarray(dataset.frequencies)[fr_idx]
+            x = plot_common.values_for_display(
+                reference, dataset, "frequency", native_x
+            )
             order = np.argsort(x)
             for ei in el_idx:
                 if phase:
                     block = dataset.rcs[np.ix_(az_idx, [ei], fr_idx, [pol_idx])][:, 0, :, 0]
-                    y = np.nanmedian(np.rad2deg(np.angle(block)), axis=0)
+                    phase_degrees = np.rad2deg(np.angle(block))
+                    phase_degrees = np.where(np.isfinite(block), phase_degrees, np.nan)
+                    y = plot_common.circular_median_degrees(
+                        phase_degrees, axis=0
+                    )
                 else:
                     block = dataset.rcs_power[np.ix_(az_idx, [ei], fr_idx, [pol_idx])][:, 0, :, 0]
                     power = np.nanmedian(block, axis=0)
-                    y = _display_values(dataset, power, frequency=x, phase=False, scale=scale)
-                axes.plot(x[order], np.asarray(y)[order], label=f"{name} | El {dataset.elevations[ei]:g}°")
-        axes.set_xlabel(f"Frequency ({selected[0][1].units.get('frequency', 'GHz')})")
-        axes.set_ylabel("Phase P50 (deg)" if phase else ("RCS P50 (Linear)" if scale == "linear" else "RCS P50 (dB)"))
+                    y = _display_values(
+                        dataset,
+                        power,
+                        frequency=native_x,
+                        phase=False,
+                        scale=scale,
+                    )
+                elevation = float(
+                    plot_common.values_for_display(
+                        reference,
+                        dataset,
+                        "elevation",
+                        [dataset.elevations[ei]],
+                    )[0]
+                )
+                axes.plot(
+                    np.asarray(x)[order],
+                    np.asarray(y)[order],
+                    label=(
+                        f"{name} | "
+                        f"{plot_common.angular_axis_name(reference, 'elevation')} "
+                        f"{elevation:g} {plot_common.axis_unit(reference, 'elevation')}"
+                    ),
+                )
+        axes.set_xlabel(plot_common.axis_label(reference, "frequency"))
+        axes.set_ylabel(
+            _plot_response_label(reference, phase=phase, scale=scale, p50=True)
+        )
 
     elif mode_key == "elevation_sweep":
         for name, dataset in selected:
             indices = _plot_selection_indices(
-                dataset, az_values, el_values, freq_values, polarization
+                reference,
+                dataset,
+                az_values,
+                el_values,
+                freq_values,
+                polarization,
             )
             if indices is None:
                 continue
             az_idx, el_idx, fr_idx, pol_idx = indices
             compatible_count += 1
-            x = np.asarray(dataset.elevations)[el_idx]
+            native_x = np.asarray(dataset.elevations)[el_idx]
+            x = plot_common.values_for_display(
+                reference, dataset, "elevation", native_x
+            )
             order = np.argsort(x)
             for fi in fr_idx:
                 if phase:
                     block = dataset.rcs[np.ix_(az_idx, el_idx, [fi], [pol_idx])][:, :, 0, 0]
-                    y = np.nanmedian(np.rad2deg(np.angle(block)), axis=0) if len(az_idx) > 1 else np.rad2deg(np.angle(block[0]))
+                    phase_degrees = np.rad2deg(np.angle(block))
+                    phase_degrees = np.where(np.isfinite(block), phase_degrees, np.nan)
+                    y = (
+                        plot_common.circular_median_degrees(
+                            phase_degrees, axis=0
+                        )
+                        if len(az_idx) > 1
+                        else phase_degrees[0]
+                    )
                 else:
                     block = dataset.rcs_power[np.ix_(az_idx, el_idx, [fi], [pol_idx])][:, :, 0, 0]
                     power = np.nanmedian(block, axis=0) if len(az_idx) > 1 else block[0]
                     y = _display_values(dataset, power, frequency=dataset.frequencies[fi], phase=False, scale=scale)
-                axes.plot(x[order], np.asarray(y)[order], label=f"{name} | {dataset.frequencies[fi]:g}")
-        axes.set_xlabel("Elevation (deg)")
-        axes.set_ylabel("Phase (deg)" if phase else ("RCS (Linear)" if scale == "linear" else "RCS (dB)"))
+                frequency = float(
+                    plot_common.values_for_display(
+                        reference,
+                        dataset,
+                        "frequency",
+                        [dataset.frequencies[fi]],
+                    )[0]
+                )
+                axes.plot(
+                    np.asarray(x)[order],
+                    np.asarray(y)[order],
+                    label=(
+                        f"{name} | {frequency:g} "
+                        f"{plot_common.axis_unit(reference, 'frequency')}"
+                    ),
+                )
+        axes.set_xlabel(plot_common.axis_label(reference, "elevation"))
+        axes.set_ylabel(
+            _plot_response_label(
+                reference,
+                phase=phase,
+                scale=scale,
+                p50=len(az_values) > 1,
+            )
+        )
 
     elif mode_key == "compare":
         if len(selected) != 2:
@@ -1128,12 +1666,16 @@ __all__ = [
     "PythonScriptRecorder",
     "coherent_divide",
     "convert_extrusion",
+    "crop_dataset",
     "duplicate_dataset",
     "join_datasets",
     "medianize_azimuth",
     "offset_db",
     "plot_datasets",
+    "regrid_axis",
     "save_dataset_batch",
     "shift_dataset",
+    "stitch_datasets",
     "wedge_to_conic",
+    "wrap_phase",
 ]

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -376,6 +377,14 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.freddy_patch.stop()
         self.feature_patch.stop()
         self.ghost_patch.stop()
+
+    def _wait_for_background(self, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        while self.window._background_job_active() and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.app.processEvents()
+        self.assertFalse(self.window._background_job_active())
 
     def test_tabs_have_one_canonical_assembly_workspace(self) -> None:
         labels = [
@@ -965,6 +974,27 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertEqual(self.window.table.item(0, 1).text(), "Unsaved")
         self.assertIn("Edit polarization axis[0]", edited.history)
 
+    def test_gui_response_edits_preserve_source_history_and_drop_raw_field(self) -> None:
+        source = _grid(1.0)
+        source.source_path = os.path.abspath("source.grim")
+        source.history = "Loaded source"
+        source.extra["rcs_amp_real"] = np.ones(source.rcs_power.shape)
+        source.extra["body_profile_radius_m"] = np.asarray([1.0, 2.0])
+
+        derived = grim_cut_dataset_mixin._dataset_with_rcs(
+            source,
+            source.rcs * np.exp(1j * np.deg2rad(15.0)),
+            rcs_power=source.rcs_power,
+            rcs_domain="complex_amplitude",
+        )
+
+        self.assertEqual(derived.source_path, source.source_path)
+        self.assertEqual(derived.history, source.history)
+        self.assertNotIn("rcs_amp_real", derived.extra)
+        np.testing.assert_array_equal(
+            derived.extra["body_profile_radius_m"], [1.0, 2.0]
+        )
+
     def test_batch_save_preserves_per_row_provenance_for_shared_grid(self) -> None:
         shared = _grid()
         shared.source_path = os.path.abspath("original_source.grim")
@@ -988,6 +1018,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
                     [0, 1], tmp, dialog_title="Test Save"
                 )
             )
+            self._wait_for_background()
             first_saved = RcsGrid.load(os.path.join(tmp, "First branch.grim"))
             second_saved = RcsGrid.load(os.path.join(tmp, "Second branch.grim"))
             self.assertEqual(
@@ -1020,6 +1051,26 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertEqual(len(payloads), 1)
         self.assertEqual(payloads[0]["loaded"], [])
         self.assertIn("pool unavailable", payloads[0]["failed"][0])
+
+    def test_import_queued_behind_isar_starts_when_isar_becomes_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_path = _grid(1.0).save(os.path.join(tmp, "queued.grim"))
+            self.window._isar_busy = True
+
+            grim_cut_dataset_mixin.DatasetOpsMixin._handle_files_dropped(
+                self.window, [source_path]
+            )
+
+            self.assertEqual(len(self.window._pending_import_batches), 1)
+            self.assertEqual(self.window.table.rowCount(), 0)
+            self.window._on_isar_compute_done({}, "ISAR cancelled for test")
+            self._wait_for_background()
+
+            self.assertEqual(self.window._pending_import_batches, [])
+            self.assertEqual(self.window.table.rowCount(), 1)
+            loaded = self.window.table.item(0, 0).data(Qt.UserRole)
+            self.assertIsInstance(loaded, RcsGrid)
+            self.assertEqual(float(loaded.rcs_power.item()), 1.0)
 
     def test_grim_archive_expansion_caps_parallel_loader_workers(self) -> None:
         tasks = [(0, "first.grim"), (1, "second.grim")]
@@ -1073,7 +1124,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 return_value=None,
             ),
         ):
-            with self.assertRaisesRegex(MemoryError, "Load fewer .grim files"):
+            with self.assertRaisesRegex(MemoryError, "Load fewer or smaller dataset files"):
                 grim_cut_dataset_mixin._recommended_loader_workers(tasks)
 
     def test_batch_save_rejects_sanitized_casefold_collision_before_write(self) -> None:
@@ -1140,9 +1191,48 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 )
 
             self.assertTrue(result)
+            self._wait_for_background()
             question.assert_called_once()
             self.assertEqual(float(RcsGrid.load(os.path.join(tmp, "First.grim")).rcs_power.item()), 1.0)
             self.assertEqual(float(RcsGrid.load(os.path.join(tmp, "Second.grim")).rcs_power.item()), 4.0)
+
+    def test_background_save_does_not_mark_a_newer_row_revision_saved(self) -> None:
+        original = _grid(1.0)
+        self.window._add_dataset_row(original, "Editable", "original")
+        row_item = self.window.table.item(0, 0)
+        started = threading.Event()
+        release = threading.Event()
+        real_publish = grim_cut_dataset_mixin._stage_and_publish_grim_batch
+
+        def delayed_publish(entries):
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test did not release save worker")
+            return real_publish(entries)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "Editable.grim")
+            with mock.patch.object(
+                grim_cut_dataset_mixin,
+                "_stage_and_publish_grim_batch",
+                side_effect=delayed_publish,
+            ):
+                self.assertTrue(
+                    self.window._save_dataset_plan(
+                        [(0, original, target)], dialog_title="Test Save"
+                    )
+                )
+                self.assertTrue(started.wait(2.0))
+                newer = _grid(2.0)
+                row_item.setData(Qt.UserRole, newer)
+                row_item.setData(DATASET_DIRTY_ROLE, True)
+                release.set()
+                self._wait_for_background()
+
+            self.assertTrue(row_item.data(DATASET_DIRTY_ROLE))
+            self.assertIs(row_item.data(Qt.UserRole), newer)
+            self.assertEqual(float(RcsGrid.load(target).rcs_power.item()), 1.0)
+            self.assertIn("remain unsaved", self.window.status.currentMessage())
 
     def test_batch_save_retains_prior_backup_when_restore_itself_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1262,6 +1352,79 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "same file more than once"):
                     self.window._write_ptm_batch(tmp, plans)
             writer.assert_not_called()
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_pioneer_batch_rejects_duplicate_targets_before_writing(self) -> None:
+        dataset = _grid(1.0)
+        plans = [
+            ("first/name", dataset, "same_name", 0, 0),
+            ("second:name", dataset, "same_name", 0, 0),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(RcsGrid, "save_pio", autospec=True) as writer:
+                with self.assertRaisesRegex(ValueError, "same file more than once"):
+                    self.window._write_pio_batch(tmp, plans)
+            writer.assert_not_called()
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_ptm_batch_rolls_back_a_late_publication_failure(self) -> None:
+        dataset = _grid(1.0)
+        plans = [
+            ("first", dataset, "first", 0, 0),
+            ("second", dataset, "second", 0, 0),
+        ]
+        real_replace = grim_cut_dataset_mixin.os.replace
+        publications = 0
+
+        def write_stage(_dataset, path, **_kwargs):
+            Path(path).write_bytes(b"ptm")
+            return path
+
+        def fail_second(source, destination):
+            nonlocal publications
+            if str(destination).casefold().endswith(".ptm"):
+                publications += 1
+                if publications == 2:
+                    raise OSError("injected PTM publication failure")
+            return real_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(RcsGrid, "save_ptm", autospec=True, side_effect=write_stage),
+                mock.patch.object(grim_cut_dataset_mixin.os, "replace", side_effect=fail_second),
+            ):
+                with self.assertRaisesRegex(OSError, "injected PTM"):
+                    self.window._write_ptm_batch(tmp, plans)
+            self.assertEqual(os.listdir(tmp), [])
+
+    def test_pioneer_batch_rolls_back_a_late_publication_failure(self) -> None:
+        dataset = _grid(1.0)
+        plans = [
+            ("first", dataset, "first", 0, 0),
+            ("second", dataset, "second", 0, 0),
+        ]
+        real_replace = grim_cut_dataset_mixin.os.replace
+        publications = 0
+
+        def write_stage(_dataset, path, **_kwargs):
+            Path(path).write_bytes(b"pio")
+            return path
+
+        def fail_second(source, destination):
+            nonlocal publications
+            if str(destination).casefold().endswith(".pio"):
+                publications += 1
+                if publications == 2:
+                    raise OSError("injected Pioneer publication failure")
+            return real_replace(source, destination)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(RcsGrid, "save_pio", autospec=True, side_effect=write_stage),
+                mock.patch.object(grim_cut_dataset_mixin.os, "replace", side_effect=fail_second),
+            ):
+                with self.assertRaisesRegex(OSError, "injected Pioneer"):
+                    self.window._write_pio_batch(tmp, plans)
             self.assertEqual(os.listdir(tmp), [])
 
     def test_duplicate_preserves_ptm_physics_metadata(self) -> None:

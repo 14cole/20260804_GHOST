@@ -49,20 +49,33 @@ def _rcs_grid_class() -> 'type':
     return existing.RcsGrid
 
 
+def _flat_csv_schema_module() -> 'Any':
+    """Load GRIM's dependency-light shared CSV contract without importing Qt."""
+
+    module_path = grim_project_path() / "grim_csv_schema.py"
+    if not module_path.is_file():
+        raise CemToolError(
+            f"GRIM flat CSV schema library not found at {module_path}; update "
+            "the GRIM_Revised_2 folder or set GRIM_REVISED_2_PATH"
+        )
+    module_name = "_cem_tools_external_grim_csv_schema"
+    existing = sys.modules.get(module_name)
+    if existing is None:
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise CemToolError(f"cannot import {module_path}")
+        existing = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = existing
+        spec.loader.exec_module(existing)
+    return existing
+
+
 def load_dataset(path: 'str | os.PathLike[str]') -> 'Any':
     source = Path(path).expanduser().resolve()
     extension = source.suffix.lower()
     if extension not in INPUT_EXTENSIONS:
         raise CemToolError(f"unsupported input extension: {extension}")
     grid_class = _rcs_grid_class()
-    if extension in {".csv", ".txt"}:
-        try:
-            with source.open("r", encoding="utf-8", errors="replace") as stream:
-                first_line = stream.readline()
-        except OSError as exc:
-            raise CemToolError(f"cannot read {source.name}: {exc}") from exc
-        if "azimuth_deg" in first_line and "magnitude_linear" in first_line:
-            return _load_flat_table(source, grid_class, "," if extension == ".csv" else "\t")
     if extension in {".csv", ".txt"}:
         fallback = (
             grid_class.load_theta_phi_csv
@@ -72,6 +85,8 @@ def load_dataset(path: 'str | os.PathLike[str]') -> 'Any':
         try:
             if grid_class.has_SENTRi_signature(str(source)):
                 return grid_class.read_SENTRi(str(source))
+            if _flat_csv_schema_module().has_flat_csv_signature(str(source)):
+                return _load_flat_table(source, grid_class)
             return fallback(str(source))
         except Exception as exc:
             raise CemToolError(f"cannot load {source.name}: {exc}") from exc
@@ -88,45 +103,22 @@ def load_dataset(path: 'str | os.PathLike[str]') -> 'Any':
         raise CemToolError(f"cannot load {source.name}: {exc}") from exc
 
 
-def _load_flat_table(source: 'Path', grid_class: 'type', delimiter: 'str') -> 'Any':
-    import csv
-
-    with source.open("r", encoding="utf-8", newline="") as stream:
-        rows = list(csv.DictReader(stream, delimiter=delimiter))
-    if not rows:
-        raise CemToolError(f"{source.name}: empty table")
-    azimuths = np.asarray(sorted({float(row["azimuth_deg"]) for row in rows}))
-    elevations = np.asarray(sorted({float(row["elevation_deg"]) for row in rows}))
-    frequencies = np.asarray(sorted({float(row["frequency_GHz"]) for row in rows}))
-    polarizations = np.asarray(list(dict.fromkeys(row["polarization"] for row in rows)))
-    shape = (len(azimuths), len(elevations), len(frequencies), len(polarizations))
-    power = np.full(shape, np.nan, dtype=np.float32)
-    phase = np.full(shape, np.nan, dtype=np.float32)
-    maps = [
-        {value: index for index, value in enumerate(axis)}
-        for axis in (azimuths, elevations, frequencies, polarizations)
-    ]
-    for row in rows:
-        index = (
-            maps[0][float(row["azimuth_deg"])],
-            maps[1][float(row["elevation_deg"])],
-            maps[2][float(row["frequency_GHz"])],
-            maps[3][row["polarization"]],
+def _load_flat_table(source: 'Path', grid_class: 'type') -> 'Any':
+    schema = _flat_csv_schema_module()
+    dataset_module = sys.modules.get(grid_class.__module__)
+    if dataset_module is None:
+        raise CemToolError("GRIM dataset module is not available")
+    try:
+        return schema.load_flat_csv(
+            str(source),
+            grid_class=grid_class,
+            canonical_angular_coordinate_system=(
+                dataset_module.canonical_angular_coordinate_system
+            ),
+            c0=float(getattr(dataset_module, "C0", 299_792_458.0)),
         )
-        magnitude = float(row["magnitude_linear"])
-        if np.isfinite(power[index]):
-            raise CemToolError(f"{source.name}: duplicate sample at {index}")
-        power[index] = magnitude * magnitude
-        phase[index] = np.radians(float(row["phase_deg"]))
-    if not np.all(np.isfinite(power)) or not np.all(np.isfinite(phase)):
-        raise CemToolError(f"{source.name}: table does not form a complete grid")
-    return grid_class(
-        azimuths, elevations, frequencies, polarizations,
-        rcs_power=power, rcs_phase=phase,
-        source_path=str(source),
-        history="Loaded CEM Tools flat table",
-        units={"azimuth": "deg", "elevation": "deg", "frequency": "GHz"},
-    )
+    except Exception as exc:
+        raise CemToolError(f"cannot load {source.name}: {exc}") from exc
 
 
 def _available_path(path: 'Path', overwrite: 'bool') -> 'None':
@@ -136,27 +128,14 @@ def _available_path(path: 'Path', overwrite: 'bool') -> 'None':
 
 
 def _write_table(grid: 'Any', destination: 'Path', delimiter: 'str') -> 'Path':
-    header = delimiter.join(
-        ("azimuth_deg", "elevation_deg", "frequency_GHz", "polarization",
-         "magnitude_linear", "phase_deg")
-    )
-    with destination.open("w", encoding="utf-8", newline="") as stream:
-        stream.write(header + "\n")
-        for ia, azimuth in enumerate(grid.azimuths):
-            for ie, elevation in enumerate(grid.elevations):
-                for iff, frequency in enumerate(grid.frequencies):
-                    for ip, polarization in enumerate(grid.polarizations):
-                        magnitude = np.sqrt(max(float(grid.rcs_power[ia, ie, iff, ip]), 0.0))
-                        phase = np.degrees(float(grid.rcs_phase[ia, ie, iff, ip]))
-                        values = (
-                            f"{float(azimuth):.17g}",
-                            f"{float(elevation):.17g}",
-                            f"{float(frequency):.17g}",
-                            str(polarization),
-                            f"{magnitude:.17g}",
-                            f"{phase:.17g}",
-                        )
-                        stream.write(delimiter.join(values) + "\n")
+    schema = _flat_csv_schema_module()
+    try:
+        schema.write_flat_csv(
+            grid, str(destination), scale="linear", delimiter=delimiter,
+            include_phase=True,
+        )
+    except Exception as exc:
+        raise CemToolError(f"cannot write {destination.name}: {exc}") from exc
     return destination
 
 
