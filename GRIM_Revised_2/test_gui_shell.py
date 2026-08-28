@@ -220,26 +220,26 @@ class UnifiedGuiShellTest(unittest.TestCase):
             [
                 "Plotting",
                 "ISAR",
-                "PPT",
-                "Assembly",
-                "GHOST",
                 "FREDDY",
+                "GHOST",
+                "Assembly",
+                "PPT",
                 "Runs",
                 "Python",
             ],
         )
 
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.ppt_workspace), 2
+            self.window.main_tabs.indexOf(self.window.freddy_integration), 2
         )
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.assembly_workspace), 3
+            self.window.main_tabs.indexOf(self.window.ghost_integration), 3
         )
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.ghost_integration), 4
+            self.window.main_tabs.indexOf(self.window.assembly_workspace), 4
         )
         self.assertEqual(
-            self.window.main_tabs.indexOf(self.window.freddy_integration), 5
+            self.window.main_tabs.indexOf(self.window.ppt_workspace), 5
         )
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.runs_workspace), 6

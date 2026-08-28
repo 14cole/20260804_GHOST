@@ -146,6 +146,7 @@ class PortableBundleTests(unittest.TestCase):
                 geometries=[{"role": "FRD", "path": str(source)}],
                 settings={},
             )
+
         with self.assertRaisesRegex(hpc_bundle.BundleError, "execution-owned"):
             hpc_bundle.create_portable_bundle(
                 self.temporary / "shell_injection",
@@ -173,6 +174,20 @@ class PortableBundleTests(unittest.TestCase):
                 ],
                 settings={},
             )
+
+    def test_bor_bundle_rejects_pure_efie_cfie_endpoint(self) -> None:
+        source = _write_geometry(self.temporary / "cfie_endpoint")
+        for alpha in (0.0, 1.0):
+            with self.subTest(alpha=alpha):
+                with self.assertRaisesRegex(
+                    hpc_bundle.BundleError, "strictly between 0 and 1"
+                ):
+                    hpc_bundle.create_portable_bundle(
+                        self.temporary / f"bad_cfie_{alpha:g}",
+                        solver="bor",
+                        geometries=[{"role": "BODY", "path": str(source)}],
+                        settings={"CFIE_ALPHA": alpha},
+                    )
 
     def test_every_allowlisted_setting_exists_in_its_canonical_driver(self) -> None:
         for solver, driver in (

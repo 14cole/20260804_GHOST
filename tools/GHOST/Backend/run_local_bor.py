@@ -472,6 +472,13 @@ def _validate_config() -> 'List[float]':
         sys.exit("ERROR: ASSEMBLY must be auto, tables, or streaming.")
     if str(TABLE_PRECISION).strip().lower() not in {"auto", "single", "double"}:
         sys.exit("ERROR: TABLE_PRECISION must be auto, single, or double.")
+    if (
+        not math.isfinite(float(CFIE_ALPHA))
+        or not 0.0 < float(CFIE_ALPHA) < 1.0
+    ):
+        sys.exit(
+            "ERROR: CFIE_ALPHA must be finite and lie strictly between 0 and 1."
+        )
     if float(STREAM_BUDGET_GB) <= 0.0:
         sys.exit("ERROR: STREAM_BUDGET_GB must be positive.")
     if not 0.0 < float(MEMORY_HEADROOM) <= 1.0:

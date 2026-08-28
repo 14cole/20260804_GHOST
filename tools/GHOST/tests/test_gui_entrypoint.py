@@ -82,6 +82,189 @@ class TestGuiEntrypoint(unittest.TestCase):
         finally:
             workspace.close()
 
+    def test_edit_during_solve_stales_result_when_geometry_was_already_dirty(self):
+        workspace = GhostWorkspace()
+        try:
+            geometry = workspace.geometry_tab
+            solver = workspace.solver_tab
+
+            # The solve snapshot is allowed to include unsaved in-memory
+            # edits.  Its dirty state therefore predates the solve and will
+            # not transition again when the user makes another edit.
+            geometry._ibc_add_row()
+            self.assertTrue(geometry.is_dirty())
+            solver._pending_solve_context = {
+                "uses_geometry_tab": True,
+                "geometry_stale": False,
+            }
+
+            geometry._diel_add_row()
+
+            self.assertTrue(
+                solver._pending_solve_context["geometry_stale"]
+            )
+
+            # Completion must carry the invalidation into the published-result
+            # guard even though dirty_changed had no second True transition.
+            solver.chk_export_after_solve.setChecked(False)
+            with (
+                mock.patch.object(solver, "_populate_results_table"),
+                mock.patch.object(solver, "_plot_results"),
+            ):
+                solver._on_solver_finished(
+                    {"samples": [], "metadata": {}}, ""
+                )
+            self.assertTrue(solver._last_result_stale)
+            self.assertFalse(solver.btn_export.isEnabled())
+            self.assertIn("during the solve", solver.lbl_status.text())
+        finally:
+            workspace.geometry_tab._set_dirty(False)
+            workspace.close()
+
+    def test_loading_clean_geometry_stales_in_flight_tab_snapshot(self):
+        workspace = GhostWorkspace()
+        try:
+            geometry = workspace.geometry_tab
+            solver = workspace.solver_tab
+            solver._pending_solve_context = {
+                "uses_geometry_tab": True,
+                "geometry_stale": False,
+            }
+            fixture = ROOT / "geometries" / "body.geo"
+
+            with (
+                mock.patch(
+                    "geometry_tab.QFileDialog.getOpenFileName",
+                    return_value=(str(fixture), "Geometry Files (*.geo)"),
+                ),
+                mock.patch("geometry_tab.QMessageBox.information"),
+            ):
+                self.assertTrue(geometry.load_geo())
+
+            self.assertFalse(geometry.is_dirty())
+            self.assertTrue(
+                solver._pending_solve_context["geometry_stale"]
+            )
+        finally:
+            workspace.close()
+
+    def test_old_thread_cleanup_cannot_clear_newer_solve_handles(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            newer_thread = object()
+            newer_worker = object()
+            newer_abort = object()
+            solver._solve_thread = newer_thread
+            solver._solve_worker = newer_worker
+            solver._abort_event = newer_abort
+            solver._active_solve_run_id = 2
+
+            solver._on_solver_thread_finished(1)
+
+            self.assertIs(solver._solve_thread, newer_thread)
+            self.assertIs(solver._solve_worker, newer_worker)
+            self.assertIs(solver._abort_event, newer_abort)
+            self.assertEqual(solver._active_solve_run_id, 2)
+
+            solver._on_solver_thread_finished(2)
+            self.assertIsNone(solver._solve_thread)
+            self.assertIsNone(solver._solve_worker)
+            self.assertIsNone(solver._abort_event)
+            self.assertIsNone(solver._active_solve_run_id)
+        finally:
+            workspace.close()
+
+    def test_automatic_export_rechecks_stale_after_confirmation(self):
+        workspace = GhostWorkspace()
+        try:
+            geometry = workspace.geometry_tab
+            solver = workspace.solver_tab
+            solver._is_solving = True
+            solver._pending_solve_context = {
+                "uses_geometry_tab": True,
+                "geometry_stale": False,
+            }
+            solver.chk_export_after_solve.setChecked(True)
+            result = {"samples": [], "metadata": {}}
+
+            def confirm_then_edit(_paths):
+                geometry._diel_add_row()
+                return True
+
+            with (
+                mock.patch.object(solver, "_populate_results_table"),
+                mock.patch.object(solver, "_plot_results"),
+                mock.patch.object(
+                    solver, "_resolve_output_path", return_value="result.grim"
+                ),
+                mock.patch(
+                    "solver_tab._planned_export_paths",
+                    return_value=["result.grim"],
+                ),
+                mock.patch.object(
+                    solver,
+                    "_confirm_export_replacements",
+                    side_effect=confirm_then_edit,
+                ),
+                mock.patch.object(
+                    solver, "_export_result_files", return_value=["result.grim"]
+                ) as export,
+            ):
+                solver._on_solver_finished(result, "")
+
+            self.assertTrue(solver._last_result_stale)
+            self.assertFalse(export.called)
+            self.assertFalse(solver._is_solving)
+            self.assertIn("Automatic export skipped", solver.lbl_status.text())
+        finally:
+            workspace.geometry_tab._set_dirty(False)
+            workspace.close()
+
+    def test_manual_export_rechecks_result_identity_after_confirmation(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            original = {"samples": [], "metadata": {}}
+            replacement = {"samples": [], "metadata": {}}
+            original_context = {"uses_geometry_tab": True}
+            replacement_context = {"uses_geometry_tab": True}
+            solver.last_result = original
+            solver.last_solve_context = original_context
+            solver._last_result_stale = False
+
+            def confirm_then_replace(_paths):
+                solver.last_result = replacement
+                solver.last_solve_context = replacement_context
+                return True
+
+            with (
+                mock.patch.object(
+                    solver, "_resolve_output_path", return_value="result.grim"
+                ),
+                mock.patch(
+                    "solver_tab._planned_export_paths",
+                    return_value=["result.grim"],
+                ),
+                mock.patch.object(
+                    solver,
+                    "_confirm_export_replacements",
+                    side_effect=confirm_then_replace,
+                ),
+                mock.patch.object(
+                    solver, "_export_result_files", return_value=["result.grim"]
+                ) as export,
+                mock.patch("solver_tab.QMessageBox.warning") as warning,
+            ):
+                solver._export_last_result()
+
+            self.assertFalse(export.called)
+            self.assertIs(solver.last_result, replacement)
+            self.assertIn("No files were written", solver.lbl_status.text())
+            warning.assert_called_once()
+        finally:
+            workspace.close()
+
     def test_workspace_forwards_typed_freddy_artifact_to_geometry(self):
         workspace = GhostWorkspace()
         try:

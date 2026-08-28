@@ -6,6 +6,7 @@ import csv
 import os
 import re
 import tempfile
+import unicodedata
 import warnings
 import numpy as np
 
@@ -20,6 +21,63 @@ LEGACY_PTM_GC_CONVENTION = "legacy_ptm_unspecified"
 _PTM_GRIM_GC_MARKER = "GRIM_GC_V1"
 WEDGE_TURNTABLE_CONVENTION = "grim_vertical_turntable_body_y_pitch_v1"
 CONIC_VH_BASIS_CONVENTION = "grim_conic_spherical_vh_v1"
+
+
+_PIO_ASCII_METADATA_REPLACEMENTS = str.maketrans(
+    {
+        "→": "->",
+        "←": "<-",
+        "↔": "<->",
+        "⇄": "<->",
+        "⇒": "=>",
+        "⇐": "<=",
+        "⇔": "<=>",
+        "°": " deg",
+        "Δ": "Delta",
+        "δ": "delta",
+        "Σ": "Sum",
+        "∑": "sum",
+        "⊕": "+",
+        "σ": "sigma",
+        "λ": "lambda",
+        "π": "pi",
+        "θ": "theta",
+        "φ": "phi",
+        "−": "-",
+        "–": "-",
+        "—": "-",
+        "×": "x",
+        "÷": "/",
+        "·": "*",
+        "≥": ">=",
+        "≤": "<=",
+        "≈": "~",
+        "…": "...",
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+    }
+)
+
+
+def _pio_ascii_metadata(value):
+    """Return readable, single-line ASCII for Pioneer header metadata.
+
+    Pioneer headers are byte-level ASCII even though GRIM histories and file
+    names are UTF-8. Common engineering symbols are transliterated for human
+    readability; any uncommon character is retained as an ASCII ``\\u`` or
+    ``\\U`` escape instead of aborting an otherwise valid complex-data export.
+    """
+
+    text = str(value or "").translate(_PIO_ASCII_METADATA_REPLACEMENTS)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(
+        " " if ord(character) < 32 or ord(character) == 127 else character
+        for character in text
+    )
+    text = " ".join(text.split())
+    return text.encode("ascii", errors="backslashreplace").decode("ascii")
 
 
 def wedge_to_conic_geometry_deg(phi_deg, tau_deg):
@@ -4424,7 +4482,9 @@ class RcsGrid:
         )
         records = []
         seen = {}
+        seen_source = {}
         used_zero_360_precedence = False
+        used_signed_180_precedence = False
         for row_idx, row in enumerate(
             rows[data_start_idx:], start=data_start_idx + 1
         ):
@@ -4457,6 +4517,10 @@ class RcsGrid:
                 raw_phi_deg = 0.0
             elif abs(raw_phi_deg - 360.0) <= coordinate_tolerance:
                 raw_phi_deg = 360.0
+            elif abs(raw_phi_deg + 180.0) <= coordinate_tolerance:
+                raw_phi_deg = -180.0
+            elif abs(raw_phi_deg - 180.0) <= coordinate_tolerance:
+                raw_phi_deg = 180.0
             azimuth_deg = _wrap_cst_azimuth_deg(raw_phi_deg)
             if abs(azimuth_deg) <= coordinate_tolerance:
                 azimuth_deg = 0.0
@@ -4478,6 +4542,23 @@ class RcsGrid:
                     azimuth_deg, elevation_deg, float(frequency_ghz),
                     polarization, power, phase,
                 )
+                source_key = (
+                    raw_phi_deg, elevation_deg, frequency_ghz, polarization
+                )
+                if source_key in seen_source:
+                    prior_source_line, prior_source_power, prior_source_phase = (
+                        seen_source[source_key]
+                    )
+                    if _cst_samples_equivalent(
+                        prior_source_power, prior_source_phase, power, phase
+                    ):
+                        continue
+                    raise ValueError(
+                        f"line {row_idx}: conflicting duplicate SENTRi sample "
+                        f"at source phi={raw_phi_deg:g}; first defined on line "
+                        f"{prior_source_line}"
+                    )
+                seen_source[source_key] = (row_idx, power, phase)
                 if key in seen:
                     (
                         prior_line,
@@ -4487,12 +4568,13 @@ class RcsGrid:
                         prior_record_index,
                     ) = seen[key]
 
-                    # SENTRi closed sweeps conventionally contain both phi=0
-                    # and phi=360.  They describe the same direction, but the
-                    # closing sample is authoritative for this format.  Apply
-                    # that rule before the generic conflict check and make it
-                    # independent of file row order.  No other wrapped seam is
-                    # granted this exception.
+                    # SENTRi closed sweeps conventionally use either 0..360 or
+                    # -180..+180 inclusive.  Each pair describes one physical
+                    # seam direction, but the closing/high endpoint (360 or
+                    # +180) is authoritative for this format.  Apply that rule
+                    # before the generic conflict check and make it independent
+                    # of file row order.  No other wrapped duplicate is granted
+                    # this exception.
                     zero_360_pair = (
                         abs(azimuth_deg) <= coordinate_tolerance
                         and (
@@ -4508,12 +4590,37 @@ class RcsGrid:
                             )
                         )
                     )
-                    if zero_360_pair:
-                        used_zero_360_precedence = True
-                        if (
-                            abs(raw_phi_deg - 360.0)
-                            <= coordinate_tolerance
-                        ):
+                    signed_180_pair = (
+                        abs(azimuth_deg + 180.0) <= coordinate_tolerance
+                        and (
+                            (
+                                abs(prior_raw_phi + 180.0)
+                                <= coordinate_tolerance
+                                and abs(raw_phi_deg - 180.0)
+                                <= coordinate_tolerance
+                            )
+                            or (
+                                abs(prior_raw_phi - 180.0)
+                                <= coordinate_tolerance
+                                and abs(raw_phi_deg + 180.0)
+                                <= coordinate_tolerance
+                            )
+                        )
+                    )
+                    if zero_360_pair or signed_180_pair:
+                        if zero_360_pair:
+                            used_zero_360_precedence = True
+                            current_is_authoritative = (
+                                abs(raw_phi_deg - 360.0)
+                                <= coordinate_tolerance
+                            )
+                        else:
+                            used_signed_180_precedence = True
+                            current_is_authoritative = (
+                                abs(raw_phi_deg - 180.0)
+                                <= coordinate_tolerance
+                            )
+                        if current_is_authoritative:
                             records[prior_record_index] = record
                             seen[key] = (
                                 row_idx,
@@ -4596,6 +4703,13 @@ class RcsGrid:
                 ),
                 "sentri_zero_360_precedence_used": bool(
                     used_zero_360_precedence
+                ),
+                "sentri_signed_180_seam_policy": (
+                    "source phi=+180 supplies canonical azimuth -180 when "
+                    "both phi=-180 and phi=+180 are present"
+                ),
+                "sentri_signed_180_precedence_used": bool(
+                    used_signed_180_precedence
                 ),
                 "sentri_polarization_mapping": (
                     "VV=tt/theta-theta; HV=pt/phi-theta; "
@@ -5902,7 +6016,9 @@ class RcsGrid:
                 "save_pio: frequency unit must be Hz, kHz, MHz, or GHz; got "
                 f"{(self.units or {}).get('frequency')!r}"
             )
-        pol_label = str(self.polarizations[pol_idx]) if len(self.polarizations) else ""
+        pol_label = _pio_ascii_metadata(
+            str(self.polarizations[pol_idx]) if len(self.polarizations) else ""
+        )
         elevation_value = float(self.elevations[el_idx]) if len(self.elevations) else 0.0
 
         def _axis_summary(values):
@@ -5924,10 +6040,10 @@ class RcsGrid:
         def _vals(arr):
             return ":".join(_pio_number(v) for v in arr)
 
-        name_field = os.path.splitext(os.path.basename(path))[0]
-        info_field = self.history or ""
-        # Newlines would corrupt the header parser; flatten them.
-        info_field = info_field.replace("\r", " ").replace("\n", " ")
+        name_field = _pio_ascii_metadata(
+            os.path.splitext(os.path.basename(path))[0]
+        )
+        info_field = _pio_ascii_metadata(self.history)
 
         header_lines = [
             f"Name={name_field}",
@@ -5956,7 +6072,13 @@ class RcsGrid:
         header_lines.append(f"Elevation={_pio_number(elevation_value)}")
         header_lines.append(f"ElevationUnits={elevation_units}")
 
-        header_blob = ("\n".join(header_lines) + "\n").encode("ascii")
+        try:
+            header_blob = ("\n".join(header_lines) + "\n").encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "save_pio: Pioneer header fields must be ASCII; an internal "
+                "metadata field was not normalized"
+            ) from exc
         # Reserve a fixed-width Offset line so the offset value can be filled
         # in before the binary block is written:
         #   "Offset=" (7) + 10-digit zero-padded offset + "\n" (1) = 18 bytes

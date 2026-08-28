@@ -93,6 +93,36 @@ class EquatorialConicGcTests(unittest.TestCase):
         self.assertEqual(restored.extra["scalar_note"], "keep me")
         self.assertIn("GC->Conic exact equatorial", restored.history)
 
+    def test_gc_to_conic_ptm_history_exports_as_ascii_pio_metadata(self):
+        source = self._grid(
+            coordinate_system="great_circle",
+            azimuths=(-90.0, 0.0, 90.0),
+            convention=GRIM_GC_CONVENTION,
+        )
+        converted = source.convert_equatorial_conic_gc("gc_to_conic")
+        converted.history += (
+            "\nGC→Conic relabel from PTM; Δ phase at 90°; "
+            "Σ body ⊕ feature; coherent ÷ reference; uncommon marker Ω"
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+            output = converted.save_pio(
+                os.path.join(folder, "converted → conic.pio"),
+                pol_idx=0,
+                precision="double",
+            )
+            with open(output, "rb") as stream:
+                header = stream.read().split(b"Offset=", 1)[0]
+            restored = RcsGrid.load_pio(output)
+
+        header_text = header.decode("ascii")
+        self.assertIn("Name=converted -> conic", header_text)
+        self.assertIn("GC->Conic relabel from PTM", header_text)
+        self.assertIn("Delta phase at 90 deg", header_text)
+        self.assertIn("Sum body + feature; coherent / reference", header_text)
+        self.assertIn(r"uncommon marker \u03a9", header_text)
+        np.testing.assert_allclose(restored.rcs, converted.rcs[..., 0:1])
+
     def test_radian_axes_are_wrapped_in_radians(self):
         source = self._grid(
             azimuths=(0.0, np.pi / 2.0, np.pi, 3.0 * np.pi / 2.0),

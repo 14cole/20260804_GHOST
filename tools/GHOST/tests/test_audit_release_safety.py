@@ -1,4 +1,4 @@
-"""Release-safety regressions promoted from the Claude audit."""
+"""Release-safety regressions promoted from the external audit."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ for entry in (str(BACKEND), str(GRIM)):
         sys.path.insert(0, entry)
 
 import bor_dispatch  # noqa: E402
+import bor_solver  # noqa: E402
 import grim_compat  # noqa: E402
 import hpc_scheduler  # noqa: E402
 from geometry_io import Segment, build_geometry_text  # noqa: E402
@@ -27,12 +28,18 @@ from grim_dataset import RcsGrid  # noqa: E402
 
 class AuditReleaseSafetyTests(unittest.TestCase):
     def test_bor_rejects_invalid_cfie_alpha_before_geometry_work(self) -> None:
-        for value in (0.0, -0.1, 1.1, float("nan")):
+        for value in (0.0, -0.1, 1.0, 1.1, float("nan")):
             with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "0 < alpha <= 1"):
+                with self.assertRaisesRegex(ValueError, "0 < alpha < 1"):
                     bor_dispatch.solve_monostatic_rcs_bor(
                         {}, [1.0], [0.0], cfie_alpha=value
                     )
+
+    def test_direct_bor_cfie_rejects_pure_efie_endpoint(self) -> None:
+        with self.assertRaisesRegex(ValueError, "0 < alpha < 1"):
+            bor_solver.solve_bor(
+                {}, 1.0e9, [0.0], formulation="cfie", cfie_alpha=1.0
+            )
 
     def test_geometry_writer_rejects_unroundtrippable_segment_names(self) -> None:
         for name in ("", "two words", "line\nbreak", "bad:name"):

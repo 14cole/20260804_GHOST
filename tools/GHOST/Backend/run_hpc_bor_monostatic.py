@@ -651,9 +651,11 @@ def submit():
         )
     if (
         not math.isfinite(float(CFIE_ALPHA))
-        or not 0.0 <= float(CFIE_ALPHA) <= 1.0
+        or not 0.0 < float(CFIE_ALPHA) < 1.0
     ):
-        sys.exit("ERROR: CFIE_ALPHA must be finite and lie in [0, 1].")
+        sys.exit(
+            "ERROR: CFIE_ALPHA must be finite and lie strictly between 0 and 1."
+        )
     if (
         N_MODES is not None and int(N_MODES) < 1
         or not math.isfinite(float(MODE_TOL))

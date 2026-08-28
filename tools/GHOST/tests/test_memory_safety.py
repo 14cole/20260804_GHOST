@@ -117,6 +117,168 @@ class AvailableMemoryDetectionTests(unittest.TestCase):
 
 
 class BorMemoryGateTests(unittest.TestCase):
+    def test_streaming_tile_shape_honors_conservative_live_set_budget(self):
+        budget_gb = 0.25
+        workers = 3
+        n_xi = 8192
+        gauss_order = 4
+        tile_elements, source_columns = bor_streaming._streaming_tile_shape(
+            n_elements=600,
+            gauss_order=gauss_order,
+            point_count=2400,
+            n_xi=n_xi,
+            tile_budget_gb=budget_gb,
+            workers=workers,
+        )
+        accounted_bytes = (
+            tile_elements
+            * gauss_order
+            * source_columns
+            * n_xi
+            * bor_streaming.BOR_STREAM_TILE_BYTES_PER_SAMPLE
+            * workers
+        )
+        self.assertLessEqual(accounted_bytes, budget_gb * 1.0e9)
+        self.assertEqual(
+            bor_streaming.BOR_STREAM_TILE_BYTES_PER_SAMPLE,
+            256.0,
+            "the fallback kernel's 200+ byte live set needs FFT/allocator slack",
+        )
+
+    def test_streaming_tile_shape_caps_rows_to_real_element_count(self):
+        tile_elements, source_columns = bor_streaming._streaming_tile_shape(
+            n_elements=7,
+            gauss_order=4,
+            point_count=28,
+            n_xi=256,
+            tile_budget_gb=1.0,
+            workers=1,
+        )
+        self.assertEqual(tile_elements, 7)
+        self.assertEqual(source_columns, 28)
+
+    def test_streaming_sampling_workers_respect_one_column_floor(self):
+        budget_gb = 1.0
+        workers = bor_streaming._streaming_worker_count(
+            gauss_order=4,
+            n_xi=8192,
+            tile_budget_gb=budget_gb,
+            workers=256,
+        )
+        minimum_live_bytes = (
+            workers
+            * 4
+            * 8192
+            * bor_streaming.BOR_STREAM_TILE_BYTES_PER_SAMPLE
+        )
+        self.assertLess(workers, 256)
+        self.assertLessEqual(minimum_live_bytes, budget_gb * 1.0e9)
+
+    def test_streaming_rejects_budget_below_one_tile_floor(self):
+        minimum_gb = (
+            4
+            * 8192
+            * bor_streaming.BOR_STREAM_TILE_BYTES_PER_SAMPLE
+            / 1.0e9
+        )
+        with self.assertRaisesRegex(ValueError, "one-column minimum"):
+            bor_streaming._streaming_worker_count(
+                gauss_order=4,
+                n_xi=8192,
+                tile_budget_gb=0.5 * minimum_gb,
+                workers=1,
+            )
+
+    def test_streaming_mode_block_plan_matches_runtime_alignment_and_peak(self):
+        mode_block, retained_gb, effective_workers = (
+            bor_streaming.plan_streaming_mode_block(
+                n_elems=1000,
+                m_max=100,
+                formulation="cfie",
+                has_ibc=False,
+                single_blocks=False,
+                stream_budget_gb=8.0,
+                workers=64,
+            )
+        )
+        runtime_block = bor_streaming._aligned_stream_mode_block(
+            100, mode_block, effective_workers
+        )
+        self.assertEqual(mode_block, runtime_block)
+        self.assertEqual(mode_block, 28)
+        self.assertEqual(effective_workers, 28)
+        self.assertAlmostEqual(
+            retained_gb,
+            bor_streaming.estimate_streaming_block_gb(
+                1000, 100, mode_block, "cfie", False, False
+            ),
+        )
+        self.assertLessEqual(retained_gb, 8.0)
+
+    def test_streaming_mode_block_rejects_impossible_retained_budget(self):
+        minimum = bor_streaming.estimate_streaming_block_gb(
+            1000, 100, 1, "cfie", False, False
+        )
+        with self.assertRaisesRegex(ValueError, "one-mode retained minimum"):
+            bor_streaming.plan_streaming_mode_block(
+                n_elems=1000,
+                m_max=100,
+                formulation="cfie",
+                has_ibc=False,
+                single_blocks=False,
+                stream_budget_gb=0.5 * minimum,
+                workers=64,
+            )
+
+    def test_streaming_runtime_uses_budget_capped_outer_workers(self):
+        points = np.asarray([[0.0, 1.0], [0.5, 0.0], [0.0, -1.0]])
+        retained_two = bor_streaming.estimate_streaming_block_gb(
+            2, 4, 2, "cfie", False, False
+        )
+        retained_three = bor_streaming.estimate_streaming_block_gb(
+            2, 4, 3, "cfie", False, False
+        )
+        budget = 0.5 * (retained_two + retained_three)
+        captured = {}
+
+        def fake_mode_sweep(*args, **kwargs):
+            captured["workers"] = kwargs["workers"]
+            captured["assembly_peak_gb"] = kwargs["assembly_peak_gb"]
+            kwargs["prepare"](4)
+            return (
+                np.zeros((2, 1), dtype=np.complex128),
+                0,
+                {"mode_converged": True},
+            )
+
+        with (
+            mock.patch.object(bor_solver, "_mode_sweep", side_effect=fake_mode_sweep),
+            mock.patch.object(
+                bor_solver.BorPecSolver, "enable_streaming"
+            ) as enable_streaming,
+            mock.patch.object(bor_solver.BorPecSolver, "prepare_operators"),
+        ):
+            bor_solver.solve_bor(
+                points,
+                1.0e9,
+                [90.0],
+                formulation="cfie",
+                n_modes=4,
+                workers=4,
+                assembly="streaming",
+                table_precision="double",
+                stream_budget_gb=budget,
+            )
+
+        self.assertEqual(captured["workers"], 2)
+        self.assertLessEqual(
+            captured["assembly_peak_gb"]
+            - bor_streaming.BOR_STREAM_TILE_BUDGET_GB,
+            budget,
+        )
+        self.assertEqual(enable_streaming.call_args.kwargs["workers"], 2)
+        self.assertEqual(enable_streaming.call_args.kwargs["mode_block"], 2)
+
     def test_streaming_estimator_counts_all_nine_efie_primitives(self):
         n_elems = 24
         m_max = 12

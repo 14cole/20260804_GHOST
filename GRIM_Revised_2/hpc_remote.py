@@ -790,19 +790,48 @@ class HpcRemoteClient:
         """Return completed/historical Slurm rows from ``sacct``."""
 
         normalized = _validate_job_ids(job_ids)
-        result = self.run_remote(
-            (
-                "sacct",
-                "--noheader",
-                "--parsable2",
-                "--array",
-                "--jobs",
-                ",".join(normalized),
-                "--format=JobID,State%32,JobName,Elapsed,ExitCode",
-            ),
+        base_arguments = (
+            "sacct",
+            "--noheader",
+            "--parsable2",
+            "--jobs",
+            ",".join(normalized),
+            "--format=JobID,State%32,JobName,Elapsed,ExitCode",
+        )
+        # Slurm added sacct's --array expansion switch in 23.02.  Prefer it
+        # because it exposes every task for correct parent-state aggregation,
+        # but retain compatibility with older cluster clients.  Retry only
+        # when the command explicitly says this option is unsupported; SSH,
+        # authentication and accounting failures must remain visible.
+        array_arguments = base_arguments[:3] + ("--array",) + base_arguments[3:]
+        result = self._run_remote(
+            array_arguments,
             timeout=timeout,
             operation="query Slurm accounting",
+            check=False,
         )
+        if result.returncode != 0:
+            error = f"{result.stderr}\n{result.stdout}".casefold()
+            unsupported_array_option = (
+                "--array" in error
+                and any(
+                    marker in error
+                    for marker in (
+                        "unrecognized option",
+                        "unknown option",
+                        "invalid option",
+                        "illegal option",
+                        "not recognized",
+                    )
+                )
+            )
+            if not unsupported_array_option:
+                raise CommandFailedError("query Slurm accounting", result)
+            result = self.run_remote(
+                base_arguments,
+                timeout=timeout,
+                operation="query Slurm accounting (legacy Slurm fallback)",
+            )
         return self._parse_status_rows(result.stdout, source="sacct")
 
     def query_jobs(

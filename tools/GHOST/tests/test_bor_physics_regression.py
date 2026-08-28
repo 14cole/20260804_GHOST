@@ -38,6 +38,7 @@ from bor_solver import (  # noqa: E402
     BOR_LINEAR_BACKWARD_ERROR_MAX,
     BOR_LINEAR_RESIDUAL_MAX,
     BorPecSolver,
+    _segment_distance,
     _mode_sweep,
     solve_bor,
     solve_bor_coated_pec,
@@ -1094,7 +1095,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             solver, 2, efie=True, mfie=True, tile_budget_gb=1.0
         )
         chunked = bor_streaming.StreamingFarBlocks(
-            solver, 2, efie=True, mfie=True, tile_budget_gb=1.0e-6
+            solver, 2, efie=True, mfie=True, tile_budget_gb=1.0e-3
         )
         self.assertEqual(full._cols, solver.P)
         self.assertLess(chunked._cols, solver.P)
@@ -1117,7 +1118,49 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             0,
             solver._far_gap(),
         )
+        self.assertIsNotNone(solver._far_gap_pair)
+        self.assertNotIn(
+            solver._far_gap_pair[1],
+            solver._near_sources_by_element[solver._far_gap_pair[0]],
+        )
         self.assertLessEqual(required, N_XI_SAFETY_CAP)
+
+    def test_far_gap_uses_closest_remaining_fft_pair(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        solver = BorPecSolver(_sphere(radius, 16), FREQUENCY_HZ)
+
+        brute_gap = math.inf
+        brute_pair = None
+        for e in range(solver.gen.n_elems):
+            for f in range(e + 1, solver.gen.n_elems):
+                if f in solver._near_sources_by_element[e]:
+                    continue
+                gap = _segment_distance(
+                    solver.gen.nodes[solver.gen.elem_n0[e]],
+                    solver.gen.nodes[solver.gen.elem_n1[e]],
+                    solver.gen.nodes[solver.gen.elem_n0[f]],
+                    solver.gen.nodes[solver.gen.elem_n1[f]],
+                )
+                if gap < brute_gap:
+                    brute_gap = gap
+                    brute_pair = (e, f)
+
+        self.assertIsNotNone(brute_pair)
+        self.assertAlmostEqual(solver._far_gap(), brute_gap, places=14)
+        self.assertNotIn(
+            solver._far_gap_pair[1],
+            solver._near_sources_by_element[solver._far_gap_pair[0]],
+        )
+        required = n_xi_for_pairs(
+            solver.k,
+            float(np.max(solver.gen.nodes[:, 0])),
+            0,
+            solver._far_gap(),
+        )
+        # This one-wavelength-circumference sphere needs 256 samples.  Using
+        # the near-routing threshold instead of the actual remaining gap
+        # incorrectly pins this ordinary case at the 8192-sample safety cap.
+        self.assertEqual(required, 256)
 
     def test_batched_rhs_and_farfield_match_scalar_paths(self):
         radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
@@ -1194,6 +1237,30 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         self.assertGreater(high["mesh_elements"], low["mesh_elements"])
         self.assertGreater(
             high["estimated_peak_gb"], low["estimated_peak_gb"]
+        )
+
+    def test_streaming_resource_preview_uses_runtime_budget_planner(self):
+        estimate = bor_dispatch.estimate_bor_resources(
+            _pec_sphere_snapshot(explicit_elements=83),
+            1.0,
+            [0.0, 90.0],
+            geometry_units="meters",
+            n_modes=100,
+            workers=64,
+            table_precision="double",
+            assembly="streaming",
+            stream_budget_gb=8.0,
+            mesh_certification=False,
+        )
+        self.assertEqual(estimate["assembly_estimate"], "streaming")
+        self.assertEqual(estimate["stream_mode_block_estimate"], 28)
+        self.assertEqual(estimate["active_mode_workers"], 28)
+        self.assertLessEqual(estimate["held_assembly_gb"], 8.0)
+        self.assertAlmostEqual(
+            estimate["held_assembly_gb"],
+            bor_streaming.estimate_streaming_block_gb(
+                estimate["mesh_elements"], 100, 28, "cfie", False, False
+            ),
         )
 
     def test_dielectric_resource_preview_counts_retained_operators(self):

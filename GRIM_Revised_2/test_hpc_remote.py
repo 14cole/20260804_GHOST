@@ -668,6 +668,42 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(statuses[0].job_id, "12")
         self.assertEqual(statuses[0].state, "FAILED")
 
+    def test_sacct_retries_without_array_for_legacy_slurm(self) -> None:
+        runner = FakeRunner(
+            completed(
+                stderr="sacct: unrecognized option '--array'\n",
+                returncode=1,
+            ),
+            completed(
+                "12_0|COMPLETED|grim|00:02|0:0\n"
+                "12_1|FAILED|grim|00:01|1:0\n"
+            ),
+        )
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        history = client.query_sacct(["12"])
+
+        self.assertEqual([row.job_id for row in history], ["12_0", "12_1"])
+        first = shlex.split(runner.calls[0][0][-1])
+        fallback = shlex.split(runner.calls[1][0][-1])
+        self.assertIn("--array", first)
+        self.assertNotIn("--array", fallback)
+        self.assertEqual(
+            first[:3] + first[4:],
+            fallback,
+            "the compatibility retry must differ only by --array",
+        )
+
+    def test_sacct_does_not_hide_non_option_failures(self) -> None:
+        runner = FakeRunner(
+            completed(stderr="Permission denied (publickey).\n", returncode=255)
+        )
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        with self.assertRaisesRegex(CommandFailedError, "Permission denied"):
+            client.query_sacct(["12"])
+        self.assertEqual(len(runner.calls), 1)
+
     def test_query_jobs_falls_back_to_sacct_after_squeue_purges_job(self) -> None:
         runner = FakeRunner(
             completed(

@@ -662,7 +662,7 @@ class BorPecSolver:
         self._near_pair_count = sum(map(len, self._near_sources_by_element))
         self._far_gap_pair = None
         self._far_gap_cache = (
-            0.0 if self._near_pair_count == ne * ne else float(direct_gap)
+            0.0 if self._near_pair_count == ne * ne else None
         )
 
     def _near_gauss_mask(self) -> 'np.ndarray':
@@ -679,9 +679,10 @@ class BorPecSolver:
         """Conservative minimum distance among FFT-routed element pairs.
 
         Same/nearby and geometrically sharp pairs use direct modal integration.
-        The routing threshold is a conservative lower bound for every pair
-        left in the FFT table and therefore safely sizes both table and
-        streaming assembly.
+        The routing threshold is only a lower bound for every pair left in
+        the FFT table.  The FFT grid must be sized from the true closest
+        remaining pair: using the threshold itself needlessly drives every
+        non-empty far table to the azimuthal safety cap.
 
         A midpoint bounding-sphere tree finds every pair that could improve
         the initial local-neighbour bound, then exact segment distance makes
@@ -700,17 +701,31 @@ class BorPecSolver:
 
         d = math.inf
         best_pair = None
-        # A topologically local far pair supplies a finite initial bound.
-        offset = self.near_span + 1
-        for e in range(gen.n_elems - offset):
-            de = _segment_distance(
-                gen.nodes[gen.elem_n0[e]], gen.nodes[gen.elem_n1[e]],
-                gen.nodes[gen.elem_n0[e + offset]],
-                gen.nodes[gen.elem_n1[e + offset]],
-            )
-            if de < d:
-                d = de
-                best_pair = (e, e + offset)
+        # Supply the tree search with a finite exact bound.  Additional
+        # geometrically-near routing can consume every pair at the original
+        # ``near_span + 1`` offset, so find the first topological offset that
+        # still contains an FFT-routed pair.
+        for offset in range(1, ne):
+            found_at_offset = False
+            for e in range(ne - offset):
+                f = e + offset
+                if f in self._near_sources_by_element[e]:
+                    continue
+                found_at_offset = True
+                de = _segment_distance(
+                    gen.nodes[gen.elem_n0[e]], gen.nodes[gen.elem_n1[e]],
+                    gen.nodes[gen.elem_n0[f]], gen.nodes[gen.elem_n1[f]],
+                )
+                if de < d:
+                    d = de
+                    best_pair = (e, f)
+            if found_at_offset:
+                break
+
+        if best_pair is None:
+            self._far_gap_pair = None
+            self._far_gap_cache = 0.0
+            return self._far_gap_cache
 
         mids = 0.5 * (
             gen.nodes[gen.elem_n0] + gen.nodes[gen.elem_n1]
@@ -724,7 +739,7 @@ class BorPecSolver:
             radius = float(half[e]) + max_half + d
             for f in tree.query_ball_point(mids[e], radius):
                 f = int(f)
-                if f <= e + self.near_span:
+                if f <= e or f in self._near_sources_by_element[e]:
                     continue
                 lower = (
                     float(np.linalg.norm(mids[e] - mids[f]))
@@ -2547,8 +2562,8 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
         )
     if form == "cfie":
         cfie_alpha = float(cfie_alpha)
-        if not np.isfinite(cfie_alpha) or not (0.0 < cfie_alpha <= 1.0):
-            raise ValueError("CFIE alpha must be finite and satisfy 0 < alpha <= 1.")
+        if not np.isfinite(cfie_alpha) or not (0.0 < cfie_alpha < 1.0):
+            raise ValueError("CFIE alpha must be finite and satisfy 0 < alpha < 1.")
     points = _validate_solve_bor_generatrix(points, form)
     solver = BorPecSolver(points, freq_hz, gauss_order=gauss_order)
     k = solver.k
@@ -2585,7 +2600,11 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     n_dofs = 2 * solver.Nn
 
     # -- far-assembly strategy and memory budget --
-    from bor_streaming import BOR_STREAM_TILE_BUDGET_GB, estimate_streaming_gb
+    from bor_streaming import (
+        BOR_STREAM_TILE_BUDGET_GB,
+        estimate_streaming_gb,
+        plan_streaming_mode_block,
+    )
     tp = str(table_precision).strip().lower()
     if tp not in ("auto", "single", "double"):
         raise ValueError("table_precision must be 'auto', 'single', or 'double'.")
@@ -2612,12 +2631,19 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     # phase-7d mode-block re-sweeps: when even the streamed blocks exceed
     # the budget, hold only an aligned range of modes and re-run the
     # (native, threaded) sampling sweep as the mode loop advances.
+    solve_workers = max(1, int(workers))
     mode_block = None
     est_held = est
-    if use_streaming and est > float(stream_budget_gb):
-        per_mode = est / (m_max + 1)
-        mode_block = max(1, int(float(stream_budget_gb) / per_mode))
-        est_held = est * mode_block / (m_max + 1)
+    if use_streaming:
+        mode_block, est_held, solve_workers = plan_streaming_mode_block(
+            solver.gen.n_elems,
+            m_max,
+            form,
+            zs_pt is not None,
+            use_single,
+            stream_budget_gb,
+            workers,
+        )
     # Non-streaming FFT table builders temporarily retain sampling and
     # contraction arrays in addition to the published tables.  The scheduler
     # reserves 3.5x persistent storage for that construction phase, so the
@@ -2639,12 +2665,12 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
             solver.enable_streaming(
                 mm, efie=alpha > 0.0, mfie=alpha < 1.0,
                 ibc_zs_pt=zs_pt if (zs_pt is not None and alpha > 0.0) else None,
-                single_blocks=use_single, workers=workers,
+                single_blocks=use_single, workers=solve_workers,
                 mode_block=mode_block,
                 tile_budget_gb=BOR_STREAM_TILE_BUDGET_GB)
         solver.prepare_operators(mm, efie=alpha > 0.0, mfie=alpha < 1.0,
                                  ibc=zs_pt is not None and alpha > 0.0,
-                                 workers=workers)
+                                 workers=solve_workers)
 
     def assemble(m):
         Z = None
@@ -2721,7 +2747,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
 
     F, modes_used, stats = _mode_sweep(n_dofs, thetas, ("VV", "HH"), m_max,
                                        mode_tol, assemble, rhs, farfield,
-                                       prepare=prepare, workers=workers,
+                                       prepare=prepare, workers=solve_workers,
                                        progress=progress,
                                        check_abort=check_abort,
                                        monitor_cond=True,

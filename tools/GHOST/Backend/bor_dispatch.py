@@ -450,7 +450,6 @@ def estimate_bor_resources(
     mode_cap, mode_tail_start = _bor_mode_limits(
         k0, radius, aspects, n_modes
     )
-    active_modes = min(worker_count, mode_cap + 1)
     from bor_solver import (
         BOR_TABLE_BUILD_PEAK_FACTOR,
         estimate_bor_dense_peak_gb,
@@ -461,18 +460,10 @@ def estimate_bor_resources(
         (2 if is_conductor else 4) * (int(elements) + 1)
         for elements, is_conductor in surface_layout
     )
-    # Use the exact same dense-work reservation as the runtime gate. Keeping a
-    # second, smaller approximation here can over-admit concurrent scheduler
-    # jobs that the solver then rejects, or that collectively exhaust memory.
-    dense_peak_gb = estimate_bor_dense_peak_gb(
-        unknowns,
-        2 * int(aspects.size),
-        workers=worker_count,
-        mode_tasks=mode_cap + 1,
-    )
-
     persistent_gb = 0.0
     held_assembly_gb = 0.0
+    stream_mode_block = None
+    effective_workers = worker_count
     estimated_assembly = "dense-direct"
     estimated_precision = "double"
     if kind == "conductor":
@@ -480,6 +471,7 @@ def estimate_bor_resources(
         from bor_streaming import (
             BOR_STREAM_TILE_BUDGET_GB,
             estimate_streaming_gb,
+            plan_streaming_mode_block,
         )
 
         has_ibc = any(chain.ibc_flag > 0 for chain in chains)
@@ -503,10 +495,20 @@ def estimate_bor_resources(
         )
         persistent_gb = full_double / (2.0 if use_single else 1.0)
         held_assembly_gb = persistent_gb
-        if use_streaming and persistent_gb > stream_budget:
-            per_mode = persistent_gb / max(mode_cap + 1, 1)
-            block = max(1, int(stream_budget / per_mode))
-            held_assembly_gb = persistent_gb * block / max(mode_cap + 1, 1)
+        if use_streaming:
+            (
+                stream_mode_block,
+                held_assembly_gb,
+                effective_workers,
+            ) = plan_streaming_mode_block(
+                element_count,
+                mode_cap,
+                formulation,
+                has_ibc,
+                use_single,
+                stream_budget,
+                worker_count,
+            )
         elif not use_streaming:
             held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
         estimated_assembly = "streaming" if use_streaming else "tables"
@@ -528,6 +530,17 @@ def estimate_bor_resources(
         assembly_peak_gb = held_assembly_gb
         estimated_assembly = "dense-all-mode-tables"
 
+    active_modes = min(effective_workers, mode_cap + 1)
+    # Use the exact same dense-work reservation and effective outer-mode
+    # concurrency as the runtime gate.  Keeping a second scheduler planner can
+    # over-admit jobs that runtime rejects or collectively exhaust memory.
+    dense_peak_gb = estimate_bor_dense_peak_gb(
+        unknowns,
+        2 * int(aspects.size),
+        workers=effective_workers,
+        mode_tasks=mode_cap + 1,
+    )
+
     peak_gb = estimate_bor_total_peak_gb(
         assembly_peak_gb,
         dense_peak_gb,
@@ -545,6 +558,9 @@ def estimate_bor_resources(
         "table_precision_estimate": estimated_precision,
         "persistent_assembly_gb": float(persistent_gb),
         "held_assembly_gb": float(held_assembly_gb),
+        "stream_mode_block_estimate": (
+            int(stream_mode_block) if stream_mode_block is not None else None
+        ),
         "estimated_peak_gb": float(peak_gb),
         "mesh_certification": bool(mesh_certification),
     }
@@ -941,9 +957,9 @@ def solve_monostatic_rcs_bor(
     if not elevations_deg:
         raise ValueError("At least one aspect angle is required.")
     cfie_alpha = float(cfie_alpha)
-    if not math.isfinite(cfie_alpha) or not (0.0 < cfie_alpha <= 1.0):
+    if not math.isfinite(cfie_alpha) or not (0.0 < cfie_alpha < 1.0):
         raise ValueError(
-            "BoR CFIE alpha must be finite and satisfy 0 < alpha <= 1. "
+            "BoR CFIE alpha must be finite and satisfy 0 < alpha < 1. "
             "Use the explicit EFIE formulation API when pure EFIE is intended."
         )
     frequencies = [float(f) for f in frequencies_ghz]

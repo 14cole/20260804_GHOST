@@ -528,6 +528,8 @@ class SolverTab(QWidget):
         self._pending_solve_context: 'Optional[Dict[str, Any]]' = None
         self._solve_thread: 'Optional[QThread]' = None
         self._solve_worker: 'Optional[_SolveWorker]' = None
+        self._solve_run_serial: 'int' = 0
+        self._active_solve_run_id: 'Optional[int]' = None
         self._is_solving: 'bool' = False
         self._abort_event: 'Optional[threading.Event]' = None
         self._plot_theme: 'Optional[Dict[str, str]]' = None
@@ -546,11 +548,24 @@ class SolverTab(QWidget):
         dirty_signal = getattr(self.geometry_tab, "dirty_changed", None)
         if dirty_signal is not None:
             dirty_signal.connect(self._on_geometry_dirty_changed)
+        geometry_signal = getattr(self.geometry_tab, "geometry_changed", None)
+        if geometry_signal is not None:
+            geometry_signal.connect(self._on_geometry_changed)
+
+    @Slot()
+    def _on_geometry_changed(self) -> 'None':
+        self._mark_geometry_dependent_results_stale()
 
     @Slot(bool)
     def _on_geometry_dirty_changed(self, dirty: 'bool') -> 'None':
         if not dirty:
             return
+        # Retain this connection for embedders that expose only the historical
+        # dirty-state signal.  GeometryTab also emits ``geometry_changed`` for
+        # every edit, including edits made while it is already dirty.
+        self._mark_geometry_dependent_results_stale()
+
+    def _mark_geometry_dependent_results_stale(self) -> 'None':
         pending = self._pending_solve_context
         if pending is not None and bool(pending.get("uses_geometry_tab", False)):
             pending["geometry_stale"] = True
@@ -572,6 +587,19 @@ class SolverTab(QWidget):
         )
         self.btn_export.setEnabled(
             not self._is_solving and self.last_result is not None and not stale
+        )
+
+    def _result_is_current_for_export(
+        self,
+        result: 'Dict[str, Any]',
+        solve_context: 'Optional[Dict[str, Any]]',
+    ) -> 'bool':
+        """Return whether a confirmed export still targets the active result."""
+
+        return bool(
+            not self._last_result_stale
+            and self.last_result is result
+            and self.last_solve_context is solve_context
         )
 
     def apply_plot_theme(
@@ -684,8 +712,9 @@ class SolverTab(QWidget):
         self.edit_cfie_alpha = QLineEdit("0.0")
         self.edit_cfie_alpha.setEnabled(False)
         self.edit_cfie_alpha.setToolTip(
-            "BoR closed-PEC CFIE coupling (0.5 recommended; 0 is EFIE). The "
-            "2-D solver has no CFIE control."
+            "BoR closed-PEC CFIE coupling, strictly between 0 and 1 "
+            "(0.5 recommended). Use the explicit solver API when pure EFIE "
+            "is intended. The 2-D solver has no CFIE control."
         )
 
         advanced_form.addRow("CFIE alpha", self.edit_cfie_alpha)
@@ -1193,6 +1222,7 @@ class SolverTab(QWidget):
         self.last_result = result
         self.last_source_path = source_path
         self.last_solve_context = self._pending_solve_context
+        completed_context = self.last_solve_context
         self._last_result_stale = bool(
             (self.last_solve_context or {}).get("geometry_stale", False)
         )
@@ -1253,6 +1283,22 @@ class SolverTab(QWidget):
                     )
                     self._set_solving_state(False)
                     return
+                # The replacement prompt runs a nested Qt event loop. A
+                # queued geometry edit or result completion can therefore
+                # invalidate/replace this result while the prompt is open.
+                # Recheck immediately before the first file write.
+                if not self._result_is_current_for_export(
+                    result, completed_context
+                ):
+                    self.lbl_status.setText(
+                        write_summary
+                        + quality_suffix
+                        + mesh_suffix
+                        + " Automatic export skipped because geometry or the "
+                        "active solver result changed during export confirmation."
+                    )
+                    self._set_solving_state(False)
+                    return
                 files = self._export_result_files(
                     result,
                     out_text,
@@ -1286,11 +1332,17 @@ class SolverTab(QWidget):
         QMessageBox.critical(self, "Solver Error", message)
         self._set_solving_state(False)
 
-    @Slot()
-    def _on_solver_thread_finished(self):
+    @Slot(int)
+    def _on_solver_thread_finished(self, run_id: 'int'):
+        # _on_solver_finished/_on_solver_error re-enable Run before QThread has
+        # necessarily emitted finished. If a new run starts in that window,
+        # the old thread must not clear the new run's worker/cancel handles.
+        if self._active_solve_run_id != int(run_id):
+            return
         self._solve_worker = None
         self._solve_thread = None
         self._abort_event = None
+        self._active_solve_run_id = None
 
     def _run_solver(self):
         if self._is_solving:
@@ -1332,9 +1384,9 @@ class SolverTab(QWidget):
                 else 0.0
             )
             if solver_kind == "bor" and (
-                not math.isfinite(cfie_alpha) or not (0.0 < cfie_alpha <= 1.0)
+                not math.isfinite(cfie_alpha) or not (0.0 < cfie_alpha < 1.0)
             ):
-                raise ValueError("BoR CFIE alpha must satisfy 0 < alpha <= 1.")
+                raise ValueError("BoR CFIE alpha must satisfy 0 < alpha < 1.")
 
             # Scattering mode and observation angles.
             scatter_mode = str(self.cmb_scatter_mode.currentData() or "monostatic")
@@ -1354,6 +1406,9 @@ class SolverTab(QWidget):
 
         abort_event = threading.Event()
         self._abort_event = abort_event
+        self._solve_run_serial += 1
+        run_id = self._solve_run_serial
+        self._active_solve_run_id = run_id
         self._pending_solve_context = {
             "snapshot": snapshot,
             "solver_kind": solver_kind,
@@ -1390,7 +1445,11 @@ class SolverTab(QWidget):
         worker.finished.connect(worker.deleteLater)
         worker.error.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._on_solver_thread_finished)
+        thread.finished.connect(
+            lambda completed_run_id=run_id: self._on_solver_thread_finished(
+                completed_run_id
+            )
+        )
 
         self._solve_thread = thread
         self._solve_worker = worker
@@ -1461,13 +1520,16 @@ class SolverTab(QWidget):
                 "again before exporting.",
             )
             return
+        result = self.last_result
+        solve_context = self.last_solve_context
+        source_path = self.last_source_path
         out_text = self._resolve_output_path(
             self.edit_output.text(),
-            self.last_source_path,
+            source_path,
         )
         self.edit_output.setText(out_text)
         try:
-            planned = _planned_export_paths(self.last_result, out_text)
+            planned = _planned_export_paths(result, out_text)
         except Exception as exc:
             QMessageBox.critical(self, "Export Error", str(exc))
             return
@@ -1476,15 +1538,32 @@ class SolverTab(QWidget):
                 "Export canceled; the solver result remains available."
             )
             return
+        # QFile replacement confirmation runs a nested event loop. Do not
+        # write the result captured above if geometry changed or another
+        # result became active while the question was open.
+        if not self._result_is_current_for_export(result, solve_context):
+            self._sync_export_state()
+            self.lbl_status.setText(
+                "Export skipped because geometry or the active solver result "
+                "changed during export confirmation. No files were written."
+            )
+            QMessageBox.warning(
+                self,
+                "Solver Result Changed",
+                "Geometry or the active solver result changed while export "
+                "confirmation was open. No files were written. Review the "
+                "current result and export again.",
+            )
+            return
         try:
             files = self._export_result_files(
-                self.last_result,
+                result,
                 out_text,
-                source_path=self.last_source_path,
+                source_path=source_path,
                 history=_result_history(
-                    self.last_result,
+                    result,
                     units=str(
-                        (self.last_result.get("metadata", {}) or {}).get(
+                        (result.get("metadata", {}) or {}).get(
                             "geometry_units_in",
                             self.cmb_units.currentText(),
                         )
@@ -1499,7 +1578,7 @@ class SolverTab(QWidget):
         self.lbl_status.setText("Exported: " + ", ".join(os.path.basename(path) for path in files))
         self.files_exported.emit(
             [str(path) for path in files],
-            "bor" if _result_kind(self.last_result) == "bor" else "2d",
+            "bor" if _result_kind(result) == "bor" else "2d",
         )
 
     def _display_db_from_linear(

@@ -348,9 +348,9 @@ named CREATE-RF SENTRi entry point. It strictly recognizes the two schemas in
 the team's `READ_SENTRi.m`: compact MHz `pp/tt/pt/tp` columns and descriptive
 Hz `PhiScat/ThetaScat` columns. SENTRi is not treated as CST. Its mapping is
 native `elevation=Theta`, and GRIM stores the reported coherent phase with its
-original sign. Closed 0°/360° sweeps are deduplicated at canonical azimuth 0°,
-with the source 360° record taking precedence regardless of row order. The four
-channels map to `VV=tt`, `HV=pt`,
+original sign. Closed 0°/360° and -180°/+180° sweeps are deduplicated at their
+canonical seam azimuth, with the source 360° or +180° closing record taking
+precedence regardless of row order. The four channels map to `VV=tt`, `HV=pt`,
 `VH=tp`, and `HH=pp`. Generic unitless theta/phi tables are not guessed to be
 SENTRi. The normal two-row export—parameter names followed by an explicit
 `Hz`/`MHz`, `deg`, `dBsm`, `deg` units row—is validated and the units row is

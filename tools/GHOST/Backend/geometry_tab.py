@@ -83,6 +83,11 @@ class MplCanvas(FigureCanvas):
 
 class GeometryTab(QWidget):
     dirty_changed = Signal(bool)
+    # Emitted for every user-visible geometry or material edit.  Unlike
+    # ``dirty_changed``, this is intentionally not edge-triggered: a solve may
+    # begin from an already-unsaved geometry, and any subsequent edit still
+    # has to invalidate that solve's snapshot and its eventual result.
+    geometry_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -246,6 +251,8 @@ class GeometryTab(QWidget):
 
     def _set_dirty(self, dirty: 'bool') -> 'None':
         value = bool(dirty)
+        if value:
+            self.geometry_changed.emit()
         if value == self._dirty:
             return
         self._dirty = value
@@ -399,6 +406,9 @@ class GeometryTab(QWidget):
         self._render_fills()
         self._update_status_label(-1)
         self.canvas.draw()
+        # Loading replaces the solver input even though the new document is
+        # clean on disk, so it must invalidate an in-flight or prior result.
+        self.geometry_changed.emit()
         self._set_dirty(False)
         QMessageBox.information(
             self,

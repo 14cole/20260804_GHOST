@@ -165,7 +165,7 @@ class SentriReaderTest(unittest.TestCase):
         grid = load_dataset(path)
         np.testing.assert_allclose(grid.azimuths, [90.0])
 
-    def test_equivalent_seam_rows_merge_and_conflicts_fail(self) -> None:
+    def test_signed_seam_always_uses_positive_180_degree_record(self) -> None:
         row = "1000,90,{phi},0,0,0,0,0,0,0,0"
         matching = self._write(
             ".csv",
@@ -179,15 +179,77 @@ class SentriReaderTest(unittest.TestCase):
         grid = RcsGrid.read_SENTRi(matching)
         np.testing.assert_allclose(grid.azimuths, [-180.0])
 
-        conflicting = self._write(
+        row_negative = "1000,90,-180,1,21,2,22,3,23,4,24"
+        row_positive = "1000,90,180,11,31,12,32,13,33,14,34"
+        for rows in ((row_negative, row_positive), (row_positive, row_negative)):
+            with self.subTest(order=rows):
+                path = self._write(
+                    ".csv", COMPACT_HEADER + "\n" + "\n".join(rows) + "\n"
+                )
+                signed_grid = RcsGrid.read_SENTRi(path)
+
+                np.testing.assert_allclose(signed_grid.azimuths, [-180.0])
+                np.testing.assert_allclose(
+                    signed_grid.rcs_power[0, 0, 0, :],
+                    10.0 ** (np.asarray([12.0, 13.0, 14.0, 11.0]) / 10.0),
+                )
+                np.testing.assert_allclose(
+                    signed_grid.rcs_phase[0, 0, 0, :],
+                    np.deg2rad([32.0, 33.0, 34.0, 31.0]),
+                )
+                self.assertTrue(
+                    signed_grid.extra["sentri_signed_180_precedence_used"]
+                )
+                self.assertIn(
+                    "phi=+180 supplies canonical azimuth -180",
+                    signed_grid.extra["sentri_signed_180_seam_policy"],
+                )
+
+        # Repeated rows at the same source angle are not a closed-sweep seam
+        # pair.  Conflicting values must still fail instead of being hidden.
+        conflicting_duplicate = self._write(
             ".csv",
             COMPACT_HEADER
             + "\n"
             + row.format(phi=-180)
-            + "\n1000,90,180,1,0,0,0,0,0,0,0\n",
+            + "\n1000,90,-180,1,0,0,0,0,0,0,0\n",
         )
         with self.assertRaisesRegex(ValueError, "conflicting duplicate SENTRi"):
-            RcsGrid.read_SENTRi(conflicting)
+            RcsGrid.read_SENTRi(conflicting_duplicate)
+
+        # A closing endpoint must not mask a conflicting repeat at the other
+        # source endpoint.  The failure is independent of where +180 appears.
+        positive = "1000,90,180,11,31,12,32,13,33,14,34"
+        negative_a = "1000,90,-180,1,21,2,22,3,23,4,24"
+        negative_b = "1000,90,-180,5,25,6,26,7,27,8,28"
+        for rows in (
+            (positive, negative_a, negative_b),
+            (negative_a, positive, negative_b),
+            (negative_a, negative_b, positive),
+        ):
+            with self.subTest(conflicting_triplet=rows):
+                path = self._write(
+                    ".csv", COMPACT_HEADER + "\n" + "\n".join(rows) + "\n"
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "conflicting duplicate SENTRi"
+                ):
+                    RcsGrid.read_SENTRi(path)
+
+        # Equivalent repeats remain harmless even when the closing endpoint
+        # appears between them; +180 still supplies the canonical sample.
+        equivalent_repeat = self._write(
+            ".csv",
+            COMPACT_HEADER
+            + "\n"
+            + "\n".join((negative_a, positive, negative_a))
+            + "\n",
+        )
+        repeated_grid = RcsGrid.read_SENTRi(equivalent_repeat)
+        np.testing.assert_allclose(
+            repeated_grid.rcs_power[0, 0, 0, :],
+            10.0 ** (np.asarray([12.0, 13.0, 14.0, 11.0]) / 10.0),
+        )
 
         # A zero-amplitude sample has no physical phase.  SENTRi can report
         # different arbitrary phase values at the equivalent -180/+180 seam;
@@ -201,6 +263,29 @@ class SentriReaderTest(unittest.TestCase):
         zero_grid = RcsGrid.read_SENTRi(zero_seam)
         np.testing.assert_allclose(zero_grid.azimuths, [-180.0])
         np.testing.assert_allclose(zero_grid.rcs_power, 0.0)
+
+    def test_csv_drop_accepts_conflicting_signed_closed_sweep_endpoints(self) -> None:
+        path = self._write(
+            ".csv",
+            DESCRIPTIVE_HEADER
+            + "\n"
+            + DESCRIPTIVE_UNITS
+            + "\n1000000000,90,-180,1,21,2,22,3,23,4,24"
+            + "\n1000000000,90,180,11,31,12,32,13,33,14,34\n",
+        )
+
+        grid = load_dataset(path)
+
+        np.testing.assert_allclose(grid.azimuths, [-180.0])
+        np.testing.assert_allclose(
+            grid.rcs_power[0, 0, 0, :],
+            10.0 ** (np.asarray([12.0, 13.0, 14.0, 11.0]) / 10.0),
+        )
+        np.testing.assert_allclose(
+            grid.rcs_phase[0, 0, 0, :],
+            np.deg2rad([32.0, 33.0, 34.0, 31.0]),
+        )
+        self.assertTrue(grid.extra["sentri_signed_180_precedence_used"])
 
     def test_zero_360_seam_always_uses_the_360_degree_record(self) -> None:
         row_zero = "1000,90,0,1,21,2,22,3,23,4,24"
@@ -251,14 +336,40 @@ class SentriReaderTest(unittest.TestCase):
             [90.0],
         )
 
-        fuzzy_signed_seam = self._write(
-            ".csv",
-            COMPACT_HEADER
-            + "\n1000,90,-180,0,0,0,0,0,0,0,0"
-            + "\n1000,90,180.0000000005,1,0,0,0,0,0,0,0\n",
-        )
-        with self.assertRaisesRegex(ValueError, "conflicting duplicate SENTRi"):
-            RcsGrid.read_SENTRi(fuzzy_signed_seam)
+        for negative_phi in (-180.0000000005, -179.9999999995):
+            for positive_phi in (179.9999999995, 180.0000000005):
+                negative_row = (
+                    f"1000,90,{negative_phi:.10f},0,0,0,0,0,0,0,0"
+                )
+                positive_row = (
+                    f"1000,90,{positive_phi:.10f},1,0,0,0,0,0,0,0"
+                )
+                for rows in (
+                    (negative_row, positive_row),
+                    (positive_row, negative_row),
+                ):
+                    with self.subTest(
+                        negative_phi=negative_phi,
+                        positive_phi=positive_phi,
+                        order=rows,
+                    ):
+                        fuzzy_signed_seam = self._write(
+                            ".csv",
+                            COMPACT_HEADER + "\n" + "\n".join(rows) + "\n",
+                        )
+                        fuzzy_grid = RcsGrid.read_SENTRi(fuzzy_signed_seam)
+                        np.testing.assert_array_equal(
+                            fuzzy_grid.azimuths, [-180.0]
+                        )
+                        np.testing.assert_allclose(
+                            fuzzy_grid.rcs_power[0, 0, 0, :],
+                            [1.0, 1.0, 1.0, 10.0 ** 0.1],
+                        )
+                        self.assertTrue(
+                            fuzzy_grid.extra[
+                                "sentri_signed_180_precedence_used"
+                            ]
+                        )
 
     def test_explicit_sentri_elevation_conversion_is_sorted_and_lossless(self) -> None:
         rows = (

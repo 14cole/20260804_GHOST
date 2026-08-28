@@ -662,8 +662,8 @@ def _validate_settings(solver: str, raw_settings: Any) -> Dict[str, Any]:
         raise BundleError("TABLE_PRECISION must be auto, single, or double.")
     if "CFIE_ALPHA" in settings:
         alpha = _require_number(settings["CFIE_ALPHA"], name="CFIE_ALPHA")
-        if not 0.0 <= alpha <= 1.0:
-            raise BundleError("CFIE_ALPHA must lie in [0, 1].")
+        if not 0.0 < alpha < 1.0:
+            raise BundleError("CFIE_ALPHA must lie strictly between 0 and 1.")
     for name in ("MEMORY_HEADROOM",):
         if name in settings:
             value = _require_number(settings[name], name=name)

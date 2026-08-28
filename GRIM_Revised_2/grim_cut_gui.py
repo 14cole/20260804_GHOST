@@ -870,9 +870,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         dock.setWidget(dock_body)
         self._shared_right_panel = dock
 
-        self.main_tabs.addTab(self.tab_simple_plots, "Plotting")
-        self._tab_key_for_index[self.main_tabs.count() - 1] = "plotting"
-
         self.tab_isar = QWidget()
         isar_layout = QVBoxLayout(self.tab_isar)
         isar_layout.setContentsMargins(10, 10, 10, 10)
@@ -889,9 +886,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         isar_context = self._build_plot_left_context(isar_left_panel, "isar")
         self._plot_contexts["isar"] = isar_context
 
-        self.main_tabs.addTab(self.tab_isar, "ISAR")
-        self._tab_key_for_index[self.main_tabs.count() - 1] = "isar"
-
         # PPT owns an independent report selection and a true 16:9 slide
         # preview. It consumes the same in-memory RcsGrid objects but does not
         # reparent or alter the Plotting tab's dataset/parameter controls.
@@ -899,8 +893,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             self,
             selected_ids_provider=self._selected_dataset_ids_for_ppt,
         )
-        self.main_tabs.addTab(self.ppt_workspace, "PPT")
-
         # One canonical Assembly workspace replaces the two independent,
         # hidden trees that used to live inside the Plotting and ISAR views.
         self.assembly_workspace = AssemblyWorkspace(self)
@@ -910,7 +902,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.assembly_workspace.set_feature_controls(
             self.feature_assembly_panel
         )
-        self.main_tabs.addTab(self.assembly_workspace, "Assembly")
         assembly_tree_panel = getattr(
             self.assembly_workspace, "assembly_tree_panel", None
         )
@@ -927,13 +918,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         # GHOST remains optional at runtime. The integration widget shows an
         # actionable unavailable message when its backend is not installed.
         self.ghost_integration = GhostIntegrationWidget(self)
-        self.main_tabs.addTab(self.ghost_integration, "GHOST")
 
         # FREDDY is a material/IBC design workspace, not an RCS dataset
         # producer. Keep it as an independent top-level tool tab and do not
         # connect its CSV outputs to GRIM's RCS dataset loader.
         self.freddy_integration = FreddyIntegrationWidget(self)
-        self.main_tabs.addTab(self.freddy_integration, "FREDDY")
 
         # Remote HPC requests are declarative on Windows and become final,
         # provenance-bound GHOST runs only after staging on the Linux login
@@ -948,7 +937,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         if runs_controls_content is not None:
             runs_controls_content.setObjectName("runsControlsContent")
-        self.main_tabs.addTab(self.runs_workspace, "Runs")
 
         # A deliberately small, read-only view of the semantic dataset/plot
         # operations performed in this session.  The recorder ignores UI
@@ -993,7 +981,22 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         self._python_empty_script = self.python_recorder.script
         self._python_clean_script = self.python_recorder.script
-        self.main_tabs.addTab(self.tab_python, "Python")
+
+        # Keep registration centralized so construction dependencies do not
+        # dictate the user-facing workflow order.
+        for label, widget, plot_key in (
+            ("Plotting", self.tab_simple_plots, "plotting"),
+            ("ISAR", self.tab_isar, "isar"),
+            ("FREDDY", self.freddy_integration, None),
+            ("GHOST", self.ghost_integration, None),
+            ("Assembly", self.assembly_workspace, None),
+            ("PPT", self.ppt_workspace, None),
+            ("Runs", self.runs_workspace, None),
+            ("Python", self.tab_python, None),
+        ):
+            tab_index = self.main_tabs.addTab(widget, label)
+            if plot_key is not None:
+                self._tab_key_for_index[tab_index] = plot_key
         self._sync_python_tab_title()
 
         try:

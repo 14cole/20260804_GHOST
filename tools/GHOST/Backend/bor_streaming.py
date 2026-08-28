@@ -130,6 +130,109 @@ from bor_kernels import n_xi_for_pairs
 
 
 BOR_STREAM_TILE_BUDGET_GB = 1.0
+# Conservative peak transient storage for one sampled (test, source, xi)
+# tuple.  The NumPy MFIE/IBC fallback keeps four real geometry grids, the
+# complex Green-function factor, roughly nine real bracket factors and four
+# complex outputs live while forming a tile; FFT output and allocator
+# temporaries raise the observed peak above the former 176-byte estimate.
+# 256 bytes covers that live set and modest FFT/allocator slack.  This is an
+# accounting constant only: changing the row/column tiling does not change
+# the quadrature samples or modal bins.
+BOR_STREAM_TILE_BYTES_PER_SAMPLE = 256.0
+
+
+def _aligned_stream_mode_block(
+    m_max: 'int', mode_block: 'Optional[int]', workers: 'int'
+) -> 'int':
+    """Return the exact range size shared by planning and runtime."""
+
+    mode_count = int(m_max) + 1
+    worker_count = max(1, int(workers))
+    if mode_count < 1:
+        raise ValueError("Streaming mode maximum must be non-negative.")
+    requested = mode_count if mode_block is None else int(mode_block)
+    if requested < 1:
+        raise ValueError("Streaming mode block must be positive.")
+    requested = max(requested, worker_count)
+    aligned = ((requested + worker_count - 1) // worker_count) * worker_count
+    return min(aligned, mode_count)
+
+
+def _streaming_worker_count(
+    gauss_order: 'int', n_xi: 'int', tile_budget_gb: 'float', workers: 'int'
+) -> 'int':
+    """Cap simultaneous sampling tiles when the one-column floor requires it."""
+
+    go = int(gauss_order)
+    samples = int(n_xi)
+    requested = max(1, int(workers))
+    budget = float(tile_budget_gb) * 1.0e9
+    if go < 1 or samples < 1:
+        raise ValueError("Streaming tile dimensions must be positive.")
+    if not np.isfinite(budget) or budget <= 0.0:
+        raise ValueError("Streaming tile budget must be positive and finite.")
+    one_tile = go * samples * BOR_STREAM_TILE_BYTES_PER_SAMPLE
+    if budget < one_tile:
+        raise ValueError(
+            "Streaming tile budget is below the modeled one-element, "
+            f"one-column minimum of {one_tile / 1.0e9:.6g} GB "
+            f"(gauss_order={go}, n_xi={samples})."
+        )
+    return min(requested, max(1, int(budget / one_tile)))
+
+
+def _streaming_tile_shape(
+    n_elements: 'int', gauss_order: 'int', point_count: 'int', n_xi: 'int',
+    tile_budget_gb: 'float', workers: 'int',
+) -> 'tuple[int, int]':
+    """Return (test-element rows, source-point columns) within the budget.
+
+    The caller must first validate the one-element/one-column floor with
+    :func:`_streaming_worker_count`.  Production then caps simultaneous
+    sampling workers so the allowance covers every live tile.
+    """
+
+    ne = int(n_elements)
+    go = int(gauss_order)
+    points = int(point_count)
+    samples = int(n_xi)
+    threads = max(1, int(workers))
+    budget = float(tile_budget_gb) * 1.0e9
+    if ne < 1 or go < 1 or points < 1 or samples < 1:
+        raise ValueError("Streaming tile dimensions must be positive.")
+    if not np.isfinite(budget) or budget <= 0.0:
+        raise ValueError("Streaming tile budget must be positive and finite.")
+
+    rows_max = max(
+        go,
+        int(
+            budget
+            / (
+                points
+                * samples
+                * BOR_STREAM_TILE_BYTES_PER_SAMPLE
+                * threads
+            )
+        ),
+    )
+    tile_elements = min(ne, max(1, rows_max // go))
+    source_columns = max(
+        1,
+        min(
+            points,
+            int(
+                budget
+                / (
+                    tile_elements
+                    * go
+                    * samples
+                    * BOR_STREAM_TILE_BYTES_PER_SAMPLE
+                    * threads
+                )
+            ),
+        ),
+    )
+    return tile_elements, source_columns
 
 
 def _n_xi_efie(k: 'complex', rho_max: 'float', m_max: 'int', d_min: 'float' = 0.0) -> 'int':
@@ -189,16 +292,12 @@ class StreamingFarBlocks:
         self._rv_ibc = rv_ibc
         self.k = complex(k)
         workers = max(1, int(workers))
-        self._workers = workers
         # phase-7d mode-block re-sweeps: hold blocks only for an aligned
         # range of modes; re-run the sampling sweep when the mode loop
         # advances past it (memory / n_ranges at sampling x n_ranges).
         # Ranges are multiples of the engine's worker count so a thread
         # wave never straddles a rebuild.
-        Bm = int(mode_block) if mode_block else mm + 1
-        Bm = max(Bm, workers)
-        Bm = ((Bm + workers - 1) // workers) * workers
-        self.mode_block = min(Bm, mm + 1)
+        self.mode_block = _aligned_stream_mode_block(mm, mode_block, workers)
         self.n_sweeps = 0
 
         rho_max = float(np.max(gen.nodes[:, 0]))
@@ -210,23 +309,22 @@ class StreamingFarBlocks:
         self._nx_b = _n_xi_bracket(k, rho_max, mm, gap)
         nx_worst = max(self._nx_e,
                        self._nx_b if (mfie or self._has_ibc) else 0)
-        # tile size from the [rows, P, n_xi] sampling footprint (~11 arrays
-        # of that shape live at once in the bracket samplers; each worker
-        # thread holds its own tile)
-        rows_max = max(go, int(tile_budget_gb * 1e9 /
-                               (P * nx_worst * 176.0 * workers)))
-        self._te = max(1, rows_max // go)
-        # The one-element tile floor above can still blow the budget by a
-        # large factor once the far-gap criterion pushes n_xi into the
-        # thousands (fine meshes): a single [go, P, n_xi] grid may be tens
-        # of GB.  The samplers therefore ALSO chunk over source columns --
-        # FFT + mode binning happen per chunk (row/column independent, so
-        # bit-identical), and only the small kept [rows, P, modes] slices
-        # persist.  cols == P when the row tiling alone meets the budget.
-        self._cols = max(1, min(P, int(tile_budget_gb * 1e9 /
-                                       (self._te * go * nx_worst *
-                                        176.0 * workers))))
-
+        self._workers = _streaming_worker_count(
+            go, nx_worst, tile_budget_gb, workers
+        )
+        # Tile the [rows, P, n_xi] sampling footprint.  Each worker thread
+        # holds its own tile; the shared helper uses the conservative live-set
+        # accounting documented by BOR_STREAM_TILE_BYTES_PER_SAMPLE.
+        self._te, self._cols = _streaming_tile_shape(
+            ne, go, P, nx_worst, tile_budget_gb, self._workers
+        )
+        # Fine meshes can push n_xi into the thousands, so row tiling alone
+        # may leave a very wide source dimension.  The samplers therefore
+        # ALSO chunk over source columns. FFT + mode binning happen per chunk
+        # (row/column independent, so bit-identical), and only the small kept
+        # [rows, P, modes] slices persist.  The validated one-column floor and
+        # capped sampling concurrency keep the modeled live set within budget;
+        # cols == P when row tiling alone is sufficient.
         # native (ctypes) sampling kernel: real-k only (the air region --
         # exactly what the solve_bor streaming path serves)
         self._native = (_NATIVE if (_NATIVE is not None and
@@ -260,6 +358,11 @@ class StreamingFarBlocks:
         k = self.solver.k
         ord_lo = max(0, lo - 1)
         n_ord = hi + 2 - ord_lo
+        # Release the previous range before allocating its replacement.  A
+        # direct ``self.Z = np.zeros(...)`` assignment keeps the old array
+        # alive until the new RHS exists, transiently defeating the retained
+        # block estimate during every re-sweep.
+        self.Z = self.K = self.B = None
         if self._efie:
             self.Z = np.zeros((9, n_ord, Nn, Nn), dtype=self.dtype)
         ms = [m for m in range(-hi, hi + 1) if lo <= abs(m) <= hi]
@@ -495,3 +598,97 @@ def estimate_streaming_gb(n_elems: 'int', m_max: 'int', formulation: 'str' = "cf
     if has_ibc:
         total += 4.0 * Nn * Nn * (2 * m_max + 1) * per
     return total / 1e9
+
+
+def estimate_streaming_block_gb(
+    n_elems: 'int', m_max: 'int', mode_block: 'int',
+    formulation: 'str' = "cfie", has_ibc: 'bool' = False,
+    single_blocks: 'bool' = False,
+) -> 'float':
+    """Worst retained range allocation for an already-aligned mode block.
+
+    This mirrors :meth:`StreamingFarBlocks._build_range`, including the two
+    overlapping EFIE neighbor orders and both signs of MFIE/IBC modes.  It is
+    deliberately conservative for the diagnostics-only pure-MFIE path in the
+    same way as :func:`estimate_streaming_gb`.
+    """
+
+    ne = int(n_elems)
+    mm = int(m_max)
+    block = int(mode_block)
+    if ne < 1 or mm < 0 or block < 1 or block > mm + 1:
+        raise ValueError("Streaming block estimate dimensions are invalid.")
+    nodes = float(ne + 1)
+    item_bytes = 8.0 if single_blocks else 16.0
+    worst = 0.0
+    for lo in range(0, mm + 1, block):
+        hi = min(lo + block - 1, mm)
+        order_lo = max(0, lo - 1)
+        efie_orders = hi + 2 - order_lo
+        signed_modes = (2 * hi + 1) if lo == 0 else 2 * (hi - lo + 1)
+        total = 9.0 * efie_orders * nodes * nodes * item_bytes
+        if formulation in ("cfie", "mfie"):
+            total += 4.0 * signed_modes * nodes * nodes * item_bytes
+        if has_ibc:
+            total += 4.0 * signed_modes * nodes * nodes * item_bytes
+        worst = max(worst, total)
+    return worst / 1.0e9
+
+
+def plan_streaming_mode_block(
+    n_elems: 'int', m_max: 'int', formulation: 'str', has_ibc: 'bool',
+    single_blocks: 'bool', stream_budget_gb: 'float', workers: 'int',
+) -> 'tuple[int, float, int]':
+    """Return a budget-safe block, retained peak, and effective workers.
+
+    A streaming range cannot be smaller than the number of simultaneously
+    solved outer modes: otherwise a worker wave can straddle two ranges and
+    force a rebuild while another worker still reads the old range.  Treat
+    ``stream_budget_gb`` as a hard retained-block limit by reducing that
+    outer concurrency when necessary.  Only a budget below the true
+    one-mode retained minimum is rejected.
+    """
+
+    budget = float(stream_budget_gb)
+    if not np.isfinite(budget) or budget <= 0.0:
+        raise ValueError("Streaming block budget must be positive and finite.")
+    mode_count = int(m_max) + 1
+    minimum = estimate_streaming_block_gb(
+        n_elems, m_max, 1, formulation, has_ibc, single_blocks
+    )
+    if minimum > budget:
+        raise ValueError(
+            "Streaming block budget is below the modeled one-mode retained "
+            f"minimum of {minimum:.6g} GB for this geometry/formulation."
+        )
+
+    # The exact retained allocation is monotone in the block size.  Find the
+    # largest budget-safe size without walking every mode on large jobs.
+    low, high = 1, mode_count
+    max_safe = 1
+    while low <= high:
+        candidate = (low + high) // 2
+        retained = estimate_streaming_block_gb(
+            n_elems, m_max, candidate, formulation, has_ibc, single_blocks
+        )
+        if retained <= budget:
+            max_safe = candidate
+            low = candidate + 1
+        else:
+            high = candidate - 1
+
+    effective_workers = min(max(1, int(workers)), max_safe)
+    if max_safe == mode_count:
+        aligned = mode_count
+    else:
+        # Keep complete outer-worker waves inside one retained range.
+        aligned = (max_safe // effective_workers) * effective_workers
+    retained = estimate_streaming_block_gb(
+        n_elems, m_max, aligned, formulation, has_ibc, single_blocks
+    )
+    if retained > budget:  # defensive invariant; should be unreachable
+        raise RuntimeError(
+            "Internal streaming planner error: aligned block exceeds its "
+            "retained-memory budget."
+        )
+    return aligned, retained, effective_workers

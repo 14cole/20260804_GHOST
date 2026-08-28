@@ -255,6 +255,14 @@ def test_bor_driver_loads():
         driver.ELEVATIONS_DEG = [0.0]
         aspects = driver._validate_config()
         assert driver._plan([], aspects) == {{}}
+        driver.CFIE_ALPHA = 1.0
+        try:
+            driver._validate_config()
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("pure-EFIE CFIE endpoint was accepted")
+        driver.CFIE_ALPHA = 0.5
         # The knobs the worker forwards must all exist on the solver entry point.
         import inspect
         from bor_dispatch import solve_monostatic_rcs_bor
