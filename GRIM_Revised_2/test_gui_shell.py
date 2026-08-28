@@ -188,6 +188,10 @@ class UnifiedGuiShellTest(unittest.TestCase):
     def test_application_palette_choices_are_not_plot_colormaps(self) -> None:
         context = self.window._plot_contexts["plotting"]
         palette_names = list(grim_cut_gui.APPLICATION_PALETTES)
+        self.assertEqual(
+            palette_names,
+            ["Colorful", "Light", "Dark", "Raytheon"],
+        )
         view_action = next(
             action
             for action in self.window.menuBar().actions()
@@ -230,6 +234,62 @@ class UnifiedGuiShellTest(unittest.TestCase):
                     freddy_theme["plot_grid"], palette["grid"]
                 )
 
+        raytheon = grim_cut_gui.APPLICATION_PALETTES["Raytheon"]
+        self.assertEqual(
+            {
+                role: raytheon[role]
+                for role in (
+                    "win_bg",
+                    "panel_bg",
+                    "text",
+                    "head_bg",
+                    "border",
+                    "hover",
+                    "checked_bg",
+                    "checked_border",
+                    "grid",
+                    "muted",
+                    "fg",
+                )
+            },
+            {
+                "win_bg": "#d9d9d6",
+                "panel_bg": "#ffffff",
+                "text": "#000000",
+                "head_bg": "#d9d9d6",
+                "border": "#63666a",
+                "hover": "#63666a",
+                "checked_bg": "#ce1126",
+                "checked_border": "#ce1126",
+                "grid": "#b1b3b3",
+                "muted": "#63666a",
+                "fg": "#000000",
+            },
+        )
+        self.assertEqual(
+            grim_cut_gui.RAYTHEON_TERTIARY_PPT_CHART_COLORS,
+            (
+                "#7ba7bc",
+                "#b7a99a",
+                "#908cc2",
+                "#9abeaa",
+                "#efb661",
+            ),
+        )
+        raytheon_application_colors = {
+            str(value).lower()
+            for value in raytheon.values()
+            if isinstance(value, str)
+        }
+        raytheon_application_colors.update(
+            str(value).lower() for value in raytheon["layer_colors"]
+        )
+        self.assertTrue(
+            raytheon_application_colors.isdisjoint(
+                grim_cut_gui.RAYTHEON_TERTIARY_PPT_CHART_COLORS
+            )
+        )
+
     def test_invalid_saved_application_palette_falls_back_to_dark(self) -> None:
         settings = _MemorySettings(
             {
@@ -249,6 +309,36 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 ].isChecked()
             )
             self.assertEqual(settings.sync_count, 0)
+        finally:
+            window.deleteLater()
+            self.app.processEvents()
+
+    def test_legacy_raytheon_palette_setting_migrates_to_current_name(self) -> None:
+        settings = _MemorySettings(
+            {
+                grim_cut_gui.APPLICATION_PALETTE_SETTINGS_KEY:
+                    "Raytheon-inspired"
+            }
+        )
+        window = _RecordingWindow(settings=settings)
+        try:
+            self.assertEqual(window.application_palette_name, "Raytheon")
+            self.assertTrue(
+                window._application_palette_actions["Raytheon"].isChecked()
+            )
+            self.assertEqual(
+                settings.values[
+                    grim_cut_gui.APPLICATION_PALETTE_SETTINGS_KEY
+                ],
+                "Raytheon",
+            )
+            self.assertEqual(settings.sync_count, 1)
+            self.assertEqual(
+                grim_cut_gui.normalize_application_palette_name(
+                    "Raytheon-inspired"
+                ),
+                "Raytheon",
+            )
         finally:
             window.deleteLater()
             self.app.processEvents()

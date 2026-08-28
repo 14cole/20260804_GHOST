@@ -137,34 +137,62 @@ APPLICATION_PALETTES: dict[str, dict[str, object]] = {
             "#1e40af", "#3b82f6", "#334155", "#0284c7",
         ),
     },
-    "Raytheon-inspired": {
-        "is_dark": True,
-        "win_bg": "#061522",
-        "panel_bg": "#0b2438",
-        "text": "#f4f7fa",
-        "head_bg": "#123a5a",
-        "border": "#2b668f",
-        "hover": "#006fa6",
-        "checked_bg": "#006fa6",
-        "checked_border": "#6bd5f5",
-        "grid": "#456b83",
-        "muted": "#9eb6c7",
-        "fg": "#f4f7fa",
-        "plot_line_freq": "#6bd5f5",
-        "plot_line_angle": "#c4b5fd",
-        "plot_worst": "#fbbf24",
+    "Raytheon": {
+        "is_dark": False,
+        "win_bg": "#d9d9d6",
+        "panel_bg": "#ffffff",
+        "text": "#000000",
+        "head_bg": "#d9d9d6",
+        "border": "#63666a",
+        "hover": "#63666a",
+        "checked_bg": "#ce1126",
+        "checked_border": "#ce1126",
+        "grid": "#b1b3b3",
+        "muted": "#63666a",
+        "fg": "#000000",
+        # Embedded application plots use primary/secondary colors. The brand's
+        # tertiary colors are reserved for PowerPoint charts when needed.
+        "plot_line_freq": "#000000",
+        "plot_line_angle": "#ce1126",
+        "plot_worst": "#63666a",
         "layer_colors": (
-            "#006fa6", "#00a3e0", "#2b668f", "#6bd5f5",
-            "#3b82f6", "#64748b", "#7c3aed", "#0e7490",
+            "#000000", "#ce1126", "#63666a", "#b1b3b3",
+            "#d9d9d6", "#000000", "#ce1126", "#63666a",
         ),
     },
 }
 DEFAULT_APPLICATION_PALETTE = "Dark"
 APPLICATION_PALETTE_SETTINGS_KEY = "appearance/application_palette"
+LEGACY_APPLICATION_PALETTE_NAMES = {
+    "Raytheon-inspired": "Raytheon",
+}
+# Official tertiary colors are intentionally not part of application chrome
+# or embedded-tool plots. They are reserved for optional PowerPoint charts
+# with enough series to require additional differentiation.
+RAYTHEON_TERTIARY_PPT_CHART_COLORS = (
+    "#7ba7bc",
+    "#b7a99a",
+    "#908cc2",
+    "#9abeaa",
+    "#efb661",
+)
 # Compatibility export for extensions/tests that used GRIM's former one fixed
 # palette. It remains the exact default Dark palette.
 BLUE_PALETTE = APPLICATION_PALETTES[DEFAULT_APPLICATION_PALETTE]
 SPLASH_DURATION_MS = 4000
+
+
+def normalize_application_palette_name(value: object) -> str:
+    """Return a current palette name, including legacy-setting migration."""
+
+    normalized = str(value).strip()
+    normalized = LEGACY_APPLICATION_PALETTE_NAMES.get(
+        normalized,
+        normalized,
+    )
+    if normalized not in APPLICATION_PALETTES:
+        return DEFAULT_APPLICATION_PALETTE
+    return normalized
 
 # Plot-operation buttons, per tab: (row1_specs, row2_specs). Each spec is
 # (button label, role key). Roles drive both the attribute wiring in
@@ -373,7 +401,7 @@ def build_qss(palette: Mapping[str, object]) -> str:
         border-radius: 6px; padding: 6px 8px;
     }}
     QWidget#plotSettingsContent {{ background: {palette['panel_bg']}; }}
-    QLabel#settingsNoMatches {{ color: {palette['grid']}; padding: 4px 2px; }}
+    QLabel#settingsNoMatches {{ color: {palette['muted']}; padding: 4px 2px; }}
     QWidget#dockBody {{ background: {palette['win_bg']}; }}
     QToolButton#sectionHeader {{
         background: {palette['head_bg']}; color: {palette['text']};
@@ -743,7 +771,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "Colorful": "Purple, cyan, and magenta dark application chrome",
             "Light": "Bright neutral application chrome with blue accents",
             "Dark": "GRIM blue/slate dark application chrome",
-            "Raytheon-inspired": "Deep navy and cyan application chrome",
+            "Raytheon": "Official white, black, cool gray, and Red 186 chrome",
         }
         for palette_name in APPLICATION_PALETTES:
             action = QAction(palette_name, self)
@@ -772,9 +800,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
     ) -> None:
         """Apply one palette to GRIM and every embedded workspace."""
 
-        normalized = str(palette_name).strip()
-        if normalized not in APPLICATION_PALETTES:
-            normalized = DEFAULT_APPLICATION_PALETTE
+        normalized = normalize_application_palette_name(palette_name)
         self.application_palette_name = normalized
         self.application_palette = dict(APPLICATION_PALETTES[normalized])
 
@@ -882,14 +908,23 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self._settings = settings if settings is not None else QSettings(
             "GRIM", "GRIM"
         )
-        saved_palette = str(
+        saved_palette_value = str(
             self._settings.value(
                 APPLICATION_PALETTE_SETTINGS_KEY,
                 DEFAULT_APPLICATION_PALETTE,
             )
         )
-        if saved_palette not in APPLICATION_PALETTES:
-            saved_palette = DEFAULT_APPLICATION_PALETTE
+        saved_palette = normalize_application_palette_name(
+            saved_palette_value
+        )
+        if saved_palette_value in LEGACY_APPLICATION_PALETTE_NAMES:
+            self._settings.setValue(
+                APPLICATION_PALETTE_SETTINGS_KEY,
+                saved_palette,
+            )
+            sync = getattr(self._settings, "sync", None)
+            if callable(sync):
+                sync()
         self.application_palette_name = saved_palette
         self.application_palette = dict(APPLICATION_PALETTES[saved_palette])
         self._application_palette_actions: dict[str, QAction] = {}
