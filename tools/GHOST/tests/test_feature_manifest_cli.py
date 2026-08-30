@@ -52,6 +52,26 @@ def _create_args(response: Path, kind: str) -> list[str]:
 
 
 class FeatureManifestCliTests(unittest.TestCase):
+    def test_create_refuses_raw_opn_frd_response_roles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for filename in (
+                "FASTENER-00-01_0.010gap_OPN.grim",
+                "FASTENER-00-01_0.010gap_fRd.GrIm",
+            ):
+                response = root / filename
+                _write_response(response)
+                with self.subTest(filename=filename):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            create_feature_manifest.main(
+                                _create_args(response, "point")
+                            )
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertFalse(
+                        Path(str(response) + ".feature.json").exists()
+                    )
+
     def test_create_and_check_line_manifest_with_solver_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             response = Path(directory) / "door_seam.grim"

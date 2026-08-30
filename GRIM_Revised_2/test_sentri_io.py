@@ -444,6 +444,43 @@ class SentriReaderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "near-duplicate GRIM elevation"):
             nearly_duplicate.convert_sentri_elevation_to_grim()
 
+    def test_sentri_conversion_also_canonicalizes_signed_azimuth_for_assembly(self):
+        rows = (
+            "1000,90,-135,1,11,2,12,3,13,4,14",
+            "1000,90,-45,5,15,6,16,7,17,8,18",
+            "1000,90,45,9,19,10,20,11,21,12,22",
+            "1000,90,135,13,23,14,24,15,25,16,26",
+        )
+        path = self._write(
+            ".csv", COMPACT_HEADER + "\n" + "\n".join(rows) + "\n"
+        )
+        native = RcsGrid.read_SENTRi(path)
+        aligned = np.arange(native.rcs_power.size, dtype=float).reshape(
+            native.rcs_power.shape
+        )
+        native.extra["aligned"] = aligned
+
+        converted = native.convert_sentri_elevation_to_grim()
+
+        np.testing.assert_array_equal(converted.azimuths, [45.0, 135.0, 225.0, 315.0])
+        np.testing.assert_array_equal(converted.elevations, [0.0])
+        np.testing.assert_array_equal(
+            converted.extra["aligned"],
+            np.take(aligned, [2, 3, 0, 1], axis=0),
+        )
+        self.assertTrue(np.all(np.diff(converted.azimuths) > 0.0))
+        self.assertEqual(
+            converted.extra["assembly_angular_coordinate_contract"],
+            "ghost.radar-azimuth-elevation.coming-from.deg.v1",
+        )
+        self.assertIn("azimuth=phi wrapped to [0,360)", converted.history)
+
+        rewrapped = converted.wrap_azimuth("0_360")
+        self.assertEqual(
+            rewrapped.extra["assembly_angular_coordinate_contract"],
+            "ghost.radar-azimuth-elevation.coming-from.deg.v1",
+        )
+
     def test_incomplete_or_generic_theta_phi_table_is_not_sentri(self) -> None:
         path = self._write(
             ".csv",

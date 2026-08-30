@@ -972,28 +972,99 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 "roll_ref": [1.0, 0.0, 0.0],
             }
             direct = Path(directory) / "direct.grim"
-            step_one = Path(directory) / "step_one.grim"
+            point_a_total = Path(directory) / "point_a_total.grim"
+            point_b_total = Path(directory) / "point_b_total.grim"
             sequential = Path(directory) / "sequential.grim"
             feature_sum.add_features_to_monostatic_grim(
                 str(base), str(direct), points=[point_a, point_b]
             )
             feature_sum.add_features_to_monostatic_grim(
-                str(base), str(step_one), points=[point_a]
+                str(base), str(point_a_total), points=[point_a]
             )
             feature_sum.add_features_to_monostatic_grim(
-                str(step_one), str(sequential), points=[point_b]
+                str(base), str(point_b_total), points=[point_b]
             )
-            with np.load(direct, allow_pickle=False) as one_pass, np.load(
-                sequential, allow_pickle=False
-            ) as two_pass:
-                direct_field = (
-                    one_pass["rcs_amp_real"] + 1j * one_pass["rcs_amp_imag"]
+
+            direct_delta_path = Path(
+                feature_sum.feature_only_output_path(str(direct))
+            )
+            point_a_delta_path = Path(
+                feature_sum.feature_only_output_path(str(point_a_total))
+            )
+            point_b_delta_path = Path(
+                feature_sum.feature_only_output_path(str(point_b_total))
+            )
+
+            def coherent_field(payload):
+                return (
+                    payload["rcs_amp_real"]
+                    + 1j * payload["rcs_amp_imag"]
                 )
-                sequential_field = (
-                    two_pass["rcs_amp_real"] + 1j * two_pass["rcs_amp_imag"]
+
+            with np.load(base, allow_pickle=False) as clean, np.load(
+                direct, allow_pickle=False
+            ) as direct_total, np.load(
+                direct_delta_path, allow_pickle=False
+            ) as direct_delta, np.load(
+                point_a_total, allow_pickle=False
+            ) as total_a, np.load(
+                point_a_delta_path, allow_pickle=False
+            ) as delta_a, np.load(
+                point_b_total, allow_pickle=False
+            ) as total_b, np.load(
+                point_b_delta_path, allow_pickle=False
+            ) as delta_b:
+                clean_field = coherent_field(clean)
+                direct_field = coherent_field(direct_total)
+                direct_delta_field = coherent_field(direct_delta)
+                delta_a_field = coherent_field(delta_a)
+                delta_b_field = coherent_field(delta_b)
+                np.testing.assert_allclose(
+                    coherent_field(total_a),
+                    clean_field + delta_a_field,
+                    rtol=2.0e-14,
+                    atol=2.0e-14,
+                )
+                np.testing.assert_allclose(
+                    coherent_field(total_b),
+                    clean_field + delta_b_field,
+                    rtol=2.0e-14,
+                    atol=2.0e-14,
+                )
+                self.assertEqual(
+                    str(direct_total["assembly_response_role"]),
+                    "body_plus_features",
+                )
+                self.assertEqual(
+                    str(direct_delta["assembly_response_role"]),
+                    "features_only_delta",
                 )
             np.testing.assert_allclose(
-                direct_field, sequential_field, rtol=2.0e-14, atol=2.0e-14
+                direct_delta_field,
+                delta_a_field + delta_b_field,
+                rtol=2.0e-14,
+                atol=2.0e-14,
+            )
+            np.testing.assert_allclose(
+                direct_field,
+                clean_field + delta_a_field + delta_b_field,
+                rtol=2.0e-14,
+                atol=2.0e-14,
+            )
+
+            # A clean base can be reused for independent trade-study builds,
+            # but a body-plus-features result must not become the next base.
+            # That sequential workflow obscures cross-batch coupling and can
+            # make downstream tree combinations count the body twice.
+            with self.assertRaisesRegex(
+                ValueError, "cannot add another batch to a feature-bearing base"
+            ):
+                feature_sum.add_features_to_monostatic_grim(
+                    str(point_a_total), str(sequential), points=[point_b]
+                )
+            self.assertFalse(sequential.exists())
+            self.assertFalse(
+                Path(feature_sum.feature_only_output_path(str(sequential))).exists()
             )
 
     def test_dispatch_builds_each_frequency_on_its_own_mesh(self):

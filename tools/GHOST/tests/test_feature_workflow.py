@@ -46,6 +46,75 @@ def _write_empty_base(path, grid=None):
     )
 
 
+class DeclaredDeltaResponseRoleTests(unittest.TestCase):
+    @staticmethod
+    def _write_domain(path: Path, domain=None):
+        payload = {}
+        if domain is not None:
+            payload["rcs_domain"] = np.asarray(domain)
+        with path.open("wb") as stream:
+            np.savez(stream, **payload)
+
+    def test_canonical_opn_frd_roles_fail_before_point_or_line_bypass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for filename, expected_role in (
+                ("SEAL-00-01_0.010gap_OPN.grim", "_OPN"),
+                ("SEAL-00-01_0.010gap_FRD.grim", "_FRD"),
+                ("SEAL-00-01_0.010gap_oPn.GrIm", "_OPN"),
+            ):
+                response = root / filename
+                response.write_bytes(b"must not reach a response loader")
+                with self.subTest(filename=filename, kind="line"):
+                    with self.assertRaisesRegex(
+                        ValueError, rf"filename role {expected_role}"
+                    ):
+                        feature_sum.load_seam_from_grim(
+                            str(response),
+                            1.0,
+                            declared_coherent_delta=True,
+                        )
+                with self.subTest(filename=filename, kind="point"):
+                    with self.assertRaisesRegex(
+                        ValueError, rf"filename role {expected_role}"
+                    ):
+                        feature_sum.prepare_point_pattern(
+                            str(response), declared_coherent_delta=True
+                        )
+
+    def test_role_free_canonical_and_gui_deltas_are_classified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            response = Path(directory) / "SEAL-00-01_0.010gap.grim"
+            for domain, expected_status in (
+                ("delta", "canonical_delta"),
+                ("power_phase", "declared_gui_derived_delta"),
+                ("power-phase", "declared_gui_derived_delta"),
+                ("complex_amplitude", "declared_gui_derived_delta"),
+                (None, "legacy_declared_delta_missing_domain"),
+            ):
+                self._write_domain(response, domain)
+                with self.subTest(domain=domain):
+                    record = (
+                        feature_workflow.validate_declared_feature_delta_response(
+                            response
+                        )
+                    )
+                    self.assertEqual(record["filename_role"], "role_free")
+                    self.assertEqual(record["embedded_rcs_domain"], domain)
+                    self.assertEqual(record["status"], expected_status)
+
+    def test_unknown_explicit_domain_cannot_be_overridden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            response = Path(directory) / "role_free_delta.grim"
+            self._write_domain(response, "whole_object_coefficient")
+            with self.assertRaisesRegex(
+                ValueError, "contradicts the embedded rcs_domain"
+            ):
+                feature_workflow.validate_declared_feature_delta_response(
+                    response
+                )
+
+
 class DatasetDiscoveryTests(unittest.TestCase):
     def test_discovers_first_use_order_from_both_strict_csvs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -102,8 +171,199 @@ class DatasetDiscoveryTests(unittest.TestCase):
                     point_locations_csv="points.csv", base_dir=root
                 )
 
+    def test_point_csv_reports_independent_bad_rows_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "points.csv"
+            source.write_text(
+                POINT_HEADER
+                + "p1,fastener,bad,0,0,0,0,1,1,0,0\n"
+                + "p2,,0,0,nan,0,0,1,1,0,0\n"
+                + "p1,fastener,0,0,0,0,0,1,1,0,0\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as caught:
+                feature_workflow.read_point_placement_csv(source)
+
+            message = str(caught.exception)
+            self.assertIn("4 validation error(s)", message)
+            self.assertIn(
+                "line 2: coordinates and vectors must be numeric; "
+                "invalid column(s) x",
+                message,
+            )
+            self.assertIn("line 3: placement_id and dataset_id are required", message)
+            self.assertIn("line 3: NaN/infinite value in column(s) z", message)
+            self.assertIn("line 4: duplicate placement_id 'p1'", message)
+
+    def test_line_csv_aggregates_errors_without_index_cascade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "lines.csv"
+            source.write_text(
+                LINE_HEADER
+                + "l1,seam,1,bad,0,0,1,0,0,0,0,1,0,0,1\n"
+                + "l1,seam,not-an-index,0,0,0,1,0,0,0,0,1,0,0,1\n"
+                + "l1,other,3,0,0,0,1,0,0,0,0,1,0,0,1\n"
+                + "l2,seam,2,0,0,0,1,0,0,0,0,1,0,0,1\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as caught:
+                feature_workflow.read_line_placement_csv(source)
+
+            message = str(caught.exception)
+            self.assertIn("4 validation error(s)", message)
+            self.assertIn(
+                "line 2: endpoints and normals must be numeric; "
+                "invalid column(s) x1",
+                message,
+            )
+            self.assertIn(
+                "line 3: segment_index must be a canonical positive integer",
+                message,
+            )
+            self.assertIn(
+                "every segment of line_id 'l1' must use the same dataset_id",
+                message,
+            )
+            self.assertIn(
+                "line 5: line_id 'l2' requires one consecutive segment_index",
+                message,
+            )
+            self.assertNotIn("expected 2", message)
+            self.assertNotIn("expected 3", message)
+
+    def test_csv_error_report_is_bounded_and_counts_omitted_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "points.csv"
+            source.write_text(
+                POINT_HEADER
+                + "".join(
+                    f"p{index},fastener,bad,0,0,0,0,1,1,0,0\n"
+                    for index in range(30)
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as caught:
+                feature_workflow.read_point_placement_csv(source)
+
+            message = str(caught.exception)
+            self.assertIn("30 validation error(s)", message)
+            self.assertIn("5 additional error(s) omitted", message)
+            self.assertNotIn("line 31:", message)
+
 
 class RequestPlanTests(unittest.TestCase):
+    def test_feature_plan_preserves_original_positional_field_layout(self):
+        request = feature_workflow.FeatureAssemblyRequest(
+            base_grim="body.grim", output_grim="assembled.grim"
+        )
+        preview = feature_workflow.FeaturePreviewGeometry(
+            surface_triangles_cad_m=None,
+            body_profile_rho_z_m=None,
+            point_locations_cad_m={},
+            line_paths_cad_m={},
+        )
+        plan = feature_workflow.FeatureAssemblyPlan(
+            request,
+            Path("body.grim"),
+            Path("assembled.grim"),
+            {},
+            None,
+            None,
+            None,
+            lambda points: np.zeros_like(points),
+            None,
+            [],
+            [],
+            [],
+            [],
+            feature_workflow.FeatureDatasetRequirements(),
+            preview,
+            0.0,
+            1.0,
+            {},
+            {"body.grim": "a" * 64},
+            ("legacy warning",),
+            ("missing.sidecar",),
+            "b" * 64,
+            False,
+            "legacy-positional-plan-seal",
+        )
+
+        self.assertEqual(plan.prepared_plan_sha256, "legacy-positional-plan-seal")
+        self.assertIsNone(plan.prepared_features_only_output_sha256)
+        self.assertTrue(plan.prepared_features_only_output_absent)
+
+    def test_physical_units_are_unset_and_required_only_for_selected_inputs(self):
+        request = feature_workflow.FeatureAssemblyRequest(
+            base_grim="body.grim",
+            output_grim="assembled.grim",
+            point_locations_csv="points.csv",
+        )
+        self.assertIsNone(request.coordinate_units)
+        self.assertIsNone(request.surface_units)
+        with self.assertRaisesRegex(
+            ValueError, "coordinate_units must be selected explicitly"
+        ):
+            feature_workflow.prepare_feature_assembly(request)
+
+        with self.assertRaisesRegex(
+            ValueError, "surface_units must be selected explicitly"
+        ):
+            feature_workflow.prepare_feature_input_preview(
+                surface_mesh="body.stl"
+            )
+        with self.assertRaisesRegex(
+            ValueError, "coordinate_units must be selected explicitly"
+        ):
+            feature_workflow.prepare_feature_input_preview(
+                point_locations_csv="points.csv"
+            )
+
+        # A base-only preview needs no arbitrary placement or mesh unit.
+        with mock.patch.object(
+            feature_workflow,
+            "load_body_requested_radar_grid",
+            return_value=None,
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory) / "body.grim"
+                base.touch()
+                preview = feature_workflow.prepare_feature_input_preview(
+                    base_grim=base
+                )
+        self.assertEqual(preview.body_source, "none")
+
+    def test_4500_mm_surface_preview_is_interpreted_as_4_5_m(self):
+        with tempfile.TemporaryDirectory() as directory:
+            surface = Path(directory) / "vehicle.stl"
+            surface.write_bytes(b"mesh bytes")
+            raw_mm = np.asarray(
+                [
+                    [[0.0, 0.0, 0.0], [4500.0, 0.0, 0.0], [0.0, 1000.0, 0.0]],
+                    [[4500.0, 1000.0, 500.0], [4500.0, 0.0, 500.0], [0.0, 1000.0, 500.0]],
+                ]
+            )
+            with mock.patch.object(
+                feature_workflow,
+                "read_surface_mesh",
+                return_value=raw_mm,
+            ):
+                preview = feature_workflow.prepare_feature_input_preview(
+                    surface_mesh=surface,
+                    surface_units="millimeters",
+                )
+
+        vertices = preview.surface_triangles_cad_m.reshape(-1, 3)
+        np.testing.assert_allclose(
+            np.ptp(vertices, axis=0),
+            [4.5, 1.0, 0.5],
+            rtol=0.0,
+            atol=1.0e-15,
+        )
+
     def _prepare_minimal_line_plan(self, root):
         base = root / "body.grim"
         _write_empty_base(base)
@@ -138,6 +398,7 @@ class RequestPlanTests(unittest.TestCase):
         request = feature_workflow.FeatureAssemblyRequest(
             base_grim=base,
             output_grim=root / "assembled.grim",
+            coordinate_units="meters",
             line_locations_csv=line_csv,
             line_datasets={"gap": dataset},
             base_dir=root,
@@ -218,6 +479,55 @@ class RequestPlanTests(unittest.TestCase):
                                  [0.0, 1.0, 0.0]]])
         return request, payload, triangles, surface, coordinates
 
+    def test_selected_mesh_with_shadow_off_requires_release_warning_waiver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request, payload, triangles, _surface, _coordinates = (
+                self._external_plane_case(root)
+            )
+            self.assertFalse(request.shadow)
+            with (
+                mock.patch.object(
+                    feature_workflow,
+                    "load_body_requested_radar_grid",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    feature_workflow, "_load_grim", return_value=payload
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "read_surface_mesh",
+                    return_value=triangles,
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "_apply_feature_library_contracts",
+                    return_value=({}, [], {}, set()),
+                ),
+            ):
+                plan = feature_workflow.prepare_feature_assembly(request)
+
+        warning = next(
+            value
+            for value in plan.validation_warnings
+            if "shadowing is OFF" in value
+        )
+        self.assertIn("Hidden point and line features", warning)
+        self.assertIn("full modeled amplitude", warning)
+        self.assertIn("one-time release-warning waiver", warning)
+
+    def test_embedded_body_without_external_mesh_has_no_shadow_off_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = self._prepare_minimal_line_plan(Path(directory))
+
+        self.assertFalse(plan.request.shadow)
+        self.assertIsNone(plan.request.surface_mesh)
+        self.assertFalse(any(
+            "shadowing is OFF" in warning
+            for warning in plan.validation_warnings
+        ))
+
     def test_enabled_snapshot_filters_preview_after_strict_parsing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -259,17 +569,20 @@ class RequestPlanTests(unittest.TestCase):
                     point_locations_csv="points.csv",
                     enabled_point_placement_ids=("stale-id",),
                     base_dir=root,
+                    coordinate_units="meters",
                 )
             with self.assertRaisesRegex(TypeError, "sequence of complete IDs"):
                 feature_workflow.prepare_feature_input_preview(
                     point_locations_csv="points.csv",
                     enabled_point_placement_ids="p1",
                     base_dir=root,
+                    coordinate_units="meters",
                 )
             clean_preview = feature_workflow.prepare_feature_input_preview(
                 point_locations_csv="points.csv",
                 enabled_point_placement_ids=(),
                 base_dir=root,
+                coordinate_units="meters",
             )
             self.assertEqual(clean_preview.point_locations_cad_m, {})
             self.assertEqual(
@@ -290,6 +603,7 @@ class RequestPlanTests(unittest.TestCase):
                     point_locations_csv="points.csv",
                     enabled_point_placement_ids=("p2",),
                     base_dir=root,
+                    coordinate_units="meters",
                 )
 
     def test_all_disabled_request_fails_before_response_loading(self):
@@ -303,6 +617,7 @@ class RequestPlanTests(unittest.TestCase):
             request = feature_workflow.FeatureAssemblyRequest(
                 base_grim="body.grim",
                 output_grim="assembled.grim",
+                coordinate_units="meters",
                 point_locations_csv="points.csv",
                 point_datasets={},
                 enabled_point_placement_ids=(),
@@ -588,6 +903,7 @@ class RequestPlanTests(unittest.TestCase):
                 point_locations_csv="points.csv",
                 line_locations_csv="lines.csv",
                 base_dir=root,
+                coordinate_units="meters",
             )
 
             np.testing.assert_array_equal(
@@ -617,6 +933,19 @@ class RequestPlanTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(ValueError, "must differ"):
                         feature_workflow.prepare_feature_assembly(request)
+
+    def test_feature_only_sibling_must_not_overwrite_clean_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "assembled_features_only.grim"
+            base.write_bytes(b"clean body")
+            request = feature_workflow.FeatureAssemblyRequest(
+                base_grim=base,
+                output_grim=root / "assembled.grim",
+                point_locations_csv=root / "points.csv",
+            )
+            with self.assertRaisesRegex(ValueError, "feature-only sibling"):
+                feature_workflow.prepare_feature_assembly(request)
 
     def test_output_must_not_overwrite_a_mapped_response(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1094,6 +1423,7 @@ class RequestPlanTests(unittest.TestCase):
             request = feature_workflow.FeatureAssemblyRequest(
                 base_grim="body.grim",
                 output_grim="assembled.grim",
+                coordinate_units="meters",
                 line_locations_csv="lines.csv",
                 line_datasets={"gap": "gap.grim"},
                 base_dir=root,
@@ -1125,6 +1455,12 @@ class RequestPlanTests(unittest.TestCase):
 
             self.assertEqual(plan.base_path, base.resolve())
             self.assertEqual(plan.output_path, (root / "assembled.grim").resolve())
+            self.assertEqual(
+                plan.features_only_output_path,
+                (root / "assembled_features_only.grim").resolve(),
+            )
+            self.assertTrue(plan.prepared_features_only_output_absent)
+            self.assertIsNone(plan.prepared_features_only_output_sha256)
             self.assertEqual(plan.dataset_requirements.line_dataset_ids, ("gap",))
             self.assertEqual(plan.dataset_requirements.point_placement_count, 0)
             self.assertEqual(plan.dataset_requirements.line_path_count, 1)
@@ -1169,6 +1505,10 @@ class RequestPlanTests(unittest.TestCase):
             # mutating the public plan after validation must not alter the
             # arrays used to build the output.
             self.assertIsNot(kwargs["placements"], plan.line_placements)
+            self.assertTrue(kwargs["expect_features_only_output_absent"])
+            self.assertIsNone(
+                kwargs["expected_features_only_output_sha256"]
+            )
             np.testing.assert_allclose(
                 kwargs["placements"][0]["perimeter"],
                 plan.line_placements[0]["perimeter"],
@@ -1447,6 +1787,95 @@ class ApplicabilityGeometryTests(unittest.TestCase):
             feature_workflow._validate_point_requested_support(
                 placement, look, np.asarray([1.0]), dataset_id="fastener"
             )
+
+    def test_zero_illumination_is_recorded_and_warned_for_points_and_lines(self):
+        pattern = SimpleNamespace(
+            frequencies=np.asarray([1.0]),
+            azimuths=np.asarray([0.0]),
+            elevations=np.asarray([-90.0, 90.0]),
+            channel_indices={"VV": 0, "HH": 1, "VH": 2},
+            amplitude=np.zeros((1, 2, 1, 3), dtype=np.complex128),
+        )
+        point_placement = {
+            "pattern": pattern,
+            "location": np.asarray([0.0, 0.0, 0.0]),
+            "aperture_normal": np.asarray([1.0, 0.0, 0.0]),
+            "roll_ref": np.asarray([0.0, 1.0, 0.0]),
+        }
+        point_record = {
+            "placement_id": "hidden_fastener",
+            "dataset_id": "fastener",
+            "dataset": "fastener_delta.grim",
+            "dataset_sha256": "1" * 64,
+        }
+        line_placement = {
+            "perimeter": np.asarray([[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]),
+            "segment_normals": np.asarray([[[1.0, 0.0, 0.0],
+                                               [1.0, 0.0, 0.0]]]),
+            "max_piece_length_m": 0.1,
+        }
+        line_record = {
+            "line_id": "hidden_seal",
+            "dataset_id": "seal",
+            "dataset": "seal_delta.grim",
+            "dataset_sha256": "2" * 64,
+        }
+        coefficient = SimpleNamespace(
+            frequency_ghz=1.0,
+            phi_deg=np.asarray([-180.0, 180.0]),
+            dA_tm=np.zeros(2, dtype=np.complex128),
+            dA_te=np.zeros(2, dtype=np.complex128),
+        )
+        radar_grid = {
+            "frequencies_ghz": np.asarray([1.0]),
+            "azimuths_deg": np.asarray([0.0]),
+            "elevations_deg": np.asarray([0.0]),
+            "axis_az_deg": 0.0,
+            "axis_el_deg": 0.0,
+            "roll_deg": 0.0,
+        }
+        with mock.patch.object(
+            feature_workflow,
+            "load_feature_library_manifest",
+            return_value=(None, []),
+        ), mock.patch.object(
+            feature_workflow,
+            "feature_response_content_sha256",
+            return_value="3" * 64,
+        ), mock.patch.object(
+            feature_workflow,
+            "_load_grim",
+            return_value={"frequencies": np.asarray([1.0])},
+        ), mock.patch.object(
+            feature_workflow,
+            "load_seam_from_grim",
+            return_value=coefficient,
+        ):
+            _contracts, warnings, _hashes, _absent = (
+                feature_workflow._apply_feature_library_contracts(
+                    line_placements=[line_placement],
+                    line_records=[line_record],
+                    point_placements=[point_placement],
+                    point_records=[point_record],
+                    radar_grid=radar_grid,
+                    require_manifests=False,
+                )
+            )
+
+        self.assertEqual(point_record["requested_look_count"], 1)
+        self.assertEqual(point_record["illuminated_requested_look_count"], 0)
+        self.assertEqual(line_record["requested_look_count"], 1)
+        self.assertEqual(line_record["illuminated_requested_look_count"], 0)
+        self.assertEqual(
+            line_record["required_cut_angle_ranges_deg"][0][
+                "illuminated_requested_look_count"
+            ],
+            0,
+        )
+        warning_text = "\n".join(warnings)
+        self.assertIn("Point 'hidden_fastener' has zero illuminated", warning_text)
+        self.assertIn("Line 'hidden_seal' has zero illuminated", warning_text)
+        self.assertIn("one-time release-warning waiver", warning_text)
 
     def test_line_metrics_use_solver_frame_and_exact_normal_turn_radius(self):
         placement = {

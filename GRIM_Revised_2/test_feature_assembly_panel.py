@@ -24,7 +24,9 @@ GHOST_BACKEND = (
 
 import feature_assembly_panel as feature_panel_module  # noqa: E402
 from feature_assembly_panel import (  # noqa: E402
+    AssemblyWorkEstimate,
     GUI_AVAILABLE,
+    LONG_BUILD_CONFIRMATION_SECONDS,
     LINE_PLACEMENT_COLUMNS,
     POINT_PLACEMENT_COLUMNS,
     FeatureAssemblyFormModel,
@@ -36,6 +38,10 @@ from feature_assembly_panel import (  # noqa: E402
     FEATURE_RECIPE_SCHEMA,
     FEATURE_RECIPE_VERSION,
     assess_surface_binding_readiness,
+    assembly_build_confirmation_required,
+    estimate_assembly_workload,
+    estimate_validated_assembly_plan_workload,
+    format_assembly_work_estimate,
     preflight_base_grim,
     read_feature_assembly_recipe,
     _normalized_grim_output_path,
@@ -45,16 +51,29 @@ from feature_assembly_panel import (  # noqa: E402
 )
 
 
-def _write_minimal_base_grim(path: Path, *, embedded_bor: bool = False) -> None:
+def _write_minimal_base_grim(
+    path: Path,
+    *,
+    embedded_bor: bool = False,
+    azimuths: tuple[float, ...] = (0.0,),
+    elevations: tuple[float, ...] = (0.0,),
+    frequencies: tuple[float, ...] = (1.0,),
+) -> None:
     """Write enough native GRIM structure for the lightweight body preflight."""
 
     payload = {
-        "azimuths": np.asarray([0.0]),
-        "elevations": np.asarray([0.0]),
-        "frequencies": np.asarray([1.0]),
+        "azimuths": np.asarray(azimuths),
+        "elevations": np.asarray(elevations),
+        "frequencies": np.asarray(frequencies),
         "polarizations": np.asarray(["HH"]),
-        "rcs_power": np.zeros((1, 1, 1, 1), dtype=np.float32),
-        "rcs_phase": np.zeros((1, 1, 1, 1), dtype=np.float32),
+        "rcs_power": np.zeros(
+            (len(azimuths), len(elevations), len(frequencies), 1),
+            dtype=np.float32,
+        ),
+        "rcs_phase": np.zeros(
+            (len(azimuths), len(elevations), len(frequencies), 1),
+            dtype=np.float32,
+        ),
     }
     if embedded_bor:
         payload.update(
@@ -242,6 +261,145 @@ def _ready_point_model() -> FeatureAssemblyFormModel:
 
 
 class FeatureAssemblyModelTests(unittest.TestCase):
+    def test_work_estimate_is_auditable_broad_and_confirms_only_validated_long_work(self):
+        small = estimate_assembly_workload(
+            look_count=361,
+            frequency_count=2,
+            point_count=12,
+            line_path_count=2,
+            line_segment_count=4,
+            line_piece_count=120,
+            mesh_triangle_count=2_000,
+            shadow_enabled=True,
+            quantities_validated=True,
+            line_piece_count_exact=True,
+            mesh_triangle_count_exact=True,
+        )
+
+        self.assertTrue(small.available)
+        self.assertEqual(small.shadow_ray_upper_bound, 361 * (12 + 120))
+        self.assertFalse(assembly_build_confirmation_required(small))
+        summary = format_assembly_work_estimate(small)
+        self.assertIn("Rough local estimate (not a benchmark)", summary)
+        self.assertIn("361 looks x 2 frequencies", summary)
+        self.assertNotIn(f"{small.rough_build_seconds:.3f}", summary)
+
+        long_kwargs = dict(
+            look_count=25_000,
+            frequency_count=40,
+            point_count=1_000,
+            line_path_count=200,
+            line_segment_count=1_000,
+            line_piece_count=20_000,
+            mesh_triangle_count=1_000_000,
+            shadow_enabled=True,
+            line_piece_count_exact=True,
+            mesh_triangle_count_exact=True,
+        )
+        prevalidated = estimate_assembly_workload(
+            **long_kwargs, quantities_validated=False
+        )
+        validated = estimate_assembly_workload(
+            **long_kwargs, quantities_validated=True
+        )
+        self.assertGreaterEqual(
+            validated.rough_build_seconds, LONG_BUILD_CONFIRMATION_SECONDS
+        )
+        self.assertFalse(assembly_build_confirmation_required(prevalidated))
+        self.assertTrue(assembly_build_confirmation_required(validated))
+
+    def test_base_preflight_reads_axis_counts_without_loading_payload_arrays(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder) / "body.grim"
+            _write_minimal_base_grim(
+                base,
+                azimuths=(-180.0, 0.0, 180.0),
+                elevations=(-10.0, 10.0),
+                frequencies=(1.0, 2.0, 3.0, 4.0),
+            )
+
+            result = preflight_base_grim(base)
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.azimuth_count, 3)
+        self.assertEqual(result.elevation_count, 2)
+        self.assertEqual(result.frequency_count, 4)
+
+    def test_validated_plan_work_estimate_uses_exact_subdivision_and_shadow_counts(self):
+        plan = SimpleNamespace(
+            radar_grid={
+                "azimuths_deg": np.asarray([0.0, 90.0, 180.0]),
+                "elevations_deg": np.asarray([-10.0, 10.0]),
+                "frequencies_ghz": np.asarray([1.0, 2.0]),
+            },
+            point_placements=({}, {}),
+            line_placements=(
+                {
+                    "perimeter": np.asarray(
+                        [
+                            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                            [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
+                        ]
+                    ),
+                    "max_piece_length_m": 0.25,
+                },
+            ),
+            request=SimpleNamespace(shadow=True),
+            surface=SimpleNamespace(triangles=np.zeros((7, 3, 3))),
+        )
+
+        estimate = estimate_validated_assembly_plan_workload(plan)
+
+        self.assertTrue(estimate.quantities_validated)
+        self.assertEqual(estimate.look_count, 6)
+        self.assertEqual(estimate.frequency_count, 2)
+        self.assertEqual(estimate.point_count, 2)
+        self.assertEqual(estimate.line_segment_count, 2)
+        self.assertEqual(estimate.line_piece_count, 8)
+        self.assertTrue(estimate.line_piece_count_exact)
+        self.assertEqual(estimate.mesh_triangle_count, 7)
+        self.assertTrue(estimate.mesh_triangle_count_exact)
+        self.assertEqual(estimate.shadow_ray_upper_bound, 6 * (2 + 8))
+
+    def test_units_default_unset_and_are_required_for_applicable_inputs(self):
+        defaults = FeatureAssemblyValues()
+        self.assertEqual(defaults.coordinate_units, "")
+        self.assertEqual(defaults.surface_units, "")
+
+        model = _ready_point_model()
+        model.values.coordinate_units = ""
+        with self.assertRaisesRegex(ValueError, "Choose the coordinate units"):
+            model.validate()
+
+        model.values.coordinate_units = "meters"
+        model.values.surface_units = ""
+        with self.assertRaisesRegex(ValueError, "Choose the physical units"):
+            model.validate()
+
+        # Inapplicable unit controls remain optional for an embedded/base-only
+        # staging preview.
+        workflow = _FakeWorkflow()
+        base_only = FeatureAssemblyFormModel(
+            FeatureAssemblyValues(base_grim="clean_body.grim")
+        )
+        preview = base_only.prepare_input_preview(workflow)
+        self.assertEqual(preview.coordinate_units, "")
+        self.assertEqual(preview.surface_units, "")
+
+    def test_mesh_dimension_summary_exposes_4500_mm_as_4_5_m(self):
+        triangles_m = np.asarray(
+            [
+                [[0.0, 0.0, 0.0], [4.5, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                [[4.5, 1.0, 0.5], [4.5, 0.0, 0.5], [0.0, 1.0, 0.5]],
+            ]
+        )
+        summary = feature_panel_module._surface_dimensions_summary(
+            triangles_m,
+            surface_units="millimeters",
+        )
+        self.assertIn("4.5 x 1 x 0.5 m", summary)
+        self.assertIn("4500 x 1000 x 500 mm", summary)
+
     def test_versioned_recipe_round_trip_preserves_all_effective_state(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -641,6 +799,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             FeatureAssemblyValues(
                 base_grim="body.grim",
                 output_grim="assembled.grim",
+                coordinate_units="inches",
                 point_locations_csv="points.csv",
                 expected_host_material="PEC",
             )
@@ -728,6 +887,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         model = FeatureAssemblyFormModel(
             FeatureAssemblyValues(
                 base_grim="body.grim",
+                coordinate_units="inches",
                 point_locations_csv="points.csv",
             )
         )
@@ -776,6 +936,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             FeatureAssemblyValues(
                 base_grim="body.grim",
                 output_grim="assembled.grim",
+                coordinate_units="inches",
                 point_locations_csv="points.csv",
                 expected_host_material="PEC",
             )
@@ -801,7 +962,10 @@ class FeatureAssemblyModelTests(unittest.TestCase):
 
     def test_input_preview_rejects_selection_change_during_load(self):
         model = FeatureAssemblyFormModel(
-            FeatureAssemblyValues(point_locations_csv="points.csv")
+            FeatureAssemblyValues(
+                coordinate_units="inches",
+                point_locations_csv="points.csv",
+            )
         )
         model.update_dataset_requirements(
             {
@@ -875,6 +1039,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 FeatureAssemblyValues(
                     base_grim=str(base),
                     output_grim=str(output),
+                    coordinate_units="inches",
                     point_locations_csv=str(points),
                     expected_host_material="PEC",
                 )
@@ -932,7 +1097,10 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             point_csv = Path(folder) / "points.csv"
             point_csv.write_bytes(b"alpha\n")
             model = FeatureAssemblyFormModel(
-                FeatureAssemblyValues(point_locations_csv=str(point_csv))
+                FeatureAssemblyValues(
+                    coordinate_units="inches",
+                    point_locations_csv=str(point_csv),
+                )
             )
             model.update_dataset_requirements(
                 {"point_dataset_ids": ("fastener",), "line_dataset_ids": ()}
@@ -1122,12 +1290,78 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         self.assertEqual(preview_plan.preview_geometry, "preview")
         self.assertIsInstance(dispatch, FeatureBuildDispatch)
         self.assertEqual(dispatch.output_path, "assembled.grim")
+        self.assertEqual(
+            Path(dispatch.features_only_output_path).name,
+            "assembled_features_only.grim",
+        )
+        self.assertFalse(dispatch.features_only_output_published)
         self.assertTrue(dispatch.reused_validated_plan)
         self.assertEqual(
             [name for name, _value in workflow.calls],
             ["prepare", "execute"],
         )
         self.assertIs(workflow.calls[-1][1], dispatch.plan)
+
+    def test_custom_service_does_not_claim_a_stale_feature_only_sibling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "assembled.grim"
+            sibling = root / "assembled_features_only.grim"
+            sibling.write_bytes(b"stale delta from an earlier build")
+
+            class TotalOnlyWorkflow(_FakeWorkflow):
+                def prepare_feature_assembly(self, request):
+                    self.calls.append(("prepare", request))
+                    return SimpleNamespace(
+                        request=request,
+                        preview_geometry="preview",
+                        features_only_output_path=sibling,
+                    )
+
+                def execute_feature_assembly(self, plan):
+                    self.calls.append(("execute", plan))
+                    output.write_bytes(b"new total only")
+                    return str(output)
+
+            workflow = TotalOnlyWorkflow()
+            model = _ready_point_model()
+            model.values.output_grim = str(output)
+
+            dispatch = model.assemble(workflow)
+
+            self.assertEqual(sibling.read_bytes(), b"stale delta from an earlier build")
+            self.assertFalse(dispatch.features_only_output_published)
+            self.assertEqual(dispatch.features_only_output_path, str(sibling))
+
+    def test_custom_service_reports_an_observably_published_feature_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "assembled.grim"
+            sibling = root / "assembled_features_only.grim"
+
+            class PairWorkflow(_FakeWorkflow):
+                def prepare_feature_assembly(self, request):
+                    self.calls.append(("prepare", request))
+                    return SimpleNamespace(
+                        request=request,
+                        preview_geometry="preview",
+                        features_only_output_path=sibling,
+                    )
+
+                def execute_feature_assembly(self, plan):
+                    self.calls.append(("execute", plan))
+                    output.write_bytes(b"new total")
+                    sibling.write_bytes(b"new feature delta")
+                    return str(output)
+
+            workflow = PairWorkflow()
+            model = _ready_point_model()
+            model.values.output_grim = str(output)
+
+            dispatch = model.assemble(workflow)
+
+            self.assertTrue(dispatch.features_only_output_published)
+            self.assertEqual(dispatch.features_only_output_path, str(sibling))
 
     def test_validated_publish_never_prepares_an_unreviewed_replacement(self):
         workflow = _FakeWorkflow()
@@ -1356,6 +1590,175 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_fresh_panel_requires_unit_choices_and_shows_interpreted_mesh_size(self):
+        with tempfile.TemporaryDirectory() as folder:
+            surface = Path(folder) / "vehicle.stl"
+            surface.write_bytes(b"mesh bytes")
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            try:
+                self.assertEqual(panel.coordinate_units.currentData(), "")
+                self.assertEqual(panel.surface_units.currentData(), "")
+                panel.set_surface_mesh(str(surface))
+                self.assertIn(
+                    "choose the physical units",
+                    panel.surface_dimensions_label.text().lower(),
+                )
+                self.assertFalse(panel.input_preview_button.isEnabled())
+
+                panel.surface_units.setCurrentIndex(
+                    panel.surface_units.findData("millimeters")
+                )
+                panel._pull_values()
+                preview = SimpleNamespace(
+                    surface_triangles_cad_m=np.asarray(
+                        [
+                            [
+                                [0.0, 0.0, 0.0],
+                                [4.5, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                            ],
+                            [
+                                [4.5, 1.0, 0.5],
+                                [4.5, 0.0, 0.5],
+                                [0.0, 1.0, 0.5],
+                            ],
+                        ]
+                    ),
+                    point_locations_cad_m={},
+                    line_paths_cad_m={},
+                    dataset_requirements=None,
+                )
+                panel._active_kind = "input_preview"
+                panel._operation_succeeded(preview)
+                panel._active_kind = ""
+
+                self.assertIn(
+                    "4.5 x 1 x 0.5 m",
+                    panel.surface_dimensions_label.text(),
+                )
+                self.assertIn(
+                    "4500 x 1000 x 500 mm",
+                    panel.surface_dimensions_label.text(),
+                )
+            finally:
+                _close_panel_without_prompt(panel)
+
+    def test_new_mesh_defaults_shadow_on_but_recipe_preserves_explicit_off(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            surface = root / "vehicle.facet"
+            surface.write_text("4 2\n", encoding="utf-8")
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            try:
+                self.assertFalse(panel.shadow.isChecked())
+                panel.set_surface_mesh(str(surface))
+                self.assertTrue(panel.shadow.isChecked())
+
+                recipe = write_feature_assembly_recipe(
+                    FeatureAssemblyValues(
+                        surface_mesh=str(surface),
+                        surface_units="meters",
+                        shadow=False,
+                    ),
+                    root / "intentional_no_shadow",
+                    name="No-shadow trade",
+                    variant="Reviewed",
+                )
+                panel.load_recipe_path(recipe, refresh=False)
+
+                self.assertEqual(panel.surface_picker.path(), str(surface.resolve()))
+                self.assertFalse(panel.shadow.isChecked())
+            finally:
+                _close_panel_without_prompt(panel)
+
+    def test_rough_workload_updates_from_current_axes_features_mesh_and_shadow(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            base = root / "vehicle.grim"
+            surface = root / "vehicle.facet"
+            _write_minimal_base_grim(
+                base,
+                azimuths=(0.0, 90.0, 180.0),
+                elevations=(-10.0, 10.0),
+                frequencies=(1.0, 2.0),
+            )
+            surface.write_text("4 2\n", encoding="utf-8")
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            try:
+                panel.set_base_grim(str(base))
+                panel.set_surface_mesh(str(surface))
+                panel.model.update_dataset_requirements(
+                    {
+                        "point_dataset_ids": ("fastener",),
+                        "line_dataset_ids": ("seal",),
+                        "point_instances": (
+                            ("bolt_1", "fastener"),
+                            ("bolt_2", "fastener"),
+                        ),
+                        "line_instances": (("door", "seal", 3),),
+                    }
+                )
+                panel._apply_requirements_to_tables()
+                panel._update_workflow_readiness()
+
+                text = panel.work_estimate_label.text()
+                self.assertIn("Rough local estimate (not a benchmark)", text)
+                self.assertIn("6 looks x 2 frequencies", text)
+                self.assertIn("2 point(s)", text)
+                self.assertIn("1 line path(s)", text)
+                self.assertIn("about 192 solver line piece(s)", text)
+                self.assertIn("up to 1,164 body-shadow ray(s)", text)
+
+                panel.shadow.setChecked(False)
+                self.app.processEvents()
+                self.assertIn("body shadowing off", panel.work_estimate_label.text())
+            finally:
+                _close_panel_without_prompt(panel)
+
+    def test_only_validated_many_hour_build_gets_a_conservative_confirmation(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        with tempfile.TemporaryDirectory() as folder:
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            try:
+                panel.model.values.output_grim = str(Path(folder) / "assembled.grim")
+                panel._validated_plan_current = True
+                panel._validation_warning_count = 0
+                long_estimate = AssemblyWorkEstimate(
+                    available=True,
+                    quantities_validated=True,
+                    rough_build_seconds=LONG_BUILD_CONFIRMATION_SECONDS,
+                )
+                with (
+                    mock.patch.object(panel, "_pull_values"),
+                    mock.patch.object(
+                        panel.model,
+                        "validated_plan_is_current",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        panel,
+                        "_validated_build_work_estimate",
+                        return_value=long_estimate,
+                    ),
+                    mock.patch.object(
+                        QMessageBox,
+                        "warning",
+                        return_value=QMessageBox.StandardButton.No,
+                    ) as confirmation,
+                    mock.patch.object(panel, "_start_operation") as start,
+                ):
+                    panel.assemble_and_save()
+
+                confirmation.assert_called_once()
+                self.assertIn(
+                    "not a benchmark", confirmation.call_args.args[2]
+                )
+                start.assert_not_called()
+                self.assertIn("before computation", panel.status_label.text())
+            finally:
+                _close_panel_without_prompt(panel)
+
     def test_surface_binding_dialog_requires_ids_and_explicit_attestation(self):
         from PySide6.QtWidgets import QDialogButtonBox, QWidget
 
@@ -1569,6 +1972,39 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         finally:
             _close_panel_without_prompt(panel)
 
+    def test_validation_qa_marks_zero_illumination_as_warn(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        try:
+            plan = SimpleNamespace(
+                skin_limit_m=1.0e-3,
+                validation_warnings=(
+                    "Point 'hidden_fastener' has zero illuminated requested looks",
+                ),
+                point_records=(
+                    {
+                        "placement_id": "hidden_fastener",
+                        "dataset_id": "fastener",
+                        "skin_offset_m": 0.0,
+                        "max_normal_error_deg": 0.0,
+                        "requested_look_count": 361,
+                        "illuminated_requested_look_count": 0,
+                    },
+                ),
+                line_records=(),
+            )
+
+            panel._show_validation_qa(plan)
+
+            result = panel.validation_qa_table.item(0, 5)
+            self.assertIsNotNone(result)
+            self.assertEqual(result.text(), "WARN: not illuminated")
+            self.assertIn("Not illuminated: 0 of 361", result.toolTip())
+            self.assertIn("WARN/not illuminated", panel.validation_qa_label.text())
+            self.assertFalse(panel.validation_warning_ack.isHidden())
+            self.assertFalse(panel.validation_warning_ack.isChecked())
+        finally:
+            _close_panel_without_prompt(panel)
+
     def test_public_busy_and_close_contract_starts_idle(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
         self.assertFalse(panel.is_busy())
@@ -1714,6 +2150,12 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel.surface_picker.set_path(str(surface))
             panel.point_csv_picker.set_path(str(points))
             panel.output_picker.set_path(str(root / "assembled.grim"))
+            panel.coordinate_units.setCurrentIndex(
+                panel.coordinate_units.findData("inches")
+            )
+            panel.surface_units.setCurrentIndex(
+                panel.surface_units.findData("inches")
+            )
             panel.expected_host_material.setText("")
             panel._pull_values()
             panel.model.update_dataset_requirements(
@@ -1783,6 +2225,111 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel._active_kind = ""
             panel._worker = None
             _close_panel_without_prompt(panel)
+
+    def test_existing_feature_only_sibling_is_named_in_overwrite_prompt(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "assembled.grim"
+            sibling = Path(folder) / "assembled_features_only.grim"
+            sibling.write_bytes(b"reviewed prior feature delta")
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            try:
+                panel.model.values.output_grim = str(output)
+                panel._validated_plan_current = True
+                panel._validation_warning_count = 0
+                with (
+                    mock.patch.object(panel, "_pull_values"),
+                    mock.patch.object(
+                        panel.model,
+                        "validated_plan_is_current",
+                        return_value=True,
+                    ),
+                    mock.patch.object(
+                        QMessageBox,
+                        "question",
+                        return_value=QMessageBox.StandardButton.No,
+                    ) as question,
+                    mock.patch.object(panel, "_start_operation") as start,
+                ):
+                    panel.assemble_and_save()
+
+                question.assert_called_once()
+                self.assertIn(
+                    "assembled_features_only.grim",
+                    question.call_args.args[2],
+                )
+                start.assert_not_called()
+                self.assertEqual(
+                    sibling.read_bytes(), b"reviewed prior feature delta"
+                )
+            finally:
+                _close_panel_without_prompt(panel)
+
+    def test_build_completion_loads_total_and_feature_delta_into_grim(self):
+        with tempfile.TemporaryDirectory() as folder:
+            total = Path(folder) / "assembled.grim"
+            sibling = Path(folder) / "assembled_features_only.grim"
+            total.write_bytes(b"total")
+            sibling.write_bytes(b"delta")
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            loaded = []
+            panel.feature_built.connect(loaded.append)
+            panel._active_kind = "build"
+            dispatch = FeatureBuildDispatch(
+                plan=SimpleNamespace(validation_warnings=()),
+                output_path=str(total),
+                reused_validated_plan=True,
+                features_only_output_path=str(sibling),
+                features_only_output_published=True,
+            )
+            try:
+                with (
+                    mock.patch.object(panel, "_show_validation_qa"),
+                    mock.patch.object(panel, "_remember_surface_dimensions"),
+                    mock.patch.object(panel, "_update_workflow_readiness"),
+                ):
+                    panel._operation_succeeded(dispatch)
+
+                self.assertEqual(loaded, [str(total), str(sibling)])
+                self.assertIn("feature-only delta", panel.status_label.text())
+            finally:
+                panel._active_kind = ""
+                _close_panel_without_prompt(panel)
+
+    def test_legacy_total_only_completion_does_not_claim_delta_was_saved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            total = Path(folder) / "legacy_total.grim"
+            missing_sibling = Path(folder) / "legacy_total_features_only.grim"
+            total.write_bytes(b"total only")
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            loaded = []
+            panel.feature_built.connect(loaded.append)
+            panel._active_kind = "build"
+            dispatch = FeatureBuildDispatch(
+                plan=SimpleNamespace(validation_warnings=()),
+                output_path=str(total),
+                reused_validated_plan=False,
+                features_only_output_path=str(missing_sibling),
+                features_only_output_published=False,
+            )
+            try:
+                with (
+                    mock.patch.object(panel, "_show_validation_qa"),
+                    mock.patch.object(panel, "_remember_surface_dimensions"),
+                    mock.patch.object(panel, "_update_workflow_readiness"),
+                ):
+                    panel._operation_succeeded(dispatch)
+
+                self.assertEqual(loaded, [str(total)])
+                self.assertNotIn("Saved reusable feature-only", panel.status_label.text())
+                self.assertIn(
+                    "No feature-only delta was published",
+                    panel.status_label.text(),
+                )
+            finally:
+                panel._active_kind = ""
+                _close_panel_without_prompt(panel)
 
     def test_validation_worker_exposes_progress_and_cooperative_cancel(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
@@ -2230,6 +2777,12 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel.expected_host_material.setText("PEC")
             panel.point_csv_picker.set_path(str(points))
             panel.output_picker.set_path(str(base))
+            panel.coordinate_units.setCurrentIndex(
+                panel.coordinate_units.findData("inches")
+            )
+            panel.surface_units.setCurrentIndex(
+                panel.surface_units.findData("inches")
+            )
             panel.model.values.point_locations_csv = str(points)
             panel.model.update_dataset_requirements(
                 {"point_dataset_ids": ("fastener",), "line_dataset_ids": ()}

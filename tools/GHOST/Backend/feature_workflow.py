@@ -39,12 +39,14 @@ from feature_sum import (
     _load_grim,
     _validate_declared_coherent_base,
     add_features_to_monostatic_grim,
+    feature_only_output_path,
     load_seam_from_grim,
     load_body_profile_grim,
     load_body_requested_radar_grid,
     preflight_feature_assembly_capacity,
     prepare_point_pattern,
     surface_of_revolution_distance,
+    validate_declared_coherent_delta_domain,
     validate_assembly_base_grid_metadata,
     validate_radar_grid,
 )
@@ -64,6 +66,7 @@ from line_expand import (
     prepare_perimeter_frame,
     surface_of_revolution_normal,
 )
+from grim_naming import require_role_free_declared_delta
 from occluder import Occluder
 from surface_mesh import TriangleSurface, read_surface_mesh
 from workflow_provenance import sha256_file
@@ -88,6 +91,9 @@ FEATURE_ASSEMBLY_REQUEST_SCHEMA = "ghost.feature-assembly-request.v1"
 FEATURE_LIBRARY_MANIFEST_SCHEMA = "ghost.feature-library-manifest.v2"
 LEGACY_FEATURE_LIBRARY_MANIFEST_SCHEMA = "ghost.feature-library-manifest.v1"
 FEATURE_LIBRARY_MANIFEST_KEY = "feature_library_manifest_json"
+DECLARED_FEATURE_DELTA_RESPONSE_SCHEMA = (
+    "ghost.declared-feature-delta-response.v1"
+)
 LINE_PHASE_CALIBRATION_SCHEMA = "ghost.line-phase-calibration.v2"
 LEGACY_LINE_PHASE_CALIBRATION_SCHEMA = "ghost.line-phase-calibration.v1"
 SURFACE_BINDING_SCHEMA = "ghost.assembly-surface-binding.v1"
@@ -109,10 +115,16 @@ class FeatureAssemblyRequest:
 
     base_grim: PathValue
     output_grim: PathValue
-    coordinate_units: str = "inches"
+    # Physical units are deliberately unset until the caller chooses them.
+    # Placement files do not carry a trustworthy length unit, so silently
+    # interpreting an omitted value as inches can scale an otherwise
+    # self-consistent vehicle by exactly 25.4x without tripping skin/normal QA.
+    coordinate_units: Optional[str] = None
 
     surface_mesh: Optional[PathValue] = None
-    surface_units: str = "inches"
+    # Required only when ``surface_mesh`` is supplied.  Embedded BoR geometry
+    # is already stored in meters inside the clean-body response.
+    surface_units: Optional[str] = None
     flip_surface_normals: bool = False
     shadow: bool = False
     shadow_bias_m: Optional[float] = None
@@ -279,6 +291,11 @@ class FeatureAssemblyPlan:
     # prevents a cached/headless caller from editing validated placement arrays
     # or provenance between Validate and Build.
     prepared_plan_sha256: str = ""
+    # Keep all v2 additions after prepared_plan_sha256.  It was the final field
+    # in the original positional plan layout, and older injected services may
+    # still bind that field positionally.
+    prepared_features_only_output_sha256: Optional[str] = None
+    prepared_features_only_output_absent: bool = True
 
     @property
     def surface_triangles_cad_m(self) -> Optional[np.ndarray]:
@@ -313,6 +330,10 @@ class FeatureAssemblyPlan:
         """Identify this scene as physically prepared, not an input-only view."""
 
         return "validated"
+
+    @property
+    def features_only_output_path(self) -> Path:
+        return Path(feature_only_output_path(str(self.output_path)))
 
 
 def feature_assembly_plan_sha256(plan: FeatureAssemblyPlan) -> str:
@@ -360,6 +381,12 @@ def feature_assembly_plan_sha256(plan: FeatureAssemblyPlan) -> str:
         "prepared_absent_paths": normalize(plan.prepared_absent_paths),
         "prepared_output_sha256": plan.prepared_output_sha256,
         "prepared_output_absent": bool(plan.prepared_output_absent),
+        "prepared_features_only_output_sha256": (
+            plan.prepared_features_only_output_sha256
+        ),
+        "prepared_features_only_output_absent": bool(
+            plan.prepared_features_only_output_absent
+        ),
         "validation_warnings": normalize(plan.validation_warnings),
     }
     digest.update(json.dumps(
@@ -476,22 +503,29 @@ def _reject_output_aliases(
 ) -> None:
     """Protect every selected input from accidental output overwrite."""
 
-    if _paths_alias(output, base):
-        raise ValueError(
-            "output_grim must differ from base_grim so the clean-body "
-            "response is not overwritten."
-        )
+    outputs = (
+        ("output_grim", output),
+        ("feature-only sibling", Path(feature_only_output_path(str(output)))),
+    )
+    for output_label, candidate in outputs:
+        if _paths_alias(candidate, base):
+            raise ValueError(
+                f"{output_label} must differ from base_grim so the clean-body "
+                "response is not overwritten."
+            )
     for kind, datasets in (
         ("point", request.point_datasets),
         ("line", request.line_datasets),
     ):
         for dataset_id, value in datasets.items():
             response = resolve_path(value, base_dir=request.base_dir)
-            if _paths_alias(output, response):
-                raise ValueError(
-                    "output_grim must differ from every mapped response input; "
-                    f"it aliases {kind} dataset_id {str(dataset_id)!r}: {response}"
-                )
+            for output_label, candidate in outputs:
+                if _paths_alias(candidate, response):
+                    raise ValueError(
+                        f"{output_label} must differ from every mapped response "
+                        f"input; it aliases {kind} dataset_id "
+                        f"{str(dataset_id)!r}: {response}"
+                    )
 
     for role, value in (
         ("surface mesh", request.surface_mesh),
@@ -501,11 +535,12 @@ def _reject_output_aliases(
         if value is None:
             continue
         source = resolve_path(value, base_dir=request.base_dir)
-        if _paths_alias(output, source):
-            raise ValueError(
-                "output_grim must differ from every selected Assembly input; "
-                f"it aliases the {role}: {source}"
-            )
+        for output_label, candidate in outputs:
+            if _paths_alias(candidate, source):
+                raise ValueError(
+                    f"{output_label} must differ from every selected Assembly "
+                    f"input; it aliases the {role}: {source}"
+                )
 
 
 def _csv_rows(path: Path, *, label: str) -> list[tuple[list[str], int]]:
@@ -518,6 +553,45 @@ def _csv_rows(path: Path, *, label: str) -> list[tuple[list[str], int]]:
             ]
     except OSError as exc:
         raise OSError(f"{path}: cannot read {label} CSV: {exc}") from exc
+
+
+_CSV_ERROR_DISPLAY_LIMIT = 25
+
+
+def _raise_csv_row_errors(
+    source: Path,
+    *,
+    label: str,
+    errors: Sequence[tuple[int, str]],
+) -> None:
+    """Raise one bounded, actionable report for independent CSV row errors."""
+
+    if not errors:
+        return
+    count = len(errors)
+    shown = list(errors[:_CSV_ERROR_DISPLAY_LIMIT])
+    lines = [
+        f"{source}: {label} CSV has {count} validation error(s):",
+        *(f"  - line {number}: {message}" for number, message in shown),
+    ]
+    omitted = count - len(shown)
+    if omitted:
+        lines.append(
+            f"  - ... {omitted} additional error(s) omitted; fix the listed "
+            "rows, then validate again to reveal any remainder."
+        )
+    else:
+        lines.append("Fix the listed rows, then validate the CSV again.")
+    raise ValueError("\n".join(lines))
+
+
+def _compact_csv_values(values: Sequence[Any], *, limit: int = 12) -> str:
+    """Render a bounded sequence inside a CSV validation message."""
+
+    selected = list(values[:limit])
+    if len(values) <= limit:
+        return repr(selected)
+    return f"{selected!r} ... ({len(values)} values total)"
 
 
 def read_point_placement_csv(
@@ -541,32 +615,53 @@ def read_point_placement_csv(
         raise ValueError(f"{source}: placement CSV has a header but no placements.")
 
     parsed: list[dict[str, Any]] = []
+    errors: list[tuple[int, str]] = []
     seen: set[str] = set()
     numeric_columns = POINT_CSV_COLUMNS[2:]
     for row, number in rows:
         if len(row) != len(POINT_CSV_COLUMNS):
-            raise ValueError(
-                f"{source}:{number}: expected exactly "
-                f"{len(POINT_CSV_COLUMNS)} columns."
-            )
+            errors.append((
+                number,
+                f"expected exactly {len(POINT_CSV_COLUMNS)} columns; "
+                f"found {len(row)}.",
+            ))
+            continue
         placement_id, dataset_id = row[:2]
+        row_errors: list[str] = []
         if not placement_id or not dataset_id:
-            raise ValueError(
-                f"{source}:{number}: placement_id and dataset_id are required."
+            row_errors.append("placement_id and dataset_id are required")
+        if placement_id:
+            if placement_id in seen:
+                row_errors.append(
+                    f"duplicate placement_id {placement_id!r}"
+                )
+            else:
+                seen.add(placement_id)
+
+        numeric: list[float] = []
+        nonnumeric: list[str] = []
+        for column, value in zip(numeric_columns, row[2:]):
+            try:
+                numeric.append(float(value))
+            except ValueError:
+                nonnumeric.append(column)
+        if nonnumeric:
+            row_errors.append(
+                "coordinates and vectors must be numeric; invalid column(s) "
+                + ", ".join(nonnumeric)
             )
-        if placement_id in seen:
-            raise ValueError(
-                f"{source}:{number}: duplicate placement_id {placement_id!r}."
+        elif not np.all(np.isfinite(numeric)):
+            nonfinite = [
+                column
+                for column, value in zip(numeric_columns, numeric)
+                if not math.isfinite(value)
+            ]
+            row_errors.append(
+                "NaN/infinite value in column(s) " + ", ".join(nonfinite)
             )
-        seen.add(placement_id)
-        try:
-            numeric = [float(value) for value in row[2:]]
-        except ValueError as exc:
-            raise ValueError(
-                f"{source}:{number}: coordinates and vectors must be numeric."
-            ) from exc
-        if not np.all(np.isfinite(numeric)):
-            raise ValueError(f"{source}:{number}: NaN/infinite value.")
+        if row_errors:
+            errors.extend((number, message) for message in row_errors)
+            continue
         values: dict[str, Any] = {
             "placement_id": placement_id,
             "dataset_id": dataset_id,
@@ -574,6 +669,7 @@ def read_point_placement_csv(
         values.update(dict(zip(numeric_columns, numeric)))
         values["_csv_line"] = number
         parsed.append(values)
+    _raise_csv_row_errors(source, label="point-placement", errors=errors)
     return parsed
 
 
@@ -598,66 +694,129 @@ def read_line_placement_csv(
         raise ValueError(f"{source}: line-placement CSV has a header but no segments.")
 
     parsed: list[dict[str, Any]] = []
-    completed_line_ids: set[str] = set()
-    current_line_id: Optional[str] = None
-    current_dataset_id: Optional[str] = None
-    expected_index = 1
+    errors: list[tuple[int, str]] = []
+    semantic_rows: list[dict[str, Any]] = []
+    sequence_tainted_line_ids: set[str] = set()
+    identity_tainted_line_ids: set[str] = set()
     numeric_columns = LINE_CSV_COLUMNS[3:]
     for row, number in rows:
         if len(row) != len(LINE_CSV_COLUMNS):
-            raise ValueError(
-                f"{source}:{number}: expected exactly "
-                f"{len(LINE_CSV_COLUMNS)} columns."
-            )
+            errors.append((
+                number,
+                f"expected exactly {len(LINE_CSV_COLUMNS)} columns; "
+                f"found {len(row)}.",
+            ))
+            if row and row[0]:
+                sequence_tainted_line_ids.add(row[0])
+                identity_tainted_line_ids.add(row[0])
+            continue
         line_id, dataset_id, raw_index = row[:3]
+        row_errors: list[str] = []
         if not line_id or not dataset_id:
-            raise ValueError(
-                f"{source}:{number}: line_id and dataset_id are required."
-            )
-        if line_id != current_line_id:
-            if current_line_id is not None:
-                completed_line_ids.add(current_line_id)
-            if line_id in completed_line_ids:
-                raise ValueError(
-                    f"{source}:{number}: rows for line_id {line_id!r} "
-                    "must be contiguous."
-                )
-            current_line_id = line_id
-            current_dataset_id = dataset_id
-            expected_index = 1
-        elif dataset_id != current_dataset_id:
-            raise ValueError(
-                f"{source}:{number}: every segment of line_id {line_id!r} "
-                "must use the same dataset_id."
-            )
+            row_errors.append("line_id and dataset_id are required")
+
+        segment_index: Optional[int]
         try:
             segment_index = int(raw_index)
-        except ValueError as exc:
-            raise ValueError(
-                f"{source}:{number}: segment_index must be an integer."
-            ) from exc
-        if str(segment_index) != raw_index or segment_index != expected_index:
-            raise ValueError(
-                f"{source}:{number}: line_id {line_id!r} requires consecutive "
-                f"segment_index values starting at 1; expected {expected_index}."
+        except ValueError:
+            segment_index = None
+        if (
+            segment_index is None
+            or str(segment_index) != raw_index
+            or segment_index < 1
+        ):
+            row_errors.append(
+                "segment_index must be a canonical positive integer"
             )
-        try:
-            numeric = [float(value) for value in row[3:]]
-        except ValueError as exc:
-            raise ValueError(
-                f"{source}:{number}: endpoints and normals must be numeric."
-            ) from exc
-        if not np.all(np.isfinite(numeric)):
-            raise ValueError(f"{source}:{number}: NaN/infinite value.")
-        values: dict[str, Any] = {
+            if line_id:
+                sequence_tainted_line_ids.add(line_id)
+
+        numeric: list[float] = []
+        nonnumeric: list[str] = []
+        for column, value in zip(numeric_columns, row[3:]):
+            try:
+                numeric.append(float(value))
+            except ValueError:
+                nonnumeric.append(column)
+        if nonnumeric:
+            row_errors.append(
+                "endpoints and normals must be numeric; invalid column(s) "
+                + ", ".join(nonnumeric)
+            )
+        elif not np.all(np.isfinite(numeric)):
+            nonfinite = [
+                column
+                for column, value in zip(numeric_columns, numeric)
+                if not math.isfinite(value)
+            ]
+            row_errors.append(
+                "NaN/infinite value in column(s) " + ", ".join(nonfinite)
+            )
+
+        semantic_rows.append({
             "line_id": line_id,
             "dataset_id": dataset_id,
             "segment_index": segment_index,
             "_csv_line": number,
-        }
+        })
+        if row_errors:
+            errors.extend((number, message) for message in row_errors)
+            continue
+        values: dict[str, Any] = dict(semantic_rows[-1])
         values.update(dict(zip(numeric_columns, numeric)))
         parsed.append(values)
-        expected_index += 1
+
+    # Sequence checks are reported once per path, not once per downstream row.
+    # A malformed identity/index row taints only that line_id so it cannot
+    # generate a cascade of misleading "expected N" messages.
+    completed_line_ids: set[str] = set()
+    start = 0
+    while start < len(semantic_rows):
+        line_id = str(semantic_rows[start]["line_id"])
+        end = start + 1
+        while (
+            end < len(semantic_rows)
+            and str(semantic_rows[end]["line_id"]) == line_id
+        ):
+            end += 1
+        group = semantic_rows[start:end]
+        if line_id:
+            first_line = int(group[0]["_csv_line"])
+            if (
+                line_id not in identity_tainted_line_ids
+                and line_id in completed_line_ids
+            ):
+                errors.append((
+                    first_line,
+                    f"rows for line_id {line_id!r} must be contiguous",
+                ))
+            completed_line_ids.add(line_id)
+            dataset_ids = tuple(dict.fromkeys(
+                str(item["dataset_id"])
+                for item in group
+                if str(item["dataset_id"])
+            ))
+            if len(dataset_ids) > 1:
+                errors.append((
+                    first_line,
+                    f"every segment of line_id {line_id!r} must use the same "
+                    "dataset_id; found " + _compact_csv_values(dataset_ids),
+                ))
+            if line_id not in sequence_tainted_line_ids:
+                indices = [int(item["segment_index"]) for item in group]
+                expected = list(range(1, len(group) + 1))
+                if indices != expected:
+                    errors.append((
+                        first_line,
+                        f"line_id {line_id!r} requires one consecutive "
+                        "segment_index sequence in CSV row order; expected "
+                        + _compact_csv_values(expected)
+                        + ", found "
+                        + _compact_csv_values(indices),
+                    ))
+        start = end
+
+    _raise_csv_row_errors(source, label="line-placement", errors=errors)
     return parsed
 
 
@@ -842,8 +1001,8 @@ def prepare_feature_input_preview(
     *,
     base_grim: Optional[PathValue] = None,
     surface_mesh: Optional[PathValue] = None,
-    coordinate_units: str = "inches",
-    surface_units: str = "inches",
+    coordinate_units: Optional[str] = None,
+    surface_units: Optional[str] = None,
     point_locations_csv: Optional[PathValue] = None,
     line_locations_csv: Optional[PathValue] = None,
     enabled_point_placement_ids: Optional[Sequence[str]] = None,
@@ -861,6 +1020,21 @@ def prepare_feature_input_preview(
     if not any((base_grim, surface_mesh, point_locations_csv, line_locations_csv)):
         raise ValueError(
             "Select a base GRIM, STL/facet mesh, or placement CSV to preview."
+        )
+
+    surface_scale: Optional[float] = None
+    if surface_mesh is not None:
+        surface_scale = _required_unit_scale(
+            surface_units,
+            label="surface_units",
+            used_for="surface_mesh",
+        )
+    coordinate_scale = 1.0
+    if point_locations_csv is not None or line_locations_csv is not None:
+        coordinate_scale = _required_unit_scale(
+            coordinate_units,
+            label="coordinate_units",
+            used_for="a point or line placement CSV",
         )
 
     profile: Optional[np.ndarray] = None
@@ -881,18 +1055,13 @@ def prepare_feature_input_preview(
         surface_path = resolve_path(surface_mesh, base_dir=base_dir)
         if not surface_path.is_file():
             raise FileNotFoundError(f"Surface mesh not found: {surface_path}")
-        surface_scale = _library_unit_scale(
-            surface_units, label="surface_units"
-        )
+        assert surface_scale is not None
         surface_triangles = (
             np.asarray(read_surface_mesh(str(surface_path)), dtype=float)
             * surface_scale
         )
         body_source = "surface_mesh"
 
-    coordinate_scale = _library_unit_scale(
-        coordinate_units, label="coordinate_units"
-    )
     point_rows = (
         read_point_placement_csv(point_locations_csv, base_dir=base_dir)
         if point_locations_csv is not None else []
@@ -1229,6 +1398,76 @@ def _resolved_dataset_paths(
     return paths, hashes
 
 
+def validate_declared_feature_delta_response(
+    dataset: PathValue,
+) -> dict[str, Any]:
+    """Enforce and describe the response role behind an Assembly mapping.
+
+    The canonical filename grammar is authoritative when it explicitly says
+    OPN or FRD.  Role-free GUI Coherent-minus results remain accepted under the
+    existing mapping attestation even though their storage-domain tag is often
+    ``power_phase`` rather than ``delta``.  The classification is retained in
+    placement provenance so that compatibility is visible rather than silent.
+
+    A non-archive compatibility double is deferred to the real response loader;
+    this keeps injected service tests/backends working without weakening real
+    GRIM metadata checks.
+    """
+
+    path = resolve_path(dataset)
+    variation = require_role_free_declared_delta(str(path))
+    metadata_access = "readable"
+    metadata: dict[str, Any] = {}
+    embedded_domain: Optional[str] = None
+    try:
+        stored_context = np.load(path, allow_pickle=False)
+    except (OSError, EOFError, ValueError, zipfile.BadZipFile):
+        stored_context = None
+        metadata_access = "deferred_to_response_loader"
+    if stored_context is not None:
+        if not hasattr(stored_context, "files"):
+            metadata_access = "deferred_to_response_loader"
+        else:
+            try:
+                with stored_context as stored:
+                    if "rcs_domain" not in stored.files:
+                        pass
+                    else:
+                        raw_domain = np.asarray(stored["rcs_domain"])
+                        if raw_domain.size != 1:
+                            raise ValueError(
+                                "rcs_domain metadata must be scalar."
+                            )
+                        embedded_domain = str(
+                            raw_domain.reshape(-1)[0]
+                        ).strip()
+                        metadata["rcs_domain"] = embedded_domain
+            except (
+                OSError,
+                EOFError,
+                TypeError,
+                ValueError,
+                zipfile.BadZipFile,
+            ) as exc:
+                raise ValueError(
+                    f"{path}: advertised rcs_domain metadata is unreadable or "
+                    "malformed; it cannot be overridden by a declared delta role."
+                ) from exc
+    status = (
+        validate_declared_coherent_delta_domain(metadata, str(path))
+        if metadata_access == "readable"
+        else "response_loader_deferred"
+    )
+    return {
+        "schema": DECLARED_FEATURE_DELTA_RESPONSE_SCHEMA,
+        "filename_role": "role_free",
+        "filename_variation": variation,
+        "embedded_rcs_domain": embedded_domain,
+        "metadata_access": metadata_access,
+        "status": status,
+    }
+
+
 def _require_known_dataset_ids(
     rows: Sequence[Mapping[str, Any]],
     dataset_paths: Mapping[str, Path],
@@ -1303,6 +1542,10 @@ def prepare_line_placements(
         base_dir=base_dir,
     )
     _require_known_dataset_ids(rows, dataset_paths, coordinates=coordinates)
+    dataset_role_validations = {
+        dataset_id: validate_declared_feature_delta_response(dataset)
+        for dataset_id, dataset in dataset_paths.items()
+    }
 
     if surface is None:
         if profile is None:
@@ -1614,6 +1857,9 @@ def prepare_line_placements(
             "max_skin_offset_m": float(offset),
             "max_normal_error_deg": float(np.max(differences)),
             "input_subtraction_order": "OPN-FRD (featured-clean)",
+            "response_role_validation": dict(
+                dataset_role_validations[dataset_id]
+            ),
             "normal_source": "csv_endpoint_interpolation",
             "skin_validation_sample_count": int(len(distance_points)),
             "normal_validation_sample_count": int(len(normal_points)),
@@ -1695,6 +1941,10 @@ def prepare_point_placements(
         base_dir=base_dir,
     )
     _require_known_dataset_ids(rows, dataset_paths, coordinates=coordinates)
+    dataset_role_validations = {
+        dataset_id: validate_declared_feature_delta_response(dataset)
+        for dataset_id, dataset in dataset_paths.items()
+    }
 
     if surface is None:
         if profile is None:
@@ -1824,6 +2074,9 @@ def prepare_point_placements(
             "skin_offset_m": offset,
             "max_normal_error_deg": float(difference),
             "input_subtraction_order": "OPN-FRD (featured-clean)",
+            "response_role_validation": dict(
+                dataset_role_validations[dataset_id]
+            ),
             "assumed_missing_cross_pol_zero": False,
             "roll_reference": "csv",
         })
@@ -1852,6 +2105,21 @@ def _library_unit_scale(units: str, *, label: str) -> float:
         return float(scale_for(units))
     except SystemExit as exc:
         raise ValueError(f"Invalid {label}: {exc}") from exc
+
+
+def _required_unit_scale(
+    units: Optional[str],
+    *,
+    label: str,
+    used_for: str,
+) -> float:
+    """Return a unit scale only after a deliberate physical-unit choice."""
+
+    if units is None or not str(units).strip():
+        raise ValueError(
+            f"{label} must be selected explicitly when {used_for} is configured."
+        )
+    return _library_unit_scale(str(units), label=label)
 
 
 def surface_binding_path(surface_path: PathValue) -> Path:
@@ -2735,7 +3003,9 @@ def _line_applicability_metrics(
     ):
         raise ValueError("requested line frequencies must be positive and finite.")
     fixed_piece_length = placement.get("max_piece_length_m")
-    def measure_frame(maximum_piece_length: float) -> tuple[float, float | None, float | None, int]:
+    def measure_frame(
+        maximum_piece_length: float,
+    ) -> tuple[float, float | None, float | None, int, int]:
         (
             _starts,
             _path_tangents,
@@ -2755,6 +3025,7 @@ def _line_applicability_metrics(
         # Match expand_perimeter exactly: every strictly front-facing sample
         # is evaluated (the fixed grazing taper drives it smoothly to zero).
         lit = normal_projection > 0.0
+        lit_look_count = int(np.count_nonzero(np.any(lit, axis=1)))
         if np.any(lit):
             lit_maximum_conical = float(np.max(conical[lit]))
             binormals = np.cross(frame_tangents, sampled_normals)
@@ -2770,7 +3041,13 @@ def _line_applicability_metrics(
             cut_max = None
             lit_count = 0
             lit_maximum_conical = 0.0
-        return lit_maximum_conical, cut_min, cut_max, lit_count
+        return (
+            lit_maximum_conical,
+            cut_min,
+            cut_max,
+            lit_count,
+            lit_look_count,
+        )
 
     maximum_conical = 0.0
     cut_ranges = []
@@ -2778,25 +3055,53 @@ def _line_applicability_metrics(
         # A fixed installed piece grid is independent of frequency.  Measure it
         # once and report the identical geometric support for every requested
         # solve frequency.
-        maximum_conical, cut_min, cut_max, lit_count = measure_frame(
+        (
+            maximum_conical,
+            cut_min,
+            cut_max,
+            lit_count,
+            lit_look_count,
+        ) = measure_frame(
             float(fixed_piece_length)
         )
-        measurements = [(cut_min, cut_max, lit_count)] * len(frequencies)
+        measurements = [(
+            cut_min,
+            cut_max,
+            lit_count,
+            lit_look_count,
+        )] * len(frequencies)
     else:
         measurements = []
         for frequency in frequencies:
-            measured_conical, cut_min, cut_max, lit_count = measure_frame(
+            (
+                measured_conical,
+                cut_min,
+                cut_max,
+                lit_count,
+                lit_look_count,
+            ) = measure_frame(
                 0.05 * C0 / (float(frequency) * 1.0e9)
             )
             maximum_conical = max(maximum_conical, measured_conical)
-            measurements.append((cut_min, cut_max, lit_count))
+            measurements.append((
+                cut_min,
+                cut_max,
+                lit_count,
+                lit_look_count,
+            ))
 
-    for frequency, (cut_min, cut_max, lit_count) in zip(frequencies, measurements):
+    for frequency, (
+        cut_min,
+        cut_max,
+        lit_count,
+        lit_look_count,
+    ) in zip(frequencies, measurements):
         cut_ranges.append({
             "frequency_ghz": float(frequency),
             "minimum_deg": cut_min,
             "maximum_deg": cut_max,
             "lit_query_count": lit_count,
+            "illuminated_requested_look_count": lit_look_count,
         })
 
     chords = perimeter[:, 1] - perimeter[:, 0]
@@ -2852,6 +3157,14 @@ def _line_applicability_metrics(
         # declaring a zero minimum radius from matching evidence.
         minimum_radius = 0.0
     return {
+        "requested_look_count": int(len(radar_directions)),
+        # Piece density can vary with frequency.  This is the largest number
+        # of distinct requested directions that illuminate at least one piece
+        # on any one solve frequency; a zero is unambiguous at every frequency.
+        "illuminated_requested_look_count": int(max(
+            (measurement[3] for measurement in measurements),
+            default=0,
+        )),
         "maximum_requested_conical_incidence_deg": maximum_conical,
         "estimated_min_along_line_normal_turn_radius_m": minimum_radius,
         "along_line_normal_turn_detected": bool(math.isfinite(minimum_radius)),
@@ -2943,7 +3256,7 @@ def _validate_point_requested_support(
     requested_frequencies: np.ndarray,
     *,
     dataset_id: str,
-) -> tuple[float, float]:
+) -> dict[str, int]:
     """Preflight exact point frequency and lit-elevation support."""
 
     pattern = placement["pattern"]
@@ -2989,7 +3302,10 @@ def _validate_point_requested_support(
             f"needs {float(np.min(queried)):g}..{float(np.max(queried)):g} deg "
             "over lit requested looks."
         )
-    return float(np.min(frequencies)), float(np.max(frequencies))
+    return {
+        "requested_look_count": int(len(radar_directions)),
+        "illuminated_requested_look_count": int(np.count_nonzero(lit)),
+    }
 
 
 def _point_segment_distance(point: np.ndarray, segment: np.ndarray) -> float:
@@ -3399,12 +3715,19 @@ def _apply_feature_library_contracts(
                     )
             manifest = manifests[dataset_id]
             if feature_kind == "point":
-                _validate_point_requested_support(
-                    placement,
-                    directions,
-                    frequencies,
-                    dataset_id=dataset_id,
+                point_support = _validate_point_requested_support(
+                    placement, directions, frequencies, dataset_id=dataset_id
                 )
+                record.update(point_support)
+                if point_support["illuminated_requested_look_count"] == 0:
+                    warnings.append(
+                        f"Point {str(record['placement_id'])!r} has zero "
+                        "illuminated requested looks, so its enabled response "
+                        "contributes zero on this radar grid. Review its "
+                        "outward normal/orientation and requested aperture. If "
+                        "intentional, review and accept the existing one-time "
+                        "release-warning waiver before Build."
+                    )
             if manifest is not None:
                 applicability = manifest["applicability"]
                 frequency_range = applicability["frequency_ghz"]
@@ -3449,6 +3772,15 @@ def _apply_feature_library_contracts(
                         "estimated_min_along_line_normal_turn_radius_m"
                     ] = None
                 record.update(public_metrics)
+                if metrics["illuminated_requested_look_count"] == 0:
+                    warnings.append(
+                        f"Line {str(record['line_id'])!r} has zero illuminated "
+                        "requested looks, so its enabled response contributes "
+                        "zero on this radar grid. Review its endpoint normals "
+                        "and requested aperture. If intentional, review and "
+                        "accept the existing one-time release-warning waiver "
+                        "before Build."
+                    )
                 for coefficient, cut_range in zip(
                     line_coefficients[dataset_id],
                     metrics["required_cut_angle_ranges_deg"],
@@ -3655,18 +3987,42 @@ def prepare_feature_assembly(
     output = _canonical_grim_output_path(
         request.output_grim, base_dir=request.base_dir
     )
+    features_only_output = Path(feature_only_output_path(str(output)))
     _reject_output_aliases(request, base=base, output=output)
     if request.line_locations_csv is None and request.point_locations_csv is None:
         raise ValueError(
             "Configure line_locations_csv or point_locations_csv."
         )
+    coordinate_scale = _required_unit_scale(
+        request.coordinate_units,
+        label="coordinate_units",
+        used_for="a point or line placement CSV",
+    )
+    surface_scale: Optional[float] = None
+    if request.surface_mesh is not None:
+        surface_scale = _required_unit_scale(
+            request.surface_units,
+            label="surface_units",
+            used_for="surface_mesh",
+        )
     if not base.is_file():
         raise FileNotFoundError(f"Base monostatic GRIM not found: {base}")
     if output.exists() and not output.is_file():
         raise ValueError(f"Assembly output exists but is not a file: {output}")
+    if features_only_output.exists() and not features_only_output.is_file():
+        raise ValueError(
+            "Feature-only Assembly output exists but is not a file: "
+            f"{features_only_output}"
+        )
     prepared_output_absent = not output.is_file()
     prepared_output_sha256 = (
         None if prepared_output_absent else sha256_file(str(output))
+    )
+    prepared_features_only_output_absent = not features_only_output.is_file()
+    prepared_features_only_output_sha256 = (
+        None
+        if prepared_features_only_output_absent
+        else sha256_file(str(features_only_output))
     )
     base_sha256 = sha256_file(str(base))
     prepared_source_sha256 = {str(base): base_sha256}
@@ -3792,9 +4148,7 @@ def prepare_feature_assembly(
     surface_triangles_cad_m: Optional[np.ndarray] = None
     mesh_topology_report = None
     if surface_path is not None:
-        surface_scale = _library_unit_scale(
-            request.surface_units, label="surface_units"
-        )
+        assert surface_scale is not None
         surface_triangles_cad_m = (
             np.asarray(read_surface_mesh(str(surface_path)), dtype=float)
             * surface_scale
@@ -3817,14 +4171,20 @@ def prepare_feature_assembly(
         )
     if request.shadow and surface is None:
         raise ValueError("shadow=True requires surface_mesh.")
+    if surface is not None and not request.shadow:
+        pre_validation_warnings.append(
+            "Geometric body shadowing is OFF while a body mesh is selected. "
+            "Hidden point and line features are not occlusion-tested and can "
+            "contribute at full modeled amplitude whenever they are front-face "
+            "illuminated. Enable body shadowing for vehicle placement work, or "
+            "review and accept the existing one-time release-warning waiver if "
+            "this no-shadow trade study is intentional."
+        )
     if cancel_check is not None and cancel_check():
         raise InterruptedError("Feature placement validation cancelled.")
     if progress_callback is not None:
         progress_callback(35, 100, "Checking body surface and topology")
 
-    coordinate_scale = _library_unit_scale(
-        request.coordinate_units, label="coordinate_units"
-    )
     skin_limit, wavelength = compute_skin_limit(
         grid["frequencies_ghz"],
         skin_tol_m=request.skin_tol_m,
@@ -4234,6 +4594,23 @@ def prepare_feature_assembly(
             f"Assembly output changed during validation: {output}. Review "
             "the newer destination and validate again."
         )
+    if prepared_features_only_output_absent:
+        if features_only_output.exists():
+            raise RuntimeError(
+                "Feature-only Assembly output was created during validation: "
+                f"{features_only_output}. Review the current destination and "
+                "validate again."
+            )
+    elif (
+        not features_only_output.is_file()
+        or sha256_file(str(features_only_output))
+        != prepared_features_only_output_sha256
+    ):
+        raise RuntimeError(
+            "Feature-only Assembly output changed during validation: "
+            f"{features_only_output}. Review the newer destination and "
+            "validate again."
+        )
     if progress_callback is not None:
         progress_callback(100, 100, "Placement validation complete")
     plan = FeatureAssemblyPlan(
@@ -4260,6 +4637,12 @@ def prepare_feature_assembly(
         prepared_absent_paths=tuple(sorted(manifest_absent_paths)),
         prepared_output_sha256=prepared_output_sha256,
         prepared_output_absent=bool(prepared_output_absent),
+        prepared_features_only_output_sha256=(
+            prepared_features_only_output_sha256
+        ),
+        prepared_features_only_output_absent=bool(
+            prepared_features_only_output_absent
+        ),
     )
     object.__setattr__(
         plan, "prepared_plan_sha256", feature_assembly_plan_sha256(plan)
@@ -4405,6 +4788,12 @@ def execute_feature_assembly(
         expected_absent_paths=execution_plan.prepared_absent_paths,
         expected_output_sha256=execution_plan.prepared_output_sha256,
         expect_output_absent=execution_plan.prepared_output_absent,
+        expected_features_only_output_sha256=(
+            execution_plan.prepared_features_only_output_sha256
+        ),
+        expect_features_only_output_absent=(
+            execution_plan.prepared_features_only_output_absent
+        ),
         cancel_check=cancel_check,
         progress_callback=progress_callback,
         _capacity_estimate=capacity_estimate,
@@ -4449,6 +4838,7 @@ def run_feature_assembly(
 
 
 __all__ = [
+    "DECLARED_FEATURE_DELTA_RESPONSE_SCHEMA",
     "FEATURE_ASSEMBLY_REQUEST_SCHEMA",
     "FEATURE_LIBRARY_MANIFEST_KEY",
     "FEATURE_LIBRARY_MANIFEST_SCHEMA",
@@ -4471,6 +4861,7 @@ __all__ = [
     "discover_feature_dataset_ids",
     "execute_feature_assembly",
     "feature_assembly_plan_sha256",
+    "feature_only_output_path",
     "feature_response_content_sha256",
     "feature_response_physics_sha256",
     "load_feature_library_manifest",
@@ -4485,6 +4876,7 @@ __all__ = [
     "run_feature_assembly",
     "surface_binding_path",
     "unit_vector",
+    "validate_declared_feature_delta_response",
     "validate_feature_library_manifest",
     "validate_normal_tolerance",
     "validate_surface_binding",

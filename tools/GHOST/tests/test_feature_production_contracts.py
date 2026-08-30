@@ -550,6 +550,60 @@ class BaseContractTests(unittest.TestCase):
                 feature_sum.ASSEMBLY_RADAR_ANGULAR_CONTRACT,
             )
 
+    def test_sentri_phase_wrap_cannot_launder_native_theta_metadata(self):
+        native = RcsGrid(
+            [0.0],
+            [90.0],
+            [1.0],
+            ["VV"],
+            rcs=np.ones((1, 1, 1, 1), dtype=np.complex128),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+                "angular_coordinate_system": "conic",
+                "elevation_coordinate_convention": "sentri_theta_top_zero",
+            },
+            extra={
+                "source_format": "SENTRi descriptive Hz RCS table",
+                "sentri_coordinate_mapping": (
+                    "elevation=theta; azimuth=wrapped phi"
+                ),
+                "sentri_elevation_convention": "sentri_theta_top_zero",
+            },
+        )
+        wrapped = native.wrap_phase("0_360")
+        self.assertEqual(
+            wrapped.extra["sentri_elevation_convention"],
+            "sentri_theta_top_zero",
+        )
+        self.assertIn("elevation=theta", wrapped.extra["sentri_coordinate_mapping"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(wrapped.save(Path(directory) / "native-theta.grim"))
+            payload = feature_sum._load_grim(str(path))
+
+        # Prove the modeled units tag is independently fail-closed even if a
+        # legacy producer loses every passthrough SENTRi marker.
+        for key in tuple(payload):
+            if key == "source_format" or key.startswith("sentri_"):
+                payload.pop(key, None)
+        with self.assertRaisesRegex(ValueError, "unconverted SENTRi polar theta"):
+            feature_sum.validate_assembly_base_grid_metadata(
+                payload,
+                {
+                    "frequencies_ghz": [1.0],
+                    "azimuths_deg": [0.0],
+                    "elevations_deg": [90.0],
+                    "axis_az_deg": 0.0,
+                    "axis_el_deg": 0.0,
+                    "roll_deg": 0.0,
+                },
+                str(path),
+            )
+
     def test_saved_sentri_conversion_is_a_canonical_assembly_base(self):
         native = RcsGrid(
             [0.0],

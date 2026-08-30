@@ -486,8 +486,11 @@ class RcsGrid:
                 exports do) rely on this: without it a load/save round-trip
                 silently drops the amplitude and those tools can no longer read
                 the file.  Array entries are only re-emitted while their shape
-                still matches the grid, so a cropped or joined grid drops them
-                rather than writing a stale array.
+                still matches the grid. Exact slice/reorder/relabel operations
+                explicitly transform the raw field with the samples; nonexact
+                magnitude/statistical operations drop it rather than writing a
+                stale array. Exact axis-union joins preserve it only when every
+                input carries a complete, compatible raw field.
 
         Raises:
             ValueError: if shapes do not match the expected grid.
@@ -647,8 +650,9 @@ class RcsGrid:
             ).astype(complex_dtype)
         return out
 
-    def _authoritative_raw_amplitude(self, selection=None):
-        """Return a solver-provided raw field when its normalization is known."""
+    def _complete_authoritative_raw_arrays(self):
+        """Return a complete raw pair, or ``None`` for malformed/partial data."""
+
         real = self.extra.get("rcs_amp_real")
         imag = self.extra.get("rcs_amp_imag")
         if real is None or imag is None:
@@ -657,6 +661,34 @@ class RcsGrid:
         imag = np.asarray(imag)
         if real.shape != self.rcs_power.shape or imag.shape != self.rcs_power.shape:
             return None
+        modeled = np.isfinite(self.rcs_power)
+        raw_finite = np.isfinite(real) & np.isfinite(imag)
+        # A raw pair is all-or-nothing authority.  Missing raw data must not
+        # turn an otherwise valid power/phase cell into NaN, and stray raw data
+        # must not resurrect a response cell explicitly marked missing.
+        if np.any(modeled != raw_finite):
+            return None
+        return real, imag
+
+    def _drop_malformed_raw_metadata(self, extra):
+        """Remove a partial raw pair before it can become derived authority."""
+
+        if self._complete_authoritative_raw_arrays() is None:
+            for key in (
+                "rcs_amp_real",
+                "rcs_amp_imag",
+                "raw_complex_amplitude_preserved",
+            ):
+                extra.pop(key, None)
+        return extra
+
+    def _authoritative_raw_amplitude(self, selection=None):
+        """Return a solver-provided raw field when its normalization is known."""
+
+        pair = self._complete_authoritative_raw_arrays()
+        if pair is None:
+            return None
+        real, imag = pair
         quantity = self.linear_quantity()
         if selection is None:
             real_values = real.astype(np.float64, copy=False)
@@ -1519,6 +1551,12 @@ class RcsGrid:
             # potentially multi-gigabyte embedded body-model arrays; the
             # containing ``extra`` dictionary itself is still new.
             edited_extra[key] = extra_value
+        self._drop_malformed_raw_metadata(edited_extra)
+        self._invalidate_assembly_sampling_hash(
+            edited_extra, f"edit-{str(name).strip().lower()}-axis"
+        )
+        if axis_index in (0, 1):
+            edited_extra.pop("assembly_angular_coordinate_contract", None)
 
         history_entry = (
             f"Edit {name} axis[{item_index}]: {old_text} -> {new_text}"
@@ -2039,6 +2077,11 @@ class RcsGrid:
             "source_body_mesh_certification_json",
         ):
             converted_extra.pop(key, None)
+        self._drop_malformed_raw_metadata(converted_extra)
+        self._invalidate_assembly_sampling_hash(
+            converted_extra, "convert-equatorial-conic-great-circle"
+        )
+        converted_extra.pop("assembly_angular_coordinate_contract", None)
 
         converted_units = copy.deepcopy(self.units or {})
         if direction == "conic_to_gc":
@@ -2879,10 +2922,16 @@ class RcsGrid:
             coherent_metadata_attested=metadata_attested,
         )
         rcs_out = self.rcs + other.rcs
-        history, extra = self._coherent_attestation_provenance(
+        history, attestation_extra = self._coherent_attestation_provenance(
             (other,),
             operation="coherent-add",
             metadata_attested=metadata_attested,
+        )
+        extra = self._derived_response_extra(
+            (other,),
+            operation="coherent-add",
+            coherent=True,
+            attestation_extra=attestation_extra,
         )
         return self._new_grid(
             self.azimuths,
@@ -2918,10 +2967,16 @@ class RcsGrid:
                 coherent_metadata_attested=metadata_attested,
             )
             total = total + grid.rcs
-        history, extra = self._coherent_attestation_provenance(
+        history, attestation_extra = self._coherent_attestation_provenance(
             grids,
             operation="coherent-add-many",
             metadata_attested=metadata_attested,
+        )
+        extra = self._derived_response_extra(
+            grids,
+            operation="coherent-add-many",
+            coherent=True,
+            attestation_extra=attestation_extra,
         )
         return self._new_grid(
             self.azimuths,
@@ -2953,10 +3008,16 @@ class RcsGrid:
             coherent_metadata_attested=metadata_attested,
         )
         rcs_out = self.rcs - other.rcs
-        history, extra = self._coherent_attestation_provenance(
+        history, attestation_extra = self._coherent_attestation_provenance(
             (other,),
             operation="coherent-subtract",
             metadata_attested=metadata_attested,
+        )
+        extra = self._derived_response_extra(
+            (other,),
+            operation="coherent-subtract",
+            coherent=True,
+            attestation_extra=attestation_extra,
         )
         return self._new_grid(
             self.azimuths,
@@ -2990,6 +3051,9 @@ class RcsGrid:
             rcs_power=power_sum,
             rcs_phase=np.full(power_sum.shape, np.nan, dtype=power_sum.dtype),
             rcs_domain="power_phase",
+            extra=self._derived_response_extra(
+                (other,), operation="incoherent-add", coherent=False
+            ),
         )
 
     def incoherent_add_many(self, *grids):
@@ -3017,6 +3081,9 @@ class RcsGrid:
             rcs_power=total,
             rcs_phase=np.full(total.shape, np.nan, dtype=total.dtype),
             rcs_domain="power_phase",
+            extra=self._derived_response_extra(
+                grids, operation="incoherent-add-many", coherent=False
+            ),
         )
 
     def incoherent_subtract(self, other):
@@ -3075,6 +3142,9 @@ class RcsGrid:
             rcs_power=power_diff,
             rcs_phase=np.full(power_diff.shape, np.nan, dtype=power_diff.dtype),
             rcs_domain="power_phase",
+            extra=self._derived_response_extra(
+                (other,), operation="incoherent-subtract", coherent=False
+            ),
         )
 
     def arithmetic_db_subtract(self, other):
@@ -3131,6 +3201,9 @@ class RcsGrid:
             rcs_phase=np.full(output_power.shape, np.nan, dtype=output_power.dtype),
             rcs_domain="power_phase",
             units=ratio_units,
+            extra=self._derived_response_extra(
+                (other,), operation="arithmetic-db-subtract", coherent=False
+            ),
         )
 
     def align_to(self, other, mode="exact"):
@@ -3208,6 +3281,19 @@ class RcsGrid:
             pol_new, pol_idx = _match_axis(self.polarizations, other.polarizations, tol=0.0)
             pwr_new = self.rcs_power[np.ix_(az_idx, el_idx, f_idx, pol_idx)]
             phs_new = self.rcs_phase[np.ix_(az_idx, el_idx, f_idx, pol_idx)]
+            selection = np.ix_(az_idx, el_idx, f_idx, pol_idx)
+            source_axes = (
+                np.asarray(self.azimuths)[az_idx],
+                np.asarray(self.elevations)[el_idx],
+                np.asarray(self.frequencies)[f_idx],
+                np.asarray(self.polarizations)[pol_idx],
+            )
+            relabeled = not all(
+                np.array_equal(source, target)
+                for source, target in zip(
+                    source_axes, (az_new, el_new, f_new, pol_new)
+                )
+            )
             return self._new_grid(
                 az_new,
                 el_new,
@@ -3216,6 +3302,10 @@ class RcsGrid:
                 rcs_power=pwr_new,
                 rcs_phase=phs_new,
                 rcs_domain="power_phase",
+                extra=self._exact_transform_extra(
+                    lambda value: value[selection],
+                    coordinate_change=("align-intersect-relabel" if relabeled else None),
+                ),
             )
 
         # interp mode
@@ -3229,16 +3319,36 @@ class RcsGrid:
         self._check_axis_sorted(other.elevations, "elevation")
         self._check_axis_sorted(other.frequencies, "frequency")
 
-        power_interp = self.rcs_power
-        phase_interp = self.rcs_phase
+        # Interpolate the authoritative complex field directly.  GHOST files
+        # intentionally retain a float64 raw amplitude alongside a float32
+        # display power/phase pair; rebuilding the field from the latter first
+        # can erase small but physically important coherent deltas.
+        power_interp = np.asarray(self.rcs_power)
+        complex_interp = np.asarray(self.rcs, dtype=np.complex128)
         for axis, old, new in (
             (0, self.azimuths, other.azimuths),
             (1, self.elevations, other.elevations),
             (2, self.frequencies, other.frequencies),
         ):
-            power_interp, phase_interp = self._interp_power_phase_axis(
-                power_interp, phase_interp, old, new, axis
+            power_interp = self._interp_real_axis(
+                power_interp, old, new, axis
             )
+            complex_interp = self._interp_complex_axis(
+                complex_interp, old, new, axis
+            )
+        complex_valid = np.isfinite(complex_interp.real) & np.isfinite(
+            complex_interp.imag
+        )
+        phase_interp = np.full(power_interp.shape, np.nan, dtype=np.float64)
+        power_interp = np.asarray(power_interp, dtype=np.float64)
+        power_interp[complex_valid] = np.abs(complex_interp[complex_valid]) ** 2
+        phase_interp[complex_valid] = np.angle(complex_interp[complex_valid])
+        interp_extra = self._derived_response_extra(
+            operation="align-interpolate", coherent=True
+        )
+        self._invalidate_assembly_sampling_hash(
+            interp_extra, "align-interpolate"
+        )
         return self._new_grid(
             other.azimuths,
             other.elevations,
@@ -3247,6 +3357,7 @@ class RcsGrid:
             rcs_power=power_interp,
             rcs_phase=phase_interp,
             rcs_domain="power_phase",
+            extra=interp_extra,
         )
 
     @staticmethod
@@ -3333,12 +3444,27 @@ class RcsGrid:
         new_axes = list(old_axes)
         new_axes[axis_idx] = new_arr
 
-        power_interp, phase_interp = self._interp_power_phase_axis(
-            self.rcs_power,
-            self.rcs_phase,
+        power_interp = self._interp_real_axis(
+            self.rcs_power, old_axes[axis_idx], new_arr, axis_idx
+        )
+        complex_interp = self._interp_complex_axis(
+            np.asarray(self.rcs, dtype=np.complex128),
             old_axes[axis_idx],
             new_arr,
             axis_idx,
+        )
+        complex_valid = np.isfinite(complex_interp.real) & np.isfinite(
+            complex_interp.imag
+        )
+        power_interp = np.asarray(power_interp, dtype=np.float64)
+        phase_interp = np.full(power_interp.shape, np.nan, dtype=np.float64)
+        power_interp[complex_valid] = np.abs(complex_interp[complex_valid]) ** 2
+        phase_interp[complex_valid] = np.angle(complex_interp[complex_valid])
+        interp_extra = self._derived_response_extra(
+            operation=f"interpolate-{key}", coherent=True
+        )
+        self._invalidate_assembly_sampling_hash(
+            interp_extra, f"interpolate-{key}"
         )
         return self._new_grid(
             new_axes[0],
@@ -3348,6 +3474,7 @@ class RcsGrid:
             rcs_power=power_interp,
             rcs_phase=phase_interp,
             rcs_domain="power_phase",
+            extra=interp_extra,
         )
 
     @staticmethod
@@ -3581,6 +3708,280 @@ class RcsGrid:
             raise ValueError("at least one grid is required")
         return checked
 
+    # Scalar declarations that remain meaningful on a derived response.  The
+    # lists are intentionally narrow: solver certificates and arbitrary source
+    # payloads must not be promoted to statements about a transformed grid.
+    _FIELD_CONVENTION_EXTRA_KEYS = frozenset({
+        "phase_reference",
+        "time_convention",
+        "polarization_basis",
+        "amplitude_convention",
+        "complex_field_domain",
+    })
+    _COORDINATE_LINEAGE_EXTRA_KEYS = frozenset({
+        "source_format",
+        "angular_coordinate_system",
+        "great_circle_coordinate_convention",
+        "elevation_coordinate_convention",
+        "ptm_cut_type",
+        "ptm_roll",
+        "ptm_tilt",
+        "assembly_angular_coordinate_contract",
+    })
+    _ASSEMBLY_LINEAGE_EXTRA_KEYS = frozenset({
+        "combine_role",
+        "combine_role_note",
+        "assembly_response_role",
+        "assembly_base_sha256",
+        "assembly_source_base_sha256_json",
+        "assembly_base_response_sha256",
+        "assembly_source_base_response_sha256",
+        "assembly_base_response_transform",
+        "source_monostatic_sha256",
+        "feature_provenance_json",
+        "assembly_provenance_json",
+        "coherent_metadata_attestation_json",
+    })
+    _RAW_AMPLITUDE_EXTRA_KEYS = ("rcs_amp_real", "rcs_amp_imag")
+
+    def _safe_derived_scalar_extra(self, *, include_field_conventions=True):
+        """Copy only scalar metadata with durable derived-grid semantics.
+
+        Every ``sentri_*`` scalar is retained conservatively.  That prefix is
+        vendor provenance as well as UI information, and losing it could make
+        a native polar-theta table look like canonical signed elevation after
+        an otherwise unrelated dataset operation.
+        """
+
+        allowed = set(self._COORDINATE_LINEAGE_EXTRA_KEYS)
+        allowed.update(self._ASSEMBLY_LINEAGE_EXTRA_KEYS)
+        if include_field_conventions:
+            allowed.update(self._FIELD_CONVENTION_EXTRA_KEYS)
+        result = {}
+        for key, value in self.extra.items():
+            if key not in allowed and not str(key).startswith("sentri_"):
+                continue
+            array = np.asarray(value)
+            if array.size != 1:
+                continue
+            result[key] = copy.deepcopy(value)
+        return result
+
+    def _has_native_sentri_coordinate_hazard(self):
+        """Return whether this grid still uses vendor polar theta as elevation."""
+
+        convention_values = []
+        for container in (self.units or {}, self.extra or {}):
+            value = container.get("elevation_coordinate_convention")
+            if value is not None:
+                convention_values.append(str(value).strip().casefold())
+            value = container.get("sentri_elevation_convention")
+            if value is not None:
+                convention_values.append(str(value).strip().casefold())
+        if "sentri_theta_top_zero" in convention_values:
+            return True
+        mapping = str(
+            (self.extra or {}).get("sentri_coordinate_mapping", "") or ""
+        ).casefold().replace(" ", "")
+        return "elevation=theta" in mapping and "elevation=90-theta" not in mapping
+
+    @classmethod
+    def _carry_native_sentri_hazard(cls, extra, sources):
+        """Make a native-SENTRi source impossible to hide in a derived grid."""
+
+        if not any(grid._has_native_sentri_coordinate_hazard() for grid in sources):
+            return extra
+        # A mixture containing native theta cannot truthfully retain a
+        # canonical Assembly angular contract from another source.
+        extra.pop("assembly_angular_coordinate_contract", None)
+        extra["source_format"] = "derived response includes native SENTRi coordinates"
+        extra["sentri_elevation_convention"] = "sentri_theta_top_zero"
+        extra["sentri_coordinate_mapping"] = (
+            "elevation=theta; native SENTRi polar coordinates retained"
+        )
+        return extra
+
+    @staticmethod
+    def _invalidate_assembly_sampling_hash(extra, operation):
+        """Retain source lineage while invalidating a sampling-bound base hash."""
+
+        digest = extra.pop("assembly_base_response_sha256", None)
+        has_assembly_lineage = digest is not None or any(
+            key in extra
+            for key in (
+                "assembly_response_role",
+                "assembly_base_sha256",
+                "source_monostatic_sha256",
+                "feature_provenance_json",
+                "assembly_provenance_json",
+            )
+        )
+        if digest is not None and str(np.asarray(digest).reshape(-1)[0]).strip():
+            prior = extra.get("assembly_source_base_response_sha256")
+            if prior is None:
+                extra["assembly_source_base_response_sha256"] = copy.deepcopy(digest)
+            elif str(np.asarray(prior).reshape(-1)[0]).strip().casefold() != str(
+                np.asarray(digest).reshape(-1)[0]
+            ).strip().casefold():
+                # Contradictory lineage must stay visibly contradictory rather
+                # than choosing one digest.  This value is provenance only;
+                # Assembly deliberately does not accept it as a current hash.
+                extra["assembly_source_base_response_sha256"] = json.dumps(
+                    sorted({
+                        str(np.asarray(prior).reshape(-1)[0]).strip().lower(),
+                        str(np.asarray(digest).reshape(-1)[0]).strip().lower(),
+                    }),
+                    separators=(",", ":"),
+                )
+        if has_assembly_lineage:
+            extra["assembly_base_response_transform"] = str(operation)
+        return extra
+
+    def _exact_transform_extra(
+        self,
+        array_transform=None,
+        *,
+        preserve_all=False,
+        preserve_raw=True,
+        coordinate_change=None,
+        preserve_angular_contract=True,
+    ):
+        """Metadata policy for an exact sample-preserving transform.
+
+        ``array_transform`` is applied only to the authoritative raw solver
+        field.  Other grid-shaped producer arrays are deliberately not guessed
+        at.  ``preserve_all`` is reserved for representation-only operations
+        such as phase wrapping where neither axes nor samples change.
+        """
+
+        if preserve_all:
+            extra = {
+                key: copy.deepcopy(value)
+                for key, value in self._extra_to_write().items()
+            }
+            if self._complete_authoritative_raw_arrays() is None:
+                for key in (
+                    *self._RAW_AMPLITUDE_EXTRA_KEYS,
+                    "raw_complex_amplitude_preserved",
+                ):
+                    extra.pop(key, None)
+        else:
+            extra = self._safe_derived_scalar_extra(
+                include_field_conventions=True
+            )
+            pair = self._complete_authoritative_raw_arrays()
+            if preserve_raw and pair is not None:
+                real_array, imag_array = pair
+                transform = array_transform or (
+                    lambda value: np.array(value, copy=True)
+                )
+                transformed_real = np.asarray(transform(real_array))
+                transformed_imag = np.asarray(transform(imag_array))
+                if np.shares_memory(transformed_real, real_array):
+                    transformed_real = np.array(transformed_real, copy=True)
+                if np.shares_memory(transformed_imag, imag_array):
+                    transformed_imag = np.array(transformed_imag, copy=True)
+                extra["rcs_amp_real"] = transformed_real
+                extra["rcs_amp_imag"] = transformed_imag
+                extra["raw_complex_amplitude_preserved"] = True
+        if not preserve_all:
+            self._carry_native_sentri_hazard(extra, (self,))
+        if coordinate_change:
+            self._invalidate_assembly_sampling_hash(extra, coordinate_change)
+        if not preserve_angular_contract:
+            extra.pop("assembly_angular_coordinate_contract", None)
+        return extra
+
+    def _derived_response_extra(
+        self,
+        others=(),
+        *,
+        operation,
+        coherent,
+        attestation_extra=None,
+    ):
+        """Metadata policy for arithmetic/interpolated/statistical responses."""
+
+        sources = (self, *tuple(others))
+        extra = self._safe_derived_scalar_extra(
+            include_field_conventions=bool(coherent)
+        )
+        self._carry_native_sentri_hazard(extra, sources)
+
+        def declared_values(key):
+            values = []
+            for grid in sources:
+                value = grid._declared_scalar_metadata(key)
+                if value:
+                    values.append(value)
+            return values
+
+        source_roles = [
+            grid._declared_scalar_metadata(
+                "assembly_response_role"
+            ).strip().casefold()
+            or None
+            for grid in sources
+        ]
+        roles = [role for role in source_roles if role is not None]
+        base_hashes = {
+            value.strip().casefold()
+            for value in declared_values("assembly_base_sha256")
+        }
+        response_hashes = {
+            value.strip().casefold()
+            for value in declared_values("assembly_base_response_sha256")
+        }
+        if len(base_hashes) == 1:
+            extra["assembly_base_sha256"] = next(iter(base_hashes))
+        elif len(base_hashes) > 1:
+            extra.pop("assembly_base_sha256", None)
+            extra["assembly_source_base_sha256_json"] = json.dumps(
+                sorted(base_hashes), separators=(",", ":")
+            )
+        if len(response_hashes) == 1:
+            extra["assembly_base_response_sha256"] = next(iter(response_hashes))
+        elif len(response_hashes) > 1:
+            extra.pop("assembly_base_response_sha256", None)
+            extra["assembly_source_base_response_sha256"] = json.dumps(
+                sorted(response_hashes), separators=(",", ":")
+            )
+
+        if coherent:
+            if "body_plus_features" in roles:
+                extra["assembly_response_role"] = "body_plus_features"
+            elif source_roles and all(
+                role == "features_only_delta" for role in source_roles
+            ) and len(base_hashes) == 1 and len(response_hashes) == 1:
+                extra["assembly_response_role"] = "features_only_delta"
+            elif roles:
+                extra["assembly_response_role"] = "coherent_field_sum"
+            if roles or any(
+                grid._declared_scalar_metadata("combine_role") for grid in sources
+            ):
+                extra["combine_role"] = "coherent"
+        else:
+            # A power/statistical result is never a reusable coherent feature
+            # delta.  A body-bearing source remains explicitly body-bearing so
+            # downstream duplicate-body guards cannot be bypassed.
+            if "body_plus_features" in roles:
+                extra["assembly_response_role"] = "body_plus_features"
+            elif roles:
+                extra["assembly_response_role"] = "incoherent_power_sum"
+            extra["combine_role"] = "power"
+            for key in (
+                "phase_reference",
+                "time_convention",
+                "amplitude_convention",
+                "complex_field_domain",
+            ):
+                extra.pop(key, None)
+            self._invalidate_assembly_sampling_hash(extra, operation)
+
+        if attestation_extra:
+            extra.update(copy.deepcopy(attestation_extra))
+        return extra
+
     def _new_grid(
         self,
         azimuths,
@@ -3597,17 +3998,13 @@ class RcsGrid:
         extra=None,
     ):
         if extra is None:
-            # Preserve scalar field-convention metadata across derived grids,
-            # but never carry shape-dependent raw amplitudes through a
-            # transform.
-            extra = {}
-            for key in (
-                "phase_reference",
-                "time_convention",
-                "polarization_basis",
-            ):
-                if key in self.extra:
-                    extra[key] = self.extra[key]
+            # Safe future-proof fallback.  Current operations pass one of the
+            # explicit policies above, but a new caller must never erase native
+            # SENTRi or Assembly response semantics merely by omission.
+            extra = self._safe_derived_scalar_extra(
+                include_field_conventions=True
+            )
+            self._carry_native_sentri_hazard(extra, (self,))
         return RcsGrid(
             azimuths,
             elevations,
@@ -3777,6 +4174,7 @@ class RcsGrid:
         el_idx = _axis_indices(self.elevations, elevations, elevation_range, "elevation", tol)
         f_idx = _axis_indices(self.frequencies, frequencies, frequency_range, "frequency", tol)
         p_idx = _axis_indices(self.polarizations, polarizations, None, "polarization", 0.0)
+        selection = np.ix_(az_idx, el_idx, f_idx, p_idx)
 
         return self._new_grid(
             self.azimuths[az_idx],
@@ -3785,6 +4183,9 @@ class RcsGrid:
             self.polarizations[p_idx],
             rcs_power=self.rcs_power[np.ix_(az_idx, el_idx, f_idx, p_idx)],
             rcs_phase=self.rcs_phase[np.ix_(az_idx, el_idx, f_idx, p_idx)],
+            extra=self._exact_transform_extra(
+                lambda value: value[selection]
+            ),
         )
 
     @staticmethod
@@ -3840,6 +4241,46 @@ class RcsGrid:
         )
         existing_phase[fill_phase] = incoming_phase[fill_phase]
 
+    @staticmethod
+    def _merge_equivalent_raw_blocks(
+        existing_real,
+        existing_imag,
+        incoming_real,
+        incoming_imag,
+        *,
+        context,
+    ):
+        """Merge authoritative float64 seam fields or reject hidden conflicts."""
+
+        existing_real = np.asarray(existing_real)
+        existing_imag = np.asarray(existing_imag)
+        incoming_real = np.asarray(incoming_real)
+        incoming_imag = np.asarray(incoming_imag)
+        existing_finite = np.isfinite(existing_real) & np.isfinite(existing_imag)
+        incoming_finite = np.isfinite(incoming_real) & np.isfinite(incoming_imag)
+        both = existing_finite & incoming_finite
+        equivalent = (
+            np.isclose(
+                existing_real,
+                incoming_real,
+                rtol=1.0e-12,
+                atol=1.0e-15,
+            )
+            & np.isclose(
+                existing_imag,
+                incoming_imag,
+                rtol=1.0e-12,
+                atol=1.0e-15,
+            )
+        )
+        if np.any(both & ~equivalent):
+            raise ValueError(
+                f"{context}: conflicting authoritative raw seam samples would overlap"
+            )
+        take = ~existing_finite & incoming_finite
+        existing_real[take] = incoming_real[take]
+        existing_imag[take] = incoming_imag[take]
+
     def mirror_about_azimuth(self, azimuth_deg: float):
         """Mirror azimuth axis about a reference angle and return a new grid.
 
@@ -3860,6 +4301,11 @@ class RcsGrid:
             rcs_power=self.rcs_power[order, :, :, :],
             rcs_phase=self.rcs_phase[order, :, :, :],
             rcs_domain="power_phase",
+            extra=self._exact_transform_extra(
+                lambda value: np.take(value, order, axis=0),
+                coordinate_change="mirror-azimuth",
+                preserve_angular_contract=False,
+            ),
         )
 
     def swap_elevation_azimuth(self):
@@ -3878,6 +4324,11 @@ class RcsGrid:
             rcs_phase=np.swapaxes(self.rcs_phase, 0, 1).copy(),
             rcs_domain="power_phase",
             units=swapped_units,
+            extra=self._exact_transform_extra(
+                lambda value: np.swapaxes(value, 0, 1),
+                coordinate_change="swap-elevation-azimuth",
+                preserve_angular_contract=False,
+            ),
         )
 
     def shift_azimuth(self, delta_deg: float):
@@ -3892,6 +4343,10 @@ class RcsGrid:
             rcs_power=np.array(self.rcs_power, copy=True),
             rcs_phase=np.array(self.rcs_phase, copy=True),
             rcs_domain="power_phase",
+            extra=self._exact_transform_extra(
+                coordinate_change="shift-azimuth",
+                preserve_angular_contract=False,
+            ),
         )
 
     def wrap_azimuth(self, mode: str):
@@ -3937,17 +4392,44 @@ class RcsGrid:
         output_shape = (len(groups),) + self.rcs_power.shape[1:]
         output_power = np.full(output_shape, np.nan, dtype=self.rcs_power.dtype)
         output_phase = np.full(output_shape, np.nan, dtype=self.rcs_phase.dtype)
+        raw_pair = self._complete_authoritative_raw_arrays()
+        preserve_raw = raw_pair is not None
+        if preserve_raw:
+            raw_real = np.asarray(raw_pair[0], dtype=np.float64)
+            raw_imag = np.asarray(raw_pair[1], dtype=np.float64)
+            output_raw_real = np.full(output_shape, np.nan, dtype=np.float64)
+            output_raw_imag = np.full(output_shape, np.nan, dtype=np.float64)
         for output_index, group in enumerate(groups):
             for source_index in group:
+                context = (
+                    f"azimuth wrap at {unique_vals[output_index]:.12g} {unit}"
+                )
                 self._merge_equivalent_sample_blocks(
                     output_power[output_index],
                     output_phase[output_index],
                     self.rcs_power[source_index],
                     self.rcs_phase[source_index],
-                    context=(
-                        f"azimuth wrap at {unique_vals[output_index]:.12g} {unit}"
-                    ),
+                    context=context,
                 )
+                if preserve_raw:
+                    self._merge_equivalent_raw_blocks(
+                        output_raw_real[output_index],
+                        output_raw_imag[output_index],
+                        raw_real[source_index],
+                        raw_imag[source_index],
+                        context=context,
+                    )
+        if preserve_raw:
+            unmodeled = ~np.isfinite(output_power)
+            output_raw_real[unmodeled] = np.nan
+            output_raw_imag[unmodeled] = np.nan
+        wrapped_extra = self._exact_transform_extra(
+            coordinate_change="wrap-azimuth", preserve_raw=False
+        )
+        if preserve_raw:
+            wrapped_extra["rcs_amp_real"] = output_raw_real
+            wrapped_extra["rcs_amp_imag"] = output_raw_imag
+            wrapped_extra["raw_complex_amplitude_preserved"] = True
         return self._new_grid(
             unique_vals,
             np.array(self.elevations, copy=True),
@@ -3956,6 +4438,7 @@ class RcsGrid:
             rcs_power=output_power,
             rcs_phase=output_phase,
             rcs_domain="power_phase",
+            extra=wrapped_extra,
         )
 
     def wrap_phase(self, mode: str):
@@ -4000,6 +4483,7 @@ class RcsGrid:
             rcs_phase=wrapped_phase,
             history=history,
             units=wrapped_units,
+            extra=self._exact_transform_extra(preserve_all=True),
         )
 
     def round_azimuths(self, decimals: int):
@@ -4023,6 +4507,9 @@ class RcsGrid:
             rcs_power=np.array(self.rcs_power, copy=True),
             rcs_phase=np.array(self.rcs_phase, copy=True),
             rcs_domain="power_phase",
+            extra=self._exact_transform_extra(
+                coordinate_change="round-azimuth"
+            ),
         )
 
     def round_elevations(self, decimals: int):
@@ -4042,6 +4529,9 @@ class RcsGrid:
             rcs_power=np.array(self.rcs_power, copy=True),
             rcs_phase=np.array(self.rcs_phase, copy=True),
             rcs_domain="power_phase",
+            extra=self._exact_transform_extra(
+                coordinate_change="round-elevation"
+            ),
         )
 
     def round_frequencies(self, decimals: int):
@@ -4061,6 +4551,9 @@ class RcsGrid:
             rcs_power=np.array(self.rcs_power, copy=True),
             rcs_phase=np.array(self.rcs_phase, copy=True),
             rcs_domain="power_phase",
+            extra=self._exact_transform_extra(
+                coordinate_change="round-frequency"
+            ),
         )
 
     def shift_elevation(self, delta_deg: float):
@@ -4075,6 +4568,10 @@ class RcsGrid:
             rcs_power=np.array(self.rcs_power, copy=True),
             rcs_phase=np.array(self.rcs_phase, copy=True),
             rcs_domain="power_phase",
+            extra=self._exact_transform_extra(
+                coordinate_change="shift-elevation",
+                preserve_angular_contract=False,
+            ),
         )
 
     def convert_sentri_elevation_to_grim(self):
@@ -4085,7 +4582,9 @@ class RcsGrid:
         conic elevation is positive above waterline, so the exact relabel is
         ``elevation = 90 - theta``.  The transformed elevation axis is
         stable-sorted and every grid-shaped sample/provenance array follows the
-        same permutation.  There is no interpolation and no phase change.
+        same permutation.  SENTRi phi is also wrapped into GRIM's canonical
+        [0, 360) degree azimuth axis and sorted.  There is no interpolation and
+        no phase change.
 
         The operation deliberately requires SENTRi convention metadata.  This
         prevents an ordinary GRIM elevation axis from being flipped by an
@@ -4123,6 +4622,14 @@ class RcsGrid:
                 "SENTRi elevation conversion requires a degree-valued "
                 f"elevation axis; got {units.get('elevation')!r}"
             )
+        azimuth_unit = self._canonical_unit(
+            units.get("azimuth"), _ANGLE_UNITS, "deg"
+        )
+        if azimuth_unit != "deg":
+            raise ValueError(
+                "SENTRi azimuth conversion requires a degree-valued azimuth "
+                f"axis; got {units.get('azimuth')!r}"
+            )
 
         native_theta = np.asarray(self.elevations, dtype=float)
         if np.any(~np.isfinite(native_theta)):
@@ -4149,8 +4656,31 @@ class RcsGrid:
                 "near-duplicate GRIM elevation coordinates within 1e-9 deg"
             )
 
-        power = np.take(self.rcs_power, order, axis=1)
-        phase = np.take(self.rcs_phase, order, axis=1)
+        native_azimuth = np.asarray(self.azimuths, dtype=float)
+        if np.any(~np.isfinite(native_azimuth)):
+            raise ValueError("SENTRi phi axis must contain only finite values")
+        converted_azimuth = np.mod(native_azimuth, 360.0)
+        converted_azimuth[
+            np.isclose(converted_azimuth, 360.0, atol=tolerance, rtol=0.0)
+            | np.isclose(converted_azimuth, 0.0, atol=tolerance, rtol=0.0)
+        ] = 0.0
+        azimuth_order = np.argsort(converted_azimuth, kind="stable")
+        converted_azimuth = converted_azimuth[azimuth_order]
+        if (
+            converted_azimuth.size > 1
+            and np.any(np.diff(converted_azimuth) <= tolerance)
+        ):
+            raise ValueError(
+                "SENTRi azimuth wrapping would create duplicate or "
+                "near-duplicate coordinates within 1e-9 deg; reload the "
+                "source with read_SENTRi so its seam-precedence policy can "
+                "resolve the duplicate first"
+            )
+
+        power = np.take(self.rcs_power, azimuth_order, axis=0)
+        power = np.take(power, order, axis=1)
+        phase = np.take(self.rcs_phase, azimuth_order, axis=0)
+        phase = np.take(phase, order, axis=1)
         original_shape = tuple(self.rcs_power.shape)
         stale_grid_metadata = {
             "solver_metadata_json",
@@ -4167,9 +4697,15 @@ class RcsGrid:
                 value_array.ndim >= 4
                 and tuple(value_array.shape[:4]) == original_shape
             ):
-                converted_extra[key] = np.take(value_array, order, axis=1)
+                converted_value = np.take(value_array, azimuth_order, axis=0)
+                converted_extra[key] = np.take(converted_value, order, axis=1)
             else:
                 converted_extra[key] = value
+
+        self._drop_malformed_raw_metadata(converted_extra)
+        self._invalidate_assembly_sampling_hash(
+            converted_extra, "convert-native-sentri-to-grim"
+        )
 
         units["elevation_coordinate_convention"] = grim_tag
         converted_extra["sentri_elevation_convention"] = grim_tag
@@ -4182,16 +4718,17 @@ class RcsGrid:
         )
         prior_history = str(self.history or "").strip()
         history_entry = (
-            "Convert native SENTRi theta to GRIM signed elevation "
-            "(elevation=90-theta); stable-sorted elevation and sample arrays; "
-            "no interpolation or phase change"
+            "Convert native SENTRi coordinates to GRIM conic angles "
+            "(elevation=90-theta; azimuth=phi wrapped to [0,360) deg); "
+            "stable-sorted axes and sample arrays; no interpolation or phase "
+            "change"
         )
         history = (
             f"{prior_history}\n{history_entry}" if prior_history else history_entry
         )
 
         return RcsGrid(
-            np.array(self.azimuths, copy=True),
+            converted_azimuth,
             converted_elevation,
             np.array(self.frequencies, copy=True),
             np.array(self.polarizations, copy=True),
@@ -4289,6 +4826,13 @@ class RcsGrid:
         out_shape = (len(az_merged), 1, len(self.frequencies), len(self.polarizations))
         out_power = np.full(out_shape, np.nan, dtype=self.rcs_power.dtype)
         out_phase = np.full(out_shape, np.nan, dtype=self.rcs_phase.dtype)
+        raw_pair = self._complete_authoritative_raw_arrays()
+        preserve_raw = raw_pair is not None
+        if preserve_raw:
+            raw_real = np.asarray(raw_pair[0], dtype=np.float64)
+            raw_imag = np.asarray(raw_pair[1], dtype=np.float64)
+            out_raw_real = np.full(out_shape, np.nan, dtype=np.float64)
+            out_raw_imag = np.full(out_shape, np.nan, dtype=np.float64)
 
         lo_target_idx = self._indices_for_axis_values(
             az_merged, az_lo, tol=azimuth_tol
@@ -4313,22 +4857,65 @@ class RcsGrid:
         lo_phase = self.rcs_phase[:, lo_idx, :, :]
         hi_power = self.rcs_power[:, hi_idx, :, :]
         hi_phase = self.rcs_phase[:, hi_idx, :, :]
+        if preserve_raw:
+            lo_raw_real = raw_real[:, lo_idx, :, :]
+            lo_raw_imag = raw_imag[:, lo_idx, :, :]
+            hi_raw_real = raw_real[:, hi_idx, :, :]
+            hi_raw_imag = raw_imag[:, hi_idx, :, :]
 
-        for label, target_indices, source_power, source_phase in (
-            ("lower elevation", lo_target_idx, lo_power, lo_phase),
-            ("shifted higher elevation", hi_target_idx, hi_power, hi_phase),
+        for label, target_indices, source_power, source_phase, source_real, source_imag in (
+            (
+                "lower elevation",
+                lo_target_idx,
+                lo_power,
+                lo_phase,
+                lo_raw_real if preserve_raw else None,
+                lo_raw_imag if preserve_raw else None,
+            ),
+            (
+                "shifted higher elevation",
+                hi_target_idx,
+                hi_power,
+                hi_phase,
+                hi_raw_real if preserve_raw else None,
+                hi_raw_imag if preserve_raw else None,
+            ),
         ):
             for src_idx, dst_idx in enumerate(target_indices):
+                context = (
+                    f"El->Az360 {label} at azimuth "
+                    f"{az_merged[dst_idx]:.12g} {azimuth_unit}"
+                )
                 self._merge_equivalent_sample_blocks(
                     out_power[dst_idx, 0, :, :],
                     out_phase[dst_idx, 0, :, :],
                     source_power[src_idx, :, :],
                     source_phase[src_idx, :, :],
-                    context=(
-                        f"El->Az360 {label} at azimuth "
-                        f"{az_merged[dst_idx]:.12g} {azimuth_unit}"
-                    ),
+                    context=context,
                 )
+                if preserve_raw:
+                    self._merge_equivalent_raw_blocks(
+                        out_raw_real[dst_idx, 0, :, :],
+                        out_raw_imag[dst_idx, 0, :, :],
+                        source_real[src_idx, :, :],
+                        source_imag[src_idx, :, :],
+                        context=context,
+                    )
+
+        if preserve_raw:
+            unmodeled = ~np.isfinite(out_power)
+            out_raw_real[unmodeled] = np.nan
+            out_raw_imag[unmodeled] = np.nan
+
+        combined_extra = self._exact_transform_extra(
+            coordinate_change="combine-elevation-pair-to-azimuth-360",
+            preserve_angular_contract=False,
+            preserve_raw=False,
+        )
+        if preserve_raw:
+            combined_extra["rcs_amp_real"] = out_raw_real
+            combined_extra["rcs_amp_imag"] = out_raw_imag
+            combined_extra["raw_complex_amplitude_preserved"] = True
 
         return self._new_grid(
             az_merged,
@@ -4338,6 +4925,7 @@ class RcsGrid:
             rcs_power=out_power,
             rcs_phase=out_phase,
             rcs_domain="power_phase",
+            extra=combined_extra,
         )
 
     @classmethod
@@ -5024,24 +5612,94 @@ class RcsGrid:
         if overlap not in {"error", "first", "last"}:
             raise ValueError("overlap must be 'error', 'first', or 'last'")
         ref = grids[0]
+
+        def canonical_json_scalar(value):
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return value.strip()
+            return json.dumps(
+                decoded,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+
+        scalar_metadata_fields = (
+            (
+                "phase_reference",
+                "phase references",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "time_convention",
+                "time conventions",
+                ref._canonical_time_convention,
+            ),
+            (
+                "polarization_basis",
+                "polarization bases",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "amplitude_convention",
+                "amplitude conventions",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "complex_field_domain",
+                "complex-field domains",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "combine_role",
+                "combination roles",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "assembly_response_role",
+                "Assembly response roles",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "assembly_base_sha256",
+                "Assembly base identities",
+                lambda value: value.strip().casefold(),
+            ),
+            (
+                "assembly_base_response_sha256",
+                "Assembly base response identities",
+                lambda value: value.strip().casefold(),
+            ),
+            (
+                "assembly_angular_coordinate_contract",
+                "Assembly angular-coordinate contracts",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "elevation_coordinate_convention",
+                "elevation-coordinate conventions",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "sentri_elevation_convention",
+                "SENTRi elevation conventions",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "sentri_coordinate_mapping",
+                "SENTRi coordinate mappings",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "feature_provenance_json",
+                "feature provenance records",
+                canonical_json_scalar,
+            ),
+        )
         for grid in grids[1:]:
             ref._assert_physical_metadata_compatible(grid)
-            left_ref = ref._phase_reference()
-            right_ref = grid._phase_reference()
-            if left_ref != right_ref and (left_ref or right_ref):
-                raise ValueError("cannot join grids with different phase references")
-            for key, label, canonicalize in (
-                (
-                    "time_convention",
-                    "time conventions",
-                    ref._canonical_time_convention,
-                ),
-                (
-                    "polarization_basis",
-                    "polarization bases",
-                    lambda value: " ".join(value.split()).casefold(),
-                ),
-            ):
+            for key, label, canonicalize in scalar_metadata_fields:
                 left_value = ref._declared_scalar_metadata(key)
                 right_value = grid._declared_scalar_metadata(key)
                 if (
@@ -5053,6 +5711,52 @@ class RcsGrid:
                         f"{left_value or '<unspecified>'!r} != "
                         f"{right_value or '<unspecified>'!r}"
                     )
+
+        preserved_scalar_extra = {}
+        for key, _label, canonicalize in scalar_metadata_fields:
+            declared = [grid._declared_scalar_metadata(key) for grid in grids]
+            nonblank = [value for value in declared if value]
+            if not nonblank:
+                continue
+            if any(not value for value in declared):
+                # A one-sided declaration cannot safely be promoted to a
+                # statement about the complete joined artifact.
+                continue
+            normalized = {canonicalize(value) for value in nonblank}
+            if len(normalized) == 1:
+                preserved_scalar_extra[key] = nonblank[0]
+
+        raw_inputs = []
+        preserve_raw_amplitude = True
+        for grid in grids:
+            raw_real = grid.extra.get("rcs_amp_real")
+            raw_imag = grid.extra.get("rcs_amp_imag")
+            if raw_real is None or raw_imag is None:
+                preserve_raw_amplitude = False
+                break
+            try:
+                raw_real = np.asarray(raw_real, dtype=np.float64)
+                raw_imag = np.asarray(raw_imag, dtype=np.float64)
+            except (TypeError, ValueError):
+                preserve_raw_amplitude = False
+                break
+            if (
+                raw_real.shape != grid.rcs_power.shape
+                or raw_imag.shape != grid.rcs_power.shape
+            ):
+                preserve_raw_amplitude = False
+                break
+            # A finite stored power cell is a modeled sample.  If its raw
+            # field is incomplete, retaining the raw arrays would make
+            # ``rcs`` authoritative but turn that valid sample into NaN.
+            modeled = np.isfinite(grid.rcs_power)
+            raw_finite = np.isfinite(raw_real) & np.isfinite(raw_imag)
+            if np.any(modeled & ~raw_finite):
+                preserve_raw_amplitude = False
+                break
+            raw_inputs.append((raw_real, raw_imag))
+        if not preserve_raw_amplitude:
+            raw_inputs = []
         if len(grids) == 1:
             # Preserve clone semantics, including original axis order, while
             # still using the bounded allocation/ownership-transfer path.
@@ -5072,12 +5776,18 @@ class RcsGrid:
         for dimension in shape:
             cell_count *= int(dimension)
         itemsize = np.dtype(out_dtype).itemsize
-        output_bytes = cell_count * itemsize * 2
+        raw_output_bytes = (
+            cell_count * 2 * np.dtype(np.float64).itemsize
+            if preserve_raw_amplitude else 0
+        )
+        output_bytes = cell_count * itemsize * 2 + raw_output_bytes
         # The bounded merge below avoids full input-sized advanced-index
         # copies. Count the two retained arrays, one union-sized sanitation
         # mask, and a conservative allowance for a bounded merge block.
         merge_block_cells = min(cell_count, _JOIN_MERGE_BLOCK_CELLS)
-        merge_scratch_bytes = merge_block_cells * (8 * itemsize + 32)
+        merge_scratch_bytes = merge_block_cells * (
+            8 * itemsize + (48 if preserve_raw_amplitude else 32)
+        )
         estimated_peak_bytes = output_bytes + cell_count + merge_scratch_bytes
         if max_output_bytes is not None and estimated_peak_bytes > int(max_output_bytes):
             raise MemoryError(
@@ -5087,8 +5797,16 @@ class RcsGrid:
             )
         joined_power = np.full(shape, np.nan, dtype=out_dtype)
         joined_phase = np.full(shape, np.nan, dtype=out_dtype)
+        joined_raw_real = (
+            np.full(shape, np.nan, dtype=np.float64)
+            if preserve_raw_amplitude else None
+        )
+        joined_raw_imag = (
+            np.full(shape, np.nan, dtype=np.float64)
+            if preserve_raw_amplitude else None
+        )
 
-        for grid in grids:
+        for grid_index, grid in enumerate(grids):
             az_idx = cls._indices_for_axis_values(az_union, grid.azimuths, tol=tol)
             el_idx = cls._indices_for_axis_values(el_union, grid.elevations, tol=tol)
             f_idx = cls._indices_for_axis_values(f_union, grid.frequencies, tol=tol)
@@ -5155,6 +5873,14 @@ class RcsGrid:
                             )
                             block_power = incoming_power[block_selection]
                             block_phase = incoming_phase[block_selection]
+                            if preserve_raw_amplitude:
+                                incoming_raw_real, incoming_raw_imag = raw_inputs[
+                                    grid_index
+                                ]
+                                existing_raw_real = joined_raw_real[target]
+                                existing_raw_imag = joined_raw_imag[target]
+                                block_raw_real = incoming_raw_real[block_selection]
+                                block_raw_imag = incoming_raw_imag[block_selection]
 
                             both = np.isfinite(existing_power) & np.isfinite(block_power)
                             power_conflict = both & ~np.isclose(
@@ -5181,8 +5907,34 @@ class RcsGrid:
                                 & ~both_zero
                                 & (phase_delta > 1e-5)
                             )
+                            raw_conflict = np.zeros_like(both)
+                            if preserve_raw_amplitude:
+                                both_raw = (
+                                    both
+                                    & np.isfinite(existing_raw_real)
+                                    & np.isfinite(existing_raw_imag)
+                                    & np.isfinite(block_raw_real)
+                                    & np.isfinite(block_raw_imag)
+                                )
+                                raw_equal = (
+                                    np.isclose(
+                                        existing_raw_real,
+                                        block_raw_real,
+                                        rtol=1.0e-12,
+                                        atol=1.0e-15,
+                                    )
+                                    & np.isclose(
+                                        existing_raw_imag,
+                                        block_raw_imag,
+                                        rtol=1.0e-12,
+                                        atol=1.0e-15,
+                                    )
+                                )
+                                raw_conflict = both_raw & ~raw_equal
                             if overlap == "error" and (
-                                np.any(power_conflict) or np.any(phase_conflict)
+                                np.any(power_conflict)
+                                or np.any(phase_conflict)
+                                or np.any(raw_conflict)
                             ):
                                 raise ValueError(
                                     "conflicting finite samples overlap during join"
@@ -5209,6 +5961,15 @@ class RcsGrid:
                             existing_phase[take_phase] = block_phase[take_phase]
                             joined_power[target] = existing_power
                             joined_phase[target] = existing_phase
+                            if preserve_raw_amplitude:
+                                existing_raw_real[take_power] = block_raw_real[
+                                    take_power
+                                ]
+                                existing_raw_imag[take_power] = block_raw_imag[
+                                    take_power
+                                ]
+                                joined_raw_real[target] = existing_raw_real
+                                joined_raw_imag[target] = existing_raw_imag
 
         # Inputs are normally already clean, but RcsGrid arrays are public and
         # may have been mutated. Preserve constructor sanitation in place, then
@@ -5224,7 +5985,16 @@ class RcsGrid:
         np.isfinite(joined_power, out=finite)
         np.logical_not(finite, out=finite)
         joined_phase[finite] = np.nan
+        if preserve_raw_amplitude:
+            joined_raw_real[finite] = np.nan
+            joined_raw_imag[finite] = np.nan
         del finite
+
+        output_extra = dict(preserved_scalar_extra)
+        if preserve_raw_amplitude:
+            output_extra["rcs_amp_real"] = joined_raw_real
+            output_extra["rcs_amp_imag"] = joined_raw_imag
+            output_extra["raw_complex_amplitude_preserved"] = True
 
         return cls(
             az_union,
@@ -5237,15 +6007,7 @@ class RcsGrid:
             source_path=ref.source_path,
             history=ref.history,
             units=dict(ref.units),
-            extra={
-                key: ref.extra[key]
-                for key in (
-                    "phase_reference",
-                    "time_convention",
-                    "polarization_basis",
-                )
-                if key in ref.extra
-            },
+            extra=output_extra,
             _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
 
@@ -5326,28 +6088,52 @@ class RcsGrid:
         p_common = p_common[p_sel]
 
         overlap_grids = []
-        for grid, power, phase in zip(grids, aligned_power, aligned_phase):
+        final_common_selection = np.ix_(az_sel, el_sel, f_sel, p_sel)
+        final_missing = missing_any[final_common_selection]
+        for grid_index, (grid, power, phase) in enumerate(
+            zip(grids, aligned_power, aligned_phase)
+        ):
+            source_indices = (
+                np.asarray(az_indices[grid_index], dtype=int)[az_sel],
+                np.asarray(el_indices[grid_index], dtype=int)[el_sel],
+                np.asarray(f_indices[grid_index], dtype=int)[f_sel],
+                np.asarray(p_indices[grid_index], dtype=int)[p_sel],
+            )
+            source_selection = np.ix_(*source_indices)
+            source_axes = (
+                np.asarray(grid.azimuths)[source_indices[0]],
+                np.asarray(grid.elevations)[source_indices[1]],
+                np.asarray(grid.frequencies)[source_indices[2]],
+                np.asarray(grid.polarizations)[source_indices[3]],
+            )
+            relabeled = not all(
+                np.array_equal(source, target)
+                for source, target in zip(
+                    source_axes, (az_common, el_common, f_common, p_common)
+                )
+            )
+            overlap_extra = grid._exact_transform_extra(
+                lambda value, selection=source_selection: value[selection],
+                coordinate_change=("overlap-axis-relabel" if relabeled else None),
+            )
+            for raw_key in grid._RAW_AMPLITUDE_EXTRA_KEYS:
+                if raw_key in overlap_extra:
+                    raw = np.asarray(overlap_extra[raw_key]).copy()
+                    raw[final_missing] = np.nan
+                    overlap_extra[raw_key] = raw
             overlap_grids.append(
                 cls(
                     az_common,
                     el_common,
                     f_common,
                     p_common,
-                    rcs_power=power[np.ix_(az_sel, el_sel, f_sel, p_sel)],
-                    rcs_phase=phase[np.ix_(az_sel, el_sel, f_sel, p_sel)],
+                    rcs_power=power[final_common_selection],
+                    rcs_phase=phase[final_common_selection],
                     rcs_domain="power_phase",
                     source_path=grid.source_path,
                     history=grid.history,
                     units=dict(grid.units),
-                    extra={
-                        key: grid.extra[key]
-                        for key in (
-                            "phase_reference",
-                            "time_convention",
-                            "polarization_basis",
-                        )
-                        if key in grid.extra
-                    },
+                    extra=overlap_extra,
                 )
             )
 
@@ -5450,6 +6236,25 @@ class RcsGrid:
                     rep = float(np.nanmean(numeric)) if numeric.size else 0.0
                     axis_values[axis_idx] = np.asarray([rep], dtype=float)
 
+        statistics_coherent = domain == "complex"
+        statistics_extra = self._derived_response_extra(
+            operation=f"statistics-{stat_key}-{domain}",
+            coherent=statistics_coherent,
+        )
+        source_role = self._declared_scalar_metadata(
+            "assembly_response_role"
+        ).strip().casefold()
+        if source_role == "features_only_delta":
+            statistics_extra["assembly_response_role"] = (
+                "coherent_field_sum"
+                if statistics_coherent
+                else "incoherent_power_sum"
+            )
+        if statistics_coherent:
+            self._invalidate_assembly_sampling_hash(
+                statistics_extra, f"statistics-{stat_key}-{domain}"
+            )
+
         if domain == "complex":
             return self._new_grid(
                 axis_values[0],
@@ -5458,6 +6263,7 @@ class RcsGrid:
                 axis_values[3],
                 reduced,
                 rcs_domain="power_phase",
+                extra=statistics_extra,
             )
         if domain == "magnitude":
             return self._new_grid(
@@ -5468,6 +6274,7 @@ class RcsGrid:
                 rcs_power=np.asarray(reduced, dtype=self.rcs_power.dtype),
                 rcs_phase=np.full(reduced.shape, np.nan, dtype=self.rcs_phase.dtype),
                 rcs_domain="power_phase",
+                extra=statistics_extra,
             )
         # db domain: compute in a log domain, then store as linear so future conversion reproduces the reduced values.
         if domain == "dbke":
@@ -5489,6 +6296,7 @@ class RcsGrid:
             rcs_power=reduced_linear,
             rcs_phase=np.full(reduced_linear.shape, np.nan, dtype=self.rcs_phase.dtype),
             rcs_domain="power_phase",
+            extra=statistics_extra,
         )
 
     def _index_for_value(self, axis, value, tol=0.0):
@@ -5595,9 +6403,11 @@ class RcsGrid:
     def _extra_to_write(self):
         """Passthrough keys to re-emit, minus anything whose shape no longer fits.
 
-        An array sized to the grid (e.g. rcs_amp_real) is only still valid if the
-        grid has not been cropped, joined or interpolated since it was read, so a
-        mismatched four-dimensional shape is dropped instead of written stale.
+        A grid-sized array (for example ``rcs_amp_real``) is emitted only while
+        its leading dimensions match the current grid. Exact transforms create
+        a correspondingly transformed array; nonexact transforms omit it. A
+        mismatched four-dimensional shape is always dropped instead of written
+        stale.
         Lower-dimensional arrays are independent ancillary models, not partial
         RCS grids: GHOST's BoR profiles, body-model amplitudes, and surface
         triangles must survive an unchanged load/save round-trip.

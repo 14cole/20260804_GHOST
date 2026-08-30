@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import io
 import json
 import os
@@ -44,7 +45,7 @@ MIME_BRANCH = "application/x-grim-branch"
 _ROLE_TYPE    = Qt.UserRole        # "root" | "branch" | "leaf"
 _ROLE_NAME    = Qt.UserRole + 1    # dataset name string (leaves only)
 _ROLE_GRID    = Qt.UserRole + 2    # RcsGrid object (leaves only, may be None)
-_ROLE_MODE    = Qt.UserRole + 3    # "coh" | "incoh" (every non-root node)
+_ROLE_MODE    = Qt.UserRole + 3    # "auto" | "coh" | "incoh" (non-roots)
 _ROLE_PURPOSE = Qt.UserRole + 4    # "response" | "preview"
 _ROLE_PREVIEW_KEY = Qt.UserRole + 5  # stable runtime scene key (preview only)
 
@@ -67,10 +68,92 @@ _PURPOSE_PREVIEW = "preview"
 
 _MODE_COH    = "coh"
 _MODE_INCOH  = "incoh"
-_DEFAULT_MODE = _MODE_COH
+_MODE_AUTO   = "auto"
+_DEFAULT_LEAF_MODE = _MODE_INCOH
+_DEFAULT_BRANCH_MODE = _MODE_AUTO
 
-_MODE_LABEL  = {_MODE_COH: "coh +", _MODE_INCOH: "inc +"}
-_MODE_COLOUR = {_MODE_COH: QColor("#3b82f6"), _MODE_INCOH: QColor("#f59e0b")}
+_MODE_LABEL = {
+    _MODE_AUTO: "auto",
+    _MODE_COH: "field +",
+    _MODE_INCOH: "power +",
+}
+_MODE_COLOUR = {
+    _MODE_AUTO: QColor("#9ca3af"),
+    _MODE_COH: QColor("#3b82f6"),
+    _MODE_INCOH: QColor("#f59e0b"),
+}
+
+# Dataset-side response semantics.  ``combine_role`` describes whether the
+# stored phase may participate in a field sum.  ``assembly_response_role``
+# distinguishes a complete body response from a feature-only delta so a
+# downstream tree cannot accidentally count the same clean body twice.
+_COMBINE_ROLE_KEY = "combine_role"
+_RESPONSE_ROLE_KEY = "assembly_response_role"
+_ASSEMBLY_PROVENANCE_KEY = "assembly_provenance_json"
+_FEATURE_PROVENANCE_KEY = "feature_provenance_json"
+_SOURCE_MONOSTATIC_SHA256_KEY = "source_monostatic_sha256"
+_ASSEMBLY_BASE_SHA256_KEY = "assembly_base_sha256"
+_ASSEMBLY_BASE_RESPONSE_SHA256_KEY = "assembly_base_response_sha256"
+
+_COMBINE_ROLE_COHERENT = "coherent"
+_COMBINE_ROLE_POWER = "power"
+_RESPONSE_ROLE_BODY_PLUS_FEATURES = "body_plus_features"
+_RESPONSE_ROLE_FEATURES_ONLY_DELTA = "features_only_delta"
+_RESPONSE_ROLE_COHERENT_SUM = "coherent_field_sum"
+_RESPONSE_ROLE_INCOHERENT_SUM = "incoherent_power_sum"
+_RESPONSE_ROLE_MIXED_SUM = "coherent_field_plus_incoherent_power"
+_COHERENT_VEHICLE_FRAME_ATTESTATION = (
+    "Every Field + response was solved or translated into one vehicle frame "
+    "with a common phase center, common attitude, and common earth V/H basis."
+)
+_KNOWN_RESPONSE_ROLES = {
+    _RESPONSE_ROLE_BODY_PLUS_FEATURES,
+    _RESPONSE_ROLE_FEATURES_ONLY_DELTA,
+    _RESPONSE_ROLE_COHERENT_SUM,
+    _RESPONSE_ROLE_INCOHERENT_SUM,
+    _RESPONSE_ROLE_MIXED_SUM,
+}
+
+# Scalar metadata that remains meaningful after axis alignment and response
+# addition.  Source-only solver certificates and shape-dependent arrays are
+# deliberately absent.  A key is copied to a multi-input result only when all
+# inputs declare the same value; explicit disagreements are errors for the
+# coordinate/convention keys below rather than silently discarded evidence.
+_SEMANTIC_SCALAR_KEYS = (
+    "phase_reference",
+    "time_convention",
+    "polarization_basis",
+    "amplitude_convention",
+    "complex_field_domain",
+    "source_format",
+    "assembly_angular_coordinate_contract",
+    "elevation_coordinate_convention",
+    "sentri_elevation_convention",
+    "sentri_coordinate_mapping",
+    "sentri_polarization_mapping",
+    "sentri_phase_mapping",
+    "sentri_zero_360_seam_policy",
+    "sentri_zero_360_precedence_used",
+    "sentri_signed_180_seam_policy",
+    "sentri_signed_180_precedence_used",
+    "sentri_units_row_present",
+)
+_STRICT_SEMANTIC_KEYS = set(_SEMANTIC_SCALAR_KEYS) - {"source_format"}
+_DYNAMIC_RESULT_METADATA_KEYS = {
+    _COMBINE_ROLE_KEY,
+    "combine_role_note",
+    _RESPONSE_ROLE_KEY,
+    _ASSEMBLY_PROVENANCE_KEY,
+    _FEATURE_PROVENANCE_KEY,
+    _SOURCE_MONOSTATIC_SHA256_KEY,
+    _ASSEMBLY_BASE_SHA256_KEY,
+    _ASSEMBLY_BASE_RESPONSE_SHA256_KEY,
+    "coherent_metadata_attestation_json",
+    "response_role_validation",
+    "rcs_amp_real",
+    "rcs_amp_imag",
+    "raw_complex_amplitude_preserved",
+}
 
 
 def _item_purpose(item: QTreeWidgetItem) -> str:
@@ -244,6 +327,17 @@ def _apply_mode_badge(item: QTreeWidgetItem, mode: str | None) -> None:
         return
     item.setText(1, _MODE_LABEL.get(mode, ""))
     item.setForeground(1, QBrush(_MODE_COLOUR.get(mode, QColor("#9ca3af"))))
+    if item.data(0, _ROLE_TYPE) == _TYPE_BRANCH:
+        item.setToolTip(
+            _COLUMN_MODE,
+            (
+                "Auto: this branch enters its parent using the combine_role "
+                "of the response built inside it."
+                if mode == _MODE_AUTO
+                else "Explicit branch override; use Auto to adopt the built "
+                "response's declared combine_role."
+            ),
+        )
     font = item.font(1)
     font.setBold(True)
     item.setFont(1, font)
@@ -255,20 +349,673 @@ def _set_node_mode(item: QTreeWidgetItem, mode: str) -> None:
         item.setData(0, _ROLE_MODE, None)
         _apply_mode_badge(item, None)
         return
-    if mode not in (_MODE_COH, _MODE_INCOH):
-        mode = _DEFAULT_MODE
+    node_type = item.data(0, _ROLE_TYPE)
+    allowed = (
+        (_MODE_AUTO, _MODE_COH, _MODE_INCOH)
+        if node_type == _TYPE_BRANCH
+        else (_MODE_COH, _MODE_INCOH)
+    )
+    if mode not in allowed:
+        mode = (
+            _DEFAULT_BRANCH_MODE
+            if node_type == _TYPE_BRANCH
+            else _DEFAULT_LEAF_MODE
+        )
     item.setData(0, _ROLE_MODE, mode)
     _apply_mode_badge(item, mode)
 
 
 def _node_mode(item: QTreeWidgetItem) -> str:
-    """Read a non-root node's add-mode. Defaults to coherent."""
+    """Read one persisted add mode with type-appropriate safe defaults."""
     if _is_preview_item(item):
         raise ValueError("preview-only nodes do not have an assembly add mode")
     raw = item.data(0, _ROLE_MODE)
+    node_type = item.data(0, _ROLE_TYPE)
     if raw in (_MODE_COH, _MODE_INCOH):
         return raw
-    return _DEFAULT_MODE
+    if node_type == _TYPE_BRANCH and raw == _MODE_AUTO:
+        return raw
+    return (
+        _DEFAULT_BRANCH_MODE
+        if node_type == _TYPE_BRANCH
+        else _DEFAULT_LEAF_MODE
+    )
+
+
+def _scalar_metadata_value(raw, *, key: str):
+    """Return one JSON-safe scalar metadata value or reject malformed data."""
+
+    array = np.asarray(raw)
+    if array.size != 1:
+        raise ValueError(f"metadata {key!r} must contain exactly one value")
+    value = array.reshape(-1)[0]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"metadata {key!r} is not valid UTF-8") from exc
+    if not isinstance(value, (str, bool, int, float)) and value is not None:
+        raise ValueError(f"metadata {key!r} must be a scalar string/number/bool")
+    return value
+
+
+def _canonical_metadata_value(key: str, value):
+    """Canonical comparison form without inventing a declaration."""
+
+    if isinstance(value, str):
+        text = " ".join(value.split())
+        if key == "time_convention":
+            # RcsGrid owns the public convention normalizer.  This local form
+            # handles the two spellings Assembly itself emits without making
+            # the tree dependent on a private instance merely to compare text.
+            compact = (
+                text.casefold()
+                .replace("ω", "omega")
+                .replace("*", "")
+                .replace(" ", "")
+            )
+            for positive in ("exp(+jomegat)", "exp(jomegat)", "exp(+jwt)", "exp(jwt)"):
+                if positive in compact:
+                    return "+jwt"
+            for negative in ("exp(-jomegat)", "exp(-jwt)"):
+                if negative in compact:
+                    return "-jwt"
+        return text.casefold()
+    return value
+
+
+def _declared_extra_scalar(grid, key: str):
+    """Read one scalar from units/extra and refuse internal contradictions."""
+
+    declarations = []
+    for container in (getattr(grid, "units", None) or {}, getattr(grid, "extra", None) or {}):
+        if key in container:
+            declarations.append(_scalar_metadata_value(container[key], key=key))
+    nonblank = [
+        value for value in declarations
+        if not isinstance(value, str) or bool(value.strip())
+    ]
+    canonical = {_canonical_metadata_value(key, value) for value in nonblank}
+    if len(canonical) > 1:
+        raise ValueError(f"dataset contains contradictory {key} metadata")
+    return nonblank[0] if nonblank else None
+
+
+def _declared_combine_role(grid) -> str | None:
+    raw = _declared_extra_scalar(grid, _COMBINE_ROLE_KEY)
+    if raw is None:
+        return None
+    role = str(raw).strip().lower()
+    if role not in {_COMBINE_ROLE_COHERENT, _COMBINE_ROLE_POWER}:
+        raise ValueError(
+            f"unknown combine_role {role!r}; expected 'coherent' or 'power'"
+        )
+    return role
+
+
+def _declared_response_role(grid) -> str | None:
+    raw = _declared_extra_scalar(grid, _RESPONSE_ROLE_KEY)
+    if raw is None:
+        return None
+    role = str(raw).strip().lower()
+    if role not in _KNOWN_RESPONSE_ROLES:
+        raise ValueError(
+            f"unknown assembly_response_role {role!r}; file must be regenerated "
+            "or its response semantics reviewed"
+        )
+    return role
+
+
+def _mode_for_grid(grid) -> str:
+    """Adopt an explicit file role; untyped responses default to power-add."""
+
+    role = _declared_combine_role(grid) if grid is not None else None
+    return _MODE_COH if role == _COMBINE_ROLE_COHERENT else _MODE_INCOH
+
+
+def _resolved_node_mode(item: QTreeWidgetItem, built_grid) -> str:
+    """Resolve branch Auto from its built response; leaves never use Auto."""
+
+    mode = _node_mode(item)
+    if mode != _MODE_AUTO:
+        return mode
+    if item.data(0, _ROLE_TYPE) != _TYPE_BRANCH:
+        return _DEFAULT_LEAF_MODE
+    return _mode_for_grid(built_grid)
+
+
+def _validate_hash(value, *, context: str) -> str:
+    digest = str(value or "").strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError(f"{context} must be a 64-character SHA-256 hex digest")
+    return digest
+
+
+def _declared_base_response_hash(grid) -> str | None:
+    raw = _declared_extra_scalar(grid, _ASSEMBLY_BASE_RESPONSE_SHA256_KEY)
+    if raw is None:
+        return None
+    return _validate_hash(raw, context=_ASSEMBLY_BASE_RESPONSE_SHA256_KEY)
+
+
+def _assembly_response_physics_sha256(grid) -> str:
+    """Match GHOST's package-independent clean-response physics digest."""
+
+    channel_indices = {}
+    for index, raw in enumerate(np.asarray(grid.polarizations).ravel()):
+        value = str(raw).strip().upper()
+        canonical = (
+            "VV" if value in {"VV", "V", "VERTICAL"}
+            else "HH" if value in {"HH", "H", "HORIZONTAL"}
+            else "VH" if value in {"VH", "HV"}
+            else value
+        )
+        if canonical not in {"VV", "HH", "VH"}:
+            raise ValueError(
+                "clean Assembly base response physics digest requires exactly "
+                "VV, HH, and reciprocal VH/HV channels"
+            )
+        if canonical in channel_indices:
+            raise ValueError(
+                f"duplicate polarization alias for {canonical} in Assembly base"
+            )
+        channel_indices[canonical] = index
+    if set(channel_indices) != {"VV", "HH", "VH"}:
+        raise ValueError(
+            "clean Assembly base response physics digest requires exactly VV, "
+            "HH, and reciprocal VH/HV channels"
+        )
+    channels = ["VV", "HH", "VH"]
+    order = [channel_indices[channel] for channel in channels]
+
+    real = (grid.extra or {}).get("rcs_amp_real")
+    imag = (grid.extra or {}).get("rcs_amp_imag")
+    if real is None or imag is None:
+        raise ValueError(
+            "matching a clean body to a features-only delta requires its "
+            "authoritative rcs_amp_real/rcs_amp_imag arrays"
+        )
+    real = np.asarray(real, dtype=np.float64)
+    imag = np.asarray(imag, dtype=np.float64)
+    if real.shape != grid.rcs_power.shape or imag.shape != grid.rcs_power.shape:
+        raise ValueError(
+            "clean body raw amplitude arrays do not match its response grid"
+        )
+    amplitude = np.asarray(real + 1j * imag, dtype=np.complex128)[..., order]
+
+    digest = hashlib.sha256()
+    digest.update(b"ghost.assembly-base-response-physics-v1\0")
+
+    def update_array(name, value, dtype):
+        array = np.ascontiguousarray(value, dtype=dtype)
+        digest.update(str(name).encode("utf-8") + b"\0")
+        digest.update(json.dumps(array.shape).encode("ascii") + b"\0")
+        digest.update(array.dtype.str.encode("ascii") + b"\0")
+        digest.update(memoryview(array).cast("B"))
+
+    update_array("azimuths", grid.azimuths, "<f8")
+    update_array("elevations", grid.elevations, "<f8")
+    update_array("frequencies", grid.frequencies, "<f8")
+    update_array("polarizations", np.asarray(channels, dtype="U2"), "<U2")
+    update_array("complex_amplitude", amplitude, "<c16")
+    for key in (
+        "phase_reference",
+        "amplitude_convention",
+        "complex_field_domain",
+    ):
+        raw = _declared_extra_scalar(grid, key)
+        if raw is None:
+            raise ValueError(
+                f"clean Assembly base is missing required {key} metadata"
+            )
+        encoded = str(raw).encode("utf-8")
+        digest.update(key.encode("ascii") + b"\0")
+        digest.update(len(encoded).to_bytes(8, "little") + encoded)
+    return digest.hexdigest()
+
+
+def _json_metadata(grid, key: str):
+    raw = _declared_extra_scalar(grid, key)
+    if raw is None:
+        return None
+    try:
+        return json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"metadata {key!r} is not valid JSON") from exc
+
+
+def _hashes_from_record(record, key: str, *, context: str) -> set[str]:
+    """Read a scalar-or-list hash field from one durable provenance record."""
+
+    if record is None:
+        return set()
+    if not isinstance(record, dict):
+        raise ValueError("assembly_provenance_json must decode to an object")
+    raw_values = record.get(key, [])
+    if raw_values is None:
+        return set()
+    if isinstance(raw_values, str):
+        raw_values = [raw_values]
+    if not isinstance(raw_values, list):
+        raise ValueError(f"assembly provenance {key} must be a list")
+    return {
+        _validate_hash(value, context=context) for value in raw_values
+    }
+
+
+def _feature_provenance_source_hashes(grid) -> tuple[set[str], bool]:
+    """Return feature source hashes and whether legacy total semantics exist."""
+
+    feature_records = _json_metadata(grid, _FEATURE_PROVENANCE_KEY)
+    if feature_records is None:
+        return set(), False
+    if not isinstance(feature_records, list) or not all(
+        isinstance(record, dict) for record in feature_records
+    ):
+        raise ValueError(
+            "feature_provenance_json must decode to a list of objects"
+        )
+    hashes = set()
+    legacy_body_total = False
+    for record in feature_records:
+        raw_hash = record.get(_SOURCE_MONOSTATIC_SHA256_KEY)
+        if raw_hash is not None:
+            hashes.add(
+                _validate_hash(
+                    raw_hash, context="feature provenance source hash"
+                )
+            )
+        if (
+            str(record.get("schema", "")).strip()
+            == "ghost.workflow.coherent-feature-addition.v1"
+        ):
+            legacy_body_total = True
+    return hashes, legacy_body_total
+
+
+def _body_plus_features_identities(grid) -> tuple[set[str], set[str]]:
+    """Return source-file and physical-response IDs already containing a body."""
+
+    role = _declared_response_role(grid)
+    direct_sources = set()
+    for key in (_SOURCE_MONOSTATIC_SHA256_KEY, _ASSEMBLY_BASE_SHA256_KEY):
+        raw = _declared_extra_scalar(grid, key)
+        if raw is not None:
+            direct_sources.add(_validate_hash(raw, context=key))
+    if len(direct_sources) > 1:
+        raise ValueError(
+            "dataset has contradictory source_monostatic_sha256 and "
+            "assembly_base_sha256 metadata"
+        )
+    direct_response = _declared_base_response_hash(grid)
+    direct_responses = {direct_response} if direct_response else set()
+
+    assembly_record = _json_metadata(grid, _ASSEMBLY_PROVENANCE_KEY)
+    assembly_sources = _hashes_from_record(
+        assembly_record,
+        "body_plus_features_source_sha256",
+        context="assembly provenance source hash",
+    )
+    assembly_responses = _hashes_from_record(
+        assembly_record,
+        "body_plus_features_base_response_sha256",
+        context="assembly provenance body-response hash",
+    )
+    # Records written before dual-identity tracking used this field for every
+    # base-response context. It is body occupancy only when the same record
+    # also says a body is physically present.
+    if assembly_sources and not assembly_responses:
+        assembly_responses.update(
+            _hashes_from_record(
+                assembly_record,
+                "assembly_base_response_sha256",
+                context="legacy assembly base-response hash",
+            )
+        )
+
+    feature_sources, legacy_body_total = (
+        _feature_provenance_source_hashes(grid)
+    )
+    if role == _RESPONSE_ROLE_FEATURES_ONLY_DELTA:
+        return set(), set()
+
+    if role == _RESPONSE_ROLE_BODY_PLUS_FEATURES:
+        sources = direct_sources | assembly_sources | feature_sources
+        responses = direct_responses | assembly_responses
+        if len(sources) != 1 or len(responses) != 1:
+            raise ValueError(
+                "body_plus_features response must identify exactly one source "
+                "file SHA-256 and one assembly base-response SHA-256"
+            )
+        return sources, responses
+    if role in {
+        _RESPONSE_ROLE_COHERENT_SUM,
+        _RESPONSE_ROLE_INCOHERENT_SUM,
+        _RESPONSE_ROLE_MIXED_SUM,
+    }:
+        return assembly_sources, assembly_responses
+    if legacy_body_total:
+        if len(feature_sources) != 1:
+            raise ValueError(
+                "legacy body-plus-features provenance must identify exactly "
+                "one source body hash"
+            )
+        return feature_sources, direct_responses
+    # A direct source hash without an explicit delta role fails safe: it may be
+    # a legacy total, and treating it as a delta could reintroduce the body.
+    return direct_sources | assembly_sources, direct_responses | assembly_responses
+
+
+def _assembly_base_reference_hashes(grid) -> set[str]:
+    """Return every source-file base context, including feature-only deltas."""
+
+    hashes: set[str] = set()
+    for key in (_ASSEMBLY_BASE_SHA256_KEY, _SOURCE_MONOSTATIC_SHA256_KEY):
+        raw = _declared_extra_scalar(grid, key)
+        if raw is not None:
+            hashes.add(_validate_hash(raw, context=key))
+    feature_hashes, _legacy_total = _feature_provenance_source_hashes(grid)
+    hashes.update(feature_hashes)
+    assembly_record = _json_metadata(grid, _ASSEMBLY_PROVENANCE_KEY)
+    for key in (
+        "assembly_base_sha256",
+        "body_plus_features_source_sha256",
+        "feature_delta_base_sha256",
+    ):
+        hashes.update(
+            _hashes_from_record(
+                assembly_record,
+                key,
+                context=f"assembly provenance {key}",
+            )
+        )
+    role = _declared_response_role(grid)
+    if role in {
+        _RESPONSE_ROLE_BODY_PLUS_FEATURES,
+        _RESPONSE_ROLE_FEATURES_ONLY_DELTA,
+    } and len(hashes) != 1:
+        raise ValueError(
+            f"{role} response must identify exactly one consistent "
+            "assembly_base_sha256"
+        )
+    return hashes
+
+
+def _assembly_base_response_reference_hashes(grid) -> set[str]:
+    """Return every physical clean-response base context carried by a grid."""
+
+    hashes = set()
+    direct = _declared_base_response_hash(grid)
+    if direct is not None:
+        hashes.add(direct)
+    assembly_record = _json_metadata(grid, _ASSEMBLY_PROVENANCE_KEY)
+    for key in (
+        "assembly_base_response_sha256",
+        "body_plus_features_base_response_sha256",
+        "feature_delta_base_response_sha256",
+    ):
+        hashes.update(
+            _hashes_from_record(
+                assembly_record,
+                key,
+                context=f"assembly provenance {key}",
+            )
+        )
+    role = _declared_response_role(grid)
+    if role in {
+        _RESPONSE_ROLE_BODY_PLUS_FEATURES,
+        _RESPONSE_ROLE_FEATURES_ONLY_DELTA,
+    } and len(hashes) != 1:
+        raise ValueError(
+            f"{role} response must identify exactly one consistent "
+            "assembly_base_response_sha256"
+        )
+    return hashes
+
+
+def _feature_delta_context(grid) -> tuple[set[str], set[str], bool]:
+    """Return durable feature-delta base context and delta-only status."""
+
+    role = _declared_response_role(grid)
+    if role == _RESPONSE_ROLE_FEATURES_ONLY_DELTA:
+        return (
+            _assembly_base_reference_hashes(grid),
+            _assembly_base_response_reference_hashes(grid),
+            True,
+        )
+    assembly_record = _json_metadata(grid, _ASSEMBLY_PROVENANCE_KEY)
+    sources = _hashes_from_record(
+        assembly_record,
+        "feature_delta_base_sha256",
+        context="assembly feature-delta source hash",
+    )
+    responses = _hashes_from_record(
+        assembly_record,
+        "feature_delta_base_response_sha256",
+        context="assembly feature-delta base-response hash",
+    )
+    delta_only = False
+    if assembly_record is not None:
+        raw_delta_only = assembly_record.get("feature_delta_only", False)
+        if type(raw_delta_only) is not bool:
+            raise ValueError(
+                "assembly provenance feature_delta_only must be boolean"
+            )
+        delta_only = raw_delta_only
+    if (
+        not sources
+        and not responses
+        and role in {
+            _RESPONSE_ROLE_COHERENT_SUM,
+            _RESPONSE_ROLE_INCOHERENT_SUM,
+            _RESPONSE_ROLE_MIXED_SUM,
+        }
+    ):
+        occupied_sources = _hashes_from_record(
+            assembly_record,
+            "body_plus_features_source_sha256",
+            context="legacy assembly occupied-body source hash",
+        )
+        feature_sources, _legacy_total = (
+            _feature_provenance_source_hashes(grid)
+        )
+        direct_source = _declared_extra_scalar(
+            grid, _ASSEMBLY_BASE_SHA256_KEY
+        )
+        direct_response = _declared_base_response_hash(grid)
+        if (
+            not occupied_sources
+            and direct_response is not None
+            and feature_sources
+        ):
+            if len(feature_sources) != 1:
+                raise ValueError(
+                    "legacy feature-delta provenance must identify exactly "
+                    "one base source hash"
+                )
+            if direct_source is not None:
+                validated_source = _validate_hash(
+                    direct_source,
+                    context="legacy feature-delta base source hash",
+                )
+                if feature_sources != {validated_source}:
+                    raise ValueError(
+                        "legacy feature-delta provenance has contradictory "
+                        "base source hashes"
+                    )
+            sources = set(feature_sources)
+            responses = {direct_response}
+            delta_only = True
+    if delta_only and (len(sources) != 1 or len(responses) != 1):
+        raise ValueError(
+            "a feature-delta-only derived response must retain exactly one "
+            "source-file and one physical base-response context"
+        )
+    return sources, responses, delta_only
+
+
+def _feature_component_signatures(grid) -> set[str]:
+    """Collect durable placed-component identities from source/assembly JSON."""
+
+    signatures: set[str] = set()
+
+    def visit(value):
+        if isinstance(value, dict):
+            signature = value.get("component_signature")
+            if signature is not None:
+                signatures.add(
+                    _validate_hash(signature, context="feature component signature")
+                )
+            listed = value.get("feature_component_signatures")
+            if listed is not None:
+                if not isinstance(listed, list):
+                    raise ValueError(
+                        "assembly feature_component_signatures must be a list"
+                    )
+                signatures.update(
+                    _validate_hash(item, context="assembly component signature")
+                    for item in listed
+                )
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for key in (_FEATURE_PROVENANCE_KEY, _ASSEMBLY_PROVENANCE_KEY):
+        decoded = _json_metadata(grid, key)
+        if decoded is not None:
+            visit(decoded)
+    return signatures
+
+
+def _assert_no_duplicate_feature_components(grids) -> set[str]:
+    seen: dict[str, int] = {}
+    for index, grid in enumerate(grids, start=1):
+        for signature in _feature_component_signatures(grid):
+            previous = seen.get(signature)
+            if previous is not None:
+                raise ValueError(
+                    "refusing to combine responses containing the same placed "
+                    f"feature component ({signature[:12]}…; inputs {previous} "
+                    f"and {index}). Use the body total or its feature delta once, "
+                    "not both."
+                )
+            seen[signature] = index
+    return set(seen)
+
+
+def _assert_no_shared_body_totals(grids) -> tuple[set[str], set[str]]:
+    """Validate body/delta provenance and return dual body occupancy IDs."""
+
+    grids = list(grids)
+    occupied_sources: dict[str, int] = {}
+    occupied_responses: dict[str, int] = {}
+    delta_sources: set[str] = set()
+    delta_responses: set[str] = set()
+    delta_only_indices: set[int] = set()
+    hashable_unoccupied = []
+
+    def occupy(mapping, digest, index, *, identity_label):
+        previous = mapping.get(digest)
+        if previous is not None:
+            raise ValueError(
+                "refusing to combine two responses containing the same clean "
+                f"body by {identity_label} ({digest[:12]}…; inputs {previous} "
+                f"and {index}). This would count the body twice. Combine the "
+                "clean body once with features-only deltas instead."
+            )
+        mapping[digest] = index
+
+    for index, grid in enumerate(grids, start=1):
+        sources, responses = _body_plus_features_identities(grid)
+        for digest in sources:
+            occupy(
+                occupied_sources,
+                digest,
+                index,
+                identity_label="source-file SHA-256",
+            )
+        for digest in responses:
+            occupy(
+                occupied_responses,
+                digest,
+                index,
+                identity_label="physical base-response SHA-256",
+            )
+
+        feature_sources, feature_responses, delta_only = (
+            _feature_delta_context(grid)
+        )
+        if delta_only:
+            delta_sources.update(feature_sources)
+            delta_responses.update(feature_responses)
+            delta_only_indices.add(index)
+        elif not sources and not responses:
+            hashable_unoccupied.append((index, grid))
+
+    if len(delta_sources) > 1 or len(delta_responses) > 1:
+        raise ValueError(
+            "refusing to combine feature deltas from different Assembly base "
+            "source or physical-response hashes"
+        )
+    if bool(delta_sources) != bool(delta_responses):
+        raise ValueError(
+            "feature-delta provenance must retain both source-file and "
+            "physical base-response hashes"
+        )
+
+    # If tagged body occupancy exists, compare every otherwise-untagged
+    # authoritative 3-D response against it. This catches clean-body +
+    # body-plus-features totals even after either file was repackaged/resaved.
+    # The same proof supplies the body identity required by a delta-only input.
+    need_physics_proof = bool(occupied_responses or delta_responses)
+    proof_errors = []
+    for index, grid in hashable_unoccupied if need_physics_proof else ():
+        try:
+            candidate = _assembly_response_physics_sha256(grid)
+        except ValueError as exc:
+            proof_errors.append(f"input {index}: {exc}")
+            continue
+        occupy(
+            occupied_responses,
+            candidate,
+            index,
+            identity_label="physical response SHA-256",
+        )
+
+    # Delta-only responses do not contain their body. If any other input is
+    # present, prove that its exact base occurs once in the assembled response.
+    if delta_sources and len(delta_only_indices) != len(grids):
+        expected_source = next(iter(delta_sources))
+        expected_response = next(iter(delta_responses))
+        if (
+            occupied_sources
+            and expected_source not in occupied_sources
+            and expected_response not in occupied_responses
+        ):
+            raise ValueError(
+                "refusing to combine responses from different assembly base "
+                "hashes (the feature-delta source does not match the body)"
+            )
+        if expected_response not in occupied_responses:
+            detail = (
+                "; ".join(proof_errors[:2])
+                if proof_errors
+                else "no response physics hash matched"
+            )
+            raise ValueError(
+                "features-only deltas require exactly one proven matching "
+                "clean-body response; " + detail
+            )
+        occupied_sources.setdefault(
+            expected_source,
+            occupied_responses[expected_response],
+        )
+
+    return set(occupied_sources), set(occupied_responses)
 
 # Icon pixel size
 _ICON = 14
@@ -490,7 +1237,33 @@ def _dict_to_item(d: dict) -> QTreeWidgetItem:
     if node_type == _TYPE_ROOT:
         _apply_mode_badge(item, None)
     else:
-        _set_node_mode(item, d.get("mode", _DEFAULT_MODE))
+        if "mode" in d:
+            mode = d["mode"]
+            allowed_modes = (
+                (_MODE_AUTO, _MODE_COH, _MODE_INCOH)
+                if node_type == _TYPE_BRANCH
+                else (_MODE_COH, _MODE_INCOH)
+            )
+            if mode not in allowed_modes:
+                raise ValueError(
+                    f"assembly response node {d.get('name')!r} has invalid "
+                    f"add mode {mode!r}"
+                )
+        elif node_type == _TYPE_LEAF:
+            mode = _mode_for_grid(item.data(0, _ROLE_GRID))
+        else:
+            mode = _DEFAULT_BRANCH_MODE
+        if (
+            node_type == _TYPE_LEAF
+            and mode == _MODE_COH
+            and _declared_combine_role(item.data(0, _ROLE_GRID))
+            == _COMBINE_ROLE_POWER
+        ):
+            raise ValueError(
+                f"assembly response leaf {d.get('name')!r} requests coherent "
+                "Field + but its dataset declares combine_role='power'"
+            )
+        _set_node_mode(item, mode)
 
     for child in d.get("children", []):
         item.addChild(_dict_to_item(child))
@@ -626,6 +1399,15 @@ class AssemblyTree(QTreeWidget):
         self.setColumnWidth(2, 48)
         self.setColumnWidth(3, 54)
         self.headerItem().setToolTip(
+            _COLUMN_MODE,
+            "How this response enters its parent: Field + is a complex sum and "
+            "requires a common phase center, time convention, polarization "
+            "basis, and coordinate frame. Power + is the safe default for an "
+            "untyped leaf. A branch defaults to Auto, which adopts the "
+            "combine_role of the response built inside that branch; use the "
+            "context menu only for an explicit branch override.",
+        )
+        self.headerItem().setToolTip(
             _COLUMN_INCLUDED,
             "Include this response node in Build Platform. Uncheck a body or "
             "feature branch to compare assembly variants without deleting it.",
@@ -662,6 +1444,18 @@ class AssemblyTree(QTreeWidget):
         self.itemChanged.connect(self._on_item_changed)
         self._branch_drag_item: QTreeWidgetItem | None = None
         self._pending_branch_data: list | None = None
+
+    def edit(self, index, trigger, event):
+        """Allow direct text editing only for the visible Name column.
+
+        Mode is a rendered view of ``_ROLE_MODE`` and must only change through
+        the explicit context-menu controls; editing its text would otherwise
+        make the badge disagree with the role used by physics.
+        """
+
+        if index.isValid() and index.column() != _COLUMN_NAME:
+            return False
+        return super().edit(index, trigger, event)
 
     def clear(self) -> None:
         """Clear all nodes after notifying owners of runtime-only previews."""
@@ -1106,7 +1900,16 @@ class AssemblyTree(QTreeWidget):
         _set_visibility_state(item, True)
         _apply_leaf_style(item, grid is not None)
         item.setIcon(0, _node_icon(_TYPE_LEAF, has_data=(grid is not None)))
-        _set_node_mode(item, _DEFAULT_MODE)
+        try:
+            mode = _mode_for_grid(grid)
+        except ValueError as exc:
+            mode = _MODE_INCOH
+            item.setToolTip(
+                _COLUMN_MODE,
+                f"Unsafe response metadata: {exc}. Build Platform will refuse "
+                "this dataset until its role metadata is repaired.",
+            )
+        _set_node_mode(item, mode)
         return item
 
     def _make_node(
@@ -1139,7 +1942,7 @@ class AssemblyTree(QTreeWidget):
         if node_type == _TYPE_ROOT:
             _apply_mode_badge(item, None)
         else:
-            _set_node_mode(item, _DEFAULT_MODE)
+            _set_node_mode(item, _DEFAULT_BRANCH_MODE)
         if parent is not None:
             _inherit_container_states(item, parent)
             parent.addChild(item)
@@ -1277,6 +2080,7 @@ class AssemblyTree(QTreeWidget):
         # Per-node add-mode setters (only meaningful for non-root nodes).
         act_set_coh = None
         act_set_inc = None
+        act_set_auto = None
         if (
             item is not None
             and not preview_only
@@ -1284,12 +2088,35 @@ class AssemblyTree(QTreeWidget):
         ):
             menu.addSeparator()
             current = _node_mode(item)
-            act_set_coh = menu.addAction("Set Add Mode: Coherent (+)")
-            act_set_inc = menu.addAction("Set Add Mode: Incoherent (+)")
+            if item.data(0, _ROLE_TYPE) == _TYPE_BRANCH:
+                act_set_auto = menu.addAction(
+                    "Set Add Mode: Auto (adopt built response role)"
+                )
+                act_set_auto.setCheckable(True)
+                act_set_auto.setChecked(current == _MODE_AUTO)
+            act_set_coh = menu.addAction(
+                "Set Add Mode: Pre-aligned coherent field (+)"
+            )
+            act_set_inc = menu.addAction("Set Add Mode: Incoherent power (+)")
             act_set_coh.setCheckable(True)
             act_set_inc.setCheckable(True)
             act_set_coh.setChecked(current == _MODE_COH)
             act_set_inc.setChecked(current == _MODE_INCOH)
+            if item.data(0, _ROLE_TYPE) == _TYPE_LEAF:
+                try:
+                    declared_role = _declared_combine_role(
+                        item.data(0, _ROLE_GRID)
+                    )
+                except ValueError as exc:
+                    act_set_coh.setEnabled(False)
+                    act_set_coh.setToolTip(str(exc))
+                else:
+                    if declared_role == _COMBINE_ROLE_POWER:
+                        act_set_coh.setEnabled(False)
+                        act_set_coh.setToolTip(
+                            "This dataset explicitly declares phase-unknown "
+                            "power and cannot enter a coherent field sum."
+                        )
 
         chosen = menu.exec(self.viewport().mapToGlobal(pos))
         if chosen == act_root:
@@ -1315,6 +2142,8 @@ class AssemblyTree(QTreeWidget):
             self.collapseItem(item)
         elif chosen == act_rename and item is not None:
             self.editItem(item, 0)
+        elif chosen == act_set_auto and item is not None:
+            _set_node_mode(item, _MODE_AUTO)
         elif chosen == act_set_coh and item is not None:
             _set_node_mode(item, _MODE_COH)
         elif chosen == act_set_inc and item is not None:
@@ -1455,8 +2284,9 @@ class AssemblyTreePanel(QWidget):
         self.btn_build = QToolButton(text="Build Platform")
         self.btn_build.setToolTip(
             "Recursively combine the selected root/branch into a single dataset, "
-            "honouring Use checkboxes and each node's coherent / incoherent "
-            "add-mode, then aligning axes using the strategy chosen in the dialog."
+            "honouring Use checkboxes and each node's pre-aligned field / "
+            "incoherent power add-mode, then aligning axes using the strategy "
+            "chosen in the dialog."
         )
         row4.addWidget(self.btn_build)
         row4.addStretch(1)
@@ -1510,7 +2340,9 @@ class AssemblyTreePanel(QWidget):
             serialized = _item_to_dict(root.child(index))
             if serialized is not None:
                 nodes.append(serialized)
-        return {"version": 4, "tree": nodes}
+        # Version 5 adds the explicit branch-only Auto add mode. Older files
+        # remain readable; a branch with no mode adopts Auto on load.
+        return {"version": 5, "tree": nodes}
 
     def _confirm_unsaved_changes(
         self,
@@ -1710,9 +2542,14 @@ class AssemblyTreePanel(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
         axis_mode = dlg.axis_mode()
+        coherent_metadata_attested = dlg.coherent_metadata_attested()
 
         try:
-            grid, history = build_assembly_grid(item, axis_mode=axis_mode)
+            grid, history = build_assembly_grid(
+                item,
+                axis_mode=axis_mode,
+                coherent_metadata_attested=coherent_metadata_attested,
+            )
         except Exception as exc:
             self._notify(f"Build failed: {exc}")
             return
@@ -1748,9 +2585,9 @@ class AssemblyTreePanel(QWidget):
             if not isinstance(data, dict):
                 raise ValueError("Assembly file root must be a JSON object.")
             version = data.get("version", 1)
-            if type(version) is not int or not 1 <= version <= 4:
+            if type(version) is not int or not 1 <= version <= 5:
                 raise ValueError(
-                    "Assembly file 'version' must be an integer from 1 through 4."
+                    "Assembly file 'version' must be an integer from 1 through 5."
                 )
             raw_nodes = data.get("tree")
             if not isinstance(raw_nodes, list):
@@ -1803,7 +2640,8 @@ class BuildDialog(QDialog):
             "Intersect — keep only axis values present in every part (no interpolation, lossless)."
         )
         self._radio_interp = QRadioButton(
-            "Interpolate — bilinear-interpolate each part onto a common grid (no extrapolation)."
+            "Interpolate — power-only builds; resample onto a common grid "
+            "(no extrapolation)."
         )
         self._radio_strict = QRadioButton(
             "Strict — require every part to share exactly the same axes (error if any differs)."
@@ -1816,6 +2654,20 @@ class BuildDialog(QDialog):
         layout.addWidget(self._radio_interp)
         layout.addWidget(self._radio_strict)
 
+        self.chk_coherent_attestation = QCheckBox(
+            "I attest every Field + response was solved or translated into "
+            "the same vehicle frame, with one phase center, attitude, and "
+            "V/H basis."
+        )
+        self.chk_coherent_attestation.setToolTip(
+            "Required whenever a build contains two or more Field + inputs, "
+            "even when their metadata labels match. This confirms physical "
+            "registration in one vehicle frame, not merely matching text. "
+            "Explicitly conflicting declarations can never be overridden; "
+            "the confirmation is recorded in provenance and history."
+        )
+        layout.addWidget(self.chk_coherent_attestation)
+
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
@@ -1827,6 +2679,9 @@ class BuildDialog(QDialog):
         if self._radio_strict.isChecked():
             return "strict"
         return "intersect"
+
+    def coherent_metadata_attested(self) -> bool:
+        return bool(self.chk_coherent_attestation.isChecked())
 
 
 def _intersect_numeric_axes(arrays, tol: float = 1e-6) -> np.ndarray:
@@ -1896,16 +2751,130 @@ def _axes_only_grid(az, el, f, pol, reference=None):
     )
 
 
-def _align_grids_for_assembly(grids, axis_mode: str) -> list:
+def _coherent_target_indices(grid, target) -> tuple[list[int], ...]:
+    """Map one target grid to source indices using GRIM's physical tolerances."""
+
+    from grim_dataset import _ANGLE_UNITS, _FREQUENCY_UNITS
+
+    az_unit = grid._supported_unit(
+        "azimuth", _ANGLE_UNITS, "deg"
+    )
+    el_unit = grid._supported_unit(
+        "elevation", _ANGLE_UNITS, "deg"
+    )
+    canonical_frequency = grid._supported_unit(
+        "frequency", _FREQUENCY_UNITS, "GHz"
+    )
+    tolerances = (
+        float(np.deg2rad(1.0e-6)) if az_unit == "rad" else 1.0e-6,
+        float(np.deg2rad(1.0e-6)) if el_unit == "rad" else 1.0e-6,
+        {"Hz": 1.0e3, "kHz": 1.0, "MHz": 1.0e-3, "GHz": 1.0e-6}[
+            canonical_frequency
+        ],
+        0.0,
+    )
+    indices = []
+    for source_axis, target_axis, tolerance, label in zip(
+        (
+            grid.azimuths,
+            grid.elevations,
+            grid.frequencies,
+            grid.polarizations,
+        ),
+        (
+            target.azimuths,
+            target.elevations,
+            target.frequencies,
+            target.polarizations,
+        ),
+        tolerances,
+        ("azimuth", "elevation", "frequency", "polarization"),
+    ):
+        matched = grid._indices_for_axis_values(
+            source_axis, target_axis, tol=tolerance
+        )
+        if matched is None or len(matched) != len(target_axis):
+            raise ValueError(
+                f"could not map coherent {label} samples to the assembly target"
+            )
+        indices.append(matched)
+    return tuple(indices)
+
+
+def _align_coherent_grid(grid, target, *, mode: str):
+    """Align authoritative complex field samples without float32 round-trip."""
+
+    from grim_dataset import RcsGrid
+
+    if mode == "intersect":
+        indices = _coherent_target_indices(grid, target)
+        field = grid.rcs[np.ix_(*indices)]
+    elif mode == "interp":
+        polarization_indices = grid._indices_for_axis_values(
+            grid.polarizations, target.polarizations, tol=0.0
+        )
+        if (
+            polarization_indices is None
+            or len(polarization_indices) != len(target.polarizations)
+        ):
+            raise ValueError("polarization axis mismatch for coherent interp")
+        field = grid.rcs[..., polarization_indices]
+        for axis, old, new, label in (
+            (0, grid.azimuths, target.azimuths, "azimuth"),
+            (1, grid.elevations, target.elevations, "elevation"),
+            (2, grid.frequencies, target.frequencies, "frequency"),
+        ):
+            grid._check_axis_sorted(old, label)
+            field = grid._interp_complex_axis(field, old, new, axis)
+    else:
+        raise ValueError(f"unsupported coherent alignment mode {mode!r}")
+    aligned = RcsGrid(
+        target.azimuths,
+        target.elevations,
+        target.frequencies,
+        target.polarizations,
+        rcs=np.asarray(field, dtype=np.complex128),
+        units=copy.deepcopy(grid.units or {}),
+    )
+    # RcsGrid stores its public interchange representation as power/phase.
+    # Keep the exact aligned field out-of-band for this one in-memory build so
+    # a near-null does not round-trip through angle/square-root reconstruction.
+    aligned._assembly_authoritative_complex = np.asarray(
+        field, dtype=np.complex128
+    )
+    return aligned
+
+
+def _align_grids_for_assembly(
+    grids,
+    axis_mode: str,
+    *,
+    coherent_count: int | None = None,
+) -> list:
     """Align every grid in `grids` to a shared set of axes per `axis_mode`.
 
     strict: validate every grid has identical axes; no resampling.
     intersect: take the pairwise intersection of every axis; no interpolation.
-    interp: build a common grid clipped to the overlapping range; bilinear
-            (linear-per-axis) interpolation onto it.
+    interp: build a common grid clipped to the overlapping range and resample
+            power-only contributors. Coherent Field + interpolation is refused
+            because it can change field phase/amplitude relationships.
     """
     if not grids:
         return []
+    if coherent_count is None:
+        coherent_count = 0
+    if (
+        type(coherent_count) is not int
+        or coherent_count < 0
+        or coherent_count > len(grids)
+    ):
+        raise ValueError("coherent_count must index the leading Field + grids")
+    if axis_mode == "interp" and coherent_count:
+        raise ValueError(
+            "Interpolate is disabled when a build contains Field + responses. "
+            "Use Strict for identical sampling or Intersect for shared exact "
+            "axis values; coherent fields are never resampled."
+        )
     ref = grids[0]
     if axis_mode == "strict":
         for g in grids[1:]:
@@ -1922,7 +2891,12 @@ def _align_grids_for_assembly(grids, axis_mode: str) -> list:
                 "intersect: parts have no common azimuth/elevation/frequency/polarization values"
             )
         target = _axes_only_grid(az, el, f, pol, ref)
-        return [g.align_to(target, mode="intersect") for g in grids]
+        return [
+            _align_coherent_grid(grid, target, mode="intersect")
+            if index < coherent_count
+            else grid.align_to(target, mode="intersect")
+            for index, grid in enumerate(grids)
+        ]
 
     if axis_mode == "interp":
         az, el, f, pol = _interp_target_axes(grids)
@@ -1934,18 +2908,310 @@ def _align_grids_for_assembly(grids, axis_mode: str) -> list:
         # Numeric interpolation requires identical categorical axes. Subset
         # and reorder polarization first without discarding the source numeric
         # samples needed to support interpolation.
-        prepared = [
-            g
-            if np.array_equal(g.polarizations, pol)
-            else g.axis_crop(polarizations=pol)
-            for g in grids
-        ]
-        return [g.align_to(target, mode="interp") for g in prepared]
+        aligned = []
+        for index, grid in enumerate(grids):
+            if index < coherent_count:
+                aligned.append(_align_coherent_grid(grid, target, mode="interp"))
+                continue
+            prepared = (
+                grid
+                if np.array_equal(grid.polarizations, pol)
+                else grid.axis_crop(polarizations=pol)
+            )
+            aligned.append(prepared.align_to(target, mode="interp"))
+        return aligned
 
     raise ValueError(f"unknown axis_mode {axis_mode!r}")
 
 
-def _combine_children(coh_grids, incoh_grids, ref):
+def _validate_coherent_sources(grids, *, metadata_attested: bool) -> None:
+    if not isinstance(metadata_attested, (bool, np.bool_)):
+        raise TypeError("coherent_metadata_attested must be True or False")
+    for grid in grids:
+        if _declared_combine_role(grid) == _COMBINE_ROLE_POWER:
+            raise ValueError(
+                "a response explicitly tagged combine_role='power' cannot be "
+                "used as a coherent pre-aligned Field + child"
+            )
+    if len(grids) < 2:
+        return
+    if not metadata_attested:
+        raise ValueError(
+            "two or more Field + responses require explicit attestation that "
+            "every coherent child was solved or translated into one common "
+            "vehicle frame, phase center, attitude, and earth V/H basis; "
+            "matching metadata labels alone are not proof of registration"
+        )
+    reference = grids[0]
+    for grid in grids[1:]:
+        reference._assert_coherent_metadata_compatible(
+            grid, metadata_attested=metadata_attested
+        )
+
+
+def _result_response_role(
+    source_grids,
+    occupied_sources,
+    occupied_responses,
+    *,
+    has_coh,
+    has_incoh,
+):
+    if has_coh and has_incoh:
+        return _RESPONSE_ROLE_MIXED_SUM
+    if has_incoh:
+        return _RESPONSE_ROLE_INCOHERENT_SUM
+    explicit_roles = [_declared_response_role(grid) for grid in source_grids]
+    body_count = max(len(occupied_sources), len(occupied_responses))
+    if body_count:
+        return (
+            _RESPONSE_ROLE_BODY_PLUS_FEATURES
+            if body_count == 1
+            else _RESPONSE_ROLE_COHERENT_SUM
+        )
+    if explicit_roles and all(
+        role == _RESPONSE_ROLE_FEATURES_ONLY_DELTA for role in explicit_roles
+    ):
+        return _RESPONSE_ROLE_FEATURES_ONLY_DELTA
+    return _RESPONSE_ROLE_COHERENT_SUM
+
+
+def _combined_semantic_extra(
+    source_grids,
+    source_coh_grids,
+    *,
+    has_coh: bool,
+    has_incoh: bool,
+    coherent_metadata_attested: bool,
+    body_occupancy=None,
+    component_signatures=None,
+):
+    """Build honest scalar metadata for a derived assembly response."""
+
+    source_grids = list(source_grids)
+    extra = {}
+    coherent_keys = {
+        "phase_reference",
+        "time_convention",
+        "amplitude_convention",
+        "complex_field_domain",
+    }
+    for key in _SEMANTIC_SCALAR_KEYS:
+        relevant = source_coh_grids if key in coherent_keys else source_grids
+        if not relevant:
+            continue
+        values = [_declared_extra_scalar(grid, key) for grid in relevant]
+        declared = [value for value in values if value is not None]
+        canonical = {
+            _canonical_metadata_value(key, value) for value in declared
+        }
+        if len(canonical) > 1 and key in _STRICT_SEMANTIC_KEYS:
+            raise ValueError(
+                f"refusing to combine parts with contradictory {key} metadata"
+            )
+        # A shared result declaration is valid only when every contributing
+        # source made it. Unknown inputs do not inherit another input's claim.
+        if len(declared) == len(relevant) and len(canonical) == 1:
+            extra[key] = copy.deepcopy(declared[0])
+
+    # No unique phase/time/amplitude exists after any incoherent contribution.
+    if has_incoh:
+        for key in coherent_keys:
+            extra.pop(key, None)
+
+    if body_occupancy is None:
+        occupied_sources, occupied_responses = (
+            _assert_no_shared_body_totals(source_grids)
+        )
+    else:
+        occupied_sources = set(body_occupancy[0])
+        occupied_responses = set(body_occupancy[1])
+    if component_signatures is None:
+        component_signatures = _assert_no_duplicate_feature_components(
+            source_grids
+        )
+    else:
+        component_signatures = set(component_signatures)
+    base_source_hashes = set()
+    base_response_hashes = set()
+    delta_source_hashes = set()
+    delta_response_hashes = set()
+    delta_only_flags = []
+    for grid in source_grids:
+        base_source_hashes.update(_assembly_base_reference_hashes(grid))
+        base_response_hashes.update(
+            _assembly_base_response_reference_hashes(grid)
+        )
+        delta_sources, delta_responses, delta_only = (
+            _feature_delta_context(grid)
+        )
+        delta_source_hashes.update(delta_sources)
+        delta_response_hashes.update(delta_responses)
+        delta_only_flags.append(delta_only)
+    feature_delta_only = bool(delta_only_flags) and all(delta_only_flags)
+    response_role = _result_response_role(
+        source_grids,
+        occupied_sources,
+        occupied_responses,
+        has_coh=has_coh,
+        has_incoh=has_incoh,
+    )
+    combine_role = (
+        _COMBINE_ROLE_COHERENT
+        if has_coh and not has_incoh
+        else _COMBINE_ROLE_POWER
+    )
+    extra[_COMBINE_ROLE_KEY] = combine_role
+    extra["combine_role_note"] = (
+        "pre-aligned complex field sum"
+        if combine_role == _COMBINE_ROLE_COHERENT
+        else "incoherent power result; no common output phase"
+    )
+    extra[_RESPONSE_ROLE_KEY] = response_role
+    if (
+        response_role == _RESPONSE_ROLE_BODY_PLUS_FEATURES
+        and len(occupied_sources) == 1
+    ):
+        digest = next(iter(occupied_sources))
+        extra[_SOURCE_MONOSTATIC_SHA256_KEY] = digest
+        extra[_ASSEMBLY_BASE_SHA256_KEY] = digest
+    elif response_role == _RESPONSE_ROLE_FEATURES_ONLY_DELTA:
+        if len(base_source_hashes) != 1:
+            raise ValueError(
+                "features_only_delta sum must retain exactly one assembly base hash"
+            )
+        extra[_ASSEMBLY_BASE_SHA256_KEY] = next(iter(base_source_hashes))
+    elif delta_source_hashes and len(base_source_hashes) == 1:
+        # Power+ or mixed transitions must not erase the base context of a
+        # feature delta; otherwise a later unrelated body could accept it.
+        extra[_ASSEMBLY_BASE_SHA256_KEY] = next(iter(base_source_hashes))
+    if (
+        len(base_response_hashes) == 1
+        and max(len(occupied_sources), len(occupied_responses)) <= 1
+    ):
+        extra[_ASSEMBLY_BASE_RESPONSE_SHA256_KEY] = next(
+            iter(base_response_hashes)
+        )
+
+    # Preserve source provenance for a one-input conversion. For a real
+    # multi-input build the aggregate record below replaces, rather than
+    # impersonates, one child's feature/assembly provenance.
+    if len(source_grids) == 1:
+        source = source_grids[0]
+        for key in (_FEATURE_PROVENANCE_KEY, _ASSEMBLY_PROVENANCE_KEY):
+            value = _declared_extra_scalar(source, key)
+            if value is not None:
+                extra[key] = copy.deepcopy(value)
+
+    record = {
+        "schema": "grim.assembly-response.v1",
+        "response_role": response_role,
+        "combine_role": combine_role,
+        "input_count": len(source_grids),
+        "coherent_input_count": len(source_coh_grids),
+        "incoherent_input_count": len(source_grids) - len(source_coh_grids),
+        "body_plus_features_source_sha256": sorted(occupied_sources),
+        "body_plus_features_base_response_sha256": sorted(
+            occupied_responses
+        ),
+        "assembly_base_sha256": sorted(base_source_hashes),
+        "assembly_base_response_sha256": sorted(base_response_hashes),
+        "feature_delta_base_sha256": sorted(delta_source_hashes),
+        "feature_delta_base_response_sha256": sorted(
+            delta_response_hashes
+        ),
+        "feature_delta_only": feature_delta_only,
+        "feature_component_signatures": sorted(component_signatures),
+        "coherent_metadata_attested": bool(
+            coherent_metadata_attested and len(source_coh_grids) > 1
+        ),
+    }
+    extra[_ASSEMBLY_PROVENANCE_KEY] = json.dumps(
+        record, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+
+    if coherent_metadata_attested and len(source_coh_grids) > 1:
+        _history, attested_extra = source_coh_grids[0]._coherent_attestation_provenance(
+            source_coh_grids[1:],
+            operation="assembly-field-add",
+            metadata_attested=True,
+        )
+        if attested_extra:
+            raw_record = attested_extra.get(
+                "coherent_metadata_attestation_json"
+            )
+            if raw_record:
+                attestation_record = json.loads(raw_record)
+                attestation_record["attested_scope"] = [
+                    "common_vehicle_frame",
+                    "common_phase_center",
+                    "common_attitude",
+                    "common_earth_vh_basis",
+                    "phasor_time_convention",
+                ]
+                attestation_record["attestation_statement"] = (
+                    _COHERENT_VEHICLE_FRAME_ATTESTATION
+                )
+                attested_extra["coherent_metadata_attestation_json"] = (
+                    json.dumps(
+                        attestation_record,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                )
+            extra.update(attested_extra)
+    return extra
+
+
+def _combined_result_units(ref, source_grids, semantic_extra, *, has_incoh: bool):
+    """Retain physical units without laundering one input's convention tags."""
+
+    units = copy.deepcopy(ref.units or {})
+    for key in list(units):
+        key_text = str(key)
+        if (
+            key in _DYNAMIC_RESULT_METADATA_KEYS
+            or key_text.endswith("_provenance_json")
+            or key_text.startswith("combine_")
+            or key_text.startswith("feature_delta_")
+            or key_text.startswith("body_plus_features_")
+            or (
+                key_text.startswith("assembly_")
+                and key_text != "assembly_angular_coordinate_contract"
+            )
+        ):
+            units.pop(key, None)
+    field_only_keys = {
+        "phase_reference",
+        "time_convention",
+        "amplitude_convention",
+        "complex_field_domain",
+    }
+    for key in _SEMANTIC_SCALAR_KEYS:
+        units.pop(key, None)
+        if has_incoh and key in field_only_keys:
+            continue
+        if key not in semantic_extra:
+            continue
+        # Keep a shared convention in units when at least one producer used
+        # that modeled container. It also remains in ``extra`` so older readers
+        # that looked there continue to see the same, noncontradictory value.
+        if any(key in (grid.units or {}) for grid in source_grids):
+            units[key] = copy.deepcopy(semantic_extra[key])
+    return units
+
+
+def _combine_children(
+    coh_grids,
+    incoh_grids,
+    ref,
+    *,
+    metadata_sources=None,
+    coherent_metadata_attested=False,
+    validated_body_occupancy=None,
+    validated_component_signatures=None,
+):
     """Coherent-field + incoherent-power combination of pre-aligned children.
 
     coh_grids contribute by complex sum   →  C_coh = Σ rcs
@@ -1953,7 +3219,34 @@ def _combine_children(coh_grids, incoh_grids, ref):
     output power   = |C_coh|² + P_incoh
     output phase   = arg(C_coh)   (NaN if there are no coherent contributors)
     """
-    from grim_dataset import RcsGrid
+    from grim_dataset import C0, RcsGrid
+
+    if not isinstance(coherent_metadata_attested, (bool, np.bool_)):
+        raise TypeError("coherent_metadata_attested must be True or False")
+    if metadata_sources is None:
+        source_grids = list(coh_grids) + list(incoh_grids)
+    else:
+        source_grids = list(metadata_sources)
+    if len(source_grids) != len(coh_grids) + len(incoh_grids):
+        raise ValueError("metadata_sources must correspond one-for-one with children")
+    source_coh_grids = source_grids[:len(coh_grids)]
+    _validate_coherent_sources(
+        source_coh_grids,
+        metadata_attested=bool(coherent_metadata_attested),
+    )
+    body_occupancy = (
+        _assert_no_shared_body_totals(source_grids)
+        if validated_body_occupancy is None
+        else (
+            set(validated_body_occupancy[0]),
+            set(validated_body_occupancy[1]),
+        )
+    )
+    component_signatures = (
+        _assert_no_duplicate_feature_components(source_grids)
+        if validated_component_signatures is None
+        else set(validated_component_signatures)
+    )
 
     C_coh = None
     if coh_grids:
@@ -1964,9 +3257,15 @@ def _combine_children(coh_grids, incoh_grids, ref):
                     "a branch containing incoherent or phase-unknown data cannot "
                     "be used as a coherent assembly child"
                 )
-        C_coh = np.array(coh_grids[0].rcs, copy=True)
+        def _field(grid):
+            aligned_field = getattr(
+                grid, "_assembly_authoritative_complex", None
+            )
+            return grid.rcs if aligned_field is None else aligned_field
+
+        C_coh = np.array(_field(coh_grids[0]), copy=True)
         for g in coh_grids[1:]:
-            C_coh = C_coh + g.rcs
+            C_coh = C_coh + _field(g)
 
     P_incoh = None
     if incoh_grids:
@@ -1987,22 +3286,65 @@ def _combine_children(coh_grids, incoh_grids, ref):
         total_power = np.array(P_incoh, copy=True)
         total_phase = np.full(total_power.shape, np.nan, dtype=total_power.dtype)
 
-    return RcsGrid(
+    extra = _combined_semantic_extra(
+        source_grids,
+        source_coh_grids,
+        has_coh=C_coh is not None,
+        has_incoh=P_incoh is not None,
+        coherent_metadata_attested=bool(coherent_metadata_attested),
+        body_occupancy=body_occupancy,
+        component_signatures=component_signatures,
+    )
+    result_units = _combined_result_units(
+        ref,
+        source_grids,
+        extra,
+        has_incoh=P_incoh is not None,
+    )
+
+    if C_coh is not None and P_incoh is None:
+        quantity = ref.linear_quantity()
+        if quantity == "sigma_3d":
+            raw_amplitude = C_coh / np.sqrt(4.0 * np.pi)
+        elif quantity == "sigma_2d":
+            frequency_hz = ref._frequency_value_to_hz(ref.frequencies)
+            k0 = 2.0 * np.pi * np.asarray(frequency_hz, dtype=float) / C0
+            raw_amplitude = C_coh * (
+                2.0 * np.sqrt(k0)[None, None, :, None]
+            )
+        else:
+            raw_amplitude = None
+        if raw_amplitude is not None:
+            extra["rcs_amp_real"] = np.asarray(
+                raw_amplitude.real, dtype=np.float64
+            )
+            extra["rcs_amp_imag"] = np.asarray(
+                raw_amplitude.imag, dtype=np.float64
+            )
+            extra["raw_complex_amplitude_preserved"] = True
+
+    result = RcsGrid(
         ref.azimuths, ref.elevations, ref.frequencies, ref.polarizations,
         rcs=None,
         rcs_power=total_power,
         rcs_phase=total_phase,
         rcs_domain="power_phase",
-        units=dict(ref.units or {}),
-        extra={
-            "phase_reference": ref.extra["phase_reference"]
-            for _ in (0,)
-            if "phase_reference" in ref.extra
-        },
+        units=result_units,
+        extra=extra,
     )
+    if C_coh is not None and P_incoh is None:
+        result._assembly_authoritative_complex = np.asarray(
+            C_coh, dtype=np.complex128
+        )
+    return result
 
 
-def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
+def build_assembly_grid(
+    node: QTreeWidgetItem,
+    *,
+    axis_mode: str = "intersect",
+    coherent_metadata_attested: bool = False,
+):
     """Recursively materialise an assembly subtree into a single RcsGrid.
 
     Leaves return their stored grid (or None if empty). Branches/roots gather
@@ -2013,6 +3355,8 @@ def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
     Returns (grid, history_string). Both are None / "" if the subtree has
     no loaded data.
     """
+    if not isinstance(coherent_metadata_attested, (bool, np.bool_)):
+        raise TypeError("coherent_metadata_attested must be True or False")
     if _is_preview_item(node):
         raise ValueError(
             "preview-only geometry is not a response assembly; use the feature "
@@ -2033,10 +3377,17 @@ def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
         child = node.child(i)
         if _is_preview_item(child):
             continue
-        child_grid, child_history = build_assembly_grid(child, axis_mode=axis_mode)
+        child_grid, child_history = build_assembly_grid(
+            child,
+            axis_mode=axis_mode,
+            coherent_metadata_attested=coherent_metadata_attested,
+        )
         if child_grid is None:
             continue
-        child_mode = _node_mode(child)
+        stored_mode = _node_mode(child)
+        child_mode = _resolved_node_mode(child, child_grid)
+        if stored_mode == _MODE_AUTO:
+            child_history += f" [Auto -> {_MODE_LABEL[child_mode]}]"
         bucket = coh if child_mode == _MODE_COH else incoh
         bucket.append((child_history, child_grid))
 
@@ -2047,35 +3398,48 @@ def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
     grids_in_order = [g for _, g in all_pairs]
 
     # Axis values alone do not establish physical compatibility. Refuse unit,
-    # quantity, and phase-reference mismatches before intersecting/interpolating.
+    # quantity, angular-frame, and convention mismatches before alignment can
+    # discard source provenance.
     ref_units = grids_in_order[0]
     for grid in grids_in_order[1:]:
-        for key, default in (("azimuth", "deg"), ("elevation", "deg"), ("frequency", "GHz")):
-            left = str((ref_units.units or {}).get(key, default)).strip().lower()
-            right = str((grid.units or {}).get(key, default)).strip().lower()
-            if left != right:
-                raise ValueError(f"refusing to combine parts with {key} units {left!r} and {right!r}")
-        if ref_units.linear_quantity() != grid.linear_quantity():
-            raise ValueError(
-                "refusing to combine parts with physical quantities "
-                f"{ref_units.linear_quantity()!r} and {grid.linear_quantity()!r}"
-            )
-        if ref_units.default_log_unit().lower() != grid.default_log_unit().lower():
-            raise ValueError(
-                "refusing to combine parts with log units "
-                f"{ref_units.default_log_unit()!r} and {grid.default_log_unit()!r}"
-            )
-        left_ref = ref_units._phase_reference()
-        right_ref = grid._phase_reference()
-        if left_ref != right_ref and (left_ref or right_ref):
-            raise ValueError("refusing to combine parts with different phase references")
+        ref_units._assert_physical_metadata_compatible(grid)
 
-    aligned = _align_grids_for_assembly(grids_in_order, axis_mode=axis_mode)
+    source_coh = grids_in_order[:len(coh)]
+    _validate_coherent_sources(
+        source_coh,
+        metadata_attested=bool(coherent_metadata_attested),
+    )
+    body_occupancy = _assert_no_shared_body_totals(grids_in_order)
+    component_signatures = _assert_no_duplicate_feature_components(
+        grids_in_order
+    )
+
+    # A one-field branch is only a structural passthrough. Avoid reconstructing
+    # it (and thereby laundering feature/SENTRi provenance) when its declared
+    # operation is already coherent.
+    if len(grids_in_order) == 1 and coh:
+        return grids_in_order[0], (
+            f"Σ {node.text(0)} ({axis_mode}): coh[{coh[0][0]}]"
+        )
+
+    aligned = _align_grids_for_assembly(
+        grids_in_order,
+        axis_mode=axis_mode,
+        coherent_count=len(coh),
+    )
     n_coh = len(coh)
     aligned_coh = aligned[:n_coh]
     aligned_incoh = aligned[n_coh:]
     ref = aligned[0]
-    result = _combine_children(aligned_coh, aligned_incoh, ref)
+    result = _combine_children(
+        aligned_coh,
+        aligned_incoh,
+        ref,
+        metadata_sources=grids_in_order,
+        coherent_metadata_attested=coherent_metadata_attested,
+        validated_body_occupancy=body_occupancy,
+        validated_component_signatures=component_signatures,
+    )
 
     parts = []
     if coh:
@@ -2083,4 +3447,6 @@ def build_assembly_grid(node: QTreeWidgetItem, *, axis_mode: str = "intersect"):
     if incoh:
         parts.append("incoh[" + " + ".join(h for h, _ in incoh) + "]")
     history = f"Σ {node.text(0)} ({axis_mode}): " + " ⊕ ".join(parts)
+    if len(coh) > 1:
+        history += " | User attestation: " + _COHERENT_VEHICLE_FRAME_ATTESTATION
     return result, history

@@ -62,8 +62,14 @@ class StrictLineCsvTests(unittest.TestCase):
                 directory, "skipped.csv",
                 HEADER + "door_1,seam,2,0,0,0,1,0,0,0,0,1,0,0,1\n",
             )
-            with self.assertRaisesRegex(ValueError, "expected 1"):
+            with self.assertRaises(ValueError) as caught:
                 place_features._line_rows(skipped)
+            message = str(caught.exception)
+            self.assertIn("line 2", message)
+            self.assertIn("line_id 'door_1'", message)
+            self.assertIn("consecutive segment_index sequence", message)
+            self.assertIn("expected [1]", message)
+            self.assertIn("found [2]", message)
 
             split_group = self._write(
                 directory, "split.csv",

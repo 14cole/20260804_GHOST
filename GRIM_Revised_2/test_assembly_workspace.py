@@ -983,6 +983,7 @@ class AssemblyGuiTests(unittest.TestCase):
         grid = RcsGrid(
             [0.0], [0.0], [1.0], ["VV"],
             rcs=np.ones((1, 1, 1, 1), dtype=np.complex128),
+            extra={"combine_role": "coherent"},
         )
         response_root.addChild(tree._make_leaf("body-response", grid))
 
@@ -1122,7 +1123,7 @@ class AssemblyGuiTests(unittest.TestCase):
         panel._set_dirty(False)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            for index, version in enumerate(("3", 0, 5, True)):
+            for index, version in enumerate(("3", 0, 6, True)):
                 with self.subTest(version=version):
                     path = os.path.join(temp_dir, f"version-{index}.asy")
                     with open(path, "w", encoding="utf-8") as stream:
@@ -1135,7 +1136,7 @@ class AssemblyGuiTests(unittest.TestCase):
                         self.assertFalse(panel._load())
 
                     critical.assert_called_once()
-                    self.assertIn("integer from 1 through 4", critical.call_args.args[2])
+                    self.assertIn("integer from 1 through 5", critical.call_args.args[2])
                     self.assertEqual(panel.tree.topLevelItemCount(), 1)
                     self.assertIs(panel.tree.topLevelItem(0), live_root)
                     self.assertIsNone(panel.assembly_path)
@@ -1234,7 +1235,7 @@ class AssemblyGuiTests(unittest.TestCase):
                 self.assertTrue(panel._save(path=target))
             self.assertFalse(panel.is_dirty())
             saved = json.loads(target.read_text(encoding="utf-8"))
-            self.assertEqual(saved["version"], 4)
+            self.assertEqual(saved["version"], 5)
             self.assertEqual(saved["tree"][0]["name"], "Unsaved Response")
 
     def test_toolbar_delete_refuses_service_owned_preview(self):

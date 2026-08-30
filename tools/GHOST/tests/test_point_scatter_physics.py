@@ -367,6 +367,52 @@ class PointScatterDyadicTests(unittest.TestCase):
                 actual[channel], expected[channel], rtol=2.0e-11, atol=2.0e-13
             )
 
+    def test_vectorized_point_rotation_matches_scalar_occluder_fallback(self):
+        reference_tensor = np.asarray([
+            [0.006 + 0.001j, 0.0012 - 0.0003j, -0.0007 + 0.0002j],
+            [0.0012 - 0.0003j, 0.0035 - 0.0008j, 0.0005 + 0.0004j],
+            [-0.0007 + 0.0002j, 0.0005 + 0.0004j, 0.002 + 0.0006j],
+        ])
+        pattern = feature_sum.prepare_point_pattern(_pattern_dict(reference_tensor))
+        normal = np.asarray([1.0, -2.0, 3.0])
+        roll = np.asarray([2.0, 1.0, 0.5])
+        frame = _local_frame(normal, roll)
+        directions = []
+        for azimuth in range(0, 360, 5):
+            for elevation in (10.0, 35.0, 70.0):
+                azimuth_rad = math.radians(azimuth)
+                elevation_rad = math.radians(elevation)
+                directions.append(frame @ np.asarray([
+                    math.cos(elevation_rad) * math.cos(azimuth_rad),
+                    math.cos(elevation_rad) * math.sin(azimuth_rad),
+                    math.sin(elevation_rad),
+                ]))
+        directions = np.asarray(directions)
+
+        class AlwaysVisible:
+            @staticmethod
+            def visible(points, _direction, cancel_check=None):
+                return np.ones(len(points), dtype=bool)
+
+        common = {
+            "pattern": pattern,
+            "location": [0.037, -0.021, 0.014],
+            "aperture_normal": normal,
+            "directions": directions,
+            "frequency_ghz": 1.25,
+            "roll_ref": roll,
+        }
+        scalar = feature_sum.point_scatterer_amplitude(
+            occluder=AlwaysVisible(), **common
+        )
+        vectorized = feature_sum.point_scatterer_amplitude(
+            _visibility=np.ones(len(directions), dtype=bool), **common
+        )
+        for channel in ("F_vv", "F_hh", "F_vh"):
+            np.testing.assert_allclose(
+                vectorized[channel], scalar[channel], rtol=2.0e-14, atol=2.0e-15
+            )
+
     def test_round_fastener_is_roll_invariant_and_backside_is_dark(self):
         reference_tensor = np.diag(
             np.asarray([0.004 + 0.001j, 0.004 + 0.001j, 0.0015 - 0.0002j])

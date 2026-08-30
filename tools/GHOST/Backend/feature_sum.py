@@ -59,6 +59,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tu
 import numpy as np
 
 from geometry_io import material_sidecar_paths
+from grim_naming import require_role_free_declared_delta
 from line_expand import (C0, GRAZING_TAPER_DEG, PSI_HH_DEG, PSI_VV_DEG, SeamCoefficients,
                          _pol_unit_vectors, combine, dbsm, expand_perimeter,
                          prepare_perimeter_frame, read_perimeter_txt,
@@ -93,6 +94,10 @@ _ASSEMBLY_BVH_WORK_BYTES_PER_TRIANGLE = 192
 _ASSEMBLY_FIXED_MEMORY_BYTES = 64 * 1024 ** 2
 _ASSEMBLY_FIXED_SCRATCH_BYTES = 32 * 1024 ** 2
 _ASSEMBLY_SCRATCH_MARGIN = 1.10
+# Bound the temporary Jones matrices used by vectorized point placement.  The
+# value is deliberately independent of the full radar grid so vehicle-scale
+# sweeps do not create an unbounded all-look temporary.
+_POINT_SCATTER_LOOK_BATCH = 32768
 
 
 def _check_cancel(cancel_check: 'Optional[Callable[[], bool]]') -> None:
@@ -404,6 +409,36 @@ def _metadata_text(grim: 'Dict[str, Any]', key: 'str', label: 'str',
     return value
 
 
+def validate_declared_coherent_delta_domain(
+        metadata: 'Dict[str, Any]', label: 'str') -> 'str':
+    """Classify metadata accepted under an explicit delta attestation.
+
+    A role-free GRIM produced by the GUI's Coherent-minus operation currently
+    carries ``rcs_domain='power_phase'`` (or, for some imported complex grids,
+    ``'complex_amplitude'``).  Those values describe storage, not the derived
+    subtraction role, so the explicit mapping may supply the missing role.
+    Missing domain metadata remains a deliberate Legacy compatibility path.
+    Any other explicit domain is a real contradiction and fails closed.
+    """
+
+    domain = _metadata_text(
+        metadata, "rcs_domain", label, required=False
+    )
+    normalized = domain.casefold().replace("-", "_")
+    if normalized == "delta":
+        return "canonical_delta"
+    if normalized in {"power_phase", "complex_amplitude"}:
+        return "declared_gui_derived_delta"
+    if not normalized:
+        return "legacy_declared_delta_missing_domain"
+    raise ValueError(
+        f"{label}: declared_coherent_delta=True contradicts the embedded "
+        f"rcs_domain={domain!r}. Accepted role-free responses are canonical "
+        "rcs_domain='delta', GUI Coherent-minus power/phase or complex-"
+        "amplitude results, and Legacy files with no domain tag."
+    )
+
+
 def _units_metadata(grim: 'Dict[str, Any]', label: 'str') -> 'Dict[str, Any]':
     """Return one explicit GRIM units object for a role-specific check."""
     text = _metadata_text(grim, "units", label)
@@ -567,6 +602,21 @@ def validate_assembly_base_grid_metadata(
                 f"{label}: Assembly requires units.{key}={expected!r}; got "
                 f"{units[key]!r}."
             )
+
+    # ``units`` is modeled and survives ordinary dataset transforms even when
+    # a buggy/legacy passthrough path drops vendor extras.  Treat native SENTRi
+    # polar theta as a hard coordinate contradiction, not metadata that an
+    # unrelated canonical-contract scalar can override.
+    elevation_convention = str(
+        units.get("elevation_coordinate_convention", "") or ""
+    ).strip().lower().replace("-", "_")
+    if elevation_convention == "sentri_theta_top_zero":
+        raise ValueError(
+            f"{label}: the base retains unconverted SENTRi polar theta in its "
+            "elevation axis (units.elevation_coordinate_convention="
+            "'sentri_theta_top_zero'). Assembly requires canonical signed "
+            "radar elevation; use the SENTRi-to-GRIM conversion first."
+        )
 
     coordinate_tags = []
     unit_coordinate = units.get("angular_coordinate_system")
@@ -929,16 +979,17 @@ def load_seam_from_grim(path: 'str', frequency_ghz: 'float',
     Both physical channels are required.  HH is the accepted alias for TM and
     VV is the accepted alias for TE.
     """
+    require_role_free_declared_delta(path)
     g = _load_grim(path) if _grim_payload is None else _grim_payload
     dom = str(g.get("rcs_domain", "")).strip()
     normalized_domain = dom.lower().replace("-", "_")
     if declared_coherent_delta:
+        validate_declared_coherent_delta_domain(g, path)
         # Listing a file in LINE_FEATURE_DATASETS is the role declaration.
         # GUI derived grids often preserve the numerical complex field as
         # power+phase while dropping or retaining stale source semantics. The
         # declaration supersedes those descriptive strings. Dimensional units
         # and the numerical power/phase normalization remain strict below.
-        pass
     else:
         if normalized_domain != "delta":
             raise ValueError(
@@ -2237,6 +2288,7 @@ def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
         # output, so the explicit declaration supersedes all of them. Units,
         # normalization, finite fields, channels, and angular coverage are
         # independently checked by _load_pattern.
+        validate_declared_coherent_delta_domain(metadata, label)
         return
     for key, required in expected.items():
         got = _metadata_text(metadata, key, label)
@@ -2270,6 +2322,7 @@ def _load_pattern(pattern, *, declared_coherent_delta=False,
         from grim_compat import load_pattern_any
         pattern = load_pattern_any(pattern)
     if isinstance(pattern, str):
+        require_role_free_declared_delta(pattern)
         g = _load_grim(pattern)
         _validate_point_pattern_metadata(
             g, pattern, declared_coherent_delta=declared_coherent_delta
@@ -2615,6 +2668,63 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
     evc, ehc = _pol_unit_vectors(dc)                           # cavity meridian basis (cavity coords)
     rc2 = rc[None, :]
     lit_indices = np.nonzero(lit)[0]
+
+    # Production exports precompute body visibility once for every point and
+    # reuse one packed row at each frequency.  In that path (and when no body
+    # occluder is requested) rotate the reciprocal Jones tensors in bounded
+    # batches instead of running several tiny NumPy operations per look.  A
+    # direct third-party occluder still uses the scalar fallback because its
+    # visibility API is necessarily queried one direction at a time here.
+    if visibility is not None or occluder is None:
+        if isinstance(visibility, PackedVisibilityRow):
+            # This materializes one look row, never the full point-by-look
+            # matrix.  At one byte per look it is bounded by the radar grid
+            # and enables vectorized masking of the expensive field work.
+            visible_mask = visibility.to_dense()
+        elif visibility is None:
+            visible_mask = None
+        else:
+            visible_mask = visibility
+
+        total_lit = len(lit_indices)
+        for start in range(0, total_lit, _POINT_SCATTER_LOOK_BATCH):
+            _check_cancel(cancel_check)
+            stop = min(total_lit, start + _POINT_SCATTER_LOOK_BATCH)
+            batch_lit = lit_indices[start:stop]
+            active = (
+                batch_lit
+                if visible_mask is None
+                else batch_lit[visible_mask[batch_lit]]
+            )
+            if active.size:
+                # R maps cavity coordinates to body coordinates.  Row-vector
+                # multiplication by R.T is exactly the scalar R @ e operation.
+                Evv = evc[active] @ R.T
+                Ehh = ehc[active] @ R.T
+                M = np.empty((active.size, 2, 2), dtype=float)
+                M[:, 0, 0] = np.einsum("ij,ij->i", Evv, e_vv[active])
+                M[:, 0, 1] = np.einsum("ij,ij->i", Evv, e_hh[active])
+                M[:, 1, 0] = np.einsum("ij,ij->i", Ehh, e_vv[active])
+                M[:, 1, 1] = np.einsum("ij,ij->i", Ehh, e_hh[active])
+
+                S = np.empty((active.size, 2, 2), dtype=complex)
+                S[:, 0, 0] = Scav["VV"][active]
+                S[:, 0, 1] = Scav["VH"][active]
+                S[:, 1, 0] = Scav["VH"][active]
+                S[:, 1, 1] = Scav["HH"][active]
+                Sb = np.matmul(
+                    np.swapaxes(M, 1, 2),
+                    np.matmul(S, M),
+                )
+                ph = np.exp(2j * k * (dirs[active] @ rc))
+                F["F_vv"][active] = Sb[:, 0, 0] * ph
+                F["F_hh"][active] = Sb[:, 1, 1] * ph
+                F["F_vh"][active] = Sb[:, 0, 1] * ph
+            if progress_callback is not None:
+                progress_callback(stop, total_lit)
+        _check_cancel(cancel_check)
+        return F
+
     for ordinal, i in enumerate(lit_indices, 1):
         _check_cancel(cancel_check)
         if visibility is not None:
@@ -3285,6 +3395,43 @@ def _prepared_line_placements_at_frequency(
             prepared.append(placement)
     return prepared
 
+
+def _feature_export_progress_weights(
+    *,
+    look_count: int,
+    frequency_count: int,
+    point_count: int,
+    line_count: int,
+    line_shadow_piece_count: int,
+    has_point_shadow: bool,
+    has_line_shadow: bool,
+) -> 'Tuple[int, int, int]':
+    """Return point-shadow, line-shadow, and per-frequency work weights.
+
+    The physics callbacks expose exact direction progress while wall time also
+    scales with the number of points/pieces. Weighting the existing stages by
+    those already available quantities keeps the bar honest without timing or
+    benchmarking the user's machine.
+    """
+
+    looks = max(1, int(look_count))
+    points = max(0, int(point_count))
+    lines = max(0, int(line_count))
+    pieces = max(0, int(line_shadow_piece_count))
+    point_shadow = (
+        max(1, looks * points) if bool(has_point_shadow) else 0
+    )
+    line_shadow = (
+        max(1, looks * max(1, pieces)) if bool(has_line_shadow) else 0
+    )
+    field_components = points + max(lines, pieces)
+    per_frequency = max(1, looks * max(1, field_components))
+    # The returned value is deliberately per frequency; the caller multiplies
+    # it by this stage count when constructing the complete progress range.
+    if int(frequency_count) < 0:
+        raise ValueError("frequency_count cannot be negative.")
+    return point_shadow, line_shadow, per_frequency
+
 def export_signature_grim(out_path: 'str', *,
                           bor_result: 'Optional[Dict[str, Any]]',
                           placements: 'Sequence[Dict[str, Any]]',
@@ -3614,6 +3761,10 @@ def export_radar_grim(out_path: 'str', *,
                       points: 'Sequence[Dict[str, Any]]' = (),
                       occluder=None,
                       source_path: 'str' = "", history: 'str' = "",
+                      assembly_response_role: 'str' = "",
+                      assembly_base_sha256: 'str' = "",
+                      assembly_base_response_sha256: 'str' = "",
+                      feature_provenance_json: 'str' = "",
                       cancel_check: 'Optional[Callable[[], bool]]' = None,
                       progress_callback: 'Optional[ProgressCallback]' = None
                       ) -> 'str':
@@ -3703,13 +3854,27 @@ def export_radar_grim(out_path: 'str', *,
             item is not None for item in line_shadow_inputs
         )
     )
-    point_shadow_start = 0
-    line_shadow_start = 1000 if has_point_shadow else 0
-    shadow_progress_offset = 1000 * (
-        int(has_point_shadow) + int(has_line_shadow)
+    line_shadow_piece_count = sum(
+        len(item[0]) for item in line_shadow_inputs if item is not None
     )
+    (
+        point_shadow_weight,
+        line_shadow_weight,
+        frequency_weight,
+    ) = _feature_export_progress_weights(
+        look_count=len(d_v_flat),
+        frequency_count=len(freqs),
+        point_count=len(points),
+        line_count=len(placements),
+        line_shadow_piece_count=line_shadow_piece_count,
+        has_point_shadow=has_point_shadow,
+        has_line_shadow=has_line_shadow,
+    )
+    point_shadow_start = 0
+    line_shadow_start = point_shadow_weight
+    shadow_progress_offset = point_shadow_weight + line_shadow_weight
     field_progress_total = max(
-        1, (len(freqs) * 1000) + shadow_progress_offset
+        1, (len(freqs) * frequency_weight) + shadow_progress_offset
     )
     point_visibility = None
     if has_point_shadow:
@@ -3730,7 +3895,9 @@ def export_radar_grim(out_path: 'str', *,
 
         def shadow_progress(done, total):
             nonlocal last_shadow_progress
-            scaled = int(round(1000.0 * int(done) / max(1, int(total))))
+            scaled = int(round(
+                point_shadow_weight * int(done) / max(1, int(total))
+            ))
             if scaled <= last_shadow_progress:
                 return
             last_shadow_progress = scaled
@@ -3767,7 +3934,9 @@ def export_radar_grim(out_path: 'str', *,
 
         def line_shadow_progress(done, total, message):
             nonlocal last_line_shadow_progress
-            scaled = int(round(1000.0 * int(done) / max(1, int(total))))
+            scaled = int(round(
+                line_shadow_weight * int(done) / max(1, int(total))
+            ))
             if scaled <= last_line_shadow_progress:
                 return
             last_line_shadow_progress = scaled
@@ -3794,10 +3963,12 @@ def export_radar_grim(out_path: 'str', *,
             placements, float(f), line_payload_cache
         )
         def frequency_progress(done, total, message, *, _fi=fi, _f=float(f)):
-            local = int(round(1000.0 * int(done) / max(1, int(total))))
+            local = int(round(
+                frequency_weight * int(done) / max(1, int(total))
+            ))
             _report_progress(
                 progress_callback,
-                shadow_progress_offset + _fi * 1000 + local,
+                shadow_progress_offset + _fi * frequency_weight + local,
                 field_progress_total,
                 f"{_f:g} GHz - {message}",
             )
@@ -3825,7 +3996,7 @@ def export_radar_grim(out_path: 'str', *,
         amp[:, :, fi, 2] = vh
         _report_progress(
             progress_callback,
-            shadow_progress_offset + (fi + 1) * 1000,
+            shadow_progress_offset + (fi + 1) * frequency_weight,
             field_progress_total,
             f"Completed {float(f):g} GHz",
         )
@@ -3865,6 +4036,22 @@ def export_radar_grim(out_path: 'str', *,
         "rcs_amp_imag": amp_imag,
         "complex_field_domain": RADAR_COMPONENT_FIELD_DOMAIN,
     }
+    if str(assembly_response_role).strip():
+        payload["assembly_response_role"] = np.asarray(
+            str(assembly_response_role).strip()
+        )
+    if str(assembly_base_sha256).strip():
+        payload["assembly_base_sha256"] = np.asarray(
+            str(assembly_base_sha256).strip().lower()
+        )
+    if str(assembly_base_response_sha256).strip():
+        payload["assembly_base_response_sha256"] = np.asarray(
+            str(assembly_base_response_sha256).strip().lower()
+        )
+    if str(feature_provenance_json).strip():
+        payload["feature_provenance_json"] = np.asarray(
+            str(feature_provenance_json)
+        )
     saved = os.path.abspath(_save_grim_npz(payload, out))
     # combine_role is part of grim_io's preserved optional schema.  Writing it
     # in the original payload avoids a second full archive load/recompression,
@@ -4174,6 +4361,68 @@ def _canonical_3d_channel_indices(polarizations, label, *, require_all=True):
     if not channels:
         raise ValueError(f"{label}: no usable radar polarization channels.")
     return channels, [indices[channel] for channel in channels]
+
+
+def assembly_response_physics_sha256(
+    payload: 'Dict[str, Any]', label: 'str' = "Assembly base response"
+) -> 'str':
+    """Hash one physical radar response independent of ZIP packaging/history."""
+
+    channels, order = _canonical_3d_channel_indices(
+        payload["polarizations"], label, require_all=True
+    )
+    amplitude = payload.get("_amp")
+    if amplitude is None:
+        if "rcs_amp_real" not in payload or "rcs_amp_imag" not in payload:
+            raise ValueError(
+                f"{label}: authoritative complex amplitude is unavailable."
+            )
+        amplitude = (
+            np.asarray(payload["rcs_amp_real"], dtype=np.float64)
+            + 1j * np.asarray(payload["rcs_amp_imag"], dtype=np.float64)
+        )
+    amplitude = np.asarray(amplitude, dtype=np.complex128)
+    digest = hashlib.sha256()
+    digest.update(b"ghost.assembly-base-response-physics-v1\0")
+
+    def update_array(name, value, dtype):
+        array = np.ascontiguousarray(value, dtype=dtype)
+        digest.update(str(name).encode("utf-8") + b"\0")
+        digest.update(json.dumps(array.shape).encode("ascii") + b"\0")
+        digest.update(array.dtype.str.encode("ascii") + b"\0")
+        digest.update(memoryview(array).cast("B"))
+
+    def update_canonical_amplitude():
+        shape = amplitude.shape[:-1] + (len(order),)
+        digest.update(b"complex_amplitude\0")
+        digest.update(json.dumps(shape).encode("ascii") + b"\0")
+        digest.update(b"<c16\0")
+        cells_per_azimuth = int(np.prod(shape[1:]))
+        azimuth_block = max(
+            1, 1_048_576 // max(1, cells_per_azimuth)
+        )
+        for start in range(0, shape[0], azimuth_block):
+            block = np.ascontiguousarray(
+                amplitude[start:start + azimuth_block, ..., order],
+                dtype="<c16",
+            )
+            digest.update(memoryview(block).cast("B"))
+
+    update_array("azimuths", payload["azimuths"], "<f8")
+    update_array("elevations", payload["elevations"], "<f8")
+    update_array("frequencies", payload["frequencies"], "<f8")
+    update_array("polarizations", np.asarray(channels, dtype="U2"), "<U2")
+    update_canonical_amplitude()
+    for key in (
+        "phase_reference",
+        "amplitude_convention",
+        "complex_field_domain",
+    ):
+        value = _metadata_text(payload, key, label)
+        encoded = value.encode("utf-8")
+        digest.update(key.encode("ascii") + b"\0")
+        digest.update(len(encoded).to_bytes(8, "little") + encoded)
+    return digest.hexdigest()
 
 
 def _normalize_expected_source_sha256(
@@ -4642,6 +4891,226 @@ def preflight_feature_assembly_capacity(
     return estimate
 
 
+def feature_only_output_path(out_path: 'str') -> 'str':
+    """Return the deterministic sibling path for an Assembly delta field."""
+
+    destination = os.path.abspath(
+        out_path if str(out_path).lower().endswith(".grim")
+        else str(out_path) + ".grim"
+    )
+    stem, extension = os.path.splitext(destination)
+    return stem + "_features_only" + extension
+
+
+def _require_atomic_link_publication(directory: 'str') -> None:
+    """Fail before field evaluation if this volume cannot publish safely."""
+
+    probe_fd, probe = tempfile.mkstemp(
+        prefix=".ghost-assembly-link-probe.", dir=directory
+    )
+    os.close(probe_fd)
+    linked = probe + ".linked"
+    try:
+        os.link(probe, linked)
+        source_stat = os.stat(probe, follow_symlinks=False)
+        linked_stat = os.stat(linked, follow_symlinks=False)
+        if (
+            int(source_stat.st_ino) == 0
+            or (int(source_stat.st_dev), int(source_stat.st_ino))
+            != (int(linked_stat.st_dev), int(linked_stat.st_ino))
+        ):
+            raise OSError(
+                "filesystem does not expose a stable hard-link file identity"
+            )
+    except OSError as exc:
+        raise RuntimeError(
+            "Assembly cannot safely publish its paired outputs on this volume: "
+            "the filesystem does not support atomic, no-overwrite hard links. "
+            "Choose a local NTFS/ext4 output folder (not this SMB/FAT/restricted "
+            "location) and retry. Feature computation was not started and no "
+            "output was published."
+        ) from exc
+    finally:
+        for path in (linked, probe):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+
+def _publish_staged_assembly_outputs(
+    entries: 'Sequence[Tuple[str, str, Optional[str]]]',
+) -> None:
+    """Publish related already-staged outputs with rollback on partial failure.
+
+    Each staging path must reside beside its destination.  Existing artifacts
+    are moved to same-volume backups before replacement, so a failure while
+    publishing the second member restores the complete previous pair.
+    """
+
+    from workflow_provenance import sha256_file
+
+    def file_identity(path):
+        stat_result = os.stat(path, follow_symlinks=False)
+        return (int(stat_result.st_dev), int(stat_result.st_ino))
+
+    def verify_published(state, *, stage, verify_digest=False):
+        target = state["target"]
+        expected_identity = state["published_identity"]
+        try:
+            before_identity = file_identity(target)
+        except OSError as exc:
+            raise RuntimeError(
+                f"{target}: published Assembly output became unavailable "
+                f"{stage}. The paired publication was not committed."
+            ) from exc
+        if before_identity != expected_identity:
+            raise RuntimeError(
+                f"{target}: an independent file replaced the staged Assembly "
+                f"output {stage}. The paired publication was not committed."
+            )
+        if not verify_digest:
+            return
+        actual_sha256 = sha256_file(target)
+        try:
+            after_identity = file_identity(target)
+        except OSError as exc:
+            raise RuntimeError(
+                f"{target}: published Assembly output became unavailable "
+                f"while it was being verified {stage}. The paired publication "
+                "was not committed."
+            ) from exc
+        if after_identity != expected_identity:
+            raise RuntimeError(
+                f"{target}: an independent file replaced the staged Assembly "
+                f"output while it was being verified {stage}. The paired "
+                "publication was not committed."
+            )
+        if actual_sha256 != state["staged_sha256"]:
+            raise RuntimeError(
+                f"{target}: the staged Assembly output changed {stage}. The "
+                "paired publication was not committed."
+            )
+
+    states = []
+    publication_complete = False
+    try:
+        for staged, target, reviewed_sha256 in entries:
+            # Establish ownership from the private staging inode, never by
+            # statting the public name after publication. An independent writer
+            # can replace that name immediately after os.link returns.
+            published_identity = file_identity(staged)
+            staged_sha256 = sha256_file(staged)
+            if file_identity(staged) != published_identity:
+                raise RuntimeError(
+                    f"{staged}: staged Assembly output changed while its "
+                    "publication digest was being computed. The paired "
+                    "publication was not started."
+                )
+            state = {
+                "staged": staged,
+                "target": target,
+                "backup": None,
+                "published_identity": published_identity,
+                "publication_link_created": False,
+                "staged_sha256": staged_sha256,
+            }
+            states.append(state)
+            if reviewed_sha256 is not None:
+                backup_fd, backup = tempfile.mkstemp(
+                    prefix=f".{os.path.basename(target)}.",
+                    suffix=".backup",
+                    dir=os.path.dirname(target),
+                )
+                os.close(backup_fd)
+                try:
+                    os.replace(target, backup)
+                except BaseException:
+                    try:
+                        os.unlink(backup)
+                    except OSError:
+                        pass
+                    raise
+                state["backup"] = backup
+                actual_backup_sha256 = sha256_file(backup)
+                if actual_backup_sha256 != reviewed_sha256:
+                    raise RuntimeError(
+                        f"{target}: output changed after its final reviewed "
+                        "digest check. The staged Assembly pair was not "
+                        "published."
+                    )
+
+            # Use no-overwrite publication even after moving a reviewed target
+            # aside. An independent writer that recreates the name wins; its
+            # file is never replaced by this transaction.
+            os.link(staged, target)
+            state["publication_link_created"] = True
+            verify_published(state, stage="immediately after publication")
+            # Keep the staging link until the pair has either fully published
+            # or rolled back. This pins the inode so an external replacement
+            # cannot recycle its identity and be mistaken for our file.
+        # Recheck the complete pair before declaring success. This catches a
+        # replacement or in-place modification of an earlier member while a
+        # later member was being published.
+        for state in states:
+            verify_published(
+                state, stage="before paired commit", verify_digest=True
+            )
+        publication_complete = True
+        for state in states:
+            try:
+                os.unlink(state["staged"])
+            except OSError:
+                # Every target already names its complete staged inode. Outer
+                # best-effort cleanup will retry without reporting false failure.
+                pass
+    except BaseException as original_error:
+        rollback_errors = []
+        for state in reversed(states):
+            target = state["target"]
+            backup = state["backup"]
+            try:
+                published_identity = state["published_identity"]
+                if state["publication_link_created"] and os.path.exists(target):
+                    current = os.stat(target, follow_symlinks=False)
+                    current_identity = (int(current.st_dev), int(current.st_ino))
+                    if current_identity == published_identity:
+                        os.unlink(target)
+                    else:
+                        rollback_errors.append(
+                            f"{target}: an independent replacement was kept"
+                        )
+                if backup is not None and os.path.exists(backup):
+                    if os.path.exists(target):
+                        rollback_errors.append(
+                            f"{target}: previous reviewed output retained at "
+                            f"{backup}"
+                        )
+                    else:
+                        os.link(backup, target)
+                        os.unlink(backup)
+                        state["backup"] = None
+            except OSError as exc:
+                rollback_errors.append(f"{target}: {exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Assembly output publication failed and rollback could not "
+                "restore every prior path without overwriting an independent "
+                "file. Recovery details: "
+                + "; ".join(rollback_errors)
+            ) from original_error
+        raise
+    finally:
+        if publication_complete:
+            for state in states:
+                backup = state["backup"]
+                if backup is not None:
+                    try:
+                        os.unlink(backup)
+                    except OSError:
+                        pass
+
+
 def add_features_to_monostatic_grim(
     base_path: 'str',
     out_path: 'str',
@@ -4662,6 +5131,8 @@ def add_features_to_monostatic_grim(
     expected_absent_paths: 'Optional[Sequence[str]]' = None,
     expected_output_sha256: 'Optional[str]' = None,
     expect_output_absent: 'bool' = False,
+    expected_features_only_output_sha256: 'Optional[str]' = None,
+    expect_features_only_output_absent: 'bool' = False,
     cancel_check: 'Optional[Callable[[], bool]]' = None,
     progress_callback: 'Optional[ProgressCallback]' = None,
     _capacity_estimate: 'Optional[AssemblyCapacityEstimate]' = None,
@@ -4669,8 +5140,10 @@ def add_features_to_monostatic_grim(
     """Coherently add placed features to one monostatic deliverable.
 
     The existing radar-frame field is retained and the newly evaluated feature
-    field is added sample-by-sample.  Writing is atomic and may target a new
-    path or intentionally replace ``base_path``.
+    field is added sample-by-sample.  A deterministic ``*_features_only.grim``
+    sibling publishes the exact placed-feature delta.  The pair is staged and
+    rollback-safe, and may target a new path or intentionally replace
+    ``base_path``.
     """
 
     _check_cancel(cancel_check)
@@ -4685,20 +5158,36 @@ def add_features_to_monostatic_grim(
     _verify_expected_absent_paths(
         absent_sources, stage="before execution"
     )
-    expected_destination_sha256 = None
-    if expected_output_sha256 is not None:
-        expected_destination_sha256 = str(expected_output_sha256).strip().lower()
-        if len(expected_destination_sha256) != 64 or any(
-            character not in "0123456789abcdef"
-            for character in expected_destination_sha256
+    def normalized_expected_digest(value, *, label):
+        if value is None:
+            return None
+        digest = str(value).strip().lower()
+        if len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
         ):
             raise ValueError(
-                "expected_output_sha256 must be a 64-character hexadecimal "
-                "SHA-256 digest."
+                f"{label} must be a 64-character hexadecimal SHA-256 digest."
             )
+        return digest
+
+    expected_destination_sha256 = normalized_expected_digest(
+        expected_output_sha256, label="expected_output_sha256"
+    )
+    expected_features_destination_sha256 = normalized_expected_digest(
+        expected_features_only_output_sha256,
+        label="expected_features_only_output_sha256",
+    )
     if expect_output_absent and expected_destination_sha256 is not None:
         raise ValueError(
             "expect_output_absent cannot be combined with expected_output_sha256."
+        )
+    if (
+        expect_features_only_output_absent
+        and expected_features_destination_sha256 is not None
+    ):
+        raise ValueError(
+            "expect_features_only_output_absent cannot be combined with "
+            "expected_features_only_output_sha256."
         )
 
     base = os.path.abspath(str(base_path))
@@ -4708,6 +5197,32 @@ def add_features_to_monostatic_grim(
         out_path if str(out_path).lower().endswith(".grim")
         else str(out_path) + ".grim"
     )
+    features_destination = feature_only_output_path(destination)
+    if os.path.exists(features_destination) and not os.path.isfile(
+        features_destination
+    ):
+        raise ValueError(
+            "Feature-only Assembly output exists but is not a regular file: "
+            f"{features_destination}"
+        )
+    for protected, protected_label in (
+        (base, "clean-body response"),
+        (destination, "assembled response"),
+    ):
+        aliases = os.path.normcase(features_destination) == os.path.normcase(
+            protected
+        )
+        if not aliases and os.path.exists(features_destination) \
+                and os.path.exists(protected):
+            try:
+                aliases = os.path.samefile(features_destination, protected)
+            except OSError:
+                aliases = False
+        if aliases:
+            raise ValueError(
+                "The deterministic feature-only output must not overwrite the "
+                f"{protected_label}: {features_destination}"
+            )
     embedded_grid = load_body_requested_radar_grid(base)
     capacity_grid = dict(radar_grid) if radar_grid is not None else embedded_grid
     if capacity_grid is not None:
@@ -4737,16 +5252,20 @@ def add_features_to_monostatic_grim(
         base_payload, label
     )
     incoming_provenance = dict(feature_provenance or {})
-    if (
-        existing_provenance_records
-        and incoming_provenance.get("feature_library_manifest_policy")
-        == "required_validated"
-    ):
+    existing_assembly_role = _optional_scalar_text(
+        base_payload, "assembly_response_role", label
+    )
+    if existing_provenance_records or existing_assembly_role in {
+        "body_plus_features",
+        "features_only_delta",
+    }:
         raise ValueError(
-            f"{label}: strict production Assembly cannot add another batch to "
-            "a feature-bearing base because cross-build applicability-footprint "
-            "coupling cannot be re-evaluated safely. Start from the clean body "
-            "and include every enabled point/line feature in one Assembly plan."
+            f"{label}: Assembly cannot add another batch to a feature-bearing "
+            "base. That workflow can double-count the body and cannot recheck "
+            "cross-build applicability-footprint coupling. Start from the "
+            "clean body and include every enabled point/line feature in one "
+            "plan, or combine separately published feature-only deltas in a "
+            "reviewed Assembly tree."
         )
     _reject_reused_feature_components(
         existing_provenance_records,
@@ -4763,6 +5282,9 @@ def add_features_to_monostatic_grim(
         from components import validate_component_schema
         validate_component_schema(base_payload, label)
         validated_base = base_payload
+    base_response_sha256 = assembly_response_physics_sha256(
+        validated_base, label
+    )
     grid = dict(radar_grid) if radar_grid is not None else embedded_grid
     if grid is None:
         raise ValueError(
@@ -4791,20 +5313,75 @@ def add_features_to_monostatic_grim(
         load_body_grim(base)
         profile = load_body_profile_grim(base)
 
+    new_provenance_record = {
+        "schema": "ghost.workflow.coherent-feature-addition.v1",
+        "source_monostatic_sha256": base_snapshot_sha256,
+        "line_feature_count": int(len(placements)),
+        "compact_feature_count": int(len(points)),
+        "corner_estimate_count": int(len(corners)),
+        "line_phase_mapping_deg": {
+            "TM": float(psi_tm_deg),
+            "TE": float(psi_te_deg),
+        },
+        "line_grazing_taper_deg": float(GRAZING_TAPER_DEG),
+        "model_scope": {
+            "translation_phase": "exp(+2j*k*d_dot_r)",
+            "body_feature_mutual_coupling": False,
+            "multiple_scattering": False,
+            "line_mapping_evidence": (
+                "legacy empirical mapping; checked-in validation covers "
+                "the circumferential PEC groove only"
+            ),
+            "point_pattern_requirement": (
+                "local installed-feature-minus-clean-skin complex Jones field"
+            ),
+        },
+        "base_grid_contract": base_grid_contract,
+        "base_coherent_metadata_contract": {
+            "legacy_compatibility_enabled": bool(
+                allow_legacy_base_metadata
+            ),
+            "legacy_missing_metadata": list(
+                validated_base.get(_LEGACY_BASE_ASSUMPTIONS_KEY, ())
+            ),
+        },
+        "details": dict(feature_provenance or {}),
+    }
+    records = list(existing_provenance_records)
+    records.append(new_provenance_record)
+    serialized_provenance = json.dumps(
+        records, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    serialized_delta_provenance = json.dumps(
+        [new_provenance_record],
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     component_tmp = None
     output_tmp = None
-    destination_lock = None
+    destination_locks = []
     try:
-        destination_lock = _acquire_destination_lock(destination)
+        for target in sorted(
+            (destination, features_destination), key=os.path.normcase
+        ):
+            destination_locks.append(_acquire_destination_lock(target))
         if _capacity_estimate is not None:
             # Free space can change during a long validation or while waiting
             # for the destination lock. Recheck immediately before staging.
             _assert_feature_assembly_disk_capacity(
                 _capacity_estimate, destination
             )
+        _require_atomic_link_publication(os.path.dirname(destination))
         destination_initial_sha256 = (
             sha256_file(destination) if os.path.isfile(destination) else None
+        )
+        features_destination_initial_sha256 = (
+            sha256_file(features_destination)
+            if os.path.isfile(features_destination)
+            else None
         )
         if expect_output_absent:
             if os.path.exists(destination):
@@ -4820,6 +5397,22 @@ def add_features_to_monostatic_grim(
                 f"{destination}: output changed after Assembly validation. "
                 "The newer destination was not reviewed; validate and confirm "
                 "again."
+            )
+        if expect_features_only_output_absent:
+            if os.path.exists(features_destination):
+                raise RuntimeError(
+                    f"{features_destination}: feature-only output was created "
+                    "after Assembly validation. The newer destination was not "
+                    "reviewed; validate and confirm again."
+                )
+        elif expected_features_destination_sha256 is not None and (
+            features_destination_initial_sha256
+            != expected_features_destination_sha256
+        ):
+            raise RuntimeError(
+                f"{features_destination}: feature-only output changed after "
+                "Assembly validation. The newer destination was not reviewed; "
+                "validate and confirm again."
             )
         component_fd, component_tmp = tempfile.mkstemp(
             prefix=f".{os.path.basename(destination)}.features.",
@@ -4855,7 +5448,12 @@ def add_features_to_monostatic_grim(
             axis_az_deg=grid["axis_az_deg"],
             axis_el_deg=grid["axis_el_deg"],
             roll_deg=grid.get("roll_deg", 0.0),
+            source_path=base,
             history="placed coherent feature field",
+            assembly_response_role="features_only_delta",
+            assembly_base_sha256=base_snapshot_sha256,
+            assembly_base_response_sha256=base_response_sha256,
+            feature_provenance_json=serialized_delta_provenance,
             cancel_check=cancel_check,
             progress_callback=field_progress,
         )
@@ -4931,6 +5529,13 @@ def add_features_to_monostatic_grim(
             COMPONENT_COMPLEX_FIELD_DOMAIN
         )
         payload["raw_complex_amplitude_preserved"] = np.asarray(True)
+        payload["assembly_response_role"] = np.asarray(
+            "body_plus_features"
+        )
+        payload["assembly_base_sha256"] = np.asarray(base_snapshot_sha256)
+        payload["assembly_base_response_sha256"] = np.asarray(
+            base_response_sha256
+        )
         payload["history"] = (
             str(np.asarray(payload.get("history", "")).reshape(-1)[0])
             + " | " + (history or "coherently added placed features")
@@ -4942,44 +5547,9 @@ def add_features_to_monostatic_grim(
         ):
             payload.pop(key, None)
 
-        records = list(existing_provenance_records)
-        records.append({
-            "schema": "ghost.workflow.coherent-feature-addition.v1",
-            "source_monostatic_sha256": base_snapshot_sha256,
-            "line_feature_count": int(len(placements)),
-            "compact_feature_count": int(len(points)),
-            "corner_estimate_count": int(len(corners)),
-            "line_phase_mapping_deg": {
-                "TM": float(psi_tm_deg),
-                "TE": float(psi_te_deg),
-            },
-            "line_grazing_taper_deg": float(GRAZING_TAPER_DEG),
-            "model_scope": {
-                "translation_phase": "exp(+2j*k*d_dot_r)",
-                "body_feature_mutual_coupling": False,
-                "multiple_scattering": False,
-                "line_mapping_evidence": (
-                    "legacy empirical mapping; checked-in validation covers "
-                    "the circumferential PEC groove only"
-                ),
-                "point_pattern_requirement": (
-                    "local installed-feature-minus-clean-skin complex Jones field"
-                ),
-            },
-            "base_grid_contract": base_grid_contract,
-            "base_coherent_metadata_contract": {
-                "legacy_compatibility_enabled": bool(
-                    allow_legacy_base_metadata
-                ),
-                "legacy_missing_metadata": list(
-                    validated_base.get(_LEGACY_BASE_ASSUMPTIONS_KEY, ())
-                ),
-            },
-            "details": dict(feature_provenance or {}),
-        })
-        payload["feature_provenance_json"] = np.asarray(json.dumps(
-            records, sort_keys=True, separators=(",", ":"), allow_nan=False
-        ))
+        payload["feature_provenance_json"] = np.asarray(
+            serialized_provenance
+        )
         from grim_io import _save_grim_npz
         _check_cancel(cancel_check)
         _report_progress(progress_callback, 94, 100,
@@ -5018,13 +5588,40 @@ def add_features_to_monostatic_grim(
                 f"{destination}: output changed during assembly; the newer "
                 "file was not overwritten."
             )
-        os.replace(output_tmp, destination)
+        if features_destination_initial_sha256 is None:
+            if os.path.exists(features_destination):
+                raise RuntimeError(
+                    f"{features_destination}: feature-only output was created "
+                    "by another process during assembly; neither Assembly "
+                    "output was published."
+                )
+        elif (
+            not os.path.isfile(features_destination)
+            or sha256_file(features_destination)
+            != features_destination_initial_sha256
+        ):
+            raise RuntimeError(
+                f"{features_destination}: feature-only output changed during "
+                "assembly; neither Assembly output was published."
+            )
+        _publish_staged_assembly_outputs((
+            (
+                component_tmp,
+                features_destination,
+                features_destination_initial_sha256,
+            ),
+            (output_tmp, destination, destination_initial_sha256),
+        ))
         # Publication is already complete and atomic.  A display-only callback
         # failure at this point must not turn a successful artifact into an
         # apparent failed build that a caller may retry and duplicate.
         try:
-            _report_progress(progress_callback, 100, 100,
-                             "Assembled response published")
+            _report_progress(
+                progress_callback,
+                100,
+                100,
+                "Assembled and feature-only responses published",
+            )
         except Exception:
             pass
     finally:
@@ -5036,10 +5633,11 @@ def add_features_to_monostatic_grim(
                 # Staging cleanup must never mask the primary failure or turn
                 # an already-published artifact into an apparent failed build.
                 pass
-        try:
-            _release_destination_lock(destination_lock)
-        except OSError:
-            # Closing the descriptor releases the OS lock. Do not report a
-            # false build failure after a successful atomic publication.
-            pass
+        for destination_lock in reversed(destination_locks):
+            try:
+                _release_destination_lock(destination_lock)
+            except OSError:
+                # Closing the descriptor releases the OS lock. Do not report a
+                # false build failure after a successful atomic publication.
+                pass
     return destination

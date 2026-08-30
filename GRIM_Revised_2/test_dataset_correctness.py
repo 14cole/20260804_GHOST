@@ -160,6 +160,363 @@ class DatasetCorrectnessTests(unittest.TestCase):
                             source.rcs_phase[ai, ei, fi],
                         )
 
+    def test_join_preserves_complete_raw_solver_amplitude_for_coherent_delta(self):
+        scale = np.sqrt(4.0 * np.pi)
+
+        def solver_grid(frequency, raw_value):
+            raw = np.asarray([raw_value], dtype=np.complex128).reshape(1, 1, 1, 1)
+            normalized = raw * scale
+            return RcsGrid(
+                [0.0],
+                [0.0],
+                [frequency],
+                ["VV"],
+                rcs_power=np.abs(normalized).astype(np.float32) ** 2,
+                rcs_phase=np.angle(normalized).astype(np.float32),
+                units={
+                    "frequency": "GHz",
+                    "rcs_linear_quantity": "sigma_3d",
+                },
+                extra={
+                    "rcs_amp_real": raw.real,
+                    "rcs_amp_imag": raw.imag,
+                    "phase_reference": "origin=(0,0), convention=exp(+jwt)",
+                    "time_convention": "exp(+jwt)",
+                    "polarization_basis": "earth V/H",
+                    "amplitude_convention": "solver far-field amplitude",
+                    "complex_field_domain": "far_field_scattering_amplitude",
+                },
+            )
+
+        opn = RcsGrid.join_many(
+            solver_grid(1.0, 1.000001 + 2.0e-8j),
+            solver_grid(2.0, 1.000002 + 3.0e-8j),
+        )
+        frd = RcsGrid.join_many(
+            solver_grid(1.0, 1.0 + 0.0j),
+            solver_grid(2.0, 1.0 + 0.0j),
+        )
+
+        self.assertTrue(opn.extra["raw_complex_amplitude_preserved"])
+        np.testing.assert_array_equal(
+            opn.extra["rcs_amp_real"].ravel(), [1.000001, 1.000002]
+        )
+        expected = scale * np.asarray([1.0e-6 + 2.0e-8j, 2.0e-6 + 3.0e-8j])
+        delta = opn.coherent_subtract(frd)
+        np.testing.assert_allclose(delta.rcs.ravel(), expected, rtol=1.0e-10, atol=1.0e-15)
+
+    def test_join_drops_raw_amplitude_when_any_input_lacks_it(self):
+        with_raw = self._single_sample()
+        with_raw.extra["rcs_amp_real"] = np.ones((1, 1, 1, 1), dtype=np.float64)
+        with_raw.extra["rcs_amp_imag"] = np.zeros((1, 1, 1, 1), dtype=np.float64)
+        without_raw = RcsGrid(
+            [1.0],
+            [0.0],
+            [1.0],
+            ["VV"],
+            rcs_power=np.ones((1, 1, 1, 1), dtype=np.float64),
+            rcs_phase=np.zeros((1, 1, 1, 1), dtype=np.float64),
+            units={"frequency": "GHz"},
+        )
+        joined = RcsGrid.join_many(with_raw, without_raw)
+        self.assertNotIn("rcs_amp_real", joined.extra)
+        self.assertNotIn("rcs_amp_imag", joined.extra)
+
+    def test_join_detects_raw_field_conflict_hidden_by_float32_power(self):
+        def raw_grid(value):
+            grid = RcsGrid(
+                [0.0], [0.0], [1.0], ["VV"],
+                rcs_power=np.asarray([1.0], dtype=np.float32).reshape(1, 1, 1, 1),
+                rcs_phase=np.asarray([0.0], dtype=np.float32).reshape(1, 1, 1, 1),
+                units={
+                    "frequency": "GHz",
+                    "rcs_linear_quantity": "sigma_3d",
+                },
+                extra={
+                    "rcs_amp_real": np.asarray([value], dtype=np.float64).reshape(
+                        1, 1, 1, 1
+                    ),
+                    "rcs_amp_imag": np.zeros((1, 1, 1, 1), dtype=np.float64),
+                },
+            )
+            return grid
+
+        with self.assertRaisesRegex(ValueError, "conflicting finite samples"):
+            RcsGrid.join_many(raw_grid(1.0), raw_grid(1.0 + 1.0e-10))
+
+    def test_join_preserves_matching_assembly_role_and_rejects_base_mismatch(self):
+        provenance = '{"schema":"ghost.workflow.coherent-feature-addition.v1"}'
+
+        def assembled_slice(azimuth, base_digest, response_digest="c" * 64):
+            return RcsGrid(
+                [azimuth], [0.0], [1.0], ["VV"],
+                rcs_power=np.ones((1, 1, 1, 1)),
+                rcs_phase=np.zeros((1, 1, 1, 1)),
+                units={"frequency": "GHz"},
+                extra={
+                    "assembly_response_role": "body_plus_features",
+                    "assembly_base_sha256": base_digest,
+                    "assembly_base_response_sha256": response_digest,
+                    "feature_provenance_json": provenance,
+                },
+            )
+
+        joined = RcsGrid.join_many(
+            assembled_slice(0.0, "a" * 64),
+            assembled_slice(1.0, "a" * 64),
+        )
+        self.assertEqual(
+            joined.extra["assembly_response_role"], "body_plus_features"
+        )
+        self.assertEqual(joined.extra["assembly_base_sha256"], "a" * 64)
+        self.assertEqual(
+            joined.extra["assembly_base_response_sha256"], "c" * 64
+        )
+        self.assertEqual(joined.extra["feature_provenance_json"], provenance)
+
+        with self.assertRaisesRegex(ValueError, "Assembly base identities"):
+            RcsGrid.join_many(
+                assembled_slice(0.0, "a" * 64),
+                assembled_slice(1.0, "b" * 64),
+            )
+        with self.assertRaisesRegex(
+            ValueError, "Assembly base response identities"
+        ):
+            RcsGrid.join_many(
+                assembled_slice(0.0, "a" * 64, "c" * 64),
+                assembled_slice(1.0, "a" * 64, "d" * 64),
+            )
+
+    @staticmethod
+    def _raw_solver_grid(raw_values, *, azimuths, frequencies, role=None):
+        raw = np.asarray(raw_values, dtype=np.complex128).reshape(
+            len(azimuths), 1, len(frequencies), 1
+        )
+        shape = raw.shape
+        extra = {
+            "rcs_amp_real": raw.real.copy(),
+            "rcs_amp_imag": raw.imag.copy(),
+            "phase_reference": "vehicle origin",
+            "time_convention": "exp(+jwt)",
+            "polarization_basis": "earth V/H",
+            "amplitude_convention": "GHOST raw far-field amplitude",
+            "complex_field_domain": "far_field_scattering_amplitude",
+        }
+        if role is not None:
+            extra.update({
+                "assembly_response_role": role,
+                "assembly_base_sha256": "a" * 64,
+                "assembly_base_response_sha256": "b" * 64,
+                "feature_provenance_json": (
+                    '[{"schema":"ghost.workflow.coherent-feature-addition.v1",'
+                    '"source_monostatic_sha256":"' + "a" * 64 + '"}]'
+                ),
+            })
+        # Deliberately erase the small raw differences from the display pair.
+        # The regression proves every exact transform keeps the authoritative
+        # float64 field rather than laundering it through float32 power/phase.
+        return RcsGrid(
+            azimuths,
+            [0.0],
+            frequencies,
+            ["VV"],
+            rcs_power=np.ones(shape, dtype=np.float32),
+            rcs_phase=np.zeros(shape, dtype=np.float32),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_linear_quantity": "sigma_3d",
+            },
+            extra=extra,
+        )
+
+    def test_exact_phase_crop_and_azimuth_wrap_keep_float64_cancellation(self):
+        epsilon = 2.0e-10 + 3.0e-11j
+        open_grid = self._raw_solver_grid(
+            [1.0 + epsilon, 1.0 + epsilon, 1.0 + epsilon, 1.0 + epsilon],
+            azimuths=[0.0, 360.0],
+            frequencies=[1.0, 2.0],
+        )
+        closed_grid = self._raw_solver_grid(
+            [1.0, 1.0, 1.0, 1.0],
+            azimuths=[0.0, 360.0],
+            frequencies=[1.0, 2.0],
+        )
+
+        def transformed(grid):
+            return (
+                grid.wrap_phase("0_360")
+                .axis_crop(frequencies=[2.0])
+                .wrap_azimuth("0_360")
+            )
+
+        delta = transformed(open_grid).coherent_subtract(
+            transformed(closed_grid)
+        )
+        expected = np.sqrt(4.0 * np.pi) * epsilon
+        self.assertEqual(delta.rcs_power.dtype, np.float64)
+        np.testing.assert_allclose(
+            delta.rcs.item(), expected, rtol=1.0e-7, atol=1.0e-15
+        )
+
+    def test_azimuth_wrap_rejects_raw_conflict_hidden_by_float32_display(self):
+        conflict = self._raw_solver_grid(
+            [1.0, 1.0 + 1.0e-10],
+            azimuths=[0.0, 360.0],
+            frequencies=[1.0],
+        )
+        with self.assertRaisesRegex(
+            ValueError, "conflicting authoritative raw seam samples"
+        ):
+            conflict.wrap_azimuth("0_360")
+
+    def test_interpolation_uses_authoritative_raw_complex_field(self):
+        source = self._raw_solver_grid(
+            [1.0, 1.0 + 2.0e-10],
+            azimuths=[0.0, 2.0],
+            frequencies=[1.0],
+        )
+        interpolated = source.interpolate_axis("azimuth", [1.0])
+        expected = np.sqrt(4.0 * np.pi) * (1.0 + 1.0e-10)
+        np.testing.assert_allclose(
+            interpolated.rcs.item(), expected, rtol=0.0, atol=1.0e-14
+        )
+        self.assertNotIn("rcs_amp_real", interpolated.extra)
+        self.assertNotIn("rcs_amp_imag", interpolated.extra)
+
+    def test_exact_transforms_drop_partial_raw_pair_instead_of_creating_nans(self):
+        malformed = self._raw_solver_grid(
+            [1.0, 1.0],
+            azimuths=[0.0, 1.0],
+            frequencies=[1.0],
+        )
+        malformed.extra["rcs_amp_imag"] = np.asarray(
+            malformed.extra["rcs_amp_imag"], dtype=np.float64
+        ).copy()
+        malformed.extra["rcs_amp_imag"][1, 0, 0, 0] = np.nan
+
+        # The malformed producer field is not authoritative even before a
+        # transform; valid display samples continue to reconstruct normally.
+        self.assertTrue(np.isfinite(malformed.rcs).all())
+        for transformed in (
+            malformed.wrap_phase("0_360"),
+            malformed.axis_crop(azimuths=[1.0]),
+        ):
+            with self.subTest(shape=transformed.rcs_power.shape):
+                self.assertNotIn("rcs_amp_real", transformed.extra)
+                self.assertNotIn("rcs_amp_imag", transformed.extra)
+                self.assertNotIn(
+                    "raw_complex_amplitude_preserved", transformed.extra
+                )
+                self.assertTrue(np.isfinite(transformed.rcs).all())
+
+    def test_exact_transforms_retain_assembly_role_and_provenance(self):
+        source = self._raw_solver_grid(
+            [1.0, 1.0],
+            azimuths=[0.0, 10.0],
+            frequencies=[1.0],
+            role="features_only_delta",
+        )
+        cropped = source.axis_crop(azimuths=[10.0])
+        self.assertEqual(
+            cropped.extra["assembly_response_role"], "features_only_delta"
+        )
+        self.assertEqual(cropped.extra["assembly_base_sha256"], "a" * 64)
+        self.assertEqual(
+            cropped.extra["assembly_base_response_sha256"], "b" * 64
+        )
+        self.assertIn("feature_provenance_json", cropped.extra)
+        np.testing.assert_array_equal(
+            cropped.extra["rcs_amp_real"].ravel(), [1.0]
+        )
+
+        shifted = cropped.shift_azimuth(5.0)
+        self.assertEqual(
+            shifted.extra["assembly_response_role"], "features_only_delta"
+        )
+        self.assertEqual(shifted.extra["assembly_base_sha256"], "a" * 64)
+        self.assertIn("feature_provenance_json", shifted.extra)
+        self.assertNotIn("assembly_base_response_sha256", shifted.extra)
+        self.assertEqual(
+            shifted.extra["assembly_source_base_response_sha256"], "b" * 64
+        )
+
+    def test_align_intersect_preserves_raw_field_and_invalidates_relabels(self):
+        source = self._raw_solver_grid(
+            [1.0, 1.0 + 4.0e-10],
+            azimuths=[0.0, 2.0],
+            frequencies=[1.0],
+            role="features_only_delta",
+        )
+        exact_target = self._raw_solver_grid(
+            [1.0], azimuths=[2.0], frequencies=[1.0]
+        )
+        exact = source.align_to(exact_target, mode="intersect")
+        np.testing.assert_array_equal(exact.extra["rcs_amp_real"], [[[[1.0 + 4.0e-10]]]])
+        self.assertEqual(
+            exact.extra["assembly_base_response_sha256"], "b" * 64
+        )
+
+        relabeled_target = self._raw_solver_grid(
+            [1.0], azimuths=[2.0 + 5.0e-7], frequencies=[1.0]
+        )
+        relabeled = source.align_to(relabeled_target, mode="intersect")
+        np.testing.assert_array_equal(relabeled.azimuths, [2.0 + 5.0e-7])
+        np.testing.assert_array_equal(
+            relabeled.extra["rcs_amp_real"], [[[[1.0 + 4.0e-10]]]]
+        )
+        self.assertEqual(
+            relabeled.extra["assembly_response_role"], "features_only_delta"
+        )
+        self.assertNotIn("assembly_base_response_sha256", relabeled.extra)
+        self.assertEqual(
+            relabeled.extra["assembly_source_base_response_sha256"], "b" * 64
+        )
+
+    def test_nonexact_operations_cannot_impersonate_reusable_feature_delta(self):
+        source = self._raw_solver_grid(
+            [1.0, 1.0],
+            azimuths=[0.0, 10.0],
+            frequencies=[1.0],
+            role="features_only_delta",
+        )
+        other = self._raw_solver_grid(
+            [0.5, 0.5],
+            azimuths=[0.0, 10.0],
+            frequencies=[1.0],
+        )
+        results = (
+            source.incoherent_add(other),
+            source.statistics_dataset(
+                "mean", axes=["azimuth"], domain="magnitude"
+            ),
+        )
+        for result in results:
+            with self.subTest(shape=result.rcs_power.shape):
+                self.assertEqual(
+                    result.extra["assembly_response_role"],
+                    "incoherent_power_sum",
+                )
+                self.assertEqual(result.extra["combine_role"], "power")
+                self.assertEqual(
+                    result.extra["assembly_base_sha256"], "a" * 64
+                )
+                self.assertIn("feature_provenance_json", result.extra)
+                self.assertNotIn(
+                    "assembly_base_response_sha256", result.extra
+                )
+
+        coherent_mixed_role = source.coherent_add(other)
+        self.assertEqual(
+            coherent_mixed_role.extra["assembly_response_role"],
+            "coherent_field_sum",
+        )
+        self.assertNotEqual(
+            coherent_mixed_role.extra["assembly_response_role"],
+            "features_only_delta",
+        )
+
     def test_join_rejects_coordinate_aliases_instead_of_misplacing_samples(self):
         aliased = self._indexed_grid(
             [0.0, 5.0e-7, 1.0], [0.0], [1.0], ["VV"], 10.0

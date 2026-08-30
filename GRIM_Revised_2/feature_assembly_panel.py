@@ -15,6 +15,7 @@ from the coherent physical assembly.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 from functools import lru_cache
 import hashlib
@@ -23,6 +24,7 @@ import json
 import math
 import os
 from pathlib import Path
+import struct
 import tempfile
 import threading
 from typing import Any, Callable, Iterable, Mapping, Protocol, runtime_checkable
@@ -35,6 +37,18 @@ UNIT_CHOICES = (
     ("meters (m)", "meters"),
     ("feet (ft)", "feet"),
 )
+UNIT_SCALE_M = {
+    "inches": 0.0254,
+    "millimeters": 1.0e-3,
+    "meters": 1.0,
+    "feet": 0.3048,
+}
+UNIT_ABBREVIATIONS = {
+    "inches": "in",
+    "millimeters": "mm",
+    "meters": "m",
+    "feet": "ft",
+}
 
 # Keep the always-visible trade-study status readable for large fastener sets.
 # The complete disabled-ID list remains available through the explicit copy
@@ -56,6 +70,206 @@ VALIDATION_PROFILES = (
 DEFAULT_SKIN_TOL_MM = 1.0
 DEFAULT_SKIN_PHASE_TOL_DEG = 15.0
 DEFAULT_NORMAL_TOL_DEG = 15.0
+
+# The estimate is deliberately a static workload model, not a machine
+# benchmark.  Confirmation is reserved for a validated plan whose rough model
+# crosses four hours; pre-validation estimates can inform but never nag.
+LONG_BUILD_CONFIRMATION_SECONDS = 4.0 * 60.0 * 60.0
+_PREVALIDATION_LINE_PIECES_PER_SEGMENT = 64
+
+
+@dataclass(frozen=True)
+class AssemblyWorkEstimate:
+    """Broad local-work estimate derived from visible Assembly quantities."""
+
+    available: bool
+    quantities_validated: bool = False
+    look_count: int = 0
+    frequency_count: int = 0
+    point_count: int = 0
+    line_path_count: int = 0
+    line_segment_count: int = 0
+    line_piece_count: int = 0
+    line_piece_count_exact: bool = False
+    mesh_triangle_count: int = 0
+    mesh_triangle_count_exact: bool = False
+    shadow_enabled: bool = False
+    shadow_ray_upper_bound: int = 0
+    rough_validation_seconds: float = 0.0
+    rough_build_seconds: float = 0.0
+
+
+def estimate_assembly_workload(
+    *,
+    look_count: int,
+    frequency_count: int,
+    point_count: int,
+    line_path_count: int,
+    line_segment_count: int,
+    line_piece_count: int,
+    mesh_triangle_count: int = 0,
+    shadow_enabled: bool = False,
+    quantities_validated: bool = False,
+    line_piece_count_exact: bool = False,
+    mesh_triangle_count_exact: bool = False,
+) -> AssemblyWorkEstimate:
+    """Return a monotone, intentionally broad workload/time model.
+
+    Coefficients describe the current vectorized field path and Python BVH
+    shadow traversal only well enough to choose human-scale time bands.  They
+    must never be presented as a stopwatch prediction.
+    """
+
+    values = {
+        "look_count": look_count,
+        "frequency_count": frequency_count,
+        "point_count": point_count,
+        "line_path_count": line_path_count,
+        "line_segment_count": line_segment_count,
+        "line_piece_count": line_piece_count,
+        "mesh_triangle_count": mesh_triangle_count,
+    }
+    normalized: dict[str, int] = {}
+    for name, value in values.items():
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = 0
+        normalized[name] = max(0, number)
+    looks = normalized["look_count"]
+    frequencies = normalized["frequency_count"]
+    if looks <= 0 or frequencies <= 0:
+        return AssemblyWorkEstimate(available=False)
+
+    points = normalized["point_count"]
+    pieces = normalized["line_piece_count"]
+    triangles = normalized["mesh_triangle_count"]
+    point_cells = looks * frequencies * points
+    line_cells = looks * frequencies * pieces
+    grid_cells = looks * frequencies * 3
+    shadow_rays = looks * (points + pieces) if shadow_enabled else 0
+
+    # Vectorized point Jones transforms are inexpensive per cell. Line pieces
+    # remain the heavier field operation. BVH rays are Python-driven, and mesh
+    # depth broadens their cost without pretending every ray visits every face.
+    field_seconds = (
+        2.0e-7 * point_cells
+        + 5.0e-6 * line_cells
+        + 8.0e-7 * grid_cells
+    )
+    mesh_depth_factor = (
+        1.0
+        if triangles <= 1
+        else 1.0 + min(2.0, math.log2(triangles) / 16.0)
+    )
+    shadow_seconds = (
+        2.5e-4 * shadow_rays * mesh_depth_factor
+        if shadow_enabled else 0.0
+    )
+    build_seconds = 3.0 + field_seconds + shadow_seconds
+
+    placement_queries = points + normalized["line_segment_count"]
+    validation_seconds = (
+        2.0
+        + 4.0e-5 * triangles
+        + 2.0e-7 * (point_cells + line_cells)
+        + 8.0e-4 * placement_queries * mesh_depth_factor
+    )
+    return AssemblyWorkEstimate(
+        available=True,
+        quantities_validated=bool(quantities_validated),
+        look_count=looks,
+        frequency_count=frequencies,
+        point_count=points,
+        line_path_count=normalized["line_path_count"],
+        line_segment_count=normalized["line_segment_count"],
+        line_piece_count=pieces,
+        line_piece_count_exact=bool(line_piece_count_exact),
+        mesh_triangle_count=triangles,
+        mesh_triangle_count_exact=bool(mesh_triangle_count_exact),
+        shadow_enabled=bool(shadow_enabled),
+        shadow_ray_upper_bound=int(shadow_rays),
+        rough_validation_seconds=float(validation_seconds),
+        rough_build_seconds=float(build_seconds),
+    )
+
+
+def _rough_time_band(seconds: float) -> str:
+    value = max(0.0, float(seconds))
+    if value < 60.0:
+        return "under a minute"
+    if value < 10.0 * 60.0:
+        return "a few minutes"
+    if value < 60.0 * 60.0:
+        return "tens of minutes"
+    if value < LONG_BUILD_CONFIRMATION_SECONDS:
+        return "roughly 1-4 hours"
+    if value < 24.0 * 60.0 * 60.0:
+        return "many hours (roughly 4-24)"
+    return "a day or more"
+
+
+def assembly_build_confirmation_required(
+    estimate: AssemblyWorkEstimate,
+    *,
+    threshold_seconds: float = LONG_BUILD_CONFIRMATION_SECONDS,
+) -> bool:
+    """Confirm only an authoritative, validated long-build estimate."""
+
+    return bool(
+        isinstance(estimate, AssemblyWorkEstimate)
+        and estimate.available
+        and estimate.quantities_validated
+        and estimate.rough_build_seconds >= float(threshold_seconds)
+    )
+
+
+def format_assembly_work_estimate(estimate: AssemblyWorkEstimate) -> str:
+    """Render broad time bands and auditable workload counts without precision."""
+
+    if not estimate.available:
+        return (
+            "Rough local estimate (not a benchmark): choose a valid clean-body "
+            "GRIM and refresh the placement CSVs to expose the radar workload."
+        )
+    stage = "Validated quantities" if estimate.quantities_validated else (
+        "Pre-validation quantities"
+    )
+    piece_prefix = "" if estimate.line_piece_count_exact else "about "
+    parts = [
+        f"{estimate.look_count:,} looks x {estimate.frequency_count:,} frequencies",
+        f"{estimate.point_count:,} point(s)",
+        f"{estimate.line_path_count:,} line path(s)",
+        f"{piece_prefix}{estimate.line_piece_count:,} solver line piece(s)",
+    ]
+    if estimate.mesh_triangle_count:
+        triangle_prefix = "" if estimate.mesh_triangle_count_exact else "up to "
+        parts.append(
+            f"{triangle_prefix}{estimate.mesh_triangle_count:,} mesh triangle(s)"
+        )
+    if estimate.shadow_enabled:
+        parts.append(
+            f"up to {estimate.shadow_ray_upper_bound:,} body-shadow ray(s)"
+        )
+    else:
+        parts.append("body shadowing off")
+    refinement = (
+        " Work quantities come from the validated plan."
+        if estimate.quantities_validated
+        else " Line subdivision and mesh cost are refined after Validate."
+    )
+    return (
+        "Rough local estimate (not a benchmark): Validate "
+        + _rough_time_band(estimate.rough_validation_seconds)
+        + "; Build "
+        + _rough_time_band(estimate.rough_build_seconds)
+        + ". "
+        + stage
+        + ": "
+        + "; ".join(parts)
+        + ". Hardware, mesh visibility, and storage speed can move these bands."
+        + refinement
+    )
 
 
 # Display/template mirrors of GHOST's versioned point- and line-placement v1
@@ -255,9 +469,11 @@ class FeatureAssemblyValues:
 
     base_grim: str = ""
     output_grim: str = ""
-    coordinate_units: str = "inches"
+    # Placement and mesh formats do not reliably encode length units.  Empty
+    # defaults force a deliberate choice instead of silently assuming inches.
+    coordinate_units: str = ""
     surface_mesh: str = ""
-    surface_units: str = "inches"
+    surface_units: str = ""
     flip_surface_normals: bool = False
     shadow: bool = False
     shadow_bias_m: float | None = None
@@ -300,6 +516,9 @@ class BaseGrimPreflight:
     requires_surface_mesh: bool
     summary: str
     keys: frozenset[str] = frozenset()
+    azimuth_count: int = 0
+    elevation_count: int = 0
+    frequency_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -322,6 +541,8 @@ class FeatureBuildDispatch:
     plan: Any
     output_path: str
     reused_validated_plan: bool = False
+    features_only_output_path: str = ""
+    features_only_output_published: bool = False
 
 
 @dataclass(frozen=True)
@@ -536,10 +757,46 @@ def _normalized_grim_output_path(value: Any, *, base_dir: Any = None) -> Path:
     return Path(str(resolved) + ".grim")
 
 
+def _features_only_grim_output_path(
+    value: Any, *, base_dir: Any = None
+) -> Path:
+    """Return the published feature-delta sibling for one Assembly output."""
+
+    output = _normalized_grim_output_path(value, base_dir=base_dir)
+    return output.with_name(output.stem + "_features_only" + output.suffix)
+
+
 def _path_key(path: Path) -> str:
     """Comparable canonical path key (case-insensitive on Windows)."""
 
     return os.path.normcase(str(path.resolve()))
+
+
+def _publication_snapshot(path: Path) -> tuple[Any, ...]:
+    """Return observable file identity used only as publication evidence."""
+
+    try:
+        result = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return (False, None, None, None, None, None)
+    return (
+        True,
+        int(result.st_dev),
+        int(result.st_ino),
+        int(result.st_size),
+        int(result.st_mtime_ns),
+        int(result.st_ctime_ns),
+    )
+
+
+def _published_during_execution(
+    path: Path,
+    before: tuple[Any, ...],
+) -> bool:
+    """Conservatively require a new or observably replaced regular file."""
+
+    after = _publication_snapshot(path)
+    return bool(after[0] and after != before and path.is_file())
 
 
 def _paths_alias(first: Path, second: Path) -> bool:
@@ -565,6 +822,37 @@ _BASE_GRIM_REQUIRED_KEYS = frozenset(
 )
 
 
+def _npy_member_vector_count(
+    archive: zipfile.ZipFile,
+    member_name: str,
+) -> int:
+    """Read only one NPY header and return its 1-D length."""
+
+    with archive.open(member_name, "r") as stream:
+        if stream.read(6) != b"\x93NUMPY":
+            return 0
+        version = stream.read(2)
+        if len(version) != 2:
+            return 0
+        major = version[0]
+        length_bytes = stream.read(2 if major == 1 else 4)
+        if len(length_bytes) not in (2, 4):
+            return 0
+        header_length = int.from_bytes(length_bytes, "little")
+        header = stream.read(header_length)
+    try:
+        metadata = ast.literal_eval(header.decode("latin1").strip())
+        shape = metadata["shape"]
+    except (KeyError, SyntaxError, UnicodeDecodeError, ValueError):
+        return 0
+    if not isinstance(shape, tuple) or len(shape) != 1:
+        return 0
+    try:
+        return max(0, int(shape[0]))
+    except (TypeError, ValueError):
+        return 0
+
+
 @lru_cache(maxsize=64)
 def _preflight_base_grim_zip(
     resolved_path: str,
@@ -577,12 +865,18 @@ def _preflight_base_grim_zip(
     path = Path(resolved_path)
     try:
         with zipfile.ZipFile(path, "r") as archive:
-            keys = frozenset(
-                Path(name).stem
+            members = {
+                Path(name).stem: name
                 for name in archive.namelist()
                 if name.casefold().endswith(".npy")
                 and not name.endswith(("/", "\\"))
-            )
+            }
+            keys = frozenset(members)
+            axis_counts = {
+                key: _npy_member_vector_count(archive, members[key])
+                for key in ("azimuths", "elevations", "frequencies")
+                if key in members
+            }
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
         return BaseGrimPreflight(
             False,
@@ -651,6 +945,9 @@ def _preflight_base_grim_zip(
         not embedded_bor,
         summary,
         keys,
+        azimuth_count=int(axis_counts.get("azimuths", 0)),
+        elevation_count=int(axis_counts.get("elevations", 0)),
+        frequency_count=int(axis_counts.get("frequencies", 0)),
     )
 
 
@@ -683,6 +980,145 @@ def preflight_base_grim(
         return BaseGrimPreflight(
             False, False, False, f"Clean-body preflight failed: {exc}"
         )
+
+
+@lru_cache(maxsize=64)
+def _surface_mesh_triangle_hint_cached(
+    resolved_path: str,
+    size: int,
+    mtime_ns: int,
+) -> tuple[int, bool]:
+    """Read only a mesh header; return (triangle hint, exact)."""
+
+    del mtime_ns
+    path = Path(resolved_path)
+    try:
+        if path.suffix.casefold() == ".facet":
+            with path.open("r", encoding="utf-8-sig") as stream:
+                for raw in stream:
+                    text = raw.split("#", 1)[0].strip()
+                    if not text:
+                        continue
+                    tokens = text.split()
+                    if len(tokens) != 2:
+                        return 0, False
+                    facets = int(tokens[1])
+                    # A facet is a triangle or quad; two triangles per declared
+                    # facet is a safe pre-validation upper hint.
+                    return max(0, 2 * facets), False
+            return 0, False
+        if path.suffix.casefold() == ".stl" and size >= 84:
+            with path.open("rb") as stream:
+                header = stream.read(84)
+            if len(header) != 84:
+                return 0, False
+            triangles = int(struct.unpack("<I", header[80:84])[0])
+            if 84 + 50 * triangles == size:
+                return max(0, triangles), True
+    except (OSError, UnicodeError, ValueError, struct.error):
+        return 0, False
+    return 0, False
+
+
+def surface_mesh_triangle_hint(
+    value: Any,
+    *,
+    base_dir: Any = None,
+) -> tuple[int, bool]:
+    """Return a cheap triangle-count hint without loading mesh coordinates."""
+
+    if not _clean_path(value):
+        return 0, False
+    try:
+        path = _resolved_user_path(value, base_dir=base_dir)
+        if not path.is_file():
+            return 0, False
+        stat = path.stat()
+        return _surface_mesh_triangle_hint_cached(
+            str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)
+        )
+    except OSError:
+        return 0, False
+
+
+def _axis_size(value: Any) -> int:
+    try:
+        size = getattr(value, "size")
+    except (AttributeError, TypeError):
+        size = None
+    if size is not None:
+        try:
+            return max(0, int(size))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return max(0, len(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def estimate_validated_assembly_plan_workload(plan: Any) -> AssemblyWorkEstimate:
+    """Derive exact stage quantities from one authoritative validated plan."""
+
+    grid = getattr(plan, "radar_grid", {}) or {}
+    azimuth_count = _axis_size(grid.get("azimuths_deg", ()))
+    elevation_count = _axis_size(grid.get("elevations_deg", ()))
+    frequency_count = _axis_size(grid.get("frequencies_ghz", ()))
+    points = tuple(getattr(plan, "point_placements", ()) or ())
+    lines = tuple(getattr(plan, "line_placements", ()) or ())
+    line_piece_count = 0
+    line_segment_count = 0
+    pieces_exact = True
+    for placement in lines:
+        segment_count = 0
+        try:
+            perimeter = placement["perimeter"]
+            segment_count = len(perimeter)
+            line_segment_count += int(segment_count)
+            shadow_points = placement.get("shadow_points")
+            if shadow_points is not None:
+                line_piece_count += int(len(shadow_points))
+                continue
+            maximum_piece_length = float(placement["max_piece_length_m"])
+            if not math.isfinite(maximum_piece_length) or maximum_piece_length <= 0.0:
+                raise ValueError
+            for segment in perimeter:
+                start = segment[0]
+                end = segment[1]
+                length = math.sqrt(sum(
+                    (float(end[index]) - float(start[index])) ** 2
+                    for index in range(3)
+                ))
+                line_piece_count += max(1, int(math.ceil(
+                    length / maximum_piece_length
+                )))
+        except (KeyError, IndexError, TypeError, ValueError, OverflowError):
+            pieces_exact = False
+            line_piece_count += max(
+                1, int(segment_count)
+            ) * _PREVALIDATION_LINE_PIECES_PER_SEGMENT
+
+    request = getattr(plan, "request", None)
+    shadow_enabled = bool(getattr(request, "shadow", False))
+    surface = getattr(plan, "surface", None)
+    triangles = getattr(surface, "triangles", None)
+    try:
+        triangle_count = len(triangles) if triangles is not None else 0
+    except TypeError:
+        triangle_count = 0
+    return estimate_assembly_workload(
+        look_count=azimuth_count * elevation_count,
+        frequency_count=frequency_count,
+        point_count=len(points),
+        line_path_count=len(lines),
+        line_segment_count=line_segment_count,
+        line_piece_count=line_piece_count,
+        mesh_triangle_count=triangle_count,
+        shadow_enabled=shadow_enabled,
+        quantities_validated=True,
+        line_piece_count_exact=pieces_exact,
+        mesh_triangle_count_exact=bool(triangles is not None),
+    )
 
 
 def _fingerprint_file(
@@ -742,6 +1178,72 @@ def _surface_binding_sidecar_path(
         return None
     resolved = _resolved_user_path(surface_mesh, base_dir=base_dir)
     return Path(str(resolved) + ".assembly.json")
+
+
+def _surface_preview_identity_key(
+    surface_mesh: Any,
+    surface_units: Any,
+    *,
+    base_dir: Any = None,
+) -> tuple[Any, ...] | None:
+    """Stat-only identity for one already interpreted surface preview."""
+
+    path = _clean_path(surface_mesh)
+    units = str(surface_units or "").strip()
+    if not path or units not in UNIT_SCALE_M:
+        return None
+    fingerprint = _fingerprint_file(
+        path,
+        base_dir=base_dir,
+        include_hash=False,
+    )
+    return (
+        units,
+        fingerprint.resolved_path,
+        fingerprint.exists,
+        fingerprint.size,
+        fingerprint.mtime_ns,
+        fingerprint.ctime_ns,
+    )
+
+
+def _surface_dimensions_summary(
+    surface_triangles_cad_m: Any,
+    *,
+    surface_units: Any,
+) -> str:
+    """Describe interpreted mesh spans in meters and selected source units."""
+
+    units = str(surface_units or "").strip()
+    if surface_triangles_cad_m is None or units not in UNIT_SCALE_M:
+        return ""
+    try:
+        vertices = surface_triangles_cad_m.reshape((-1, 3))
+        if int(vertices.shape[0]) == 0:
+            return ""
+        minimum = vertices.min(axis=0)
+        maximum = vertices.max(axis=0)
+        spans_m = [
+            max(0.0, float(maximum[i]) - float(minimum[i]))
+            for i in range(3)
+        ]
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return ""
+    if not all(math.isfinite(value) for value in spans_m):
+        return ""
+    scale = UNIT_SCALE_M[units]
+    spans_source = [value / scale for value in spans_m]
+
+    def format_triplet(values: Iterable[float]) -> str:
+        return " x ".join(f"{float(value):.6g}" for value in values)
+
+    return (
+        "Interpreted physical size: "
+        + format_triplet(spans_m)
+        + " m (x/y/z). Source-coordinate spans: "
+        + format_triplet(spans_source)
+        + f" {UNIT_ABBREVIATIONS[units]} ({units} selected)."
+    )
 
 
 def _surface_binding_identity_key(
@@ -831,6 +1333,22 @@ def assess_surface_binding_readiness(
             "waiting",
             "Choose the matching STL/facet mesh before checking solve-to-CAD "
             "registration.",
+            ready=not required,
+            required=required,
+            external_body=True,
+            sidecar_path=sidecar,
+        )
+    selected_units = str(surface_units or "").strip()
+    if selected_units not in UNIT_SCALE_M:
+        message = (
+            "Choose the physical units of the selected surface mesh before "
+            "checking solve-to-CAD registration."
+            if not selected_units
+            else f"Unsupported surface mesh units: {selected_units!r}."
+        )
+        return SurfaceBindingReadiness(
+            "waiting",
+            message,
             ready=not required,
             required=required,
             external_body=True,
@@ -1262,8 +1780,10 @@ def read_feature_assembly_recipe(
     coordinate_units = str(raw_values["coordinate_units"])
     surface_units = str(raw_values["surface_units"])
     supported_units = {value for _label, value in UNIT_CHOICES}
-    if coordinate_units not in supported_units or surface_units not in supported_units:
+    if coordinate_units and coordinate_units not in supported_units:
         raise ValueError("Assembly recipe contains unsupported coordinate units.")
+    if surface_units and surface_units not in supported_units:
+        raise ValueError("Assembly recipe contains unsupported surface units.")
     skin_tol = _require_finite_nonnegative(
         raw_values["skin_tol_m"], "Recipe skin distance tolerance"
     )
@@ -1594,6 +2114,25 @@ class FeatureAssemblyFormModel:
     @property
     def line_instances(self) -> tuple[tuple[str, str, int], ...]:
         return self._line_instances
+
+    @property
+    def prepared_plan(self) -> Any | None:
+        """Return the cached reviewed plan for read-only GUI summaries."""
+
+        cache = self._prepared_plan_cache
+        return None if cache is None else cache.plan
+
+    @property
+    def enabled_line_segment_count(self) -> int:
+        enabled = self.enabled_line_ids
+        if enabled is None:
+            return int(self._line_segment_count)
+        selected = set(enabled)
+        return sum(
+            int(segment_count)
+            for line_id, _dataset_id, segment_count in self._line_instances
+            if line_id in selected
+        )
 
     @property
     def enabled_point_placement_ids(self) -> tuple[str, ...] | None:
@@ -2092,6 +2631,15 @@ class FeatureAssemblyFormModel:
         output = _normalized_grim_output_path(
             values.output_grim, base_dir=values.base_dir
         )
+        output_targets = (
+            ("assembled response", output),
+            (
+                "feature-only sibling",
+                _features_only_grim_output_path(
+                    values.output_grim, base_dir=values.base_dir
+                ),
+            ),
+        )
         protected: list[tuple[str, str]] = [("clean-body response", values.base_grim)]
         protected.extend(
             (
@@ -2109,13 +2657,15 @@ class FeatureAssemblyFormModel:
             for dataset_id, path in values.line_datasets.items()
         )
         for label, path in protected:
-            if _clean_path(path) and _paths_alias(
-                output,
-                _resolved_user_path(path, base_dir=values.base_dir),
-            ):
-                raise ValueError(
-                    f"Output must not overwrite the {label}. Choose a new file name."
-                )
+            if not _clean_path(path):
+                continue
+            source = _resolved_user_path(path, base_dir=values.base_dir)
+            for output_label, target in output_targets:
+                if _paths_alias(target, source):
+                    raise ValueError(
+                        f"The {output_label} must not overwrite the {label}. "
+                        "Choose a new file name."
+                    )
 
     def validate(self) -> None:
         values = self.values
@@ -2176,10 +2726,25 @@ class FeatureAssemblyFormModel:
             raise ValueError(
                 "Geometric shadowing requires an STL or facet surface mesh."
             )
-        if values.coordinate_units not in {value for _, value in UNIT_CHOICES}:
-            raise ValueError(f"Unsupported coordinate units: {values.coordinate_units!r}.")
-        if values.surface_units not in {value for _, value in UNIT_CHOICES}:
-            raise ValueError(f"Unsupported surface units: {values.surface_units!r}.")
+        supported_units = {value for _, value in UNIT_CHOICES}
+        if point_csv or line_csv:
+            if not str(values.coordinate_units).strip():
+                raise ValueError(
+                    "Choose the coordinate units used by the selected placement CSV(s)."
+                )
+            if values.coordinate_units not in supported_units:
+                raise ValueError(
+                    f"Unsupported coordinate units: {values.coordinate_units!r}."
+                )
+        if _clean_path(values.surface_mesh):
+            if not str(values.surface_units).strip():
+                raise ValueError(
+                    "Choose the physical units of the selected surface mesh."
+                )
+            if values.surface_units not in supported_units:
+                raise ValueError(
+                    f"Unsupported surface units: {values.surface_units!r}."
+                )
         skin = _require_finite_nonnegative(
             values.skin_tol_m, "Skin distance tolerance"
         )
@@ -2493,10 +3058,25 @@ class FeatureAssemblyFormModel:
             raise ValueError(
                 "Choose a clean-body GRIM, body mesh, or placement CSV to preview."
             )
-        if values.coordinate_units not in {value for _, value in UNIT_CHOICES}:
-            raise ValueError(f"Unsupported coordinate units: {values.coordinate_units!r}.")
-        if values.surface_units not in {value for _, value in UNIT_CHOICES}:
-            raise ValueError(f"Unsupported surface units: {values.surface_units!r}.")
+        supported_units = {value for _, value in UNIT_CHOICES}
+        if point_csv or line_csv:
+            if not str(values.coordinate_units).strip():
+                raise ValueError(
+                    "Choose the coordinate units used by the selected placement CSV(s)."
+                )
+            if values.coordinate_units not in supported_units:
+                raise ValueError(
+                    f"Unsupported coordinate units: {values.coordinate_units!r}."
+                )
+        if _clean_path(values.surface_mesh):
+            if not str(values.surface_units).strip():
+                raise ValueError(
+                    "Choose the physical units of the selected surface mesh."
+                )
+            if values.surface_units not in supported_units:
+                raise ValueError(
+                    f"Unsupported surface units: {values.surface_units!r}."
+                )
         source_values = (
             ("base", base_grim, False),
             ("surface", surface_mesh, False),
@@ -2602,6 +3182,16 @@ class FeatureAssemblyFormModel:
             raise InterruptedError(
                 "Feature assembly cancelled; existing output kept."
             )
+        plan_features_path = getattr(plan, "features_only_output_path", None)
+        features_path = (
+            Path(plan_features_path)
+            if plan_features_path is not None
+            else _features_only_grim_output_path(
+                self.values.output_grim,
+                base_dir=self.values.base_dir,
+            )
+        )
+        features_before = _publication_snapshot(features_path)
         if _callable_accepts_runtime_hooks(adapter.execute):
             output = adapter.execute(
                 plan,
@@ -2617,6 +3207,10 @@ class FeatureAssemblyFormModel:
             plan=plan,
             output_path=str(output),
             reused_validated_plan=reused,
+            features_only_output_path=str(features_path),
+            features_only_output_published=_published_during_execution(
+                features_path, features_before
+            ),
         )
 
     def assemble_validated(
@@ -2646,6 +3240,18 @@ class FeatureAssemblyFormModel:
             raise InterruptedError(
                 "Feature assembly cancelled; existing output kept."
             )
+        plan_features_path = getattr(
+            cache.plan, "features_only_output_path", None
+        )
+        features_path = (
+            Path(plan_features_path)
+            if plan_features_path is not None
+            else _features_only_grim_output_path(
+                self.values.output_grim,
+                base_dir=self.values.base_dir,
+            )
+        )
+        features_before = _publication_snapshot(features_path)
         if _callable_accepts_runtime_hooks(adapter.execute):
             output = adapter.execute(
                 cache.plan,
@@ -2658,6 +3264,10 @@ class FeatureAssemblyFormModel:
             plan=cache.plan,
             output_path=str(output),
             reused_validated_plan=True,
+            features_only_output_path=str(features_path),
+            features_only_output_published=_published_during_execution(
+                features_path, features_before
+            ),
         )
 
 
@@ -3563,6 +4173,9 @@ if GUI_AVAILABLE:
             self._surface_binding_checked: Mapping[str, Any] | None = None
             self._surface_binding_error_key: tuple[Any, ...] | None = None
             self._surface_binding_error = ""
+            self._surface_dimensions_key: tuple[Any, ...] | None = None
+            self._surface_dimensions_text = ""
+            self._current_work_estimate = AssemblyWorkEstimate(available=False)
             self._build_ui()
 
         def _build_ui(self) -> None:
@@ -3674,6 +4287,8 @@ if GUI_AVAILABLE:
             )
             self.coordinate_units = QComboBox(body_group)
             self.surface_units = QComboBox(body_group)
+            self.coordinate_units.addItem("Choose coordinate units...", "")
+            self.surface_units.addItem("Choose mesh units...", "")
             for label, value in UNIT_CHOICES:
                 self.coordinate_units.addItem(label, value)
                 self.surface_units.addItem(label, value)
@@ -3703,6 +4318,14 @@ if GUI_AVAILABLE:
             body_form.addRow("Clean-body response:", self.base_picker)
             body_form.addRow("Surface mesh (optional):", self.surface_picker)
             body_form.addRow("Surface mesh units:", self.surface_units)
+            self.surface_dimensions_label = QLabel(body_group)
+            self.surface_dimensions_label.setObjectName("featureSummary")
+            self.surface_dimensions_label.setWordWrap(True)
+            self.surface_dimensions_label.setText(
+                "No external mesh selected; physical mesh dimensions are not "
+                "available yet."
+            )
+            body_form.addRow("Interpreted mesh size:", self.surface_dimensions_label)
             binding_box = QWidget(body_group)
             binding_layout = QVBoxLayout(binding_box)
             binding_layout.setContentsMargins(0, 0, 0, 0)
@@ -4095,6 +4718,18 @@ if GUI_AVAILABLE:
             self.build_summary_label.setObjectName("featureBuildSummary")
             self.build_summary_label.setWordWrap(True)
             review_form.addRow("This build:", self.build_summary_label)
+            self.work_estimate_label = QLabel(review_group)
+            self.work_estimate_label.setObjectName("featureWorkEstimate")
+            self.work_estimate_label.setWordWrap(True)
+            self.work_estimate_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.work_estimate_label.setToolTip(
+                "A broad static workload model, not a runtime benchmark. It "
+                "uses radar looks/frequencies, enabled features, solver line "
+                "pieces, mesh triangles, and optional body-shadow rays."
+            )
+            review_form.addRow("Rough workload:", self.work_estimate_label)
             self.model_scope_label = QLabel(
                 "Model boundary: Assembly coherently superposes reviewed local "
                 "feature deltas. It does not solve body–feature mutual coupling, "
@@ -4162,8 +4797,10 @@ if GUI_AVAILABLE:
             self.validation_qa_table.setAlternatingRowColors(True)
             self.validation_qa_table.setMinimumHeight(135)
             self.validation_qa_table.setToolTip(
-                "Successful authoritative placement records. Click a row to reveal "
-                "the same instance in Spatial Feature Configuration."
+                "Authoritative placement records. WARN means the placement "
+                "passed physical checks but is not illuminated by any requested "
+                "look and therefore contributes zero. Click a row to reveal the "
+                "same instance in Spatial Feature Configuration."
             )
             review_form.addRow("", self.validation_qa_table)
             content_layout.addWidget(review_group)
@@ -4233,7 +4870,7 @@ if GUI_AVAILABLE:
             self.save_recipe_button.clicked.connect(self._save_recipe)
             self.save_recipe_as_button.clicked.connect(self._save_recipe_as)
             self.base_picker.editing_finished.connect(self._base_path_changed)
-            self.surface_picker.editing_finished.connect(self._input_setting_changed)
+            self.surface_picker.editing_finished.connect(self._surface_path_changed)
             self.output_picker.editing_finished.connect(self._output_path_changed)
             self.point_csv_picker.editing_finished.connect(
                 lambda: self._placement_csv_changed("point")
@@ -4677,7 +5314,7 @@ if GUI_AVAILABLE:
 
         def set_surface_mesh(self, path: str) -> None:
             self.surface_picker.set_path(path)
-            self._mark_preview_stale()
+            self._surface_path_changed()
 
         def set_point_csv(self, path: str, *, discover: bool = True) -> None:
             self.point_csv_picker.set_path(path)
@@ -4739,6 +5376,11 @@ if GUI_AVAILABLE:
             }:
                 raise ValueError(
                     "Choose the matching STL or .facet body surface first."
+                )
+            if values.surface_units not in UNIT_SCALE_M:
+                raise ValueError(
+                    "Choose the physical units of the selected surface mesh "
+                    "before checking or creating its binding."
                 )
             adapter = coerce_feature_workflow(self._service)
             return adapter, base, surface, str(values.surface_units)
@@ -4883,6 +5525,62 @@ if GUI_AVAILABLE:
 
             self._start_operation("binding_write", operation)
 
+        def _refresh_work_estimate(
+            self,
+            base_preflight: BaseGrimPreflight,
+            *,
+            validation_current: bool,
+        ) -> AssemblyWorkEstimate:
+            """Refresh the displayed estimate from current or reviewed inputs."""
+
+            estimate = AssemblyWorkEstimate(available=False)
+            plan = self.model.prepared_plan if validation_current else None
+            if plan is not None:
+                estimate = estimate_validated_assembly_plan_workload(plan)
+            if not estimate.available:
+                enabled_points = self.model.enabled_point_placement_ids
+                enabled_lines = self.model.enabled_line_ids
+                point_count = (
+                    len(enabled_points)
+                    if enabled_points is not None
+                    else self.model.point_placement_count
+                )
+                line_count = (
+                    len(enabled_lines)
+                    if enabled_lines is not None
+                    else self.model.line_path_count
+                )
+                segment_count = self.model.enabled_line_segment_count
+                line_piece_count = max(
+                    line_count,
+                    segment_count * _PREVALIDATION_LINE_PIECES_PER_SEGMENT,
+                )
+                triangle_count, triangle_exact = surface_mesh_triangle_hint(
+                    self.model.values.surface_mesh,
+                    base_dir=self.model.values.base_dir,
+                )
+                estimate = estimate_assembly_workload(
+                    look_count=(
+                        int(base_preflight.azimuth_count)
+                        * int(base_preflight.elevation_count)
+                    ),
+                    frequency_count=int(base_preflight.frequency_count),
+                    point_count=point_count,
+                    line_path_count=line_count,
+                    line_segment_count=segment_count,
+                    line_piece_count=line_piece_count,
+                    mesh_triangle_count=triangle_count,
+                    shadow_enabled=bool(self.model.values.shadow),
+                    quantities_validated=False,
+                    line_piece_count_exact=False,
+                    mesh_triangle_count_exact=triangle_exact,
+                )
+            self._current_work_estimate = estimate
+            self.work_estimate_label.setText(
+                format_assembly_work_estimate(estimate)
+            )
+            return estimate
+
         def _update_workflow_readiness(self) -> None:
             """Keep the compact step summary and actions honest and actionable."""
 
@@ -4913,6 +5611,10 @@ if GUI_AVAILABLE:
 
             point_selected = bool(values.point_locations_csv)
             line_selected = bool(values.line_locations_csv)
+            placement_units_ready = bool(
+                not (point_selected or line_selected)
+                or values.coordinate_units in UNIT_SCALE_M
+            )
             try:
                 point_current = (
                     point_selected and self.model.requirements_look_current("point")
@@ -5157,6 +5859,9 @@ if GUI_AVAILABLE:
                 mappings_complete and not point_unusable and not line_unusable
             )
             surface_selected = bool(values.surface_mesh)
+            surface_units_ready = bool(
+                not surface_selected or values.surface_units in UNIT_SCALE_M
+            )
             surface_file_ready = existing_surface_file(values.surface_mesh)
             surface_required = bool(
                 body_ready
@@ -5167,6 +5872,7 @@ if GUI_AVAILABLE:
                 if surface_required
                 else not surface_selected or surface_file_ready
             )
+            self._update_surface_dimensions_display(base_preflight)
             binding_status = assess_surface_binding_readiness(
                 base_grim=values.base_grim,
                 surface_mesh=values.surface_mesh,
@@ -5190,6 +5896,7 @@ if GUI_AVAILABLE:
                 not self.job_is_running()
                 and binding_status.external_body
                 and surface_file_ready
+                and surface_units_ready
             )
             self.check_surface_binding_button.setEnabled(
                 binding_action_ready
@@ -5241,6 +5948,8 @@ if GUI_AVAILABLE:
                     response_files_ready,
                     output_ready,
                     surface_ready,
+                    placement_units_ready,
+                    surface_units_ready,
                     binding_status.ready,
                     settings_ready,
                     host_material_ready,
@@ -5254,6 +5963,10 @@ if GUI_AVAILABLE:
             )
             if not validation_current:
                 self._validated_plan_current = False
+            self._refresh_work_estimate(
+                base_preflight,
+                validation_current=validation_current,
+            )
 
             checks = [
                 (service_ready, "GHOST backend"),
@@ -5268,6 +5981,10 @@ if GUI_AVAILABLE:
             ]
             if surface_selected or surface_required:
                 checks.append((surface_ready, "surface mesh"))
+            if surface_selected:
+                checks.append((surface_units_ready, "mesh units"))
+            if has_placements:
+                checks.append((placement_units_ready, "placement units"))
             if binding_status.external_body and production_profile:
                 checks.append((binding_status.ready, "reviewed body binding"))
             checks.append((host_material_ready, "host material IDs"))
@@ -5291,6 +6008,16 @@ if GUI_AVAILABLE:
                 next_step = (
                     "Next: choose the matching .stl or .facet surface mesh required "
                     "for this external 3-D body or shadowing."
+                )
+            elif surface_selected and not surface_units_ready:
+                next_step = (
+                    "Next: choose the physical units stored in the selected "
+                    "surface mesh."
+                )
+            elif has_placements and not placement_units_ready:
+                next_step = (
+                    "Next: choose the coordinate units used by the selected "
+                    "placement CSV(s)."
                 )
             elif binding_status.required and not binding_status.ready:
                 next_step = "Next: " + binding_status.message.lstrip("✗⚠○ ")
@@ -5344,6 +6071,8 @@ if GUI_AVAILABLE:
             )
             preview_possible = bool(
                 (not has_body or body_ready)
+                and placement_units_ready
+                and surface_units_ready
                 and any(
                     (
                         body_ready,
@@ -5425,6 +6154,21 @@ if GUI_AVAILABLE:
             self._update_workflow_readiness()
 
         def _input_setting_changed(self, *_args: Any) -> None:
+            self._mark_preview_stale()
+
+        def _surface_path_changed(self) -> None:
+            """Default a newly selected mesh to physically safer shadowing."""
+
+            selected = self.surface_picker.path()
+            previous = _clean_path(self.model.values.surface_mesh)
+            newly_selected = bool(selected and selected != previous)
+            if newly_selected and not self._loading_recipe:
+                self.shadow.blockSignals(True)
+                try:
+                    self.shadow.setChecked(True)
+                finally:
+                    self.shadow.blockSignals(False)
+            self.model.values.surface_mesh = selected
             self._mark_preview_stale()
 
         def _output_path_changed(self) -> None:
@@ -5534,6 +6278,89 @@ if GUI_AVAILABLE:
             label.setVisible(bool(checked))
             help_label.setVisible(bool(checked))
             button.setText("Hide guide" if checked else "CSV guide")
+
+        def _remember_surface_dimensions(self, preview: Any) -> None:
+            """Cache physical mesh spans only for the exact previewed selection."""
+
+            geometry = getattr(preview, "preview_geometry", preview)
+            triangles = getattr(geometry, "surface_triangles_cad_m", None)
+            text = _surface_dimensions_summary(
+                triangles,
+                surface_units=self.model.values.surface_units,
+            )
+            try:
+                key = _surface_preview_identity_key(
+                    self.model.values.surface_mesh,
+                    self.model.values.surface_units,
+                    base_dir=self.model.values.base_dir,
+                )
+            except OSError:
+                key = None
+            self._surface_dimensions_key = key if text else None
+            self._surface_dimensions_text = text
+
+        def _update_surface_dimensions_display(
+            self,
+            base_preflight: BaseGrimPreflight | None = None,
+        ) -> None:
+            values = self.model.values
+            if not _clean_path(values.surface_mesh):
+                preflight = base_preflight or preflight_base_grim(
+                    values.base_grim, base_dir=values.base_dir
+                )
+                if preflight.embedded_bor:
+                    text = (
+                        "Embedded BoR geometry is authoritative and already "
+                        "stored in meters in the clean-body response."
+                    )
+                elif preflight.valid and preflight.requires_surface_mesh:
+                    text = (
+                        "No external mesh selected; choose the matching mesh "
+                        "before physical body dimensions can be interpreted."
+                    )
+                else:
+                    text = (
+                        "No external mesh selected; physical mesh dimensions "
+                        "are not available yet."
+                    )
+                self.surface_dimensions_label.setText(text)
+                return
+            if values.surface_units not in UNIT_SCALE_M:
+                self.surface_dimensions_label.setText(
+                    "Not interpreted: choose the physical units stored in this "
+                    "mesh before previewing, binding, or building."
+                )
+                return
+            if (
+                self._surface_dimensions_key is None
+                or not self._surface_dimensions_text
+            ):
+                self.surface_dimensions_label.setText(
+                    "Not interpreted yet: click Preview geometry to confirm the "
+                    "selected units and physical x/y/z dimensions in meters."
+                )
+                return
+            try:
+                current_key = _surface_preview_identity_key(
+                    values.surface_mesh,
+                    values.surface_units,
+                    base_dir=values.base_dir,
+                )
+            except OSError:
+                current_key = None
+            if (
+                current_key is not None
+                and current_key == self._surface_dimensions_key
+                and self._surface_dimensions_text
+            ):
+                self.surface_dimensions_label.setText(
+                    self._surface_dimensions_text
+                )
+                return
+            self.surface_dimensions_label.setText(
+                "Not interpreted yet: click Preview geometry to confirm the "
+                "selected units and physical x/y/z dimensions in meters."
+            )
 
         def _save_template(self, kind: str) -> None:
             default_name = (
@@ -5704,6 +6531,7 @@ if GUI_AVAILABLE:
             normal_limit = float(self.model.values.normal_tol_deg)
             offsets: list[float] = []
             normal_errors: list[float] = []
+            not_illuminated_count = 0
             for row, (kind, record) in enumerate(raw_rows):
                 identifier_key = "line_id" if kind == "line" else "placement_id"
                 identifier = str(record.get(identifier_key, "")).strip()
@@ -5742,23 +6570,60 @@ if GUI_AVAILABLE:
                     normal_text = f"{normal_error:.3g}° / {normal_limit:.3g}°"
                 else:
                     normal_text = "outward ✓"
+                illumination_raw = record.get(
+                    "illuminated_requested_look_count"
+                )
+                requested_raw = record.get("requested_look_count")
+                try:
+                    illuminated_looks = int(illumination_raw)
+                except (TypeError, ValueError):
+                    illuminated_looks = -1
+                try:
+                    requested_looks = int(requested_raw)
+                except (TypeError, ValueError):
+                    requested_looks = -1
+                not_illuminated = (
+                    "illuminated_requested_look_count" in record
+                    and illuminated_looks == 0
+                )
+                if not_illuminated:
+                    not_illuminated_count += 1
+                result_text = (
+                    "WARN: not illuminated" if not_illuminated else "PASS"
+                )
                 values = (
                     "Line" if kind == "line" else "Point",
                     identifier,
                     dataset_id,
                     offset_text,
                     normal_text,
-                    "PASS",
+                    result_text,
                 )
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(value)
                     if column == 0:
                         item.setData(Qt.ItemDataRole.UserRole, (kind, identifier))
                     if column == 5:
-                        item.setToolTip(
-                            "Passed the authoritative skin, outward-normal, frame, "
-                            "response-mapping, and source-integrity checks."
-                        )
+                        if not_illuminated:
+                            requested_text = (
+                                str(requested_looks)
+                                if requested_looks >= 0
+                                else "the"
+                            )
+                            item.setToolTip(
+                                "Not illuminated: 0 of " + requested_text
+                                + " requested looks illuminate this enabled "
+                                "feature, so it contributes zero on this radar "
+                                "grid. Physical placement checks passed; review "
+                                "the normal/aperture or accept the one-time "
+                                "release-warning waiver if this is intentional."
+                            )
+                        else:
+                            item.setToolTip(
+                                "Passed the authoritative skin, outward-normal, "
+                                "frame, response-mapping, illumination, and "
+                                "source-integrity checks."
+                            )
                     self.validation_qa_table.setItem(row, column, item)
 
             if not raw_rows:
@@ -5770,9 +6635,14 @@ if GUI_AVAILABLE:
             point_count = sum(kind == "point" for kind, _record in raw_rows)
             line_count = len(raw_rows) - point_count
             summary = (
-                f"✓ {len(raw_rows)} enabled placement(s) passed: {point_count} point, "
-                f"{line_count} line."
+                f"✓ {len(raw_rows)} enabled placement(s) passed physical checks: "
+                f"{point_count} point, {line_count} line."
             )
+            if not_illuminated_count:
+                summary += (
+                    f" ⚠ {not_illuminated_count} WARN/not illuminated and "
+                    "contributes zero on this radar grid."
+                )
             if validation_warnings:
                 summary += (
                     f" ⚠ {len(validation_warnings)} production QA warning(s) "
@@ -5908,6 +6778,12 @@ if GUI_AVAILABLE:
                 cooperative=True,
             )
 
+        def _validated_build_work_estimate(self) -> AssemblyWorkEstimate:
+            plan = self.model.prepared_plan
+            if plan is None:
+                return AssemblyWorkEstimate(available=False)
+            return estimate_validated_assembly_plan_workload(plan)
+
         @Slot()
         def assemble_and_save(self) -> None:
             if self.job_is_running():
@@ -5944,16 +6820,50 @@ if GUI_AVAILABLE:
                 self.model.values.output_grim,
                 base_dir=self.model.values.base_dir,
             )
-            if output.exists():
+            features_only_output = _features_only_grim_output_path(
+                self.model.values.output_grim,
+                base_dir=self.model.values.base_dir,
+            )
+            existing_outputs = [
+                path for path in (output, features_only_output) if path.exists()
+            ]
+            if existing_outputs:
+                listed = "\n".join(f"• {path.name}" for path in existing_outputs)
                 answer = QMessageBox.question(
                     self,
-                    "Replace assembled response?",
-                    f"{output.name} already exists. Replace it with this assembly?",
+                    "Replace Assembly output files?",
+                    "Assembly publishes the body-plus-features response and a "
+                    "feature-only delta sibling. The following existing file(s) "
+                    "will be replaced together:\n\n"
+                    + listed
+                    + "\n\nContinue?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
                 if answer != QMessageBox.StandardButton.Yes:
-                    self.status_changed.emit("Assembly cancelled; existing output kept.")
+                    self.status_changed.emit(
+                        "Assembly cancelled; existing output files kept."
+                    )
+                    return
+            build_estimate = self._validated_build_work_estimate()
+            if assembly_build_confirmation_required(build_estimate):
+                answer = QMessageBox.warning(
+                    self,
+                    "Long Assembly build estimate",
+                    format_assembly_work_estimate(build_estimate)
+                    + "\n\nThis validated workload falls in the many-hours "
+                    "range on the static local model. Continue now? You can "
+                    "cancel cooperatively during the build without publishing "
+                    "a partial output.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    self.status_changed.emit(
+                        "Long Assembly build cancelled before computation; "
+                        "existing output files kept."
+                    )
                     return
             self._start_operation(
                 "build",
@@ -6221,6 +7131,7 @@ if GUI_AVAILABLE:
                     "artists; Spatial Feature Configuration → Use controls "
                     "preview, validation, response loading, and build membership."
                 )
+                self._remember_surface_dimensions(preview_result)
                 self.preview_ready.emit(preview_result)
                 self._update_workflow_readiness()
             elif kind == "preview":
@@ -6249,6 +7160,7 @@ if GUI_AVAILABLE:
                     + " Build will reuse this validation while inputs remain unchanged."
                     + warning_text
                 )
+                self._remember_surface_dimensions(result)
                 self.preview_ready.emit(result)
                 self._update_workflow_readiness()
             elif kind == "build":
@@ -6256,8 +7168,29 @@ if GUI_AVAILABLE:
                 self._preview_is_current = True
                 self._show_validation_qa(dispatch.plan)
                 self._validated_plan_current = True
+                self._remember_surface_dimensions(dispatch.plan)
                 self.preview_ready.emit(dispatch.plan)
                 self.feature_built.emit(str(dispatch.output_path))
+                features_only_path = str(
+                    dispatch.features_only_output_path or ""
+                ).strip()
+                features_only_saved = bool(
+                    dispatch.features_only_output_published
+                    and features_only_path
+                    and _path_key(Path(features_only_path))
+                    != _path_key(Path(dispatch.output_path))
+                    and Path(features_only_path).is_file()
+                )
+                if features_only_saved:
+                    # Preserve the existing one-path signal contract while
+                    # routing both published artifacts through GRIM's normal
+                    # dataset loader for immediate before/after plotting.
+                    self.feature_built.emit(features_only_path)
+                features_status = (
+                    f" Saved reusable feature-only delta: {features_only_path}."
+                    if features_only_saved
+                    else " No feature-only delta was published by this workflow service."
+                )
                 reuse_text = (
                     " Reused the unchanged validated preview."
                     if dispatch.reused_validated_plan
@@ -6273,7 +7206,8 @@ if GUI_AVAILABLE:
                     else ""
                 )
                 self.status_changed.emit(
-                    f"Saved assembled response: {dispatch.output_path}."
+                    f"Saved body-plus-features response: {dispatch.output_path}."
+                    + features_status
                     + reuse_text
                     + warning_text
                     + " The result is ready in GRIM for plotting or further "
@@ -6342,6 +7276,7 @@ else:
 
 __all__ = [
     "GUI_AVAILABLE",
+    "LONG_BUILD_CONFIRMATION_SECONDS",
     "FEATURE_RECIPE_SCHEMA",
     "FEATURE_RECIPE_SUFFIX",
     "FEATURE_RECIPE_VERSION",
@@ -6352,6 +7287,7 @@ __all__ = [
     "UNIT_CHOICES",
     "VALIDATION_PROFILES",
     "BaseGrimPreflight",
+    "AssemblyWorkEstimate",
     "SurfaceBindingReadiness",
     "FeatureAssemblyFormModel",
     "FeatureAssemblyPanel",
@@ -6362,10 +7298,15 @@ __all__ = [
     "LoadedFeatureAssemblyRecipe",
     "coerce_feature_workflow",
     "assess_surface_binding_readiness",
+    "assembly_build_confirmation_required",
+    "estimate_assembly_workload",
+    "estimate_validated_assembly_plan_workload",
     "feature_assembly_recipe_payload",
+    "format_assembly_work_estimate",
     "placement_csv_template_text",
     "preflight_base_grim",
     "read_feature_assembly_recipe",
+    "surface_mesh_triangle_hint",
     "write_feature_assembly_recipe",
     "write_placement_csv_template",
 ]

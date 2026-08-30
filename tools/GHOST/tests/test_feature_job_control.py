@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import threading
@@ -39,6 +40,499 @@ def _write_empty_base(path: Path) -> None:
 
 
 class FeatureJobControlTests(unittest.TestCase):
+    @staticmethod
+    def _scalar(payload, key):
+        value = np.asarray(payload[key]).reshape(()).item()
+        return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+    def test_feature_progress_weights_scale_with_exact_shadow_and_field_work(self):
+        point_shadow, line_shadow, per_frequency = (
+            feature_sum._feature_export_progress_weights(
+                look_count=100,
+                frequency_count=3,
+                point_count=2,
+                line_count=1,
+                line_shadow_piece_count=50,
+                has_point_shadow=True,
+                has_line_shadow=True,
+            )
+        )
+
+        self.assertEqual(point_shadow, 200)
+        self.assertEqual(line_shadow, 5_000)
+        self.assertEqual(per_frequency, 5_200)
+
+        without_shadow = feature_sum._feature_export_progress_weights(
+            look_count=100,
+            frequency_count=3,
+            point_count=2,
+            line_count=1,
+            line_shadow_piece_count=0,
+            has_point_shadow=False,
+            has_line_shadow=False,
+        )
+        self.assertEqual(without_shadow, (0, 0, 300))
+
+    def test_success_publishes_total_and_reusable_feature_delta_with_shared_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            _write_empty_base(base)
+
+            saved = feature_sum.add_features_to_monostatic_grim(
+                str(base),
+                str(output),
+                radar_grid=GRID,
+                declared_coherent_base=True,
+                feature_provenance={"case": "publication-test"},
+            )
+
+            self.assertEqual(Path(saved), output.resolve())
+            self.assertEqual(
+                Path(feature_sum.feature_only_output_path(str(output))),
+                features.resolve(),
+            )
+            self.assertTrue(features.is_file())
+            with (
+                np.load(base, allow_pickle=False) as clean,
+                np.load(output, allow_pickle=False) as total,
+                np.load(features, allow_pickle=False) as delta,
+            ):
+                self.assertEqual(
+                    self._scalar(total, "assembly_response_role"),
+                    "body_plus_features",
+                )
+                self.assertEqual(
+                    self._scalar(delta, "assembly_response_role"),
+                    "features_only_delta",
+                )
+                self.assertEqual(
+                    self._scalar(total, "assembly_base_sha256"),
+                    self._scalar(delta, "assembly_base_sha256"),
+                )
+                self.assertEqual(
+                    self._scalar(total, "assembly_base_response_sha256"),
+                    self._scalar(delta, "assembly_base_response_sha256"),
+                )
+                self.assertEqual(
+                    self._scalar(total, "assembly_base_response_sha256"),
+                    feature_sum.assembly_response_physics_sha256(
+                        feature_sum._load_grim(str(base)), base.name
+                    ),
+                )
+                self.assertEqual(
+                    self._scalar(total, "feature_provenance_json"),
+                    self._scalar(delta, "feature_provenance_json"),
+                )
+                delta_records = feature_sum.json.loads(
+                    self._scalar(delta, "feature_provenance_json")
+                )
+                self.assertEqual(len(delta_records), 1)
+                self.assertEqual(
+                    delta_records[0]["details"]["case"],
+                    "publication-test",
+                )
+                clean_amp = clean["rcs_amp_real"] + 1j * clean["rcs_amp_imag"]
+                total_amp = total["rcs_amp_real"] + 1j * total["rcs_amp_imag"]
+                delta_amp = delta["rcs_amp_real"] + 1j * delta["rcs_amp_imag"]
+                np.testing.assert_allclose(total_amp - clean_amp, delta_amp)
+            self.assertEqual(list(root.glob(".*.backup")), [])
+            self.assertEqual(list(root.glob(".*.tmp.*.grim")), [])
+            self.assertEqual(list(root.glob(".*.features.*.grim")), [])
+
+    def test_unreviewed_feature_only_sibling_blocks_both_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            _write_empty_base(base)
+            intruder = b"unreviewed feature-only output"
+            features.write_bytes(intruder)
+
+            with self.assertRaisesRegex(RuntimeError, "feature-only output was created"):
+                feature_sum.add_features_to_monostatic_grim(
+                    str(base),
+                    str(output),
+                    radar_grid=GRID,
+                    declared_coherent_base=True,
+                    expect_output_absent=True,
+                    expect_features_only_output_absent=True,
+                )
+
+            self.assertFalse(output.exists())
+            self.assertEqual(features.read_bytes(), intruder)
+
+    def test_feature_bearing_total_cannot_be_used_as_another_build_base(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean = root / "clean.grim"
+            first = root / "first.grim"
+            second = root / "second.grim"
+            _write_empty_base(clean)
+            feature_sum.add_features_to_monostatic_grim(
+                str(clean),
+                str(first),
+                radar_grid=GRID,
+                declared_coherent_base=True,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "feature-bearing base"
+            ):
+                feature_sum.add_features_to_monostatic_grim(
+                    str(first),
+                    str(second),
+                    radar_grid=GRID,
+                    declared_coherent_base=True,
+                )
+
+            self.assertFalse(second.exists())
+            self.assertFalse(
+                Path(feature_sum.feature_only_output_path(str(second))).exists()
+            )
+
+    def test_pair_publication_failure_rolls_back_both_existing_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            _write_empty_base(base)
+            old_total = b"previous total"
+            old_features = b"previous feature delta"
+            output.write_bytes(old_total)
+            features.write_bytes(old_features)
+            real_link = feature_sum.os.link
+
+            def fail_total_publication(source, destination):
+                if (
+                    Path(destination) == output
+                    and ".tmp." in Path(source).name
+                    and Path(source).suffix == ".grim"
+                ):
+                    raise OSError("simulated total publication failure")
+                return real_link(source, destination)
+
+            with mock.patch.object(
+                feature_sum.os, "link", side_effect=fail_total_publication
+            ):
+                with self.assertRaisesRegex(
+                    OSError, "total publication failure"
+                ):
+                    feature_sum.add_features_to_monostatic_grim(
+                        str(base),
+                        str(output),
+                        radar_grid=GRID,
+                        declared_coherent_base=True,
+                    )
+
+            self.assertEqual(output.read_bytes(), old_total)
+            self.assertEqual(features.read_bytes(), old_features)
+            self.assertEqual(list(root.glob(".*.backup")), [])
+            self.assertEqual(list(root.glob(".*.tmp.*.grim")), [])
+            self.assertEqual(list(root.glob(".*.features.*.grim")), [])
+
+    def test_failed_replace_does_not_delete_external_file_at_absent_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            _write_empty_base(base)
+            intruder = b"external writer won the race"
+            real_link = feature_sum.os.link
+
+            def race_before_total_link(source, destination):
+                if Path(destination) == output:
+                    output.write_bytes(intruder)
+                return real_link(source, destination)
+
+            with mock.patch.object(
+                feature_sum.os, "link", side_effect=race_before_total_link
+            ):
+                with self.assertRaises(OSError):
+                    feature_sum.add_features_to_monostatic_grim(
+                        str(base),
+                        str(output),
+                        radar_grid=GRID,
+                        declared_coherent_base=True,
+                    )
+
+            self.assertEqual(output.read_bytes(), intruder)
+            self.assertFalse(features.exists())
+            self.assertEqual(list(root.glob(".*.backup")), [])
+
+    def test_external_replacement_between_link_and_verification_survives(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            intruder_source = root / "independent-feature-output"
+            _write_empty_base(base)
+            old_total = b"reviewed previous total"
+            old_features = b"reviewed previous feature delta"
+            intruder = b"independent writer replaced the new link"
+            output.write_bytes(old_total)
+            features.write_bytes(old_features)
+            intruder_source.write_bytes(intruder)
+            real_link = feature_sum.os.link
+
+            def replace_immediately_after_feature_link(source, destination):
+                result = real_link(source, destination)
+                if (
+                    Path(destination) == features
+                    and ".features." in Path(source).name
+                ):
+                    os.replace(intruder_source, features)
+                return result
+
+            with mock.patch.object(
+                feature_sum.os,
+                "link",
+                side_effect=replace_immediately_after_feature_link,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "without overwriting an independent file"
+                ):
+                    feature_sum.add_features_to_monostatic_grim(
+                        str(base),
+                        str(output),
+                        radar_grid=GRID,
+                        declared_coherent_base=True,
+                    )
+
+            self.assertEqual(features.read_bytes(), intruder)
+            self.assertEqual(output.read_bytes(), old_total)
+            backups = list(root.glob(".*.backup"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), old_features)
+            self.assertEqual(list(root.glob(".*.tmp.*.grim")), [])
+            self.assertEqual(list(root.glob(".*.features.*.grim")), [])
+
+    def test_external_replacement_before_pair_commit_is_detected_and_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            intruder_source = root / "independent-feature-output"
+            _write_empty_base(base)
+            old_total = b"reviewed previous total"
+            old_features = b"reviewed previous feature delta"
+            intruder = b"independent writer won before paired commit"
+            output.write_bytes(old_total)
+            features.write_bytes(old_features)
+            intruder_source.write_bytes(intruder)
+            real_link = feature_sum.os.link
+
+            def replace_feature_while_total_is_published(source, destination):
+                result = real_link(source, destination)
+                if (
+                    Path(destination) == output
+                    and ".tmp." in Path(source).name
+                ):
+                    os.replace(intruder_source, features)
+                return result
+
+            with mock.patch.object(
+                feature_sum.os,
+                "link",
+                side_effect=replace_feature_while_total_is_published,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "without overwriting an independent file"
+                ):
+                    feature_sum.add_features_to_monostatic_grim(
+                        str(base),
+                        str(output),
+                        radar_grid=GRID,
+                        declared_coherent_base=True,
+                    )
+
+            self.assertEqual(features.read_bytes(), intruder)
+            self.assertEqual(output.read_bytes(), old_total)
+            backups = list(root.glob(".*.backup"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), old_features)
+            self.assertEqual(list(root.glob(".*.tmp.*.grim")), [])
+            self.assertEqual(list(root.glob(".*.features.*.grim")), [])
+
+    def test_in_place_mutation_before_pair_commit_restores_reviewed_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            _write_empty_base(base)
+            old_total = b"reviewed previous total"
+            old_features = b"reviewed previous feature delta"
+            output.write_bytes(old_total)
+            features.write_bytes(old_features)
+            real_link = feature_sum.os.link
+
+            def mutate_feature_while_total_is_published(source, destination):
+                result = real_link(source, destination)
+                if (
+                    Path(destination) == output
+                    and ".tmp." in Path(source).name
+                ):
+                    features.write_bytes(b"mutated through the public hard link")
+                return result
+
+            with mock.patch.object(
+                feature_sum.os,
+                "link",
+                side_effect=mutate_feature_while_total_is_published,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "staged Assembly output changed"
+                ):
+                    feature_sum.add_features_to_monostatic_grim(
+                        str(base),
+                        str(output),
+                        radar_grid=GRID,
+                        declared_coherent_base=True,
+                    )
+
+            self.assertEqual(features.read_bytes(), old_features)
+            self.assertEqual(output.read_bytes(), old_total)
+            self.assertEqual(list(root.glob(".*.backup")), [])
+            self.assertEqual(list(root.glob(".*.tmp.*.grim")), [])
+            self.assertEqual(list(root.glob(".*.features.*.grim")), [])
+
+    def test_existing_target_recreation_race_keeps_intruder_for_both_outputs(self):
+        for raced_name in ("assembled_features_only.grim", "assembled.grim"):
+            with self.subTest(raced_name=raced_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                base = root / "clean.grim"
+                output = root / "assembled.grim"
+                features = root / "assembled_features_only.grim"
+                raced = root / raced_name
+                _write_empty_base(base)
+                old_total = b"reviewed previous total"
+                old_features = b"reviewed previous delta"
+                intruder = b"independent writer recreated this target"
+                output.write_bytes(old_total)
+                features.write_bytes(old_features)
+                real_link = feature_sum.os.link
+
+                def recreate_before_exclusive_publish(source, destination):
+                    if Path(destination) == raced and (
+                        ".features." in Path(source).name
+                        or ".tmp." in Path(source).name
+                    ):
+                        raced.write_bytes(intruder)
+                    return real_link(source, destination)
+
+                with mock.patch.object(
+                    feature_sum.os,
+                    "link",
+                    side_effect=recreate_before_exclusive_publish,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "without overwriting an independent file"
+                    ):
+                        feature_sum.add_features_to_monostatic_grim(
+                            str(base),
+                            str(output),
+                            radar_grid=GRID,
+                            declared_coherent_base=True,
+                        )
+
+                self.assertEqual(raced.read_bytes(), intruder)
+                other = output if raced == features else features
+                expected_other = old_total if other == output else old_features
+                self.assertEqual(other.read_bytes(), expected_other)
+                backups = list(root.glob(".*.backup"))
+                self.assertEqual(len(backups), 1)
+                expected_backup = old_features if raced == features else old_total
+                self.assertEqual(backups[0].read_bytes(), expected_backup)
+                self.assertEqual(list(root.glob(".*.tmp.*.grim")), [])
+                self.assertEqual(list(root.glob(".*.features.*.grim")), [])
+
+    def test_backup_digest_recheck_detects_existing_target_swap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            features = root / "assembled_features_only.grim"
+            _write_empty_base(base)
+            old_total = b"reviewed total"
+            old_features = b"reviewed delta"
+            intruder = b"changed after final digest check"
+            output.write_bytes(old_total)
+            features.write_bytes(old_features)
+            real_replace = feature_sum.os.replace
+            swapped = False
+
+            def swap_before_backup(source, destination):
+                nonlocal swapped
+                if (
+                    not swapped
+                    and Path(source) == output
+                    and str(destination).endswith(".backup")
+                ):
+                    output.write_bytes(intruder)
+                    swapped = True
+                return real_replace(source, destination)
+
+            with mock.patch.object(
+                feature_sum.os, "replace", side_effect=swap_before_backup
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "changed after its final reviewed digest check"
+                ):
+                    feature_sum.add_features_to_monostatic_grim(
+                        str(base),
+                        str(output),
+                        radar_grid=GRID,
+                        declared_coherent_base=True,
+                    )
+
+            self.assertTrue(swapped)
+            self.assertEqual(output.read_bytes(), intruder)
+            self.assertEqual(features.read_bytes(), old_features)
+            self.assertEqual(list(root.glob(".*.backup")), [])
+
+    def test_unsupported_hard_links_fail_before_feature_computation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "clean.grim"
+            output = root / "assembled.grim"
+            _write_empty_base(base)
+
+            with (
+                mock.patch.object(
+                    feature_sum.os,
+                    "link",
+                    side_effect=OSError("hard links unsupported"),
+                ),
+                mock.patch.object(feature_sum, "export_radar_grim") as export,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "filesystem does not support atomic, no-overwrite hard links",
+                ):
+                    feature_sum.add_features_to_monostatic_grim(
+                        str(base),
+                        str(output),
+                        radar_grid=GRID,
+                        declared_coherent_base=True,
+                    )
+
+            export.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertFalse(
+                Path(feature_sum.feature_only_output_path(str(output))).exists()
+            )
+            self.assertEqual(
+                list(root.glob(".ghost-assembly-link-probe.*")), []
+            )
+
     def test_cancelled_atomic_build_keeps_existing_output_and_cleans_temps(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

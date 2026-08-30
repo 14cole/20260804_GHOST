@@ -31,6 +31,7 @@ from feature_workflow import (
     feature_response_content_sha256,
     load_feature_library_manifest,
     resolve_path,
+    validate_declared_feature_delta_response,
     validate_feature_library_manifest,
     write_surface_binding as _write_backend_surface_binding,
 )
@@ -283,6 +284,7 @@ def _resolve_response(value: str) -> Path:
     response = resolve_path(value)
     if not response.is_file():
         raise FileNotFoundError(f"Feature response not found: {response}")
+    validate_declared_feature_delta_response(response)
     return response
 
 

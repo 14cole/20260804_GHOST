@@ -164,7 +164,8 @@ class AssemblyVisibilityTest(unittest.TestCase):
         result, _history = build_assembly_grid(root, axis_mode="strict")
 
         self.assertIsNotNone(result)
-        self.assertAlmostEqual(float(result.rcs_power.item()), 9.0, places=12)
+        # Untyped response leaves now fail safe to incoherent power addition.
+        self.assertAlmostEqual(float(result.rcs_power.item()), 5.0, places=12)
 
     def test_use_column_controls_build_without_changing_preview(self) -> None:
         tree, root, branch, first, second = self._tree_with_two_leaves()
@@ -184,7 +185,7 @@ class AssemblyVisibilityTest(unittest.TestCase):
         result, history = build_assembly_grid(root, axis_mode="strict")
         self.assertIsNotNone(result)
         self.assertAlmostEqual(float(result.rcs_power.item()), 4.0, places=12)
-        self.assertNotIn("A", history)
+        self.assertNotIn("incoh[A]", history)
         self.assertIn("B", history)
 
         # Show remains preview-only even after solve membership is changed.
