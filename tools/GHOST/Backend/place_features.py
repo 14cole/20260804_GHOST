@@ -6,10 +6,13 @@ Edit only the USER SETTINGS block, then run:
     python place_features.py
 
 Production is the default: the clean body must carry the strict coherent/grid
-metadata contract and every active feature response must have a validated,
-content-bound feature-library manifest. An external monostatic GRIM also needs
-its matching indexed ASCII ``.facet``/STL platform surface. Point and line
-datasets use the single canonical OPN-FRD (featured-clean) differential
+metadata contract and passed fine-mesh VV/HH body certificate, and every active
+feature response must have a validated, content-bound feature-library manifest.
+Use the explicit ``external`` profile for a reviewed external/HPC body whose
+solver certificate is not embedded; its strict metadata, surface binding, host,
+and feature-manifest checks remain active. An external monostatic GRIM also
+needs its matching indexed ASCII ``.facet``/STL platform surface. Point and
+line datasets use the single canonical OPN-FRD (featured-clean) differential
 response.
 
 The executable settings wrapper delegates to :mod:`feature_workflow`, which
@@ -22,12 +25,14 @@ from pathlib import Path
 # USER SETTINGS
 # =============================================================================
 
-# Production is deliberately the default. It requires strict clean-body
-# metadata, validated response manifests, and an effective host material /
-# coating ID for every active response. Use "legacy" only for a reviewed older
-# library whose missing declarations you intentionally accept; that choice and
-# every compatibility assumption are recorded as warnings in the output.
-VALIDATION_PROFILE = "production"       # "production" or explicit "legacy"
+# Production is deliberately the default. It requires a certified local GHOST
+# body, strict clean-body metadata, validated response manifests, and an
+# effective host material / coating ID for every active response. Use
+# "external" for a reviewed external/HPC body that lacks the local mesh
+# certificate while retaining all other strict checks. Use "legacy" only for a
+# reviewed older library whose missing declarations you intentionally accept;
+# that choice and every compatibility assumption are recorded as warnings.
+VALIDATION_PROFILE = "production"       # production, external, or explicit legacy
 
 # The clean local material/coating stack expected by every response manifest.
 # A global value is convenient for a homogeneous host. Per-response overrides
@@ -231,11 +236,14 @@ def _validation_policy():
 
     profile = str(VALIDATION_PROFILE).strip().casefold()
     if profile == "production":
-        return profile, False, True
+        return profile, False, True, True
+    if profile == "external":
+        return profile, False, True, False
     if profile == "legacy":
-        return profile, True, False
+        return profile, True, False, False
     raise ValueError(
-        "VALIDATION_PROFILE must be exactly 'production' or 'legacy'."
+        "VALIDATION_PROFILE must be exactly 'production', 'external', or "
+        "'legacy'."
     )
 
 
@@ -245,13 +253,20 @@ def main():
             "Configure LINE_FEATURE_LOCATIONS_CSV or POINT_FEATURE_LOCATIONS_CSV."
         )
     try:
-        profile, allow_legacy_metadata, require_manifests = _validation_policy()
+        (
+            profile,
+            allow_legacy_metadata,
+            require_manifests,
+            require_body_certification,
+        ) = _validation_policy()
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     print(
         f"Validation profile: {profile.title()} "
         f"(strict base metadata={'yes' if not allow_legacy_metadata else 'no'}, "
-        f"validated feature manifests={'yes' if require_manifests else 'no'})"
+        f"validated feature manifests={'yes' if require_manifests else 'no'}, "
+        "certified body mesh="
+        f"{'yes' if require_body_certification else 'explicit waiver'})"
     )
     request = FeatureAssemblyRequest(
         base_grim=BASE_MONOSTATIC_GRIM,
@@ -271,6 +286,7 @@ def main():
         normal_tol_deg=NORMAL_TOL_DEG,
         allow_legacy_base_metadata=allow_legacy_metadata,
         require_feature_manifests=require_manifests,
+        require_body_mesh_certification=require_body_certification,
         expected_host_material=EXPECTED_HOST_MATERIAL,
         expected_host_materials=EXPECTED_HOST_MATERIALS,
         base_dir=PROJECT_ROOT,
@@ -310,7 +326,12 @@ def main():
             f"ray bias {plan.occluder.bias * 1e3:.4g} mm"
         )
     try:
-        saved = execute_feature_assembly(plan)
+        saved = execute_feature_assembly(
+            plan,
+            acknowledged_plan_sha256=(
+                ACKNOWLEDGED_PLAN_SHA256 if plan.validation_warnings else None
+            ),
+        )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:
         raise SystemExit(str(exc)) from exc
     print(f"Wrote one combined monostatic dataset: {saved}")

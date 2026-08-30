@@ -1,0 +1,10 @@
+-c constraints-windows-py312.txt
+
+setuptools
+wheel
+numpy
+matplotlib
+PySide6
+scipy
+psutil
+pywin32; sys_platform == "win32"

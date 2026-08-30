@@ -1408,6 +1408,78 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         self.assertTrue(stats["mode_converged"])
         np.testing.assert_allclose(field, [[2.0 + 0.0j]])
 
+    def test_signed_modal_pairs_obey_axisymmetric_cfie_symmetry(self):
+        """Verify +m/-m operators independently, before their fields sum.
+
+        For the supported isotropic axisymmetric formulations, changing the
+        sign of m is a diagonal similarity transform that flips the phi basis.
+        Monostatic co-polarized +m and -m far-field contributions are equal.
+        This catches a signed FFT bin, Gs parity, excitation, or projection
+        regression that a final power-only sphere comparison could conceal.
+        """
+
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        solver = BorPecSolver(_sphere(radius, 10), FREQUENCY_HZ)
+        mode_cap = 2
+        alpha = 0.5
+        solver.prepare_operators(
+            mode_cap, efie=True, mfie=True, workers=1
+        )
+        transform = np.concatenate((
+            np.ones(solver.Nn), -np.ones(solver.Nn)
+        ))
+
+        for mode in (1, 2):
+            systems = {}
+            contributions = {"VV": {}, "HH": {}}
+            for signed_mode in (mode, -mode):
+                matrix = (
+                    alpha * solver.assemble_mode(signed_mode, mode_cap)
+                    + (1.0 - alpha) * ETA0
+                    * solver.assemble_mfie_mode(signed_mode, mode_cap)
+                )
+                mask = solver.basis_mask(signed_mode)
+                systems[signed_mode] = matrix[np.ix_(mask, mask)]
+                for polarization, component in (("VV", 0), ("HH", 1)):
+                    excitation = (
+                        alpha * solver.rhs_mode(
+                            signed_mode, 47.0, polarization
+                        )
+                        + (1.0 - alpha) * ETA0
+                        * solver.rhs_mfie_mode(
+                            signed_mode, 47.0, polarization
+                        )
+                    )
+                    solution = np.zeros(
+                        2 * solver.Nn, dtype=np.complex128
+                    )
+                    solution[mask] = np.linalg.solve(
+                        systems[signed_mode], excitation[mask]
+                    )
+                    contributions[polarization][signed_mode] = (
+                        solver.farfield_mode(
+                            signed_mode, solution, 47.0
+                        )[component]
+                    )
+
+            active_transform = transform[solver.basis_mask(mode)]
+            expected_negative = (
+                active_transform[:, None]
+                * systems[mode]
+                * active_transform[None, :]
+            )
+            np.testing.assert_allclose(
+                systems[-mode], expected_negative,
+                rtol=2.0e-11, atol=2.0e-11,
+            )
+            for polarization in ("VV", "HH"):
+                np.testing.assert_allclose(
+                    contributions[polarization][-mode],
+                    contributions[polarization][mode],
+                    rtol=2.0e-11, atol=2.0e-12,
+                    err_msg=f"m={mode}, {polarization}",
+                )
+
     def test_hpc_bor_discovers_only_configured_bor_directories(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -265,6 +265,8 @@ class Occluder:
         self._bvh_base = 0
         self._bvh_lo = None
         self._bvh_hi = None
+        self._tri_edge1 = None
+        self._tri_edge2 = None
 
     @property
     def tris(self) -> 'np.ndarray':
@@ -298,6 +300,8 @@ class Occluder:
             clone._bvh_base = int(self._bvh_base)
             clone._bvh_lo = self._bvh_lo
             clone._bvh_hi = self._bvh_hi
+            clone._tri_edge1 = self._tri_edge1
+            clone._tri_edge2 = self._tri_edge2
         clone._bvh_lock = threading.Lock()
         return clone
 
@@ -401,6 +405,14 @@ class Occluder:
                 dtype=ordered.dtype,
             ).reshape(ordered.shape)
             self._tris = immutable_ordered
+            self._tri_edge1 = np.frombuffer(
+                np.ascontiguousarray(ordered[:, 1] - ordered[:, 0]).tobytes(),
+                dtype=ordered.dtype,
+            ).reshape((n_triangles, 3))
+            self._tri_edge2 = np.frombuffer(
+                np.ascontiguousarray(ordered[:, 2] - ordered[:, 0]).tobytes(),
+                dtype=ordered.dtype,
+            ).reshape((n_triangles, 3))
             self._bvh_base = base
             # As with triangles, a write=False flag on an owning ndarray can be
             # reversed by outside code. Back the published boxes with immutable
@@ -435,20 +447,22 @@ class Occluder:
         # conservative bound so acceleration can never cull a leaf the exact
         # triangle test would accept.
         coordinate_tol = 4e-9 * self.diag
-        lo = self._bvh_lo[node] - coordinate_tol
-        hi = self._bvh_hi[node] + coordinate_tol
-        if not np.all(lo <= hi):
-            return None
+        lo_values = self._bvh_lo[node]
+        hi_values = self._bvh_hi[node]
         near = -np.inf
         far = np.inf
         for axis in range(3):
+            lo = float(lo_values[axis]) - coordinate_tol
+            hi = float(hi_values[axis]) + coordinate_tol
+            if lo > hi:
+                return None
             component = float(direction[axis])
             if abs(component) <= 1e-15:
-                if origin[axis] < lo[axis] or origin[axis] > hi[axis]:
+                if origin[axis] < lo or origin[axis] > hi:
                     return None
                 continue
-            t0 = (lo[axis] - origin[axis]) / component
-            t1 = (hi[axis] - origin[axis]) / component
+            t0 = (lo - origin[axis]) / component
+            t1 = (hi - origin[axis]) / component
             if t0 > t1:
                 t0, t1 = t1, t0
             near = max(near, t0)
@@ -464,9 +478,9 @@ class Occluder:
         stop = min(start + self._LEAF_TRIANGLES, len(self.tris))
         if start >= stop:
             return False
-        tri = self.tris[start:stop]
-        edge1 = tri[:, 1] - tri[:, 0]
-        edge2 = tri[:, 2] - tri[:, 0]
+        tri0 = self.tris[start:stop, 0]
+        edge1 = self._tri_edge1[start:stop]
+        edge2 = self._tri_edge2[start:stop]
         h = np.cross(direction[None, :], edge2)
         determinant = np.einsum("ij,ij->i", edge1, h)
         determinant_tol = 1e-14 * (self.diag ** 2)
@@ -475,7 +489,7 @@ class Occluder:
             return False
         inverse = np.zeros_like(determinant)
         inverse[valid] = 1.0 / determinant[valid]
-        s = origin[None, :] - tri[:, 0]
+        s = origin[None, :] - tri0
         u = inverse * np.einsum("ij,ij->i", s, h)
         valid &= (u >= -1e-9) & (u <= 1.0 + 1e-9)
         if not np.any(valid):
@@ -510,13 +524,17 @@ class Occluder:
             left_entry = self._aabb_entry(left, origin, direction, minimum_t)
             right_entry = self._aabb_entry(right, origin, direction, minimum_t)
             # Visit the nearer child first.  The stack is LIFO, hence far first.
-            children = []
-            if left_entry is not None:
-                children.append((left, left_entry))
-            if right_entry is not None:
-                children.append((right, right_entry))
-            children.sort(key=lambda item: item[1], reverse=True)
-            stack.extend(children)
+            if left_entry is None:
+                if right_entry is not None:
+                    stack.append((right, right_entry))
+            elif right_entry is None:
+                stack.append((left, left_entry))
+            elif left_entry <= right_entry:
+                stack.append((right, right_entry))
+                stack.append((left, left_entry))
+            else:
+                stack.append((left, left_entry))
+                stack.append((right, right_entry))
         return False
 
     def visible(self, points: 'np.ndarray', direction: 'np.ndarray',

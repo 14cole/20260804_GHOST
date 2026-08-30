@@ -28,8 +28,7 @@ class DatasetCorrectnessTests(unittest.TestCase):
             units={"frequency": "GHz"},
         )
 
-    def test_dbke_std_uses_frequency_unit_exactly_once(self):
-        expected = float(np.std(10.0 * np.log10([1.0, 2.0])))
+    def test_log_domain_std_is_rejected_as_dimensionally_invalid(self):
         frequencies = {
             "Hz": 1.0e9,
             "kHz": 1.0e6,
@@ -48,14 +47,19 @@ class DatasetCorrectnessTests(unittest.TestCase):
                     rcs_phase=np.zeros_like(power),
                     units={"frequency": unit},
                 )
+                for domain in ("dbsm", "dbke"):
+                    with self.subTest(unit=unit, domain=domain):
+                        with self.assertRaisesRegex(
+                            ValueError, "dB spread, not an absolute RCS dataset"
+                        ):
+                            grid.statistics_dataset(
+                                "std", ["elevation"], domain=domain
+                            )
+
                 reduced = grid.statistics_dataset(
-                    "std", ["elevation"], domain="dbke"
+                    "std", ["elevation"], domain="magnitude"
                 )
-                displayed = reduced.linear_to_dbke(
-                    reduced.rcs_power,
-                    reduced.frequencies.reshape(1, 1, -1, 1),
-                )
-                self.assertAlmostEqual(float(displayed.item()), expected, places=10)
+                self.assertAlmostEqual(float(reduced.rcs_power.item()), 0.5)
 
     def test_save_rejects_object_metadata_before_publishing_archive(self):
         grid = self._single_sample()

@@ -28,7 +28,53 @@ def _write_response(path: Path, marker: float = 1.0) -> None:
         np.savez(stream, response_marker=np.asarray([marker], dtype=float))
 
 
+def _write_validation_report(
+    response: Path, *, case_id: str = "full-wave-case-007"
+) -> Path:
+    paths = {}
+    digests = {}
+    for role in feature_workflow.FEATURE_VALIDATION_ARTIFACT_ROLES:
+        artifact = response.parent / f"{case_id}-{role}.grim"
+        artifact.write_bytes(f"{case_id}:{role}\n".encode("ascii"))
+        paths[role] = str(artifact.resolve())
+        digests[role] = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    report = response.parent / f"{case_id}-validation-report.json"
+    gate_limits = {
+        "active_floor_db": -40.0,
+        **feature_workflow.FEATURE_VALIDATION_RELEASE_CEILINGS,
+    }
+    passed_section = {
+        "passed": True,
+        "gate_limits": gate_limits,
+        "gates": {
+            "normalized_complex_rms": True,
+            "magnitude_error_p95_db": True,
+            "phase_error_rms_deg": True,
+            "complex_coherence": True,
+            "every_polarization_channel": True,
+        },
+    }
+    report.write_text(json.dumps({
+        "schema": "ghost.validation.feature-case-report.v1",
+        "passed": True,
+        "comparisons": [{
+            "case_id": case_id,
+            "passed": True,
+            "paths": paths,
+            "artifact_sha256": digests,
+            "feature_response_content_sha256": [
+                feature_workflow.feature_response_content_sha256(response)
+            ],
+            "clean_baseline": passed_section,
+            "featured_total": passed_section,
+            "isolated_feature_delta": passed_section,
+        }],
+    }), encoding="utf-8")
+    return report
+
+
 def _create_args(response: Path, kind: str) -> list[str]:
+    report = _write_validation_report(response)
     args = [
         "create", str(response),
         "--dataset-id", "door_seam" if kind == "line" else "fastener",
@@ -39,6 +85,7 @@ def _create_args(response: Path, kind: str) -> list[str]:
         "--footprint-radius-m", "0.02",
         "--validation-status", "validated",
         "--validation-case-id", "full-wave-case-007",
+        "--validation-report", str(report),
         "--attest-reviewed-evidence",
     ]
     if kind == "line":
@@ -46,12 +93,81 @@ def _create_args(response: Path, kind: str) -> list[str]:
             "--minimum-along-line-normal-turn-radius-m", "0.5",
             "--maximum-conical-incidence-deg", "25.0",
             "--maximum-path-vertex-turn-deg", "35.0",
-            "--phase-calibration-case-id", "phase-map-case-003",
+            "--phase-calibration-case-id", "full-wave-case-007",
         ])
     return args
 
 
 class FeatureManifestCliTests(unittest.TestCase):
+    def test_validated_manifest_refuses_unbound_or_changed_full_wave_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            response = root / "fastener.grim"
+            _write_response(response)
+            args = _create_args(response, "point")
+            report = Path(args[args.index("--validation-report") + 1])
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            payload["comparisons"][0][
+                "feature_response_content_sha256"
+            ] = ["9" * 64]
+            report.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    create_feature_manifest.main(args)
+            self.assertEqual(raised.exception.code, 2)
+
+            args = _create_args(response, "point")
+            report = Path(args[args.index("--validation-report") + 1])
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            for section in (
+                "clean_baseline", "featured_total", "isolated_feature_delta"
+            ):
+                payload["comparisons"][0][section]["gate_limits"][
+                    "active_floor_db"
+                ] = 0.0
+            report.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    create_feature_manifest.main(args)
+            self.assertEqual(raised.exception.code, 2)
+
+            args = _create_args(response, "point")
+            report = Path(args[args.index("--validation-report") + 1])
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            for section in (
+                "clean_baseline", "featured_total", "isolated_feature_delta"
+            ):
+                payload["comparisons"][0][section]["gate_limits"][
+                    "max_normalized_rms"
+                ] = 10.0
+            report.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    create_feature_manifest.main(args)
+            self.assertEqual(raised.exception.code, 2)
+
+            args = _create_args(response, "point")
+            report = Path(args[args.index("--validation-report") + 1])
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            payload["comparisons"][0][
+                "feature_response_content_sha256"
+            ].append("8" * 64)
+            report.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    create_feature_manifest.main(args)
+            self.assertEqual(raised.exception.code, 2)
+
+            args = _create_args(response, "point")
+            report = Path(args[args.index("--validation-report") + 1])
+            payload = json.loads(report.read_text(encoding="utf-8"))
+            changed = Path(payload["comparisons"][0]["paths"]["featured_truth"])
+            changed.write_bytes(b"changed after validation")
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    create_feature_manifest.main(args)
+            self.assertEqual(raised.exception.code, 2)
+
     def test_create_refuses_raw_opn_frd_response_roles(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -283,6 +399,7 @@ class HeadlessPlacementPolicyTests(unittest.TestCase):
         request = prepare.call_args.args[0]
         self.assertFalse(request.allow_legacy_base_metadata)
         self.assertTrue(request.require_feature_manifests)
+        self.assertTrue(request.require_body_mesh_certification)
         self.assertEqual(request.expected_host_material, "default stack")
         self.assertEqual(
             request.expected_host_materials,
@@ -295,6 +412,14 @@ class HeadlessPlacementPolicyTests(unittest.TestCase):
         request = prepare.call_args.args[0]
         self.assertTrue(request.allow_legacy_base_metadata)
         self.assertFalse(request.require_feature_manifests)
+        self.assertFalse(request.require_body_mesh_certification)
+
+    def test_external_profile_keeps_strict_feature_contracts_with_body_waiver(self):
+        _result, prepare, _execute = self._run_main(profile="external")
+        request = prepare.call_args.args[0]
+        self.assertFalse(request.allow_legacy_base_metadata)
+        self.assertTrue(request.require_feature_manifests)
+        self.assertFalse(request.require_body_mesh_certification)
 
     def test_warning_plan_is_not_executed_without_exact_acknowledgement(self):
         with self.assertRaisesRegex(SystemExit, "not published"):

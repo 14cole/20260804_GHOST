@@ -36,6 +36,7 @@ from feature_sum import _load_grim  # noqa: E402
 from validate_feature_reconstruction import (  # noqa: E402
     CASE_MANIFEST_SCHEMA,
     CASE_REQUIRED_PATHS,
+    _feature_response_content_hashes,
     load_case_manifest,
 )
 
@@ -283,6 +284,7 @@ def build_validator_manifest(plan: dict[str, Any]) -> dict[str, Any]:
     for case in plan["cases"]:
         prefix = Path("cases") / case["id"]
         entry = {
+            "id": case["id"],
             "name": case["name"],
             "body": plan["bodies"][case["body_id"]]["name"],
             "feature": case["feature_summary"],
@@ -345,7 +347,9 @@ def _scalar_text(payload: dict[str, Any], key: str) -> str:
     return str(value.reshape(-1)[0])
 
 
-def _artifact_errors(path: Path, contract: dict[str, Any]) -> list[str]:
+def _artifact_errors(
+    path: Path, contract: dict[str, Any], *, role: str
+) -> list[str]:
     errors: list[str] = []
     try:
         payload = _load_grim(str(path))
@@ -403,6 +407,18 @@ def _artifact_errors(path: Path, contract: dict[str, Any]) -> list[str]:
         errors.append(f"complex amplitude shape must be {expected_shape}; got {amplitude.shape}")
     elif not np.all(np.isfinite(amplitude.real) & np.isfinite(amplitude.imag)):
         errors.append("complex amplitude contains a NaN or infinity")
+    if role == "featured_prediction":
+        try:
+            feature_hashes = _feature_response_content_hashes(payload, str(path))
+        except ValueError as exc:
+            errors.append(str(exc))
+        else:
+            if not feature_hashes:
+                errors.append(
+                    "featured_prediction must retain Assembly provenance with "
+                    "at least one dataset_content_sha256; otherwise a passing "
+                    "case cannot certify the exact reusable response"
+                )
     return errors
 
 
@@ -420,7 +436,9 @@ def preflight_run(plan_path: str | os.PathLike[str], output_root: str | os.PathL
         for role in CASE_REQUIRED_PATHS:
             path = case_dir / filenames[role]
             exists = path.is_file()
-            errors = [] if not exists else _artifact_errors(path, plan["solve_contract"])
+            errors = [] if not exists else _artifact_errors(
+                path, plan["solve_contract"], role=role
+            )
             if not exists:
                 errors.append("required artifact is missing")
             passed = exists and not errors

@@ -24,9 +24,9 @@ GHOST_BACKEND = (
 
 import feature_assembly_panel as feature_panel_module  # noqa: E402
 from feature_assembly_panel import (  # noqa: E402
+    ASSEMBLY_REVIEW_POINT_FIELD_CELLS,
     AssemblyWorkEstimate,
     GUI_AVAILABLE,
-    LONG_BUILD_CONFIRMATION_SECONDS,
     LINE_PLACEMENT_COLUMNS,
     POINT_PLACEMENT_COLUMNS,
     FeatureAssemblyFormModel,
@@ -104,9 +104,11 @@ def _isolated_ghost_backend():
         workflow = importlib.import_module("feature_workflow")
         physics = importlib.import_module("feature_sum")
         line_model = importlib.import_module("line_expand")
+        workload = importlib.import_module("assembly_workload")
         yield SimpleNamespace(
             feature_workflow=workflow,
             feature_sum=physics,
+            assembly_workload=workload,
             c0=line_model.C0,
             psi_hh_deg=line_model.PSI_HH_DEG,
             psi_vv_deg=line_model.PSI_VV_DEG,
@@ -261,7 +263,37 @@ def _ready_point_model() -> FeatureAssemblyFormModel:
 
 
 class FeatureAssemblyModelTests(unittest.TestCase):
-    def test_work_estimate_is_auditable_broad_and_confirms_only_validated_long_work(self):
+    def test_gui_workload_counts_match_authoritative_backend_contract(self):
+        kwargs = dict(
+            look_count=25_001,
+            frequency_count=17,
+            point_count=613,
+            line_path_count=29,
+            line_segment_count=311,
+            line_piece_count=19_997,
+            mesh_triangle_count=1_000_003,
+            shadow_enabled=True,
+            quantities_validated=True,
+            line_piece_count_exact=True,
+            mesh_triangle_count_exact=True,
+        )
+        local = estimate_assembly_workload(**kwargs)
+        with _isolated_ghost_backend() as ghost:
+            backend = ghost.assembly_workload.estimate_assembly_workload(**kwargs)
+
+        for field_name in (
+            "radar_grid_cell_count",
+            "point_field_cell_count",
+            "line_field_cell_count",
+            "shadow_ray_upper_bound",
+            "packed_visibility_bytes_upper_bound",
+            "review_reasons",
+        ):
+            self.assertEqual(
+                getattr(local, field_name), getattr(backend, field_name)
+            )
+
+    def test_work_preflight_is_auditable_and_confirms_only_validated_large_work(self):
         small = estimate_assembly_workload(
             look_count=361,
             frequency_count=2,
@@ -278,11 +310,18 @@ class FeatureAssemblyModelTests(unittest.TestCase):
 
         self.assertTrue(small.available)
         self.assertEqual(small.shadow_ray_upper_bound, 361 * (12 + 120))
+        self.assertEqual(small.point_field_cell_count, 361 * 2 * 12)
+        self.assertEqual(small.line_field_cell_count, 361 * 2 * 120)
+        self.assertEqual(
+            small.packed_visibility_bytes_upper_bound,
+            (12 + 120) * ((361 + 7) // 8),
+        )
         self.assertFalse(assembly_build_confirmation_required(small))
         summary = format_assembly_work_estimate(small)
-        self.assertIn("Rough local estimate (not a benchmark)", summary)
+        self.assertIn("operation counts; no elapsed-time estimate", summary)
         self.assertIn("361 looks x 2 frequencies", summary)
-        self.assertNotIn(f"{small.rough_build_seconds:.3f}", summary)
+        self.assertIn("reused across frequencies", summary)
+        self.assertNotIn("hours", summary.casefold())
 
         long_kwargs = dict(
             look_count=25_000,
@@ -302,11 +341,23 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         validated = estimate_assembly_workload(
             **long_kwargs, quantities_validated=True
         )
-        self.assertGreaterEqual(
-            validated.rough_build_seconds, LONG_BUILD_CONFIRMATION_SECONDS
-        )
+        self.assertTrue(validated.review_reasons)
         self.assertFalse(assembly_build_confirmation_required(prevalidated))
         self.assertTrue(assembly_build_confirmation_required(validated))
+
+        exact_boundary = estimate_assembly_workload(
+            look_count=1,
+            frequency_count=1,
+            point_count=ASSEMBLY_REVIEW_POINT_FIELD_CELLS,
+            line_path_count=0,
+            line_segment_count=0,
+            line_piece_count=0,
+            quantities_validated=True,
+        )
+        self.assertTrue(any(
+            "point look-frequency" in reason
+            for reason in exact_boundary.review_reasons
+        ))
 
     def test_base_preflight_reads_axis_counts_without_loading_payload_arrays(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -432,6 +483,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 normal_tol_deg=8.0,
                 allow_legacy_base_metadata=False,
                 require_feature_manifests=True,
+                require_body_mesh_certification=True,
                 expected_host_material="paint-stack-v3",
                 base_dir=str(root),
                 point_datasets={"fastener": "inputs/fastener.grim"},
@@ -473,6 +525,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             self.assertEqual(restored.normal_tol_deg, 8.0)
             self.assertFalse(restored.allow_legacy_base_metadata)
             self.assertTrue(restored.require_feature_manifests)
+            self.assertTrue(restored.require_body_mesh_certification)
             self.assertEqual(restored.expected_host_material, "paint-stack-v3")
             self.assertEqual(
                 restored.point_host_materials, {"fastener": "paint-stack-v3"}
@@ -1407,6 +1460,39 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         self.assertFalse(workflow.received_cancel())
         self.assertEqual(progress, [(2, 4, "placing points")])
 
+    def test_validated_build_forwards_sealed_warning_acknowledgement(self):
+        class AckWorkflow(_FakeWorkflow):
+            def prepare_feature_assembly(self, request):
+                self.calls.append(("prepare", request))
+                return SimpleNamespace(
+                    request=request,
+                    preview_geometry="preview",
+                    validation_warnings=("review workload",),
+                    prepared_plan_sha256="a" * 64,
+                )
+
+            def execute_feature_assembly(
+                self,
+                plan,
+                *,
+                acknowledged_plan_sha256=None,
+                cancel_check=None,
+                progress_callback=None,
+            ):
+                self.calls.append(("execute", plan))
+                self.received_ack = acknowledged_plan_sha256
+                return plan.request.kwargs["output_grim"]
+
+        workflow = AckWorkflow()
+        model = _ready_point_model()
+        model.prepare_preview(workflow)
+        model.assemble_validated(
+            workflow,
+            acknowledged_plan_sha256="a" * 64,
+        )
+
+        self.assertEqual(workflow.received_ack, "a" * 64)
+
     def test_validation_forwards_progress_and_cooperative_cancellation_hooks(self):
         class HookPrepareWorkflow(_FakeWorkflow):
             def prepare_feature_assembly(
@@ -1702,12 +1788,12 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 panel._update_workflow_readiness()
 
                 text = panel.work_estimate_label.text()
-                self.assertIn("Rough local estimate (not a benchmark)", text)
+                self.assertIn("operation counts; no elapsed-time estimate", text)
                 self.assertIn("6 looks x 2 frequencies", text)
                 self.assertIn("2 point(s)", text)
                 self.assertIn("1 line path(s)", text)
                 self.assertIn("about 192 solver line piece(s)", text)
-                self.assertIn("up to 1,164 body-shadow ray(s)", text)
+                self.assertIn("up to 1,164 body-shadow candidate ray(s)", text)
 
                 panel.shadow.setChecked(False)
                 self.app.processEvents()
@@ -1715,7 +1801,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             finally:
                 _close_panel_without_prompt(panel)
 
-    def test_only_validated_many_hour_build_gets_a_conservative_confirmation(self):
+    def test_only_validated_large_build_gets_count_based_confirmation(self):
         from PySide6.QtWidgets import QMessageBox
 
         with tempfile.TemporaryDirectory() as folder:
@@ -1727,7 +1813,8 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 long_estimate = AssemblyWorkEstimate(
                     available=True,
                     quantities_validated=True,
-                    rough_build_seconds=LONG_BUILD_CONFIRMATION_SECONDS,
+                    point_field_cell_count=ASSEMBLY_REVIEW_POINT_FIELD_CELLS,
+                    review_reasons=("large point field",),
                 )
                 with (
                     mock.patch.object(panel, "_pull_values"),
@@ -1752,7 +1839,8 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
 
                 confirmation.assert_called_once()
                 self.assertIn(
-                    "not a benchmark", confirmation.call_args.args[2]
+                    "not an elapsed-time prediction",
+                    confirmation.call_args.args[2],
                 )
                 start.assert_not_called()
                 self.assertIn("before computation", panel.status_label.text())
@@ -2018,7 +2106,9 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertFalse(panel.advanced_section.header.isChecked())
         self.assertTrue(panel.skin_tol.isEnabled())
         self.assertEqual(panel.validation_profile.currentData()[0], "production")
-        self.assertEqual(panel._validation_profile_flags(), (False, True))
+        self.assertEqual(
+            panel._validation_profile_flags(), (False, True, True)
+        )
         self.assertEqual(panel.skin_tol.suffix().strip(), "mm")
         self.assertAlmostEqual(panel.skin_tol.value(), 1.0)
         self.assertLessEqual(panel.skin_tol.singleStep(), 0.01)
@@ -2040,7 +2130,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         panel.skin_tol.setValue(22.0)
         panel.phase_tol.setValue(75.0)
         panel.normal_tol.setValue(33.0)
-        panel.validation_profile.setCurrentIndex(1)
+        panel.validation_profile.setCurrentIndex(2)
 
         panel.reset_qa_defaults_button.click()
         panel._pull_values()
@@ -2049,7 +2139,9 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertAlmostEqual(panel.model.values.skin_tol_m, 1.0e-3)
         self.assertEqual(panel.phase_tol.value(), 15.0)
         self.assertEqual(panel.normal_tol.value(), 15.0)
-        self.assertEqual(panel._validation_profile_flags(), (True, False))
+        self.assertEqual(
+            panel._validation_profile_flags(), (True, False, False)
+        )
         _close_panel_without_prompt(panel)
 
     def test_dirty_recipe_close_and_load_offer_save_discard_cancel(self):
@@ -2534,7 +2626,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                     panel.surface_units.findData("meters")
                 )
                 # This fixture intentionally predates certified feature manifests.
-                panel.validation_profile.setCurrentIndex(1)
+                panel.validation_profile.setCurrentIndex(2)
                 panel.skin_tol.setValue(1.0e-5)  # millimeters = 1e-8 meters
                 panel.phase_tol.setValue(0.1)
                 panel.normal_tol.setValue(2.0)

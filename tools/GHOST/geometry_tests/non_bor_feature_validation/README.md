@@ -79,6 +79,13 @@ python geometry_tests/non_bor_feature_validation/prepare_external_cases.py --pre
 python Backend/validate_feature_reconstruction.py --manifest PATH_TO_RUN/feature_cases.json --report PATH_TO_RUN/validation_report.json
 ```
 
+The generated case manifest carries the plan's stable case IDs. The validation
+report hashes every artifact and extracts the reusable feature-response hashes
+from each assembled prediction. Use that report with
+`Backend/create_feature_manifest.py create --validation-report ...`; Production
+will not accept a current `validated` response manifest based on a free-form
+case name alone.
+
 The checked-in numerical gates are **uncalibrated engineering targets**, not
 evidence that any body or feature has passed. No external Maxwell result ships
 with this repository. Establish final per-family gates only after mesh,

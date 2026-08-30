@@ -36,8 +36,17 @@ DESCRIPTIVE_UNITS = (
 
 
 class SentriReaderTest(unittest.TestCase):
-    def _write(self, suffix: str, text: str, *, bom: bool = False) -> str:
-        handle = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    def _write(
+        self,
+        suffix: str,
+        text: str,
+        *,
+        bom: bool = False,
+        prefix: str = "tmp",
+    ) -> str:
+        handle = tempfile.NamedTemporaryFile(
+            delete=False, suffix=suffix, prefix=prefix
+        )
         handle.close()
         encoding = "utf-8-sig" if bom else "utf-8"
         with open(handle.name, "w", encoding=encoding, newline="") as stream:
@@ -533,6 +542,7 @@ class SentriReaderTest(unittest.TestCase):
             "theta(deg) phi(deg) abs(rcs)(dbm^2) abs(theta)(dbm^2) "
             "phase(theta)(deg) abs(phi)(dbm^2) phase(phi)(deg) ax.ratio(db)\n"
             "0 0 0 0 0 0 0 0\n",
+            prefix="f=10GHz_",
         )
         legacy_grid = load_dataset(legacy_txt)
         self.assertIn("Loaded theta/phi TXT", legacy_grid.history)
@@ -544,6 +554,17 @@ class SentriReaderTest(unittest.TestCase):
         grid = RcsGrid.read_SENTRi(path)
         self.assertEqual(grid.rcs_power.shape, (2, 2, 2, 4))
         self.assertGreater(int(np.count_nonzero(np.isnan(grid.rcs_power))), 0)
+
+    def test_sentri_dense_cartesian_product_is_preflighted(self) -> None:
+        row1 = "1000,80,0,0,0,0,0,0,0,0,0"
+        row2 = "2000,100,10,0,0,0,0,0,0,0,0"
+        path = self._write(
+            ".csv", COMPACT_HEADER + "\n" + row1 + "\n" + row2 + "\n"
+        )
+        with self.assertRaisesRegex(
+            MemoryError, "SENTRi import.*dense grid.*exceeding"
+        ):
+            RcsGrid.read_SENTRi(path, max_output_bytes=1)
 
 
 if __name__ == "__main__":

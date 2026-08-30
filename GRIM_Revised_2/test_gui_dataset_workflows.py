@@ -124,6 +124,25 @@ class AxisEditTransactionTest(unittest.TestCase):
             edited.history,
         )
 
+    def test_nonreordering_axis_edit_owns_independent_sample_arrays(self) -> None:
+        source = _axis_grid([0.0, 1.0, 2.0], 1.0)
+
+        numeric_edit = source.edit_axis_value("azimuth", 1, 1.5)
+        polarization_edit = source.edit_axis_value("polarization", 0, "CUSTOM")
+
+        for edited in (numeric_edit, polarization_edit):
+            with self.subTest(axis=edited.history.splitlines()[-1]):
+                self.assertFalse(
+                    np.shares_memory(source.rcs_power, edited.rcs_power)
+                )
+                self.assertFalse(
+                    np.shares_memory(source.rcs_phase, edited.rcs_phase)
+                )
+                edited.rcs_power.flat[0] = 1234.0
+                edited.rcs_phase.flat[0] = 2.5
+                self.assertNotEqual(float(source.rcs_power.flat[0]), 1234.0)
+                self.assertNotEqual(float(source.rcs_phase.flat[0]), 2.5)
+
     def test_polarization_edit_rejects_blank_and_trimmed_casefold_duplicate(self) -> None:
         source = RcsGrid(
             [0.0],
@@ -805,6 +824,124 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             "Statistics blocked before allocation",
             self.window.status.currentMessage(),
         )
+
+    def test_dataset_add_runs_off_the_gui_thread(self) -> None:
+        left = _axis_grid([0.0, 1.0], 1.0)
+        right = _axis_grid([0.0, 1.0], 2.0)
+        self.window._add_dataset_row(left, "Left", "Loaded")
+        self.window._add_dataset_row(right, "Right", "Loaded")
+        self._select_rows_in_order(0, 1)
+        started = threading.Event()
+        release = threading.Event()
+        worker_threads: list[int] = []
+        gui_thread = threading.get_ident()
+        real_add = RcsGrid.incoherent_add
+
+        def delayed_add(source, *args, **kwargs):
+            worker_threads.append(threading.get_ident())
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test did not release dataset-add worker")
+            return real_add(source, *args, **kwargs)
+
+        with mock.patch.object(
+            RcsGrid,
+            "incoherent_add",
+            autospec=True,
+            side_effect=delayed_add,
+        ):
+            self.window._incoherent_add_selected()
+            self.assertTrue(started.wait(2.0))
+            self.assertTrue(self.window._background_job_active())
+            self.assertFalse(self.window.dataset_job_progress.isHidden())
+            self.assertEqual(self.window.dataset_job_progress.minimum(), 0)
+            self.assertEqual(self.window.dataset_job_progress.maximum(), 0)
+            self.assertEqual(self.window.table.rowCount(), 2)
+            self.assertNotEqual(worker_threads, [gui_thread])
+            release.set()
+            self._wait_for_background()
+
+        self.assertTrue(self.window.dataset_job_progress.isHidden())
+        self.assertEqual(self.window.table.rowCount(), 3)
+        result = self.window.table.item(2, 0).data(Qt.UserRole)
+        np.testing.assert_allclose(result.rcs_power, 5.0)
+
+    def test_align_runs_off_gui_thread_and_reports_per_dataset_progress(self) -> None:
+        reference = _axis_grid([0.0, 1.0], 1.0)
+        source = _axis_grid([0.0, 1.0], 2.0)
+        self.window._add_dataset_row(reference, "Reference", "Loaded")
+        self.window._add_dataset_row(source, "Source", "Loaded")
+        self._select_rows_in_order(0, 1)
+        started = threading.Event()
+        release = threading.Event()
+        worker_threads: list[int] = []
+        gui_thread = threading.get_ident()
+        real_align = RcsGrid.align_to
+
+        def delayed_align(dataset, *args, **kwargs):
+            worker_threads.append(threading.get_ident())
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test did not release alignment worker")
+            return real_align(dataset, *args, **kwargs)
+
+        with (
+            mock.patch.object(
+                RcsGrid, "align_to", autospec=True, side_effect=delayed_align
+            ),
+            mock.patch("grim_cut_dataset_mixin.AlignDialog") as dialog_type,
+        ):
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_mode.return_value = "exact"
+            self.window._align_selected()
+            self.assertTrue(started.wait(2.0))
+            self.assertTrue(self.window._background_job_active())
+            self.assertFalse(self.window.dataset_job_progress.isHidden())
+            self.assertEqual(self.window.table.rowCount(), 2)
+            self.assertNotEqual(worker_threads, [gui_thread])
+            release.set()
+            self._wait_for_background()
+
+        self.assertEqual(self.window.table.rowCount(), 3)
+        self.assertEqual(self.window.table.item(2, 0).text(), "Source [Aligned]")
+        self.assertTrue(self.window.dataset_job_progress.isHidden())
+
+    def test_single_ptm_export_runs_off_gui_thread(self) -> None:
+        dataset = _axis_grid([0.0, 1.0], 1.0)
+        self.window._add_dataset_row(dataset, "PTM source", "Loaded")
+        self._select_rows_in_order(0)
+        started = threading.Event()
+        release = threading.Event()
+        worker_threads: list[int] = []
+        gui_thread = threading.get_ident()
+        output_path = os.path.abspath("async-export.ptm")
+
+        def delayed_save(_dataset, path, **_kwargs):
+            worker_threads.append(threading.get_ident())
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test did not release PTM writer")
+            return path
+
+        with (
+            mock.patch.object(
+                RcsGrid, "save_ptm", autospec=True, side_effect=delayed_save
+            ),
+            mock.patch(
+                "grim_cut_dataset_mixin.QFileDialog.getSaveFileName",
+                return_value=(output_path, "PTM Files (*.ptm)"),
+            ),
+        ):
+            self.window._export_ptm_selected()
+            self.assertTrue(started.wait(2.0))
+            self.assertTrue(self.window._background_job_active())
+            self.assertNotEqual(worker_threads, [gui_thread])
+            release.set()
+            self._wait_for_background()
+
+        self.assertTrue(self.window.dataset_job_progress.isHidden())
+        self.assertIn("Exported async-export.ptm", self.window.status.currentMessage())
 
     def test_polarization_edit_uses_stored_index_and_updates_workflow_state(self) -> None:
         power = np.asarray([10.0, 20.0, 30.0]).reshape(1, 1, 1, 3)

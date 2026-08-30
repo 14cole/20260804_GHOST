@@ -299,7 +299,12 @@ class TestSsParsing(unittest.TestCase):
             np.testing.assert_allclose(converted.elevations, [10.0, 20.0])
             np.testing.assert_array_equal(converted.polarizations, ["VV", "VH", "HV", "HH"])
             self.assertEqual(converted.units["frequency"], "GHz")
-            self.assertEqual(converted.linear_quantity(), "sigma_3d")
+            self.assertEqual(converted.linear_quantity(), "power_ratio")
+            self.assertEqual(converted.units["rcs_log_unit"], "dB")
+            self.assertIn(
+                "unverified",
+                converted.extra["ss_absolute_normalization_status"],
+            )
 
             expected_first = np.asarray([10.0, 11.0, 12.0], dtype=np.complex64)
             expected_second = expected_first + np.complex64(1j)
@@ -312,6 +317,60 @@ class TestSsParsing(unittest.TestCase):
             np.testing.assert_array_equal(restored.polarizations, converted.polarizations)
             np.testing.assert_allclose(restored.rcs, converted.rcs, equal_nan=True)
             self.assertEqual(restored.units["frequency"], "GHz")
+            self.assertEqual(restored.linear_quantity(), "power_ratio")
+
+            with self.assertRaisesRegex(
+                ValueError, "PTM stores 3-D RCS.*power_ratio"
+            ):
+                converted.save_ptm(
+                    os.path.join(tmp, "unsafe.ptm"), el_idx=0, pol_idx=0
+                )
+            with self.assertRaisesRegex(
+                ValueError, "relative/dimensionless response.*absolute 3-D RCS"
+            ):
+                converted.save_pio(
+                    os.path.join(tmp, "unsafe.pio"), el_idx=0, pol_idx=0
+                )
+
+    def test_ss_dense_allocation_is_rejected_before_output_arrays(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "allocation-bomb.ss")
+            build_ss(
+                source,
+                2,
+                3,
+                2,
+                9.0,
+                11.0,
+                dict(edge_diff=True, iqmatrix=True, ibspsave=3),
+                "incident",
+                sweep_values=[10.0, 20.0],
+            )
+            with self.assertRaisesRegex(
+                MemoryError, "SS import.*dense grid.*exceeding"
+            ):
+                RcsGrid.load_ss(source, max_output_bytes=1)
+
+    def test_ss_rejects_finite_field_whose_squared_power_overflows_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "power-overflow.ss")
+            metadata = build_ss(
+                source,
+                1,
+                1,
+                1,
+                9.0,
+                9.0,
+                dict(edge_diff=False, iqmatrix=False, ibspsave=1),
+                "incident",
+            )
+            with open(source, "r+b") as stream:
+                stream.seek(metadata["nbytesb"] + 408)
+                stream.write(_be_f4(np.finfo(np.float32).max))
+            with self.assertRaisesRegex(
+                ValueError, "too large for finite relative-power storage"
+            ):
+                RcsGrid.load_ss(source)
 
 
 if __name__ == "__main__":

@@ -142,13 +142,14 @@ changes the digest and invalidates the acknowledgment. This keeps unattended
 execution from silently turning a stale compatibility waiver into a distributed
 result.
 
-## Creating and checking a team-attested feature manifest
+## Creating and checking an evidence-bound feature manifest
 
 A production point or line library must place exactly one UTF-8 JSON sidecar
 next to each mapped GRIM response. Use the supported command to create the
 sidecar only after a responsible team member has reviewed the declared host,
-response conventions, applicability envelope, and referenced validation
-evidence:
+response conventions, applicability envelope, and the machine-generated
+full-wave report. A `validated` manifest cannot be created from typed case IDs
+alone:
 
 ```bash
 python Backend/create_feature_manifest.py create door_seam.grim \
@@ -160,8 +161,9 @@ python Backend/create_feature_manifest.py create door_seam.grim \
   --maximum-conical-incidence-deg 20 \
   --maximum-path-vertex-turn-deg 30 \
   --validation-status validated \
+  --validation-report validation_report.json \
   --validation-case-id door-seam-flat-pec-v3 \
-  --phase-calibration-case-id line-phase-map-v1 \
+  --phase-calibration-case-id door-seam-flat-pec-v3 \
   --attest-reviewed-evidence
 
 python Backend/create_feature_manifest.py check door_seam.grim \
@@ -175,16 +177,16 @@ either
 JSON may instead be embedded under `feature_library_manifest_json`; embedded
 and sidecar declarations must agree when both exist. The supported creator
 does not rewrite a response archive that already embeds a declaration. It
-always writes the current v2 response and line-calibration schemas. Existing v1
-declarations remain readable only through explicit Legacy compatibility; review
-the evidence and recreate them before Production use.
+always writes the current v3 response schema and v2 line-calibration schema.
+Existing v1/v2 declarations remain readable only through explicit Legacy
+compatibility; review the evidence and recreate them before Production use.
 
 This is a complete line-response example (replace the engineering values and
 case IDs with evidence from that exact response library):
 
 ```json
 {
-  "schema": "ghost.feature-library-manifest.v2",
+  "schema": "ghost.feature-library-manifest.v3",
   "dataset_id": "door_seam",
   "feature_kind": "line",
   "subtraction_order": "featured_minus_clean",
@@ -207,11 +209,32 @@ case IDs with evidence from that exact response library):
     "tm_deg": 166.9,
     "te_deg": -9.2,
     "grazing_taper_deg": 10.0,
-    "case_ids": ["line-phase-map-v1"]
+    "case_ids": ["door-seam-flat-pec-v3"]
   },
   "validation": {
     "status": "validated",
-    "case_ids": ["door-seam-flat-pec-v3", "door-seam-curved-pec-v2"]
+    "case_ids": ["door-seam-flat-pec-v3"],
+    "evidence": [{
+      "schema": "ghost.validation.feature-case-evidence.v1",
+      "case_id": "door-seam-flat-pec-v3",
+      "passed": true,
+      "report_sha256": "<digest of validation_report.json>",
+      "comparison_sha256": "<digest of this case result>",
+      "feature_response_content_sha256": "<same response digest as above>",
+      "gate_limits": {
+        "active_floor_db": -40.0,
+        "max_normalized_rms": 0.25,
+        "max_magnitude_p95_db": 3.5,
+        "max_phase_rms_deg": 25.0,
+        "min_coherence": 0.95
+      },
+      "artifact_sha256": {
+        "clean_truth": "<digest>",
+        "clean_prediction": "<digest>",
+        "featured_truth": "<digest>",
+        "featured_prediction": "<digest>"
+      }
+    }]
   }
 }
 ```
@@ -241,15 +264,24 @@ derive or independently prove the declaration from geometry. Use kind-qualified
 host mappings when a point and line response share a `dataset_id` but belong on
 different stacks.
 
-The Production profile rejects missing, provisional, or uncertified evidence.
+The Production profile rejects missing, provisional, uncertified, legacy, or
+unbound evidence. The validator report records stable case IDs, all four
+artifact hashes, and every reusable response-content hash found in the
+assembled prediction's provenance. The manifest creator re-hashes those four
+artifacts and refuses a case unless it passed all three comparisons and
+actually exercised the exact response being certified.
+
+A library-certification case may place the same response at several locations,
+but it must not combine different reusable response files. Combined line/point
+or mixed-library cases remain valuable system regressions; they cannot certify
+one member because opposite errors could cancel in the aggregate field.
 Use Legacy only to evaluate an established library whose missing contracts have
 been explicitly reviewed; the profile and warnings are recorded in provenance.
-A manifest is a **team attestation**, not a machine-issued certificate. The
-checker verifies the schema, exact response-content hash, conventions, host ID,
-envelope fields, and evidence identifiers. It does not solve Maxwell's
-equations, assess mesh convergence, inspect the cited cases, or prove that a
-locally derived delta remains accurate on a full vehicle. Independent converged
-full-wave comparisons and representative envelope coverage remain required.
+A manifest still includes a **team attestation**: the software can prove what
+files were compared and which gates passed, but it cannot prove that an
+external file came from Maxwell's equations or that its mesh converged. The
+reviewer remains responsible for solver independence, convergence, materials,
+and representative envelope coverage.
 
 ## External 3-D solver conventions
 
@@ -561,7 +593,15 @@ that a locally two-dimensional expansion cannot contain.
 The report includes normalized complex RMS error, 95th-percentile magnitude
 error, phase RMS, complex coherence, and per-channel diagnostics. Samples near
 truth-field nulls remain in complex RMS but are excluded from pointwise phase
-and dB statistics because phase at a null is undefined.
+and dB statistics because phase at a null is undefined. Production evidence
+must use an active-field floor of -40 dB or lower; raising that floor toward the
+pattern peak would discard too much angular evidence even if the remaining
+samples passed.
+
+It also records the SHA-256 of all four artifacts and extracts the exact feature
+response-content hashes from `featured_prediction` Assembly provenance. Keep
+the four artifacts unchanged until the response manifest is created; the
+creator checks them again and binds their hashes into the v3 sidecar.
 
 The reported best-fit global phase is diagnostic only and is never applied. A
 large nearly constant phase offset usually indicates a mismatched origin, time

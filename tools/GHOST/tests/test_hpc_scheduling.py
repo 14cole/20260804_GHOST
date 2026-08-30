@@ -100,6 +100,71 @@ def test_balance():
     check(sparse_summary["idle_slots"] == 46, "idle slots are reported")
 
 
+def test_windows_lock_initialization():
+    """The Windows coordination byte must be seeded under its own lock."""
+
+    print("\nWindows lock initialization")
+
+    class OrderedWindowsLock:
+        LK_LOCK = 1
+        LK_NBLCK = 2
+        LK_UNLCK = 3
+
+        def __init__(self, events, *, unavailable=False):
+            self.events = events
+            self.unavailable = unavailable
+
+        def locking(self, _fd, mode, _count):
+            self.events.append("unlock" if mode == self.LK_UNLCK else "lock")
+            if self.unavailable and mode == self.LK_NBLCK:
+                raise OSError(hpc_scheduler.errno.EACCES, "lock held")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        operation_path = Path(tmp) / "operation.lock"
+        events = []
+        fake_lock = OrderedWindowsLock(events)
+        real_write = os.write
+
+        def record_write(fd, payload):
+            events.append("write")
+            return real_write(fd, payload)
+
+        with mock.patch.object(hpc_scheduler, "fcntl", None), \
+                mock.patch.object(hpc_scheduler, "msvcrt", fake_lock), \
+                mock.patch.object(hpc_scheduler.os, "write", side_effect=record_write):
+            fd = hpc_scheduler.ClaimBroker._try_lock_file(operation_path)
+            check(fd is not None and events[:2] == ["lock", "write"],
+                  "an empty Windows operation file is seeded only after locking")
+            hpc_scheduler.ClaimBroker._unlock_file(fd)
+        check(operation_path.read_bytes() == b"\0" and events[-1] == "unlock",
+              "the initialized Windows operation lock releases cleanly")
+
+        # A nonblocking contender must report ordinary unavailability and close
+        # the descriptor it opened, rather than leaking it or raising.
+        captured_fds = []
+        real_open = os.open
+
+        def record_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            captured_fds.append(fd)
+            return fd
+
+        unavailable_lock = OrderedWindowsLock([], unavailable=True)
+        with mock.patch.object(hpc_scheduler, "fcntl", None), \
+                mock.patch.object(hpc_scheduler, "msvcrt", unavailable_lock), \
+                mock.patch.object(hpc_scheduler.os, "open", side_effect=record_open):
+            result = hpc_scheduler.ClaimBroker._try_lock_file(operation_path)
+        check(result is None, "a busy nonblocking Windows operation lock is unavailable")
+        try:
+            os.fstat(captured_fds[-1])
+        except OSError:
+            closed = True
+        else:
+            closed = False
+            os.close(captured_fds[-1])
+        check(closed, "a busy Windows operation-lock attempt closes its descriptor")
+
+
 def test_claims():
     print("\nclaim broker")
     with tempfile.TemporaryDirectory() as tmp:
@@ -919,6 +984,7 @@ def test_end_to_end():
 
 def main():
     test_balance()
+    test_windows_lock_initialization()
     test_claims()
     test_memory_admission()
     test_memory_cpu_backfill()

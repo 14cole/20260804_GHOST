@@ -11,8 +11,8 @@ from grim_dataset import RcsGrid
 
 
 class TestCstIo(unittest.TestCase):
-    def _write(self, rows, suffix=".csv"):
-        descriptor, path = tempfile.mkstemp(suffix=suffix)
+    def _write(self, rows, suffix=".csv", prefix="tmp"):
+        descriptor, path = tempfile.mkstemp(suffix=suffix, prefix=prefix)
         os.close(descriptor)
         self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
         with open(path, "w", newline="", encoding="utf-8") as stream:
@@ -233,6 +233,28 @@ class TestCstIo(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "frequency must be positive"):
             RcsGrid.read_CST(wide_path)
 
+    def test_cst_rejects_positive_source_frequency_that_underflows_in_ghz(self):
+        flat_path = self._write(
+            [[
+                "Elevation(deg)", "Azimuth(deg)", "Frequency(Hz)",
+                "Polarity", "Magnitude(dBsm)", "Phase(deg)",
+            ], [0.0, 0.0, 1.0e-320, "VV", 0.0, 0.0]],
+            suffix=".cst_data",
+        )
+        wide_path = self._write(
+            [[
+                "Frequency(Hz)", "Theta(deg)", "Phi(deg)",
+                "RCS Theta-Theta(dBsm)", "Phase Theta-Theta(deg)",
+            ], [1.0e-320, 90.0, 0.0, 0.0, 0.0]]
+        )
+        for path in (flat_path, wide_path):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "line 2: frequency conversion to GHz did not produce",
+                ):
+                    RcsGrid.read_CST(path)
+
     def test_wide_cst_converts_theta_and_discovers_only_present_pols(self):
         path = self._write(
             [
@@ -390,6 +412,131 @@ class TestCstIo(unittest.TestCase):
             ValueError, "conflicting duplicate CST theta/phi sample"
         ):
             RcsGrid.read_CST(conflicting_path)
+
+    def test_flat_and_wide_dense_cartesian_products_are_preflighted(self):
+        flat_path = self._write(
+            [
+                [
+                    "Elevation(deg)", "Azimuth(deg)", "Frequency(GHz)",
+                    "Polarity", "Magnitude(dBsm)", "Phase(deg)",
+                ],
+                [0.0, 0.0, 1.0, "VV", 0.0, 0.0],
+                [1.0, 1.0, 2.0, "HH", 0.0, 0.0],
+            ],
+            suffix=".cst_data",
+        )
+        wide_path = self._write(
+            [
+                [
+                    "Frequency(GHz)", "Theta(deg)", "Phi(deg)",
+                    "RCS Theta-Theta(dBsm)", "Phase Theta-Theta(deg)",
+                ],
+                [1.0, 90.0, 0.0, 0.0, 0.0],
+                [2.0, 80.0, 10.0, 0.0, 0.0],
+            ]
+        )
+        for path in (flat_path, wide_path):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                    MemoryError, "CST .*dense grid.*exceeding"
+                ):
+                    RcsGrid.read_CST(path, max_output_bytes=1)
+
+    def test_legacy_theta_phi_txt_requires_explicit_units_and_frequency(self):
+        header = [
+            "theta(deg)", "phi(deg)", "abs(rcs)(dbm^2)",
+            "abs(theta)(dbm^2)", "phase(theta)(deg)",
+            "abs(phi)(dbm^2)", "phase(phi)(deg)", "ax.ratio(db)",
+        ]
+        rows = [header, [10.0, 20.0, 3.010299957, 0.0, 90.0, -10.0, -45.0, 0.0]]
+        qualified_path = self._write(
+            rows, suffix=".txt", prefix="f=2GHz_"
+        )
+        loaded = RcsGrid.load_theta_phi_txt(qualified_path)
+        np.testing.assert_array_equal(loaded.frequencies, [2.0])
+        np.testing.assert_array_equal(loaded.polarizations, ["VV", "HH", "TOTAL"])
+        np.testing.assert_allclose(
+            loaded.rcs_power[0, 0, 0], [1.0, 0.1, 2.0], rtol=2.0e-8
+        )
+        np.testing.assert_allclose(
+            loaded.rcs_phase[0, 0, 0, :2], np.deg2rad([90.0, -45.0])
+        )
+        self.assertEqual(loaded.extra["dense_import_allocation_bytes"], 24)
+        self.assertEqual(loaded.extra["dense_import_peak_bytes"], 108)
+
+        explicit_path = self._write(rows, suffix=".txt")
+        explicit = RcsGrid.load_theta_phi_txt(
+            explicit_path, frequency_ghz=3.0
+        )
+        np.testing.assert_array_equal(explicit.frequencies, [3.0])
+        with self.assertRaisesRegex(ValueError, "requires an explicit frequency"):
+            RcsGrid.load_theta_phi_txt(explicit_path)
+
+        unitless_path = self._write(
+            [
+                ["theta", "phi", "abs(rcs)", "abs(theta)", "phase(theta)",
+                 "abs(phi)", "phase(phi)"],
+                [10.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            suffix=".txt",
+            prefix="f=2GHz_",
+        )
+        with self.assertRaisesRegex(ValueError, "explicit header with"):
+            RcsGrid.load_theta_phi_txt(unitless_path)
+
+    def test_legacy_theta_phi_txt_rejects_malformed_and_conflicting_rows_by_line(self):
+        header = [
+            "theta(deg)", "phi(deg)", "abs(rcs)(dbm^2)",
+            "abs(theta)(dbm^2)", "phase(theta)(deg)",
+            "abs(phi)(dbm^2)", "phase(phi)(deg)", "ax.ratio(db)",
+        ]
+        malformed = self._write(
+            [header, [10.0, 20.0, 0.0, "bad", 0.0, 0.0, 0.0, 0.0]],
+            suffix=".txt",
+            prefix="f=1GHz_",
+        )
+        with self.assertRaisesRegex(
+            ValueError, "line 2: invalid abs_theta_dbm2 value 'bad'"
+        ):
+            RcsGrid.load_theta_phi_txt(malformed)
+
+        conflicting = self._write(
+            [
+                header,
+                [10.0, 20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [10.0, 20.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            suffix=".txt",
+            prefix="f=1GHz_",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "line 3: conflicting duplicate legacy TXT sample.*first defined on line 2",
+        ):
+            RcsGrid.load_theta_phi_txt(conflicting)
+
+    def test_legacy_theta_phi_dense_cartesian_product_is_preflighted(self):
+        header = [
+            "theta(deg)", "phi(deg)", "abs(rcs)(dbm^2)",
+            "abs(theta)(dbm^2)", "phase(theta)(deg)",
+            "abs(phi)(dbm^2)", "phase(phi)(deg)", "ax.ratio(db)",
+        ]
+        path = self._write(
+            [
+                header,
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ],
+            suffix=".txt",
+            prefix="f=1GHz_",
+        )
+        with self.assertRaisesRegex(
+            MemoryError, "legacy theta/phi TXT import.*dense grid.*exceeding"
+        ):
+            RcsGrid.load_theta_phi_txt(path, max_output_bytes=195)
+        loaded = RcsGrid.load_theta_phi_txt(path, max_output_bytes=196)
+        self.assertEqual(loaded.extra["dense_import_allocation_bytes"], 96)
+        self.assertEqual(loaded.extra["dense_import_peak_bytes"], 196)
 
 
 if __name__ == "__main__":

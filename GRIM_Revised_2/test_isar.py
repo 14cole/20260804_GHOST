@@ -30,6 +30,28 @@ class TestIsarPhysics(unittest.TestCase):
         self.assertNotIsInstance(result, str)
         return result
 
+    @staticmethod
+    def _preflight_grid(*, units=None, extra=None, elevation=0.0):
+        azimuth = np.asarray([-15.0, -5.0, 5.0, 15.0])
+        frequency_ghz = np.asarray([9.0, 9.1, 9.2, 9.3])
+        field = np.ones((4, 1, 4, 1), dtype=np.complex64)
+        base_units = {
+            "azimuth": "deg",
+            "elevation": "deg",
+            "frequency": "GHz",
+            "angular_coordinate_system": "conic",
+        }
+        base_units.update(units or {})
+        return RcsGrid(
+            azimuth,
+            [elevation],
+            frequency_ghz,
+            ["VV"],
+            rcs=field,
+            units=base_units,
+            extra=extra or {},
+        )
+
     def test_all_windows_preserve_unit_point_peak(self):
         samples = np.ones((self.theta.size, self.frequency.size), dtype=np.complex64)
         for window in (
@@ -114,7 +136,8 @@ class TestIsarPhysics(unittest.TestCase):
         samples = np.ones((17, 1, 19, 1), dtype=np.complex64)
         grid = RcsGrid(
             azimuth, [0.0], frequency, ["VV"], rcs=samples,
-            units={"frequency": "GHz"},
+            units={"frequency": "GHz", "time_convention": "exp(+jwt)"},
+            extra={"phase_reference": "fixed origin"},
         )
         bands, elapsed = form_isar(grid, reconstruction="accurate", window="Hamming")
         self.assertEqual(len(bands), 1)
@@ -133,7 +156,8 @@ class TestIsarPhysics(unittest.TestCase):
             ["VV"],
             rcs_power=power,
             rcs_phase=np.zeros_like(power),
-            units={"frequency": "GHz"},
+            units={"frequency": "GHz", "time_convention": "exp(+jwt)"},
+            extra={"phase_reference": "fixed origin"},
         )
         args = (
             grid,
@@ -157,6 +181,124 @@ class TestIsarPhysics(unittest.TestCase):
         self.assertGreater(
             float(np.max(np.abs(first["magnitude"] - changed["magnitude"]))),
             0.1,
+        )
+
+    def test_preprocess_cache_invalidates_after_raw_only_change(self):
+        grid = self._preflight_grid(
+            units={"rcs_linear_quantity": "sigma_3d"},
+            extra={
+                "phase_reference": "fixed origin",
+                "time_convention": "exp(+jwt)",
+            },
+        )
+        scale = np.sqrt(4.0 * np.pi)
+        grid.extra["rcs_amp_real"] = np.ones(grid.rcs_power.shape) / scale
+        grid.extra["rcs_amp_imag"] = np.zeros(grid.rcs_power.shape)
+        frequency_hz = np.asarray(grid.frequencies) * 1.0e9
+        args = (
+            grid,
+            "Hanning",
+            list(range(4)),
+            list(range(4)),
+            0,
+            0,
+            frequency_hz,
+            1.0e8,
+            1.0,
+        )
+        first = isar_mode._compute_band(*args)
+        cached = isar_mode._compute_band(*args)
+        self.assertFalse(first["preprocess_cache_hit"])
+        self.assertTrue(cached["preprocess_cache_hit"])
+
+        grid.extra["rcs_amp_real"][:] = (
+            np.asarray([1.0, 1.5, 2.5, 4.0])[None, None, :, None] / scale
+        )
+        changed = isar_mode._compute_band(*args)
+        self.assertFalse(changed["preprocess_cache_hit"])
+        self.assertGreater(
+            float(np.max(np.abs(first["magnitude"] - changed["magnitude"]))),
+            0.1,
+        )
+
+    def test_preprocess_cache_identity_includes_phase_reference(self):
+        grid = self._preflight_grid(
+            units={"time_convention": "exp(+jwt)"},
+            extra={"phase_reference": "origin A"},
+        )
+        frequency_hz = np.asarray(grid.frequencies) * 1.0e9
+        args = (
+            grid, "Hanning", list(range(4)), list(range(4)), 0, 0,
+            frequency_hz, 1.0e8, 1.0,
+        )
+        self.assertFalse(isar_mode._compute_band(*args)["preprocess_cache_hit"])
+        self.assertTrue(isar_mode._compute_band(*args)["preprocess_cache_hit"])
+        grid.extra["phase_reference"] = "origin B"
+        self.assertFalse(isar_mode._compute_band(*args)["preprocess_cache_hit"])
+
+    def test_native_sentri_theta_requires_coordinate_conversion(self):
+        grid = self._preflight_grid(
+            units={
+                "time_convention": "exp(+jwt)",
+                "elevation_coordinate_convention": "sentri_theta_top_zero",
+            },
+            extra={"phase_reference": "fixed origin", "source_format": "SENTRi CSV"},
+            elevation=90.0,
+        )
+        with self.assertRaisesRegex(ValueError, "Convert SENTRi Coordinates"):
+            form_isar(grid)
+
+    def test_non_equatorial_great_circle_ptm_is_rejected(self):
+        grid = self._preflight_grid(
+            units={
+                "angular_coordinate_system": "great_circle",
+                "great_circle_coordinate_convention": "grim_gc_v1",
+                "angular_roll_deg": 0.0,
+                "angular_tilt_deg": 0.0,
+                "time_convention": "exp(+jwt)",
+            },
+            extra={"phase_reference": "fixed origin", "source_format": "PTM"},
+            elevation=12.0,
+        )
+        with self.assertRaisesRegex(ValueError, "great-circle aspect/pitch"):
+            form_isar(grid)
+
+    def test_incompatible_or_unknown_time_convention_is_not_attestable(self):
+        for convention in ("exp(-jwt)", "vendor convention unknown"):
+            with self.subTest(convention=convention):
+                grid = self._preflight_grid(
+                    units={"time_convention": convention},
+                    extra={"phase_reference": "fixed origin"},
+                )
+                with self.assertRaisesRegex(ValueError, r"requires the exp\(\+j\*omega\*t\)"):
+                    form_isar(grid, legacy_metadata_attested=True)
+
+    def test_legacy_phase_metadata_requires_explicit_attestation(self):
+        azimuth = np.linspace(-2.0, 2.0, 17)
+        frequency = np.linspace(8.0, 9.0, 19)
+        grid = RcsGrid(
+            azimuth,
+            [0.0],
+            frequency,
+            ["VV"],
+            rcs=np.ones((17, 1, 19, 1), dtype=np.complex64),
+            units={"frequency": "GHz"},
+        )
+        with self.assertRaisesRegex(ValueError, "Attest Legacy Phase"):
+            form_isar(grid)
+        bands, _elapsed = form_isar(grid, legacy_metadata_attested=True)
+        self.assertEqual(len(bands), 1)
+
+    def test_time_convention_text_alone_is_not_a_phase_center(self):
+        grid = self._preflight_grid(
+            extra={"phase_reference": "exp(+jwt)"},
+        )
+        with self.assertRaisesRegex(ValueError, "fixed phase reference/center"):
+            form_isar(grid)
+        self.assertIsNone(
+            isar_mode._isar_preflight_error(
+                grid, legacy_metadata_attested=True
+            )
         )
 
 

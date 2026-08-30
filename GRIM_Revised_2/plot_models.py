@@ -61,6 +61,7 @@ class PlotContext:
     btn_isar_peak_scale: QToolButton
     spin_isar_peak_drop: QDoubleSpinBox
     chk_isar_square: QCheckBox
+    chk_isar_legacy_phase_attestation: QCheckBox
     btn_isar_apply: QToolButton
     btn_plot_bg: QToolButton
     btn_plot_grid: QToolButton

@@ -508,7 +508,15 @@ def _derived_response_extra(dataset: RcsGrid) -> dict:
     return extra
 
 
-def _copy_grid(dataset: RcsGrid, *, rcs, rcs_power, rcs_domain=None, units=None) -> RcsGrid:
+def _copy_grid(
+    dataset: RcsGrid,
+    *,
+    rcs=None,
+    rcs_power,
+    rcs_phase=None,
+    rcs_domain=None,
+    units=None,
+) -> RcsGrid:
     return RcsGrid(
         dataset.azimuths,
         dataset.elevations,
@@ -516,13 +524,53 @@ def _copy_grid(dataset: RcsGrid, *, rcs, rcs_power, rcs_domain=None, units=None)
         dataset.polarizations,
         rcs=rcs,
         rcs_power=rcs_power,
-        rcs_phase=None if rcs is not None else dataset.rcs_phase,
+        rcs_phase=(
+            None
+            if rcs is not None
+            else dataset.rcs_phase if rcs_phase is None else rcs_phase
+        ),
         rcs_domain=rcs_domain or dataset.rcs_domain,
         source_path=dataset.source_path,
         history=dataset.history,
         units=dict(dataset.units or {}) if units is None else dict(units),
         extra=_derived_response_extra(dataset),
     )
+
+
+def _authoritative_response_phase(dataset: RcsGrid) -> np.ndarray:
+    """Return response phase without constructing a whole complex grid.
+
+    Solver-native GRIM files can carry a validated raw real/imaginary pair
+    whose phase is authoritative.  ``RcsGrid.rcs`` promotes that pair to a
+    full complex128 grid.  Phase-only edits and positive magnitude scaling do
+    not need that allocation; ``atan2`` recovers the identical phase directly.
+    For ordinary power/phase grids the stored phase is already authoritative
+    and can be passed through as a view (the receiving grid owns its copy).
+    """
+
+    raw_pair = dataset._complete_authoritative_raw_arrays()
+    if raw_pair is None:
+        return dataset.rcs_phase
+    real, imag = raw_pair
+    phase = np.empty(dataset.rcs_power.shape, dtype=np.float64)
+    np.arctan2(
+        np.asarray(imag, dtype=np.float64),
+        np.asarray(real, dtype=np.float64),
+        out=phase,
+    )
+    return phase
+
+
+def _phase_shifted_response(dataset: RcsGrid, phase_degrees: float) -> np.ndarray:
+    """Return authoritative phase shifted into the canonical signed interval."""
+
+    phase = np.array(_authoritative_response_phase(dataset), copy=True)
+    delta = np.deg2rad(float(phase_degrees))
+    with np.errstate(invalid="ignore"):
+        np.add(phase, delta + np.pi, out=phase)
+        np.remainder(phase, 2.0 * np.pi, out=phase)
+        np.subtract(phase, np.pi, out=phase)
+    return phase
 
 
 def duplicate_dataset(dataset: RcsGrid) -> RcsGrid:
@@ -849,11 +897,10 @@ def shift_dataset(
     if elevation_degrees is not None:
         result = result.shift_elevation(float(elevation_degrees))
     if phase_degrees is not None:
-        phasor = np.exp(1j * np.deg2rad(float(phase_degrees)))
         result = _copy_grid(
             result,
-            rcs=result.rcs * phasor,
             rcs_power=result.rcs_power,
+            rcs_phase=_phase_shifted_response(result, float(phase_degrees)),
             rcs_domain="complex_amplitude",
         )
     return result
@@ -872,11 +919,10 @@ def offset_db(dataset: RcsGrid, value_db: float) -> RcsGrid:
     """Shift all displayed RCS values by a constant number of decibels."""
 
     scale = 10.0 ** (float(value_db) / 10.0)
-    rcs = dataset.rcs * (math.sqrt(scale) if dataset.rcs_domain == "complex_amplitude" else scale)
     return _copy_grid(
         dataset,
-        rcs=rcs,
         rcs_power=dataset.rcs_power * scale,
+        rcs_phase=_authoritative_response_phase(dataset),
         rcs_domain=dataset.rcs_domain,
     )
 
@@ -896,15 +942,56 @@ def coherent_divide(
         coherent=True,
         coherent_metadata_attested=metadata_attested,
     )
-    left = numerator.rcs
-    right = denominator.rcs
-    result_rcs = np.full(
-        left.shape,
-        np.nan + 1j * np.nan,
-        dtype=np.result_type(left.dtype, right.dtype),
+    shape = tuple(int(value) for value in numerator.rcs_power.shape)
+    raw_response = (
+        numerator._complete_authoritative_raw_arrays() is not None
+        or denominator._complete_authoritative_raw_arrays() is not None
     )
-    valid = np.isfinite(left) & np.isfinite(right) & (right != 0)
-    np.divide(left, right, out=result_rcs, where=valid)
+    real_dtype = (
+        np.dtype(np.float64)
+        if raw_response
+        else np.result_type(
+            numerator.rcs_power.dtype,
+            numerator.rcs_phase.dtype,
+            denominator.rcs_power.dtype,
+            denominator.rcs_phase.dtype,
+        )
+    )
+    complex_dtype = (
+        np.dtype(np.complex128)
+        if real_dtype.itemsize > np.dtype(np.float32).itemsize
+        else np.dtype(np.complex64)
+    )
+    result_power = np.full(shape, np.nan, dtype=real_dtype)
+    result_phase = np.full(shape, np.nan, dtype=real_dtype)
+
+    # Bound the transient to slices of the leading axis.  A coherent ratio
+    # must ultimately own one output grid, but it need not retain both full
+    # complex inputs plus a third full complex quotient at the same time.
+    cells_per_azimuth = max(1, int(np.prod(shape[1:], dtype=np.int64)))
+    working_bytes_per_cell = (
+        3 * complex_dtype.itemsize + real_dtype.itemsize + 3
+    )
+    rows_per_block = max(
+        1,
+        (16 * 1024**2) // (cells_per_azimuth * working_bytes_per_cell),
+    )
+    for start in range(0, shape[0], rows_per_block):
+        stop = min(shape[0], start + rows_per_block)
+        selection = (slice(start, stop), slice(None), slice(None), slice(None))
+        left = np.asarray(numerator.rcs_slice(selection), dtype=complex_dtype)
+        right = np.asarray(denominator.rcs_slice(selection), dtype=complex_dtype)
+        quotient = np.full(left.shape, np.nan + 1j * np.nan, dtype=complex_dtype)
+        valid = np.isfinite(left) & np.isfinite(right) & (right != 0)
+        np.divide(left, right, out=quotient, where=valid)
+        power_block = result_power[selection]
+        np.multiply(quotient.real, quotient.real, out=power_block)
+        power_block += quotient.imag * quotient.imag
+        np.arctan2(
+            quotient.imag,
+            quotient.real,
+            out=result_phase[selection],
+        )
     units = dict(numerator.units or {})
     units["rcs_log_unit"] = "dB"
     units["rcs_linear_quantity"] = "power_ratio"
@@ -935,8 +1022,8 @@ def coherent_divide(
         numerator.elevations,
         numerator.frequencies,
         numerator.polarizations,
-        result_rcs,
-        rcs_power=np.abs(result_rcs) ** 2,
+        rcs_power=result_power,
+        rcs_phase=result_phase,
         rcs_domain="complex_amplitude",
         source_path=numerator.source_path,
         history=history,
@@ -1381,8 +1468,9 @@ def plot_datasets(
                 )
             for fi in fr_idx:
                 for ei in el_idx:
+                    selection = np.ix_(az_idx, [ei], [fi], [pol_idx])
                     raw = (
-                        dataset.rcs[np.ix_(az_idx, [ei], [fi], [pol_idx])][:, 0, 0, 0]
+                        dataset.rcs_slice(selection)[:, 0, 0, 0]
                         if phase
                         else dataset.rcs_power[np.ix_(az_idx, [ei], [fi], [pol_idx])][:, 0, 0, 0]
                     )
@@ -1431,7 +1519,9 @@ def plot_datasets(
             order = np.argsort(x)
             for ei in el_idx:
                 if phase:
-                    block = dataset.rcs[np.ix_(az_idx, [ei], fr_idx, [pol_idx])][:, 0, :, 0]
+                    block = dataset.rcs_slice(
+                        np.ix_(az_idx, [ei], fr_idx, [pol_idx])
+                    )[:, 0, :, 0]
                     phase_degrees = np.rad2deg(np.angle(block))
                     phase_degrees = np.where(np.isfinite(block), phase_degrees, np.nan)
                     y = plot_common.circular_median_degrees(
@@ -1490,7 +1580,9 @@ def plot_datasets(
             order = np.argsort(x)
             for fi in fr_idx:
                 if phase:
-                    block = dataset.rcs[np.ix_(az_idx, el_idx, [fi], [pol_idx])][:, :, 0, 0]
+                    block = dataset.rcs_slice(
+                        np.ix_(az_idx, el_idx, [fi], [pol_idx])
+                    )[:, :, 0, 0]
                     phase_degrees = np.rad2deg(np.angle(block))
                     phase_degrees = np.where(np.isfinite(block), phase_degrees, np.nan)
                     y = (
@@ -1542,15 +1634,30 @@ def plot_datasets(
             pol_idx = _indices(dataset.polarizations, [polarization], text=True)[0]
             if varying == "azimuth":
                 x = np.asarray(dataset.azimuths)[az_idx]
-                raw = (dataset.rcs if phase else dataset.rcs_power)[np.ix_(az_idx, [el_idx[0]], [fr_idx[0]], [pol_idx])][:, 0, 0, 0]
+                selection = np.ix_(az_idx, [el_idx[0]], [fr_idx[0]], [pol_idx])
+                raw = (
+                    dataset.rcs_slice(selection)
+                    if phase
+                    else dataset.rcs_power[selection]
+                )[:, 0, 0, 0]
                 frequency = dataset.frequencies[fr_idx[0]]
             elif varying == "elevation":
                 x = np.asarray(dataset.elevations)[el_idx]
-                raw = (dataset.rcs if phase else dataset.rcs_power)[np.ix_([az_idx[0]], el_idx, [fr_idx[0]], [pol_idx])][0, :, 0, 0]
+                selection = np.ix_([az_idx[0]], el_idx, [fr_idx[0]], [pol_idx])
+                raw = (
+                    dataset.rcs_slice(selection)
+                    if phase
+                    else dataset.rcs_power[selection]
+                )[0, :, 0, 0]
                 frequency = dataset.frequencies[fr_idx[0]]
             else:
                 x = np.asarray(dataset.frequencies)[fr_idx]
-                raw = (dataset.rcs if phase else dataset.rcs_power)[np.ix_([az_idx[0]], [el_idx[0]], fr_idx, [pol_idx])][0, 0, :, 0]
+                selection = np.ix_([az_idx[0]], [el_idx[0]], fr_idx, [pol_idx])
+                raw = (
+                    dataset.rcs_slice(selection)
+                    if phase
+                    else dataset.rcs_power[selection]
+                )[0, 0, :, 0]
                 frequency = x
             y = _display_values(dataset, raw, frequency=frequency, phase=phase, scale=scale)
             order = np.argsort(x)
@@ -1579,7 +1686,12 @@ def plot_datasets(
             fr_axis = np.asarray(dataset.frequencies)[fr_idx]
             x_mesh, y_mesh = np.meshgrid(az_axis, fr_axis, indexing="ij")
             for ei in el_idx:
-                raw = (dataset.rcs if phase else dataset.rcs_power)[np.ix_(az_idx, [ei], fr_idx, [pol_idx])][:, 0, :, 0]
+                selection = np.ix_(az_idx, [ei], fr_idx, [pol_idx])
+                raw = (
+                    dataset.rcs_slice(selection)
+                    if phase
+                    else dataset.rcs_power[selection]
+                )[:, 0, :, 0]
                 z = _display_values(dataset, raw, frequency=fr_axis[None, :], phase=phase, scale=scale)
                 if str(waterfall_style).lower().startswith("wire"):
                     axes.plot_wireframe(x_mesh, y_mesh, z, label=name)
@@ -1599,7 +1711,9 @@ def plot_datasets(
         freq = np.asarray(dataset._frequency_value_to_hz(dataset.frequencies[fr_idx]), dtype=float)
         order_f = np.argsort(freq)
         freq = freq[order_f]
-        complex_data = dataset.rcs[np.ix_(az_idx, [el_idx], fr_idx, [pol_idx])][:, 0, :, 0][:, order_f]
+        complex_data = dataset.rcs_slice(
+            np.ix_(az_idx, [el_idx], fr_idx, [pol_idx])
+        )[:, 0, :, 0][:, order_f]
         window = np.hanning(freq.size)
         image = np.fft.fftshift(np.fft.ifft(complex_data * window[None, :], axis=1), axes=1)
         distance = np.fft.fftshift(np.fft.fftfreq(freq.size, d=float(np.mean(np.diff(freq))))) * 299_792_458.0 / 2.0

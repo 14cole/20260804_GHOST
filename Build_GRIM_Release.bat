@@ -14,7 +14,7 @@ if defined VIRTUAL_ENV if exist "%VIRTUAL_ENV%\Scripts\python.exe" (
 
 where py.exe >nul 2>&1
 if not errorlevel 1 (
-  py.exe -3 -c "import sys" >nul 2>&1
+  py.exe -3.12 -c "import sys" >nul 2>&1
   if not errorlevel 1 goto run_py
 )
 
@@ -24,7 +24,7 @@ if not errorlevel 1 (
   goto run_python
 )
 
-echo Python 3 was not found. Install Python 3.10 or newer, then run this file again.
+echo Python 3.12 was not found. Install 64-bit Python 3.12, then run this file again.
 pause
 exit /b 1
 
@@ -33,7 +33,7 @@ exit /b 1
 goto finished
 
 :run_py
-py.exe -3 "%~dp0build_release.py" %*
+py.exe -3.12 "%~dp0build_release.py" %*
 
 :finished
 set "GRIM_RELEASE_EXIT=%ERRORLEVEL%"

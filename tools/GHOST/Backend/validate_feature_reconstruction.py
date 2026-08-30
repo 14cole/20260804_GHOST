@@ -12,8 +12,10 @@ phase-origin or time-sign error in the external reference.
 """
 
 import argparse
+import hashlib
 import json
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -48,14 +50,99 @@ MIN_COMPLEX_COHERENCE = 0.95
 REPORT_JSON = "feature_validation_report.json"
 
 CASE_MANIFEST_SCHEMA = "ghost.validation.feature-cases.v1"
+FEATURE_VALIDATION_EVIDENCE_SCHEMA = (
+    "ghost.validation.feature-case-evidence.v1"
+)
 CASE_REQUIRED_PATHS = (
     "clean_truth",
     "clean_prediction",
     "featured_truth",
     "featured_prediction",
 )
+_CASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 # =============================================================================
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _load_hashed_grim(path):
+    """Load one immutable-on-read artifact and return its exact byte hash."""
+
+    before = _sha256_file(path)
+    payload = _load_grim(str(path))
+    after = _sha256_file(path)
+    if after != before:
+        raise RuntimeError(
+            f"{path}: validation artifact changed while it was being loaded."
+        )
+    return payload, before
+
+
+def _feature_response_content_hashes(payload, label):
+    """Return reusable feature-library hashes proven by one Assembly output.
+
+    A full-wave comparison certifies an installed reconstruction, not merely a
+    case name. Assembly records the exact reusable response-content hash in
+    each prepared placement. Preserve those bindings in the report so the
+    manifest tool can prove that a selected case actually exercised the
+    response being certified.
+    """
+
+    if "feature_provenance_json" not in payload:
+        return []
+    raw = np.asarray(payload["feature_provenance_json"])
+    if raw.size != 1:
+        raise ValueError(
+            f"{label}: feature_provenance_json must contain one JSON value."
+        )
+    try:
+        records = json.loads(str(raw.reshape(-1)[0]))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"{label}: feature_provenance_json is malformed."
+        ) from exc
+    if not isinstance(records, list) or any(
+        not isinstance(record, dict) for record in records
+    ):
+        raise ValueError(
+            f"{label}: feature_provenance_json must decode to an array of objects."
+        )
+    hashes = set()
+    for record in records:
+        details = record.get("details", record)
+        if not isinstance(details, dict):
+            continue
+        placements = details.get("placements", [])
+        if not isinstance(placements, list):
+            raise ValueError(
+                f"{label}: feature provenance placements must be an array."
+            )
+        for placement in placements:
+            if not isinstance(placement, dict):
+                raise ValueError(
+                    f"{label}: feature provenance placement must be an object."
+                )
+            value = str(
+                placement.get("dataset_content_sha256", "")
+            ).strip().lower()
+            if not value:
+                continue
+            if len(value) != 64 or any(
+                character not in "0123456789abcdef" for character in value
+            ):
+                raise ValueError(
+                    f"{label}: feature provenance contains an invalid "
+                    "dataset_content_sha256."
+                )
+            hashes.add(value)
+    return sorted(hashes)
 
 
 def _text(payload, key, label):
@@ -179,20 +266,104 @@ def _comparison_metrics(
             "Complex-field polarization dimension does not match its labels."
         )
     per_channel = {}
+    every_channel_passed = True
     for index, polarization in enumerate(polarizations):
         channel_reference = reference[..., index]
+        channel_estimate = estimate[..., index]
         channel_error = error[..., index]
-        denominator = float(np.sqrt(np.mean(np.abs(channel_reference) ** 2)))
+        channel_reference_rms = float(np.sqrt(
+            np.mean(np.abs(channel_reference) ** 2)
+        ))
+        # Preserve a strict but finite scale for an analytically null channel.
+        # Without this floor, 0/0 hides a spurious predicted cross-pol field;
+        # with a machine-scale global floor, harmless roundoff does not become
+        # an infinity while a materially false channel still fails.
+        channel_scale = max(
+            channel_reference_rms,
+            reference_rms * 1.0e-12,
+            tiny,
+        )
+        channel_normalized_rms = float(
+            np.sqrt(np.mean(np.abs(channel_error) ** 2)) / channel_scale
+        )
+        channel_peak = float(np.max(np.abs(channel_reference)))
+        channel_active = (
+            np.abs(channel_reference)
+            >= channel_peak * 10.0 ** (float(active_floor_db) / 20.0)
+        ) if channel_peak > tiny else np.zeros(
+            channel_reference.shape, dtype=bool
+        )
+        if np.any(channel_active):
+            channel_magnitude_error_db = 20.0 * np.log10(
+                np.maximum(np.abs(channel_estimate[channel_active]), tiny)
+                / np.maximum(np.abs(channel_reference[channel_active]), tiny)
+            )
+            channel_phase_error_deg = np.degrees(np.angle(
+                channel_estimate[channel_active]
+                * np.conjugate(channel_reference[channel_active])
+            ))
+            channel_magnitude_p95 = float(np.percentile(
+                np.abs(channel_magnitude_error_db), 95.0
+            ))
+            channel_phase_rms = float(np.sqrt(np.mean(
+                channel_phase_error_deg ** 2
+            )))
+            channel_inner = np.vdot(
+                channel_reference.ravel(), channel_estimate.ravel()
+            )
+            channel_coherence = float(
+                abs(channel_inner)
+                / max(
+                    float(
+                        np.linalg.norm(channel_reference)
+                        * np.linalg.norm(channel_estimate)
+                    ),
+                    tiny,
+                )
+            )
+            channel_gates = {
+                "normalized_complex_rms": (
+                    channel_normalized_rms <= float(max_normalized_rms)
+                ),
+                "magnitude_error_p95_db": (
+                    channel_magnitude_p95 <= float(max_magnitude_p95_db)
+                ),
+                "phase_error_rms_deg": (
+                    channel_phase_rms <= float(max_phase_rms_deg)
+                ),
+                "complex_coherence": (
+                    channel_coherence >= float(min_coherence)
+                ),
+            }
+        else:
+            channel_magnitude_p95 = None
+            channel_phase_rms = None
+            channel_coherence = (
+                1.0 if not np.any(np.abs(channel_estimate) > tiny) else 0.0
+            )
+            channel_gates = {
+                "normalized_complex_rms": (
+                    channel_normalized_rms <= float(max_normalized_rms)
+                ),
+                "magnitude_error_p95_db": True,
+                "phase_error_rms_deg": True,
+                "complex_coherence": channel_coherence >= float(min_coherence),
+            }
+        channel_passed = bool(all(channel_gates.values()))
+        every_channel_passed = every_channel_passed and channel_passed
         per_channel[polarization] = {
-            "normalized_complex_rms": float(
-                np.sqrt(np.mean(np.abs(channel_error) ** 2))
-                / max(denominator, tiny)
-            ),
+            "normalized_complex_rms": channel_normalized_rms,
             "truth_peak_dbsm": float(
                 10.0 * math.log10(
-                    max(4.0 * math.pi * float(np.max(np.abs(channel_reference)) ** 2), tiny)
+                    max(4.0 * math.pi * channel_peak ** 2, tiny)
                 )
             ),
+            "active_sample_count": int(np.count_nonzero(channel_active)),
+            "magnitude_error_p95_db": channel_magnitude_p95,
+            "phase_error_rms_deg": channel_phase_rms,
+            "complex_coherence": channel_coherence,
+            "gates": channel_gates,
+            "passed": channel_passed,
         }
 
     gates = {
@@ -200,10 +371,12 @@ def _comparison_metrics(
         "magnitude_error_p95_db": magnitude_p95 <= float(max_magnitude_p95_db),
         "phase_error_rms_deg": phase_rms <= float(max_phase_rms_deg),
         "complex_coherence": coherence >= float(min_coherence),
+        "every_polarization_channel": every_channel_passed,
     }
     return {
         "shape": list(reference.shape),
         "active_field_floor_db": float(active_floor_db),
+        "gate_limits": settings,
         "active_sample_count": int(np.count_nonzero(active)),
         "normalized_complex_rms": normalized_rms,
         "magnitude_error_p95_db": magnitude_p95,
@@ -232,8 +405,8 @@ def compare_grims(
 
     truth_label = str(Path(truth_path).resolve())
     prediction_label = str(Path(prediction_path).resolve())
-    truth = _load_grim(truth_label)
-    prediction = _load_grim(prediction_label)
+    truth, truth_sha256 = _load_hashed_grim(truth_label)
+    prediction, prediction_sha256 = _load_hashed_grim(prediction_label)
     _require_compatible(truth, prediction, truth_label, prediction_label)
     result = _comparison_metrics(
         truth["_amp"],
@@ -249,6 +422,10 @@ def compare_grims(
         "schema": "ghost.validation.feature-reconstruction.v1",
         "truth": truth_label,
         "prediction": prediction_label,
+        "artifact_sha256": {
+            "truth": truth_sha256,
+            "prediction": prediction_sha256,
+        },
         **result,
     }
 
@@ -284,7 +461,11 @@ def compare_feature_case(
         "featured_truth": str(Path(featured_truth).resolve()),
         "featured_prediction": str(Path(featured_prediction).resolve()),
     }
-    payloads = {name: _load_grim(path) for name, path in paths.items()}
+    loaded = {
+        name: _load_hashed_grim(path) for name, path in paths.items()
+    }
+    payloads = {name: value[0] for name, value in loaded.items()}
+    artifact_sha256 = {name: value[1] for name, value in loaded.items()}
     anchor_name = "clean_truth"
     anchor = payloads[anchor_name]
     for name in ("clean_prediction", "featured_truth", "featured_prediction"):
@@ -332,6 +513,13 @@ def compare_feature_case(
     return {
         "schema": "ghost.validation.feature-case.v1",
         "paths": paths,
+        "artifact_sha256": artifact_sha256,
+        "feature_response_content_sha256": (
+            _feature_response_content_hashes(
+                payloads["featured_prediction"],
+                paths["featured_prediction"],
+            )
+        ),
         "clean_baseline": clean_result,
         "featured_total": featured_result,
         "isolated_feature_delta": delta_result,
@@ -386,6 +574,7 @@ def load_case_manifest(path):
     defaults.update({key: float(value) for key, value in top_gates.items()})
 
     resolved = []
+    seen_case_ids = set()
     for index, raw in enumerate(cases, start=1):
         if not isinstance(raw, dict):
             raise ValueError(
@@ -394,6 +583,16 @@ def load_case_manifest(path):
         name = str(raw.get("name", "")).strip()
         if not name:
             raise ValueError(f"{manifest_path}: case {index} has no name.")
+        case_id = str(raw.get("id", f"case-{index:03d}")).strip()
+        if not _CASE_ID.fullmatch(case_id):
+            raise ValueError(
+                f"{manifest_path}: case {name!r} has invalid id {case_id!r}."
+            )
+        if case_id in seen_case_ids:
+            raise ValueError(
+                f"{manifest_path}: duplicate case id {case_id!r}."
+            )
+        seen_case_ids.add(case_id)
         missing = [key for key in CASE_REQUIRED_PATHS if not raw.get(key)]
         if missing:
             raise ValueError(
@@ -412,6 +611,7 @@ def load_case_manifest(path):
             )
         gates.update({key: float(value) for key, value in case_gates.items()})
         resolved.append({
+            "case_id": case_id,
             "name": name,
             "paths": {
                 key: str((manifest_path.parent / str(raw[key])).resolve())
@@ -451,6 +651,7 @@ def main(argv=None):
         failed = False
         for case in cases:
             result = compare_feature_case(**case["paths"], **case["gates"])
+            result["case_id"] = case["case_id"]
             result["name"] = case["name"]
             result["body"] = case["body"]
             result["feature"] = case["feature"]

@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QProgressBar,
     QScrollArea,
     QSizePolicy,
     QSplitter,
@@ -998,10 +999,25 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_dataset_load = QToolButton(text="Load…")
         self.btn_dataset_save = QToolButton(text="Save")
         self.btn_dataset_save_all = QToolButton(text="Save All")
+        self.btn_dataset_export = QToolButton(text="Export…")
+        self.btn_dataset_export.setPopupMode(QToolButton.InstantPopup)
+        dataset_export_menu = QMenu(self.btn_dataset_export)
+        action_export_pio = dataset_export_menu.addAction("Pioneer (.pio)…")
+        action_export_ptm = dataset_export_menu.addAction("PTM (.ptm)…")
+        action_export_csv = dataset_export_menu.addAction("CSV…")
+        action_export_pio.triggered.connect(self._export_pio_selected)
+        action_export_ptm.triggered.connect(self._export_ptm_selected)
+        action_export_csv.triggered.connect(self._export_csv_selected)
+        self.btn_dataset_export.setMenu(dataset_export_menu)
+        self.btn_dataset_export.setToolTip(
+            "Export selected rows to solver interchange (.pio/.ptm) or flat "
+            "CSV. Native .grim storage uses Save."
+        )
         self.btn_dataset_delete = QToolButton(text="Delete")
         dataset_actions.addWidget(self.btn_dataset_load)
         dataset_actions.addWidget(self.btn_dataset_save)
         dataset_actions.addWidget(self.btn_dataset_save_all)
+        dataset_actions.addWidget(self.btn_dataset_export)
         dataset_actions.addWidget(self.btn_dataset_delete)
         dataset_actions.addStretch(1)
         sec_datasets.addLayout(dataset_actions)
@@ -1253,7 +1269,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "or [−180°, 180°). Missing phase remains missing, and azimuth seam "
                 "conflicts are never silently discarded."
             ),
-            "btn_shift": "Shift azimuth by a user-entered number of degrees.",
+            "btn_shift": (
+                "Shift azimuth and/or elevation coordinates in degrees and/or "
+                "apply a constant phase shift. No interpolation is performed."
+            ),
             "btn_round": "Round coordinate axes without changing sample values.",
             "btn_offset": "Apply an additive level offset without inventing coherent phase.",
             "btn_medianize": (
@@ -1438,6 +1457,12 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
         self.status = self.statusBar()
         self.status.showMessage("Ready")
+        self.dataset_job_progress = QProgressBar(self)
+        self.dataset_job_progress.setObjectName("datasetJobProgress")
+        self.dataset_job_progress.setMaximumWidth(190)
+        self.dataset_job_progress.setTextVisible(True)
+        self.dataset_job_progress.setVisible(False)
+        self.status.addPermanentWidget(self.dataset_job_progress)
 
         self.btn_python_clear.clicked.connect(self._clear_python_script)
         self.btn_python_copy.clicked.connect(self._copy_python_script)
@@ -1655,6 +1680,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             # stepping/playing is the point of the scrub workflow, and the
             # async compute path coalesces bursts of requests.
             if tab_key == "isar":
+                context.chk_isar_legacy_phase_attestation.toggled.connect(
+                    lambda checked, widget=context.chk_isar_legacy_phase_attestation: setattr(
+                        widget,
+                        "_attested_dataset",
+                        self.active_dataset if checked else None,
+                    )
+                )
                 context.btn_isar_apply.clicked.connect(self._on_isar_window_changed)
                 context.btn_isar_ap_prev.clicked.connect(self._on_isar_ap_prev)
                 context.btn_isar_ap_next.clicked.connect(self._on_isar_ap_next)
@@ -2187,6 +2219,22 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(btn_isar_apply, row, 2, 1, 4)
         row += 1
 
+        chk_isar_legacy_phase_attestation = QCheckBox("Attest Legacy Phase")
+        chk_isar_legacy_phase_attestation.setToolTip(
+            "Only for an unmarked legacy conic dataset whose source has been "
+            "reviewed. By checking this, you attest that its complex samples "
+            "share a fixed phase reference/center, use exp(+j*omega*t), and "
+            "follow S~exp(-j*2*k*R). This cannot override native SENTRi theta, "
+            "great-circle coordinates, or an explicitly incompatible time "
+            "convention. Prefer adding durable metadata to the dataset."
+            " The attestation is bound to the active dataset and clears when "
+            "the dataset changes."
+        )
+        settings_layout.addWidget(
+            chk_isar_legacy_phase_attestation, row, 0, 1, 6
+        )
+        row += 1
+
         isar_settings_layout = settings_layout
         settings_layout = common_settings_layout
         row = common_row
@@ -2364,6 +2412,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             btn_isar_peak_scale=btn_isar_peak_scale,
             spin_isar_peak_drop=spin_isar_peak_drop,
             chk_isar_square=chk_isar_square,
+            chk_isar_legacy_phase_attestation=chk_isar_legacy_phase_attestation,
             btn_isar_apply=btn_isar_apply,
             btn_plot_bg=btn_plot_bg,
             btn_plot_grid=btn_plot_grid,
@@ -2722,11 +2771,19 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             getattr(self, "_pending_import_batches", ())
         ):
             active_name = self._background_worker_name or "A dataset task"
+            message = (
+                f"{active_name} is still running. Wait for it to finish before "
+                "closing GRIM."
+            )
+            # Keep the reason visible after the modal warning is dismissed.
+            # In particular, a second close during a toolbar or close-triggered
+            # save must not fall through to the unsaved-data Discard path and
+            # destroy the QThread that owns the atomic staging operation.
+            self.status.showMessage(message)
             QMessageBox.warning(
                 self,
                 "Dataset Task Still Running",
-                f"{active_name} is still running. Wait for it to finish before "
-                "closing GRIM.",
+                message,
             )
             self.main_tabs.setCurrentIndex(0)
             event.ignore()
@@ -2904,6 +2961,17 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 ):
                     event.ignore()
                     return
+                # Native saves are intentionally asynchronous.  Do not tear
+                # down the owning window/QThread (or let process exit strand a
+                # staging file) while that save is still running.  The atomic
+                # publisher marks rows clean when it finishes; a subsequent
+                # close then proceeds without another prompt.
+                self.status.showMessage(
+                    "Saving unsaved datasets in the background. Close GRIM "
+                    "again after the save completes."
+                )
+                event.ignore()
+                return
         self.runs_workspace.save_settings()
         dispose_ppt = getattr(self.ppt_workspace, "dispose", None)
         if callable(dispose_ppt):

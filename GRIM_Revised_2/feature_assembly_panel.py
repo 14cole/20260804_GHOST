@@ -56,7 +56,7 @@ UNIT_ABBREVIATIONS = {
 FEATURE_SELECTION_DISPLAY_ID_LIMIT = 8
 
 FEATURE_RECIPE_SCHEMA = "grim.feature-assembly-recipe"
-FEATURE_RECIPE_VERSION = 3
+FEATURE_RECIPE_VERSION = 4
 FEATURE_RECIPE_SUFFIX = ".assembly.json"
 # Hash normal placement/library inputs while keeping recipe saves responsive for
 # very large vehicle meshes and clean-body response files. Large inputs still
@@ -64,23 +64,31 @@ FEATURE_RECIPE_SUFFIX = ".assembly.json"
 FEATURE_RECIPE_HASH_LIMIT_BYTES = 16 * 1024 * 1024
 
 VALIDATION_PROFILES = (
-    ("Production (recommended)", "production", False, True),
-    ("Legacy compatibility", "legacy", True, False),
+    ("Production — certified GHOST body (recommended)", "production", False, True, True),
+    ("External/HPC body — reviewed", "external", False, True, False),
+    ("Legacy compatibility", "legacy", True, False, False),
 )
 DEFAULT_SKIN_TOL_MM = 1.0
 DEFAULT_SKIN_PHASE_TOL_DEG = 15.0
 DEFAULT_NORMAL_TOL_DEG = 15.0
 
-# The estimate is deliberately a static workload model, not a machine
-# benchmark.  Confirmation is reserved for a validated plan whose rough model
-# crosses four hours; pre-validation estimates can inform but never nag.
-LONG_BUILD_CONFIRMATION_SECONDS = 4.0 * 60.0 * 60.0
+# Conservative operator-review thresholds mirrored from GHOST's Qt-free
+# ``assembly_workload`` contract. They are operation counts, not elapsed-time
+# claims. The bundled backend records the same counts in the sealed plan and
+# turns a threshold crossing into an acknowledged validation warning.
+ASSEMBLY_REVIEW_RADAR_GRID_CELLS = 10_000_000
+ASSEMBLY_REVIEW_POINT_FIELD_CELLS = 250_000_000
+ASSEMBLY_REVIEW_LINE_FIELD_CELLS = 500_000_000
+ASSEMBLY_REVIEW_SHADOW_RAYS = 5_000_000
+ASSEMBLY_REVIEW_LARGE_MESH_TRIANGLES = 1_000_000
+ASSEMBLY_REVIEW_LARGE_MESH_SHADOW_RAYS = 100_000
+WORKLOAD_REVIEW_WARNING_PREFIX = "Assembly workload review required"
 _PREVALIDATION_LINE_PIECES_PER_SEGMENT = 64
 
 
 @dataclass(frozen=True)
 class AssemblyWorkEstimate:
-    """Broad local-work estimate derived from visible Assembly quantities."""
+    """Auditable operation counts derived from visible Assembly quantities."""
 
     available: bool
     quantities_validated: bool = False
@@ -94,9 +102,12 @@ class AssemblyWorkEstimate:
     mesh_triangle_count: int = 0
     mesh_triangle_count_exact: bool = False
     shadow_enabled: bool = False
+    radar_grid_cell_count: int = 0
+    point_field_cell_count: int = 0
+    line_field_cell_count: int = 0
     shadow_ray_upper_bound: int = 0
-    rough_validation_seconds: float = 0.0
-    rough_build_seconds: float = 0.0
+    packed_visibility_bytes_upper_bound: int = 0
+    review_reasons: tuple[str, ...] = ()
 
 
 def estimate_assembly_workload(
@@ -113,12 +124,7 @@ def estimate_assembly_workload(
     line_piece_count_exact: bool = False,
     mesh_triangle_count_exact: bool = False,
 ) -> AssemblyWorkEstimate:
-    """Return a monotone, intentionally broad workload/time model.
-
-    Coefficients describe the current vectorized field path and Python BVH
-    shadow traversal only well enough to choose human-scale time bands.  They
-    must never be presented as a stopwatch prediction.
-    """
+    """Return exact/upper-bound operation counts without inventing an ETA."""
 
     values = {
         "look_count": look_count,
@@ -144,37 +150,43 @@ def estimate_assembly_workload(
     points = normalized["point_count"]
     pieces = normalized["line_piece_count"]
     triangles = normalized["mesh_triangle_count"]
-    point_cells = looks * frequencies * points
-    line_cells = looks * frequencies * pieces
-    grid_cells = looks * frequencies * 3
+    grid_cells = looks * frequencies
+    point_cells = grid_cells * points
+    line_cells = grid_cells * pieces
     shadow_rays = looks * (points + pieces) if shadow_enabled else 0
-
-    # Vectorized point Jones transforms are inexpensive per cell. Line pieces
-    # remain the heavier field operation. BVH rays are Python-driven, and mesh
-    # depth broadens their cost without pretending every ray visits every face.
-    field_seconds = (
-        2.0e-7 * point_cells
-        + 5.0e-6 * line_cells
-        + 8.0e-7 * grid_cells
+    packed_bytes = (
+        (points + pieces) * ((looks + 7) // 8) if shadow_enabled else 0
     )
-    mesh_depth_factor = (
-        1.0
-        if triangles <= 1
-        else 1.0 + min(2.0, math.log2(triangles) / 16.0)
-    )
-    shadow_seconds = (
-        2.5e-4 * shadow_rays * mesh_depth_factor
-        if shadow_enabled else 0.0
-    )
-    build_seconds = 3.0 + field_seconds + shadow_seconds
-
-    placement_queries = points + normalized["line_segment_count"]
-    validation_seconds = (
-        2.0
-        + 4.0e-5 * triangles
-        + 2.0e-7 * (point_cells + line_cells)
-        + 8.0e-4 * placement_queries * mesh_depth_factor
-    )
+    reasons: list[str] = []
+    if grid_cells >= ASSEMBLY_REVIEW_RADAR_GRID_CELLS:
+        reasons.append(
+            f"{grid_cells:,} radar look-frequency cells "
+            f"(review threshold {ASSEMBLY_REVIEW_RADAR_GRID_CELLS:,})"
+        )
+    if point_cells >= ASSEMBLY_REVIEW_POINT_FIELD_CELLS:
+        reasons.append(
+            f"{point_cells:,} point look-frequency evaluations "
+            f"(review threshold {ASSEMBLY_REVIEW_POINT_FIELD_CELLS:,})"
+        )
+    if line_cells >= ASSEMBLY_REVIEW_LINE_FIELD_CELLS:
+        reasons.append(
+            f"{line_cells:,} line-piece look-frequency evaluations "
+            f"(review threshold {ASSEMBLY_REVIEW_LINE_FIELD_CELLS:,})"
+        )
+    if shadow_rays >= ASSEMBLY_REVIEW_SHADOW_RAYS:
+        reasons.append(
+            f"up to {shadow_rays:,} body-shadow candidate rays "
+            f"(review threshold {ASSEMBLY_REVIEW_SHADOW_RAYS:,})"
+        )
+    if (
+        shadow_enabled
+        and triangles >= ASSEMBLY_REVIEW_LARGE_MESH_TRIANGLES
+        and shadow_rays >= ASSEMBLY_REVIEW_LARGE_MESH_SHADOW_RAYS
+    ):
+        reasons.append(
+            f"{triangles:,}-triangle body mesh with up to "
+            f"{shadow_rays:,} shadow candidates"
+        )
     return AssemblyWorkEstimate(
         available=True,
         quantities_validated=bool(quantities_validated),
@@ -188,48 +200,46 @@ def estimate_assembly_workload(
         mesh_triangle_count=triangles,
         mesh_triangle_count_exact=bool(mesh_triangle_count_exact),
         shadow_enabled=bool(shadow_enabled),
+        radar_grid_cell_count=int(grid_cells),
+        point_field_cell_count=int(point_cells),
+        line_field_cell_count=int(line_cells),
         shadow_ray_upper_bound=int(shadow_rays),
-        rough_validation_seconds=float(validation_seconds),
-        rough_build_seconds=float(build_seconds),
+        packed_visibility_bytes_upper_bound=int(packed_bytes),
+        review_reasons=tuple(reasons),
     )
-
-
-def _rough_time_band(seconds: float) -> str:
-    value = max(0.0, float(seconds))
-    if value < 60.0:
-        return "under a minute"
-    if value < 10.0 * 60.0:
-        return "a few minutes"
-    if value < 60.0 * 60.0:
-        return "tens of minutes"
-    if value < LONG_BUILD_CONFIRMATION_SECONDS:
-        return "roughly 1-4 hours"
-    if value < 24.0 * 60.0 * 60.0:
-        return "many hours (roughly 4-24)"
-    return "a day or more"
 
 
 def assembly_build_confirmation_required(
     estimate: AssemblyWorkEstimate,
-    *,
-    threshold_seconds: float = LONG_BUILD_CONFIRMATION_SECONDS,
 ) -> bool:
-    """Confirm only an authoritative, validated long-build estimate."""
+    """Require review only for an authoritative threshold-crossing plan."""
 
     return bool(
         isinstance(estimate, AssemblyWorkEstimate)
         and estimate.available
         and estimate.quantities_validated
-        and estimate.rough_build_seconds >= float(threshold_seconds)
+        and bool(estimate.review_reasons)
     )
 
 
+def _format_binary_bytes(value: int) -> str:
+    count = max(0, int(value))
+    if count < 1024:
+        return f"{count:,} B"
+    if count < 1024 ** 2:
+        return f"{count / 1024.0:.2f} KiB"
+    if count < 1024 ** 3:
+        return f"{count / (1024.0 ** 2):.2f} MiB"
+    return f"{count / (1024.0 ** 3):.2f} GiB"
+
+
 def format_assembly_work_estimate(estimate: AssemblyWorkEstimate) -> str:
-    """Render broad time bands and auditable workload counts without precision."""
+    """Render auditable counts and explicitly decline a runtime prediction."""
 
     if not estimate.available:
         return (
-            "Rough local estimate (not a benchmark): choose a valid clean-body "
+            "Workload preflight (operation counts; no elapsed-time estimate): "
+            "choose a valid clean-body "
             "GRIM and refresh the placement CSVs to expose the radar workload."
         )
     stage = "Validated quantities" if estimate.quantities_validated else (
@@ -241,6 +251,8 @@ def format_assembly_work_estimate(estimate: AssemblyWorkEstimate) -> str:
         f"{estimate.point_count:,} point(s)",
         f"{estimate.line_path_count:,} line path(s)",
         f"{piece_prefix}{estimate.line_piece_count:,} solver line piece(s)",
+        f"{estimate.point_field_cell_count:,} point look-frequency evaluations",
+        f"{estimate.line_field_cell_count:,} line-piece look-frequency evaluations",
     ]
     if estimate.mesh_triangle_count:
         triangle_prefix = "" if estimate.mesh_triangle_count_exact else "up to "
@@ -249,7 +261,12 @@ def format_assembly_work_estimate(estimate: AssemblyWorkEstimate) -> str:
         )
     if estimate.shadow_enabled:
         parts.append(
-            f"up to {estimate.shadow_ray_upper_bound:,} body-shadow ray(s)"
+            f"up to {estimate.shadow_ray_upper_bound:,} body-shadow candidate ray(s)"
+        )
+        parts.append(
+            "up to "
+            + _format_binary_bytes(estimate.packed_visibility_bytes_upper_bound)
+            + " packed visibility"
         )
     else:
         parts.append("body shadowing off")
@@ -258,16 +275,29 @@ def format_assembly_work_estimate(estimate: AssemblyWorkEstimate) -> str:
         if estimate.quantities_validated
         else " Line subdivision and mesh cost are refined after Validate."
     )
+    if estimate.review_reasons:
+        review = (
+            " Operator review required: " + "; ".join(estimate.review_reasons) + "."
+            if estimate.quantities_validated
+            else " Validate to confirm whether the conservative review gate applies."
+        )
+    else:
+        review = " No count-based review threshold is crossed."
+    shadow_note = (
+        " Shadow candidates are computed once and reused across frequencies; "
+        "front-facing culling can reduce actual BVH traces. Ray cost depends "
+        "strongly on mesh/ray geometry and hardware."
+        if estimate.shadow_enabled
+        else ""
+    )
     return (
-        "Rough local estimate (not a benchmark): Validate "
-        + _rough_time_band(estimate.rough_validation_seconds)
-        + "; Build "
-        + _rough_time_band(estimate.rough_build_seconds)
-        + ". "
+        "Workload preflight (operation counts; no elapsed-time estimate). "
         + stage
         + ": "
         + "; ".join(parts)
-        + ". Hardware, mesh visibility, and storage speed can move these bands."
+        + "."
+        + review
+        + shadow_note
         + refinement
     )
 
@@ -484,6 +514,7 @@ class FeatureAssemblyValues:
     normal_tol_deg: float = 15.0
     allow_legacy_base_metadata: bool = False
     require_feature_manifests: bool = True
+    require_body_mesh_certification: bool = True
     expected_host_material: str = ""
     base_dir: str | None = None
     point_datasets: dict[str, str] = field(default_factory=dict)
@@ -1539,6 +1570,9 @@ def feature_assembly_recipe_payload(
         "normal_tol_deg": float(values.normal_tol_deg),
         "allow_legacy_base_metadata": bool(values.allow_legacy_base_metadata),
         "require_feature_manifests": bool(values.require_feature_manifests),
+        "require_body_mesh_certification": bool(
+            values.require_body_mesh_certification
+        ),
         "expected_host_material": str(values.expected_host_material).strip(),
         # Every effective path above is rebased to this recipe directory.
         "base_dir": ".",
@@ -1706,7 +1740,7 @@ def read_feature_assembly_recipe(
             f"Not a {FEATURE_RECIPE_SCHEMA!r} Assembly recipe."
         )
     version = payload.get("version")
-    if version not in {1, 2, FEATURE_RECIPE_VERSION}:
+    if version not in {1, 2, 3, FEATURE_RECIPE_VERSION}:
         raise ValueError(
             f"Unsupported Assembly recipe version {version!r}; this GRIM build "
             f"supports versions 1 through {FEATURE_RECIPE_VERSION}."
@@ -1747,6 +1781,8 @@ def read_feature_assembly_recipe(
         required.add("expected_host_material")
     if version >= 3:
         required.update({"point_host_materials", "line_host_materials"})
+    if version >= 4:
+        required.add("require_body_mesh_certification")
     missing = sorted(required - set(raw_values))
     if missing:
         raise ValueError(
@@ -1768,6 +1804,11 @@ def read_feature_assembly_recipe(
             "shadow",
             "allow_legacy_base_metadata",
             "require_feature_manifests",
+            *(
+                ("require_body_mesh_certification",)
+                if version >= 4
+                else ()
+            ),
         )
     ):
         raise ValueError("Assembly recipe boolean settings must be true or false.")
@@ -1851,6 +1892,9 @@ def read_feature_assembly_recipe(
         normal_tol_deg=normal_tol,
         allow_legacy_base_metadata=raw_values["allow_legacy_base_metadata"],
         require_feature_manifests=raw_values["require_feature_manifests"],
+        require_body_mesh_certification=bool(
+            raw_values.get("require_body_mesh_certification", False)
+        ),
         expected_host_material=expected_host_material.strip(),
         base_dir=None,
         point_datasets={
@@ -1886,6 +1930,12 @@ def read_feature_assembly_recipe(
         warnings.append(
             "Recipe v2 has only one global host material/coating ID. Review "
             "per-response host IDs before Production validation of mixed stacks."
+        )
+    if version < 4:
+        warnings.append(
+            "This older recipe does not claim a certified GHOST body mesh. "
+            "It was loaded with the explicit External/HPC body waiver; select "
+            "Production only after validating a locally certified body result."
         )
     raw_manifest = payload.get("source_manifest", [])
     if not isinstance(raw_manifest, list):
@@ -1975,6 +2025,19 @@ def _callable_accepts_runtime_hooks(value: Callable[..., Any]) -> bool:
     ):
         return True
     return {"cancel_check", "progress_callback"}.issubset(parameters)
+
+
+def _callable_accepts_keyword(value: Callable[..., Any], name: str) -> bool:
+    """Whether a service accepts one optional execution keyword."""
+
+    try:
+        parameters = inspect.signature(value).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def _require_finite_nonnegative(value: Any, label: str) -> float:
@@ -2767,6 +2830,16 @@ class FeatureAssemblyFormModel:
             )
         if values.shadow_bias_m is not None:
             _require_finite_nonnegative(values.shadow_bias_m, "Shadow bias")
+        if values.require_body_mesh_certification and (
+            values.allow_legacy_base_metadata
+            or not values.require_feature_manifests
+        ):
+            raise ValueError(
+                "Certified-body Production validation also requires strict "
+                "base metadata and certified feature manifests. Choose the "
+                "Production profile again or use the explicit External/HPC "
+                "profile."
+            )
         self._validate_output_target()
 
     def build_request(self, service: Any) -> Any:
@@ -2808,6 +2881,9 @@ class FeatureAssemblyFormModel:
             ),
             require_feature_manifests=bool(
                 values.require_feature_manifests
+            ),
+            require_body_mesh_certification=bool(
+                values.require_body_mesh_certification
             ),
             expected_host_material=(
                 str(values.expected_host_material).strip() or None
@@ -2855,6 +2931,7 @@ class FeatureAssemblyFormModel:
             float(values.normal_tol_deg),
             bool(values.allow_legacy_base_metadata),
             bool(values.require_feature_manifests),
+            bool(values.require_body_mesh_certification),
             str(values.expected_host_material).strip(),
             tuple(
                 (dataset_id, str(values.point_host_materials.get(dataset_id, "")).strip())
@@ -3148,6 +3225,7 @@ class FeatureAssemblyFormModel:
         self,
         service: Any,
         *,
+        acknowledged_plan_sha256: str | None = None,
         cancel_check: Callable[[], bool] | None = None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> FeatureBuildDispatch:
@@ -3192,12 +3270,23 @@ class FeatureAssemblyFormModel:
             )
         )
         features_before = _publication_snapshot(features_path)
+        execute_kwargs: dict[str, Any] = {}
         if _callable_accepts_runtime_hooks(adapter.execute):
-            output = adapter.execute(
-                plan,
+            execute_kwargs.update(
                 cancel_check=cancel_check,
                 progress_callback=progress_callback,
             )
+        if (
+            acknowledged_plan_sha256 is not None
+            and _callable_accepts_keyword(
+                adapter.execute, "acknowledged_plan_sha256"
+            )
+        ):
+            execute_kwargs["acknowledged_plan_sha256"] = (
+                acknowledged_plan_sha256
+            )
+        if execute_kwargs:
+            output = adapter.execute(plan, **execute_kwargs)
         else:
             # Compatible injected/test services may predate runtime hooks. The
             # authoritative bundled backend accepts them; legacy services still
@@ -3217,6 +3306,7 @@ class FeatureAssemblyFormModel:
         self,
         service: Any,
         *,
+        acknowledged_plan_sha256: str | None = None,
         cancel_check: Callable[[], bool] | None = None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> FeatureBuildDispatch:
@@ -3252,12 +3342,23 @@ class FeatureAssemblyFormModel:
             )
         )
         features_before = _publication_snapshot(features_path)
+        execute_kwargs: dict[str, Any] = {}
         if _callable_accepts_runtime_hooks(adapter.execute):
-            output = adapter.execute(
-                cache.plan,
+            execute_kwargs.update(
                 cancel_check=cancel_check,
                 progress_callback=progress_callback,
             )
+        if (
+            acknowledged_plan_sha256 is not None
+            and _callable_accepts_keyword(
+                adapter.execute, "acknowledged_plan_sha256"
+            )
+        ):
+            execute_kwargs["acknowledged_plan_sha256"] = (
+                acknowledged_plan_sha256
+            )
+        if execute_kwargs:
+            output = adapter.execute(cache.plan, **execute_kwargs)
         else:
             output = adapter.execute(cache.plan)
         return FeatureBuildDispatch(
@@ -4641,16 +4742,29 @@ if GUI_AVAILABLE:
             self.shadow_bias = QLineEdit(advanced)
             self.shadow_bias.setPlaceholderText("Auto (recommended)")
             self.validation_profile = QComboBox(advanced)
-            for label, key, allow_legacy, require_manifests in VALIDATION_PROFILES:
+            for (
+                label,
+                key,
+                allow_legacy,
+                require_manifests,
+                require_body_certification,
+            ) in VALIDATION_PROFILES:
                 self.validation_profile.addItem(
                     label,
-                    (key, allow_legacy, require_manifests),
+                    (
+                        key,
+                        allow_legacy,
+                        require_manifests,
+                        require_body_certification,
+                    ),
                 )
             self.validation_profile.setCurrentIndex(0)
             self.validation_profile.setToolTip(
-                "Production rejects missing clean-body metadata and uncertified "
-                "feature responses. Legacy compatibility is an explicit exception "
-                "and reports applicability gaps as review warnings."
+                "Production requires a certified, fine-mesh dual-polarization "
+                "GHOST body and certified feature responses. External/HPC keeps "
+                "strict metadata and feature manifests but explicitly waives the "
+                "local body certificate. Legacy compatibility reports missing "
+                "applicability evidence as review warnings."
             )
             self.expected_host_material = QLineEdit(advanced)
             self.expected_host_material.setPlaceholderText(
@@ -4950,11 +5064,11 @@ if GUI_AVAILABLE:
             self._update_recipe_status()
             self._update_workflow_readiness()
 
-        def _validation_profile_flags(self) -> tuple[bool, bool]:
+        def _validation_profile_flags(self) -> tuple[bool, bool, bool]:
             data = self.validation_profile.currentData()
-            if not isinstance(data, (tuple, list)) or len(data) != 3:
-                return False, True
-            return bool(data[1]), bool(data[2])
+            if not isinstance(data, (tuple, list)) or len(data) != 4:
+                return False, True, True
+            return bool(data[1]), bool(data[2]), bool(data[3])
 
         def _set_validation_profile_from_values(
             self, values: FeatureAssemblyValues
@@ -4962,14 +5076,19 @@ if GUI_AVAILABLE:
             target = (
                 bool(values.allow_legacy_base_metadata),
                 bool(values.require_feature_manifests),
+                bool(values.require_body_mesh_certification),
             )
             index = 0
             for candidate in range(self.validation_profile.count()):
                 data = self.validation_profile.itemData(candidate)
                 if (
                     isinstance(data, (tuple, list))
-                    and len(data) == 3
-                    and (bool(data[1]), bool(data[2])) == target
+                    and len(data) == 4
+                    and (
+                        bool(data[1]),
+                        bool(data[2]),
+                        bool(data[3]),
+                    ) == target
                 ):
                     index = candidate
                     break
@@ -4977,9 +5096,16 @@ if GUI_AVAILABLE:
 
         @Slot()
         def _validation_profile_changed(self, *_args: Any) -> None:
-            allow_legacy, require_manifests = self._validation_profile_flags()
+            (
+                allow_legacy,
+                require_manifests,
+                require_body_certification,
+            ) = self._validation_profile_flags()
             self.model.values.allow_legacy_base_metadata = allow_legacy
             self.model.values.require_feature_manifests = require_manifests
+            self.model.values.require_body_mesh_certification = (
+                require_body_certification
+            )
             self._mark_preview_stale()
 
         @Slot()
@@ -5604,6 +5730,7 @@ if GUI_AVAILABLE:
             (
                 values.allow_legacy_base_metadata,
                 values.require_feature_manifests,
+                values.require_body_mesh_certification,
             ) = self._validation_profile_flags()
             values.expected_host_material = (
                 self.expected_host_material.text().strip()
@@ -5778,11 +5905,23 @@ if GUI_AVAILABLE:
             production_profile = bool(
                 strict_feature_library and not values.allow_legacy_base_metadata
             )
-            qa_mode = (
-                "Production — strict body metadata, certified response manifests"
-                if production_profile
-                else "legacy response compatibility (warnings shown after validation)"
+            certified_body_profile = bool(
+                values.require_body_mesh_certification
             )
+            if certified_body_profile:
+                qa_mode = (
+                    "Production — certified fine-mesh body, strict metadata, "
+                    "certified response manifests"
+                )
+            elif production_profile:
+                qa_mode = (
+                    "External/HPC — strict metadata and response manifests; "
+                    "local body certificate explicitly waived"
+                )
+            else:
+                qa_mode = (
+                    "legacy response compatibility (warnings shown after validation)"
+                )
             host_id = values.expected_host_material.strip()
             try:
                 effective_hosts = self.model.effective_host_materials()
@@ -5823,9 +5962,13 @@ if GUI_AVAILABLE:
             self.advanced_section.header.setText(
                 "Advanced placement checks · "
                 + (
-                    "Production validation"
-                    if production_profile
-                    else "legacy-library compatibility"
+                    "Production certified-body validation"
+                    if certified_body_profile
+                    else (
+                        "External/HPC reviewed-body validation"
+                        if production_profile
+                        else "legacy-library compatibility"
+                    )
                 )
             )
 
@@ -5987,6 +6130,8 @@ if GUI_AVAILABLE:
                 checks.append((placement_units_ready, "placement units"))
             if binding_status.external_body and production_profile:
                 checks.append((binding_status.ready, "reviewed body binding"))
+            if certified_body_profile:
+                checks.append((validation_current, "body mesh certificate"))
             checks.append((host_material_ready, "host material IDs"))
             if not settings_ready:
                 checks.append((False, "advanced settings"))
@@ -6412,6 +6557,7 @@ if GUI_AVAILABLE:
             (
                 values.allow_legacy_base_metadata,
                 values.require_feature_manifests,
+                values.require_body_mesh_certification,
             ) = self._validation_profile_flags()
             values.expected_host_material = (
                 self.expected_host_material.text().strip()
@@ -6846,29 +6992,49 @@ if GUI_AVAILABLE:
                     )
                     return
             build_estimate = self._validated_build_work_estimate()
-            if assembly_build_confirmation_required(build_estimate):
+            prepared_plan = self.model.prepared_plan
+            plan_warnings = tuple(
+                str(value)
+                for value in (
+                    getattr(prepared_plan, "validation_warnings", ()) or ()
+                )
+            )
+            sealed_workload_warning = any(
+                value.startswith(WORKLOAD_REVIEW_WARNING_PREFIX)
+                for value in plan_warnings
+            )
+            if (
+                assembly_build_confirmation_required(build_estimate)
+                and not sealed_workload_warning
+            ):
                 answer = QMessageBox.warning(
                     self,
-                    "Long Assembly build estimate",
+                    "Review large Assembly workload",
                     format_assembly_work_estimate(build_estimate)
-                    + "\n\nThis validated workload falls in the many-hours "
-                    "range on the static local model. Continue now? You can "
-                    "cancel cooperatively during the build without publishing "
-                    "a partial output.",
+                    + "\n\nThese are operation counts, not an elapsed-time "
+                    "prediction. Continue with this reviewed plan? You can "
+                    "cancel cooperatively without publishing a partial output.",
                     QMessageBox.StandardButton.Yes
                     | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.No,
                 )
                 if answer != QMessageBox.StandardButton.Yes:
                     self.status_changed.emit(
-                        "Long Assembly build cancelled before computation; "
+                        "Large Assembly workload cancelled before computation; "
                         "existing output files kept."
                     )
                     return
+            acknowledged_plan_sha256 = (
+                str(getattr(prepared_plan, "prepared_plan_sha256", "")).strip()
+                if self._validation_warning_count
+                and self.validation_warning_ack.isChecked()
+                else None
+            )
             self._start_operation(
                 "build",
                 lambda cancel_check, progress_callback: self.model.assemble_validated(
                     adapter,
+                    acknowledged_plan_sha256=acknowledged_plan_sha256,
                     cancel_check=cancel_check,
                     progress_callback=progress_callback,
                 ),
@@ -7276,7 +7442,13 @@ else:
 
 __all__ = [
     "GUI_AVAILABLE",
-    "LONG_BUILD_CONFIRMATION_SECONDS",
+    "ASSEMBLY_REVIEW_LARGE_MESH_SHADOW_RAYS",
+    "ASSEMBLY_REVIEW_LARGE_MESH_TRIANGLES",
+    "ASSEMBLY_REVIEW_LINE_FIELD_CELLS",
+    "ASSEMBLY_REVIEW_POINT_FIELD_CELLS",
+    "ASSEMBLY_REVIEW_RADAR_GRID_CELLS",
+    "ASSEMBLY_REVIEW_SHADOW_RAYS",
+    "WORKLOAD_REVIEW_WARNING_PREFIX",
     "FEATURE_RECIPE_SCHEMA",
     "FEATURE_RECIPE_SUFFIX",
     "FEATURE_RECIPE_VERSION",

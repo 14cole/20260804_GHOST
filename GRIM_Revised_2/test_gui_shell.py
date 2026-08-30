@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from matplotlib.colors import to_hex
-from PySide6.QtCore import QMimeData, QUrl, Qt, Signal
+from PySide6.QtCore import QMimeData, QThread, QUrl, Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -726,7 +726,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.window._add_dataset_row(source, "Native SENTRi", "", "sentri.csv")
         self.window.table.selectRow(0)
         self.window.btn_sentri_elevation.click()
-        self.app.processEvents()
+        self._wait_for_background()
 
         self.assertEqual(self.window.table.rowCount(), 2)
         self.assertEqual(
@@ -1127,6 +1127,71 @@ class UnifiedGuiShellTest(unittest.TestCase):
             with self.assertRaisesRegex(MemoryError, "Load fewer or smaller dataset files"):
                 grim_cut_dataset_mixin._recommended_loader_workers(tasks)
 
+    def test_native_gui_save_adapts_compression_from_bounded_sample(self) -> None:
+        shape = (1100, 1, 1000, 1)
+        rng = np.random.default_rng(1776)
+        random_power = rng.random(shape, dtype=np.float32)
+        random_phase = rng.uniform(-np.pi, np.pi, size=shape).astype(np.float32)
+        noisy = RcsGrid(
+            np.arange(shape[0]),
+            [0.0],
+            np.arange(1, shape[2] + 1),
+            ["VV"],
+            rcs_power=random_power,
+            rcs_phase=random_phase,
+        )
+        smooth = RcsGrid(
+            noisy.azimuths,
+            noisy.elevations,
+            noisy.frequencies,
+            noisy.polarizations,
+            rcs_power=np.ones(shape, dtype=np.float32),
+            rcs_phase=np.zeros(shape, dtype=np.float32),
+        )
+
+        noisy_decision = grim_cut_dataset_mixin._grim_save_compression_decision(noisy)
+        smooth_decision = grim_cut_dataset_mixin._grim_save_compression_decision(smooth)
+        self.assertFalse(noisy_decision["compressed"])
+        self.assertTrue(smooth_decision["compressed"])
+        self.assertLessEqual(
+            noisy_decision["sample_bytes"],
+            grim_cut_dataset_mixin._GRIM_COMPRESSION_SAMPLE_BYTES,
+        )
+        self.assertLessEqual(
+            smooth_decision["sample_bytes"],
+            grim_cut_dataset_mixin._GRIM_COMPRESSION_SAMPLE_BYTES,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            noisy_path = os.path.join(temporary, "noisy.grim")
+            smooth_path = os.path.join(temporary, "smooth.grim")
+            decisions: list[dict[str, object]] = []
+            grim_cut_dataset_mixin._stage_and_publish_grim_batch(
+                [
+                    (noisy, noisy_path, "noisy"),
+                    (smooth, smooth_path, "smooth"),
+                ],
+                compression_log=decisions,
+            )
+            with zipfile.ZipFile(noisy_path) as archive:
+                self.assertTrue(
+                    all(
+                        member.compress_type == zipfile.ZIP_STORED
+                        for member in archive.infolist()
+                    )
+                )
+            with zipfile.ZipFile(smooth_path) as archive:
+                self.assertTrue(
+                    all(
+                        member.compress_type == zipfile.ZIP_DEFLATED
+                        for member in archive.infolist()
+                    )
+                )
+        self.assertEqual(
+            [decision["compressed"] for decision in decisions],
+            [False, True],
+        )
+
     def test_batch_save_rejects_sanitized_casefold_collision_before_write(self) -> None:
         self.window._add_dataset_row(_grid(), "Body/A", "first")
         self.window._add_dataset_row(_grid(), "body:a", "second")
@@ -1195,6 +1260,8 @@ class UnifiedGuiShellTest(unittest.TestCase):
             question.assert_called_once()
             self.assertEqual(float(RcsGrid.load(os.path.join(tmp, "First.grim")).rcs_power.item()), 1.0)
             self.assertEqual(float(RcsGrid.load(os.path.join(tmp, "Second.grim")).rcs_power.item()), 4.0)
+            self.assertIn("Storage mode:", self.window.status.currentMessage())
+            self.assertIn("sampled saving", self.window.status.currentMessage())
 
     def test_background_save_does_not_mark_a_newer_row_revision_saved(self) -> None:
         original = _grid(1.0)
@@ -1204,11 +1271,11 @@ class UnifiedGuiShellTest(unittest.TestCase):
         release = threading.Event()
         real_publish = grim_cut_dataset_mixin._stage_and_publish_grim_batch
 
-        def delayed_publish(entries):
+        def delayed_publish(entries, **kwargs):
             started.set()
             if not release.wait(5.0):
                 raise TimeoutError("test did not release save worker")
-            return real_publish(entries)
+            return real_publish(entries, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
             target = os.path.join(tmp, "Editable.grim")
@@ -1313,6 +1380,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 ) as save_ptm,
             ):
                 self.window._export_ptm_selected()
+                self._wait_for_background()
 
         save_ptm.assert_called_once_with(
             dataset, destination, el_idx=0, pol_idx=0
@@ -1336,6 +1404,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 ),
             ):
                 self.window._export_pio_selected()
+                self._wait_for_background()
 
         self.assertIn(
             "cannot represent", self.window.status.currentMessage()
@@ -1451,6 +1520,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
             return_value=[("PTM cut", dataset)],
         ):
             self.window._duplicate_selected()
+            self._wait_for_background()
 
         duplicate = self.window.table.item(start_row, 0).data(Qt.UserRole)
         self.assertEqual(duplicate.angular_coordinate_system(), "great_circle")
@@ -1718,6 +1788,49 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertFalse(event.isAccepted())
         warning.assert_called_once()
         self.assertIn("Range Cal", warning.call_args.args[2])
+        self.assertIn("Range Cal", self.window.status.currentMessage())
+
+    def test_running_dataset_job_precedes_dirty_discard_close(self) -> None:
+        self.window._add_dataset_row(_grid(), "Unsaved result", "Derived")
+        self.window._background_worker_name = "Dataset save"
+        buttons = getattr(
+            grim_cut_gui.QMessageBox,
+            "StandardButton",
+            grim_cut_gui.QMessageBox,
+        )
+        event = QCloseEvent()
+        with (
+            mock.patch.object(
+                self.window, "_background_job_active", return_value=True
+            ),
+            mock.patch.object(
+                grim_cut_gui.QMessageBox,
+                "warning",
+                return_value=buttons.Discard,
+            ) as warning,
+            mock.patch.object(self.window.ppt_workspace, "dispose") as dispose,
+        ):
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.args[1], "Dataset Task Still Running")
+        self.assertNotIn("Unsaved Datasets", warning.call_args.args)
+        self.assertIn("Dataset save", self.window.status.currentMessage())
+        dispose.assert_not_called()
+
+    def test_completed_dataset_thread_does_not_block_close(self) -> None:
+        completed_thread = QThread(self.window)
+        self.window._background_worker_thread = completed_thread
+        self.window._background_worker_name = "Completed dataset save"
+        self.assertFalse(completed_thread.isRunning())
+
+        event = QCloseEvent()
+        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+            self.window.closeEvent(event)
+
+        self.assertTrue(event.isAccepted())
+        warning.assert_not_called()
 
     def test_isar_worker_is_cancelled_and_blocks_close_until_done(self) -> None:
         current_cancel = threading.Event()
@@ -1751,6 +1864,38 @@ class UnifiedGuiShellTest(unittest.TestCase):
 
         self.assertFalse(event.isAccepted())
         self.assertIn("Unsaved result", warning.call_args.args[2])
+
+    def test_close_waits_for_async_unsaved_dataset_save(self) -> None:
+        self.window._add_dataset_row(_grid(), "Unsaved result", "Derived")
+        buttons = getattr(
+            grim_cut_gui.QMessageBox,
+            "StandardButton",
+            grim_cut_gui.QMessageBox,
+        )
+        event = QCloseEvent()
+        with (
+            mock.patch.object(
+                grim_cut_gui.QMessageBox, "warning", return_value=buttons.Save
+            ),
+            mock.patch.object(
+                grim_cut_gui.QFileDialog,
+                "getExistingDirectory",
+                return_value="C:/safe-save-target",
+            ),
+            mock.patch.object(
+                self.window, "_save_rows_to_directory", return_value=True
+            ) as start_save,
+            mock.patch.object(self.window.ppt_workspace, "dispose") as dispose,
+        ):
+            self.window.closeEvent(event)
+
+        self.assertFalse(event.isAccepted())
+        start_save.assert_called_once()
+        dispose.assert_not_called()
+        self.assertIn(
+            "Close GRIM again after the save completes",
+            self.window.status.currentMessage(),
+        )
 
     def test_running_feature_job_blocks_close_on_assembly_tab(self) -> None:
         event = QCloseEvent()

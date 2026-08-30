@@ -20,6 +20,7 @@ import platform
 import re
 import sys
 from typing import Callable, Iterable, Mapping, Sequence, TextIO
+import uuid
 
 
 MINIMUM_PYTHON = (3, 10)
@@ -78,6 +79,7 @@ GHOST_SENTINELS = (
     "bor_streaming.py",
     "components.py",
     "solver_quality.py",
+    "assembly_workload.py",
     "feature_sum.py",
     "feature_workflow.py",
     "hpc_bundle.py",
@@ -471,6 +473,66 @@ def _native_results(
     return results
 
 
+def _registered_com_clsid(
+    prog_id: str,
+    registry_module=None,
+) -> tuple[str, str]:
+    """Return a registered local COM CLSID and server without activation.
+
+    Recent pywin32 releases do not expose ``pythoncom.CLSIDFromProgID`` on
+    every supported build.  The merged Windows classes registry is the
+    authoritative, read-only place to check registration without starting the
+    application.  Probe both registry views so a 32-bit Office installation is
+    still diagnosed correctly from 64-bit Python.
+    """
+
+    if registry_module is None:
+        import winreg as registry_module
+
+    registry = registry_module
+    views = []
+    for value in (
+        0,
+        getattr(registry, "KEY_WOW64_64KEY", 0),
+        getattr(registry, "KEY_WOW64_32KEY", 0),
+    ):
+        if value not in views:
+            views.append(value)
+
+    failures: list[str] = []
+    for view in views:
+        access = int(getattr(registry, "KEY_READ", 0)) | int(view)
+        try:
+            with registry.OpenKey(
+                registry.HKEY_CLASSES_ROOT,
+                rf"{prog_id}\CLSID",
+                0,
+                access,
+            ) as key:
+                raw_clsid, _value_type = registry.QueryValueEx(key, None)
+            parsed = uuid.UUID(str(raw_clsid).strip().strip("{}"))
+            clsid = "{" + str(parsed).upper() + "}"
+            with registry.OpenKey(
+                registry.HKEY_CLASSES_ROOT,
+                rf"CLSID\{clsid}\LocalServer32",
+                0,
+                access,
+            ) as key:
+                raw_server, _value_type = registry.QueryValueEx(key, None)
+            server = str(raw_server).strip()
+            if not server:
+                raise OSError("LocalServer32 is blank")
+            return clsid, server
+        except (OSError, TypeError, ValueError) as exc:
+            failures.append(f"view {view:#x}: {type(exc).__name__}: {exc}")
+
+    raise OSError(
+        f"{prog_id} has no usable CLSID/LocalServer32 registration ("
+        + "; ".join(failures)
+        + ")"
+    )
+
+
 def _default_powerpoint_probe() -> tuple[bool, str]:
     """Check pywin32 and COM registration without launching PowerPoint."""
 
@@ -480,7 +542,7 @@ def _default_powerpoint_probe() -> tuple[bool, str]:
     except Exception as exc:
         return False, f"pywin32 is not importable: {type(exc).__name__}: {exc}"
     try:
-        clsid = pythoncom.CLSIDFromProgID("PowerPoint.Application")
+        clsid, _server = _registered_com_clsid("PowerPoint.Application")
     except Exception as exc:
         return False, f"desktop PowerPoint is not registered for COM: {type(exc).__name__}: {exc}"
     try:
@@ -748,6 +810,37 @@ def startup_exit_code(results: Iterable[DiagnosticResult]) -> int:
     return 1 if any(result.blocks_startup for result in results) else 0
 
 
+def native_acceleration_status(
+    results: Iterable[DiagnosticResult],
+) -> tuple[bool, tuple[str, ...]]:
+    """Report solver acceleration separately from functional readiness.
+
+    The native libraries are optional because their NumPy/SciPy fallbacks are
+    physically equivalent.  Calling a machine simply ``READY`` when both
+    accelerators are absent is nevertheless misleading for vehicle-scale
+    work, so the human-facing report exposes that performance limitation
+    without turning it into a startup blocker.
+    """
+
+    expected = {
+        "native_fmm": "GHOST 2-D near-field acceleration",
+        "native_bor": "GHOST BoR streaming acceleration",
+    }
+    native = {
+        result.key: result
+        for result in results
+        if result.key in expected
+    }
+    limited = tuple(
+        native[key].name
+        if key in native
+        else expected[key] + " (diagnostic missing)"
+        for key in expected
+        if key not in native or native[key].status != "PASS"
+    )
+    return not limited, limited
+
+
 def write_report(
     results: Sequence[DiagnosticResult],
     *,
@@ -766,20 +859,36 @@ def write_report(
     optional_notices = [
         result for result in results if not result.required and result.status in {"WARN", "SKIP"}
     ]
+    native_ready, limited_native = native_acceleration_status(results)
     print(file=stream)
     if blockers:
+        print(
+            f"FUNCTIONAL READINESS: NOT READY - {len(blockers)} required "
+            "startup blocker(s).",
+            file=stream,
+        )
         print(
             f"RESULT: NOT READY - {len(blockers)} required startup blocker(s).",
             file=stream,
         )
         print("Fix the required FAIL items, then run this diagnostic again.", file=stream)
     else:
+        print("FUNCTIONAL READINESS: READY", file=stream)
         print("RESULT: READY - no required startup blockers were found.", file=stream)
         if optional_notices:
             print(
                 f"Optional notices: {len(optional_notices)}. They do not prevent GRIM from starting.",
                 file=stream,
             )
+    if native_ready:
+        print("SOLVER PERFORMANCE: ACCELERATED - native libraries are available.", file=stream)
+    else:
+        names = ", ".join(limited_native) or "native solver acceleration"
+        print(
+            "SOLVER PERFORMANCE: LIMITED - functional fallbacks are available, "
+            f"but {names} is not accelerated.",
+            file=stream,
+        )
 
 
 def build_argument_parser() -> argparse.ArgumentParser:

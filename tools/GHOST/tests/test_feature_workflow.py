@@ -528,6 +528,77 @@ class RequestPlanTests(unittest.TestCase):
             for warning in plan.validation_warnings
         ))
 
+    def test_requested_body_certificate_is_authoritative_and_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request, payload, triangles, _surface, _coordinates = (
+                self._external_plane_case(root)
+            )
+            request = feature_workflow.replace(
+                request, require_body_mesh_certification=True
+            )
+            certificate = {
+                "schema": "ghost.workflow.body-mesh-certification.v1",
+                "passed": True,
+                "published_mesh": "fine",
+                "frequencies_ghz": [1.0],
+                "per_frequency": {},
+            }
+            with (
+                mock.patch.object(
+                    feature_workflow,
+                    "audit_body_mesh_certification",
+                    return_value=certificate,
+                ) as audit,
+                mock.patch.object(
+                    feature_workflow,
+                    "load_body_requested_radar_grid",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    feature_workflow, "_load_grim", return_value=payload
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "read_surface_mesh",
+                    return_value=triangles,
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "_apply_feature_library_contracts",
+                    return_value=({}, [], {}, set()),
+                ),
+            ):
+                plan = feature_workflow.prepare_feature_assembly(request)
+
+        audit.assert_called_once_with(
+            str(request.base_grim.resolve()), loaded_grim=payload
+        )
+        self.assertEqual(
+            plan.feature_provenance["body_mesh_certification_policy"],
+            "required_validated",
+        )
+        self.assertEqual(
+            plan.feature_provenance["body_mesh_certification"], certificate
+        )
+
+    def test_requested_body_certificate_failure_stops_before_physics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request, _payload, _triangles, _surface, _coordinates = (
+                self._external_plane_case(root)
+            )
+            request = feature_workflow.replace(
+                request, require_body_mesh_certification=True
+            )
+            with mock.patch.object(
+                feature_workflow,
+                "audit_body_mesh_certification",
+                side_effect=ValueError("not a passed fine-mesh body result"),
+            ):
+                with self.assertRaisesRegex(ValueError, "fine-mesh"):
+                    feature_workflow.prepare_feature_assembly(request)
+
     def test_enabled_snapshot_filters_preview_after_strict_parsing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1078,6 +1149,89 @@ class RequestPlanTests(unittest.TestCase):
                     feature_workflow.execute_feature_assembly(plan)
             snapshot.assert_not_called()
             self.assertFalse(plan.output_path.exists())
+
+    def test_large_workload_warning_requires_exact_sealed_plan_acknowledgement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = self._prepare_minimal_line_plan(Path(directory))
+            workload = feature_workflow.estimate_assembly_workload(
+                look_count=1,
+                frequency_count=1,
+                point_count=250_000_000,
+                line_path_count=0,
+                line_segment_count=0,
+                line_piece_count=0,
+                quantities_validated=True,
+            )
+            warning = feature_workflow.workload_review_warning(workload)
+            self.assertIsNotNone(warning)
+            object.__setattr__(plan, "validation_warnings", (warning,))
+            object.__setattr__(
+                plan,
+                "prepared_plan_sha256",
+                feature_workflow.feature_assembly_plan_sha256(plan),
+            )
+
+            with mock.patch.object(
+                feature_workflow, "preflight_feature_assembly_capacity"
+            ) as capacity:
+                with self.assertRaisesRegex(
+                    RuntimeError, "workload review was not acknowledged"
+                ):
+                    feature_workflow.execute_feature_assembly(plan)
+            capacity.assert_not_called()
+
+            with (
+                mock.patch.object(
+                    feature_workflow,
+                    "preflight_feature_assembly_capacity",
+                    return_value=SimpleNamespace(),
+                ),
+                mock.patch.object(
+                    feature_workflow,
+                    "add_features_to_monostatic_grim",
+                    return_value=str(plan.output_path),
+                ) as publish,
+            ):
+                saved = feature_workflow.execute_feature_assembly(
+                    plan,
+                    acknowledged_plan_sha256=plan.prepared_plan_sha256,
+                )
+            self.assertEqual(saved, str(plan.output_path))
+            publish.assert_called_once()
+
+    def test_prepared_large_workload_warning_is_part_of_sealed_plan(self):
+        workload = feature_workflow.estimate_assembly_workload(
+            look_count=1,
+            frequency_count=1,
+            point_count=250_000_000,
+            line_path_count=0,
+            line_segment_count=0,
+            line_piece_count=0,
+            quantities_validated=True,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(
+                feature_workflow,
+                "_prepared_assembly_workload",
+                return_value=workload,
+            ):
+                plan = self._prepare_minimal_line_plan(Path(directory))
+
+        warning = next(
+            value
+            for value in plan.validation_warnings
+            if value.startswith("Assembly workload review required")
+        )
+        self.assertIn("250,000,000 point look-frequency", warning)
+        self.assertEqual(
+            plan.feature_provenance["assembly_workload_preflight"]
+            ["point_field_cell_count"],
+            250_000_000,
+        )
+        self.assertEqual(
+            plan.prepared_plan_sha256,
+            feature_workflow.feature_assembly_plan_sha256(plan),
+        )
 
     def test_progress_callback_cannot_mutate_private_execution_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

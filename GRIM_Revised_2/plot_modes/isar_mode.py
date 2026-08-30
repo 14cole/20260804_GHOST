@@ -536,6 +536,202 @@ _PREPROCESS_CACHE: OrderedDict[tuple, dict] = OrderedDict()
 _PREPROCESS_CACHE_LIMIT = max(int(os.environ.get("GRIM_ISAR_CACHE_MB", "512")), 0) * 1024**2
 _PREPROCESS_CACHE_BYTES = 0
 
+_ISAR_TIME_CONVENTION = "+jwt"
+_SENTRI_NATIVE_ELEVATION = "sentri_theta_top_zero"
+_GRIM_ELEVATION = "grim_elevation_waterline_zero_top_positive"
+
+
+def _declared_scalar_metadata(dataset, key: str) -> str:
+    """Read one convention declaration without guessing between containers."""
+
+    getter = getattr(dataset, "_declared_scalar_metadata", None)
+    if callable(getter):
+        return str(getter(key) or "").strip()
+    declared = []
+    for container_name in ("units", "extra"):
+        container = getattr(dataset, container_name, None) or {}
+        if key not in container:
+            continue
+        value = np.asarray(container[key])
+        if value.size != 1:
+            raise ValueError(f"metadata {key!r} must be scalar")
+        text = str(value.reshape(-1)[0] or "").strip()
+        if text:
+            declared.append(text)
+    normalized = {" ".join(value.split()).casefold() for value in declared}
+    if len(normalized) > 1:
+        raise ValueError(f"dataset contains contradictory {key} metadata")
+    return declared[0] if declared else ""
+
+
+def _canonical_time_convention(dataset, value: str) -> str:
+    canonicalizer = getattr(dataset, "_canonical_time_convention", None)
+    if callable(canonicalizer):
+        return str(canonicalizer(value))
+    compact = (
+        str(value or "").strip().casefold().replace("omega", "w")
+        .replace("ω", "w").replace("*", "").replace(" ", "")
+    )
+    if "exp(+jwt)" in compact or "exp(jwt)" in compact:
+        return "+jwt"
+    if "exp(-jwt)" in compact:
+        return "-jwt"
+    return compact
+
+
+def _isar_preflight_error(dataset, *, legacy_metadata_attested=False) -> str | None:
+    """Return a user-facing reason that ``dataset`` is unsafe for ISAR.
+
+    The implemented k-space geometry is GRIM conic azimuth/elevation and the
+    IFFT sign assumes ``exp(+j*omega*t)`` with a monostatic phase history
+    proportional to ``exp(-j*2*k*R)``.  Missing declarations on a legacy file
+    can be covered by an explicit per-render attestation; contradictory or
+    unsupported declarations cannot.
+    """
+
+    if not isinstance(legacy_metadata_attested, (bool, np.bool_)):
+        raise TypeError("legacy_metadata_attested must be True or False")
+
+    units = getattr(dataset, "units", None) or {}
+    extra = getattr(dataset, "extra", None) or {}
+
+    def canonical_angular(value) -> str:
+        text = str(value or "").strip().lower().replace("-", "_")
+        return {
+            "": "conic",
+            "az_el": "conic",
+            "azimuth_elevation": "conic",
+            "spherical": "conic",
+            "gc": "great_circle",
+            "greatcircle": "great_circle",
+        }.get(text, text)
+
+    angular_declarations = {
+        canonical_angular(container.get("angular_coordinate_system"))
+        for container in (units, extra)
+        if str(container.get("angular_coordinate_system", "") or "").strip()
+    }
+    if len(angular_declarations) > 1:
+        return "units and extra contain contradictory angular coordinate systems"
+    angular_getter = getattr(dataset, "angular_coordinate_system", None)
+    angular_system = next(iter(angular_declarations), None) or (
+        canonical_angular(angular_getter()) if callable(angular_getter) else "conic"
+    )
+    if angular_system != "conic":
+        if angular_system == "great_circle":
+            return (
+                "great-circle aspect/pitch is not an azimuth/elevation ISAR "
+                "aperture. Convert the dataset to GRIM conic coordinates first; "
+                "non-equatorial PTM cuts require a physically defined conversion"
+            )
+        return (
+            f"angular coordinate system {angular_system or '<unspecified>'!r} is "
+            "unsupported; convert the dataset to GRIM conic azimuth/elevation first"
+        )
+
+    elevation_declarations = {
+        str(value or "").strip().lower()
+        for value in (
+            units.get("elevation_coordinate_convention", ""),
+            extra.get("sentri_elevation_convention", ""),
+        )
+        if str(value or "").strip()
+    }
+    if len(elevation_declarations) > 1:
+        return "units and extra contain contradictory elevation conventions"
+    elevation_convention = next(iter(elevation_declarations), "")
+    if elevation_convention == _SENTRI_NATIVE_ELEVATION:
+        return (
+            "native SENTRi theta uses 0 deg top-down and 90 deg waterline. "
+            "Run Geometry & Units > Convert SENTRi Coordinates before ISAR"
+        )
+    if elevation_convention and elevation_convention != _GRIM_ELEVATION:
+        return (
+            f"elevation convention {elevation_convention!r} is unsupported; "
+            "convert or relabel it to GRIM signed elevation before ISAR"
+        )
+
+    phase_reference = _declared_scalar_metadata(dataset, "phase_reference")
+    declared_time = _declared_scalar_metadata(dataset, "time_convention")
+    declared_time_key = (
+        _canonical_time_convention(dataset, declared_time) if declared_time else ""
+    )
+    phase_time_key = (
+        _canonical_time_convention(dataset, phase_reference)
+        if phase_reference else ""
+    )
+    phase_declares_time = phase_time_key in {"+jwt", "-jwt"}
+
+    if declared_time and declared_time_key != _ISAR_TIME_CONVENTION:
+        return (
+            "ISAR requires the exp(+j*omega*t) time convention; dataset declares "
+            f"{declared_time!r}. Convert/conjugate the phase history explicitly "
+            "before imaging"
+        )
+    if phase_declares_time and phase_time_key != _ISAR_TIME_CONVENTION:
+        return (
+            "ISAR requires the exp(+j*omega*t) time convention, but the phase "
+            f"reference declares {phase_reference!r}. Convert/conjugate the phase "
+            "history explicitly before imaging"
+        )
+    if (
+        declared_time_key == _ISAR_TIME_CONVENTION
+        and phase_declares_time
+        and phase_time_key != declared_time_key
+    ):
+        return "time-convention and phase-reference declarations contradict each other"
+
+    missing = []
+    if not phase_reference or phase_declares_time:
+        missing.append("a fixed phase reference/center")
+    if not declared_time and not phase_declares_time:
+        missing.append("the exp(+j*omega*t) time convention")
+    if missing and not bool(legacy_metadata_attested):
+        return (
+            "legacy phase metadata is incomplete (missing " + " and ".join(missing)
+            + "). Declare it in the dataset, or deliberately enable 'Attest Legacy "
+            "Phase' after verifying a fixed phase center and S~exp(-j*2*k*R)"
+        )
+    return None
+
+
+def _isar_metadata_token(dataset, elevation_index: int, polarization_index: int) -> tuple:
+    """Cache identity for physical conventions not encoded in numeric axes."""
+
+    units = getattr(dataset, "units", None) or {}
+    extra = getattr(dataset, "extra", None) or {}
+    angular_getter = getattr(dataset, "angular_coordinate_system", None)
+    angular_system = (
+        angular_getter() if callable(angular_getter)
+        else units.get("angular_coordinate_system", "conic")
+    )
+    gc_getter = getattr(dataset, "great_circle_coordinate_convention", None)
+    gc_convention = gc_getter() if callable(gc_getter) else units.get(
+        "great_circle_coordinate_convention", ""
+    )
+    orientation_getter = getattr(dataset, "angular_frame_orientation_deg", None)
+    orientation = orientation_getter() if callable(orientation_getter) else (
+        units.get("angular_roll_deg", extra.get("ptm_roll", 0.0)),
+        units.get("angular_tilt_deg", extra.get("ptm_tilt", 0.0)),
+    )
+    scalar_fields = tuple(
+        _declared_scalar_metadata(dataset, key)
+        for key in ("phase_reference", "time_convention", "polarization_basis")
+    )
+    return (
+        str(angular_system),
+        str(gc_convention),
+        tuple(float(value) for value in orientation),
+        str(units.get("elevation_coordinate_convention", extra.get(
+            "sentri_elevation_convention", ""
+        ))),
+        str(units.get("azimuth", "deg")),
+        str(units.get("elevation", "deg")),
+        scalar_fields,
+        float(np.asarray(dataset.elevations)[int(elevation_index)]),
+        str(np.asarray(dataset.polarizations)[int(polarization_index)]),
+    )
+
 
 def _array_token(values) -> tuple:
     arr = np.ascontiguousarray(values)
@@ -553,20 +749,38 @@ def _selected_data_token(
     frequency_indices,
     polarization_index: int,
 ) -> bytes:
-    """Exact digest of the selected source power/phase without a full copy.
+    """Exact digest of the selected authoritative complex source.
 
     RcsGrid arrays are intentionally public and may be changed in place, so an
     object id or axis-only cache key is not a safe data revision. Hashing one
     frequency row at a time bounds temporary memory while detecting any selected
-    sample change and also makes reuse across object-id recycling harmless.
+    sample change and also makes reuse across object-id recycling harmless. When
+    a complete raw real/imaginary pair is authoritative, hash that pair instead
+    of the display power/phase arrays; this mirrors ``RcsGrid.rcs_slice``.
     """
 
     digest = hashlib.blake2b(digest_size=20)
     frequency_indices = np.asarray(frequency_indices, dtype=np.intp)
-    for label, values in (
-        (b"power", dataset.rcs_power),
-        (b"phase", dataset.rcs_phase),
-    ):
+    raw_pair_getter = getattr(dataset, "_complete_authoritative_raw_arrays", None)
+    raw_pair = raw_pair_getter() if callable(raw_pair_getter) else None
+    if raw_pair is None:
+        sources = (
+            (b"power", dataset.rcs_power),
+            (b"phase", dataset.rcs_phase),
+        )
+        digest.update(b"power-phase")
+    else:
+        sources = (
+            (b"raw-real", raw_pair[0]),
+            (b"raw-imag", raw_pair[1]),
+        )
+        digest.update(b"authoritative-raw")
+        linear_quantity = getattr(dataset, "linear_quantity", None)
+        digest.update(str(
+            linear_quantity() if callable(linear_quantity) else ""
+        ).encode("utf-8"))
+
+    for label, values in sources:
         source = np.asarray(values)
         digest.update(label)
         digest.update(source.dtype.str.encode("ascii"))
@@ -792,6 +1006,7 @@ def _compute_band(
         _array_token(az_values),
         _array_token(np.asarray(freq_hz, dtype=float)),
         source_token,
+        _isar_metadata_token(dataset, elev_idx, pol_idx),
         target_token,
         az_center_deg,
         preprocess_mode,
@@ -1217,12 +1432,23 @@ def form_isar(
     l1_iterations: int = 100,
     flip_x: bool = False,
     flip_y: bool = False,
+    legacy_metadata_attested: bool = False,
 ):
     """Form full-resolution ISAR images without Qt or display decimation.
 
     Returns ``(band_results, elapsed_seconds)`` using the same physical path as
     the GUI. ``reconstruction`` accepts ``fast``, ``accurate``, or ``sparse``.
+    ``legacy_metadata_attested=True`` is a deliberate assertion that an
+    otherwise-unmarked legacy conic dataset uses a fixed phase center,
+    ``exp(+j*omega*t)``, and ``S~exp(-j*2*k*R)``. It never overrides an
+    explicitly incompatible coordinate or time-convention declaration.
     """
+    preflight_error = _isar_preflight_error(
+        dataset, legacy_metadata_attested=legacy_metadata_attested
+    )
+    if preflight_error is not None:
+        raise ValueError(f"ISAR blocked: {preflight_error}")
+
     az_indices = list(range(len(dataset.azimuths))) if azimuth_indices is None else sorted(
         int(i) for i in azimuth_indices
     )
@@ -1304,6 +1530,34 @@ def render(self) -> None:
         self.status.showMessage("Select a dataset before plotting.")
         return
     if self._preflight_plot_datasets([("Dataset", self.active_dataset)]) is None:
+        return
+
+    legacy_attestation_widget = getattr(
+        self, "chk_isar_legacy_phase_attestation", None
+    )
+    if (
+        legacy_attestation_widget is not None
+        and legacy_attestation_widget.isChecked()
+        and getattr(legacy_attestation_widget, "_attested_dataset", None)
+        is not self.active_dataset
+    ):
+        # An attestation is source-specific. Never let a checked box silently
+        # carry from one active dataset to another.
+        legacy_attestation_widget.setChecked(False)
+    legacy_metadata_attested = bool(
+        legacy_attestation_widget.isChecked()
+        if legacy_attestation_widget is not None else False
+    )
+    try:
+        preflight_error = _isar_preflight_error(
+            self.active_dataset,
+            legacy_metadata_attested=legacy_metadata_attested,
+        )
+    except (TypeError, ValueError) as exc:
+        self.status.showMessage(f"ISAR blocked: invalid convention metadata: {exc}.")
+        return
+    if preflight_error is not None:
+        self.status.showMessage(f"ISAR blocked: {preflight_error}.")
         return
 
     az_indices = sorted(self._selected_indices(self.list_az))
@@ -1516,6 +1770,7 @@ def render(self) -> None:
         "l1_iters": l1_iters,
         "flip_x": flip_x,
         "flip_y": flip_y,
+        "legacy_metadata_attested": legacy_metadata_attested,
     })
 
 
@@ -1734,6 +1989,10 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     if n_bands > 1:
         parts.append(f" ({n_bands} bands)")
     notes = []
+    if params.get("legacy_metadata_attested"):
+        notes.append(
+            "legacy phase metadata user-attested as fixed-center exp(+j*omega*t)"
+        )
     if composite_subs:
         notes.append(
             f"wide aperture — composited {composite_subs} × ~{_COMPOSITE_SUB_DEG:g}° looks "

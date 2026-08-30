@@ -3,11 +3,13 @@ from dataclasses import replace
 import hashlib
 import json
 import csv
+import operator
 import os
 import re
 import tempfile
 import unicodedata
 import warnings
+import zipfile
 import numpy as np
 
 C0 = 299_792_458.0
@@ -288,7 +290,319 @@ _ANGLE_UNITS = {
 # from bypassing constructor sanitation with a public-looking boolean switch.
 _JOIN_MERGE_BLOCK_CELLS = 262_144
 _PIO_WRITE_BLOCK_CELLS = 262_144
+_RAW_COMPLEX_VALIDATION_BLOCK_CELLS = 262_144
+# Text/binary legacy readers expand sparse row sets into dense Cartesian grids.
+# Keep a direct-call safety ceiling even when the GUI's broader batch-memory
+# planner is bypassed. Callers handling a deliberately larger verified file
+# may raise the explicit per-load limit.
+_DENSE_IMPORT_FALLBACK_LIMIT_BYTES = 2 * 1024**3
 _ADOPT_CLEAN_ARRAYS_TOKEN = object()
+
+
+def _available_import_memory_bytes():
+    """Best-effort available physical memory without a hard dependency."""
+
+    try:
+        import psutil
+
+        available = int(psutil.virtual_memory().available)
+        if available > 0:
+            return available
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                available = int(status.ullAvailPhys)
+                if available > 0:
+                    return available
+        except Exception:
+            pass
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        available_pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        available = page_size * available_pages
+        return available if available > 0 else None
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _default_dense_import_limit_bytes():
+    available = _available_import_memory_bytes()
+    if available is None:
+        return _DENSE_IMPORT_FALLBACK_LIMIT_BYTES
+    # Match GRIM's other dense dataset workflows: never let one legacy import
+    # reserve more than half of currently available physical memory.
+    return max(1, int(available * 0.5))
+
+
+def _checked_dense_import_allocation(
+    shape,
+    dtypes,
+    *,
+    source,
+    max_output_bytes=None,
+    resident_bytes=0,
+):
+    """Validate one planned dense import before any output array allocation.
+
+    ``dense_bytes`` is exact for the declared arrays. ``resident_bytes`` lets
+    readers add the exact NumPy payloads that remain live while those outputs
+    are created. Python row/dict overhead is deliberately not guessed;
+    this guard's job is to stop sparse-axis Cartesian-product bombs before
+    ``np.full`` commits the dense storage.
+    """
+
+    dimensions = []
+    cell_count = 1
+    for raw_count in tuple(shape):
+        if isinstance(raw_count, (bool, np.bool_)) or not isinstance(
+            raw_count, (int, np.integer)
+        ):
+            raise ValueError(f"{source}: dense axis counts must be integers")
+        count = int(raw_count)
+        if count <= 0:
+            raise ValueError(f"{source}: dense axis counts must be positive")
+        dimensions.append(count)
+        cell_count *= count
+
+    dtype_list = [np.dtype(value) for value in tuple(dtypes)]
+    if not dtype_list:
+        raise ValueError(f"{source}: dense allocation must declare an array dtype")
+    bytes_per_cell = sum(dtype.itemsize for dtype in dtype_list)
+    dense_bytes = cell_count * bytes_per_cell
+    try:
+        resident = operator.index(resident_bytes)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{source}: resident_bytes must be a nonnegative integer") from exc
+    if resident < 0:
+        raise ValueError(f"{source}: resident_bytes must be nonnegative")
+    peak_bytes = dense_bytes + resident
+
+    if max_output_bytes is None:
+        limit = _default_dense_import_limit_bytes()
+    else:
+        if isinstance(max_output_bytes, (bool, np.bool_)):
+            raise ValueError(f"{source}: max_output_bytes must be a positive integer")
+        try:
+            limit = operator.index(max_output_bytes)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"{source}: max_output_bytes must be a positive integer"
+            ) from exc
+        if limit <= 0:
+            raise ValueError(f"{source}: max_output_bytes must be a positive integer")
+
+    if dense_bytes > np.iinfo(np.intp).max or peak_bytes > np.iinfo(np.intp).max:
+        raise MemoryError(
+            f"{source}: dense grid {tuple(dimensions)} exceeds this Python/NumPy "
+            "build's addressable allocation size"
+        )
+    if peak_bytes > limit:
+        raise MemoryError(
+            f"{source}: dense grid {tuple(dimensions)} has {cell_count:,} cells; "
+            f"the planned arrays require {dense_bytes / 1024**2:.1f} MiB"
+            + (
+                f" plus {resident / 1024**2:.1f} MiB of live parsed NumPy payload"
+                if resident
+                else ""
+            )
+            + f", exceeding the {limit / 1024**2:.1f} MiB import limit. "
+            "Split the source sweep or pass a larger explicit max_output_bytes "
+            "only after verifying available memory."
+        )
+    return {
+        "shape": tuple(dimensions),
+        "cell_count": int(cell_count),
+        "dense_bytes": int(dense_bytes),
+        "resident_bytes": int(resident),
+        "peak_bytes": int(peak_bytes),
+        "limit_bytes": int(limit),
+    }
+
+
+def _preflight_native_archive_allocation(
+    path,
+    *,
+    allow_legacy_pickle=False,
+    max_output_bytes=None,
+):
+    """Validate NPZ member framing and peak eager-load bytes before extraction.
+
+    ``np.load`` defers each compressed member until subscription.  Without a
+    central-directory/header preflight, a tiny archive can declare a huge NPY
+    shape and trigger a multi-gigabyte allocation before GRIM sees the axes.
+    This reads only bounded NPY headers, verifies their declared data lengths,
+    and applies the same configurable memory policy as direct dense imports.
+    """
+
+    if max_output_bytes is None:
+        limit = _default_dense_import_limit_bytes()
+    else:
+        if isinstance(max_output_bytes, (bool, np.bool_)):
+            raise ValueError("native .grim max_output_bytes must be a positive integer")
+        try:
+            limit = operator.index(max_output_bytes)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "native .grim max_output_bytes must be a positive integer"
+            ) from exc
+        if limit <= 0:
+            raise ValueError("native .grim max_output_bytes must be a positive integer")
+
+    member_payload_bytes: dict[str, int] = {}
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+            names = [info.filename for info in infos]
+            seen_names: set[str] = set()
+            duplicate_names: set[str] = set()
+            for name in names:
+                if name in seen_names:
+                    duplicate_names.add(name)
+                seen_names.add(name)
+            if duplicate_names:
+                raise ValueError(
+                    f"{path} contains duplicate archive member(s): "
+                    + ", ".join(sorted(duplicate_names))
+                )
+            unexpected = [name for name in names if not name.endswith(".npy")]
+            if unexpected:
+                raise ValueError(
+                    f"{path} contains unsupported non-NPY archive member(s): "
+                    + ", ".join(unexpected[:5])
+                )
+            encrypted = [info.filename for info in infos if info.flag_bits & 0x1]
+            if encrypted:
+                raise ValueError(
+                    f"{path} contains encrypted archive member(s), which GRIM "
+                    "does not support"
+                )
+
+            declared_uncompressed = sum(max(0, int(info.file_size)) for info in infos)
+            if declared_uncompressed > limit:
+                raise MemoryError(
+                    f"{path} declares {declared_uncompressed / 1024**3:.2f} GiB "
+                    "of uncompressed native members, above the current "
+                    f"{limit / 1024**3:.2f} GiB load limit. Use a machine with "
+                    "more available memory or pass a larger reviewed "
+                    "max_output_bytes value."
+                )
+
+            for info in infos:
+                with archive.open(info, "r") as member:
+                    version = np.lib.format.read_magic(member)
+                    if version == (1, 0):
+                        shape, _fortran, dtype = (
+                            np.lib.format.read_array_header_1_0(
+                                member, max_header_size=10_000
+                            )
+                        )
+                    elif version in {(2, 0), (3, 0)}:
+                        # Formats 2 and 3 share the four-byte header-length
+                        # framing. GRIM writes ASCII dtype descriptors, so the
+                        # public v2 reader safely validates either one.
+                        shape, _fortran, dtype = (
+                            np.lib.format.read_array_header_2_0(
+                                member, max_header_size=10_000
+                            )
+                        )
+                    else:
+                        raise ValueError(
+                            f"{path} contains unsupported NPY version "
+                            f"{version!r} in {info.filename}"
+                        )
+                    header_bytes = int(member.tell())
+
+                dtype = np.dtype(dtype)
+                remaining = int(info.file_size) - header_bytes
+                if remaining < 0:
+                    raise ValueError(
+                        f"{path} contains a truncated NPY header in {info.filename}"
+                    )
+                if dtype.hasobject:
+                    if not bool(allow_legacy_pickle):
+                        raise ValueError(
+                            f"{path} contains object-typed member {info.filename}; "
+                            "legacy pickle loading must be explicitly enabled"
+                        )
+                    payload_bytes = remaining
+                else:
+                    element_count = 1
+                    for raw_dimension in tuple(shape):
+                        dimension = int(raw_dimension)
+                        if dimension < 0:
+                            raise ValueError(
+                                f"{path} contains a negative NPY dimension in "
+                                f"{info.filename}"
+                            )
+                        element_count *= dimension
+                    payload_bytes = element_count * int(dtype.itemsize)
+                    if payload_bytes != remaining:
+                        raise ValueError(
+                            f"{path} contains inconsistent NPY shape/data framing "
+                            f"in {info.filename}"
+                        )
+                member_payload_bytes[info.filename[:-4]] = payload_bytes
+    except (zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise ValueError(f"{path} is not a valid native .grim/NPZ archive") from exc
+
+    required = {
+        "azimuths",
+        "elevations",
+        "frequencies",
+        "polarizations",
+        "rcs_power",
+        "rcs_phase",
+    }
+    missing = sorted(required.difference(member_payload_bytes))
+    if missing:
+        raise ValueError(
+            f"{path} is not a supported .grim file (missing keys: "
+            + ", ".join(missing)
+            + ")"
+        )
+    retained_bytes = sum(member_payload_bytes.values())
+    # During RcsGrid construction, sanitized power and phase arrays coexist
+    # with the eager NPZ members. This is the dominant exact load peak.
+    peak_bytes = max(
+        declared_uncompressed,
+        retained_bytes
+        + member_payload_bytes["rcs_power"]
+        + member_payload_bytes["rcs_phase"],
+    )
+    if peak_bytes > limit:
+        raise MemoryError(
+            f"{path} needs about {peak_bytes / 1024**3:.2f} GiB peak memory "
+            "for eager native load and validation, above the current "
+            f"{limit / 1024**3:.2f} GiB limit. Close other datasets, use a "
+            "machine with more available memory, or pass a larger reviewed "
+            "max_output_bytes value."
+        )
+    return {
+        "member_payload_bytes": member_payload_bytes,
+        "declared_uncompressed_bytes": declared_uncompressed,
+        "retained_bytes": retained_bytes,
+        "estimated_peak_bytes": peak_bytes,
+        "limit_bytes": limit,
+    }
 
 
 def canonical_angular_coordinate_system(value):
@@ -499,12 +813,7 @@ class RcsGrid:
         self.azimuths = self._clean_axis(azimuths)
         self.elevations = self._clean_axis(elevations)
         self.frequencies = self._clean_axis(frequencies)
-        pol_arr = np.asarray(polarizations)
-        if pol_arr.dtype.kind == "O":
-            # Normalize object arrays of strings to native unicode dtype so
-            # np.savez stores them without pickle (round-trips with allow_pickle=False).
-            pol_arr = np.asarray([str(p) for p in pol_arr.tolist()])
-        self.polarizations = pol_arr
+        self.polarizations = self._canonical_polarization_axis(polarizations)
 
         expected = (len(self.azimuths), len(self.elevations), len(self.frequencies), len(self.polarizations))
 
@@ -706,7 +1015,16 @@ class RcsGrid:
             if selection is None:
                 scale = scale[None, None, :, None]
             else:
-                scale = scale[selection[2]]
+                # Apply exactly the same NumPy indexing semantics to the
+                # frequency normalization as to the raw response.  Indexing
+                # only the 1-D frequency vector is incorrect for a retained
+                # 4-D slice: NumPy then broadcasts frequency along the final
+                # polarization axis.  A zero-stride broadcast view costs no
+                # grid-sized storage for basic slices and also gives advanced
+                # selections (including np.ix_) the exact response shape.
+                scale = np.broadcast_to(
+                    scale[None, None, :, None], self.rcs_power.shape
+                )[selection]
             return raw * scale
         if quantity == "sigma_3d":
             return raw * np.sqrt(4.0 * np.pi)
@@ -801,6 +1119,7 @@ class RcsGrid:
             "grid": {},
             "metadata": {},
             "phase": {},
+            "raw_complex": {},
             "seam": {},
             "frequency_uniformity": {},
             "readiness": {},
@@ -1231,6 +1550,29 @@ class RcsGrid:
             physical_metadata_valid = False
             add_issue(errors, "invalid_physical_metadata", str(exc))
 
+        raw_report = self._raw_complex_consistency_report(
+            expected_shape=expected_shape,
+            frequencies=self.frequencies,
+            rcs_power=power,
+            rcs_phase=phase,
+            units=self.units,
+            extra=self.extra,
+        )
+        raw_issues = list(raw_report.pop("issues"))
+        metrics["raw_complex"] = raw_report
+        for raw_issue in raw_issues:
+            details = {
+                key: value
+                for key, value in raw_issue.items()
+                if key not in {"code", "message"}
+            }
+            add_issue(
+                errors,
+                raw_issue["code"],
+                raw_issue["message"],
+                **details,
+            )
+
         frequency_metric = metrics["frequency_uniformity"]
         frequency = numeric_axes.get("frequency")
         frequency_uniform = None
@@ -1373,6 +1715,7 @@ class RcsGrid:
             and phase_numeric
             and supported_units
             and physical_metadata_valid
+            and not raw_issues
             and not grid_metric.get("infinite_power_count", 0)
             and not grid_metric.get("negative_power_count", 0)
             and not phase_metric.get("infinite_phase_count", 0)
@@ -1464,7 +1807,7 @@ class RcsGrid:
 
         if axis_index == 3:
             old_value = str(source_axis[item_index])
-            new_value = str(value).strip()
+            new_value = str(value).strip().upper()
             if not new_value:
                 raise ValueError("polarization label must not be blank")
             duplicate_key = new_value.casefold()
@@ -1517,8 +1860,14 @@ class RcsGrid:
             power = np.take(self.rcs_power, order, axis=axis_index)
             phase = np.take(self.rcs_phase, order, axis=axis_index)
         else:
-            power = self.rcs_power
-            phase = self.rcs_phase
+            # The internal adoption token below is only safe for arrays owned
+            # by this result.  A metadata-only/non-reordering edit used to
+            # hand the new grid the source object's public mutable arrays,
+            # allowing a later mutation of either dataset to change both.
+            # Copy once here, then transfer those fresh buffers into the
+            # constructor without its usual second sanitation copy.
+            power = np.array(self.rcs_power, copy=True)
+            phase = np.array(self.rcs_phase, copy=True)
 
         original_shape = tuple(self.rcs_power.shape)
         stale_grid_metadata = {
@@ -3507,6 +3856,47 @@ class RcsGrid:
         return arr.astype(np.float64, copy=False)
 
     @staticmethod
+    def _canonical_polarization_axis(polarizations):
+        """Return stripped uppercase polarization identities without aliases.
+
+        Polarization labels are identifiers, not display prose. Treating
+        ``HH`` and ``hh`` as distinct allowed joins to create an axis that a
+        later native save correctly rejected as a case-folded duplicate.
+        Canonicalizing at every construction boundary keeps lookup, union, and
+        serialization behavior consistent. Distinct input channels that fold
+        to one identity are rejected rather than silently merged.
+        """
+
+        values = np.asarray(polarizations)
+        if values.ndim != 1 or values.size == 0:
+            raise ValueError(
+                "polarizations must be a nonempty one-dimensional string axis"
+            )
+        labels = []
+        for raw_value in values.tolist():
+            if isinstance(raw_value, bytes):
+                try:
+                    label = raw_value.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError("polarization labels must be UTF-8 strings") from exc
+            elif isinstance(raw_value, (str, np.str_)):
+                label = str(raw_value)
+            else:
+                raise ValueError(
+                    f"polarization labels must be strings; got {raw_value!r}"
+                )
+            label = label.strip().upper()
+            if not label:
+                raise ValueError("polarization labels must not be blank")
+            labels.append(label)
+        if len(set(labels)) != len(labels):
+            raise ValueError(
+                "polarization labels must be unique after case normalization"
+            )
+        # Native unicode prevents object/pickle storage in .grim archives.
+        return np.asarray(labels, dtype=str)
+
+    @staticmethod
     def _axis_value_match(axis_arr, value, tol=1e-6):
         axis_arr = np.asarray(axis_arr)
         if np.issubdtype(axis_arr.dtype, np.number) and isinstance(
@@ -4141,6 +4531,8 @@ class RcsGrid:
             all_indices = list(range(len(axis_arr)))
             values = self._as_list(axis_values)
             if values is not None:
+                if axis_name == "polarization":
+                    values = [str(value).strip().upper() for value in values]
                 selected = self._indices_for_axis_values(axis_arr, values, tol=axis_tol)
                 if selected is None:
                     raise ValueError(f"{axis_name} contains value(s) not present in dataset")
@@ -6198,6 +6590,12 @@ class RcsGrid:
 
         if domain == "complex" and stat_key == "percentile":
             raise ValueError("percentile on complex values is not supported; use magnitude, dbsm, or dbke domain")
+        if stat_key == "std" and domain in {"db", "dbsm", "dbke"}:
+            raise ValueError(
+                "standard deviation in a logarithmic domain is a dB spread, "
+                "not an absolute RCS dataset. Use domain='magnitude' for a "
+                "linear-power RCS standard deviation."
+            )
 
         if stat_key == "mean":
             reduced = np.nanmean(values, axis=reduce_axes, keepdims=True)
@@ -6341,7 +6739,9 @@ class RcsGrid:
         az_idx = self._index_for_value(self.azimuths, azimuth, tol=tol)
         el_idx = self._index_for_value(self.elevations, elevation, tol=tol)
         f_idx = self._index_for_value(self.frequencies, frequency, tol=tol)
-        p_idx = self._index_for_value(self.polarizations, polarization, tol=tol)
+        p_idx = self._index_for_value(
+            self.polarizations, str(polarization).strip().upper(), tol=tol
+        )
         return self.rcs_slice((az_idx, el_idx, f_idx, p_idx))
 
     def rcs_to_dbsm(self, rcs_value, eps=1e-12):
@@ -6381,7 +6781,9 @@ class RcsGrid:
         az_idx = self._index_for_value(self.azimuths, azimuth, tol=tol)
         el_idx = self._index_for_value(self.elevations, elevation, tol=tol)
         f_idx = self._index_for_value(self.frequencies, frequency, tol=tol)
-        p_idx = self._index_for_value(self.polarizations, polarization, tol=tol)
+        p_idx = self._index_for_value(
+            self.polarizations, str(polarization).strip().upper(), tol=tol
+        )
         return self.linear_to_dbsm(self.rcs_power[az_idx, el_idx, f_idx, p_idx], eps=eps)
 
     def get_dbke_by_value(self, azimuth, elevation, frequency, polarization, tol=0.0, eps=1e-12):
@@ -6389,7 +6791,9 @@ class RcsGrid:
         az_idx = self._index_for_value(self.azimuths, azimuth, tol=tol)
         el_idx = self._index_for_value(self.elevations, elevation, tol=tol)
         f_idx = self._index_for_value(self.frequencies, frequency, tol=tol)
-        p_idx = self._index_for_value(self.polarizations, polarization, tol=tol)
+        p_idx = self._index_for_value(
+            self.polarizations, str(polarization).strip().upper(), tol=tol
+        )
         return self.linear_to_dbke(self.rcs_power[az_idx, el_idx, f_idx, p_idx], self.frequencies[f_idx], eps=eps)
 
     # keys this class fully models and always rewrites itself.  rcs_domain and
@@ -6448,6 +6852,7 @@ class RcsGrid:
         path = os.fspath(path)
         if not path.casefold().endswith(".grim"):
             path = f"{path}.grim"
+        extra_to_write = self._extra_to_write()
         self._validate_native_payload(
             path=path,
             azimuths=self.azimuths,
@@ -6457,6 +6862,7 @@ class RcsGrid:
             rcs_power=self.rcs_power,
             rcs_phase=self.rcs_phase,
             units=self.units,
+            extra=extra_to_write,
         )
         directory = os.path.dirname(os.path.abspath(path)) or os.curdir
         fd, stage_path = tempfile.mkstemp(
@@ -6468,7 +6874,7 @@ class RcsGrid:
             with os.fdopen(fd, "wb") as f:
                 fd = -1
                 units_payload = json.dumps(self.units) if self.units else ""
-                payload = dict(self._extra_to_write())          # passthrough first
+                payload = dict(extra_to_write)                  # passthrough first
                 payload.update(
                     azimuths=self.azimuths,
                     elevations=self.elevations,
@@ -6516,6 +6922,314 @@ class RcsGrid:
         return path
 
     @classmethod
+    def _raw_complex_consistency_report(
+        cls,
+        *,
+        expected_shape,
+        frequencies,
+        rcs_power,
+        rcs_phase,
+        units,
+        extra,
+    ):
+        """Check a solver raw-field pair against displayed power and phase.
+
+        GHOST stores its unnormalised far-field amplitude alongside physical
+        ``rcs_power``.  The relationship is quantity dependent: sigma3D is
+        ``4*pi*|A|^2`` and sigma2D is ``|A|^2/(4*k0)``.  This routine mirrors
+        the producer-side tolerances while scanning bounded blocks, so loading
+        or auditing a large archive never constructs another grid-sized
+        complex or expected-power array.
+        """
+
+        metadata = dict(extra or {})
+        has_real = "rcs_amp_real" in metadata
+        has_imag = "rcs_amp_imag" in metadata
+        report = {
+            "present": bool(has_real or has_imag),
+            "complete_pair": bool(has_real and has_imag),
+            "finite_pair_count": 0,
+            "missing_pair_count": 0,
+            "invalid_pair_count": 0,
+            "coverage_mismatch_count": 0,
+            "live_phase_missing_count": 0,
+            "phase_mismatch_count": 0,
+            "power_mismatch_count": 0,
+            "normalization_overflow_count": 0,
+            "maximum_phase_error_rad": None,
+            "maximum_power_absolute_error": None,
+            "normalization": None,
+            "issues": [],
+        }
+
+        def issue(code, message, **details):
+            item = {"code": str(code), "message": str(message)}
+            item.update(details)
+            report["issues"].append(item)
+
+        raw_flag = metadata.get("raw_complex_amplitude_preserved")
+        flag_true = False
+        if raw_flag is not None:
+            raw_flag_array = np.asarray(raw_flag)
+            if raw_flag_array.size != 1:
+                issue(
+                    "invalid_raw_complex_preserved_flag",
+                    "raw_complex_amplitude_preserved must be scalar",
+                )
+            else:
+                flag_value = raw_flag_array.reshape(-1)[0]
+                if isinstance(flag_value, (str, np.str_, bytes, np.bytes_)):
+                    if isinstance(flag_value, (bytes, np.bytes_)):
+                        try:
+                            flag_value = bytes(flag_value).decode("ascii")
+                        except UnicodeDecodeError:
+                            flag_value = ""
+                    flag_true = str(flag_value).strip().casefold() in {
+                        "1", "true", "yes", "on"
+                    }
+                else:
+                    try:
+                        flag_true = bool(flag_value)
+                    except (TypeError, ValueError):
+                        flag_true = False
+
+        if has_real != has_imag:
+            issue(
+                "partial_raw_complex_pair",
+                "raw complex amplitude must provide both rcs_amp_real and rcs_amp_imag",
+            )
+            return report
+        if not has_real:
+            if flag_true:
+                issue(
+                    "missing_raw_complex_pair",
+                    "raw_complex_amplitude_preserved is true but the raw amplitude grids are absent",
+                )
+            return report
+
+        raw_real = np.asarray(metadata["rcs_amp_real"])
+        raw_imag = np.asarray(metadata["rcs_amp_imag"])
+        for name, values in (
+            ("rcs_amp_real", raw_real),
+            ("rcs_amp_imag", raw_imag),
+        ):
+            if values.shape != tuple(expected_shape):
+                issue(
+                    "raw_complex_shape_mismatch",
+                    f"{name} shape {values.shape} does not match axes {tuple(expected_shape)}",
+                    field=name,
+                )
+            if values.dtype.kind not in "iuf":
+                issue(
+                    "non_numeric_raw_complex",
+                    f"{name} must be real numeric",
+                    field=name,
+                )
+        if report["issues"]:
+            return report
+
+        power = np.asarray(rcs_power)
+        phase = np.asarray(rcs_phase)
+        if power.shape != tuple(expected_shape) or phase.shape != tuple(expected_shape):
+            return report
+        if power.dtype.kind not in "iuf" or phase.dtype.kind not in "iuf":
+            return report
+
+        normalized_units = dict(units or {})
+        quantity = str(
+            normalized_units.get("rcs_linear_quantity", "")
+        ).strip().casefold()
+        if not quantity:
+            log_unit = str(
+                normalized_units.get("rcs_log_unit", "dBsm")
+            ).strip().casefold()
+            quantity = "sigma_2d" if log_unit == "dbke" else "sigma_3d"
+        if quantity not in {"sigma_2d", "sigma_3d"}:
+            issue(
+                "unsupported_raw_complex_normalization",
+                "raw complex amplitude requires rcs_linear_quantity sigma_2d or sigma_3d",
+                linear_quantity=quantity,
+            )
+            return report
+        report["normalization"] = quantity
+
+        frequency_values = np.asarray(frequencies, dtype=np.float64)
+        frequency_unit = cls._canonical_unit(
+            normalized_units.get("frequency"), _FREQUENCY_UNITS, "GHz"
+        )
+        frequency_scale = {
+            "Hz": 1.0,
+            "kHz": 1.0e3,
+            "MHz": 1.0e6,
+            "GHz": 1.0e9,
+        }.get(frequency_unit)
+        if frequency_scale is None:
+            issue(
+                "unsupported_raw_complex_frequency_unit",
+                "raw complex amplitude normalization requires a supported frequency unit",
+                frequency_unit=str(normalized_units.get("frequency")),
+            )
+            return report
+
+        max_phase_error = 0.0
+        max_power_error = 0.0
+        float32_epsilon = np.finfo(np.float32).eps
+        float32_tiny = np.finfo(np.float32).tiny
+
+        for frequency_index, frequency_value in enumerate(frequency_values):
+            if not np.isfinite(frequency_value) or frequency_value <= 0.0:
+                issue(
+                    "invalid_raw_complex_frequency",
+                    "raw complex amplitude normalization requires positive finite frequencies",
+                )
+                return report
+            if quantity == "sigma_2d":
+                k0 = (
+                    2.0
+                    * np.pi
+                    * float(frequency_value)
+                    * float(frequency_scale)
+                    / C0
+                )
+                power_scale = 1.0 / (4.0 * k0)
+            else:
+                power_scale = 4.0 * np.pi
+
+            iterator = np.nditer(
+                (
+                    power[:, :, frequency_index, :],
+                    phase[:, :, frequency_index, :],
+                    raw_real[:, :, frequency_index, :],
+                    raw_imag[:, :, frequency_index, :],
+                ),
+                flags=["external_loop", "buffered", "zerosize_ok"],
+                op_flags=[["readonly"], ["readonly"], ["readonly"], ["readonly"]],
+                order="K",
+                buffersize=_RAW_COMPLEX_VALIDATION_BLOCK_CELLS,
+            )
+            for power_block, phase_block, real_block, imag_block in iterator:
+                power_block = np.asarray(power_block, dtype=np.float64)
+                phase_block = np.asarray(phase_block, dtype=np.float64)
+                real_block = np.asarray(real_block, dtype=np.float64)
+                imag_block = np.asarray(imag_block, dtype=np.float64)
+
+                real_finite = np.isfinite(real_block)
+                imag_finite = np.isfinite(imag_block)
+                raw_finite = real_finite & imag_finite
+                raw_missing = np.isnan(real_block) & np.isnan(imag_block)
+                invalid_pair = ~(raw_finite | raw_missing)
+                power_finite = np.isfinite(power_block)
+
+                report["finite_pair_count"] += int(np.count_nonzero(raw_finite))
+                report["missing_pair_count"] += int(np.count_nonzero(raw_missing))
+                report["invalid_pair_count"] += int(np.count_nonzero(invalid_pair))
+                report["coverage_mismatch_count"] += int(
+                    np.count_nonzero(raw_finite != power_finite)
+                )
+
+                comparable = raw_finite & power_finite
+                if not np.any(comparable):
+                    continue
+
+                comparable_real = real_block[comparable]
+                comparable_imag = imag_block[comparable]
+                comparable_power = power_block[comparable]
+                with np.errstate(over="ignore", invalid="ignore"):
+                    amp_abs2 = (
+                        comparable_real * comparable_real
+                        + comparable_imag * comparable_imag
+                    )
+                    expected_power = amp_abs2 * power_scale
+                expected_finite = np.isfinite(expected_power)
+                overflow_count = int(np.count_nonzero(~expected_finite))
+                report["normalization_overflow_count"] += overflow_count
+                if np.any(expected_finite):
+                    expected_values = expected_power[expected_finite]
+                    stored_values = comparable_power[expected_finite]
+                    absolute_error = np.abs(stored_values - expected_values)
+                    tolerance = (
+                        16.0
+                        * float32_epsilon
+                        * np.maximum(expected_values, stored_values)
+                        + float32_tiny
+                    )
+                    report["power_mismatch_count"] += int(
+                        np.count_nonzero(absolute_error > tolerance)
+                    )
+                    if absolute_error.size:
+                        max_power_error = max(
+                            max_power_error, float(np.max(absolute_error))
+                        )
+
+                live = comparable & (
+                    (np.abs(real_block) > float32_tiny)
+                    | (np.abs(imag_block) > float32_tiny)
+                )
+                live_phase_missing = live & ~np.isfinite(phase_block)
+                report["live_phase_missing_count"] += int(
+                    np.count_nonzero(live_phase_missing)
+                )
+                phase_comparable = live & np.isfinite(phase_block)
+                if np.any(phase_comparable):
+                    raw_angle = np.arctan2(
+                        imag_block[phase_comparable], real_block[phase_comparable]
+                    )
+                    phase_difference = phase_block[phase_comparable] - raw_angle
+                    phase_error = np.abs(
+                        np.arctan2(np.sin(phase_difference), np.cos(phase_difference))
+                    )
+                    report["phase_mismatch_count"] += int(
+                        np.count_nonzero(phase_error > 2.0e-5)
+                    )
+                    if phase_error.size:
+                        max_phase_error = max(
+                            max_phase_error, float(np.max(phase_error))
+                        )
+
+        report["maximum_phase_error_rad"] = float(max_phase_error)
+        report["maximum_power_absolute_error"] = float(max_power_error)
+        if report["invalid_pair_count"]:
+            issue(
+                "invalid_raw_complex_pair",
+                "raw complex amplitude contains one-sided NaN or infinite component samples",
+                count=report["invalid_pair_count"],
+            )
+        if report["coverage_mismatch_count"]:
+            issue(
+                "raw_complex_coverage_mismatch",
+                "raw complex amplitude finite coverage does not match rcs_power",
+                count=report["coverage_mismatch_count"],
+            )
+        if report["normalization_overflow_count"]:
+            issue(
+                "raw_complex_normalization_overflow",
+                f"raw complex amplitude is too large to form finite {quantity} power",
+                count=report["normalization_overflow_count"],
+            )
+        if report["power_mismatch_count"]:
+            issue(
+                "raw_complex_power_mismatch",
+                "rcs_power is inconsistent with the stored raw complex amplitude "
+                f"under {quantity} normalization",
+                count=report["power_mismatch_count"],
+                maximum_absolute_error=report["maximum_power_absolute_error"],
+            )
+        if report["live_phase_missing_count"]:
+            issue(
+                "raw_complex_phase_missing",
+                "nonzero raw complex amplitude has no finite stored rcs_phase",
+                count=report["live_phase_missing_count"],
+            )
+        if report["phase_mismatch_count"]:
+            issue(
+                "raw_complex_phase_mismatch",
+                "rcs_phase is inconsistent with the stored raw complex amplitude",
+                count=report["phase_mismatch_count"],
+                maximum_phase_error_rad=report["maximum_phase_error_rad"],
+            )
+        return report
+
+    @classmethod
     def _validate_native_payload(
         cls,
         *,
@@ -6527,6 +7241,7 @@ class RcsGrid:
         rcs_power,
         rcs_phase,
         units,
+        extra=None,
     ):
         """Validate the native archive before constructor sanitation.
 
@@ -6635,6 +7350,18 @@ class RcsGrid:
             if raw_unit is not None and str(raw_unit).strip():
                 normalized_units[key] = canonical
 
+        raw_report = cls._raw_complex_consistency_report(
+            expected_shape=expected,
+            frequencies=numeric_axes["frequency"],
+            rcs_power=power,
+            rcs_phase=phase,
+            units=normalized_units,
+            extra=extra,
+        )
+        if raw_report["issues"]:
+            first_issue = raw_report["issues"][0]
+            raise ValueError(f"{path} contains {first_issue['message']}")
+
         return (
             numeric_axes["azimuth"],
             numeric_axes["elevation"],
@@ -6652,6 +7379,7 @@ class RcsGrid:
         mmap_mode: str | None = None,
         *,
         allow_legacy_pickle: bool = False,
+        max_output_bytes=None,
     ):
         """Load a grid from a .grim (npz) file.
 
@@ -6661,6 +7389,10 @@ class RcsGrid:
                 be memory-mapped; a warning is emitted when this is supplied.
             allow_legacy_pickle: Explicitly opt in to legacy object-array files.
                 Never enable this for an untrusted file.
+            max_output_bytes: Optional reviewed cap for the exact native NPZ
+                payload plus the power/phase sanitation copies. By default one
+                load may use at most half of currently available memory (or
+                the conservative 2 GiB fallback when memory is unknown).
 
         Returns:
             RcsGrid instance loaded from disk.
@@ -6668,14 +7400,24 @@ class RcsGrid:
         path = os.fspath(path)
         if not path.casefold().endswith(".grim"):
             path = f"{path}.grim"
+        _preflight_native_archive_allocation(
+            path,
+            allow_legacy_pickle=bool(allow_legacy_pickle),
+            max_output_bytes=max_output_bytes,
+        )
         if mmap_mode is not None:
             warnings.warn(
                 "mmap_mode has no effect for .grim/.npz archives; arrays are loaded eagerly",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        with open(path, "rb") as f:
-            data = np.load(f, allow_pickle=bool(allow_legacy_pickle))
+        # ``NpzFile`` owns a ZipFile reader in addition to the caller-owned
+        # stream.  Close both deterministically: relying on garbage collection
+        # can retain archive buffers (and, on Windows, file locks) beyond the
+        # lifetime of the returned eager ``RcsGrid``.
+        with open(path, "rb") as f, np.load(
+            f, allow_pickle=bool(allow_legacy_pickle)
+        ) as data:
 
             units = {}
             if "units" in data:
@@ -6710,6 +7452,20 @@ class RcsGrid:
                     f"{path} is not a supported .grim file (missing keys: {', '.join(missing)})"
                 )
 
+            # Load only the raw-field members needed for consistency checking
+            # before validating the core payload.  Large independent ancillary
+            # meshes/profiles remain unopened until the required axes and RCS
+            # grids have passed validation.
+            raw_extra = {
+                key: data[key]
+                for key in (
+                    "rcs_amp_real",
+                    "rcs_amp_imag",
+                    "raw_complex_amplitude_preserved",
+                )
+                if key in data
+            }
+
             (
                 azimuths,
                 elevations,
@@ -6727,13 +7483,21 @@ class RcsGrid:
                 rcs_power=data["rcs_power"],
                 rcs_phase=data["rcs_phase"],
                 units=units,
+                extra=raw_extra,
             )
 
-            # keys this class does not model (e.g. the raw complex amplitude and
-            # provenance flags written by solver exports) ride along
-            # in `extra` so save() can put them back -- see _extra_to_write
-            extra = {k: data[k] for k in getattr(data, "files", [])
-                     if k not in cls._RESERVED_KEYS}
+            # Keys this class does not model (including the already-validated
+            # raw complex pair and solver provenance) ride along in ``extra``
+            # so save() can put them back -- see _extra_to_write.
+            extra = {
+                key: (
+                    raw_extra[key]
+                    if key in raw_extra
+                    else data[key]
+                )
+                for key in getattr(data, "files", [])
+                if key not in cls._RESERVED_KEYS
+            }
 
             return cls(
                 azimuths,
@@ -6898,7 +7662,7 @@ class RcsGrid:
         )
 
     @classmethod
-    def load_ss(cls, path):
+    def load_ss(cls, path, *, max_output_bytes=None):
         """Load an Xpatch ``.ss`` signature file into an RcsGrid.
 
         Delegates the binary parse to :mod:`read_ss` (a pure-Python port of the
@@ -6907,8 +7671,15 @@ class RcsGrid:
 
             - each signal is one (azimuth, elevation) look;
             - the four polarizations VV/VH/HV/HH become the polarization axis;
-            - the complex scattering samples become ``rcs`` (power = |c|**2);
+            - complex scattering samples retain relative magnitude and phase;
             - Xpatch frequencies are retained in their documented GHz unit.
+
+        The checked-in reader is a hand-transcribed structural port without a
+        trusted Xpatch/MATLAB absolute-normalization fixture.  Consequently its
+        samples are deliberately tagged as a dimensionless power ratio, not
+        sigma3D/dBsm. This keeps plotting available while quantity checks and
+        missing phase-reference metadata quarantine the file from PTM/PIO,
+        range calibration, and coherent vehicle Assembly.
         """
         import read_ss
 
@@ -6939,10 +7710,22 @@ class RcsGrid:
                 f"SS frequency axis ({n_freq}) != per-signal sample count ({data_nf}); "
                 "header-C is likely misread (run read_ss.py directly and check 'match')."
             )
+        if np.any(~np.isfinite(az)) or np.any(~np.isfinite(el)):
+            raise ValueError("SS angular coordinates must be finite")
+        if (
+            np.any(~np.isfinite(freq))
+            or np.any(freq <= 0.0)
+            or np.unique(freq).size != freq.size
+        ):
+            raise ValueError(
+                "SS frequency axis must contain unique positive finite GHz values"
+            )
+        if freq.size > 1 and np.any(np.diff(freq) <= 0.0):
+            raise ValueError("SS frequency axis must be strictly increasing")
 
         az_axis = np.asarray(sorted(set(az.tolist())), dtype=float)
         el_axis = np.asarray(sorted(set(el.tolist())), dtype=float)
-        pols = np.asarray(["VV", "VH", "HV", "HH"], dtype=object)
+        pols = np.asarray(["VV", "VH", "HV", "HH"], dtype=str)
         pol_data = [
             np.asarray(data[name]) for name in ("vv", "vh", "hv", "hh")
         ]
@@ -6953,6 +7736,29 @@ class RcsGrid:
                     f"SS {name} samples have shape {samples.shape}; expected "
                     f"{expected_signal_shape} from record framing"
                 )
+
+        ss_imono = int(data.get("imono", 1))
+        ss_angle_source = str(data.get("angle_source", "incident"))
+        extra = {}
+        if ss_imono == 2:
+            if ss_angle_source == "observation":
+                extra["fixed_incident_azimuth_deg"] = float(
+                    np.asarray(data["az_inc"])[0]
+                )
+                extra["fixed_incident_elevation_deg"] = float(
+                    np.asarray(data["el_inc"])[0]
+                )
+            else:
+                extra["fixed_observation_azimuth_deg"] = float(
+                    np.asarray(data["az_obs"])[0]
+                )
+                extra["fixed_observation_elevation_deg"] = float(
+                    np.asarray(data["el_obs"])[0]
+                )
+        # The four complex matrices and selected axes are all that must stay
+        # live for grid construction. Release the parser's duplicate angle and
+        # header arrays before the dense allocation.
+        del data
 
         coordinate_owner = {}
         for signal_index, (azimuth, elevation) in enumerate(zip(az, el)):
@@ -6970,45 +7776,91 @@ class RcsGrid:
         az_index = {v: i for i, v in enumerate(az_axis.tolist())}
         el_index = {v: i for i, v in enumerate(el_axis.tolist())}
 
-        grid = np.full(
-            (len(az_axis), len(el_axis), n_freq, len(pols)),
-            np.nan + 1j * np.nan,
-            dtype=np.complex64,
+        shape = (len(az_axis), len(el_axis), n_freq, len(pols))
+        resident_bytes = sum(
+            int(samples.nbytes)
+            for samples in (
+                az,
+                el,
+                freq,
+                az_axis,
+                el_axis,
+                pols,
+                *pol_data,
+            )
         )
+        allocation = _checked_dense_import_allocation(
+            shape,
+            (np.float32, np.float32),
+            source=f"SS import {path}",
+            max_output_bytes=max_output_bytes,
+            resident_bytes=resident_bytes,
+        )
+        power = np.full(shape, np.nan, dtype=np.float32)
+        phase = np.full(shape, np.nan, dtype=np.float32)
         for s in range(n_sig):
             ai = az_index[float(az[s])]
             ei = el_index[float(el[s])]
             for pj, samples in enumerate(pol_data):
-                grid[ai, ei, :, pj] = np.asarray(samples[s], dtype=np.complex64)
+                row = np.asarray(samples[s], dtype=np.complex64)
+                finite = np.isfinite(row.real) & np.isfinite(row.imag)
+                missing = np.isnan(row.real) & np.isnan(row.imag)
+                if np.any(~(finite | missing)):
+                    raise ValueError(
+                        f"SS {pols[pj]} signal {s + 1} contains an infinite "
+                        "or one-sided missing complex sample"
+                    )
+                if np.any(finite):
+                    finite_row = row[finite]
+                    real64 = finite_row.real.astype(np.float64)
+                    imag64 = finite_row.imag.astype(np.float64)
+                    sample_power = real64 * real64 + imag64 * imag64
+                    if np.any(sample_power > np.finfo(np.float32).max):
+                        raise ValueError(
+                            f"SS {pols[pj]} signal {s + 1} magnitude is too "
+                            "large for finite relative-power storage"
+                        )
+                    power[ai, ei, finite, pj] = sample_power.astype(np.float32)
+                    phase[ai, ei, finite, pj] = np.arctan2(
+                        imag64, real64
+                    ).astype(np.float32)
 
-        if not np.isfinite(grid).any():
+        if not np.isfinite(power).any():
             raise ValueError("SS parsed, but no finite scattering samples were found")
 
-        extra = {}
-        if int(data.get("imono", 1)) == 2:
-            if data.get("angle_source") == "observation":
-                extra["fixed_incident_azimuth_deg"] = float(np.asarray(data["az_inc"])[0])
-                extra["fixed_incident_elevation_deg"] = float(np.asarray(data["el_inc"])[0])
-            else:
-                extra["fixed_observation_azimuth_deg"] = float(np.asarray(data["az_obs"])[0])
-                extra["fixed_observation_elevation_deg"] = float(np.asarray(data["el_obs"])[0])
+        extra.update(
+            {
+                "source_format": "Xpatch SS",
+                "ss_absolute_normalization_status": (
+                    "unverified; loaded as dimensionless relative power"
+                ),
+                "ss_reader_validation_scope": (
+                    "record framing and axes only; absolute field/RCS normalization "
+                    "requires an independent Xpatch or MATLAB ssread fixture"
+                ),
+                "dense_import_allocation_bytes": allocation["dense_bytes"],
+                "dense_import_peak_bytes": allocation["peak_bytes"],
+                "dense_import_limit_bytes": allocation["limit_bytes"],
+            }
+        )
 
         return cls(
             az_axis,
             el_axis,
             freq,
             pols,
-            rcs=grid,
-            rcs_domain="complex_amplitude",
+            rcs_power=power,
+            rcs_phase=phase,
+            rcs_domain="power_phase",
             source_path=path,
             history=(f"Loaded Xpatch .ss ({n_sig} signals, {n_freq} freqs, "
-                     f"{data.get('angle_source', 'incident')} angles, "
-                     f"imono={data.get('imono', '?')}): {path}"),
+                     f"{ss_angle_source} angles, imono={ss_imono}): {path}"),
             units={
                 "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
-                "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
+                "rcs_log_unit": "dB", "rcs_linear_quantity": "power_ratio",
             },
             extra=extra,
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
 
     @classmethod
@@ -7210,7 +8062,7 @@ class RcsGrid:
         )
 
     @classmethod
-    def read_CST(cls, path):
+    def read_CST(cls, path, *, max_output_bytes=None):
         """Read a supported CST RCS table into a physically tagged grid.
 
         Two schemas are recognized:
@@ -7272,7 +8124,12 @@ class RcsGrid:
                 "magnitude_dbsm" in mapped or "iq" in mapped
             ):
                 return cls._read_cst_flat_rows(
-                    path, rows, header_idx, mapped, tokens
+                    path,
+                    rows,
+                    header_idx,
+                    mapped,
+                    tokens,
+                    max_output_bytes=max_output_bytes,
                 )
 
         if str(path).lower().endswith(".cst_data"):
@@ -7280,10 +8137,12 @@ class RcsGrid:
                 "Could not find the .cst_data header. Need elevation, azimuth, "
                 "frequency, polarity, and magnitude(dBsm) and/or IQ columns."
             )
-        return cls._read_cst_theta_phi_csv(path, rows=rows)
+        return cls._read_cst_theta_phi_csv(
+            path, rows=rows, max_output_bytes=max_output_bytes
+        )
 
     @classmethod
-    def read_SENTRi(cls, path):
+    def read_SENTRi(cls, path, *, max_output_bytes=None):
         """Read either RCS table schema emitted by CREATE-RF SENTRi.
 
         The supplied team ``READ_SENTRi.m`` documents two header families:
@@ -7644,12 +8503,23 @@ class RcsGrid:
         if not records:
             raise ValueError("SENTRi table contains no data rows")
 
+        # The normalized records are now authoritative. Release CSV cells and
+        # duplicate maps before allocating the dense Cartesian grids.
+        rows.clear()
+        del seen, seen_source
+
         azimuths = np.asarray(sorted({row[0] for row in records}), dtype=float)
         elevations = np.asarray(sorted({row[1] for row in records}), dtype=float)
         frequencies = np.asarray(sorted({row[2] for row in records}), dtype=float)
         polarizations = np.asarray([spec[0] for spec in channel_specs])
         shape = (
             len(azimuths), len(elevations), len(frequencies), len(polarizations)
+        )
+        allocation = _checked_dense_import_allocation(
+            shape,
+            (np.float64, np.float64),
+            source=f"SENTRi import {path}",
+            max_output_bytes=max_output_bytes,
         )
         power = np.full(shape, np.nan, dtype=np.float64)
         phase = np.full(shape, np.nan, dtype=np.float64)
@@ -7717,7 +8587,11 @@ class RcsGrid:
                     "* exp(+j*deg2rad(reported_phase_deg))"
                 ),
                 "sentri_units_row_present": bool(has_units_row),
+                "dense_import_allocation_bytes": allocation["dense_bytes"],
+                "dense_import_peak_bytes": allocation["peak_bytes"],
+                "dense_import_limit_bytes": allocation["limit_bytes"],
             },
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
 
     @classmethod
@@ -7788,13 +8662,22 @@ class RcsGrid:
         return False
 
     @classmethod
-    def load_theta_phi_csv(cls, path):
+    def load_theta_phi_csv(cls, path, *, max_output_bytes=None):
         """Compatibility name for :meth:`read_CST`."""
 
-        return cls.read_CST(path)
+        return cls.read_CST(path, max_output_bytes=max_output_bytes)
 
     @classmethod
-    def _read_cst_flat_rows(cls, path, rows, header_idx, col_idx, header_tokens):
+    def _read_cst_flat_rows(
+        cls,
+        path,
+        rows,
+        header_idx,
+        col_idx,
+        header_tokens,
+        *,
+        max_output_bytes=None,
+    ):
         """Parse the legacy row-per-polarization ``.cst_data`` schema."""
 
         def _cell(row, key):
@@ -7951,6 +8834,11 @@ class RcsGrid:
         seen = {}
         for row_idx, azimuth, elevation, raw_frequency, polarization, power, phase in raw_records:
             frequency = float(raw_frequency * frequency_scale)
+            if not np.isfinite(frequency) or frequency <= 0.0:
+                raise ValueError(
+                    f"line {row_idx}: frequency conversion to GHz did not "
+                    "produce a positive finite value"
+                )
             key = (azimuth, elevation, frequency, polarization)
             if key in seen:
                 prior_line, prior_power, prior_phase = seen[key]
@@ -7967,12 +8855,23 @@ class RcsGrid:
                 (azimuth, elevation, frequency, polarization, power, phase)
             )
 
+        # Do not retain both the raw CSV rows and normalized row tuples while
+        # the dense power/phase arrays are being committed.
+        rows.clear()
+        del raw_records, seen
+
         azimuths = np.asarray(sorted({record[0] for record in records}), dtype=float)
         elevations = np.asarray(sorted({record[1] for record in records}), dtype=float)
         frequencies = np.asarray(sorted({record[2] for record in records}), dtype=float)
         polarizations = np.asarray(pol_order, dtype=object)
         shape = (
             len(azimuths), len(elevations), len(frequencies), len(polarizations)
+        )
+        allocation = _checked_dense_import_allocation(
+            shape,
+            (np.float64, np.float64),
+            source=f"CST flat import {path}",
+            max_output_bytes=max_output_bytes,
         )
         power = np.full(shape, np.nan, dtype=np.float64)
         phase = np.full(shape, np.nan, dtype=np.float64)
@@ -8019,11 +8918,17 @@ class RcsGrid:
                 "cst_iq_rows_validated": iq_validated,
                 "cst_iq_only_rows": iq_only,
                 "cst_iq_unparsed_fallback_rows": iq_unparsed,
+                "dense_import_allocation_bytes": allocation["dense_bytes"],
+                "dense_import_peak_bytes": allocation["peak_bytes"],
+                "dense_import_limit_bytes": allocation["limit_bytes"],
             },
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
 
     @classmethod
-    def _read_cst_theta_phi_csv(cls, path, *, rows=None):
+    def _read_cst_theta_phi_csv(
+        cls, path, *, rows=None, max_output_bytes=None
+    ):
         """Load a theta/phi scattering CSV into an RcsGrid.
 
         Expected layout:
@@ -8216,7 +9121,7 @@ class RcsGrid:
                 "guessed and generic Abs(field) tables are not accepted."
             )
 
-        records: list[tuple[float, float, float, float, float, float, float, float, float, float, float]] = []
+        records = []
         for row_index, row in enumerate(rows[data_start_idx:], start=data_start_idx):
             line_no = row_index + 1
             if not row or all(str(cell).strip() == "" for cell in row):
@@ -8280,6 +9185,7 @@ class RcsGrid:
                     _cell("phase_hv_deg"),
                     _cell("phase_vh_deg"),
                     _cell("phase_hh_deg"),
+                    int(line_no),
                 )
             )
 
@@ -8314,16 +9220,22 @@ class RcsGrid:
         normalized_records = []
         for record in records:
             f_ghz = float(record[0] * freq_scale_to_ghz)
+            if not np.isfinite(f_ghz) or f_ghz <= 0.0:
+                raise ValueError(
+                    f"line {int(record[11])}: frequency conversion to GHz "
+                    "did not produce a positive finite value"
+                )
             theta_deg = float(record[1])
             if theta_deg < -1.0e-9 or theta_deg > 180.0 + 1.0e-9:
                 raise ValueError(
-                    f"standard CST theta must be within [0, 180] deg, got {theta_deg:g}"
+                    f"line {int(record[11])}: standard CST theta must be "
+                    f"within [0, 180] deg, got {theta_deg:g}"
                 )
             elevation_deg = float(90.0 - theta_deg)
             azimuth_deg = _wrap_cst_azimuth_deg(record[2])
             if any(_has_magnitude(record[spec[1]]) for spec in present_specs):
                 normalized_records.append(
-                    (f_ghz, elevation_deg, azimuth_deg, record)
+                    (f_ghz, elevation_deg, azimuth_deg, int(record[11]), record)
                 )
 
         freqs = np.asarray(
@@ -8342,20 +9254,33 @@ class RcsGrid:
         az_idx = {float(value): index for index, value in enumerate(azims.tolist())}
         pol_idx = {str(value): index for index, value in enumerate(pols.tolist())}
 
-        shape = (len(azims), len(elevs), len(freqs), len(pols))
-        power = np.full(shape, np.nan, dtype=np.float64)
-        phase = np.full(shape, np.nan, dtype=np.float64)
-
-        def _dbsm_to_linear(value: float) -> float:
-            return _cst_dbsm_to_power(value, context="CST wide-table magnitude")
+        def _dbsm_to_linear(
+            value: float, source_line_no: int, component_name: str
+        ) -> float:
+            return _cst_dbsm_to_power(
+                value,
+                context=(
+                    f"line {source_line_no} CST {component_name} magnitude"
+                ),
+            )
 
         def _deg_to_rad(value: float) -> float:
             if not np.isfinite(value):
                 return float("nan")
             return float(np.deg2rad(value))
 
+        # Resolve conversions and duplicate conflicts before committing the
+        # potentially large dense Cartesian output arrays.  This also keeps
+        # every conflict diagnostic tied to both physical source line numbers.
+        prepared_samples = []
         seen = {}
-        for f_ghz, elevation_deg, azimuth_deg, source_record in normalized_records:
+        for (
+            f_ghz,
+            elevation_deg,
+            azimuth_deg,
+            source_line_no,
+            source_record,
+        ) in normalized_records:
             ai = az_idx[azimuth_deg]
             ei = el_idx[elevation_deg]
             fi = f_idx[f_ghz]
@@ -8364,24 +9289,68 @@ class RcsGrid:
                 if not _has_magnitude(magnitude):
                     continue
                 sample_key = (azimuth_deg, elevation_deg, f_ghz, pol_label)
-                sample_power = _dbsm_to_linear(magnitude)
+                sample_power = _dbsm_to_linear(
+                    magnitude, source_line_no, component_name
+                )
                 sample_phase = _deg_to_rad(source_record[phase_index])
                 if sample_key in seen:
-                    prior_power, prior_phase = seen[sample_key]
+                    prior_line_no, prior_power, prior_phase = seen[sample_key]
                     if _cst_samples_equivalent(
                         prior_power, prior_phase, sample_power, sample_phase
                     ):
                         continue
                     raise ValueError(
-                        "conflicting duplicate CST theta/phi sample after "
+                        f"line {source_line_no}: conflicting duplicate CST "
+                        "theta/phi sample after "
                         "coordinate conversion: "
                         f"az={azimuth_deg:g}, el={elevation_deg:g}, "
-                        f"f={f_ghz:g} GHz, component={component_name}"
+                        f"f={f_ghz:g} GHz, component={component_name}; "
+                        f"first defined on line {prior_line_no}"
                     )
-                seen[sample_key] = (sample_power, sample_phase)
-                pi = pol_idx[pol_label]
-                power[ai, ei, fi, pi] = sample_power
-                phase[ai, ei, fi, pi] = sample_phase
+                seen[sample_key] = (
+                    source_line_no,
+                    sample_power,
+                    sample_phase,
+                )
+                prepared_samples.append(
+                    (
+                        azimuth_deg,
+                        elevation_deg,
+                        f_ghz,
+                        pol_label,
+                        sample_power,
+                        sample_phase,
+                    )
+                )
+
+        rows.clear()
+        del records, normalized_records, seen
+
+        shape = (len(azims), len(elevs), len(freqs), len(pols))
+        allocation = _checked_dense_import_allocation(
+            shape,
+            (np.float64, np.float64),
+            source=f"CST wide import {path}",
+            max_output_bytes=max_output_bytes,
+        )
+        power = np.full(shape, np.nan, dtype=np.float64)
+        phase = np.full(shape, np.nan, dtype=np.float64)
+        for (
+            azimuth_deg,
+            elevation_deg,
+            f_ghz,
+            pol_label,
+            sample_power,
+            sample_phase,
+        ) in prepared_samples:
+            index = (
+                az_idx[azimuth_deg],
+                el_idx[elevation_deg],
+                f_idx[f_ghz],
+                pol_idx[pol_label],
+            )
+            power[index] = sample_power
+            phase[index] = sample_phase
 
         if not np.isfinite(power).any():
             raise ValueError(
@@ -8413,14 +9382,24 @@ class RcsGrid:
                 "cst_polarization_mapping": (
                     "theta=V, phi=H; component pair mapped in written order"
                 ),
+                "dense_import_allocation_bytes": allocation["dense_bytes"],
+                "dense_import_peak_bytes": allocation["peak_bytes"],
+                "dense_import_limit_bytes": allocation["limit_bytes"],
             },
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
 
     @classmethod
-    def load_theta_phi_txt(cls, path):
+    def load_theta_phi_txt(
+        cls,
+        path,
+        *,
+        frequency_ghz=None,
+        max_output_bytes=None,
+    ):
         """Load whitespace-delimited theta/phi TXT format into an RcsGrid.
 
-        Expected columns after two header rows:
+        Expected columns in an explicit unit-bearing header row:
             theta(deg), phi(deg), abs(rcs)(dbm^2), abs(theta)(dbm^2),
             phase(theta)(deg), abs(phi)(dbm^2), phase(phi)(deg), ax.ratio(db)
 
@@ -8434,7 +9413,10 @@ class RcsGrid:
         """
 
         def _norm_token(text: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "", str(text).strip().lower())
+            normalized = (
+                str(text).strip().lower().replace("²", "2").replace("°", "deg")
+            )
+            return re.sub(r"[^a-z0-9]+", "", normalized)
 
         def _frequency_from_filename_ghz(file_path: str) -> float | None:
             name = os.path.basename(str(file_path))
@@ -8452,44 +9434,35 @@ class RcsGrid:
             if not np.isfinite(raw_value):
                 return None
 
-            raw_unit = (match.group(2) or "").strip().lower()
-            unit = raw_unit
-            if unit.startswith("ghz"):
+            unit = (match.group(2) or "").strip().lower()
+            if unit == "ghz":
                 scale = 1.0
-            elif unit.startswith("mhz"):
+            elif unit == "mhz":
                 scale = 1.0e-3
-            elif unit.startswith("khz"):
+            elif unit == "khz":
                 scale = 1.0e-6
-            elif unit.startswith("hz"):
+            elif unit == "hz":
                 scale = 1.0e-9
             else:
-                magnitude = abs(raw_value)
-                if magnitude >= 1.0e6:
-                    scale = 1.0e-9
-                elif magnitude >= 1.0e3:
-                    scale = 1.0e-3
-                else:
-                    scale = 1.0
-            return float(raw_value * scale)
+                return None
+            converted = float(raw_value * scale)
+            return converted if np.isfinite(converted) and converted > 0.0 else None
 
         alias_to_key = {
             "thetadeg": "theta_deg",
             "phideg": "phi_deg",
             "absrcsdbm2": "abs_rcs_dbm2",
+            "absrcsdbsm": "abs_rcs_dbm2",
             "absthetadbm2": "abs_theta_dbm2",
+            "absthetadbsm": "abs_theta_dbm2",
             "phasethetadeg": "phase_theta_deg",
             "absphidbm2": "abs_phi_dbm2",
+            "absphidbsm": "abs_phi_dbm2",
             "phasephideg": "phase_phi_deg",
             "axratiodb": "ax_ratio_db",
         }
 
-        with open(path, "r", encoding="utf-8-sig") as f:
-            lines = f.readlines()
-        if not lines:
-            raise ValueError("TXT is empty")
-
         header_idx = None
-        data_start_idx = 0
         col_idx: dict[str, int] = {}
         required = {
             "theta_deg",
@@ -8500,136 +9473,260 @@ class RcsGrid:
             "phase_phi_deg",
         }
 
-        fallback_col_idx = {
-            "theta_deg": 0,
-            "phi_deg": 1,
-            "abs_rcs_dbm2": 2,
-            "abs_theta_dbm2": 3,
-            "phase_theta_deg": 4,
-            "abs_phi_dbm2": 5,
-            "phase_phi_deg": 6,
-            "ax_ratio_db": 7,
-        }
-
         def _tokenize(text: str) -> list[str]:
             return [tok for tok in re.split(r"[,\s]+", text.strip()) if tok]
 
-        def _is_numeric_data_line(tokens: list[str]) -> bool:
-            if len(tokens) < 7:
-                return False
-            numeric_needed = (0, 1, 3, 4, 5, 6)
-            for idx in numeric_needed:
-                if idx >= len(tokens):
-                    return False
-                try:
-                    float(tokens[idx])
-                except ValueError:
-                    return False
-            return True
+        saw_line = False
+        # First pass identifies the explicit schema without retaining the
+        # potentially large text file. The second pass below parses rows and
+        # performs duplicate validation before any dense-grid allocation.
+        with open(path, "r", encoding="utf-8-sig") as f:
+            for i, line in enumerate(f):
+                saw_line = True
+                tokens = _tokenize(line)
+                mapped: dict[str, int] = {}
+                for j, token in enumerate(tokens):
+                    key = alias_to_key.get(_norm_token(token))
+                    if key is not None and key not in mapped:
+                        mapped[key] = j
+                if required.issubset(mapped.keys()):
+                    header_idx = i
+                    col_idx = mapped
+                    break
 
-        for i, line in enumerate(lines):
-            tokens = _tokenize(line)
-            mapped: dict[str, int] = {}
-            for j, token in enumerate(tokens):
-                key = alias_to_key.get(_norm_token(token))
-                if key is not None and key not in mapped:
-                    mapped[key] = j
-            if required.issubset(mapped.keys()):
-                header_idx = i
-                col_idx = mapped
-                data_start_idx = i + 1
-                break
+        if not saw_line:
+            raise ValueError("TXT is empty")
 
         if header_idx is None:
-            for i, line in enumerate(lines):
-                tokens = _tokenize(line)
-                if _is_numeric_data_line(tokens):
-                    col_idx = dict(fallback_col_idx)
-                    data_start_idx = i
-                    break
-            else:
-                raise ValueError(
-                    "Could not parse TXT: expected header columns or numeric rows with at least 7 columns."
-                )
-
-        def _parse_float(raw: str) -> float:
-            text = str(raw).strip()
-            if text == "":
-                return float("nan")
-            return float(text)
-
-        records: list[tuple[float, float, float, float, float, float, float, float]] = []
-        for line in lines[data_start_idx:]:
-            tokens = _tokenize(line)
-            if not tokens:
-                continue
-
-            def _cell(key: str) -> float:
-                idx = col_idx.get(key, -1)
-                if idx < 0 or idx >= len(tokens):
-                    return float("nan")
-                try:
-                    return _parse_float(tokens[idx])
-                except ValueError:
-                    return float("nan")
-
-            theta_deg = _cell("theta_deg")
-            phi_deg = _cell("phi_deg")
-            if not (np.isfinite(theta_deg) and np.isfinite(phi_deg)):
-                continue
-
-            records.append(
-                (
-                    float(theta_deg),
-                    float(phi_deg),
-                    _cell("abs_theta_dbm2"),
-                    _cell("phase_theta_deg"),
-                    _cell("abs_phi_dbm2"),
-                    _cell("phase_phi_deg"),
-                    _cell("abs_rcs_dbm2"),
-                    _cell("ax_ratio_db"),
-                )
+            raise ValueError(
+                "Could not parse legacy theta/phi TXT: an explicit header with "
+                "theta(deg), phi(deg), abs(theta)(dBm^2), phase(theta)(deg), "
+                "abs(phi)(dBm^2), and phase(phi)(deg) is required. Headerless "
+                "column-order guessing is not physically safe."
             )
 
-        if not records:
+        inferred_frequency = _frequency_from_filename_ghz(path)
+        if frequency_ghz is None:
+            if inferred_frequency is None:
+                raise ValueError(
+                    "legacy theta/phi TXT requires an explicit frequency with "
+                    "unit in the filename (for example 'f=10GHz') or the "
+                    "frequency_ghz= loader argument"
+                )
+            selected_frequency = inferred_frequency
+            frequency_source = "unit-qualified filename"
+        else:
+            if isinstance(frequency_ghz, (bool, np.bool_)):
+                raise ValueError("frequency_ghz must be a positive finite value")
+            try:
+                selected_frequency = float(frequency_ghz)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("frequency_ghz must be a positive finite value") from exc
+            if not np.isfinite(selected_frequency) or selected_frequency <= 0.0:
+                raise ValueError("frequency_ghz must be a positive finite value")
+            if inferred_frequency is not None and not np.isclose(
+                selected_frequency,
+                inferred_frequency,
+                rtol=1.0e-12,
+                atol=0.0,
+            ):
+                raise ValueError(
+                    f"frequency_ghz={selected_frequency:g} conflicts with the "
+                    f"unit-qualified filename value {inferred_frequency:g} GHz"
+                )
+            frequency_source = "explicit frequency_ghz argument"
+
+        def _required_value(
+            tokens,
+            line_index,
+            key: str,
+            *,
+            allow_negative_infinity=False,
+        ) -> float:
+            idx = col_idx.get(key, -1)
+            if idx < 0 or idx >= len(tokens):
+                raise ValueError(f"line {line_index}: {key} is missing")
+            text = str(tokens[idx]).strip()
+            if not text:
+                raise ValueError(f"line {line_index}: {key} is blank")
+            try:
+                value = float(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"line {line_index}: invalid {key} value {text!r}"
+                ) from exc
+            if not np.isfinite(value) and not (
+                allow_negative_infinity and np.isneginf(value)
+            ):
+                expected = "finite or -Inf" if allow_negative_infinity else "finite"
+                raise ValueError(
+                    f"line {line_index}: {key} must be {expected}"
+                )
+            return float(value)
+
+        def _optional_value(
+            tokens,
+            line_index,
+            key: str,
+            *,
+            allow_negative_infinity=False,
+        ):
+            idx = col_idx.get(key, -1)
+            if idx < 0 or idx >= len(tokens) or not str(tokens[idx]).strip():
+                return float("nan")
+            return _required_value(
+                tokens,
+                line_index,
+                key,
+                allow_negative_infinity=allow_negative_infinity,
+            )
+
+        def _iter_data_tokens():
+            with open(path, "r", encoding="utf-8-sig") as stream:
+                for line_index, line in enumerate(stream, start=1):
+                    if line_index <= header_idx + 1:
+                        continue
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith(("#", "!", "%")):
+                        continue
+                    yield line_index, _tokenize(line)
+
+        def _parse_data_tokens(tokens, line_index):
+            theta_deg = _required_value(tokens, line_index, "theta_deg")
+            phi_deg = _required_value(tokens, line_index, "phi_deg")
+            abs_theta_db = _required_value(
+                tokens,
+                line_index,
+                "abs_theta_dbm2",
+                allow_negative_infinity=True,
+            )
+            phase_theta_deg = _required_value(
+                tokens, line_index, "phase_theta_deg"
+            )
+            abs_phi_db = _required_value(
+                tokens,
+                line_index,
+                "abs_phi_dbm2",
+                allow_negative_infinity=True,
+            )
+            phase_phi_deg = _required_value(
+                tokens, line_index, "phase_phi_deg"
+            )
+            abs_rcs_db = _optional_value(
+                tokens,
+                line_index,
+                "abs_rcs_dbm2",
+                allow_negative_infinity=True,
+            )
+            # Retain validation of this legacy optional column even though it
+            # does not form an RCS channel.
+            _optional_value(tokens, line_index, "ax_ratio_db")
+            sample_values = (
+                (
+                    "VV",
+                    _cst_dbsm_to_power(
+                        abs_theta_db, context=f"line {line_index} abs(theta)"
+                    ),
+                    float(np.deg2rad(phase_theta_deg)),
+                ),
+                (
+                    "HH",
+                    _cst_dbsm_to_power(
+                        abs_phi_db, context=f"line {line_index} abs(phi)"
+                    ),
+                    float(np.deg2rad(phase_phi_deg)),
+                ),
+                (
+                    "TOTAL",
+                    (
+                        _cst_dbsm_to_power(
+                            abs_rcs_db, context=f"line {line_index} abs(rcs)"
+                        )
+                        if not np.isnan(abs_rcs_db)
+                        else float("nan")
+                    ),
+                    float("nan"),
+                ),
+            )
+            return float(theta_deg), float(phi_deg), sample_values
+
+        # Validation pass: collect only axis identities and the duplicate map.
+        # No row list survives into the dense-allocation phase.
+        azimuth_values = set()
+        elevation_values = set()
+        seen_samples = {}
+        data_row_count = 0
+        for line_index, tokens in _iter_data_tokens():
+            theta_deg, phi_deg, sample_values = _parse_data_tokens(
+                tokens, line_index
+            )
+            data_row_count += 1
+            azimuth_values.add(theta_deg)
+            elevation_values.add(phi_deg)
+            coordinate = (theta_deg, phi_deg)
+            for polarization, sample_power, sample_phase in sample_values:
+                if not np.isfinite(sample_power):
+                    continue
+                sample_key = coordinate + (polarization,)
+                prior = seen_samples.get(sample_key)
+                if prior is not None:
+                    prior_line, prior_power, prior_phase = prior
+                    if not _cst_samples_equivalent(
+                        prior_power, prior_phase, sample_power, sample_phase
+                    ):
+                        raise ValueError(
+                            f"line {line_index}: conflicting duplicate legacy "
+                            f"TXT sample at theta={theta_deg:g}, phi={phi_deg:g}, "
+                            f"polarization={polarization}; first defined on line "
+                            f"{prior_line}"
+                        )
+                else:
+                    seen_samples[sample_key] = (
+                        line_index,
+                        sample_power,
+                        sample_phase,
+                    )
+
+        if data_row_count == 0:
             raise ValueError("TXT contains no data rows after header")
 
-        azims = np.asarray(sorted({r[0] for r in records}), dtype=float)   # theta -> azimuth
-        elevs = np.asarray(sorted({r[1] for r in records}), dtype=float)   # phi -> elevation
-        freq_ghz = _frequency_from_filename_ghz(path)
-        if freq_ghz is None:
-            freqs = np.asarray([0.0], dtype=float)
-            freq_unit = "arb"
-        else:
-            freqs = np.asarray([float(freq_ghz)], dtype=float)
-            freq_unit = "GHz"
-        pols = np.asarray(["VV", "HH", "TOTAL"], dtype=object)
-
-        el_idx = {float(v): i for i, v in enumerate(elevs.tolist())}
-        az_idx = {float(v): i for i, v in enumerate(azims.tolist())}
+        azims = np.asarray(sorted(azimuth_values), dtype=float)  # theta -> azimuth
+        elevs = np.asarray(sorted(elevation_values), dtype=float)  # phi -> elevation
+        freqs = np.asarray([float(selected_frequency)], dtype=float)
+        pols = np.asarray(["VV", "HH", "TOTAL"], dtype=str)
+        del azimuth_values, elevation_values, seen_samples
 
         shape = (len(azims), len(elevs), 1, len(pols))
+        resident_bytes = sum(
+            int(axis.nbytes) for axis in (azims, elevs, freqs, pols)
+        )
+        allocation = _checked_dense_import_allocation(
+            shape,
+            (np.float32, np.float32),
+            source=f"legacy theta/phi TXT import {path}",
+            max_output_bytes=max_output_bytes,
+            resident_bytes=resident_bytes,
+        )
         power = np.full(shape, np.nan, dtype=np.float32)
         phase = np.full(shape, np.nan, dtype=np.float32)
+        el_idx = {float(v): i for i, v in enumerate(elevs.tolist())}
+        az_idx = {float(v): i for i, v in enumerate(azims.tolist())}
+        pol_idx = {str(v): i for i, v in enumerate(pols.tolist())}
 
-        def _db_to_linear(value: float) -> float:
-            if not np.isfinite(value):
-                return float("nan")
-            return float(10.0 ** (value / 10.0))
-
-        def _deg_to_rad(value: float) -> float:
-            if not np.isfinite(value):
-                return float("nan")
-            return float(np.deg2rad(value))
-
-        for theta_deg, phi_deg, abs_theta_db, ph_theta_deg, abs_phi_db, ph_phi_deg, abs_rcs_db, _ in records:
+        # Fill pass: reparse the stream only after the validated row objects
+        # and duplicate map have been released.
+        for line_index, tokens in _iter_data_tokens():
+            theta_deg, phi_deg, sample_values = _parse_data_tokens(
+                tokens, line_index
+            )
             ai = az_idx[theta_deg]
             ei = el_idx[phi_deg]
-            power[ai, ei, 0, 0] = _db_to_linear(abs_theta_db)   # VV
-            phase[ai, ei, 0, 0] = _deg_to_rad(ph_theta_deg)
-            power[ai, ei, 0, 1] = _db_to_linear(abs_phi_db)     # HH
-            phase[ai, ei, 0, 1] = _deg_to_rad(ph_phi_deg)
-            power[ai, ei, 0, 2] = _db_to_linear(abs_rcs_db)     # TOTAL
+            for polarization, sample_power, sample_phase in sample_values:
+                if not np.isfinite(sample_power):
+                    continue
+                pi = pol_idx[polarization]
+                power[ai, ei, 0, pi] = sample_power
+                phase[ai, ei, 0, pi] = sample_phase
 
         if not np.isfinite(power).any():
             raise ValueError("TXT parsed, but no finite magnitude values were found")
@@ -8645,9 +9742,17 @@ class RcsGrid:
             source_path=path,
             history=f"Loaded theta/phi TXT: {path}",
             units={
-                "azimuth": "deg", "elevation": "deg", "frequency": freq_unit,
+                "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
                 "rcs_log_unit": "dBsm", "rcs_linear_quantity": "sigma_3d",
             },
+            extra={
+                "source_format": "legacy theta/phi TXT",
+                "legacy_txt_frequency_source": frequency_source,
+                "dense_import_allocation_bytes": allocation["dense_bytes"],
+                "dense_import_peak_bytes": allocation["peak_bytes"],
+                "dense_import_limit_bytes": allocation["limit_bytes"],
+            },
+            _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
         )
 
     @classmethod
@@ -8677,8 +9782,26 @@ class RcsGrid:
         first_line: str = ""
 
         with open(path, "rb") as f:
+            file_size = int(os.fstat(f.fileno()).st_size)
+
+            def _decode_header_line(raw_line: bytes, where: str) -> str:
+                try:
+                    decoded = raw_line.decode("ascii").strip()
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        f"PIO {where} must contain ASCII key=value text"
+                    ) from exc
+                if any(
+                    ord(character) < 32 and character not in {"\t"}
+                    for character in decoded
+                ):
+                    raise ValueError(
+                        f"PIO {where} contains binary control bytes"
+                    )
+                return decoded
+
             raw_first = f.readline()
-            first_line = raw_first.decode("ascii", errors="replace").strip()
+            first_line = _decode_header_line(raw_first, "header")
             if "=" in first_line:
                 first_key, _, first_value = first_line.partition("=")
                 header[first_key.strip().lower()] = first_value.strip()
@@ -8688,7 +9811,7 @@ class RcsGrid:
                 raw_line = f.readline()
                 if not raw_line:
                     raise ValueError("Unexpected EOF while reading PIO header")
-                line = raw_line.decode("ascii", errors="replace").strip()
+                line = _decode_header_line(raw_line, "header")
                 if "=" in line:
                     key, _, value = line.partition("=")
                     key_l = key.strip().lower()
@@ -8696,30 +9819,47 @@ class RcsGrid:
                     if key_l == "offset":
                         break
 
+            header_end = int(f.tell())
+
             offset_raw = header.get("offset")
             if offset_raw is None:
                 raise ValueError("PIO header missing 'Offset='")
-            try:
-                offset = int(float(offset_raw))
-            except ValueError as exc:
-                raise ValueError(f"PIO header has non-numeric Offset: {offset_raw!r}") from exc
 
-            def _int(key: str) -> int | None:
+            def _integer_field(key: str, *, positive: bool) -> int:
                 raw = header.get(key)
                 if raw is None:
-                    return None
-                try:
-                    return int(float(raw))
-                except ValueError:
-                    return None
+                    raise ValueError(f"PIO header missing {key}")
+                text = str(raw).strip()
+                if not re.fullmatch(r"[+-]?\d+", text):
+                    raise ValueError(
+                        f"PIO header {key} must be an exact integer; got {raw!r}"
+                    )
+                value = int(text, 10)
+                if positive and value <= 0:
+                    raise ValueError(f"PIO header {key} must be greater than zero")
+                if not positive and value < 0:
+                    raise ValueError(f"PIO header {key} must not be negative")
+                return value
 
-            xsize = _int("xsize")
-            ysize = _int("ysize")
-            if xsize is None or ysize is None:
-                raise ValueError("PIO header missing xsize/ysize")
+            offset = _integer_field("offset", positive=False)
+            xsize = _integer_field("xsize", positive=True)
+            ysize = _integer_field("ysize", positive=True)
+            if offset < header_end:
+                raise ValueError(
+                    f"PIO Offset={offset} precedes the end of the header at byte {header_end}"
+                )
 
             precision = (header.get("precision") or "").strip().lower()
             data_type = (header.get("type") or "complex").strip().lower()
+            if data_type not in {"complex", "real"}:
+                raise ValueError(
+                    f"Unsupported PIO Type: {header.get('type')!r}; expected Complex or Real"
+                )
+            data_format = (header.get("dataformat") or "binary").strip().lower()
+            if data_format != "binary":
+                raise ValueError(
+                    f"Unsupported PIO DataFormat: {header.get('dataformat')!r}; expected Binary"
+                )
             order_text = (header.get("order") or "little endian").strip().lower()
             if "big" in order_text:
                 byte_order = ">"
@@ -8735,14 +9875,32 @@ class RcsGrid:
             else:
                 raise ValueError(f"Unsupported PIO precision: {precision!r}")
 
-            n_floats = int(xsize) * int(ysize) * (2 if data_type == "complex" else 1)
+            cell_count = int(xsize) * int(ysize)
+            components_per_cell = 2 if data_type == "complex" else 1
+            n_floats = cell_count * components_per_cell
             itemsize = np.dtype(dtype).itemsize
+            payload_bytes = n_floats * itemsize
+            if payload_bytes > np.iinfo(np.intp).max:
+                raise ValueError(
+                    "PIO dimensions exceed this Python/NumPy build's addressable payload size"
+                )
+            payload_end = offset + payload_bytes
+            if offset > file_size:
+                raise ValueError(
+                    f"PIO Offset={offset} lies beyond the {file_size}-byte file"
+                )
+            if payload_end > file_size:
+                available = max(0, file_size - offset)
+                raise ValueError(
+                    "PIO data block truncated: expected "
+                    f"{payload_bytes} bytes at Offset={offset}, got {available}"
+                )
 
             f.seek(offset, 0)
-            raw_buf = f.read(n_floats * itemsize)
-            if len(raw_buf) < n_floats * itemsize:
+            raw_buf = f.read(payload_bytes)
+            if len(raw_buf) != payload_bytes:
                 raise ValueError(
-                    f"PIO data block truncated: expected {n_floats * itemsize} bytes, got {len(raw_buf)}"
+                    f"PIO data block truncated: expected {payload_bytes} bytes, got {len(raw_buf)}"
                 )
             rawdata = np.frombuffer(raw_buf, dtype=dtype, count=n_floats)
 
@@ -8750,11 +9908,19 @@ class RcsGrid:
             footer_blob = f.read()
 
         for raw_line in footer_blob.splitlines():
-            line = raw_line.decode("ascii", errors="replace").strip() if isinstance(raw_line, bytes) else str(raw_line).strip()
-            if "=" not in line:
+            line = _decode_header_line(raw_line, "footer")
+            if not line:
                 continue
+            if "=" not in line:
+                raise ValueError(
+                    "PIO bytes after the declared data block are not a valid "
+                    "ASCII key=value footer; Type/dimensions/Offset may be wrong"
+                )
             key, _, value = line.partition("=")
-            footer[key.strip().lower()] = value.strip()
+            key = key.strip().lower()
+            if not key:
+                raise ValueError("PIO footer contains a blank key")
+            footer[key] = value.strip()
 
         def _parse_axis_values(key: str, expected_size: int) -> np.ndarray | None:
             raw = header.get(key)
@@ -8767,27 +9933,98 @@ class RcsGrid:
                     continue
                 try:
                     values.append(float(tok))
-                except ValueError:
-                    return None
-            if len(values) == expected_size:
-                return np.asarray(values, dtype=float)
-            return None
+                except ValueError as exc:
+                    raise ValueError(
+                        f"PIO header {key} contains a non-numeric axis value {tok!r}"
+                    ) from exc
+            if len(values) != expected_size:
+                raise ValueError(
+                    f"PIO header {key} contains {len(values)} values; "
+                    f"expected {expected_size}"
+                )
+            result = np.asarray(values, dtype=float)
+            if np.any(~np.isfinite(result)):
+                raise ValueError(f"PIO header {key} contains a nonfinite axis value")
+            return result
 
         def _build_axis(prefix: str, size: int) -> np.ndarray:
             vals = _parse_axis_values(f"{prefix}vals", size)
-            if vals is not None:
-                return vals
             start = header.get(f"{prefix}start")
             stop = header.get(f"{prefix}stop")
             step = header.get(f"{prefix}step")
-            try:
-                start_f = float(start) if start is not None else None
-                stop_f = float(stop) if stop is not None else None
-                step_f = float(step) if step is not None else None
-            except ValueError:
-                start_f = stop_f = step_f = None
+            parsed = {}
+            for field_name, raw_value in (
+                (f"{prefix}start", start),
+                (f"{prefix}stop", stop),
+                (f"{prefix}step", step),
+            ):
+                if raw_value is None:
+                    parsed[field_name] = None
+                    continue
+                try:
+                    numeric = float(raw_value)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"PIO header {field_name} must be numeric; got {raw_value!r}"
+                    ) from exc
+                if not np.isfinite(numeric):
+                    raise ValueError(
+                        f"PIO header {field_name} must be finite; got {raw_value!r}"
+                    )
+                parsed[field_name] = numeric
+            start_f = parsed[f"{prefix}start"]
+            stop_f = parsed[f"{prefix}stop"]
+            step_f = parsed[f"{prefix}step"]
+            if vals is not None:
+                # XVals/YVals are the authoritative coordinates, but Pioneer
+                # writers commonly include scalar summaries as well. Refuse a
+                # contradictory header instead of silently choosing one axis.
+                comparisons = (
+                    (f"{prefix.upper()}Start", start_f, float(vals[0])),
+                    (f"{prefix.upper()}Stop", stop_f, float(vals[-1])),
+                )
+                for label, declared, actual in comparisons:
+                    if declared is None:
+                        continue
+                    scale = max(1.0, abs(declared), abs(actual))
+                    if not np.isclose(
+                        declared, actual, rtol=1.0e-10, atol=1.0e-12 * scale
+                    ):
+                        raise ValueError(
+                            f"PIO {label}={declared:g} conflicts with explicit "
+                            f"{prefix.upper()}Vals endpoint {actual:g}"
+                        )
+                if step_f is not None:
+                    summary_step = (
+                        0.0
+                        if size == 1
+                        else float(vals[-1] - vals[0]) / float(size - 1)
+                    )
+                    scale = max(1.0, abs(step_f), abs(summary_step))
+                    if not np.isclose(
+                        step_f,
+                        summary_step,
+                        rtol=1.0e-10,
+                        atol=1.0e-12 * scale,
+                    ):
+                        raise ValueError(
+                            f"PIO {prefix.upper()}Step={step_f:g} conflicts "
+                            f"with explicit {prefix.upper()}Vals summary step "
+                            f"{summary_step:g}"
+                        )
+                return vals
             if start_f is not None and step_f is not None:
-                return start_f + np.arange(size, dtype=float) * step_f
+                values = start_f + np.arange(size, dtype=float) * step_f
+                if stop_f is not None:
+                    scale = max(1.0, abs(stop_f), abs(float(values[-1])))
+                    if not np.isclose(
+                        values[-1], stop_f, rtol=1.0e-10, atol=1.0e-12 * scale
+                    ):
+                        raise ValueError(
+                            f"PIO {prefix.upper()}Start/{prefix.upper()}Step/"
+                            f"{prefix.upper()}Stop are inconsistent with {size} samples"
+                        )
+                return values
             if start_f is not None and stop_f is not None and size > 1:
                 return np.linspace(start_f, stop_f, size)
             if size == 1 and start_f is not None:
@@ -8797,12 +10034,35 @@ class RcsGrid:
         xvals = _build_axis("x", int(xsize))
         yvals = _build_axis("y", int(ysize))
 
+        descending_axes = {}
+        for axis_name, values in (("X", xvals), ("Y", yvals)):
+            if np.any(~np.isfinite(values)):
+                raise ValueError(f"PIO {axis_name} axis contains nonfinite coordinates")
+            differences = np.diff(values)
+            increasing = bool(values.size <= 1 or np.all(differences > 0.0))
+            descending = bool(values.size > 1 and np.all(differences < 0.0))
+            if not increasing and not descending:
+                raise ValueError(
+                    f"PIO {axis_name} axis must be strictly monotonic without duplicates"
+                )
+            descending_axes[axis_name] = descending
+
         xname = (header.get("xname") or "").strip().lower()
         yname = (header.get("yname") or "").strip().lower()
 
         if data_type == "complex":
-            complex_arr = rawdata[0::2].astype(np.float64) + 1j * rawdata[1::2].astype(np.float64)
+            real_samples = rawdata[0::2]
+            imag_samples = rawdata[1::2]
+            finite_pair = np.isfinite(real_samples) & np.isfinite(imag_samples)
+            missing_pair = np.isnan(real_samples) & np.isnan(imag_samples)
+            if np.any(~(finite_pair | missing_pair)):
+                raise ValueError(
+                    "PIO complex data contains an infinite or one-sided missing sample"
+                )
+            complex_arr = real_samples.astype(np.float64) + 1j * imag_samples.astype(np.float64)
         else:
+            if np.any(np.isinf(rawdata)):
+                raise ValueError("PIO real data contains an infinite sample")
             complex_arr = rawdata.astype(np.complex128)
 
         # MATLAB reshape(data, xsize, ysize) is column-major.
@@ -8810,6 +10070,15 @@ class RcsGrid:
         data_2d = np.asarray(complex_arr, dtype=complex_dtype).reshape(
             (int(xsize), int(ysize)), order="F"
         )
+        # Descending range sweeps are valid Pioneer input.  Canonicalize them
+        # into the increasing GRIM axis order while applying the identical
+        # reversal to the corresponding data dimension.
+        if descending_axes["X"]:
+            xvals = xvals[::-1].copy()
+            data_2d = data_2d[::-1, :]
+        if descending_axes["Y"]:
+            yvals = yvals[::-1].copy()
+            data_2d = data_2d[:, ::-1]
 
         if not (xname in ("azimuth", "position") and yname == "frequency"):
             raise ValueError(
@@ -8817,13 +10086,25 @@ class RcsGrid:
                 "expected azimuth/position vs frequency"
             )
 
-        xunit = cls._canonical_unit(header.get("xunits"), _ANGLE_UNITS, "deg")
+        xunit_raw = header.get("xunits")
+        if xunit_raw is None or not str(xunit_raw).strip():
+            raise ValueError(
+                "PIO header missing XUnits; azimuth values cannot be safely "
+                "interpreted as degrees or radians"
+            )
+        xunit = cls._canonical_unit(xunit_raw, _ANGLE_UNITS, "deg")
         if xunit not in {"deg", "rad"}:
             raise ValueError(
                 f"Unsupported PIO azimuth unit: {header.get('xunits')!r}; "
                 "expected degrees or radians"
             )
-        yunit = cls._canonical_unit(header.get("yunits"), _FREQUENCY_UNITS, "GHz")
+        yunit_raw = header.get("yunits")
+        if yunit_raw is None or not str(yunit_raw).strip():
+            raise ValueError(
+                "PIO header missing YUnits; frequency values cannot be safely "
+                "interpreted as Hz, kHz, MHz, or GHz"
+            )
+        yunit = cls._canonical_unit(yunit_raw, _FREQUENCY_UNITS, "GHz")
         frequency_to_ghz = {
             "Hz": 1.0e-9,
             "kHz": 1.0e-6,
@@ -8836,6 +10117,8 @@ class RcsGrid:
                 "expected Hz, kHz, MHz, or GHz"
             )
         freqs_ghz = np.asarray(yvals, dtype=float) * frequency_to_ghz[yunit]
+        if np.any(~np.isfinite(freqs_ghz)) or np.any(freqs_ghz <= 0.0):
+            raise ValueError("PIO frequency axis must contain positive finite values")
 
         elevation_raw = header.get("elevation") or footer.get("elevation")
         if elevation_raw is None or str(elevation_raw).strip() == "":
@@ -8853,6 +10136,13 @@ class RcsGrid:
             or footer.get("elevationunits")
             or footer.get("elevation_units")
         )
+        if elevation_raw is not None and (
+            elevation_unit_raw is None or not str(elevation_unit_raw).strip()
+        ):
+            raise ValueError(
+                "PIO contains Elevation but no ElevationUnits; the angle cannot "
+                "be safely interpreted"
+            )
         elevation_unit = cls._canonical_unit(
             elevation_unit_raw, _ANGLE_UNITS, xunit
         )
@@ -8866,6 +10156,8 @@ class RcsGrid:
             if elevation_unit == "rad"
             else elevation_native
         )
+        if not np.isfinite(elevation_deg):
+            raise ValueError("PIO elevation must be finite")
 
         pol = (header.get("polarity") or footer.get("polarity") or "").strip().upper()
         if not pol:
@@ -8876,6 +10168,8 @@ class RcsGrid:
                     break
         if not pol:
             pol = "NA"
+        if any(ord(character) < 32 or ord(character) == 127 for character in pol):
+            raise ValueError("PIO polarity must not contain control characters")
 
         azimuths = np.asarray(xvals, dtype=float)
         if xunit == "rad":
@@ -8931,11 +10225,27 @@ class RcsGrid:
                 f"{self.angular_coordinate_system()!r} angular coordinates; "
                 "retain .grim or use PTM for a great-circle cut"
             )
-        if self.linear_quantity() != "sigma_3d":
+        quantity = self.linear_quantity()
+        if quantity != "sigma_3d":
+            if quantity == "sigma_2d":
+                remedy = (
+                    "Convert 2-D sigma_2d/dBke data to a physically defined "
+                    "3-D quantity before export."
+                )
+            elif quantity == "power_ratio":
+                remedy = (
+                    "This relative/dimensionless response has no established "
+                    "absolute 3-D RCS normalization; retain .grim/CSV or provide "
+                    "a reviewed conversion to sigma_3d first."
+                )
+            else:
+                remedy = (
+                    "Establish and record an absolute sigma_3d/dBsm "
+                    "normalization before export."
+                )
             raise ValueError(
                 "save_pio: Pioneer output requires a sigma_3d RCS dataset; "
-                f"got {self.linear_quantity()!r}. Convert 2-D sigma_2d/dBke "
-                "data to a physically defined 3-D quantity before export."
+                f"got {quantity!r}. {remedy}"
             )
         if el_idx is None:
             if len(self.elevations) == 1:
@@ -8970,6 +10280,29 @@ class RcsGrid:
         frequencies = np.asarray(self.frequencies, dtype=float)
         xsize = int(azimuths.size)
         ysize = int(frequencies.size)
+        for axis_name, values in (
+            ("azimuth", azimuths),
+            ("frequency", frequencies),
+        ):
+            if values.ndim != 1 or values.size == 0:
+                raise ValueError(
+                    f"save_pio: {axis_name} axis must be a nonempty 1-D array"
+                )
+            if np.any(~np.isfinite(values)):
+                raise ValueError(
+                    f"save_pio: {axis_name} axis contains nonfinite coordinates"
+                )
+            differences = np.diff(values)
+            if values.size > 1 and not (
+                np.all(differences > 0.0) or np.all(differences < 0.0)
+            ):
+                raise ValueError(
+                    f"save_pio: {axis_name} axis must be strictly monotonic"
+                )
+        if np.any(frequencies <= 0.0):
+            raise ValueError(
+                "save_pio: frequency axis must contain positive coordinates"
+            )
 
         # complex_slice[i, j] = complex sample at azimuths[i], frequencies[j]
         power_slice = self.rcs_power[:, el_idx, :, pol_idx]

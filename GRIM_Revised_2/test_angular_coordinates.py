@@ -56,8 +56,10 @@ class EquatorialConicGcTests(unittest.TestCase):
             units=units,
             extra={
                 "phase_reference": "exp(-jkr)",
-                "rcs_amp_real": field.real.copy(),
-                "rcs_amp_imag": field.imag.copy(),
+                # GHOST's stored sigma3D raw amplitude is normalized so that
+                # physical power is 4*pi*|A_raw|^2.
+                "rcs_amp_real": (field.real / np.sqrt(4.0 * np.pi)).copy(),
+                "rcs_amp_imag": (field.imag / np.sqrt(4.0 * np.pi)).copy(),
                 "scalar_note": "keep me",
                 "solver_metadata_json": "stale grid binding",
                 "production_mesh_certification_json": "stale certificate",

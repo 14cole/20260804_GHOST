@@ -854,9 +854,6 @@ class ClaimBroker:
                         return None
                     raise
             elif msvcrt is not None:  # pragma: no cover - Windows-only branch
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"\0")
-                    os.fsync(fd)
                 os.lseek(fd, 0, os.SEEK_SET)
                 mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
                 try:
@@ -868,6 +865,16 @@ class ClaimBroker:
                         os.close(fd)
                         return None
                     raise
+                # ``msvcrt.locking`` can lock this byte range while the file is
+                # still empty.  Seed the stable coordination file only *after*
+                # owning that range.  Seeding before the lock lets two first
+                # openers both observe size zero; one can then lock byte zero
+                # while the other is about to write it, turning ordinary lock
+                # contention into an intermittent Windows PermissionError.
+                if os.fstat(fd).st_size == 0:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.write(fd, b"\0")
+                    os.fsync(fd)
             else:  # pragma: no cover - every supported platform has one API
                 raise RuntimeError("No supported advisory file-lock API is available.")
             return fd

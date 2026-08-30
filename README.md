@@ -26,10 +26,13 @@ Keep this tree together when copying it to another machine. Do not copy only
 
 ## Build a copy-ready release
 
-On Windows, double-click `Build_GRIM_Release.bat`. From any operating system,
-run `python -m build_release` at the top level (`python3 -m build_release` when
-Python 3 uses that command name). The standard-library-only builder reads the
-version from `pyproject.toml` and creates these items under `dist/`:
+On 64-bit x86 Windows with CPython 3.12, double-click
+`Build_GRIM_Release.bat` or run `python -m build_release` at the top level.
+The release gate deliberately refuses another operating system or architecture
+because it must exercise the actual supported Windows stack. Build from an exactly clean, committed Git
+checkout whose `HEAD` has tag `v<version>` or `<version>` matching
+`pyproject.toml`. The builder packages only Git-tracked files, runs the
+complete release acceptance gate, and creates these items under `dist/`:
 
 ```text
 GRIM-<version>/
@@ -37,12 +40,30 @@ GRIM-<version>.zip
 GRIM-<version>-SHA256SUMS.txt
 ```
 
-The ZIP keeps the complete GRIM, GHOST, and FREDDY source layout, assets, and
-launchers, while omitting Git data, virtual environments, Python/test caches,
-and temporary files. `SHA256SUMS.txt` is also inside the release folder and
-ZIP. The external manifest verifies both the ZIP and every extracted payload
-file. Existing release artifacts are never overwritten, and an incomplete
-source tree fails before output is created.
+The gate verifies every package in the exact Windows Python dependency lock is
+installed at the reviewed version, strict UTF-8,
+prohibited release terms, startup diagnostics, the GRIM/GHOST/FREDDY unit
+tests, the separate GHOST CEM-tools suite, the standalone GHOST HPC-scheduling
+and local-driver integration tests, the GHOST ASCII-transfer check,
+and the selected native-acceleration policy. Missing native acceleration is a
+recorded warning by default; pass `--native-policy require` for a
+performance-ready build that must contain the matching native binaries.
+
+The ZIP keeps the complete GRIM, GHOST, and FREDDY tracked source layout,
+assets, and launchers while omitting Git data, untracked files, virtual
+environments, caches, and temporary files. `BUILD-INFO.json` records the source
+commit and release tag, deterministic source-tree digest, dependency-lock
+digest, gate status, target runtime, and build ID. `SHA256SUMS.txt` is also inside the release folder
+and ZIP. The external manifest verifies both the ZIP and every extracted
+payload file. Each artifact is exposed atomically, with the external manifest
+published last as the completion marker. Existing release artifacts are never
+overwritten, and an incomplete or dirty source tree fails before output is
+created.
+
+For a reviewed source export that is not inside any Git worktree, provide a
+newline-delimited allowlist with `--source-inventory PATH`. Runtime modules and
+acceptance tests present in that export are mandatory inventory entries. There
+is no CLI option to bypass the acceptance gate.
 
 Copy only the ZIP (and preferably its adjacent checksum manifest) to the other
 machine, extract it, then follow **Install and run** below. Git is not needed on
@@ -83,10 +104,17 @@ WinSCP binary mode so bytes are not re-encoded in transit.
 From the top-level folder:
 
 ```powershell
-py -3 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install `
+  -r requirements\windows-py312.txt
+.venv\Scripts\python.exe -m pip install --no-build-isolation `
+  -c requirements\constraints-windows-py312.txt -e .
 .venv\Scripts\python.exe -m grim_cut_gui
 ```
+
+For repeatable offline team installation, prepare the locked wheelhouse once
+and install with `--no-index` as described in `requirements/README.md`. Release
+creation itself never downloads or resolves packages from the network.
 
 All Windows launchers prefer this one repository-root `.venv`, then an active
 `VIRTUAL_ENV`, then a system Python. This keeps the integrated and standalone
@@ -96,7 +124,8 @@ To export `.pptx` files on Windows, install the optional PowerPoint bridge and
 have desktop Microsoft PowerPoint available:
 
 ```powershell
-py -m pip install -e ".[powerpoint]"
+.venv\Scripts\python.exe -m pip install `
+  -c requirements\constraints-windows-py312.txt -e ".[powerpoint]"
 ```
 
 The PPT slide preview works without PowerPoint; only final `.pptx` generation
@@ -272,6 +301,10 @@ enable or disable a feature in the electromagnetic assembly.
 
 ```powershell
 py -W error -m unittest -v test_clean_utf8.py
+
+cd requirements
+py -m unittest discover -s . -p "test*.py" -v
+cd ..
 
 py -m unittest discover -s GRIM_Revised_2 -p "test*.py" -v
 

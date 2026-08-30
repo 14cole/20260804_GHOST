@@ -27,6 +27,12 @@ import zipfile
 
 import numpy as np
 
+from assembly_workload import (
+    WORKLOAD_REVIEW_WARNING_PREFIX,
+    estimate_assembly_workload,
+    warnings_require_workload_acknowledgement,
+    workload_review_warning,
+)
 from feature_sum import (
     ASSEMBLY_RADAR_ANGULAR_CONTRACT,
     POINT_PATTERN_FRAME_CONVENTION,
@@ -45,6 +51,7 @@ from feature_sum import (
     load_body_requested_radar_grid,
     preflight_feature_assembly_capacity,
     prepare_point_pattern,
+    require_body_mesh_certification as audit_body_mesh_certification,
     surface_of_revolution_distance,
     validate_declared_coherent_delta_domain,
     validate_assembly_base_grid_metadata,
@@ -88,9 +95,31 @@ LINE_CSV_COLUMNS = (
 LINE_PLACEMENT_SCHEMA = "ghost.line-placement.v1"
 
 FEATURE_ASSEMBLY_REQUEST_SCHEMA = "ghost.feature-assembly-request.v1"
-FEATURE_LIBRARY_MANIFEST_SCHEMA = "ghost.feature-library-manifest.v2"
+FEATURE_LIBRARY_MANIFEST_SCHEMA = "ghost.feature-library-manifest.v3"
+PREVIOUS_FEATURE_LIBRARY_MANIFEST_SCHEMA = "ghost.feature-library-manifest.v2"
 LEGACY_FEATURE_LIBRARY_MANIFEST_SCHEMA = "ghost.feature-library-manifest.v1"
 FEATURE_LIBRARY_MANIFEST_KEY = "feature_library_manifest_json"
+FEATURE_VALIDATION_EVIDENCE_SCHEMA = (
+    "ghost.validation.feature-case-evidence.v1"
+)
+FEATURE_VALIDATION_ARTIFACT_ROLES = (
+    "clean_truth",
+    "clean_prediction",
+    "featured_truth",
+    "featured_prediction",
+)
+# A project may tighten these release ceilings, but a manifest must not turn a
+# numerically weak comparison into "validated" by silently loosening them.
+FEATURE_VALIDATION_RELEASE_CEILINGS = {
+    "max_normalized_rms": 0.25,
+    "max_magnitude_p95_db": 3.5,
+    "max_phase_rms_deg": 25.0,
+    "min_coherence": 0.95,
+}
+# Raising the active-field floor discards more of each pattern from the
+# pointwise magnitude/phase gates.  Production evidence may include weaker
+# samples (a more-negative floor), but must not validate only the pattern peak.
+FEATURE_VALIDATION_MAX_ACTIVE_FLOOR_DB = -40.0
 DECLARED_FEATURE_DELTA_RESPONSE_SCHEMA = (
     "ghost.declared-feature-delta-response.v1"
 )
@@ -161,6 +190,12 @@ class FeatureAssemblyRequest:
     # library. Keys may be "point:<dataset_id>" / "line:<dataset_id>" or a
     # bare dataset_id; the plan-level value above is only a fallback.
     expected_host_materials: Mapping[str, str] = field(default_factory=dict)
+    # Production builds from a locally solved GHOST body can require the
+    # embedded, dual-polarization fine-mesh certificate. External/HPC body
+    # responses need an explicit caller-selected waiver because GRIM cannot
+    # reconstruct solver convergence evidence that is absent from the file.
+    # Appended for positional compatibility with earlier request layouts.
+    require_body_mesh_certification: bool = False
 
 
 @dataclass(frozen=True)
@@ -2456,6 +2491,131 @@ def _finite_manifest_number(value: Any, label: str) -> float:
     return number
 
 
+def _manifest_sha256(value: Any, label: str) -> str:
+    digest = str(value).strip().lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError(f"{label} must be a lowercase hexadecimal SHA-256 digest.")
+    return digest
+
+
+def _normalize_feature_validation_evidence(
+    value: Any,
+    *,
+    response_content_sha256: str,
+) -> list[dict[str, Any]]:
+    """Validate machine-generated full-wave evidence bound to this response."""
+
+    if not isinstance(value, list) or not value:
+        raise ValueError(
+            "A current validated feature manifest requires a nonempty "
+            "validation.evidence array generated from passing full-wave cases."
+        )
+    normalized = []
+    seen_case_ids = set()
+    for index, raw in enumerate(value):
+        label = f"validation.evidence[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{label} must be an object.")
+        if str(raw.get("schema", "")).strip() != FEATURE_VALIDATION_EVIDENCE_SCHEMA:
+            raise ValueError(
+                f"{label}.schema must be {FEATURE_VALIDATION_EVIDENCE_SCHEMA!r}."
+            )
+        case_id = str(raw.get("case_id", "")).strip()
+        if not case_id or case_id in seen_case_ids:
+            raise ValueError(
+                f"{label}.case_id must be nonempty and unique within the manifest."
+            )
+        seen_case_ids.add(case_id)
+        if raw.get("passed") is not True:
+            raise ValueError(f"{label} must record passed=true.")
+        report_sha256 = _manifest_sha256(
+            raw.get("report_sha256"), f"{label}.report_sha256"
+        )
+        comparison_sha256 = _manifest_sha256(
+            raw.get("comparison_sha256"), f"{label}.comparison_sha256"
+        )
+        evidence_response = _manifest_sha256(
+            raw.get("feature_response_content_sha256"),
+            f"{label}.feature_response_content_sha256",
+        )
+        if evidence_response != response_content_sha256:
+            raise ValueError(
+                f"{label} certifies feature response {evidence_response}, not "
+                f"this manifest response {response_content_sha256}."
+            )
+        artifacts = raw.get("artifact_sha256")
+        if not isinstance(artifacts, Mapping) or set(artifacts) != set(
+            FEATURE_VALIDATION_ARTIFACT_ROLES
+        ):
+            raise ValueError(
+                f"{label}.artifact_sha256 must contain exactly "
+                f"{list(FEATURE_VALIDATION_ARTIFACT_ROLES)}."
+            )
+        normalized_artifacts = {
+            role: _manifest_sha256(
+                artifacts[role], f"{label}.artifact_sha256.{role}"
+            )
+            for role in FEATURE_VALIDATION_ARTIFACT_ROLES
+        }
+        raw_limits = raw.get("gate_limits")
+        required_limits = {
+            "active_floor_db",
+            *FEATURE_VALIDATION_RELEASE_CEILINGS,
+        }
+        if not isinstance(raw_limits, Mapping) or set(raw_limits) != required_limits:
+            raise ValueError(
+                f"{label}.gate_limits must contain exactly "
+                f"{sorted(required_limits)}."
+            )
+        gate_limits = {
+            key: _finite_manifest_number(
+                raw_limits[key], f"{label}.gate_limits.{key}"
+            )
+            for key in required_limits
+        }
+        if gate_limits["active_floor_db"] > FEATURE_VALIDATION_MAX_ACTIVE_FLOOR_DB:
+            raise ValueError(
+                f"{label}.gate_limits.active_floor_db="
+                f"{gate_limits['active_floor_db']:g} excludes more weak-field "
+                "samples than the Production maximum "
+                f"{FEATURE_VALIDATION_MAX_ACTIVE_FLOOR_DB:g} dB."
+            )
+        for key in (
+            "max_normalized_rms",
+            "max_magnitude_p95_db",
+            "max_phase_rms_deg",
+        ):
+            if not 0.0 <= gate_limits[key] <= FEATURE_VALIDATION_RELEASE_CEILINGS[key]:
+                raise ValueError(
+                    f"{label}.gate_limits.{key}={gate_limits[key]:g} is looser "
+                    f"than the Production ceiling "
+                    f"{FEATURE_VALIDATION_RELEASE_CEILINGS[key]:g}."
+                )
+        if not FEATURE_VALIDATION_RELEASE_CEILINGS[
+            "min_coherence"
+        ] <= gate_limits["min_coherence"] <= 1.0:
+            raise ValueError(
+                f"{label}.gate_limits.min_coherence={gate_limits['min_coherence']:g} "
+                "is looser than the Production floor "
+                f"{FEATURE_VALIDATION_RELEASE_CEILINGS['min_coherence']:g}."
+            )
+        normalized.append({
+            "schema": FEATURE_VALIDATION_EVIDENCE_SCHEMA,
+            "case_id": case_id,
+            "passed": True,
+            "report_sha256": report_sha256,
+            "comparison_sha256": comparison_sha256,
+            "feature_response_content_sha256": evidence_response,
+            "artifact_sha256": normalized_artifacts,
+            "gate_limits": {
+                key: gate_limits[key] for key in sorted(gate_limits)
+            },
+        })
+    return sorted(normalized, key=lambda item: item["case_id"])
+
+
 def validate_feature_library_manifest(
     manifest: Mapping[str, Any], *, dataset_id: str, feature_kind: str
 ) -> dict[str, Any]:
@@ -2489,14 +2649,16 @@ def validate_feature_library_manifest(
     manifest_schema = str(manifest["schema"]).strip()
     if manifest_schema not in {
         FEATURE_LIBRARY_MANIFEST_SCHEMA,
+        PREVIOUS_FEATURE_LIBRARY_MANIFEST_SCHEMA,
         LEGACY_FEATURE_LIBRARY_MANIFEST_SCHEMA,
     }:
         raise ValueError(
             f"Feature-library manifest schema={manifest['schema']!r}; require "
             f"{FEATURE_LIBRARY_MANIFEST_SCHEMA!r} (or Legacy-only "
+            f"{PREVIOUS_FEATURE_LIBRARY_MANIFEST_SCHEMA!r}/"
             f"{LEGACY_FEATURE_LIBRARY_MANIFEST_SCHEMA!r})."
         )
-    legacy_manifest = manifest_schema == LEGACY_FEATURE_LIBRARY_MANIFEST_SCHEMA
+    v1_manifest = manifest_schema == LEGACY_FEATURE_LIBRARY_MANIFEST_SCHEMA
     response_content_sha256 = str(
         manifest["response_content_sha256"]
     ).strip().lower()
@@ -2591,7 +2753,7 @@ def validate_feature_library_manifest(
         path_turn_value = applicability.get("maximum_path_vertex_turn_deg")
         path_turn_max = (
             180.0
-            if legacy_manifest and path_turn_value is None
+            if v1_manifest and path_turn_value is None
             else _finite_manifest_number(
                 path_turn_value,
                 "applicability.maximum_path_vertex_turn_deg",
@@ -2621,7 +2783,7 @@ def validate_feature_library_manifest(
                 LINE_PHASE_CALIBRATION_SCHEMA,
                 LEGACY_LINE_PHASE_CALIBRATION_SCHEMA,
             }
-            if legacy_manifest else {LINE_PHASE_CALIBRATION_SCHEMA}
+            if v1_manifest else {LINE_PHASE_CALIBRATION_SCHEMA}
         )
         if calibration_schema not in allowed_calibration_schemas:
             raise ValueError(
@@ -2691,6 +2853,36 @@ def validate_feature_library_manifest(
             "A validated feature-library manifest requires at least one "
             "validation.case_ids entry."
         )
+    cleaned_case_ids = [value.strip() for value in case_ids]
+    if len(set(cleaned_case_ids)) != len(cleaned_case_ids):
+        raise ValueError(
+            "Feature-library manifest validation.case_ids must be unique."
+        )
+    evidence: list[dict[str, Any]] = []
+    if manifest_schema == FEATURE_LIBRARY_MANIFEST_SCHEMA:
+        if status == "validated":
+            evidence = _normalize_feature_validation_evidence(
+                validation.get("evidence"),
+                response_content_sha256=response_content_sha256,
+            )
+            evidence_case_ids = {item["case_id"] for item in evidence}
+            if evidence_case_ids != set(cleaned_case_ids):
+                raise ValueError(
+                    "validation.case_ids must exactly match the passing "
+                    "machine-generated validation.evidence case IDs."
+                )
+            if feature_kind == "line" and not set(
+                value.strip() for value in calibration_cases
+            ).issubset(evidence_case_ids):
+                raise ValueError(
+                    "line_phase_calibration.case_ids must refer to passing "
+                    "full-wave evidence cases for this exact response."
+                )
+        elif validation.get("evidence") not in (None, []):
+            raise ValueError(
+                "A provisional or uncertified manifest must not carry passing "
+                "validation.evidence."
+            )
 
     normalized = json.loads(json.dumps(dict(manifest), sort_keys=True))
     normalized["response_content_sha256"] = response_content_sha256
@@ -2725,9 +2917,9 @@ def validate_feature_library_manifest(
         }
     normalized["validation"] = dict(validation)
     normalized["validation"]["status"] = status
-    normalized["validation"]["case_ids"] = [
-        value.strip() for value in case_ids
-    ]
+    normalized["validation"]["case_ids"] = cleaned_case_ids
+    if manifest_schema == FEATURE_LIBRARY_MANIFEST_SCHEMA:
+        normalized["validation"]["evidence"] = evidence
     return normalized
 
 
@@ -3637,9 +3829,9 @@ def _apply_feature_library_contracts(
                             f"{feature_kind} dataset {dataset_id!r} uses "
                             f"Legacy manifest schema {manifest['schema']!r}; "
                             f"Production requires {FEATURE_LIBRARY_MANIFEST_SCHEMA!r} "
-                            "so path-turn/taper and current response identity "
-                            "assumptions are explicit. Migrate it with the "
-                            "supported manifest tool."
+                            "so passing full-wave cases, all four artifacts, "
+                            "and the exact exercised response are bound. "
+                            "Migrate it with the supported manifest tool."
                         )
                         if require_manifests:
                             raise ValueError(message)
@@ -3969,6 +4161,73 @@ def _apply_feature_library_contracts(
     return contracts, warnings, source_hashes, absent_source_paths
 
 
+def _prepared_assembly_workload(
+    radar_grid: Mapping[str, Any],
+    lines: Sequence[Mapping[str, Any]],
+    points: Sequence[Mapping[str, Any]],
+    *,
+    triangle_count: int,
+    shadow_enabled: bool,
+):
+    """Count the exact field grid and a conservative shadow-ray upper bound."""
+
+    look_count = (
+        len(radar_grid.get("azimuths_deg", ()))
+        * len(radar_grid.get("elevations_deg", ()))
+    )
+    frequency_count = len(radar_grid.get("frequencies_ghz", ()))
+    line_piece_count = 0
+    line_segment_count = 0
+    pieces_exact = True
+    for placement in lines:
+        segment_count = 1
+        segments_counted = False
+        try:
+            perimeter = np.asarray(placement["perimeter"], dtype=float)
+            if perimeter.ndim == 2 and perimeter.shape == (2, 3):
+                perimeter = perimeter.reshape(1, 2, 3)
+            if perimeter.ndim != 3 or perimeter.shape[1:] != (2, 3):
+                raise ValueError
+            segment_count = len(perimeter)
+            line_segment_count += segment_count
+            segments_counted = True
+            shadow_points = placement.get("shadow_points")
+            if shadow_points is not None:
+                line_piece_count += len(shadow_points)
+                continue
+            maximum_piece_length = float(placement["max_piece_length_m"])
+            if not math.isfinite(maximum_piece_length) or maximum_piece_length <= 0.0:
+                raise ValueError
+            lengths = np.linalg.norm(perimeter[:, 1] - perimeter[:, 0], axis=1)
+            if not np.all(np.isfinite(lengths)) or np.any(lengths <= 0.0):
+                raise ValueError
+            line_piece_count += sum(
+                max(1, int(math.ceil(float(length) / maximum_piece_length)))
+                for length in lengths
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            # This path is for old injected/test placements. Authoritative
+            # prepared placements always carry the fixed subdivision length.
+            pieces_exact = False
+            if not segments_counted:
+                line_segment_count += segment_count
+            line_piece_count += max(1, segment_count)
+
+    return estimate_assembly_workload(
+        look_count=look_count,
+        frequency_count=frequency_count,
+        point_count=len(points),
+        line_path_count=len(lines),
+        line_segment_count=line_segment_count,
+        line_piece_count=line_piece_count,
+        mesh_triangle_count=triangle_count,
+        shadow_enabled=shadow_enabled,
+        quantities_validated=True,
+        line_piece_count_exact=pieces_exact,
+        mesh_triangle_count_exact=True,
+    )
+
+
 def prepare_feature_assembly(
     request: FeatureAssemblyRequest,
     *,
@@ -4079,6 +4338,13 @@ def prepare_feature_assembly(
         raise InterruptedError("Feature placement validation cancelled.")
 
     base_payload = _load_grim(str(base))
+    body_mesh_certification = None
+    if request.require_body_mesh_certification:
+        if progress_callback is not None:
+            progress_callback(10, 100, "Checking body mesh certification")
+        body_mesh_certification = audit_body_mesh_certification(
+            str(base), loaded_grim=base_payload
+        )
     existing_feature_records = _decoded_feature_provenance(
         base_payload, base.name
     )
@@ -4403,6 +4669,17 @@ def prepare_feature_assembly(
                 "the smallest supported bias."
             )
 
+    assembly_workload = _prepared_assembly_workload(
+        grid,
+        lines,
+        points,
+        triangle_count=(0 if surface is None else len(surface.triangles)),
+        shadow_enabled=bool(request.shadow),
+    )
+    workload_warning = workload_review_warning(assembly_workload)
+    if workload_warning is not None:
+        validation_warnings.append(workload_warning)
+
     requirements = FeatureDatasetRequirements(
         point_dataset_ids=tuple(dict.fromkeys(
             str(record["dataset_id"]) for record in point_records
@@ -4506,6 +4783,7 @@ def prepare_feature_assembly(
             "TE": float(PSI_VV_DEG),
         },
         "line_grazing_taper_deg": float(GRAZING_TAPER_DEG),
+        "assembly_workload_preflight": assembly_workload.as_dict(),
         "base_grid_contract": base_grid_contract,
         "legacy_base_metadata_allowed": bool(
             request.allow_legacy_base_metadata
@@ -4515,6 +4793,12 @@ def prepare_feature_assembly(
             if request.require_feature_manifests
             else "legacy_warn"
         ),
+        "body_mesh_certification_policy": (
+            "required_validated"
+            if request.require_body_mesh_certification
+            else "external_or_survey_waiver"
+        ),
+        "body_mesh_certification": body_mesh_certification,
         "expected_host_material": (
             None
             if request.expected_host_material is None
@@ -4731,6 +5015,7 @@ def _execution_plan_snapshot(plan: FeatureAssemblyPlan) -> FeatureAssemblyPlan:
 
 def execute_feature_assembly(
     plan: FeatureAssemblyPlan, *,
+    acknowledged_plan_sha256: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> str:
@@ -4753,6 +5038,16 @@ def execute_feature_assembly(
             "Feature Assembly plan predates the sealed validation contract; "
             "validate the placement configuration again before building."
         )
+    if warnings_require_workload_acknowledgement(plan.validation_warnings):
+        acknowledgement = str(acknowledged_plan_sha256 or "").strip().lower()
+        expected = str(plan.prepared_plan_sha256).strip().lower()
+        if acknowledgement != expected:
+            raise RuntimeError(
+                "Assembly workload review was not acknowledged. Review the "
+                "operation counts in validation_warnings, then pass this exact "
+                "sealed plan digest as acknowledged_plan_sha256: "
+                f"{expected}. Output was not published."
+            )
     capacity_estimate = preflight_feature_assembly_capacity(
         str(plan.base_path),
         str(plan.output_path),
@@ -4802,6 +5097,7 @@ def execute_feature_assembly(
 
 def run_feature_assembly(
     request: FeatureAssemblyRequest, *,
+    acknowledged_plan_sha256: Optional[str] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> str:
@@ -4830,11 +5126,15 @@ def run_feature_assembly(
         cancel_check=cancel_check,
         progress_callback=mapped_progress(0, 25),
     )
-    return execute_feature_assembly(
-        plan,
-        cancel_check=cancel_check,
-        progress_callback=mapped_progress(25, 75),
-    )
+    execute_kwargs = {
+        "cancel_check": cancel_check,
+        "progress_callback": mapped_progress(25, 75),
+    }
+    if acknowledged_plan_sha256 is not None:
+        execute_kwargs["acknowledged_plan_sha256"] = (
+            acknowledged_plan_sha256
+        )
+    return execute_feature_assembly(plan, **execute_kwargs)
 
 
 __all__ = [
@@ -4842,6 +5142,10 @@ __all__ = [
     "FEATURE_ASSEMBLY_REQUEST_SCHEMA",
     "FEATURE_LIBRARY_MANIFEST_KEY",
     "FEATURE_LIBRARY_MANIFEST_SCHEMA",
+    "FEATURE_VALIDATION_ARTIFACT_ROLES",
+    "FEATURE_VALIDATION_EVIDENCE_SCHEMA",
+    "FEATURE_VALIDATION_MAX_ACTIVE_FLOOR_DB",
+    "FEATURE_VALIDATION_RELEASE_CEILINGS",
     "LEGACY_FEATURE_LIBRARY_MANIFEST_SCHEMA",
     "LEGACY_LINE_PHASE_CALIBRATION_SCHEMA",
     "LINE_CSV_COLUMNS",
@@ -4849,6 +5153,7 @@ __all__ = [
     "LINE_PLACEMENT_SCHEMA",
     "POINT_CSV_COLUMNS",
     "POINT_PLACEMENT_SCHEMA",
+    "PREVIOUS_FEATURE_LIBRARY_MANIFEST_SCHEMA",
     "SURFACE_BINDING_SCHEMA",
     "SURFACE_FRAME_CONVENTION",
     "FeatureAssemblyPlan",

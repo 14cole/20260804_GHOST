@@ -36,6 +36,68 @@ class _IsarComputeSignals(QObject):
     done = Signal(object, object)  # (params, result)
 
 
+_AXIS_AVAILABILITY_WORK_BYTES = 8 * 1024**2
+
+
+def _selected_polarization_axis_availability(
+    dataset: RcsGrid,
+    polarization_indices,
+    *,
+    require_phase: bool,
+    maximum_work_bytes: int = _AXIS_AVAILABILITY_WORK_BYTES,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return finite-sample masks for frequency, elevation, and azimuth.
+
+    The parameter sidebar asks this question whenever polarization selection
+    changes.  Advanced-indexing the polarization axis first copied an entire
+    selected 4-D power grid (and another phase grid in phase mode).  Scan
+    basic-slice azimuth blocks instead: input arrays remain views and the only
+    transient is one bounded Boolean block.
+    """
+
+    shape = tuple(int(value) for value in dataset.rcs_power.shape)
+    if len(shape) != 4 or tuple(dataset.rcs_phase.shape) != shape:
+        raise ValueError("dataset power and phase grids must have matching 4-D shapes")
+    selected = sorted({int(value) for value in polarization_indices})
+    if not selected:
+        return (
+            np.zeros(shape[2], dtype=bool),
+            np.zeros(shape[1], dtype=bool),
+            np.zeros(shape[0], dtype=bool),
+        )
+    if selected[0] < 0 or selected[-1] >= shape[3]:
+        raise IndexError("polarization index is out of range")
+    budget = int(maximum_work_bytes)
+    if budget < 1:
+        raise ValueError("maximum_work_bytes must be positive")
+
+    frequency_available = np.zeros(shape[2], dtype=bool)
+    elevation_available = np.zeros(shape[1], dtype=bool)
+    azimuth_available = np.zeros(shape[0], dtype=bool)
+    cells_per_azimuth = max(1, shape[1] * shape[2])
+    simultaneous_masks = 2 if require_phase else 1
+    azimuth_block = max(
+        1,
+        min(
+            shape[0],
+            budget // (cells_per_azimuth * simultaneous_masks),
+        ),
+    )
+
+    for pol_index in selected:
+        for start in range(0, shape[0], azimuth_block):
+            stop = min(shape[0], start + azimuth_block)
+            selection = (slice(start, stop), slice(None), slice(None), pol_index)
+            valid = np.isfinite(dataset.rcs_power[selection])
+            if require_phase:
+                valid &= np.isfinite(dataset.rcs_phase[selection])
+            azimuth_available[start:stop] |= valid.any(axis=(1, 2))
+            elevation_available |= valid.any(axis=(0, 2))
+            frequency_available |= valid.any(axis=(0, 1))
+
+    return frequency_available, elevation_available, azimuth_available
+
+
 class PlotOpsMixin:
     def _on_param_selection_changed(self) -> None:
         self._maybe_autoplot()
@@ -50,21 +112,22 @@ class PlotOpsMixin:
             self._sync_axis_list(self.list_az, self.active_dataset.azimuths, None)
             return
 
-        pwr_sel = self.active_dataset.rcs_power[:, :, :, selected_pol]
-        if self._button_checked(self.btn_phase):
-            phs_sel = self.active_dataset.rcs_phase[:, :, :, selected_pol]
-            valid = np.isfinite(pwr_sel) & np.isfinite(phs_sel)
-        else:
-            valid = np.isfinite(pwr_sel)
+        freq_available, elev_available, az_available = (
+            _selected_polarization_axis_availability(
+                self.active_dataset,
+                selected_pol,
+                require_phase=self._button_checked(self.btn_phase),
+            )
+        )
 
         self._sync_axis_list(
-            self.list_freq, self.active_dataset.frequencies, valid.any(axis=(0, 1, 3))
+            self.list_freq, self.active_dataset.frequencies, freq_available
         )
         self._sync_axis_list(
-            self.list_elev, self.active_dataset.elevations, valid.any(axis=(0, 2, 3))
+            self.list_elev, self.active_dataset.elevations, elev_available
         )
         self._sync_axis_list(
-            self.list_az, self.active_dataset.azimuths, valid.any(axis=(1, 2, 3))
+            self.list_az, self.active_dataset.azimuths, az_available
         )
         self._maybe_autoplot()
 

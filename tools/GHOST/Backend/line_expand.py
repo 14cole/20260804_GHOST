@@ -74,6 +74,17 @@ C0 = 299792458.0
 # future numerical-default change cannot silently reuse an older validation.
 GRAZING_TAPER_DEG = 10.0
 
+# Batching many look directions turns the repeated piece-by-vector products in
+# ``expand_perimeter`` into bounded matrix products.  The pair budget is the
+# important limit: the batch path retains several real/complex arrays per
+# (solver piece, look) pair, so a fixed direction count would be unsafe for a
+# very finely subdivided perimeter.  Small jobs deliberately stay on the
+# historical scalar-look path, preserving its exact floating-point reduction
+# order for validation fixtures and interactive previews.
+_LINE_BATCH_MIN_DIRECTIONS = 16
+_LINE_BATCH_MAX_DIRECTIONS = 128
+_LINE_BATCH_PAIR_BUDGET = 8_192
+
 # Legacy local-polarization inter-solver calibration constants.  The original
 # ring-calibration fixture is unavailable; the checked-in replacement PEC
 # ring-groove regression tests this exact software path but does not establish
@@ -480,6 +491,75 @@ def _transverse_seam_basis(t_hat: 'np.ndarray',
     return e_tm, e_te
 
 
+def _transverse_seam_projections_many(
+    t_hat: 'np.ndarray',
+    b_hat: 'np.ndarray',
+    directions: 'np.ndarray',
+    e_vv: 'np.ndarray',
+    e_hh: 'np.ndarray',
+    tol: 'float' = 1e-12,
+) -> 'Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]':
+    """Project the local TM/TE basis onto earth V/H in bounded batches.
+
+    This is algebraically equivalent to constructing the two three-vectors for
+    every piece/look pair, but needs four scalars per pair instead of six.  For
+    transverse earth polarization ``e``::
+
+        e_TM.e = t.e / |t x d|
+        e_TE.e = (t x d).e / |t x d| = t.(d x e) / |t x d|
+
+    The uncommon seam-parallel fallback repeats the scalar implementation's
+    signed ``+b`` construction so batching cannot introduce a polarization
+    discontinuity at a nearly degenerate local frame.
+    """
+
+    t = np.atleast_2d(np.asarray(t_hat, dtype=float))
+    b = np.atleast_2d(np.asarray(b_hat, dtype=float))
+    looks = np.atleast_2d(np.asarray(directions, dtype=float))
+    vertical = np.atleast_2d(np.asarray(e_vv, dtype=float))
+    horizontal = np.atleast_2d(np.asarray(e_hh, dtype=float))
+    if t.shape != b.shape or t.shape[1] != 3:
+        raise ValueError("t_hat and b_hat must be matching (n, 3) arrays.")
+    if looks.ndim != 2 or looks.shape[1] != 3:
+        raise ValueError("directions must have shape (n, 3).")
+    if vertical.shape != looks.shape or horizontal.shape != looks.shape:
+        raise ValueError("earth polarization arrays must match directions.")
+
+    tm_v = t @ vertical.T
+    tm_h = t @ horizontal.T
+    denominator = np.hypot(tm_v, tm_h)
+    regular = denominator > float(tol)
+    te_v = t @ np.cross(looks, vertical).T
+    te_h = t @ np.cross(looks, horizontal).T
+    for values in (tm_v, tm_h, te_v, te_h):
+        np.divide(values, denominator, out=values, where=regular)
+
+    # Exactly seam-parallel looks are grazing and later receive zero weight,
+    # but a deterministic finite basis is still required for robust arithmetic
+    # and for near-degenerate regression tests.
+    for piece_index, direction_index in np.argwhere(~regular):
+        look = looks[direction_index]
+        local_tm, local_te = _transverse_seam_basis(
+            t[piece_index:piece_index + 1],
+            b[piece_index:piece_index + 1],
+            look,
+            tol=tol,
+        )
+        tm_v[piece_index, direction_index] = float(
+            local_tm[0] @ vertical[direction_index]
+        )
+        tm_h[piece_index, direction_index] = float(
+            local_tm[0] @ horizontal[direction_index]
+        )
+        te_v[piece_index, direction_index] = float(
+            local_te[0] @ vertical[direction_index]
+        )
+        te_h[piece_index, direction_index] = float(
+            local_te[0] @ horizontal[direction_index]
+        )
+    return tm_v, te_v, tm_h, te_h
+
+
 def _subdivide(segments: 'np.ndarray', max_len: 'float',
                segment_normals: 'Optional[np.ndarray]' = None
                ) -> 'Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]':
@@ -610,6 +690,7 @@ def expand_perimeter(segments: 'np.ndarray',
                      cancel_check: 'Optional[Callable[[], bool]]' = None,
                      progress_callback: 'Optional[Callable[[int, int], None]]' = None,
                      _shadow_visibility=None,
+                     _look_batch_size: 'Optional[int]' = None,
                      ) -> 'Dict[str, np.ndarray]':
     """Expand a seam coefficient along a 3D perimeter.
 
@@ -630,6 +711,11 @@ def expand_perimeter(segments: 'np.ndarray',
 
     Returns ``{"F_vv", "F_hh", "F_vh"}`` complex arrays over directions in the
     physical 3-D amplitude normalization (sigma = 4 pi |F|^2).
+
+    ``_look_batch_size`` is a private diagnostics/test control.  Production
+    calls should leave it unset so the implementation selects a bounded batch
+    from the solver-piece count.  A value of one forces the scalar reference
+    path.
     """
     freq = float(frequency_ghz if frequency_ghz is not None else coefficients.frequency_ghz)
     if not math.isfinite(freq) or freq <= 0.0:
@@ -717,7 +803,38 @@ def expand_perimeter(segments: 'np.ndarray',
     if not math.isfinite(taper) or taper <= 0.0:
         raise ValueError("grazing_taper_deg must be positive and finite.")
 
-    for i, d in enumerate(dirs):
+    if _look_batch_size is None:
+        automatic_batch_size = min(
+            _LINE_BATCH_MAX_DIRECTIONS,
+            max(1, _LINE_BATCH_PAIR_BUDGET // max(1, len(r_mid))),
+        )
+        look_batch_size = (
+            automatic_batch_size
+            if (
+                len(dirs) >= _LINE_BATCH_MIN_DIRECTIONS
+                and automatic_batch_size >= 4
+            )
+            else 1
+        )
+    else:
+        try:
+            look_batch_size = int(_look_batch_size)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "_look_batch_size must be a positive integer."
+            ) from exc
+        if look_batch_size != _look_batch_size or look_batch_size <= 0:
+            raise ValueError("_look_batch_size must be a positive integer.")
+        look_batch_size = min(look_batch_size, _LINE_BATCH_MAX_DIRECTIONS)
+
+    # A live occluder is deliberately scalar: third-party visibility callbacks
+    # may carry per-look side effects, and ray tracing dominates their runtime.
+    # Production Assembly freezes visibility into packed storage before calling
+    # this routine, so its field evaluation still takes the batched path.
+    use_scalar_looks = look_batch_size <= 1 or visible_query is not None
+
+    scalar_looks = enumerate(dirs) if use_scalar_looks else ()
+    for i, d in scalar_looks:
         if cancel_check is not None and cancel_check():
             raise InterruptedError("Feature assembly cancelled.")
         d_n = n_hat @ d
@@ -754,19 +871,136 @@ def expand_perimeter(segments: 'np.ndarray',
         e_tm_local, e_te_local = _transverse_seam_basis(
             frame_t_hat, b_hat, d
         )
-        for key, e_t, e_r in (("F_vv", e_vv[i], e_vv[i]),
-                              ("F_hh", e_hh[i], e_hh[i]),
-                              ("F_vh", e_hh[i], e_vv[i])):
-            # Project transmit and receive fields onto the same signed local
-            # polarization axes.  The resulting dyad is reciprocal, and when
-            # a_tm == a_te it reduces to the identity on the transverse plane
-            # (so a mere seam-frame rotation cannot manufacture cross-pol).
-            tx_tm, rx_tm = e_tm_local @ e_t, e_tm_local @ e_r
-            tx_te, rx_te = e_te_local @ e_t, e_te_local @ e_r
-            coeff = tx_tm * rx_tm * a_tm + tx_te * rx_te * a_te
-            F[key][i] = pref * np.sum(w_lit * coeff * phase)
+        # Reuse the four unique projections across all three channels.  The
+        # former channel loop recomputed the same matvecs for co- and cross-pol.
+        tm_v = e_tm_local @ e_vv[i]
+        te_v = e_te_local @ e_vv[i]
+        tm_h = e_tm_local @ e_hh[i]
+        te_h = e_te_local @ e_hh[i]
+        # The dyad is reciprocal, and an isotropic coefficient remains
+        # cross-pol free under a mere seam-frame rotation.
+        coeff = tm_v * tm_v * a_tm + te_v * te_v * a_te
+        F["F_vv"][i] = pref * np.sum(
+            w_lit * coeff * phase
+        )
+        coeff = tm_h * tm_h * a_tm + te_h * te_h * a_te
+        F["F_hh"][i] = pref * np.sum(
+            w_lit * coeff * phase
+        )
+        coeff = tm_h * tm_v * a_tm + te_h * te_v * a_te
+        F["F_vh"][i] = pref * np.sum(
+            w_lit * coeff * phase
+        )
         if progress_callback is not None:
             progress_callback(i + 1, len(dirs))
+
+    piece_column = dL[:, None]
+    total_directions = len(dirs)
+    batch_starts = (
+        range(0, total_directions, look_batch_size)
+        if not use_scalar_looks
+        else ()
+    )
+    for batch_start in batch_starts:
+        batch_stop = min(total_directions, batch_start + look_batch_size)
+        # Match the scalar path's first cancellation checkpoint before doing
+        # work.  Subsequent checkpoints occur in look order before publishing
+        # each result, limiting cancellation latency to one bounded batch.
+        if cancel_check is not None and cancel_check():
+            raise InterruptedError("Feature assembly cancelled.")
+
+        batch_dirs = dirs[batch_start:batch_stop]
+        d_n = n_hat @ batch_dirs.T
+        d_b = b_hat @ batch_dirs.T
+        d_path = path_t_hat @ batch_dirs.T
+        lit = d_n > 0.0
+
+        if not np.any(lit):
+            for local_index, direction_index in enumerate(
+                range(batch_start, batch_stop)
+            ):
+                if (
+                    local_index > 0
+                    and cancel_check is not None
+                    and cancel_check()
+                ):
+                    raise InterruptedError("Feature assembly cancelled.")
+                if progress_callback is not None:
+                    progress_callback(direction_index + 1, total_directions)
+            continue
+
+        phi = np.degrees(np.arctan2(d_n, d_b))
+        a_tm = np.zeros(phi.shape, dtype=complex)
+        a_te = np.zeros(phi.shape, dtype=complex)
+        if np.any(lit):
+            a_tm[lit], a_te[lit] = coefficients.sample(phi[lit])
+        a_tm *= cal_tm
+        a_te *= cal_te
+
+        w_lit = np.clip(
+            np.degrees(np.arcsin(np.clip(d_n, -1.0, 1.0))) / taper,
+            0.0,
+            1.0,
+        )
+        w_lit = np.where(
+            lit, 0.5 - 0.5 * np.cos(math.pi * w_lit), 0.0
+        )
+        if packed_shadow is not None:
+            visible = np.empty(lit.shape, dtype=bool)
+            for local_index, direction_index in enumerate(
+                range(batch_start, batch_stop)
+            ):
+                visible[:, local_index] = packed_shadow.column(direction_index)
+            w_lit *= visible
+        elif dense_shadow is not None:
+            w_lit *= dense_shadow[:, batch_start:batch_stop]
+
+        # Keep the same exact finite-piece integral as the scalar reference;
+        # only its evaluation order across independent look columns changes.
+        x = k * d_path * piece_column
+        phase = (
+            np.exp(2j * k * (r0 @ batch_dirs.T))
+            * piece_column
+            * np.exp(1j * x)
+            * np.sinc(x / math.pi)
+        )
+        tm_v, te_v, tm_h, te_h = _transverse_seam_projections_many(
+            frame_t_hat,
+            b_hat,
+            batch_dirs,
+            e_vv[batch_start:batch_stop],
+            e_hh[batch_start:batch_stop],
+        )
+
+        weighted_phase = w_lit * phase
+        batch_values = {
+            "F_vv": pref * np.sum(
+                weighted_phase * (tm_v * tm_v * a_tm + te_v * te_v * a_te),
+                axis=0,
+            ),
+            "F_hh": pref * np.sum(
+                weighted_phase * (tm_h * tm_h * a_tm + te_h * te_h * a_te),
+                axis=0,
+            ),
+            "F_vh": pref * np.sum(
+                weighted_phase * (tm_h * tm_v * a_tm + te_h * te_v * a_te),
+                axis=0,
+            ),
+        }
+
+        for local_index, direction_index in enumerate(
+            range(batch_start, batch_stop)
+        ):
+            if (
+                local_index > 0
+                and cancel_check is not None
+                and cancel_check()
+            ):
+                raise InterruptedError("Feature assembly cancelled.")
+            for key in F:
+                F[key][direction_index] = batch_values[key][local_index]
+            if progress_callback is not None:
+                progress_callback(direction_index + 1, total_directions)
     return F
 
 

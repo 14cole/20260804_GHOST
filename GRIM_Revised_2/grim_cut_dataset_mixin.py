@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import uuid
 import zipfile
+import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -63,7 +64,9 @@ from grim_python import (
     convert_extrusion,
     crop_dataset,
     medianize_azimuth,
+    offset_db,
     regrid_axis,
+    shift_dataset,
 )
 
 # Characters forbidden in filenames on Windows (and `/` on POSIX). Replaced
@@ -264,8 +267,97 @@ class _GrimBatchRollbackError(RuntimeError):
     """A batch failed and at least one prior artifact could not be restored."""
 
 
+_GRIM_COMPRESSION_SAMPLE_BYTES = 1024**2
+_GRIM_SMALL_ARCHIVE_BYTES = 8 * 1024**2
+_GRIM_LARGE_MINIMUM_SAVINGS = 0.20
+
+
+def _representative_contiguous_bytes(
+    array: np.ndarray,
+    byte_budget: int,
+) -> bytes:
+    """Return at most ``byte_budget`` bytes without copying the full array."""
+
+    value = np.asarray(array)
+    budget = max(0, int(byte_budget))
+    if budget == 0 or value.nbytes == 0 or not value.flags.c_contiguous:
+        return b""
+    raw = memoryview(value).cast("B")
+    if len(raw) <= budget:
+        return bytes(raw)
+    # Beginning/middle/end blocks avoid classifying a file from one unusually
+    # smooth local region while keeping the sample strictly bounded.
+    block = max(1, budget // 3)
+    middle = max(0, (len(raw) - block) // 2)
+    end = max(0, len(raw) - block)
+    sample = bytes(raw[:block]) + bytes(raw[middle : middle + block])
+    remaining = budget - len(sample)
+    if remaining > 0:
+        sample += bytes(raw[end : end + remaining])
+    return sample[:budget]
+
+
+def _grim_save_compression_decision(dataset: RcsGrid) -> dict[str, object]:
+    """Choose compact versus fast NPZ storage from a bounded byte sample."""
+
+    arrays: list[np.ndarray] = [dataset.rcs_power, dataset.rcs_phase]
+    arrays.extend(
+        np.asarray(value)
+        for value in dataset._extra_to_write().values()
+        if isinstance(value, np.ndarray)
+        and not np.asarray(value).dtype.hasobject
+        and np.asarray(value).ndim > 0
+    )
+    # Power and phase always participate. Add only the largest ancillary
+    # payloads so hundreds of scalar metadata arrays cannot dilute their
+    # representative sample.
+    core = arrays[:2]
+    ancillary = sorted(arrays[2:], key=lambda value: value.nbytes, reverse=True)[:6]
+    sampled_arrays = [
+        value
+        for value in core + ancillary
+        if value.nbytes and value.flags.c_contiguous
+    ]
+    total_payload_bytes = sum(int(value.nbytes) for value in arrays)
+    per_array_budget = max(
+        1,
+        _GRIM_COMPRESSION_SAMPLE_BYTES // max(1, len(sampled_arrays)),
+    )
+    sample_parts: list[bytes] = []
+    remaining = _GRIM_COMPRESSION_SAMPLE_BYTES
+    for value in sampled_arrays:
+        if remaining <= 0:
+            break
+        part = _representative_contiguous_bytes(
+            value, min(per_array_budget, remaining)
+        )
+        sample_parts.append(part)
+        remaining -= len(part)
+    sample = b"".join(sample_parts)
+    if sample:
+        compressed_sample_bytes = len(zlib.compress(sample, level=1))
+        compression_ratio = compressed_sample_bytes / len(sample)
+    else:
+        compression_ratio = 1.0
+    estimated_savings = max(0.0, 1.0 - float(compression_ratio))
+    minimum_savings = (
+        0.02
+        if total_payload_bytes <= _GRIM_SMALL_ARCHIVE_BYTES
+        else _GRIM_LARGE_MINIMUM_SAVINGS
+    )
+    return {
+        "compressed": bool(estimated_savings >= minimum_savings),
+        "estimated_savings_fraction": estimated_savings,
+        "sample_bytes": len(sample),
+        "payload_bytes": total_payload_bytes,
+        "minimum_savings_fraction": minimum_savings,
+    }
+
+
 def _stage_and_publish_grim_batch(
     entries: list[tuple[RcsGrid, str, str]],
+    *,
+    compression_log: list[dict[str, object]] | None = None,
 ) -> list[str]:
     """Write every grid first, then atomically publish each completed file.
 
@@ -306,7 +398,15 @@ def _stage_and_publish_grim_batch(
                 # history is never mutated from the worker thread.
                 snapshot = copy.copy(dataset)
                 snapshot.history = str(row_history or "").strip()
-                snapshot.save(stage_path)
+                compression = _grim_save_compression_decision(snapshot)
+                snapshot.save(
+                    stage_path,
+                    compressed=bool(compression["compressed"]),
+                )
+                if compression_log is not None:
+                    compression_log.append(
+                        {**compression, "target": target}
+                    )
             except Exception:
                 try:
                     os.unlink(stage_path)
@@ -2045,15 +2145,20 @@ class _CsvExportWorker(QObject):
 class _BackgroundCallableWorker(QObject):
     """Run one pure-Python/NumPy callable away from Qt's GUI thread."""
 
+    progress = Signal(int, int, str)
     finished = Signal(object)
 
-    def __init__(self, function, parent=None) -> None:
+    def __init__(self, function, *, reports_progress: bool = False, parent=None) -> None:
         super().__init__(parent)
         self._function = function
+        self._reports_progress = bool(reports_progress)
 
     def run(self) -> None:
         try:
-            result = self._function()
+            if self._reports_progress:
+                result = self._function(self.progress.emit)
+            else:
+                result = self._function()
         except Exception as exc:
             self.finished.emit(
                 {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
@@ -2194,6 +2299,37 @@ class DatasetOpsMixin:
         thread = self._background_worker_thread
         return isinstance(thread, QThread) and thread.isRunning()
 
+    def _set_background_progress(
+        self,
+        done_count: int | None = None,
+        total_count: int | None = None,
+        detail: str = "",
+    ) -> None:
+        """Keep long dataset work visible even when status text is replaced."""
+
+        progress = getattr(self, "dataset_job_progress", None)
+        if progress is None:
+            return
+        total = int(total_count or 0)
+        if total > 0:
+            done = min(max(int(done_count or 0), 0), total)
+            progress.setRange(0, total)
+            progress.setValue(done)
+            progress.setFormat(f"%v / %m  {str(detail).strip()}".rstrip())
+        else:
+            progress.setRange(0, 0)
+            progress.setFormat(str(detail).strip() or "Working…")
+        progress.setVisible(True)
+
+    def _clear_background_progress(self) -> None:
+        progress = getattr(self, "dataset_job_progress", None)
+        if progress is None:
+            return
+        progress.setVisible(False)
+        progress.setRange(0, 1)
+        progress.setValue(0)
+        progress.setFormat("%p%")
+
     def _try_start_background_job(self, job_name: str, worker: QObject) -> bool:
         self._ensure_background_worker_state()
         if bool(getattr(self, "_isar_busy", False)):
@@ -2218,6 +2354,7 @@ class DatasetOpsMixin:
         self._background_worker_thread = thread
         self._background_worker = worker
         self._background_worker_name = job_name
+        self._set_background_progress(detail=job_name)
         thread.start()
         return True
 
@@ -2226,6 +2363,8 @@ class DatasetOpsMixin:
         job_name: str,
         function,
         completion,
+        *,
+        reports_progress: bool = False,
     ) -> bool:
         """Run computation off-thread and publish its result on Qt's thread."""
 
@@ -2234,13 +2373,69 @@ class DatasetOpsMixin:
             active_name = self._background_worker_name or "Another background job"
             self.status.showMessage(f"{active_name} is still running. Please wait.")
             return False
-        worker = _BackgroundCallableWorker(function)
+        worker = _BackgroundCallableWorker(
+            function, reports_progress=reports_progress
+        )
+        if reports_progress:
+            worker.progress.connect(self._on_background_callable_progress)
         worker.finished.connect(self._on_background_callable_finished)
         self._pending_callable_completion = completion
         if not self._try_start_background_job(job_name, worker):
             self._pending_callable_completion = None
             return False
         return True
+
+    def _on_background_callable_progress(
+        self, done_count: int, total_count: int, detail: str
+    ) -> None:
+        job_name = self._background_worker_name or "Dataset operation"
+        detail_text = str(detail).strip()
+        suffix = f" ({detail_text})" if detail_text else ""
+        self._set_background_progress(done_count, total_count, detail_text)
+        self.status.showMessage(
+            f"{job_name}... {int(done_count)}/{int(total_count)}{suffix}"
+        )
+
+    def _start_dataset_map_job(
+        self,
+        job_name: str,
+        datasets: list[tuple[str, RcsGrid]],
+        operation,
+        completion,
+        *,
+        start_message: str,
+    ) -> bool:
+        """Run an independent full-grid transform for each selected row."""
+
+        launch_items = tuple(datasets)
+
+        def compute(progress):
+            results = []
+            skipped = []
+            total = len(launch_items)
+            for index, (name, dataset) in enumerate(launch_items, start=1):
+                try:
+                    result = operation(index - 1, name, dataset)
+                except Exception as exc:
+                    skipped.append(f"{name} ({exc})")
+                else:
+                    results.append((index - 1, name, result))
+                progress(index, total, name)
+            return results, skipped
+
+        def publish(payload) -> None:
+            results, skipped = payload
+            completion(results, skipped)
+
+        started = self._start_background_callable(
+            job_name,
+            compute,
+            publish,
+            reports_progress=True,
+        )
+        if started:
+            self.status.showMessage(start_message)
+        return started
 
     def _on_background_callable_finished(self, payload: dict[str, object]) -> None:
         completion = self._pending_callable_completion
@@ -2260,6 +2455,7 @@ class DatasetOpsMixin:
         self._background_worker = None
         self._background_worker_name = ""
         self._active_import_keys.clear()
+        self._clear_background_progress()
 
         if self._start_next_pending_import_batch():
             return
@@ -2311,6 +2507,7 @@ class DatasetOpsMixin:
         return False
 
     def _on_load_worker_progress(self, done_count: int, total_count: int, detail: str) -> None:
+        self._set_background_progress(done_count, total_count, detail)
         detail_text = str(detail).strip()
         if detail_text:
             self.status.showMessage(
@@ -2388,6 +2585,7 @@ class DatasetOpsMixin:
     def _on_csv_export_progress(
         self, done_count: int, total_count: int, detail: str
     ) -> None:
+        self._set_background_progress(done_count, total_count, detail)
         suffix = f" ({str(detail).strip()})" if str(detail).strip() else ""
         self.status.showMessage(
             f"Exporting CSV... {done_count}/{total_count}{suffix}"
@@ -2404,6 +2602,7 @@ class DatasetOpsMixin:
         self.status.showMessage(f"Exported {len(paths)} dataset(s) to CSV.")
 
     def _on_join_worker_progress(self, done_count: int, total_count: int, _: str) -> None:
+        self._set_background_progress(done_count, total_count, "Joining")
         self.status.showMessage(f"Joining datasets... {done_count}/{total_count}")
 
     def _on_join_worker_finished(self, payload: dict[str, object]) -> None:
@@ -2445,6 +2644,7 @@ class DatasetOpsMixin:
     def _on_range_cal_worker_progress(
         self, done_count: int, total_count: int, detail: str
     ) -> None:
+        self._set_background_progress(done_count, total_count, detail)
         detail_text = str(detail).strip()
         suffix = f" ({detail_text})" if detail_text else ""
         self.status.showMessage(
@@ -3221,38 +3421,43 @@ class DatasetOpsMixin:
             metadata_attested = attestation
         names = [name for name, _ in datasets]
         base = datasets[0][1]
-        try:
-            if len(datasets) == 2:
-                result = getattr(base, func_add)(
-                    datasets[1][1], metadata_attested=metadata_attested
-                ) if coherent else getattr(base, func_add)(datasets[1][1])
-            else:
-                others = [ds for _, ds in datasets[1:]]
-                result = getattr(base, func_add_many)(
-                    *others, metadata_attested=metadata_attested
-                ) if coherent else getattr(base, func_add_many)(*others)
-        except (ValueError, TypeError) as exc:
-            self.status.showMessage(str(exc))
-            return
-
+        input_refs = self._python_input_references(datasets)
         new_name = f" {op_symbol} ".join(names)
         history = f"{op_label}: {new_name}"
-        output_id = self._add_dataset_row(result, new_name, history, file_name="")
-        input_refs = self._python_input_references(datasets)
-        recorder = getattr(self, "python_recorder", None)
-        if recorder is not None and input_refs is not None:
-            method = func_add if len(datasets) == 2 else func_add_many
-            recorder.record_expression(
-                self._python_output_reference(output_id, new_name),
-                input_refs,
-                lambda variables, method=method, attested=metadata_attested: (
-                    f"{variables[0]}.{method}({', '.join(variables[1:])}"
-                    + (", metadata_attested=True" if attested else "")
-                    + ")"
-                ),
-                comment=op_label,
+
+        def _calculate_result():
+            if len(datasets) == 2:
+                return getattr(base, func_add)(
+                    datasets[1][1], metadata_attested=metadata_attested
+                ) if coherent else getattr(base, func_add)(datasets[1][1])
+            others = [ds for _, ds in datasets[1:]]
+            return getattr(base, func_add_many)(
+                *others, metadata_attested=metadata_attested
+            ) if coherent else getattr(base, func_add_many)(*others)
+
+        def _publish_result(result):
+            output_id = self._add_dataset_row(
+                result, new_name, history, file_name=""
             )
-        self.status.showMessage(f"{op_label} created: {new_name}")
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and input_refs is not None:
+                method = func_add if len(datasets) == 2 else func_add_many
+                recorder.record_expression(
+                    self._python_output_reference(output_id, new_name),
+                    input_refs,
+                    lambda variables, method=method, attested=metadata_attested: (
+                        f"{variables[0]}.{method}({', '.join(variables[1:])}"
+                        + (", metadata_attested=True" if attested else "")
+                        + ")"
+                    ),
+                    comment=op_label,
+                )
+            self.status.showMessage(f"{op_label} created: {new_name}")
+
+        if self._start_background_callable(
+            op_label, _calculate_result, _publish_result
+        ):
+            self.status.showMessage(f"{op_label} is running in the background...")
 
     def _combine_datasets_sub(
         self,
@@ -3281,39 +3486,46 @@ class DatasetOpsMixin:
                 return
             metadata_attested = attestation
         names = [name for name, _ in datasets]
-        result = datasets[0][1]
-        try:
+        input_refs = self._python_input_references(datasets)
+        new_name = f" {op_symbol} ".join(names)
+        history = f"{op_label}: {new_name}"
+
+        def _calculate_result():
+            result = datasets[0][1]
             for _, ds in datasets[1:]:
                 result = getattr(result, func_sub)(
                     ds, metadata_attested=metadata_attested
                 ) if coherent else getattr(result, func_sub)(ds)
-        except (ValueError, TypeError) as exc:
-            self.status.showMessage(str(exc))
-            return
+            return result
 
-        new_name = f" {op_symbol} ".join(names)
-        history = f"{op_label}: {new_name}"
-        output_id = self._add_dataset_row(result, new_name, history, file_name="")
-        input_refs = self._python_input_references(datasets)
-        recorder = getattr(self, "python_recorder", None)
-        if recorder is not None and input_refs is not None:
-            recorder.record_expression(
-                self._python_output_reference(output_id, new_name),
-                input_refs,
-                lambda variables, method=func_sub, attested=metadata_attested: (
-                    ".".join(
-                        [variables[0]]
-                        + [
-                            f"{method}({variable}"
-                            + (", metadata_attested=True" if attested else "")
-                            + ")"
-                            for variable in variables[1:]
-                        ]
-                    )
-                ),
-                comment=op_label,
+        def _publish_result(result):
+            output_id = self._add_dataset_row(
+                result, new_name, history, file_name=""
             )
-        self.status.showMessage(f"{op_label} created: {new_name}")
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and input_refs is not None:
+                recorder.record_expression(
+                    self._python_output_reference(output_id, new_name),
+                    input_refs,
+                    lambda variables, method=func_sub, attested=metadata_attested: (
+                        ".".join(
+                            [variables[0]]
+                            + [
+                                f"{method}({variable}"
+                                + (", metadata_attested=True" if attested else "")
+                                + ")"
+                                for variable in variables[1:]
+                            ]
+                        )
+                    ),
+                    comment=op_label,
+                )
+            self.status.showMessage(f"{op_label} created: {new_name}")
+
+        if self._start_background_callable(
+            op_label, _calculate_result, _publish_result
+        ):
+            self.status.showMessage(f"{op_label} is running in the background...")
 
     def _coherent_add_selected(self) -> None:
         self._combine_datasets_add(
@@ -4186,13 +4398,22 @@ class DatasetOpsMixin:
             row_snapshots.append((dataset_id, dataset, target))
 
         def compute_save():
+            compression_log: list[dict[str, object]] = []
             try:
                 return {
-                    "published": _stage_and_publish_grim_batch(save_entries),
+                    "published": _stage_and_publish_grim_batch(
+                        save_entries,
+                        compression_log=compression_log,
+                    ),
+                    "compression": compression_log,
                     "error": None,
                 }
             except Exception as exc:
-                return {"published": [], "error": exc}
+                return {
+                    "published": [],
+                    "compression": compression_log,
+                    "error": exc,
+                }
 
         def publish_save(payload) -> None:
             error = payload.get("error") if isinstance(payload, dict) else None
@@ -4266,6 +4487,27 @@ class DatasetOpsMixin:
                 f"Saved {len(published)} dataset(s) to "
                 f"{os.path.dirname(os.path.abspath(published[0]))}."
             )
+            compression = list(payload.get("compression", []))
+            if compression:
+                shown_modes = []
+                for decision in compression[:3]:
+                    mode = (
+                        "compact"
+                        if bool(decision.get("compressed", False))
+                        else "fast uncompressed"
+                    )
+                    saving = 100.0 * float(
+                        decision.get("estimated_savings_fraction", 0.0)
+                    )
+                    shown_modes.append(
+                        f"{os.path.basename(str(decision.get('target', 'dataset')))}: "
+                        f"{mode} ({saving:.0f}% sampled saving)"
+                    )
+                if len(compression) > len(shown_modes):
+                    shown_modes.append(
+                        f"and {len(compression) - len(shown_modes)} more"
+                    )
+                message += " Storage mode: " + "; ".join(shown_modes) + "."
             if rows_not_marked:
                 message += (
                     f" {rows_not_marked} row(s) changed or were removed while "
@@ -4434,44 +4676,65 @@ class DatasetOpsMixin:
             return
 
         mode = dlg.get_mode()
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in others:
-            try:
-                aligned = dataset.align_to(ref_grid, mode=mode)
-            except (ValueError, TypeError) as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = f"Align ({mode}) to {ref_name}: {name}"
-            output_name = f"{name} [Aligned]"
-            output_id = self._add_dataset_row(
-                aligned, output_name, history, file_name=""
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
-            reference_ref = self._python_reference_for_dataset(ref_grid)
-            recorder = getattr(self, "python_recorder", None)
-            if (
-                recorder is not None
-                and source_ref is not None
-                and reference_ref is not None
-            ):
-                recorder.record_expression(
-                    self._python_output_reference(output_id, output_name),
-                    [source_ref, reference_ref],
-                    lambda variables, mode=mode: (
-                        f"{variables[0]}.align_to({variables[1]}, mode={mode!r})"
-                    ),
-                    comment=f"Align {name} to {ref_name}",
-                )
-            produced += 1
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in others
+        ]
+        reference_ref = self._python_reference_for_dataset(ref_grid)
 
-        if produced == 0:
-            self.status.showMessage("Align created 0 datasets.")
-            return
-        msg = f"Align created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        def compute(progress):
+            results = []
+            skipped = []
+            total = len(others)
+            for index, (name, dataset) in enumerate(others, start=1):
+                try:
+                    aligned = dataset.align_to(ref_grid, mode=mode)
+                except (ValueError, TypeError) as exc:
+                    skipped.append(f"{name} ({exc})")
+                else:
+                    results.append((index - 1, name, aligned))
+                progress(index, total, name)
+            return results, skipped
+
+        def publish(payload) -> None:
+            results, skipped = payload
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, aligned in results:
+                history = f"Align ({mode}) to {ref_name}: {name}"
+                output_name = f"{name} [Aligned]"
+                output_id = self._add_dataset_row(
+                    aligned, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if (
+                    recorder is not None
+                    and source_ref is not None
+                    and reference_ref is not None
+                ):
+                    recorder.record_expression(
+                        self._python_output_reference(output_id, output_name),
+                        [source_ref, reference_ref],
+                        lambda variables, mode=mode: (
+                            f"{variables[0]}.align_to({variables[1]}, mode={mode!r})"
+                        ),
+                        comment=f"Align {name} to {ref_name}",
+                    )
+
+            produced = len(results)
+            if produced == 0:
+                message = "Align created 0 datasets."
+            else:
+                message = f"Align created {produced} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        if self._start_background_callable(
+            "Dataset alignment", compute, publish, reports_progress=True
+        ):
+            self.status.showMessage(
+                f"Aligning {len(others)} dataset(s) to {ref_name}..."
+            )
 
     def _interpolate_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -4731,42 +4994,43 @@ class DatasetOpsMixin:
         )
         if not ok:
             return
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                mirrored = dataset.mirror_about_azimuth(about)
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = f"Mirror about az={about:.6g} deg: {name}"
-            output_name = f"{name} [Mirror {about:.6g}°]"
-            output_id = self._add_dataset_row(
-                mirrored,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
+        def operation(_index, _name, dataset):
+            return dataset.mirror_about_azimuth(about)
+
+        def publish(results, skipped) -> None:
             recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "mirror_about_azimuth",
-                    args=(float(about),),
-                    comment=f"Mirror {name} about azimuth {about:g} degrees",
+            for source_index, name, mirrored in results:
+                history = f"Mirror about az={about:.6g} deg: {name}"
+                output_name = f"{name} [Mirror {about:.6g}°]"
+                output_id = self._add_dataset_row(
+                    mirrored, output_name, history, file_name=""
                 )
-            produced += 1
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        source_ref,
+                        "mirror_about_azimuth",
+                        args=(float(about),),
+                        comment=f"Mirror {name} about azimuth {about:g} degrees",
+                    )
+            message = f"Mirror created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
 
-        if produced == 0:
-            self.status.showMessage("Mirror created 0 datasets.")
-            return
-        msg = f"Mirror created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        self._start_dataset_map_job(
+            "Dataset mirror",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Mirroring {len(datasets)} dataset(s)...",
+        )
 
     def _wrap_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -4908,59 +5172,52 @@ class DatasetOpsMixin:
             history_parts.append(f"Phase {ph_delta:+.6g} deg")
         suffix = " ".join(suffix_parts)
         history_axes = ", ".join(history_parts)
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        phasor = np.exp(1j * np.deg2rad(ph_delta)) if ph_on else None
-
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                shifted = dataset
-                if az_on:
-                    shifted = shifted.shift_azimuth(az_delta)
-                if el_on:
-                    shifted = shifted.shift_elevation(el_delta)
-                if ph_on:
-                    shifted = _dataset_with_rcs(
-                        shifted,
-                        shifted.rcs * phasor,
-                        rcs_power=shifted.rcs_power,
-                        rcs_domain="complex_amplitude",
-                    )
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = f"Shift ({history_axes}): {name}"
-            output_name = f"{name} [Shift {suffix}]"
-            output_id = self._add_dataset_row(
-                shifted,
-                output_name,
-                history,
-                file_name="",
+        def operation(_index, _name, dataset):
+            return shift_dataset(
+                dataset,
+                azimuth_degrees=float(az_delta) if az_on else None,
+                elevation_degrees=float(el_delta) if el_on else None,
+                phase_degrees=float(ph_delta) if ph_on else None,
             )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_function(
-                    self._python_output_reference(output_id, output_name),
-                    "shift_dataset",
-                    [source_ref],
-                    kwargs={
-                        "azimuth_degrees": float(az_delta) if az_on else None,
-                        "elevation_degrees": float(el_delta) if el_on else None,
-                        "phase_degrees": float(ph_delta) if ph_on else None,
-                    },
-                    comment=f"Shift {name}: {history_axes}",
-                )
-            produced += 1
 
-        if produced == 0:
-            self.status.showMessage("Shift created 0 datasets.")
-            return
-        msg = f"Shift created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, shifted in results:
+                history = f"Shift ({history_axes}): {name}"
+                output_name = f"{name} [Shift {suffix}]"
+                output_id = self._add_dataset_row(
+                    shifted, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "shift_dataset",
+                        [source_ref],
+                        kwargs={
+                            "azimuth_degrees": float(az_delta) if az_on else None,
+                            "elevation_degrees": float(el_delta) if el_on else None,
+                            "phase_degrees": float(ph_delta) if ph_on else None,
+                        },
+                        comment=f"Shift {name}: {history_axes}",
+                    )
+            message = f"Shift created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "Dataset shift",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Shifting {len(datasets)} dataset(s)...",
+        )
 
     def _round_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -4982,61 +5239,61 @@ class DatasetOpsMixin:
             ax[:2] for ax, key in (("Az", "azimuths"), ("El", "elevations"), ("Fq", "frequencies"))
             if params[key]
         )
+        enabled_methods = tuple(
+            method
+            for enabled, method in (
+                (params["azimuths"], "round_azimuths"),
+                (params["elevations"], "round_elevations"),
+                (params["frequencies"], "round_frequencies"),
+            )
+            if enabled
+        )
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                rounded = dataset
-                if params["azimuths"]:
-                    rounded = rounded.round_azimuths(decimals)
-                if params["elevations"]:
-                    rounded = rounded.round_elevations(decimals)
-                if params["frequencies"]:
-                    rounded = rounded.round_frequencies(decimals)
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = (
-                f"Round {axes_label} to {decimals} dp: {name}"
-            )
-            output_name = f"{name} [Round {decimals}dp]"
-            output_id = self._add_dataset_row(
-                rounded,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
+        def operation(_index, _name, dataset):
+            rounded = dataset
+            for method in enabled_methods:
+                rounded = getattr(rounded, method)(decimals)
+            return rounded
+
+        def publish(results, skipped) -> None:
             recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                enabled_methods = [
-                    method
-                    for enabled, method in (
-                        (params["azimuths"], "round_azimuths"),
-                        (params["elevations"], "round_elevations"),
-                        (params["frequencies"], "round_frequencies"),
-                    )
-                    if enabled
-                ]
-                recorder.record_expression(
-                    self._python_output_reference(output_id, output_name),
-                    [source_ref],
-                    lambda variables, methods=tuple(enabled_methods), decimals=decimals: (
-                        variables[0]
-                        + "".join(f".{method}({int(decimals)})" for method in methods)
-                    ),
-                    comment=f"Round {name} axes {axes_label} to {decimals} decimals",
+            for source_index, name, rounded in results:
+                history = f"Round {axes_label} to {decimals} dp: {name}"
+                output_name = f"{name} [Round {decimals}dp]"
+                output_id = self._add_dataset_row(
+                    rounded, output_name, history, file_name=""
                 )
-            produced += 1
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_expression(
+                        self._python_output_reference(output_id, output_name),
+                        [source_ref],
+                        lambda variables, methods=enabled_methods, decimals=decimals: (
+                            variables[0]
+                            + "".join(
+                                f".{method}({int(decimals)})" for method in methods
+                            )
+                        ),
+                        comment=(
+                            f"Round {name} axes {axes_label} to {decimals} decimals"
+                        ),
+                    )
+            message = f"Round created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
 
-        if produced == 0:
-            self.status.showMessage("Round created 0 datasets.")
-            return
-        msg = f"Round created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        self._start_dataset_map_job(
+            "Dataset rounding",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Rounding {len(datasets)} dataset(s)...",
+        )
 
     def _swap_elevation_azimuth_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -5045,41 +5302,42 @@ class DatasetOpsMixin:
         )
         if datasets is None:
             return
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                swapped = dataset.swap_elevation_azimuth()
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = f"Swap El/Az: {name}"
-            output_name = f"{name} [Swap El/Az]"
-            output_id = self._add_dataset_row(
-                swapped,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
+        def operation(_index, _name, dataset):
+            return dataset.swap_elevation_azimuth()
+
+        def publish(results, skipped) -> None:
             recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "swap_elevation_azimuth",
-                    comment=f"Swap elevation and azimuth for {name}",
+            for source_index, name, swapped in results:
+                history = f"Swap El/Az: {name}"
+                output_name = f"{name} [Swap El/Az]"
+                output_id = self._add_dataset_row(
+                    swapped, output_name, history, file_name=""
                 )
-            produced += 1
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        source_ref,
+                        "swap_elevation_azimuth",
+                        comment=f"Swap elevation and azimuth for {name}",
+                    )
+            message = f"Swap El/Az created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
 
-        if produced == 0:
-            self.status.showMessage("Swap El/Az created 0 datasets.")
-            return
-        msg = f"Swap El/Az created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        self._start_dataset_map_job(
+            "Elevation/azimuth swap",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Swapping axes for {len(datasets)} dataset(s)...",
+        )
 
     def _convert_sentri_elevation_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -5091,52 +5349,48 @@ class DatasetOpsMixin:
         )
         if datasets is None:
             return
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                converted = dataset.convert_sentri_elevation_to_grim()
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
+        def operation(_index, _name, dataset):
+            return dataset.convert_sentri_elevation_to_grim()
 
-            history = (
-                "SENTRi elevation to GRIM: elevation=90-theta; "
-                f"no interpolation or phase change: {name}"
-            )
-            output_name = f"{name} [SENTRi El→GRIM]"
-            output_id = self._add_dataset_row(
-                converted,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
+        def publish(results, skipped) -> None:
             recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "convert_sentri_elevation_to_grim",
-                    comment=(
-                        f"Convert native SENTRi theta to GRIM signed "
-                        f"elevation for {name}"
-                    ),
+            for source_index, name, converted in results:
+                history = (
+                    "SENTRi elevation to GRIM: elevation=90-theta; "
+                    f"no interpolation or phase change: {name}"
                 )
-            produced += 1
-
-        if produced == 0:
-            msg = "SENTRi El→GRIM created 0 datasets."
+                output_name = f"{name} [SENTRi El→GRIM]"
+                output_id = self._add_dataset_row(
+                    converted, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        source_ref,
+                        "convert_sentri_elevation_to_grim",
+                        comment=(
+                            f"Convert native SENTRi theta to GRIM signed "
+                            f"elevation for {name}"
+                        ),
+                    )
+            message = f"SENTRi El→GRIM created {len(results)} dataset(s)."
             if skipped:
-                msg += f" Skipped: {', '.join(skipped)}"
-            self.status.showMessage(msg)
-            return
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
 
-        msg = f"SENTRi El→GRIM created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        self._start_dataset_map_job(
+            "SENTRi elevation conversion",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Converting {len(datasets)} SENTRi dataset(s)...",
+        )
 
     def _elevation_to_azimuth_360_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -5154,54 +5408,59 @@ class DatasetOpsMixin:
                 selected_pair = (pair[0], pair[1])
             except (TypeError, ValueError):
                 selected_pair = None
+        pair_text = (
+            "min/max elevation"
+            if selected_pair is None
+            else f"{selected_pair[0]:.6g}/{selected_pair[1]:.6g} deg"
+        )
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                if selected_pair is None:
-                    result = dataset.combine_elevation_pair_to_azimuth_360(azimuth_shift_deg=180.0)
-                    pair_text = "min/max elevation"
-                else:
-                    result = dataset.combine_elevation_pair_to_azimuth_360(
-                        selected_pair[0],
-                        selected_pair[1],
-                        azimuth_shift_deg=180.0,
-                    )
-                    pair_text = f"{selected_pair[0]:.6g}/{selected_pair[1]:.6g} deg"
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-
-            history = f"El->Az360 (shift +180 deg, pair={pair_text}): {name}"
-            output_name = f"{name} [El->Az360]"
-            output_id = self._add_dataset_row(
-                result,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                args = selected_pair or ()
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "combine_elevation_pair_to_azimuth_360",
-                    args=args,
-                    kwargs={"azimuth_shift_deg": 180.0},
-                    comment=f"Convert {name} elevation pair to 360-degree azimuth",
+        def operation(_index, _name, dataset):
+            if selected_pair is None:
+                return dataset.combine_elevation_pair_to_azimuth_360(
+                    azimuth_shift_deg=180.0
                 )
-            produced += 1
+            return dataset.combine_elevation_pair_to_azimuth_360(
+                selected_pair[0],
+                selected_pair[1],
+                azimuth_shift_deg=180.0,
+            )
 
-        if produced == 0:
-            self.status.showMessage("El->Az360 created 0 datasets.")
-            return
-        msg = f"El->Az360 created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, result in results:
+                history = f"El->Az360 (shift +180 deg, pair={pair_text}): {name}"
+                output_name = f"{name} [El->Az360]"
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        source_ref,
+                        "combine_elevation_pair_to_azimuth_360",
+                        args=selected_pair or (),
+                        kwargs={"azimuth_shift_deg": 180.0},
+                        comment=(
+                            f"Convert {name} elevation pair to 360-degree azimuth"
+                        ),
+                    )
+            message = f"El->Az360 created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "Elevation-to-azimuth conversion",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Converting {len(datasets)} dataset(s) to 360-degree azimuth...",
+        )
 
     def _range_cal_selected(self) -> None:
         targets = self._selected_datasets_ordered(
@@ -5305,49 +5564,43 @@ class DatasetOpsMixin:
         )
         if not ok:
             return
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        linear_scale = 10.0 ** (value / 10.0)
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                if dataset.rcs_domain == "complex_amplitude":
-                    result_rcs = dataset.rcs * np.sqrt(linear_scale)
-                else:
-                    result_rcs = dataset.rcs * linear_scale
-                result = _dataset_with_rcs(
-                    dataset,
-                    result_rcs,
-                    rcs_power=dataset.rcs_power * linear_scale,
-                    rcs_domain=dataset.rcs_domain,
-                )
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = f"Offset ({value:+.6g}): {name}"
-            output_name = f"{name} [Offset {value:+.6g}]"
-            output_id = self._add_dataset_row(
-                result, output_name, history, file_name=""
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
+        def operation(_index, _name, dataset):
+            return offset_db(dataset, float(value))
+
+        def publish(results, skipped) -> None:
             recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_function(
-                    self._python_output_reference(output_id, output_name),
-                    "offset_db",
-                    [source_ref],
-                    args=(float(value),),
-                    comment=f"Offset {name} by {value:+g} dB",
+            for source_index, name, result in results:
+                history = f"Offset ({value:+.6g}): {name}"
+                output_name = f"{name} [Offset {value:+.6g}]"
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
                 )
-            produced += 1
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "offset_db",
+                        [source_ref],
+                        args=(float(value),),
+                        comment=f"Offset {name} by {value:+g} dB",
+                    )
+            message = f"Offset created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
 
-        if produced == 0:
-            self.status.showMessage("Offset created 0 datasets.")
-            return
-        msg = f"Offset created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        self._start_dataset_map_job(
+            "Dataset offset",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Applying offset to {len(datasets)} dataset(s)...",
+        )
 
     def _convert_to_dbke_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -5365,49 +5618,55 @@ class DatasetOpsMixin:
         if length_m <= 0.0 or not np.isfinite(length_m):
             self.status.showMessage("Convert to dBke: length must be positive.")
             return
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                result = convert_extrusion(
-                    dataset, to="dbke", length_m=float(length_m)
-                )
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = f"Convert to dBke (extruded L={length_label}, {length_m:.6g} m): {name}"
-            output_name = f"{name} [→ dBke L={length_label}]"
-            output_id = self._add_dataset_row(
-                result,
-                output_name,
-                history,
-                file_name="",
+        def operation(_index, _name, dataset):
+            return convert_extrusion(
+                dataset, to="dbke", length_m=float(length_m)
             )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_function(
-                    self._python_output_reference(output_id, output_name),
-                    "convert_extrusion",
-                    [source_ref],
-                    kwargs={"to": "dbke", "length_m": float(length_m)},
-                    comment=f"Convert {name} from dBsm to dBke",
-                )
-            produced += 1
 
-        if produced == 0:
-            self.status.showMessage("Convert to dBke created 0 datasets.")
-            return
-        # Frequency-independent dB offset (extrusion approximation) for the status line.
-        offset_db = 10.0 * np.log10(np.pi / (length_m * length_m))
-        msg = (
-            f"Convert to dBke created {produced} dataset(s) "
-            f"(L={length_label} → constant offset {offset_db:+.2f} dB)."
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, result in results:
+                history = (
+                    f"Convert to dBke (extruded L={length_label}, "
+                    f"{length_m:.6g} m): {name}"
+                )
+                output_name = f"{name} [→ dBke L={length_label}]"
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "convert_extrusion",
+                        [source_ref],
+                        kwargs={"to": "dbke", "length_m": float(length_m)},
+                        comment=f"Convert {name} from dBsm to dBke",
+                    )
+            conversion_offset_db = 10.0 * np.log10(
+                np.pi / (length_m * length_m)
+            )
+            message = (
+                f"Convert to dBke created {len(results)} dataset(s) "
+                f"(L={length_label} → constant offset "
+                f"{conversion_offset_db:+.2f} dB)."
+            )
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "dBsm-to-dBke conversion",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Converting {len(datasets)} dataset(s) to dBke...",
         )
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
 
     def _convert_to_dbsm_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -5432,50 +5691,55 @@ class DatasetOpsMixin:
         if length_m <= 0.0 or not np.isfinite(length_m):
             self.status.showMessage("Convert to dBsm: length must be positive.")
             return
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                result = convert_extrusion(
-                    dataset, to="dbsm", length_m=float(length_m)
-                )
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-            history = f"Convert to dBsm (extruded L={length_label}, {length_m:.6g} m): {name}"
-            output_name = f"{name} [→ dBsm L={length_label}]"
-            output_id = self._add_dataset_row(
-                result,
-                output_name,
-                history,
-                file_name="",
+        def operation(_index, _name, dataset):
+            return convert_extrusion(
+                dataset, to="dbsm", length_m=float(length_m)
             )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_function(
-                    self._python_output_reference(output_id, output_name),
-                    "convert_extrusion",
-                    [source_ref],
-                    kwargs={"to": "dbsm", "length_m": float(length_m)},
-                    comment=f"Convert {name} from dBke to dBsm",
-                )
-            produced += 1
 
-        if produced == 0:
-            self.status.showMessage("Convert to dBsm created 0 datasets.")
-            return
-        # The extrusion offset is the exact negative of the forward direction:
-        # dBsm − dBke = 20·log10(L) − 10·log10(π).
-        offset_db = 20.0 * np.log10(length_m) - 10.0 * np.log10(np.pi)
-        msg = (
-            f"Convert to dBsm created {produced} dataset(s) "
-            f"(L={length_label} → constant offset {offset_db:+.2f} dB)."
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, result in results:
+                history = (
+                    f"Convert to dBsm (extruded L={length_label}, "
+                    f"{length_m:.6g} m): {name}"
+                )
+                output_name = f"{name} [→ dBsm L={length_label}]"
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "convert_extrusion",
+                        [source_ref],
+                        kwargs={"to": "dbsm", "length_m": float(length_m)},
+                        comment=f"Convert {name} from dBke to dBsm",
+                    )
+            conversion_offset_db = (
+                20.0 * np.log10(length_m) - 10.0 * np.log10(np.pi)
+            )
+            message = (
+                f"Convert to dBsm created {len(results)} dataset(s) "
+                f"(L={length_label} → constant offset "
+                f"{conversion_offset_db:+.2f} dB)."
+            )
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "dBke-to-dBsm conversion",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Converting {len(datasets)} dataset(s) to dBsm...",
         )
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
 
     def _convert_conic_gc_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
@@ -5501,58 +5765,55 @@ class DatasetOpsMixin:
         direction = params["direction"]
         mode = params["mode"]
         attest_legacy = bool(params.get("attest_legacy_ptm_convention", False))
-
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                if mode != "relabel":
-                    raise ValueError(
-                        "general conic/great-circle conversion is unavailable "
-                        "until full polarization-basis rotation is implemented"
-                    )
-                result, suffix, hist_extra = self._conic_gc_relabel(
-                    dataset,
-                    direction,
-                    attest_legacy_ptm_convention=attest_legacy,
-                )
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-
-            arrow = "Conic→GC" if direction == "conic_to_gc" else "GC→Conic"
-            history = f"{arrow} {mode}: {name}{hist_extra}"
-            output_name = f"{name} [{arrow} {suffix}]"
-            output_id = self._add_dataset_row(
-                result,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_method(
-                    self._python_output_reference(output_id, output_name),
-                    source_ref,
-                    "convert_equatorial_conic_gc",
-                    args=(direction,),
-                    kwargs={"attest_legacy_ptm_convention": attest_legacy},
-                    comment=f"{arrow} exact zero-plane relabel for {name}",
-                )
-            produced += 1
-
-        if produced == 0:
-            msg = "Conic↔GC created 0 datasets."
-            if skipped:
-                msg += f" Skipped: {', '.join(skipped)}"
-            self.status.showMessage(msg)
-            return
         arrow = "Conic→GC" if direction == "conic_to_gc" else "GC→Conic"
-        msg = f"{arrow} ({mode}) created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
+
+        def operation(_index, _name, dataset):
+            if mode != "relabel":
+                raise ValueError(
+                    "general conic/great-circle conversion is unavailable "
+                    "until full polarization-basis rotation is implemented"
+                )
+            return self._conic_gc_relabel(
+                dataset,
+                direction,
+                attest_legacy_ptm_convention=attest_legacy,
+            )
+
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, payload in results:
+                result, suffix, hist_extra = payload
+                history = f"{arrow} {mode}: {name}{hist_extra}"
+                output_name = f"{name} [{arrow} {suffix}]"
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        source_ref,
+                        "convert_equatorial_conic_gc",
+                        args=(direction,),
+                        kwargs={"attest_legacy_ptm_convention": attest_legacy},
+                        comment=f"{arrow} exact zero-plane relabel for {name}",
+                    )
+            message = f"{arrow} ({mode}) created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "Conic/Great-Circle conversion",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Converting {len(datasets)} dataset(s): {arrow}...",
+        )
 
     def _conic_gc_relabel(
         self,
@@ -5592,55 +5853,69 @@ class DatasetOpsMixin:
             )
             return
         assume_cross_zero = params["assume_missing_cross_pol_zero"]
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        produced = 0
-        skipped: list[str] = []
-        for name, dataset in datasets:
-            try:
-                az_in = np.asarray(dataset.azimuths, dtype=float)
-                el_in = np.asarray(dataset.elevations, dtype=float)
-                if az_in.size < 2 or el_in.size < 1:
-                    skipped.append(f"{name} (need ≥2 azimuths and ≥1 elevation)")
-                    continue
+        def compute(progress):
+            results = []
+            skipped = []
+            total = len(datasets)
+            for index, (name, dataset) in enumerate(datasets, start=1):
+                try:
+                    az_in = np.asarray(dataset.azimuths, dtype=float)
+                    el_in = np.asarray(dataset.elevations, dtype=float)
+                    if az_in.size < 2 or el_in.size < 1:
+                        raise ValueError("need at least 2 azimuths and 1 elevation")
+                    result, suffix, hist_extra = self._wedge_to_conic_regrid(
+                        dataset,
+                        assume_missing_cross_pol_zero=assume_cross_zero,
+                    )
+                except Exception as exc:
+                    skipped.append(f"{name} ({exc})")
+                else:
+                    results.append((index - 1, name, result, suffix, hist_extra))
+                progress(index, total, name)
+            return results, skipped
 
-                result, suffix, hist_extra = self._wedge_to_conic_regrid(
-                    dataset,
-                    assume_missing_cross_pol_zero=assume_cross_zero,
-                )
-            except Exception as exc:
-                skipped.append(f"{name} ({exc})")
-                continue
-
-            history = f"Wedge→Conic {mode}: {name}{hist_extra}"
-            output_name = f"{name} [Wedge→Conic {suffix}]"
-            output_id = self._add_dataset_row(
-                result,
-                output_name,
-                history,
-                file_name="",
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
+        def publish(payload) -> None:
+            results, skipped = payload
             recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_function(
-                    self._python_output_reference(output_id, output_name),
-                    "wedge_to_conic",
-                    [source_ref],
-                    kwargs={
-                        "mode": mode,
-                        "assume_missing_cross_pol_zero": assume_cross_zero,
-                    },
-                    comment=f"Wedge-to-Conic {mode} for {name}",
+            for source_index, name, result, suffix, hist_extra in results:
+                history = f"Wedge→Conic {mode}: {name}{hist_extra}"
+                output_name = f"{name} [Wedge→Conic {suffix}]"
+                output_id = self._add_dataset_row(
+                    result, output_name, history, file_name=""
                 )
-            produced += 1
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "wedge_to_conic",
+                        [source_ref],
+                        kwargs={
+                            "mode": mode,
+                            "assume_missing_cross_pol_zero": assume_cross_zero,
+                        },
+                        comment=f"Wedge-to-Conic {mode} for {name}",
+                    )
 
-        if produced == 0:
-            self.status.showMessage("Wedge→Conic created 0 datasets.")
-            return
-        msg = f"Wedge→Conic ({mode}) created {produced} dataset(s)."
-        if skipped:
-            msg += f" Skipped: {', '.join(skipped)}"
-        self.status.showMessage(msg)
+            produced = len(results)
+            message = f"Wedge→Conic ({mode}) created {produced} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        if self._start_background_callable(
+            "Wedge-to-Conic conversion",
+            compute,
+            publish,
+            reports_progress=True,
+        ):
+            self.status.showMessage(
+                f"Converting {len(datasets)} wedge dataset(s) to conic coordinates..."
+            )
 
     def _wedge_to_conic_relabel(self, dataset: "RcsGrid"):
         raise ValueError(
@@ -5800,35 +6075,58 @@ class DatasetOpsMixin:
         )
         if datasets is None:
             return
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
 
-        for name, dataset in datasets:
-            dup = RcsGrid(
-                dataset.azimuths.copy(),
-                dataset.elevations.copy(),
-                dataset.frequencies.copy(),
-                dataset.polarizations.copy(),
-                rcs_power=dataset.rcs_power.copy(),
-                rcs_phase=dataset.rcs_phase.copy(),
-                rcs_domain=dataset.rcs_domain,
-                source_path=dataset.source_path,
-                history=dataset.history,
-                units=copy.deepcopy(dataset.units or {}),
-                extra=copy.deepcopy(dataset.extra or {}),
-            )
-            output_name = f"{name} [Copy]"
-            output_id = self._add_dataset_row(
-                dup, output_name, f"Duplicate of: {name}", file_name=""
-            )
-            source_ref = self._python_reference_for_dataset(dataset)
-            recorder = getattr(self, "python_recorder", None)
-            if recorder is not None and source_ref is not None:
-                recorder.record_function(
-                    self._python_output_reference(output_id, output_name),
-                    "duplicate_dataset",
-                    [source_ref],
-                    comment=f"Duplicate {name}",
+        def compute(progress):
+            copies = []
+            total = len(datasets)
+            for index, (name, dataset) in enumerate(datasets, start=1):
+                duplicate = RcsGrid(
+                    dataset.azimuths.copy(),
+                    dataset.elevations.copy(),
+                    dataset.frequencies.copy(),
+                    dataset.polarizations.copy(),
+                    rcs_power=dataset.rcs_power.copy(),
+                    rcs_phase=dataset.rcs_phase.copy(),
+                    rcs_domain=dataset.rcs_domain,
+                    source_path=dataset.source_path,
+                    history=dataset.history,
+                    units=copy.deepcopy(dataset.units or {}),
+                    extra=copy.deepcopy(dataset.extra or {}),
                 )
-        self.status.showMessage(f"Duplicated {len(datasets)} dataset(s).")
+                copies.append((index - 1, name, duplicate))
+                progress(index, total, name)
+            return copies
+
+        def publish(copies) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, duplicate in copies:
+                output_name = f"{name} [Copy]"
+                output_id = self._add_dataset_row(
+                    duplicate,
+                    output_name,
+                    f"Duplicate of: {name}",
+                    file_name="",
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "duplicate_dataset",
+                        [source_ref],
+                        comment=f"Duplicate {name}",
+                    )
+            self.status.showMessage(f"Duplicated {len(copies)} dataset(s).")
+
+        if self._start_background_callable(
+            "Dataset duplication", compute, publish, reports_progress=True
+        ):
+            self.status.showMessage(
+                f"Duplicating {len(datasets)} dataset(s) in the background..."
+            )
 
     def _iter_pio_slices(self, dataset: RcsGrid, base_name: str):
         """Yield filenames and indices for single-cut complex file formats.
@@ -5854,7 +6152,13 @@ class DatasetOpsMixin:
                 yield "_".join(parts), ei, pi
 
     @staticmethod
-    def _write_pio_batch(directory: str, plans, *, precision: str = "single") -> int:
+    def _write_pio_batch(
+        directory: str,
+        plans,
+        *,
+        precision: str = "single",
+        progress_cb=None,
+    ) -> int:
         """Validate and stage a Pioneer fan-out before publishing any target."""
 
         prepared = []
@@ -5876,9 +6180,12 @@ class DatasetOpsMixin:
             seen_targets[target_key] = str(name)
             prepared.append((dataset, stem, int(el_idx), int(pol_idx), target))
 
+        work_total = max(1, len(prepared) * 2)
         with tempfile.TemporaryDirectory(prefix=".grim_pio_", dir=directory) as stage:
             staged = []
-            for dataset, stem, el_idx, pol_idx, target in prepared:
+            for index, (dataset, stem, el_idx, pol_idx, target) in enumerate(
+                prepared, start=1
+            ):
                 stage_path = os.path.join(stage, f"{stem}.pio")
                 saved = dataset.save_pio(
                     stage_path,
@@ -5887,15 +6194,23 @@ class DatasetOpsMixin:
                     precision=precision,
                 )
                 staged.append((saved, target))
+                if progress_cb is not None:
+                    progress_cb(index, work_total, f"Staged {os.path.basename(target)}")
             published: list[str] = []
             try:
-                for stage_path, target in staged:
+                for index, (stage_path, target) in enumerate(staged, start=1):
                     if os.path.lexists(target):
                         raise FileExistsError(
                             f"Pioneer target appeared during export: {target}"
                         )
                     os.replace(stage_path, target)
                     published.append(target)
+                    if progress_cb is not None:
+                        progress_cb(
+                            len(prepared) + index,
+                            work_total,
+                            f"Published {os.path.basename(target)}",
+                        )
             except BaseException as original_error:
                 cleanup_errors = []
                 for target in reversed(published):
@@ -5939,8 +6254,26 @@ class DatasetOpsMixin:
                 )
                 if not path:
                     return
-                saved = dataset.save_pio(path, el_idx=el_idx, pol_idx=pol_idx)
-                self.status.showMessage(f"Exported {os.path.basename(saved)}.")
+                def compute_single(progress):
+                    progress(0, 1, f"Writing {os.path.basename(path)}")
+                    saved = dataset.save_pio(
+                        path, el_idx=el_idx, pol_idx=pol_idx
+                    )
+                    progress(1, 1, f"Published {os.path.basename(saved)}")
+                    return saved
+
+                def publish_single(saved) -> None:
+                    self.status.showMessage(
+                        f"Exported {os.path.basename(saved)}."
+                    )
+
+                if self._start_background_callable(
+                    "Pioneer export",
+                    compute_single,
+                    publish_single,
+                    reports_progress=True,
+                ):
+                    self.status.showMessage("Exporting 1 Pioneer file...")
                 return
             directory = QFileDialog.getExistingDirectory(
                 self,
@@ -5949,29 +6282,42 @@ class DatasetOpsMixin:
             if not directory:
                 return
             plans = [(name, dataset, *item) for item in slices]
-            produced = self._write_pio_batch(directory, plans)
+        else:
+            directory = QFileDialog.getExistingDirectory(
+                self, "Export Selected Datasets as .pio"
+            )
+            if not directory:
+                return
+            plans = [
+                (name, dataset, stem, el_idx, pol_idx)
+                for dataset_index, (name, dataset) in enumerate(datasets, start=1)
+                for stem, el_idx, pol_idx in self._iter_pio_slices(
+                    dataset, f"d{dataset_index:03d}_{name}"
+                )
+            ]
+
+        def compute_batch(progress):
+            return self._write_pio_batch(
+                directory, plans, progress_cb=progress
+            )
+
+        def publish_batch(produced) -> None:
             self.status.showMessage(
                 f"Exported {produced} .pio file(s) to {directory}."
             )
-            return
 
-        directory = QFileDialog.getExistingDirectory(
-            self, "Export Selected Datasets as .pio"
-        )
-        if not directory:
-            return
-        plans = [
-            (name, dataset, stem, el_idx, pol_idx)
-            for dataset_index, (name, dataset) in enumerate(datasets, start=1)
-            for stem, el_idx, pol_idx in self._iter_pio_slices(
-                dataset, f"d{dataset_index:03d}_{name}"
+        if self._start_background_callable(
+            "Pioneer export",
+            compute_batch,
+            publish_batch,
+            reports_progress=True,
+        ):
+            self.status.showMessage(
+                f"Exporting {len(plans)} Pioneer file(s) in the background..."
             )
-        ]
-        produced = self._write_pio_batch(directory, plans)
-        self.status.showMessage(f"Exported {produced} .pio file(s) to {directory}.")
 
     @staticmethod
-    def _write_ptm_batch(directory: str, plans) -> int:
+    def _write_ptm_batch(directory: str, plans, *, progress_cb=None) -> int:
         """Validate and stage a PTM fan-out before publishing any target."""
 
         prepared = []
@@ -5996,23 +6342,34 @@ class DatasetOpsMixin:
         # Validate/write every slice into a sibling staging folder first. A
         # publication failure removes every new target already moved, so this
         # empty-folder fan-out is all-or-nothing.
+        work_total = max(1, len(prepared) * 2)
         with tempfile.TemporaryDirectory(prefix=".grim_ptm_", dir=directory) as stage:
             staged = []
-            for dataset, stem, el_idx, pol_idx, target in prepared:
+            for index, (dataset, stem, el_idx, pol_idx, target) in enumerate(
+                prepared, start=1
+            ):
                 stage_path = os.path.join(stage, f"{stem}.ptm")
                 saved = dataset.save_ptm(
                     stage_path, el_idx=el_idx, pol_idx=pol_idx
                 )
                 staged.append((saved, target))
+                if progress_cb is not None:
+                    progress_cb(index, work_total, f"Staged {os.path.basename(target)}")
             published: list[str] = []
             try:
-                for stage_path, target in staged:
+                for index, (stage_path, target) in enumerate(staged, start=1):
                     if os.path.lexists(target):
                         raise FileExistsError(
                             f"PTM target appeared during export: {target}"
                         )
                     os.replace(stage_path, target)
                     published.append(target)
+                    if progress_cb is not None:
+                        progress_cb(
+                            len(prepared) + index,
+                            work_total,
+                            f"Published {os.path.basename(target)}",
+                        )
             except BaseException as original_error:
                 cleanup_errors = []
                 for target in reversed(published):
@@ -6052,12 +6409,27 @@ class DatasetOpsMixin:
                     )
                     if not path:
                         return
-                    saved = dataset.save_ptm(
-                        path, el_idx=el_idx, pol_idx=pol_idx
-                    )
-                    self.status.showMessage(
-                        f"Exported {os.path.basename(saved)}."
-                    )
+
+                    def compute_single(progress):
+                        progress(0, 1, f"Writing {os.path.basename(path)}")
+                        saved = dataset.save_ptm(
+                            path, el_idx=el_idx, pol_idx=pol_idx
+                        )
+                        progress(1, 1, f"Published {os.path.basename(saved)}")
+                        return saved
+
+                    def publish_single(saved) -> None:
+                        self.status.showMessage(
+                            f"Exported {os.path.basename(saved)}."
+                        )
+
+                    if self._start_background_callable(
+                        "PTM export",
+                        compute_single,
+                        publish_single,
+                        reports_progress=True,
+                    ):
+                        self.status.showMessage("Exporting 1 PTM file...")
                     return
                 directory = QFileDialog.getExistingDirectory(
                     self,
@@ -6080,10 +6452,25 @@ class DatasetOpsMixin:
                     )
                 ]
 
-            produced = self._write_ptm_batch(directory, plans)
-            self.status.showMessage(
-                f"Exported {produced} .ptm file(s) to {directory}."
-            )
+            def compute_batch(progress):
+                return self._write_ptm_batch(
+                    directory, plans, progress_cb=progress
+                )
+
+            def publish_batch(produced) -> None:
+                self.status.showMessage(
+                    f"Exported {produced} .ptm file(s) to {directory}."
+                )
+
+            if self._start_background_callable(
+                "PTM export",
+                compute_batch,
+                publish_batch,
+                reports_progress=True,
+            ):
+                self.status.showMessage(
+                    f"Exporting {len(plans)} PTM file(s) in the background..."
+                )
         except (OSError, TypeError, ValueError) as exc:
             self.status.showMessage(f"PTM export failed: {exc}")
 
@@ -6265,25 +6652,31 @@ class DatasetOpsMixin:
         attestation = self._confirm_coherent_metadata(datasets, "Coherent ÷")
         if attestation is None:
             return
-        try:
-            result = coherent_divide(
+        input_refs = self._python_input_references(datasets)
+        out_name = f"{name_a} ÷ {name_b}"
+
+        def compute():
+            return coherent_divide(
                 ds_a, ds_b, metadata_attested=bool(attestation)
             )
-        except (ValueError, TypeError) as exc:
-            self.status.showMessage(f"Coherent ÷: {exc}")
-            return
-        out_name = f"{name_a} ÷ {name_b}"
-        output_id = self._add_dataset_row(
-            result, out_name, f"Coherent ÷: {name_a} / {name_b}", file_name=""
-        )
-        input_refs = self._python_input_references(datasets)
-        recorder = getattr(self, "python_recorder", None)
-        if recorder is not None and input_refs is not None:
-            recorder.record_function(
-                self._python_output_reference(output_id, out_name),
-                "coherent_divide",
-                input_refs,
-                kwargs={"metadata_attested": True} if attestation else None,
-                comment=f"Coherently divide {name_a} by {name_b}",
+
+        def publish(result) -> None:
+            output_id = self._add_dataset_row(
+                result,
+                out_name,
+                f"Coherent ÷: {name_a} / {name_b}",
+                file_name="",
             )
-        self.status.showMessage(f"Coherent ÷ produced: {out_name}")
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and input_refs is not None:
+                recorder.record_function(
+                    self._python_output_reference(output_id, out_name),
+                    "coherent_divide",
+                    input_refs,
+                    kwargs={"metadata_attested": True} if attestation else None,
+                    comment=f"Coherently divide {name_a} by {name_b}",
+                )
+            self.status.showMessage(f"Coherent ÷ produced: {out_name}")
+
+        if self._start_background_callable("Coherent ÷", compute, publish):
+            self.status.showMessage("Coherent ÷ is running in the background...")

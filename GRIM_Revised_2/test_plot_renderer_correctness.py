@@ -9,7 +9,10 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
-from grim_cut_plot_mixin import PlotOpsMixin
+from grim_cut_plot_mixin import (
+    PlotOpsMixin,
+    _selected_polarization_axis_availability,
+)
 from grim_python import plot_datasets
 from plot_modes import (
     azimuth_polar_mode,
@@ -68,6 +71,51 @@ def _grid(
 
 
 class PlotRendererHelperTests(unittest.TestCase):
+    def test_polarization_availability_scans_bounded_basic_slices(self):
+        class RejectAdvancedPolarizationIndex(np.ndarray):
+            def __getitem__(self, key):
+                if (
+                    isinstance(key, tuple)
+                    and len(key) == 4
+                    and isinstance(key[3], (list, tuple, np.ndarray))
+                ):
+                    raise AssertionError(
+                        "availability must not copy a full advanced-indexed grid"
+                    )
+                return super().__getitem__(key)
+
+        shape = (4, 3, 2, 2)
+        power = np.full(shape, np.nan)
+        phase = np.full(shape, np.nan)
+        power[0, 1, 0, 0] = 1.0
+        phase[0, 1, 0, 0] = 0.0
+        power[3, 2, 1, 1] = 2.0
+        # This sample is available for magnitude but not coherent phase.
+        grid = RcsGrid(
+            np.arange(shape[0]),
+            np.arange(shape[1]),
+            np.arange(shape[2]),
+            ["HH", "VV"],
+            rcs_power=power,
+            rcs_phase=phase,
+        )
+        grid.rcs_power = grid.rcs_power.view(RejectAdvancedPolarizationIndex)
+        grid.rcs_phase = grid.rcs_phase.view(RejectAdvancedPolarizationIndex)
+
+        magnitude_masks = _selected_polarization_axis_availability(
+            grid, [0, 1], require_phase=False, maximum_work_bytes=1
+        )
+        phase_masks = _selected_polarization_axis_availability(
+            grid, [0, 1], require_phase=True, maximum_work_bytes=1
+        )
+
+        np.testing.assert_array_equal(magnitude_masks[0], [True, True])
+        np.testing.assert_array_equal(magnitude_masks[1], [False, True, True])
+        np.testing.assert_array_equal(magnitude_masks[2], [True, False, False, True])
+        np.testing.assert_array_equal(phase_masks[0], [True, False])
+        np.testing.assert_array_equal(phase_masks[1], [False, True, False])
+        np.testing.assert_array_equal(phase_masks[2], [True, False, False, False])
+
     def test_compatible_frequency_and_angle_units_convert_to_reference(self):
         reference = _grid()
         other = _grid(angle_unit="rad", frequency_unit="Hz")
@@ -286,8 +334,12 @@ class PlotRendererHelperTests(unittest.TestCase):
     def test_degree_and_radian_grids_form_equivalent_isar_geometry(self):
         degree = _grid()
         radian = _grid(angle_unit="rad")
-        degree_result, _ = form_isar(degree, reconstruction="fast")
-        radian_result, _ = form_isar(radian, reconstruction="fast")
+        degree_result, _ = form_isar(
+            degree, reconstruction="fast", legacy_metadata_attested=True
+        )
+        radian_result, _ = form_isar(
+            radian, reconstruction="fast", legacy_metadata_attested=True
+        )
         self.assertEqual(len(degree_result), len(radian_result))
         for left, right in zip(degree_result, radian_result):
             np.testing.assert_allclose(left["az_values"], right["az_values"], atol=1.0e-12)
@@ -369,6 +421,33 @@ class PlotRendererHelperTests(unittest.TestCase):
         self.assertEqual(axis.get_xlabel(), "Frequency (GHz)")
         self.assertEqual(axis.get_ylabel(), "Phase P50 (deg)")
         self.assertTrue(np.all(np.abs(axis.lines[0].get_ydata()) > 170.0))
+
+    def test_headless_phase_plots_never_reconstruct_the_whole_complex_grid(self):
+        dataset = _grid()
+        common_options = {
+            "datasets": [("phase", dataset)],
+            "azimuths": dataset.azimuths,
+            "elevations": dataset.elevations,
+            "frequencies": dataset.frequencies,
+            "polarization": "HH",
+            "phase": True,
+        }
+
+        with mock.patch.object(
+            RcsGrid,
+            "rcs",
+            new_callable=mock.PropertyMock,
+            side_effect=AssertionError("whole-grid complex reconstruction"),
+        ):
+            for mode in (
+                "azimuth_rect",
+                "azimuth_polar",
+                "frequency",
+                "elevation_sweep",
+            ):
+                with self.subTest(mode=mode):
+                    figure = plot_datasets(mode=mode, **common_options)
+                    figure.clear()
 
 
 class _CanvasCounter:

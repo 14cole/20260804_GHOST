@@ -172,14 +172,21 @@ class OccluderAccelerationTests(unittest.TestCase):
         self.assertIs(snapshot.tris, blocker.tris)
         self.assertIs(snapshot._bvh_lo, blocker._bvh_lo)
         self.assertIs(snapshot._bvh_hi, blocker._bvh_hi)
+        self.assertIs(snapshot._tri_edge1, blocker._tri_edge1)
+        self.assertIs(snapshot._tri_edge2, blocker._tri_edge2)
         self.assertIsNot(snapshot._bvh_lock, blocker._bvh_lock)
         self.assertFalse(snapshot.tris.flags.writeable)
         with self.assertRaises(ValueError):
             snapshot.tris.setflags(write=True)
-        for boxes in (blocker._bvh_lo, blocker._bvh_hi):
-            self.assertFalse(boxes.flags.writeable)
+        for acceleration_array in (
+            blocker._bvh_lo,
+            blocker._bvh_hi,
+            blocker._tri_edge1,
+            blocker._tri_edge2,
+        ):
+            self.assertFalse(acceleration_array.flags.writeable)
             with self.assertRaises(ValueError):
-                boxes.setflags(write=True)
+                acceleration_array.setflags(write=True)
 
         blocker._bias = 100.0
         self.assertAlmostEqual(snapshot.bias, 2.5e-7)

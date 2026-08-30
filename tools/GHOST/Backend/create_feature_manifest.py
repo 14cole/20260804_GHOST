@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Create/check team-attested Assembly response and surface manifests.
+"""Create/check evidence-bound Assembly response and surface manifests.
 
-This command records reviewed engineering claims and binds them to the exact
-GRIM/geometry payloads. It does not run a full-wave comparison and does not
-machine-certify electromagnetic accuracy or CAD registration.
+The feature command consumes a report from validate_feature_reconstruction.py
+and proves that each selected passing case exercised the exact response being
+certified. Surface registration remains a separately reviewed attestation.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,10 @@ import numpy as np
 from feature_workflow import (
     FEATURE_LIBRARY_MANIFEST_KEY,
     FEATURE_LIBRARY_MANIFEST_SCHEMA,
+    FEATURE_VALIDATION_ARTIFACT_ROLES,
+    FEATURE_VALIDATION_EVIDENCE_SCHEMA,
+    FEATURE_VALIDATION_MAX_ACTIVE_FLOOR_DB,
+    FEATURE_VALIDATION_RELEASE_CEILINGS,
     GRAZING_TAPER_DEG,
     LINE_PHASE_CALIBRATION_SCHEMA,
     PSI_HH_DEG,
@@ -35,6 +40,9 @@ from feature_workflow import (
     validate_feature_library_manifest,
     write_surface_binding as _write_backend_surface_binding,
 )
+
+
+_FEATURE_CASE_REPORT_SCHEMA = "ghost.validation.feature-case-report.v1"
 
 
 _SURFACE_UNIT_ALIASES = {
@@ -121,6 +129,265 @@ def _finite_number(value: Any, label: str) -> float:
     return result
 
 
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _digest_text(value: Any, *, label: str) -> str:
+    digest = str(value).strip().lower()
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError(f"{label} must be a lowercase hexadecimal SHA-256 digest.")
+    return digest
+
+
+def _comparison_sha256(comparison: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(comparison),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return _sha256_bytes(encoded)
+
+
+def _validated_gate_limits(
+    comparison: Mapping[str, Any], *, label: str
+) -> dict[str, float]:
+    """Require all three comparisons and every polarization to pass safe gates."""
+
+    sections = (
+        "clean_baseline",
+        "featured_total",
+        "isolated_feature_delta",
+    )
+    common_limits = None
+    required_limits = {"active_floor_db", *FEATURE_VALIDATION_RELEASE_CEILINGS}
+    for section_name in sections:
+        section = comparison.get(section_name)
+        if not isinstance(section, dict) or section.get("passed") is not True:
+            raise ValueError(f"{label}.{section_name} did not pass.")
+        gates = section.get("gates")
+        if not isinstance(gates, dict) or not gates or any(
+            value is not True for value in gates.values()
+        ):
+            raise ValueError(
+                f"{label}.{section_name} contains a failed or malformed gate."
+            )
+        if gates.get("every_polarization_channel") is not True:
+            raise ValueError(
+                f"{label}.{section_name} predates per-polarization release "
+                "gating; regenerate it with the current validator."
+            )
+        raw_limits = section.get("gate_limits")
+        if not isinstance(raw_limits, dict) or set(raw_limits) != required_limits:
+            raise ValueError(
+                f"{label}.{section_name}.gate_limits must contain exactly "
+                f"{sorted(required_limits)}."
+            )
+        try:
+            limits = {key: float(raw_limits[key]) for key in required_limits}
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{label}.{section_name}.gate_limits must be numeric."
+            ) from exc
+        if not all(math.isfinite(value) for value in limits.values()):
+            raise ValueError(
+                f"{label}.{section_name}.gate_limits must be finite."
+            )
+        if common_limits is None:
+            common_limits = limits
+        elif limits != common_limits:
+            raise ValueError(
+                f"{label} uses different gate limits across clean, featured, "
+                "and isolated-delta comparisons."
+            )
+    assert common_limits is not None
+    if common_limits["active_floor_db"] > FEATURE_VALIDATION_MAX_ACTIVE_FLOOR_DB:
+        raise ValueError(
+            f"{label} active_floor_db={common_limits['active_floor_db']:g} "
+            "excludes more weak-field samples than the Production maximum "
+            f"{FEATURE_VALIDATION_MAX_ACTIVE_FLOOR_DB:g} dB."
+        )
+    for key in (
+        "max_normalized_rms",
+        "max_magnitude_p95_db",
+        "max_phase_rms_deg",
+    ):
+        if not 0.0 <= common_limits[key] <= FEATURE_VALIDATION_RELEASE_CEILINGS[key]:
+            raise ValueError(
+                f"{label} {key}={common_limits[key]:g} is looser than the "
+                f"Production ceiling {FEATURE_VALIDATION_RELEASE_CEILINGS[key]:g}."
+            )
+    if not FEATURE_VALIDATION_RELEASE_CEILINGS[
+        "min_coherence"
+    ] <= common_limits["min_coherence"] <= 1.0:
+        raise ValueError(
+            f"{label} min_coherence={common_limits['min_coherence']:g} is "
+            "looser than the Production floor "
+            f"{FEATURE_VALIDATION_RELEASE_CEILINGS['min_coherence']:g}."
+        )
+    return {key: common_limits[key] for key in sorted(common_limits)}
+
+
+def _validation_evidence_from_reports(
+    report_paths: Sequence[str],
+    *,
+    requested_case_ids: Sequence[str],
+    response_content_sha256: str,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Extract passing, artifact-bound evidence for one exact feature response."""
+
+    if not report_paths:
+        raise ValueError(
+            "A validated feature manifest requires at least one "
+            "--validation-report produced by validate_feature_reconstruction.py."
+        )
+    requested = [str(value).strip() for value in requested_case_ids]
+    if any(not value for value in requested) or len(set(requested)) != len(requested):
+        raise ValueError("--validation-case-id values must be nonempty and unique.")
+    requested_set = set(requested)
+    evidence: list[dict[str, Any]] = []
+    seen_case_ids: set[str] = set()
+    for raw_report_path in report_paths:
+        report_path = Path(raw_report_path).expanduser().resolve()
+        if not report_path.is_file():
+            raise FileNotFoundError(f"Validation report not found: {report_path}")
+        report_bytes = report_path.read_bytes()
+        try:
+            report = json.loads(report_bytes.decode("utf-8-sig"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"{report_path}: validation report is not valid UTF-8 JSON."
+            ) from exc
+        if not isinstance(report, dict) or report.get("schema") != (
+            _FEATURE_CASE_REPORT_SCHEMA
+        ):
+            raise ValueError(
+                f"{report_path}: report schema must be "
+                f"{_FEATURE_CASE_REPORT_SCHEMA!r}."
+            )
+        comparisons = report.get("comparisons")
+        if not isinstance(comparisons, list):
+            raise ValueError(f"{report_path}: comparisons must be an array.")
+        report_sha256 = _sha256_bytes(report_bytes)
+        for index, comparison in enumerate(comparisons):
+            label = f"{report_path}: comparison {index + 1}"
+            if not isinstance(comparison, dict):
+                raise ValueError(f"{label} must be an object.")
+            case_id = str(comparison.get("case_id", "")).strip()
+            if not case_id:
+                raise ValueError(
+                    f"{label} has no stable case_id; regenerate the report "
+                    "with the current validator."
+                )
+            if requested_set and case_id not in requested_set:
+                continue
+            response_hashes = comparison.get(
+                "feature_response_content_sha256"
+            )
+            if not isinstance(response_hashes, list) or any(
+                not isinstance(value, str) for value in response_hashes
+            ):
+                raise ValueError(
+                    f"{label} has no valid feature-response provenance list."
+                )
+            response_hashes = {
+                _digest_text(value, label=f"{label} feature response hash")
+                for value in response_hashes
+            }
+            if response_content_sha256 not in response_hashes:
+                if requested_set and case_id in requested_set:
+                    raise ValueError(
+                        f"{label} did not exercise this exact feature response "
+                        f"({response_content_sha256})."
+                    )
+                continue
+            if len(response_hashes) != 1:
+                raise ValueError(
+                    f"{label} combines {len(response_hashes)} distinct reusable "
+                    "feature responses. Its aggregate pass cannot certify any "
+                    "one library response because errors can cancel. Add an "
+                    "isolated case that uses only this response."
+                )
+            if comparison.get("passed") is not True:
+                raise ValueError(
+                    f"{label} exercised this response but did not pass every "
+                    "clean, featured-total, and isolated-delta gate."
+                )
+            gate_limits = _validated_gate_limits(comparison, label=label)
+            if case_id in seen_case_ids:
+                raise ValueError(
+                    f"Validation case_id {case_id!r} appears more than once "
+                    "across the selected reports."
+                )
+            artifacts = comparison.get("artifact_sha256")
+            paths = comparison.get("paths")
+            if not isinstance(artifacts, dict) or set(artifacts) != set(
+                FEATURE_VALIDATION_ARTIFACT_ROLES
+            ):
+                raise ValueError(
+                    f"{label}.artifact_sha256 must contain exactly "
+                    f"{list(FEATURE_VALIDATION_ARTIFACT_ROLES)}."
+                )
+            if not isinstance(paths, dict) or set(paths) != set(
+                FEATURE_VALIDATION_ARTIFACT_ROLES
+            ):
+                raise ValueError(
+                    f"{label}.paths must contain exactly "
+                    f"{list(FEATURE_VALIDATION_ARTIFACT_ROLES)}."
+                )
+            checked_artifacts = {}
+            for role in FEATURE_VALIDATION_ARTIFACT_ROLES:
+                expected = _digest_text(
+                    artifacts[role], label=f"{label}.artifact_sha256.{role}"
+                )
+                artifact = Path(str(paths[role])).expanduser().resolve()
+                if not artifact.is_file():
+                    raise FileNotFoundError(
+                        f"{label}: evidence artifact is missing: {artifact}"
+                    )
+                actual = _sha256_file(artifact)
+                if actual != expected:
+                    raise ValueError(
+                        f"{label}: {role} changed after validation; expected "
+                        f"{expected}, got {actual}. Regenerate the report."
+                    )
+                checked_artifacts[role] = actual
+            seen_case_ids.add(case_id)
+            evidence.append({
+                "schema": FEATURE_VALIDATION_EVIDENCE_SCHEMA,
+                "case_id": case_id,
+                "passed": True,
+                "report_sha256": report_sha256,
+                "comparison_sha256": _comparison_sha256(comparison),
+                "feature_response_content_sha256": response_content_sha256,
+                "artifact_sha256": checked_artifacts,
+                "gate_limits": gate_limits,
+            })
+    if requested_set - seen_case_ids:
+        raise ValueError(
+            "Selected validation case ID(s) were not found as passing evidence "
+            "for this exact response: " + ", ".join(sorted(requested_set - seen_case_ids))
+        )
+    if not evidence:
+        raise ValueError(
+            "No passing validation case in the selected report(s) exercised "
+            "this exact feature response."
+        )
+    evidence.sort(key=lambda item: item["case_id"])
+    return evidence, [item["case_id"] for item in evidence]
+
+
 def _normalized_surface_units(value: Any) -> str:
     key = str(value or "").strip().casefold()
     try:
@@ -184,10 +451,20 @@ def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, A
         raise ValueError("--dataset-id must not be blank.")
     if not host_material:
         raise ValueError("--host-material must not be blank.")
-    if args.validation_status == "validated" and not validation_case_ids:
+    response_content_sha256 = feature_response_content_sha256(response)
+    validation_evidence: list[dict[str, Any]] = []
+    if args.validation_status == "validated":
+        validation_evidence, validation_case_ids = (
+            _validation_evidence_from_reports(
+                args.validation_report,
+                requested_case_ids=validation_case_ids,
+                response_content_sha256=response_content_sha256,
+            )
+        )
+    elif args.validation_report:
         raise ValueError(
-            "A validated declaration requires at least one "
-            "--validation-case-id from reviewed evidence."
+            "--validation-report is accepted only with "
+            "--validation-status validated."
         )
 
     applicability: dict[str, Any] = {
@@ -205,12 +482,13 @@ def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, A
         "phase_origin": _FEATURE_PHASE_ORIGINS[args.feature_kind],
         "frame_convention": _FEATURE_FRAME_CONVENTIONS[args.feature_kind],
         "time_convention": "exp(+jwt)",
-        "response_content_sha256": feature_response_content_sha256(response),
+        "response_content_sha256": response_content_sha256,
         "host": {"material": host_material},
         "applicability": applicability,
         "validation": {
             "status": args.validation_status,
             "case_ids": validation_case_ids,
+            "evidence": validation_evidence,
         },
     }
 
@@ -226,10 +504,19 @@ def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, A
                 "radius-m, --maximum-conical-incidence-deg, and "
                 "--maximum-path-vertex-turn-deg."
             )
+        if not phase_case_ids and validation_evidence:
+            phase_case_ids = list(validation_case_ids)
         if not phase_case_ids:
             raise ValueError(
                 "A line manifest requires at least one independent "
                 "--phase-calibration-case-id."
+            )
+        if validation_evidence and not set(phase_case_ids).issubset(
+            validation_case_ids
+        ):
+            raise ValueError(
+                "Every --phase-calibration-case-id must name a selected "
+                "passing full-wave validation case for this exact response."
             )
         applicability.update({
             "minimum_along_line_normal_turn_radius_m": line_values[0],
@@ -449,21 +736,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create.add_argument(
         "--validation-case-id", action="append", default=[],
-        help="Reviewed full-wave validation case ID; repeat for multiple cases.",
+        help=(
+            "Case ID to select from --validation-report; repeat for multiple "
+            "cases. If omitted, every passing case bound to this response is used."
+        ),
+    )
+    create.add_argument(
+        "--validation-report", action="append", default=[],
+        help=(
+            "Passing JSON report from validate_feature_reconstruction.py; "
+            "required for validated status and repeatable across case families."
+        ),
     )
     create.add_argument("--minimum-along-line-normal-turn-radius-m", type=float)
     create.add_argument("--maximum-conical-incidence-deg", type=float)
     create.add_argument("--maximum-path-vertex-turn-deg", type=float)
     create.add_argument(
         "--phase-calibration-case-id", action="append", default=[],
-        help="Independent line phase-calibration case ID; repeat as needed.",
+        help=(
+            "Selected passing full-wave case that checks the line phase mapping; "
+            "defaults to all selected evidence cases."
+        ),
     )
     create.add_argument(
         "--attest-reviewed-evidence", action="store_true", required=True,
         help=(
             "Confirm a responsible team member reviewed the declared response, "
-            "host, envelope, and case IDs. This is an attestation, not a solver "
-            "certification."
+            "host, envelope, and machine-bound evidence. This does not replace "
+            "independent solver convergence review."
         ),
     )
     create.add_argument(

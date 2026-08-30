@@ -5396,6 +5396,31 @@ def _normalize_public_2d_solver_method(method: 'Any') -> 'str':
         )
     return normalized
 
+
+def _validate_disabled_2d_cfie_alpha(value: 'Any') -> 'float':
+    """Require the exact disabled value for the unimplemented 2-D CFIE knob.
+
+    A tolerance check is inappropriate for an algorithm selector: accepting a
+    tiny nonzero value would silently ignore a requested formulation change.
+    ``NaN`` also compares false to ordinary magnitude thresholds, so validate
+    finiteness explicitly before any geometry or operator work begins.
+    """
+
+    try:
+        alpha = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "cfie_alpha is not implemented by any active 2-D formulation; "
+            "use the exact disabled value cfie_alpha=0."
+        ) from exc
+    if not math.isfinite(alpha) or alpha != 0.0:
+        raise ValueError(
+            "cfie_alpha is not implemented by any active 2-D formulation; "
+            "use the exact disabled value cfie_alpha=0. No unchanged field "
+            "was returned under a different solver setting."
+        )
+    return 0.0
+
 def _rcs_sigma_from_amp(
     amp_vec: 'np.ndarray',
     k_value: 'float',
@@ -7744,6 +7769,8 @@ def solve_monostatic_rcs_2d_single_polarization(
     if any(not math.isfinite(e) for e in elevations):
         raise ValueError("Elevation angles must all be finite.")
 
+    cfie_alpha = _validate_disabled_2d_cfie_alpha(cfie_alpha)
+
     mesh_ref_ghz: 'Optional[float]' = None
     if mesh_reference_ghz is not None:
         mesh_ref_ghz = float(mesh_reference_ghz)
@@ -7834,13 +7861,6 @@ def solve_monostatic_rcs_2d_single_polarization(
 
     check_abort()
     emit_progress("Initializing solver")
-
-    if abs(float(cfie_alpha)) > EPS:
-        raise ValueError(
-            "cfie_alpha is not implemented by any active 2-D formulation; "
-            "use cfie_alpha=0. No unchanged field was returned under a "
-            "different solver setting."
-        )
 
     # --- Mesh caching: when mesh_reference_ghz is set, the mesh topology is
     # frequency-independent and can be built once before the frequency loop. ---
@@ -8875,6 +8895,8 @@ def solve_bistatic_rcs_2d_single_polarization(
     if any(not math.isfinite(a) for a in obs_angles):
         raise ValueError("Observation angles must all be finite.")
 
+    cfie_alpha = _validate_disabled_2d_cfie_alpha(cfie_alpha)
+
     solver_method = _normalize_public_2d_solver_method(solver_method)
     if solver_method == "fmm":
         raise ValueError(
@@ -8904,12 +8926,6 @@ def solve_bistatic_rcs_2d_single_polarization(
     for _msg in list(preflight_report.get("warnings", []) or []):
         materials.warn_once(str(_msg))
     _warn_far_quadrature_override(materials)
-
-    if abs(float(cfie_alpha)) > EPS:
-        raise ValueError(
-            "cfie_alpha is not implemented by any active 2-D formulation; "
-            "use cfie_alpha=0."
-        )
 
     samples: 'List[Dict[str, Any]]' = []
     residual_values: 'List[float]' = []
@@ -9873,11 +9889,7 @@ def compute_boundary_densities(
     and the formulation used for a single-frequency, single-angle debug solve.
     """
 
-    if abs(float(cfie_alpha)) > EPS:
-        raise ValueError(
-            "cfie_alpha is not implemented by boundary-density diagnostics; "
-            "use cfie_alpha=0."
-        )
+    cfie_alpha = _validate_disabled_2d_cfie_alpha(cfie_alpha)
     pol = _normalize_polarization(polarization)
     unit_scale = _unit_scale_to_meters(geometry_units)
     base_dir = _material_base_dir_for_snapshot(

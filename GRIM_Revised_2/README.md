@@ -231,9 +231,11 @@ membership as one portable
 when possible. Loading a recipe warns when an input is missing or has changed;
 it never silently treats changed bytes as the saved configuration. Loading a
 different recipe or closing GRIM with recipe edits presents **Save / Discard /
-Cancel**, so a trade-study configuration is not silently lost. Version 1
-recipes remain readable, but are flagged for a host-ID review before Production
-validation.
+Cancel**, so a trade-study configuration is not silently lost. Current recipes
+use schema version 4 and record the body-certification policy. Version 1-3
+recipes remain readable, but load with certification disabled, select the
+reviewed external/HPC workflow, and show a warning rather than silently claiming
+Production certification.
 If every feature is unchecked, **Preview geometry** deliberately shows the
 clean body alone; validation and build still require at least one enabled
 feature.
@@ -307,10 +309,16 @@ CSV/STL or modify placement validation, shadowing, or the assembled RCS.
 Point datasets require compatible 3-D delta channels (VV, HH, and reciprocal
 cross-polarization where used). Line datasets require the TE and TM 2-D delta
 responses consumed by line expansion. The GUI starts in the visibly labeled
-**Production (recommended)** profile: clean-body metadata is strict, certified
-feature-library manifests are required, and every active response row must have
-an effective host material/coating ID. The global field is a convenience default;
-use per-response row overrides for mixed vehicle substrates or coating stacks.
+**Production — certified GHOST body (recommended)** profile: clean-body metadata
+is strict, certified feature-library manifests are required, the clean-body
+response must carry a valid body-mesh certificate, and every active response row
+must have an effective host material/coating ID. **External/HPC body — reviewed**
+keeps the strict metadata, manifest, and host-material requirements but records
+an explicit local waiver of the GHOST body certificate for a separately reviewed
+solve/mesh provenance chain. **Legacy compatibility** relaxes those contracts and
+remains visibly unsuitable for Production publication. The global host-material
+field is a convenience default; use per-response row overrides for mixed vehicle
+substrates or coating stacks.
 The manifest binds each
 response ID to its installed-minus-clean sign, phase origin, local frame, host
 material declaration, frequency range, footprint, curvature/conical limits,
@@ -525,7 +533,19 @@ Xpatch `.ss` imports retain the documented GHz frequency values and interpret
 each binary signal record as one angular look with frequency-varying
 VV/VH/HV/HH complex samples. Saving the imported dataset as `.grim` maps those
 records into GRIM's azimuth/elevation/frequency/polarization grid without
-transposing the physical axes or applying a frequency-magnitude heuristic.
+transposing the physical axes or applying a frequency-magnitude heuristic. The
+available SS header/reference does not establish an absolute RCS normalization,
+so these files are deliberately labeled relative `power_ratio`/dB data. They can
+be plotted and round-tripped, but PTM/PIO export, range calibration, and coherent
+Assembly publication remain blocked until a reviewed conversion establishes
+physical `sigma_3d` or `sigma_2d` units.
+
+Generic theta/phi TXT input requires a unit-bearing column header and either an
+explicit `frequency_ghz=` argument or a unit-qualified filename such as
+`f=10GHz`; headerless column order and unitless filename numbers are not guessed.
+Pioneer PIO input likewise requires explicit X/Y axis units, and any explicit
+Elevation value must carry ElevationUnits. Descending axes are accepted only
+when strictly monotonic and are reversed together with their sample matrix.
 
 `RcsGrid.read_SENTRi()` (also exposed as `grim_headless.read_SENTRi()`) is the
 named CREATE-RF SENTRi entry point. It strictly recognizes the two schemas in

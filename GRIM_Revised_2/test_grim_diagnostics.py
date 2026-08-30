@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import grim_diagnostics as diagnostics
 
@@ -78,9 +79,31 @@ class GrimDiagnosticsTests(unittest.TestCase):
         output = io.StringIO()
         diagnostics.write_report(results, stream=output)
         rendered = output.getvalue()
+        self.assertIn("FUNCTIONAL READINESS: READY", rendered)
         self.assertIn("RESULT: READY", rendered)
+        self.assertIn("SOLVER PERFORMANCE: LIMITED", rendered)
         self.assertIn("[optional] PowerPoint export", rendered)
         self.assertIn("do not prevent GRIM from starting", rendered)
+
+    def test_native_acceleration_is_reported_independently(self) -> None:
+        accelerated = [
+            diagnostics.DiagnosticResult(
+                "native_fmm", "FMM", "PASS", False, "loaded"
+            ),
+            diagnostics.DiagnosticResult(
+                "native_bor", "BoR", "PASS", False, "loaded"
+            ),
+        ]
+        self.assertEqual(
+            diagnostics.native_acceleration_status(accelerated),
+            (True, ()),
+        )
+        output = io.StringIO()
+        diagnostics.write_report(accelerated, stream=output)
+        self.assertIn("SOLVER PERFORMANCE: ACCELERATED", output.getvalue())
+        ready, limitations = diagnostics.native_acceleration_status([])
+        self.assertFalse(ready)
+        self.assertEqual(len(limitations), 2)
 
     def test_missing_required_ghost_sentinel_returns_nonzero(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -238,6 +261,35 @@ class GrimDiagnosticsTests(unittest.TestCase):
         self.assertEqual(powerpoint.status, "WARN")
         self.assertFalse(powerpoint.blocks_startup)
         self.assertEqual(diagnostics.startup_exit_code(results), 0)
+
+    def test_default_powerpoint_probe_does_not_require_removed_pythoncom_api(self) -> None:
+        # pywin32 311 on CPython 3.12 does not expose CLSIDFromProgID. The
+        # diagnostic must use the read-only COM registry probe and must never
+        # activate PowerPoint merely to establish readiness.
+        imported = []
+
+        def import_module(name: str):
+            imported.append(name)
+            return object()
+
+        with mock.patch.object(
+            diagnostics.importlib, "import_module", side_effect=import_module
+        ), mock.patch.object(
+            diagnostics,
+            "_registered_com_clsid",
+            return_value=(
+                "{91493441-5A91-11CF-8700-00AA0060263B}",
+                r"C:\Program Files\Microsoft Office\POWERPNT.EXE /Automation",
+            ),
+        ), mock.patch.object(
+            diagnostics.metadata, "version", return_value="311"
+        ):
+            ready, detail = diagnostics._default_powerpoint_probe()
+
+        self.assertTrue(ready)
+        self.assertEqual(imported, ["pythoncom", "win32com.client"])
+        self.assertIn("pywin32 311", detail)
+        self.assertIn("PowerPoint was not launched", detail)
 
     def test_windows_native_probe_never_offers_foreign_library_formats(self) -> None:
         offered: list[tuple[Path, ...]] = []

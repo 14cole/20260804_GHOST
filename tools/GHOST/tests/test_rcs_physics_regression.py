@@ -382,6 +382,41 @@ class NumericalCertificationTests(unittest.TestCase):
             "equilibrated_1norm_lu_onenormest",
         )
 
+    def test_condition_gate_is_explicit_and_threshold_override_is_auditable(self):
+        metadata = {
+            "residual_norm_max": 1.0e-12,
+            "residual_nonfinite_count": 0,
+            "condition_est_max": 2.0e7,
+            "condition_est_computed": True,
+            "warnings": [],
+        }
+        default_gate = rcs.evaluate_quality_gate(metadata)
+        self.assertFalse(default_gate["passed"])
+        self.assertIn("condition_est_max", default_gate["reason"])
+
+        reviewed_gate = rcs.evaluate_quality_gate(
+            metadata, thresholds={"condition_est_max": 5.0e7}
+        )
+        self.assertTrue(reviewed_gate["passed"])
+        self.assertEqual(
+            reviewed_gate["thresholds"]["condition_est_max"], 5.0e7
+        )
+        self.assertEqual(
+            reviewed_gate["values"]["condition_est_max"], 2.0e7
+        )
+
+        no_condition = dict(metadata)
+        no_condition.update({
+            "condition_est_max": float("nan"),
+            "condition_est_computed": False,
+        })
+        residual_only_gate = rcs.evaluate_quality_gate(no_condition)
+        self.assertTrue(residual_only_gate["passed"])
+        self.assertIn(
+            "condition number was not requested",
+            residual_only_gate["reason"],
+        )
+
     def test_nonzero_cfie_is_rejected_instead_of_ignored(self):
         snapshot = {
             "segments": [_circle_segment(0.05, 24, 2)],
@@ -399,6 +434,72 @@ class NumericalCertificationTests(unittest.TestCase):
                 strict_quality_gate=False,
                 max_panels=1000,
             )
+
+    def test_every_nonzero_or_nonfinite_2d_cfie_value_fails_closed(self):
+        """An unimplemented algorithm selector must never use EPS semantics."""
+
+        snapshot = {
+            "segments": [_circle_segment(0.05, 24, 2)],
+            "ibcs": [],
+            "dielectrics": [],
+        }
+        for value in (1.0e-15, -1.0e-15, float("nan"), float("inf")):
+            with self.subTest(value=value), mock.patch.object(
+                rcs,
+                "validate_geometry_snapshot_for_solver",
+                side_effect=AssertionError("geometry work started"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "cfie_alpha is not implemented"
+                ):
+                    rcs.solve_monostatic_rcs_2d_single_polarization(
+                        snapshot,
+                        frequencies_ghz=[1.0],
+                        elevations_deg=[0.0],
+                        polarization="TM",
+                        geometry_units="meters",
+                        cfie_alpha=value,
+                        strict_quality_gate=False,
+                        max_panels=1000,
+                    )
+
+    def test_bistatic_and_density_cfie_guards_run_before_geometry(self):
+        snapshot = {
+            "segments": [_circle_segment(0.05, 24, 2)],
+            "ibcs": [],
+            "dielectrics": [],
+        }
+        with mock.patch.object(
+            rcs,
+            "validate_geometry_snapshot_for_solver",
+            side_effect=AssertionError("geometry work started"),
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "cfie_alpha is not implemented"
+            ):
+                rcs.solve_bistatic_rcs_2d_single_polarization(
+                    snapshot,
+                    frequencies_ghz=[1.0],
+                    incidence_angles_deg=[0.0],
+                    observation_angles_deg=[0.0],
+                    polarization="TM",
+                    geometry_units="meters",
+                    cfie_alpha=float("nan"),
+                    strict_quality_gate=False,
+                    max_panels=1000,
+                )
+            with self.assertRaisesRegex(
+                ValueError, "cfie_alpha is not implemented"
+            ):
+                rcs.compute_boundary_densities(
+                    snapshot,
+                    frequency_ghz=1.0,
+                    elevation_deg=0.0,
+                    polarization="TM",
+                    geometry_units="meters",
+                    cfie_alpha=1.0e-15,
+                    max_panels=1000,
+                )
 
     def test_sheet_memory_gate_runs_before_dense_assembly(self):
         snapshot = {

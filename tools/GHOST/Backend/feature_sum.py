@@ -1417,27 +1417,31 @@ def verify_body_artifact_bundle(body_grim: 'str') -> 'Dict[str, Any]':
     }
 
 
-def load_body_solver_diagnostics(path: 'str') -> 'Dict[str, Any]':
+def load_body_solver_diagnostics(
+    path: 'str',
+    *,
+    loaded_grim: 'Optional[Dict[str, Any]]' = None,
+) -> 'Dict[str, Any]':
     """Read the canonical per-frequency solver audit from a body artifact."""
 
     label = str(path)
     try:
-        body = load_body_grim(label)
+        grim = _load_grim(label) if loaded_grim is None else loaded_grim
+        body = load_body_grim(label, loaded_grim=grim)
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise ValueError(
             f"{label}: not a valid BoR body artifact."
         ) from exc
     try:
-        with np.load(label, allow_pickle=False) as payload:
-            frequencies = [
-                float(value)
-                for value in np.asarray(
-                    payload["frequencies"], dtype=float
-                ).ravel()
-            ]
-            raw = np.asarray(
-                payload["solver_metadata_json"]
-            ).reshape(()).item()
+        frequencies = [
+            float(value)
+            for value in np.asarray(
+                grim["frequencies"], dtype=float
+            ).ravel()
+        ]
+        raw = np.asarray(
+            grim["solver_metadata_json"]
+        ).reshape(()).item()
     except KeyError as exc:
         raise ValueError(
             f"{label}: body has no solver diagnostics; rerun the body with "
@@ -1530,16 +1534,22 @@ def load_body_solver_diagnostics(path: 'str') -> 'Dict[str, Any]':
     }
 
 
-def require_body_mesh_certification(path: 'str') -> 'Dict[str, Any]':
-    """Explicitly audit that a body used the refined-mesh path.
+def require_body_mesh_certification(
+    path: 'str',
+    *,
+    loaded_grim: 'Optional[Dict[str, Any]]' = None,
+) -> 'Dict[str, Any]':
+    """Audit that a body used the passed dual-channel refined-mesh path.
 
-    This opt-in audit helper is retained for users who want to enforce that
-    policy themselves.  Normal loading and downstream feature operations do
-    not call it.
+    The Production Feature Assembly profile calls this authoritatively. A
+    response solved outside the local GHOST certification workflow must use
+    the explicit External/HPC Assembly profile; ordinary file loading remains
+    available because a missing certificate does not by itself corrupt the
+    stored field.
     """
 
     label = str(path)
-    loaded = load_body_solver_diagnostics(label)
+    loaded = load_body_solver_diagnostics(label, loaded_grim=loaded_grim)
     frequencies = list(loaded["frequencies_ghz"])
     per_frequency = dict(loaded["per_frequency"])
 
@@ -1932,7 +1942,11 @@ def load_body_requested_radar_grid(
     }
 
 
-def load_body_grim(path: 'str') -> 'Dict[float, Dict[str, Any]]':
+def load_body_grim(
+    path: 'str',
+    *,
+    loaded_grim: 'Optional[Dict[str, Any]]' = None,
+) -> 'Dict[float, Dict[str, Any]]':
     """Read a body .grim back into the ``{frequency: {theta_deg, amp_vv, amp_hh}}``
     dict that sum_features and the exporters consume.
 
@@ -1941,7 +1955,7 @@ def load_body_grim(path: 'str') -> 'Dict[float, Dict[str, Any]]':
     body GRIMs remain readable so existing validated datasets do not need a
     lossy conversion.
     """
-    g = _load_grim(str(path))
+    g = _load_grim(str(path)) if loaded_grim is None else loaded_grim
     label = str(path)
     if "body_model_metadata_json" in g:
         try:

@@ -28,7 +28,9 @@ import prepare_external_cases as harness  # noqa: E402
 PLAN_PATH = CASE_ROOT / "external_case_plan.json"
 
 
-def _write_structural_grim(path, contract, *, frequencies=None):
+def _write_structural_grim(
+    path, contract, *, frequencies=None, include_feature_provenance=True
+):
     grid = contract["acceptance_grid"]
     azimuths = np.asarray(grid["azimuths_deg"], dtype=float)
     elevations = np.asarray(grid["elevations_deg"], dtype=float)
@@ -68,6 +70,15 @@ def _write_structural_grim(path, contract, *, frequencies=None):
         "rcs_amp_real": amplitude.real,
         "rcs_amp_imag": amplitude.imag,
     }
+    if Path(path).stem == "featured_prediction" and include_feature_provenance:
+        payload["feature_provenance_json"] = json.dumps([{
+            "schema": "ghost.workflow.coherent-feature-addition.v1",
+            "details": {
+                "placements": [{
+                    "dataset_content_sha256": "a" * 64,
+                }],
+            },
+        }])
     return Path(_save_grim_npz(payload, str(path)))
 
 
@@ -131,6 +142,7 @@ class ExternalCasePlanTests(unittest.TestCase):
             self.assertEqual(manifest["schema"], "ghost.validation.feature-cases.v1")
             self.assertEqual(len(manifest["cases"]), 14)
             for entry in manifest["cases"]:
+                self.assertTrue(entry["id"])
                 for role in harness.CASE_REQUIRED_PATHS:
                     self.assertEqual(Path(entry[role]).name, f"{role}.grim")
                 case_id = Path(entry["clean_truth"]).parent.name
@@ -188,6 +200,25 @@ class ExternalCasePlanTests(unittest.TestCase):
             artifact = report["cases"][0]["artifacts"]["featured_truth"]
             self.assertFalse(artifact["passed"])
             self.assertTrue(any("frequencies" in error for error in artifact["errors"]))
+
+            _write_structural_grim(
+                wrong_path,
+                plan["solve_contract"],
+            )
+            prediction = (
+                case_dir / plan["artifact_filenames"]["featured_prediction"]
+            )
+            _write_structural_grim(
+                prediction,
+                plan["solve_contract"],
+                include_feature_provenance=False,
+            )
+            report = harness.preflight_run(PLAN_PATH, directory)
+            artifact = report["cases"][0]["artifacts"]["featured_prediction"]
+            self.assertFalse(artifact["passed"])
+            self.assertTrue(any(
+                "dataset_content_sha256" in error for error in artifact["errors"]
+            ))
 
     def test_duplicate_case_id_is_rejected(self):
         payload = json.loads(PLAN_PATH.read_text(encoding="utf-8"))

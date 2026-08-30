@@ -23,7 +23,7 @@ from grim_io import _save_grim_npz  # noqa: E402
 import validate_feature_reconstruction as validation  # noqa: E402
 
 
-def _write_field(path, amplitude):
+def _write_field(path, amplitude, *, feature_response_sha256=None):
     field = np.asarray(amplitude, dtype=np.complex128)
     if field.shape != (3, 2, 1, 3):
         raise AssertionError(f"unexpected test field shape {field.shape}")
@@ -55,20 +55,50 @@ def _write_field(path, amplitude):
         "rcs_amp_real": field.real,
         "rcs_amp_imag": field.imag,
     }
+    if feature_response_sha256 is not None:
+        payload["feature_provenance_json"] = json.dumps([{
+            "schema": "ghost.workflow.coherent-feature-addition.v1",
+            "details": {
+                "placements": [{
+                    "dataset_id": "test-feature",
+                    "dataset_content_sha256": feature_response_sha256,
+                }],
+            },
+        }])
     return Path(_save_grim_npz(payload, str(path)))
 
 
 class FeatureCaseComparisonTests(unittest.TestCase):
+    def test_weak_cross_pol_channel_cannot_hide_behind_strong_copol(self):
+        reference = np.ones((20, 3), dtype=np.complex128)
+        reference[:, 2] = 1.0e-6 + 0.0j
+        estimate = reference.copy()
+        estimate[:, 2] *= -1.0
+
+        result = validation._comparison_metrics(
+            reference,
+            estimate,
+            ["VV", "HH", "VH"],
+        )
+
+        self.assertLess(result["normalized_complex_rms"], 1.0e-4)
+        self.assertFalse(result["per_channel"]["VH"]["passed"])
+        self.assertFalse(result["gates"]["every_polarization_channel"])
+        self.assertFalse(result["passed"])
+
     def test_exact_clean_featured_and_delta_fields_pass(self):
         base = np.full((3, 2, 1, 3), 2.0 + 0.4j, dtype=np.complex128)
         delta = np.full((3, 2, 1, 3), 0.15 - 0.08j, dtype=np.complex128)
+        response_sha256 = "a" * 64
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clean_truth = _write_field(root / "clean_truth.grim", base)
             clean_prediction = _write_field(root / "clean_prediction.grim", base)
             featured_truth = _write_field(root / "featured_truth.grim", base + delta)
             featured_prediction = _write_field(
-                root / "featured_prediction.grim", base + delta
+                root / "featured_prediction.grim",
+                base + delta,
+                feature_response_sha256=response_sha256,
             )
 
             result = validation.compare_feature_case(
@@ -79,6 +109,13 @@ class FeatureCaseComparisonTests(unittest.TestCase):
             )
 
         self.assertTrue(result["passed"])
+        self.assertEqual(
+            result["feature_response_content_sha256"], [response_sha256]
+        )
+        self.assertEqual(
+            set(result["artifact_sha256"]),
+            set(validation.CASE_REQUIRED_PATHS),
+        )
         for section in (
             "clean_baseline",
             "featured_total",
@@ -131,6 +168,7 @@ class FeatureManifestTests(unittest.TestCase):
                 "schema": validation.CASE_MANIFEST_SCHEMA,
                 "gates": {"max_normalized_rms": 0.12},
                 "cases": [{
+                    "id": "flat-plate-fastener",
                     "name": "flat plate with one fastener",
                     "body": "finite rectangular PEC plate",
                     "feature": "off-center installed-minus-clean fastener",
@@ -145,6 +183,7 @@ class FeatureManifestTests(unittest.TestCase):
             cases = validation.load_case_manifest(manifest)
 
         self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0]["case_id"], "flat-plate-fastener")
         self.assertEqual(cases[0]["name"], "flat plate with one fastener")
         self.assertEqual(cases[0]["gates"]["max_normalized_rms"], 0.12)
         self.assertEqual(cases[0]["gates"]["min_coherence"], 0.99)

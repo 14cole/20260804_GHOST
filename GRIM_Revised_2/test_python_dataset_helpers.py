@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -172,6 +173,94 @@ class PythonDatasetHelperTest(unittest.TestCase):
                 np.shares_memory(result.extra["body_profile_radius_m"], body_profile)
             )
             self.assertFalse(result.extra["body_profile_radius_m"].flags.writeable)
+
+    def test_phase_offset_and_ratio_avoid_whole_grid_rcs_materialization(self):
+        source = _grid(values=(1.0, 4.0, 9.0, 16.0))
+        denominator = _grid(values=(1.0, 1.0, 1.0, 1.0))
+        with mock.patch.object(
+            RcsGrid,
+            "rcs",
+            new_callable=mock.PropertyMock,
+            side_effect=AssertionError("whole-grid complex response requested"),
+        ):
+            shifted = shift_dataset(source, phase_degrees=30.0)
+            offset = offset_db(source, 6.0)
+            ratio = coherent_divide(
+                source, denominator, metadata_attested=True
+            )
+
+        np.testing.assert_allclose(
+            shifted.rcs_phase,
+            np.deg2rad(30.0),
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(offset.rcs_power, source.rcs_power * 10.0**0.6)
+        np.testing.assert_allclose(ratio.rcs_power.ravel(), [1.0, 4.0, 9.0, 16.0])
+
+    def test_sigma_2d_raw_frequency_scaling_survives_full_slice_divide(self):
+        shape = (2, 1, 3, 2)
+        frequencies_ghz = np.asarray([1.0, 2.0, 4.0])
+        raw_numerator = (
+            np.arange(1, np.prod(shape) + 1, dtype=np.float64).reshape(shape)
+            * np.exp(1j * 0.3)
+        )
+        raw_denominator = np.ones(shape, dtype=np.complex128) * np.exp(-1j * 0.2)
+        k0 = (
+            2.0 * np.pi * frequencies_ghz * 1.0e9 / 299_792_458.0
+        )[None, None, :, None]
+
+        def raw_grid(raw):
+            return RcsGrid(
+                [0.0, 10.0],
+                [0.0],
+                frequencies_ghz,
+                ["HH", "VV"],
+                rcs_power=np.abs(raw) ** 2 / (4.0 * k0),
+                rcs_phase=np.angle(raw),
+                units={
+                    "frequency": "GHz",
+                    "rcs_linear_quantity": "sigma_2d",
+                    "rcs_log_unit": "dBke",
+                },
+                extra={
+                    "rcs_amp_real": raw.real.copy(),
+                    "rcs_amp_imag": raw.imag.copy(),
+                    "raw_complex_amplitude_preserved": True,
+                },
+            )
+
+        numerator = raw_grid(raw_numerator)
+        denominator = raw_grid(raw_denominator)
+        full_selection = (
+            slice(None),
+            slice(None),
+            slice(None),
+            slice(None),
+        )
+
+        sliced = numerator.rcs_slice(full_selection)
+        self.assertEqual(sliced.shape, shape)
+        np.testing.assert_allclose(
+            sliced,
+            raw_numerator / (2.0 * np.sqrt(k0)),
+            rtol=1.0e-13,
+            atol=1.0e-13,
+        )
+        ratio = coherent_divide(
+            numerator, denominator, metadata_attested=True
+        )
+        np.testing.assert_allclose(
+            ratio.rcs_power,
+            np.abs(raw_numerator / raw_denominator) ** 2,
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            ratio.rcs_phase,
+            np.angle(raw_numerator / raw_denominator),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
 
     def test_coherent_divide_requires_explicit_unknown_metadata_attestation(self):
         numerator = _grid(values=(4.0, 4.0, 4.0, 4.0))

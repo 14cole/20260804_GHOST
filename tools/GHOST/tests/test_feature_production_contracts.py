@@ -55,7 +55,29 @@ def manifest(
         "response_content_sha256": response_content_sha256,
         "host": {"material": "PEC outer skin"},
         "applicability": applicability,
-        "validation": {"status": "validated", "case_ids": ["fixture-001"]},
+        "validation": {
+            "status": "validated",
+            "case_ids": ["fixture-001"],
+            "evidence": [{
+                "schema": feature_workflow.FEATURE_VALIDATION_EVIDENCE_SCHEMA,
+                "case_id": "fixture-001",
+                "passed": True,
+                "report_sha256": "b" * 64,
+                "comparison_sha256": "c" * 64,
+                "feature_response_content_sha256": response_content_sha256,
+                "artifact_sha256": {
+                    role: character * 64
+                    for role, character in zip(
+                        feature_workflow.FEATURE_VALIDATION_ARTIFACT_ROLES,
+                        "def0",
+                    )
+                },
+                "gate_limits": {
+                    "active_floor_db": -40.0,
+                    **feature_workflow.FEATURE_VALIDATION_RELEASE_CEILINGS,
+                },
+            }],
+        },
     }
     if kind == "line":
         result["line_phase_calibration"] = {
@@ -63,7 +85,7 @@ def manifest(
             "tm_deg": feature_workflow.PSI_HH_DEG,
             "te_deg": feature_workflow.PSI_VV_DEG,
             "grazing_taper_deg": feature_workflow.GRAZING_TAPER_DEG,
-            "case_ids": ["phase-fixture-001"],
+            "case_ids": ["fixture-001"],
         }
     return result
 
@@ -79,6 +101,46 @@ def _point_pattern_stub():
 
 
 class FeatureManifestTests(unittest.TestCase):
+    def test_current_validated_manifest_requires_response_bound_evidence(self):
+        missing = manifest("fastener", "point")
+        missing["validation"].pop("evidence")
+        with self.assertRaisesRegex(ValueError, "validation.evidence"):
+            feature_workflow.validate_feature_library_manifest(
+                missing, dataset_id="fastener", feature_kind="point"
+            )
+
+        wrong_response = manifest("fastener", "point")
+        wrong_response["validation"]["evidence"][0][
+            "feature_response_content_sha256"
+        ] = "9" * 64
+        with self.assertRaisesRegex(ValueError, "not this manifest response"):
+            feature_workflow.validate_feature_library_manifest(
+                wrong_response, dataset_id="fastener", feature_kind="point"
+            )
+
+        peak_only = manifest("fastener", "point")
+        peak_only["validation"]["evidence"][0]["gate_limits"][
+            "active_floor_db"
+        ] = 0.0
+        with self.assertRaisesRegex(ValueError, "excludes more weak-field samples"):
+            feature_workflow.validate_feature_library_manifest(
+                peak_only, dataset_id="fastener", feature_kind="point"
+            )
+
+    def test_v2_manifest_remains_legacy_readable_without_evidence(self):
+        previous = manifest("fastener", "point")
+        previous["schema"] = (
+            feature_workflow.PREVIOUS_FEATURE_LIBRARY_MANIFEST_SCHEMA
+        )
+        previous["validation"].pop("evidence")
+        normalized = feature_workflow.validate_feature_library_manifest(
+            previous, dataset_id="fastener", feature_kind="point"
+        )
+        self.assertEqual(
+            normalized["schema"],
+            feature_workflow.PREVIOUS_FEATURE_LIBRARY_MANIFEST_SCHEMA,
+        )
+
     def test_manifest_requires_canonical_identity_and_conventions(self):
         validated = feature_workflow.validate_feature_library_manifest(
             manifest("gap", "line"), dataset_id="gap", feature_kind="line"

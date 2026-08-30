@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1205,6 +1206,70 @@ class AssemblyGuiTests(unittest.TestCase):
             self.assertTrue(panel.is_dirty())
             critical.assert_called_once()
             self.assertIn("Unsaved Measurement", critical.call_args.args[2])
+
+    def test_embedded_grid_encoding_runs_outside_gui_thread(self):
+        from assembly_tree import AssemblyTreePanel, _TYPE_ROOT
+
+        panel = AssemblyTreePanel()
+        root = panel.tree._make_node("Response", _TYPE_ROOT, edit=False)
+        root.addChild(panel.tree._make_leaf("Large Measurement", object()))
+        gui_thread = threading.get_ident()
+        worker_threads: list[int] = []
+
+        def encode(_grid):
+            worker_threads.append(threading.get_ident())
+            return "encoded-grid"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "platform.asy"
+            with patch("assembly_tree._grid_to_b64", side_effect=encode), patch.object(
+                panel, "_notify"
+            ):
+                self.assertTrue(panel._save(path=target))
+
+            document = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(
+                document["tree"][0]["children"][0]["data"], "encoded-grid"
+            )
+
+        self.assertEqual(len(worker_threads), 1)
+        self.assertNotEqual(worker_threads[0], gui_thread)
+
+    def test_close_is_refused_while_assembly_save_worker_is_active(self):
+        from PySide6.QtCore import QTimer
+        from assembly_tree import AssemblyTreePanel, QMessageBox, _TYPE_ROOT
+
+        panel = AssemblyTreePanel()
+        panel.tree._make_node("Response", _TYPE_ROOT, edit=False)
+        close_results: list[bool] = []
+        worker_started = threading.Event()
+        release_worker = threading.Event()
+
+        def hold_save_worker(*_args, **_kwargs) -> None:
+            worker_started.set()
+            if not release_worker.wait(timeout=2.0):
+                raise TimeoutError("test did not release assembly save worker")
+
+        def check_close_during_save() -> None:
+            self.assertTrue(worker_started.wait(timeout=1.0))
+            close_results.append(panel.request_close())
+            release_worker.set()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "platform.asy"
+            QTimer.singleShot(0, check_close_during_save)
+            with patch(
+                "assembly_tree._write_assembly_snapshot",
+                side_effect=hold_save_worker,
+            ), patch.object(QMessageBox, "warning") as warning, patch.object(
+                panel, "_notify"
+            ):
+                self.assertTrue(panel._save(path=target))
+
+        self.assertEqual(close_results, [False])
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.args[1], "Assembly Save Still Running")
+        self.assertFalse(panel._save_in_progress)
 
     def test_assembly_dirty_prompt_and_atomic_save_failure(self):
         from assembly_tree import AssemblyTreePanel, QMessageBox, _TYPE_ROOT

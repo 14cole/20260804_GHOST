@@ -73,10 +73,14 @@ py Backend\create_feature_manifest.py create-surface-binding --help
 py Backend\create_feature_manifest.py check-surface-binding --help
 ```
 
-This is a team-attestation and integrity tool, not an electromagnetic
-certificate. See [FEATURE_VALIDATION_GUIDE.md](FEATURE_VALIDATION_GUIDE.md) for
-the exact manifest fields, headless settings, reduced-order limitations, and
-required independent full-wave evidence.
+For `validated` libraries this is now an evidence-binding and integrity tool:
+it consumes the full-wave validator report, re-hashes all four case artifacts,
+and proves that the assembled prediction used the exact response. Team review
+is still required because software cannot establish external-solver
+independence or mesh convergence. See
+[FEATURE_VALIDATION_GUIDE.md](FEATURE_VALIDATION_GUIDE.md) for the exact
+manifest fields, headless settings, reduced-order limitations, and required
+independent full-wave evidence.
 
 Use `1c_build_deltas/subtract_datasets.py` for canonical OPN-FRD 2-D deltas.
 General CEM joins and coherent subtraction are under `CEM_Tools`.

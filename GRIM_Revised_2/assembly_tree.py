@@ -12,7 +12,7 @@ import uuid
 
 import numpy as np
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt, Signal
+from PySide6.QtCore import QByteArray, QEventLoop, QMimeData, QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QDrag, QFont, QIcon, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QRadioButton,
     QToolButton,
     QTreeWidget,
@@ -1105,50 +1106,57 @@ def _grid_to_b64(grid) -> str:
 def _b64_to_grid(b64: str):
     """Reconstruct an RcsGrid from a base-64 string."""
     from grim_dataset import RcsGrid
-    buf = io.BytesIO(base64.b64decode(b64))
-    data = np.load(buf, allow_pickle=False)
-
-    units: dict = {}
-    if "units" in data:
-        raw = data["units"]
-        if isinstance(raw, np.ndarray):
-            raw = raw.item()
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        if isinstance(raw, str) and raw:
-            try:
-                units = json.loads(raw)
-            except json.JSONDecodeError as exc:
+    # Every member used below is materialized eagerly.  Close both the
+    # in-memory stream and NumPy's ZipFile wrapper before returning so repeated
+    # assembly loads do not retain duplicate encoded archives until GC runs.
+    with io.BytesIO(base64.b64decode(b64)) as buf, np.load(
+        buf, allow_pickle=False
+    ) as data:
+        units: dict = {}
+        if "units" in data:
+            raw = data["units"]
+            if isinstance(raw, np.ndarray):
+                raw = raw.item()
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            if isinstance(raw, str) and raw:
+                try:
+                    units = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "embedded dataset contains corrupt units metadata; refusing "
+                        "to guess its physical conventions"
+                    ) from exc
+            if not isinstance(units, dict):
                 raise ValueError(
-                    "embedded dataset contains corrupt units metadata; refusing "
-                    "to guess its physical conventions"
-                ) from exc
-        if not isinstance(units, dict):
-            raise ValueError("embedded dataset units metadata must be a JSON object")
+                    "embedded dataset units metadata must be a JSON object"
+                )
 
-    source_path_raw = data["source_path"].item() if "source_path" in data else None
-    source_path     = source_path_raw if source_path_raw else None
-    history_raw     = data["history"].item() if "history" in data else None
-    history         = history_raw if history_raw else None
-    extra = {
-        key: data[key]
-        for key in getattr(data, "files", [])
-        if key not in RcsGrid._RESERVED_KEYS
-    }
+        source_path_raw = (
+            data["source_path"].item() if "source_path" in data else None
+        )
+        source_path = source_path_raw if source_path_raw else None
+        history_raw = data["history"].item() if "history" in data else None
+        history = history_raw if history_raw else None
+        extra = {
+            key: data[key]
+            for key in getattr(data, "files", [])
+            if key not in RcsGrid._RESERVED_KEYS
+        }
 
-    return RcsGrid(
-        data["azimuths"],
-        data["elevations"],
-        data["frequencies"],
-        data["polarizations"],
-        rcs_power=data["rcs_power"],
-        rcs_phase=data["rcs_phase"],
-        rcs_domain="power_phase",
-        source_path=source_path,
-        history=history,
-        units=units,
-        extra=extra,
-    )
+        return RcsGrid(
+            data["azimuths"],
+            data["elevations"],
+            data["frequencies"],
+            data["polarizations"],
+            rcs_power=data["rcs_power"],
+            rcs_phase=data["rcs_phase"],
+            rcs_domain="power_phase",
+            source_path=source_path,
+            history=history,
+            units=units,
+            extra=extra,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1189,6 +1197,202 @@ def _item_to_dict(item: QTreeWidgetItem) -> dict | None:
                     f"leaf {item.text(0)!r}: {exc}"
                 ) from exc
     return d
+
+
+def _item_to_save_snapshot(item: QTreeWidgetItem) -> dict | None:
+    """Capture Qt-owned tree state without encoding large dataset arrays."""
+
+    if _is_preview_item(item):
+        return None
+    node_type = item.data(0, _ROLE_TYPE)
+    children = []
+    for index in range(item.childCount()):
+        child = _item_to_save_snapshot(item.child(index))
+        if child is not None:
+            children.append(child)
+    snapshot: dict = {
+        "name": item.text(0),
+        "type": node_type,
+        "included": _inclusion_state(item) != Qt.Unchecked,
+        "visible": _visibility_state(item) != Qt.Unchecked,
+        "children": children,
+    }
+    if node_type != _TYPE_ROOT:
+        snapshot["mode"] = _node_mode(item)
+    if node_type == _TYPE_LEAF:
+        snapshot["dataset"] = item.data(0, _ROLE_NAME)
+        snapshot["_grid"] = item.data(0, _ROLE_GRID)
+    return snapshot
+
+
+def _encode_save_snapshot(
+    snapshot: dict,
+    *,
+    progress_callback=None,
+    progress_state: list[int] | None = None,
+) -> dict:
+    """Encode one detached save snapshot; safe to run outside Qt's GUI thread."""
+
+    encoded = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"children", "_grid"}
+    }
+    encoded["children"] = [
+        _encode_save_snapshot(
+            child,
+            progress_callback=progress_callback,
+            progress_state=progress_state,
+        )
+        for child in snapshot.get("children", [])
+    ]
+    if snapshot.get("type") == _TYPE_LEAF:
+        grid = snapshot.get("_grid")
+        if grid is not None:
+            try:
+                encoded["data"] = _grid_to_b64(grid)
+            except Exception as exc:
+                raise ValueError(
+                    "Could not serialize the embedded dataset for response "
+                    f"leaf {snapshot.get('name')!r}: {exc}"
+                ) from exc
+            if progress_state is not None:
+                progress_state[0] += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        progress_state[0],
+                        progress_state[1],
+                        str(snapshot.get("name", "dataset")),
+                    )
+    return encoded
+
+
+def _write_assembly_snapshot(
+    target: Path,
+    document_snapshot: dict,
+    *,
+    progress_callback=None,
+) -> None:
+    """Encode and atomically publish a detached Assembly document snapshot."""
+
+    leaf_count = 0
+
+    def count_grids(node: dict) -> None:
+        nonlocal leaf_count
+        if node.get("type") == _TYPE_LEAF and node.get("_grid") is not None:
+            leaf_count += 1
+        for child in node.get("children", []):
+            count_grids(child)
+
+    for root_snapshot in document_snapshot.get("tree", []):
+        count_grids(root_snapshot)
+    progress_state = [0, max(1, leaf_count)]
+    if progress_callback is not None:
+        progress_callback(0, progress_state[1], "Preparing assembly")
+    document = {
+        "version": int(document_snapshot["version"]),
+        "tree": [
+            _encode_save_snapshot(
+                node,
+                progress_callback=progress_callback,
+                progress_state=progress_state,
+            )
+            for node in document_snapshot.get("tree", [])
+        ],
+    }
+
+    temporary_path: Path | None = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(document, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, target)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+class _AssemblySaveWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object)
+
+    def __init__(self, target: Path, document_snapshot: dict) -> None:
+        super().__init__()
+        self._target = target
+        self._document_snapshot = document_snapshot
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            _write_assembly_snapshot(
+                self._target,
+                self._document_snapshot,
+                progress_callback=self.progress.emit,
+            )
+        except Exception as exc:
+            self.finished.emit({"ok": False, "error": str(exc)})
+            return
+        self.finished.emit({"ok": True})
+
+
+class _AssemblySaveUiBridge(QObject):
+    """Receive worker signals on Qt's GUI thread while a nested event loop runs."""
+
+    def __init__(self, dialog: QProgressDialog, event_loop: QEventLoop) -> None:
+        super().__init__(dialog)
+        self._dialog = dialog
+        self._event_loop = event_loop
+        self.result: dict = {"ok": False, "error": "save worker stopped unexpectedly"}
+
+    @Slot(int, int, str)
+    def update_progress(self, done: int, total: int, detail: str) -> None:
+        count = max(1, int(total))
+        self._dialog.setRange(0, count)
+        self._dialog.setValue(min(max(int(done), 0), count))
+        detail_text = str(detail).strip()
+        self._dialog.setLabelText(
+            "Saving Assembly datasets..."
+            + (f"\n{detail_text}" if detail_text else "")
+        )
+
+    @Slot(object)
+    def complete(self, payload: object) -> None:
+        self.result = dict(payload) if isinstance(payload, dict) else {
+            "ok": False,
+            "error": "save worker returned an invalid result",
+        }
+        self._event_loop.quit()
+
+
+class _AssemblySaveProgressDialog(QProgressDialog):
+    """Progress window that cannot dismiss its active save worker."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._close_allowed = False
+
+    def allow_close(self) -> None:
+        self._close_allowed = True
+
+    def reject(self) -> None:
+        if self._close_allowed:
+            super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if self._close_allowed:
+            super().closeEvent(event)
+        else:
+            event.ignore()
 
 
 def _dict_to_item(d: dict) -> QTreeWidgetItem:
@@ -2298,6 +2502,7 @@ class AssemblyTreePanel(QWidget):
         self._suppress_dirty = False
         self._dirty = False
         self._assembly_path: Path | None = None
+        self._save_in_progress = False
 
         self.btn_add_root.clicked.connect(
             lambda: self.tree._make_node("New Root", _TYPE_ROOT)
@@ -2344,6 +2549,17 @@ class AssemblyTreePanel(QWidget):
         # remain readable; a branch with no mode adopts Auto on load.
         return {"version": 5, "tree": nodes}
 
+    def _save_document_snapshot(self) -> dict:
+        """Capture tree fields quickly; array compression happens in a worker."""
+
+        root = self.tree.invisibleRootItem()
+        nodes = []
+        for index in range(root.childCount()):
+            snapshot = _item_to_save_snapshot(root.child(index))
+            if snapshot is not None:
+                nodes.append(snapshot)
+        return {"version": 5, "tree": nodes}
+
     def _confirm_unsaved_changes(
         self,
         *,
@@ -2369,6 +2585,14 @@ class AssemblyTreePanel(QWidget):
         return True
 
     def request_close(self, parent: QWidget | None = None) -> bool:
+        if self._save_in_progress:
+            QMessageBox.warning(
+                parent or self,
+                "Assembly Save Still Running",
+                "The assembly tree is still being saved. Wait for the save to "
+                "finish before closing GRIM.",
+            )
+            return False
         return self._confirm_unsaved_changes(action="closing GRIM", parent=parent)
 
     def _set_show_all(self, raw_state: int) -> None:
@@ -2462,6 +2686,14 @@ class AssemblyTreePanel(QWidget):
             self.tree.collapseItem(item)
 
     def _save(self, path: str | os.PathLike[str] | None = None) -> bool:
+        if self._save_in_progress:
+            QMessageBox.warning(
+                self,
+                "Assembly Save Still Running",
+                "The assembly tree is already being saved. Wait for the current "
+                "save to finish.",
+            )
+            return False
         target = Path(path).expanduser() if path is not None else None
         if target is None:
             default_path = str(self._assembly_path or Path("assembly.asy"))
@@ -2478,7 +2710,6 @@ class AssemblyTreePanel(QWidget):
             target = target.with_suffix(".asy")
         target = target.resolve(strict=False)
 
-        temporary_path: Path | None = None
         try:
             if not target.parent.is_dir():
                 raise FileNotFoundError(
@@ -2486,27 +2717,65 @@ class AssemblyTreePanel(QWidget):
                 )
             if target.exists() and not target.is_file():
                 raise OSError(f"Save target is not a regular file: {target}")
-            fd, temporary_name = tempfile.mkstemp(
-                prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
-            )
-            temporary_path = Path(temporary_name)
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-                json.dump(self._document(), stream, indent=2)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, target)
-            temporary_path = None
+            document_snapshot = self._save_document_snapshot()
         except Exception as exc:
-            if temporary_path is not None:
-                try:
-                    temporary_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
             QMessageBox.critical(
                 self,
                 "Assembly Save Failed",
                 f"Could not save the assembly tree:\n{exc}",
+            )
+            return False
+
+        dialog = _AssemblySaveProgressDialog(
+            "Saving Assembly datasets...",
+            "",
+            0,
+            0,
+            self,
+        )
+        dialog.setWindowTitle("Save Assembly Tree")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setCancelButton(None)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumDuration(250)
+
+        event_loop = QEventLoop(self)
+        bridge = _AssemblySaveUiBridge(dialog, event_loop)
+        thread = QThread(self)
+        worker = _AssemblySaveWorker(target, document_snapshot)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(bridge.update_progress)
+        worker.finished.connect(bridge.complete)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(event_loop.quit)
+        self._save_in_progress = True
+        try:
+            thread.start()
+            event_loop.exec()
+            thread.quit()
+            thread.wait()
+        finally:
+            # The nested event loop can dispatch GRIM's close event while the
+            # worker is active. Keep the panel alive until its child thread has
+            # stopped, then permit normal application shutdown again.
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
+            self._save_in_progress = False
+            dialog.allow_close()
+            dialog.close()
+            dialog.deleteLater()
+            thread.deleteLater()
+
+        if not bool(bridge.result.get("ok", False)):
+            error = str(bridge.result.get("error", "Unknown save error"))
+            QMessageBox.critical(
+                self,
+                "Assembly Save Failed",
+                f"Could not save the assembly tree:\n{error}",
             )
             return False
 
@@ -2808,7 +3077,7 @@ def _align_coherent_grid(grid, target, *, mode: str):
 
     if mode == "intersect":
         indices = _coherent_target_indices(grid, target)
-        field = grid.rcs[np.ix_(*indices)]
+        field = grid.rcs_slice(np.ix_(*indices))
     elif mode == "interp":
         polarization_indices = grid._indices_for_axis_values(
             grid.polarizations, target.polarizations, tol=0.0
@@ -2818,7 +3087,9 @@ def _align_coherent_grid(grid, target, *, mode: str):
             or len(polarization_indices) != len(target.polarizations)
         ):
             raise ValueError("polarization axis mismatch for coherent interp")
-        field = grid.rcs[..., polarization_indices]
+        field = grid.rcs_slice(
+            (slice(None), slice(None), slice(None), polarization_indices)
+        )
         for axis, old, new, label in (
             (0, grid.azimuths, target.azimuths, "azimuth"),
             (1, grid.elevations, target.elevations, "elevation"),
@@ -3265,22 +3536,37 @@ def _combine_children(
 
         C_coh = np.array(_field(coh_grids[0]), copy=True)
         for g in coh_grids[1:]:
-            C_coh = C_coh + _field(g)
+            next_field = _field(g)
+            result_dtype = np.result_type(C_coh.dtype, next_field.dtype)
+            if C_coh.dtype != result_dtype:
+                C_coh = C_coh.astype(result_dtype)
+            np.add(C_coh, next_field, out=C_coh)
 
     P_incoh = None
     if incoh_grids:
         P_incoh = np.array(incoh_grids[0].rcs_power, copy=True)
         for g in incoh_grids[1:]:
-            P_incoh = P_incoh + g.rcs_power
+            result_dtype = np.result_type(P_incoh.dtype, g.rcs_power.dtype)
+            if P_incoh.dtype != result_dtype:
+                P_incoh = P_incoh.astype(result_dtype)
+            np.add(P_incoh, g.rcs_power, out=P_incoh)
 
     if C_coh is not None and P_incoh is not None:
-        total_power = np.abs(C_coh) ** 2 + P_incoh
+        total_power = np.empty(C_coh.shape, dtype=C_coh.real.dtype)
+        np.absolute(C_coh, out=total_power)
+        np.square(total_power, out=total_power)
+        result_dtype = np.result_type(total_power.dtype, P_incoh.dtype)
+        if total_power.dtype != result_dtype:
+            total_power = total_power.astype(result_dtype)
+        np.add(total_power, P_incoh, out=total_power)
         # No single field phase exists for a coherent-field plus statistically
         # independent power sum. Mark it unknown so an ancestor cannot silently
         # reinterpret the incoherent contribution as a coherent field.
         total_phase = np.full(total_power.shape, np.nan, dtype=total_power.dtype)
     elif C_coh is not None:
-        total_power = np.abs(C_coh) ** 2
+        total_power = np.empty(C_coh.shape, dtype=C_coh.real.dtype)
+        np.absolute(C_coh, out=total_power)
+        np.square(total_power, out=total_power)
         total_phase = np.angle(C_coh)
     else:
         total_power = np.array(P_incoh, copy=True)
@@ -3305,21 +3591,19 @@ def _combine_children(
     if C_coh is not None and P_incoh is None:
         quantity = ref.linear_quantity()
         if quantity == "sigma_3d":
-            raw_amplitude = C_coh / np.sqrt(4.0 * np.pi)
+            raw_scale = 1.0 / np.sqrt(4.0 * np.pi)
         elif quantity == "sigma_2d":
             frequency_hz = ref._frequency_value_to_hz(ref.frequencies)
             k0 = 2.0 * np.pi * np.asarray(frequency_hz, dtype=float) / C0
-            raw_amplitude = C_coh * (
-                2.0 * np.sqrt(k0)[None, None, :, None]
-            )
+            raw_scale = 2.0 * np.sqrt(k0)[None, None, :, None]
         else:
-            raw_amplitude = None
-        if raw_amplitude is not None:
-            extra["rcs_amp_real"] = np.asarray(
-                raw_amplitude.real, dtype=np.float64
+            raw_scale = None
+        if raw_scale is not None:
+            extra["rcs_amp_real"] = np.multiply(
+                C_coh.real, raw_scale, dtype=np.float64
             )
-            extra["rcs_amp_imag"] = np.asarray(
-                raw_amplitude.imag, dtype=np.float64
+            extra["rcs_amp_imag"] = np.multiply(
+                C_coh.imag, raw_scale, dtype=np.float64
             )
             extra["raw_complex_amplitude_preserved"] = True
 
