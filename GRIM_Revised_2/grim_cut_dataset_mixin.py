@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import json
 import math
 import os
 import re
@@ -256,6 +257,31 @@ def _append_provenance(existing: object, event: object) -> str:
     if previous == addition or previous.endswith("\n" + addition):
         return previous
     return previous + "\n" + addition
+
+
+_COHERENT_METADATA_LABELS = {
+    "phase_reference": "phase reference / phase center",
+    "time_convention": "phasor time convention",
+    "polarization_basis": "polarization basis",
+}
+
+
+def _missing_coherent_metadata_keys(datasets) -> set[str]:
+    """Return coherent declarations absent from any selected input."""
+
+    missing: set[str] = set()
+    for dataset in datasets:
+        getter = getattr(dataset, "_declared_scalar_metadata", None)
+        for key in _COHERENT_METADATA_LABELS:
+            if callable(getter):
+                value = getter(key)
+            else:
+                value = (dataset.extra or {}).get(
+                    key, (dataset.units or {}).get(key, "")
+                )
+            if not str(value or "").strip():
+                missing.add(key)
+    return missing
 
 
 def _ensure_grim_output_path(path: str | os.PathLike) -> str:
@@ -1168,6 +1194,198 @@ class RangeCalibrationDialog(QDialog):
                 float(self.spin_gain_limit_db.value())
                 if self.chk_gain_limit.isChecked()
                 else None
+            ),
+        }
+
+
+class SupportReferenceDifferenceDialog(QDialog):
+    """Assign the two physical roles for guided support-reference subtraction."""
+
+    def __init__(self, entries, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Support-Referenced Difference")
+        self.setMinimumWidth(640)
+        self._entries = list(entries)
+
+        layout = QVBoxLayout(self)
+        description = QLabel(
+            "Create an unsaved derived dataset using the exact complex operation "
+            "A(target + support) - A(support-only). Select the physical roles "
+            "below; GRIM will not interpolate, regrid, or change phase."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        role_box = QGroupBox("1. Assign acquisition roles")
+        role_layout = QGridLayout(role_box)
+        self.combo_target = QComboBox()
+        self.combo_support = QComboBox()
+        for row_index, (name, _dataset) in enumerate(self._entries, start=1):
+            label = f"[{row_index}] {name}"
+            self.combo_target.addItem(label)
+            self.combo_support.addItem(label)
+        if len(self._entries) > 1:
+            self.combo_support.setCurrentIndex(1)
+        role_layout.addWidget(QLabel("Target + support acquisition:"), 0, 0)
+        role_layout.addWidget(self.combo_target, 0, 1)
+        role_layout.addWidget(QLabel("Support-only reference:"), 1, 0)
+        role_layout.addWidget(self.combo_support, 1, 1)
+        layout.addWidget(role_box)
+
+        self.compatibility_label = QLabel("")
+        self.compatibility_label.setWordWrap(True)
+        self.compatibility_label.setObjectName("supportReferenceCompatibility")
+        layout.addWidget(self.compatibility_label)
+
+        assumptions_box = QGroupBox("2. Confirm the measurement contract")
+        assumptions_layout = QVBoxLayout(assumptions_box)
+        self.chk_acquisition = QCheckBox(
+            "I confirm both acquisitions use the same calibration, phase "
+            "center/reference, coordinates,\npolarization basis, and static setup."
+        )
+        self.chk_interaction = QCheckBox(
+            "I understand the result is support-referenced, not a reconstructed "
+            "free-space target:\ncoupling, shadowing, multiple bounce, and drift "
+            "cannot be recovered by two-file subtraction."
+        )
+        assumptions_layout.addWidget(self.chk_acquisition)
+        assumptions_layout.addWidget(self.chk_interaction)
+        layout.addWidget(assumptions_box)
+
+        note = QLabel(
+            "The output is added as a new unsaved row only after QA review. "
+            "Neither input is modified. Complex sample-energy and coherence "
+            "metrics are diagnostic; they do not prove physical support removal."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+
+        self.combo_target.currentIndexChanged.connect(self._update_validity)
+        self.combo_support.currentIndexChanged.connect(self._update_validity)
+        self.chk_acquisition.toggled.connect(self._update_validity)
+        self.chk_interaction.toggled.connect(self._update_validity)
+        self._update_validity()
+
+    def _selected_entries(self):
+        if not self._entries:
+            return None, None
+        target_index = int(self.combo_target.currentIndex())
+        support_index = int(self.combo_support.currentIndex())
+        if target_index < 0 or support_index < 0:
+            return None, None
+        return (
+            self._entries[target_index],
+            self._entries[support_index],
+        )
+
+    def _update_validity(self, *_args) -> None:
+        target_entry, support_entry = self._selected_entries()
+        valid = False
+        message = "Select two different datasets."
+        metadata_attested = False
+        if target_entry is not None and support_entry is not None:
+            if self.combo_target.currentIndex() == self.combo_support.currentIndex():
+                message = (
+                    "Target + support and support-only must be different rows."
+                )
+            else:
+                target = target_entry[1]
+                support = support_entry[1]
+                missing = _missing_coherent_metadata_keys((target, support))
+                acquisition_contract = None
+                try:
+                    target._assert_compatible(
+                        support,
+                        coherent=True,
+                        coherent_metadata_attested=bool(missing),
+                        _scan_phase_samples=False,
+                    )
+                    acquisition_contract = target._assert_support_reference_metadata_compatible(
+                        support
+                    )
+                except (TypeError, ValueError) as exc:
+                    message = (
+                        "Not compatible for exact complex subtraction: " + str(exc)
+                    )
+                else:
+                    acquisition_missing = dict(
+                        acquisition_contract.get(
+                            "missing_declarations_by_role", {}
+                        )
+                    )
+                    metadata_attested = bool(missing or acquisition_missing)
+                    valid = True
+                    if missing or acquisition_missing:
+                        coherent_labels = ", ".join(
+                            _COHERENT_METADATA_LABELS[key]
+                            for key in _COHERENT_METADATA_LABELS
+                            if key in missing
+                        )
+                        semantic_families = acquisition_contract.get(
+                            "semantic_families", {}
+                        )
+                        acquisition_labels = sorted(
+                            {
+                                str(
+                                    semantic_families.get(
+                                        fact.split(".", 1)[0], {}
+                                    ).get("label", fact.split(".", 1)[0])
+                                )
+                                for fact in acquisition_missing
+                            }
+                        )
+                        missing_sections = []
+                        if coherent_labels:
+                            missing_sections.append(
+                                "coherent conventions: " + coherent_labels
+                            )
+                        if acquisition_labels:
+                            missing_sections.append(
+                                "acquisition/setup declarations: "
+                                + ", ".join(acquisition_labels)
+                            )
+                        message = (
+                            "Exact axes are compatible and no explicit declaration "
+                            "contradicts the other input. "
+                            "The full finite-phase sample scan will run in the "
+                            "background before subtraction. "
+                            "The following missing declarations will be covered by "
+                            "your recorded acquisition attestation: "
+                            + "; ".join(missing_sections)
+                            + "."
+                        )
+                    else:
+                        message = (
+                            "Ready: axes, units, coherent metadata, coordinate frame, "
+                            "phase reference, time convention, and polarization "
+                            "basis are compatible. Full finite-phase sample QA will "
+                            "run in the background before subtraction."
+                        )
+        self._metadata_attested = metadata_attested
+        self.compatibility_label.setText(message)
+        ok = self.buttons.button(QDialogButtonBox.Ok)
+        ok.setEnabled(
+            valid
+            and self.chk_acquisition.isChecked()
+            and self.chk_interaction.isChecked()
+        )
+
+    def get_params(self) -> dict:
+        target_entry, support_entry = self._selected_entries()
+        return {
+            "target": target_entry,
+            "support": support_entry,
+            "metadata_attested": bool(self._metadata_attested),
+            "assumptions_attested": bool(
+                self.chk_acquisition.isChecked()
+                and self.chk_interaction.isChecked()
             ),
         }
 
@@ -2957,11 +3175,33 @@ class DatasetOpsMixin:
             notify()
 
     def _on_dataset_selection_changed(self) -> None:
+        previous_active = getattr(self, "active_dataset", None)
+
+        def commit_active_dataset(dataset) -> None:
+            self.active_dataset = dataset
+            if dataset is previous_active:
+                return
+            invalidate_isar = getattr(self, "_invalidate_isar_result", None)
+            if callable(invalidate_isar):
+                invalidate_isar()
+            contexts = getattr(self, "_plot_contexts", {}) or {}
+            isar_context = contexts.get("isar")
+            attestation = getattr(
+                isar_context, "chk_isar_legacy_phase_attestation", None
+            )
+            if attestation is not None:
+                was_blocked = attestation.blockSignals(True)
+                try:
+                    attestation.setChecked(False)
+                    setattr(attestation, "_attested_dataset", None)
+                finally:
+                    attestation.blockSignals(was_blocked)
+
         selected = self.table.selectionModel().selectedRows()
         self._update_dataset_selection_order([idx.row() for idx in selected])
         summary_label = getattr(self, "lbl_dataset_selection_summary", None)
         if not selected:
-            self.active_dataset = None
+            commit_active_dataset(None)
             self._clear_param_lists()
             if summary_label is not None:
                 summary_label.setText(
@@ -2978,11 +3218,13 @@ class DatasetOpsMixin:
         item = self.table.item(row, 0)
         dataset = item.data(Qt.UserRole) if item else None
         if not isinstance(dataset, RcsGrid):
-            self.active_dataset = None
+            commit_active_dataset(None)
             self._clear_param_lists()
             return
-        self.active_dataset = dataset
-        self._populate_params(dataset)
+        active_changed = dataset is not previous_active
+        commit_active_dataset(dataset)
+        if active_changed:
+            self._populate_params(dataset)
         if summary_label is not None:
             active_name = item.text() if item is not None else f"Row {row + 1}"
             shown_active_name = (
@@ -3356,23 +3598,10 @@ class DatasetOpsMixin:
         still rejected by :class:`RcsGrid`, regardless of this attestation.
         """
 
-        labels = {
-            "phase_reference": "phase reference / phase center",
-            "time_convention": "phasor time convention",
-            "polarization_basis": "polarization basis",
-        }
-        missing: set[str] = set()
-        for _name, dataset in datasets:
-            getter = getattr(dataset, "_declared_scalar_metadata", None)
-            for key in labels:
-                if callable(getter):
-                    value = getter(key)
-                else:
-                    value = (dataset.extra or {}).get(
-                        key, (dataset.units or {}).get(key, "")
-                    )
-                if not str(value or "").strip():
-                    missing.add(key)
+        labels = _COHERENT_METADATA_LABELS
+        missing = _missing_coherent_metadata_keys(
+            [dataset for _name, dataset in datasets]
+        )
 
         if not missing:
             return False
@@ -3540,6 +3769,139 @@ class DatasetOpsMixin:
         self._combine_datasets_sub(
             "Coherent -", "-", "coherent_subtract", coherent=True
         )
+
+    def _support_reference_difference_selected(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message=(
+                "Select target+support and support-only datasets, then choose "
+                "Support Ref -."
+            ),
+        )
+        if datasets is None:
+            return
+        if len(datasets) < 2:
+            self.status.showMessage(
+                "Support Ref -: select at least two datasets to assign the "
+                "target+support and support-only roles."
+            )
+            return
+
+        dialog = SupportReferenceDifferenceDialog(datasets, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            dialog.deleteLater()
+            return
+        params = dialog.get_params()
+        dialog.deleteLater()
+        target_name, target = params["target"]
+        support_name, support = params["support"]
+        metadata_attested = bool(params["metadata_attested"])
+        assumptions_attested = bool(params["assumptions_attested"])
+        inputs = [(target_name, target), (support_name, support)]
+        input_refs = self._python_input_references(inputs)
+        output_name = f"SupportRef[{target_name} - {support_name}]"
+
+        def compute():
+            return target.support_referenced_difference(
+                support,
+                metadata_attested=metadata_attested,
+                assumptions_attested=assumptions_attested,
+                target_label=target_name,
+                support_label=support_name,
+            )
+
+        def publish(result) -> None:
+            raw_provenance = (result.extra or {}).get(
+                "support_reference_difference_json", ""
+            )
+            if isinstance(raw_provenance, np.ndarray):
+                raw_provenance = raw_provenance.reshape(()).item()
+            provenance = json.loads(str(raw_provenance))
+            qa = provenance["qa"]
+            energies = qa["energy_sum_linear"]
+
+            def _metric(value, *, suffix=""):
+                if value is None:
+                    return "not defined"
+                return f"{float(value):.6g}{suffix}"
+
+            common = int(qa["common_finite_sample_count"])
+            total = int(qa["total_sample_count"])
+            excluded = int(qa["excluded_sample_count"])
+            coherence = qa.get("complex_coherence")
+            coherence_phase = qa.get("complex_coherence_phase_deg")
+            coherence_text = (
+                f"{float(coherence):.6f} at "
+                f"{float(coherence_phase):.3f} deg"
+                if coherence is not None and coherence_phase is not None
+                else "not meaningful (fewer than two common samples or zero energy)"
+            )
+            review = (
+                f"Target + support: {target_name}\n"
+                f"Support-only reference: {support_name}\n\n"
+                f"Common finite samples: {common:,} / {total:,}\n"
+                f"Excluded/missing samples: {excluded:,}\n"
+                "Unweighted complex sample-energy sums:\n"
+                "  Before (target + support): "
+                f"{_metric(energies['pre_target_plus_support'])}\n"
+                "  Support-only reference: "
+                f"{_metric(energies['subtracted_support_reference'])}\n"
+                "  After (support-referenced difference): "
+                f"{_metric(energies['post_support_referenced_difference'])}\n"
+                "  Algebraic closure residual: "
+                f"{_metric(energies['algebraic_closure_residual'])}\n"
+                "After / before: "
+                f"{_metric(qa.get('post_to_pre_energy_db'), suffix=' dB')}\n"
+                f"Complex input coherence: {coherence_text}\n\n"
+                "These are subtraction QA diagnostics, not proof of a free-space "
+                "target response. Target/support coupling, shadowing, multiple "
+                "bounce, and acquisition drift remain unrecoverable.\n\n"
+                "Add this result as a new unsaved dataset?"
+            )
+            answer = QMessageBox.question(
+                self,
+                "Review Support-Referenced Difference",
+                review,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self.status.showMessage(
+                    "Support-referenced difference reviewed but not added; "
+                    "input datasets were unchanged."
+                )
+                return
+            output_id = self._add_dataset_row(
+                result, output_name, "", file_name=""
+            )
+            recorder = getattr(self, "python_recorder", None)
+            if recorder is not None and input_refs is not None:
+                recorder.record_expression(
+                    self._python_output_reference(output_id, output_name),
+                    input_refs,
+                    lambda variables: (
+                        f"{variables[0]}.support_referenced_difference("
+                        f"{variables[1]}, metadata_attested="
+                        f"{metadata_attested!r}, assumptions_attested=True, "
+                        f"target_label={target_name!r}, "
+                        f"support_label={support_name!r})"
+                    ),
+                    comment=(
+                        "Support-referenced exact complex difference; not a "
+                        "reconstructed free-space target"
+                    ),
+                )
+            self.status.showMessage(
+                f"Support-referenced difference created: {output_name} (unsaved)."
+            )
+
+        if self._start_background_callable(
+            "Support-referenced difference", compute, publish
+        ):
+            self.status.showMessage(
+                "Support-referenced exact complex subtraction and QA are "
+                "running in the background..."
+            )
 
     def _incoherent_add_selected(self) -> None:
         self._combine_datasets_add("Incoherent +", "+", "incoherent_add", "incoherent_add_many")
@@ -4525,6 +4887,19 @@ class DatasetOpsMixin:
         return started
 
     def _export_plot(self) -> None:
+        if self.last_plot_mode == "isar_image":
+            if getattr(self, "_isar_busy", False):
+                self.status.showMessage(
+                    "ISAR reconstruction is still running; wait for the latest "
+                    "image before exporting."
+                )
+                return
+            figure_is_current = getattr(self, "_isar_figure_is_current", None)
+            if not callable(figure_is_current) or not figure_is_current():
+                self.status.showMessage(
+                    "The current ISAR settings have no completed image to export."
+                )
+                return
         path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export Plot",
@@ -4550,6 +4925,50 @@ class DatasetOpsMixin:
             # cannot replace the export target with an invalid or stale spec.
             recorder.record_plot_save(path, dpi=200)
         self.status.showMessage(f"Plot exported: {os.path.basename(path)}")
+
+    def _export_isar_result(self) -> None:
+        """Save the latest source-bound numerical ISAR result off the GUI thread."""
+
+        if getattr(self, "_isar_busy", False):
+            self.status.showMessage(
+                "ISAR reconstruction is still running; wait before exporting its result."
+            )
+            return
+        payload = getattr(self, "_last_isar_artifact", None)
+        result_is_current = getattr(self, "_isar_numerical_result_is_current", None)
+        if (
+            payload is None
+            or not callable(result_is_current)
+            or not result_is_current()
+        ):
+            self.status.showMessage(
+                "No current completed ISAR result is available; render the image first."
+            )
+            return
+        path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Numerical ISAR Result",
+            "isar-result.isar.npz",
+            "GRIM ISAR Result (*.isar.npz)",
+        )
+        if not path:
+            return
+        band_results, manifest = payload
+
+        def compute_export():
+            from isar_artifact import save_isar_artifact
+
+            return save_isar_artifact(path, band_results, manifest)
+
+        def publish_export(saved_path):
+            self.status.showMessage(
+                f"ISAR result exported: {os.path.basename(str(saved_path))}"
+            )
+
+        if self._start_background_callable(
+            "ISAR result export", compute_export, publish_export
+        ):
+            self.status.showMessage("Saving numerical ISAR result in the background…")
 
     def _on_plot_context_menu(self, pos) -> None:
         menu = QMenu(self)

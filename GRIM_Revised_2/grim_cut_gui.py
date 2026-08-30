@@ -1166,6 +1166,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         ))
         _ops_pad("Calibration", (
             ("Range Cal", "btn_range_cal"),
+            ("Support Ref -", "btn_support_reference"),
         ), cols=1)
         self.btn_overlap.setToolTip(
             "Crop every selected dataset to the common axis values and finite "
@@ -1176,6 +1177,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "Complex substitution calibration using loaded measured-cal and "
             "exact-reference datasets plus a signed one-way physical "
             "displacement; GRIM applies the monostatic two-way phase."
+        )
+        self.btn_support_reference.setToolTip(
+            "Guided exact complex target+support minus support-only workflow. "
+            "Requires identical grids and coherent conventions, records input "
+            "content hashes and subtraction QA, and creates a new unsaved "
+            "support-referenced difference. It does not reconstruct a free-space "
+            "target or remove target/support interaction terms."
         )
         _ops_pad("Geometry & Units", (
             ("El→Az360", "btn_el_to_az360"),
@@ -1574,7 +1582,12 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             if "azimuth_polar" in controls:
                 controls["azimuth_polar"].clicked.connect(self._plot_azimuth_polar)
             if "isar_image" in controls:
-                controls["isar_image"].clicked.connect(self._plot_isar_image)
+                # ISAR is asynchronous. Wrap the explicit click so recorder
+                # intent is attached to the exact request accepted by the
+                # worker instead of a process-wide "something is busy" flag.
+                controls["isar_image"].clicked.connect(
+                    self._on_explicit_isar_plot_clicked
+                )
             if "az_vs_range" in controls:
                 controls["az_vs_range"].clicked.connect(self._plot_az_vs_range)
             if "fit_both" in controls:
@@ -1594,7 +1607,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "elevation_sweep",
                 "waterfall",
                 "compare",
-                "isar_image",
                 "az_vs_range",
             ):
                 button = controls.get(recorded_mode)
@@ -1625,6 +1637,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_round.clicked.connect(self._round_selected)
         self.btn_offset.clicked.connect(self._offset_selected)
         self.btn_range_cal.clicked.connect(self._range_cal_selected)
+        self.btn_support_reference.clicked.connect(
+            self._support_reference_difference_selected
+        )
         self.btn_medianize.clicked.connect(self._medianize_selected)
         self.btn_duplicate.clicked.connect(self._duplicate_selected)
         self.btn_el_to_az360.clicked.connect(self._elevation_to_azimuth_360_selected)
@@ -1661,6 +1676,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             context.btn_dataset_ops.toggled.connect(self._toggle_dataset_ops)
             context.btn_settings.toggled.connect(context.settings_frame.setVisible)
             context.btn_export_plot.clicked.connect(self._export_plot)
+            if context.btn_export_isar_result is not None:
+                context.btn_export_isar_result.clicked.connect(
+                    self._export_isar_result
+                )
             context.chk_plot_legend.toggled.connect(self._update_legend_visibility)
             context.btn_plot_bg.clicked.connect(lambda _=False, which="bg": self._choose_plot_color(which))
             context.btn_plot_grid.clicked.connect(
@@ -1680,6 +1699,43 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             # stepping/playing is the point of the scrub workflow, and the
             # async compute path coalesces bursts of requests.
             if tab_key == "isar":
+                # Numerical exports and the visible canvas are bound to the
+                # exact controls that produced them. Deferred settings edits
+                # therefore invalidate immediately even before Apply; live
+                # aperture controls invalidate first, then launch their new
+                # coalesced render through the connections below.
+                for widget, signal_name in (
+                    (context.combo_isar_window, "currentTextChanged"),
+                    (context.combo_isar_units, "currentTextChanged"),
+                    (context.chk_isar_az_interp, "toggled"),
+                    (context.spin_isar_az_min, "valueChanged"),
+                    (context.spin_isar_az_max, "valueChanged"),
+                    (context.spin_isar_az_step, "valueChanged"),
+                    (context.chk_isar_freq_band, "toggled"),
+                    (context.spin_isar_freq_min, "valueChanged"),
+                    (context.spin_isar_freq_max, "valueChanged"),
+                    (context.combo_isar_recon, "currentTextChanged"),
+                    (context.spin_isar_l1_strength, "valueChanged"),
+                    (context.spin_isar_l1_iters, "valueChanged"),
+                    (context.chk_isar_flip_x, "toggled"),
+                    (context.chk_isar_flip_y, "toggled"),
+                    (context.chk_isar_aperture, "toggled"),
+                    (context.spin_isar_ap_center, "valueChanged"),
+                    (context.spin_isar_ap_width, "valueChanged"),
+                    (context.chk_isar_legacy_phase_attestation, "toggled"),
+                ):
+                    getattr(widget, signal_name).connect(
+                        self._invalidate_isar_result
+                    )
+                for widget, signal_name in (
+                    (context.chk_isar_square, "toggled"),
+                    (context.combo_plot_scale, "currentIndexChanged"),
+                    (context.chk_colorbar, "toggled"),
+                    (context.chk_colorbar_shared, "toggled"),
+                ):
+                    getattr(widget, signal_name).connect(
+                        self._invalidate_isar_figure
+                    )
                 context.chk_isar_legacy_phase_attestation.toggled.connect(
                     lambda checked, widget=context.chk_isar_legacy_phase_attestation: setattr(
                         widget,
@@ -1695,6 +1751,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 context.spin_plot_zmin.valueChanged.connect(self._on_isar_clim_changed)
                 context.spin_plot_zmax.valueChanged.connect(self._on_isar_clim_changed)
                 context.spin_plot_zstep.valueChanged.connect(self._on_isar_clim_changed)
+                context.combo_colormap.currentTextChanged.connect(
+                    self._on_colormap_changed
+                )
+                context.chk_colormap_invert.toggled.connect(
+                    self._on_colormap_changed
+                )
+                context.chk_plot_grid_visible.toggled.connect(
+                    self._apply_plot_theme
+                )
                 context.chk_isar_aperture.toggled.connect(self._on_isar_window_changed)
                 context.spin_isar_ap_center.valueChanged.connect(self._on_isar_window_changed)
                 context.spin_isar_ap_width.valueChanged.connect(self._on_isar_window_changed)
@@ -1868,10 +1933,21 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         btn_dataset_ops = QToolButton(text="Dataset Operations")
         btn_dataset_ops.setCheckable(True)
         btn_export_plot = QToolButton(text="Export Plot")
+        btn_export_isar_result = None
+        if tab_key == "isar":
+            btn_export_isar_result = QToolButton(text="Export ISAR Result")
+            btn_export_isar_result.setEnabled(False)
+            btn_export_isar_result.setToolTip(
+                "Save the latest completed full-resolution ISAR arrays and a "
+                "source-bound formation manifest. Disabled while a render is "
+                "running or when the current settings have not completed."
+            )
         settings_title = "ISAR Settings" if tab_key == "isar" else "Plot Settings"
         btn_settings = QToolButton(text=settings_title)
         btn_settings.setCheckable(True)
         topbar.addWidget(btn_dataset_ops)
+        if btn_export_isar_result is not None:
+            topbar.addWidget(btn_export_isar_result)
         topbar.addWidget(btn_export_plot)
         topbar.addWidget(btn_settings)
         left_layout.addLayout(topbar)
@@ -2093,18 +2169,20 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         combo_isar_recon.addItems([
             "Fast PFA (FFT)",
             "Accurate PFA (Cartesian)",
-            "Sparse L1 (clean)",
+            "Sparse L1 (experimental)",
         ])
         combo_isar_recon.setToolTip(
             "Fast PFA: keystone-corrected matched-filter imaging — quickest, "
             "but residual range curvature can defocus off-centre scatterers.\n"
             "Accurate PFA: regrids both Cartesian wavenumber axes before the FFT; "
             "better focus for wider apertures and targets away from the phase centre.\n"
-            "Sparse L1: basis-pursuit-denoise reconstruction (van den Berg & "
-            "Friedlander 2008) — solves for the fewest scatterers that explain "
-            "the data, so sidelobes vanish and the object outline stands out. "
-            "Slower (iterative); intended for sub-aperture / sub-band looks. "
-            "The taper window only applies to FFT mode."
+            "Sparse L1: experimental fixed-lambda complex LASSO/FISTA image "
+            "reconstruction. It promotes a sparse pixel image and may reduce "
+            "sidelobes or noise, but it can also suppress weak or distributed "
+            "real scattering. It does not identify/remove pylons, birds, "
+            "cavity returns, or clutter, and it does not create cleaned phase "
+            "history. Slower (iterative); intended for sub-aperture/sub-band "
+            "looks. The taper window only applies to PFA modes."
         )
         settings_layout.addWidget(combo_isar_recon, row, 1)
         spin_isar_l1_strength = QDoubleSpinBox()
@@ -2114,19 +2192,21 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         spin_isar_l1_strength.setValue(0.05)
         spin_isar_l1_strength.setToolTip(
             "Sparsity strength (λ as a fraction of the matched-filter peak). "
-            "Higher = cleaner/sparser image but faint scatterers drop out; "
-            "lower keeps weak features at the cost of residual haze."
+            "Higher produces a sparser image but can delete faint real returns; "
+            "lower retains more pixels. This is not a calibrated noise bound "
+            "and does not select a physical contaminant component."
         )
         settings_layout.addWidget(spin_isar_l1_strength, row, 2)
         spin_isar_l1_iters = QDoubleSpinBox()
         spin_isar_l1_iters.setRange(10, 1000)
         spin_isar_l1_iters.setDecimals(0)
         spin_isar_l1_iters.setSingleStep(25)
-        spin_isar_l1_iters.setValue(100)
+        spin_isar_l1_iters.setValue(300)
         spin_isar_l1_iters.setSuffix(" it")
         spin_isar_l1_iters.setToolTip(
-            "Sparse solver iterations. 100 is usually converged; raise it if "
-            "the image still changes between runs."
+            "Maximum sparse solver iterations. The status bar reports whether "
+            "the primal/dual-gap convergence test passed; reaching this limit "
+            "means the solution is not certified."
         )
         settings_layout.addWidget(spin_isar_l1_iters, row, 3)
         chk_isar_flip_x = QCheckBox("Flip X")
@@ -2219,12 +2299,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(btn_isar_apply, row, 2, 1, 4)
         row += 1
 
-        chk_isar_legacy_phase_attestation = QCheckBox("Attest Legacy Phase")
+        chk_isar_legacy_phase_attestation = QCheckBox(
+            "Attest Legacy ISAR Contract"
+        )
         chk_isar_legacy_phase_attestation.setToolTip(
             "Only for an unmarked legacy conic dataset whose source has been "
             "reviewed. By checking this, you attest that its complex samples "
-            "share a fixed phase reference/center, use exp(+j*omega*t), and "
-            "follow S~exp(-j*2*k*R). This cannot override native SENTRi theta, "
+            "are far-field monostatic, have a stationary or motion-compensated "
+            "fixed phase reference/center, use exp(+j*omega*t), and follow "
+            "S~exp(-j*2*k*R). This cannot override native SENTRi theta, "
             "great-circle coordinates, or an explicitly incompatible time "
             "convention. Prefer adding durable metadata to the dataset."
             " The attestation is bound to the active dataset and clears when "
@@ -2428,6 +2511,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             plot_grid_color=None,
             plot_text_color=None,
             last_plot_mode=None,
+            btn_export_isar_result=btn_export_isar_result,
         )
 
     def _move_shared_right_panel(self, tab_key: str) -> None:

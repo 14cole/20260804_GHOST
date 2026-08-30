@@ -1,5 +1,6 @@
 """Synthetic physics regressions for ISAR image formation."""
 
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 
 import numpy as np
@@ -42,6 +43,12 @@ class TestIsarPhysics(unittest.TestCase):
             "angular_coordinate_system": "conic",
         }
         base_units.update(units or {})
+        base_extra = {
+            "measurement_geometry": "far-field monostatic",
+            "motion_compensation": "stable",
+            "range_phase_convention": "S~exp(-j*2*k*R)",
+        }
+        base_extra.update(extra or {})
         return RcsGrid(
             azimuth,
             [elevation],
@@ -49,7 +56,7 @@ class TestIsarPhysics(unittest.TestCase):
             ["VV"],
             rcs=field,
             units=base_units,
-            extra=extra or {},
+            extra=base_extra,
         )
 
     def test_all_windows_preserve_unit_point_peak(self):
@@ -137,7 +144,12 @@ class TestIsarPhysics(unittest.TestCase):
         grid = RcsGrid(
             azimuth, [0.0], frequency, ["VV"], rcs=samples,
             units={"frequency": "GHz", "time_convention": "exp(+jwt)"},
-            extra={"phase_reference": "fixed origin"},
+            extra={
+                "phase_reference": "fixed origin",
+                "measurement_geometry": "far-field monostatic",
+                "motion_compensation": "stable",
+                "range_phase_convention": "S~exp(-j*2*k*R)",
+            },
         )
         bands, elapsed = form_isar(grid, reconstruction="accurate", window="Hamming")
         self.assertEqual(len(bands), 1)
@@ -236,6 +248,30 @@ class TestIsarPhysics(unittest.TestCase):
         grid.extra["phase_reference"] = "origin B"
         self.assertFalse(isar_mode._compute_band(*args)["preprocess_cache_hit"])
 
+    def test_preprocess_cache_is_safe_for_parallel_headless_callers(self):
+        def exercise_cache(worker: int) -> None:
+            for iteration in range(100):
+                key = (iteration % 11,)
+                value = {
+                    "observed": np.full(
+                        (2, 3), worker + iteration, dtype=np.complex64
+                    )
+                }
+                isar_mode._preprocess_cache_put(key, value)
+                cached = isar_mode._preprocess_cache_get(key)
+                self.assertIsNotNone(cached)
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            list(executor.map(exercise_cache, range(8)))
+
+        with isar_mode._PREPROCESS_CACHE_LOCK:
+            recorded_bytes = sum(
+                int(value["_cache_nbytes"])
+                for value in isar_mode._PREPROCESS_CACHE.values()
+            )
+            self.assertEqual(isar_mode._PREPROCESS_CACHE_BYTES, recorded_bytes)
+            self.assertGreaterEqual(isar_mode._PREPROCESS_CACHE_BYTES, 0)
+
     def test_native_sentri_theta_requires_coordinate_conversion(self):
         grid = self._preflight_grid(
             units={
@@ -284,7 +320,7 @@ class TestIsarPhysics(unittest.TestCase):
             rcs=np.ones((17, 1, 19, 1), dtype=np.complex64),
             units={"frequency": "GHz"},
         )
-        with self.assertRaisesRegex(ValueError, "Attest Legacy Phase"):
+        with self.assertRaisesRegex(ValueError, "Attest Legacy ISAR Contract"):
             form_isar(grid)
         bands, _elapsed = form_isar(grid, legacy_metadata_attested=True)
         self.assertEqual(len(bands), 1)

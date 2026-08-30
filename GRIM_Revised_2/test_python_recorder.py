@@ -156,6 +156,63 @@ class PythonRecorderTests(unittest.TestCase):
             self.assertTrue(image.is_file())
             self.assertGreater(image.stat().st_size, 100)
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("matplotlib") is not None,
+        "Matplotlib is not installed in this runtime",
+    )
+    def test_generated_isar_script_replays_headlessly(self):
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            source = root / "phase-aware.grim"
+            image = root / "isar.png"
+            script_path = root / "isar_recipe.py"
+            run_directory = root / "elsewhere"
+            run_directory.mkdir()
+            grid = RcsGrid(
+                np.linspace(-4.0, 4.0, 9),
+                [0.0],
+                np.linspace(9.0, 10.0, 9),
+                ["VV"],
+                rcs=np.ones((9, 1, 9, 1), dtype=np.complex64),
+                units={"frequency": "GHz", "time_convention": "exp(+jwt)"},
+                extra={
+                    "phase_reference": "fixed origin",
+                    "measurement_geometry": "far-field monostatic",
+                    "motion_compensation": "stable",
+                    "range_phase_convention": "S~exp(-j*2*k*R)",
+                },
+            )
+            grid.save(source)
+
+            recorder = PythonScriptRecorder()
+            original = DatasetReference("isar-source", "ISAR source", str(source))
+            recorder.bind_loaded(original)
+            recorder.record_plot(
+                [original],
+                names=["ISAR source"],
+                mode="isar_image",
+                parameters={
+                    "azimuths": grid.azimuths.tolist(),
+                    "elevations": [0.0],
+                    "frequencies": grid.frequencies.tolist(),
+                    "polarization": "VV",
+                    "phase": False,
+                    "scale": "dbsm",
+                    "isar_options": {
+                        "window": "Hamming",
+                        "reconstruction": "accurate",
+                        "length_unit": "m",
+                    },
+                },
+            )
+            recorder.record_plot_save(str(image), dpi=100)
+            script_path.write_text(recorder.script, encoding="utf-8")
+
+            completed = self._run_script(script_path, run_directory)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(image.is_file())
+            self.assertGreater(image.stat().st_size, 100)
+
     def test_clear_resets_bindings_and_variable_names(self):
         recorder = PythonScriptRecorder()
         source = DatasetReference("id", "Data", "input.grim")
@@ -165,6 +222,118 @@ class PythonRecorderTests(unittest.TestCase):
         recorder.bind_loaded(source)
         self.assertEqual(recorder.script.count("dataset_1 ="), 1)
         self.assertNotIn("dataset_2 =", recorder.script)
+
+    def test_untrusted_names_and_comments_cannot_inject_python_lines(self):
+        recorder = PythonScriptRecorder()
+        source = DatasetReference(
+            "source-id",
+            "Safe name\nraise RuntimeError('name injection')",
+            "input.grim",
+        )
+        output = DatasetReference("output-id", "Output")
+        recorder.bind_loaded(source)
+        recorder.record_method(
+            output,
+            source,
+            "wrap_azimuth",
+            args=("0_360",),
+            comment="Wrap safely\nraise RuntimeError('comment injection')",
+        )
+        recorder.record_unsupported_plot(
+            "waterfall",
+            "unsupported\nraise RuntimeError('reason injection')",
+        )
+        script = recorder.script
+        compile(script, "<generated-grim-script>", "exec")
+        self.assertNotIn("\nraise RuntimeError", script)
+        self.assertIn("# Load Safe name raise RuntimeError", script)
+        self.assertIn("# Wrap safely raise RuntimeError", script)
+
+    def test_long_uniform_plot_axes_use_compact_hard_coded_expressions(self):
+        recorder = PythonScriptRecorder()
+        source = DatasetReference("source-id", "Uniform source", "input.grim")
+        azimuths = np.linspace(-180.0, 180.0, 20_001)
+        target = np.linspace(-5.0, 5.0, 10_001)
+        recorder.record_plot(
+            [source],
+            names=["Uniform source"],
+            mode="isar_image",
+            parameters={
+                "azimuths": azimuths.tolist(),
+                "elevations": [0.0],
+                "frequencies": [9.0, 10.0],
+                "polarization": "VV",
+                "isar_options": {
+                    "azimuth_target_degrees": target.tolist(),
+                    "legacy_metadata_attested": True,
+                },
+            },
+        )
+        script = recorder.script
+        compile(script, "<generated-grim-script>", "exec")
+        self.assertIn("np.linspace(-180.0, 180.0, 20001)", script)
+        self.assertIn("np.linspace(-5.0, 5.0, 10001)", script)
+        self.assertLess(len(script), 12_000)
+
+    def test_nearly_uniform_large_axis_is_not_approximately_compacted(self):
+        recorder = PythonScriptRecorder()
+        source = DatasetReference("source-id", "Irregular source", "input.grim")
+        azimuths = np.linspace(1.0e12, 1.0e12 + 15.0, 16)
+        azimuths[8] += 0.005
+        recorder.record_plot(
+            [source],
+            names=["Irregular source"],
+            mode="isar_image",
+            parameters={
+                "azimuths": azimuths.tolist(),
+                "elevations": [0.0],
+                "frequencies": [9.0, 10.0],
+                "polarization": "VV",
+            },
+        )
+        script = recorder.script
+        self.assertNotIn(
+            "np.linspace(1000000000000.0, 1000000000015.0, 16)", script
+        )
+        self.assertIn(repr(float(azimuths[8])), script)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("matplotlib") is not None,
+        "Matplotlib is not installed in this runtime",
+    )
+    def test_headless_isar_matches_gui_floor_labels_and_display_decimation(self):
+        grid = self._grid()
+        band = {
+            "magnitude": np.asarray([[0.0, 1.0], [0.5, 0.25]], dtype=np.float32),
+            "x_range": np.asarray([-1.0, 1.0]),
+            "y_range": np.asarray([-2.0, 2.0]),
+            "az_values": np.asarray([-4.0, 4.0]),
+            "composite": 0,
+        }
+        with mock.patch(
+            "plot_modes.isar_mode.form_isar", return_value=([band], 0.01)
+        ) as form:
+            figure = plot_datasets(
+                [("Dataset", grid)],
+                mode="isar_image",
+                azimuths=[-180.0, 0.0],
+                elevations=[0.0],
+                frequencies=[9.0, 10.0],
+                polarization="VV",
+                scale="dbsm",
+                isar_options={"length_unit": "ft", "reconstruction": "accurate"},
+                show_colorbar=False,
+                square_aspect=True,
+            )
+        self.assertTrue(form.call_args.kwargs["decimate_display"])
+        self.assertFalse(form.call_args.kwargs["retain_complex"])
+        axis = figure.axes[0]
+        display = np.asarray(axis.images[0].get_array())
+        self.assertEqual(float(np.min(display)), -120.0)
+        self.assertEqual(axis.get_xlabel(), "Cross-Range (ft)")
+        self.assertEqual(axis.get_ylabel(), "Range (ft)")
+        self.assertIn("Cartesian PFA", axis.get_title())
+        self.assertEqual(float(axis.get_aspect()), 1.0)
 
     def test_identical_plot_specs_are_deduplicated(self):
         recorder = PythonScriptRecorder()

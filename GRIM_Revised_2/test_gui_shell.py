@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -16,13 +17,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from matplotlib.colors import to_hex
-from PySide6.QtCore import QMimeData, QThread, QUrl, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QMimeData, QThread, QUrl, Qt, Signal
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QMessageBox,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -37,6 +39,7 @@ from grim_cut_dataset_mixin import (
     DATASET_ID_ROLE,
     ConicGCDialog,
     RangeCalibrationDialog,
+    SupportReferenceDifferenceDialog,
     WedgeConicDialog,
 )
 from assembly_tree import (
@@ -386,6 +389,137 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(self.window._background_job_active())
 
+    def test_isar_exports_are_bound_to_isar_inputs_not_other_plot_renders(self) -> None:
+        self.window._activate_plot_tab("isar")
+        context = self.window._plot_contexts["isar"]
+        self.window._isar_input_revision = 10
+        self.window._isar_view_revision = 20
+        self.window._last_isar_completed_input_revision = 10
+        self.window._last_isar_completed_view_revision = 20
+        self.window._last_isar_figure_token = self.window.plot_figure
+        self.window._last_isar_artifact = ([{"result": True}], {"schema": "test"})
+        context.btn_export_isar_result.setEnabled(True)
+
+        # The ordinary plotting generation is global legacy state, but its
+        # changes must not make a still-current ISAR canvas look stale.
+        self.window._start_plot_render()
+        self.assertTrue(self.window._isar_numerical_result_is_current())
+        self.assertTrue(self.window._isar_figure_is_current())
+
+        # A deferred numerical setting edit invalidates both exports before
+        # Apply, so the old image cannot be mistaken for the new recipe.
+        next_index = (context.combo_isar_window.currentIndex() + 1) % max(
+            context.combo_isar_window.count(), 1
+        )
+        context.combo_isar_window.setCurrentIndex(next_index)
+        self.assertFalse(self.window._isar_numerical_result_is_current())
+        self.assertFalse(self.window._isar_figure_is_current())
+        self.assertIsNone(self.window._last_isar_artifact)
+        self.assertFalse(context.btn_export_isar_result.isEnabled())
+
+    def test_isar_view_only_edit_preserves_numerical_artifact(self) -> None:
+        self.window._activate_plot_tab("isar")
+        context = self.window._plot_contexts["isar"]
+        self.window._isar_input_revision = 3
+        self.window._isar_view_revision = 4
+        self.window._last_isar_completed_input_revision = 3
+        self.window._last_isar_completed_view_revision = 4
+        self.window._last_isar_figure_token = self.window.plot_figure
+        artifact = ([{"result": True}], {"schema": "test"})
+        self.window._last_isar_artifact = artifact
+
+        context.chk_isar_square.setChecked(not context.chk_isar_square.isChecked())
+        self.assertTrue(self.window._isar_numerical_result_is_current())
+        self.assertFalse(self.window._isar_figure_is_current())
+        self.assertIs(self.window._last_isar_artifact, artifact)
+
+    def test_clear_isar_canvas_invalidates_only_the_figure_export(self) -> None:
+        self.window._activate_plot_tab("isar")
+        self.window._isar_input_revision = 3
+        self.window._isar_view_revision = 4
+        self.window._last_isar_completed_input_revision = 3
+        self.window._last_isar_completed_view_revision = 4
+        self.window._last_isar_figure_token = self.window.plot_figure
+        artifact = ([{"result": True}], {"schema": "test"})
+        self.window._last_isar_artifact = artifact
+
+        self.window._clear_plot()
+
+        self.assertTrue(self.window._isar_numerical_result_is_current())
+        self.assertFalse(self.window._isar_figure_is_current())
+        self.assertIs(self.window._last_isar_artifact, artifact)
+        self.assertFalse(self.window.plot_ax.images)
+
+    def test_plot_recorder_specs_are_owned_by_each_canvas(self) -> None:
+        plotting_spec = (
+            "supported", ("plot-ref",), ("Plotting",), "frequency", {}
+        )
+        isar_spec = (
+            "supported", ("isar-ref",), ("ISAR",), "isar_image", {}
+        )
+        self.window._activate_plot_tab("plotting")
+        self.window.last_python_plot_spec = plotting_spec
+        self.window._activate_plot_tab("isar")
+        self.window.last_python_plot_spec = isar_spec
+
+        with mock.patch.object(
+            self.window.python_recorder, "record_plot"
+        ) as record_plot:
+            self.window._activate_plot_tab("plotting")
+            self.assertTrue(self.window._emit_last_successful_python_plot())
+            self.assertEqual(record_plot.call_args.kwargs["mode"], "frequency")
+
+            self.window._activate_plot_tab("isar")
+            self.assertTrue(self.window._emit_last_successful_python_plot())
+            self.assertEqual(record_plot.call_args.kwargs["mode"], "isar_image")
+
+    def test_ctrl_select_same_active_dataset_keeps_isar_result_current(self) -> None:
+        first = _grid(1.0)
+        second = _grid(2.0)
+        self.window._add_dataset_row(first, "First", "", "first.grim")
+        self.window._add_dataset_row(second, "Second", "", "second.grim")
+        first_row_dataset = self.window.table.item(0, 0).data(Qt.UserRole)
+        selection = self.window.table.selectionModel()
+        first_index = self.window.table.model().index(0, 0)
+        second_index = self.window.table.model().index(1, 0)
+        self.window.table.setCurrentIndex(first_index)
+        selection.select(
+            first_index, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows
+        )
+        self.app.processEvents()
+        self.assertIs(self.window.active_dataset, first_row_dataset)
+        revision = self.window._isar_input_revision
+
+        selection.select(
+            second_index, QItemSelectionModel.Select | QItemSelectionModel.Rows
+        )
+        self.app.processEvents()
+
+        self.assertIs(self.window.active_dataset, first_row_dataset)
+        self.assertEqual(self.window._isar_input_revision, revision)
+
+    def test_dataset_identity_change_clears_legacy_isar_attestation(self) -> None:
+        first = _grid(1.0)
+        second = _grid(2.0)
+        self.window._add_dataset_row(first, "First", "", "first.grim")
+        self.window._add_dataset_row(second, "Second", "", "second.grim")
+        first_row_dataset = self.window.table.item(0, 0).data(Qt.UserRole)
+        self.window.table.setCurrentCell(0, 0)
+        self.app.processEvents()
+        attestation = self.window._plot_contexts[
+            "isar"
+        ].chk_isar_legacy_phase_attestation
+        attestation.setChecked(True)
+        self.assertIs(
+            getattr(attestation, "_attested_dataset", None), first_row_dataset
+        )
+
+        self.window.table.setCurrentCell(1, 0)
+        self.app.processEvents()
+
+        self.assertFalse(attestation.isChecked())
+        self.assertIsNone(getattr(attestation, "_attested_dataset", None))
+
     def test_tabs_have_one_canonical_assembly_workspace(self) -> None:
         labels = [
             self.window.main_tabs.tabText(index)
@@ -710,6 +844,113 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertTrue(params["allow_singleton_angular_broadcast"])
         self.assertTrue(params["convention_attested"])
         dialog.deleteLater()
+
+    def test_support_reference_button_and_dialog_make_roles_and_limits_explicit(self) -> None:
+        self.assertEqual(self.window.btn_support_reference.text(), "Support Ref -")
+        tooltip = self.window.btn_support_reference.toolTip()
+        self.assertIn("target+support minus support-only", tooltip)
+        self.assertIn("does not reconstruct a free-space target", tooltip)
+
+        entries = [("Vehicle on support", _grid(3.0)), ("Support only", _grid(1.0))]
+        dialog = SupportReferenceDifferenceDialog(entries, parent=self.window)
+        ok_button = dialog.buttons.button(QDialogButtonBox.Ok)
+        self.assertFalse(ok_button.isEnabled())
+        self.assertIn("Exact axes", dialog.compatibility_label.text())
+        self.assertIn("calibration ID", dialog.compatibility_label.text())
+        self.assertIn(
+            "no explicit declaration contradicts", dialog.compatibility_label.text()
+        )
+        dialog.chk_acquisition.setChecked(True)
+        dialog.chk_interaction.setChecked(True)
+        self.assertTrue(ok_button.isEnabled())
+        params = dialog.get_params()
+        self.assertEqual(params["target"][0], "Vehicle on support")
+        self.assertEqual(params["support"][0], "Support only")
+        self.assertTrue(params["metadata_attested"])
+        self.assertTrue(params["assumptions_attested"])
+
+        dialog.combo_support.setCurrentIndex(0)
+        self.assertFalse(ok_button.isEnabled())
+        self.assertIn("different rows", dialog.compatibility_label.text())
+        dialog.deleteLater()
+
+    def test_support_reference_operation_reviews_and_publishes_unsaved_result(self) -> None:
+        combined = _grid(3.0)
+        support = _grid(1.0)
+        self.window._add_dataset_row(
+            combined, "Vehicle on support", "", "combined.grim"
+        )
+        self.window._add_dataset_row(
+            support, "Support only", "", "support.grim"
+        )
+        selection = self.window.table.selectionModel()
+        flags = QItemSelectionModel.Select | QItemSelectionModel.Rows
+        selection.select(self.window.table.model().index(0, 0), flags)
+        selection.select(self.window.table.model().index(1, 0), flags)
+        self.app.processEvents()
+
+        class _AcceptedSupportDialog:
+            def __init__(self, entries, parent=None):
+                self.parent = parent
+                self.entries = list(entries)
+
+            @staticmethod
+            def exec():
+                return QDialog.Accepted
+
+            def get_params(self):
+                return {
+                    "target": self.entries[0],
+                    "support": self.entries[1],
+                    "metadata_attested": True,
+                    "assumptions_attested": True,
+                }
+
+            @staticmethod
+            def deleteLater():
+                return None
+
+        def _run_worker_now(_job_name, worker):
+            worker.run()
+            return True
+
+        with (
+            mock.patch.object(
+                grim_cut_dataset_mixin,
+                "SupportReferenceDifferenceDialog",
+                _AcceptedSupportDialog,
+            ),
+            mock.patch.object(
+                self.window,
+                "_try_start_background_job",
+                side_effect=_run_worker_now,
+            ),
+            mock.patch.object(
+                grim_cut_dataset_mixin.QMessageBox,
+                "question",
+                return_value=QMessageBox.Yes,
+            ) as review,
+        ):
+            self.window.btn_support_reference.click()
+
+        self.assertEqual(review.call_count, 1)
+        self.assertIn("not proof of a free-space", review.call_args.args[2])
+        self.assertEqual(self.window.table.rowCount(), 3)
+        result_item = self.window.table.item(2, 0)
+        self.assertEqual(
+            result_item.text(),
+            "SupportRef[Vehicle on support - Support only]",
+        )
+        self.assertTrue(result_item.data(DATASET_DIRTY_ROLE))
+        self.assertEqual(self.window.table.item(2, 1).text(), "Unsaved")
+        result = result_item.data(Qt.UserRole)
+        np.testing.assert_allclose(result.rcs, 2.0 + 0.0j)
+        provenance = json.loads(result.extra["support_reference_difference_json"])
+        self.assertTrue(provenance["not_free_space_target"])
+        recorded = self.window.python_recorder.script
+        self.assertIn(".support_referenced_difference(", recorded)
+        self.assertIn("assumptions_attested=True", recorded)
+        self.assertIn("target_label='Vehicle on support'", recorded)
 
     def test_sentri_elevation_button_is_explicit_and_converts_selected_data(self) -> None:
         self.assertEqual(self.window.btn_sentri_elevation.text(), "SENTRi El→GRIM")

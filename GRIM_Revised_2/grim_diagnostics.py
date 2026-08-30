@@ -43,6 +43,7 @@ GRIM_STARTUP_FILES = (
     "grim_diagnostics.py",
     "grim_headless.py",
     "grim_python.py",
+    "isar_artifact.py",
     "grim_cut_dataset_mixin.py",
     "grim_cut_plot_mixin.py",
     "ppt_workspace.py",

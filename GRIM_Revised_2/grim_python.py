@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import tempfile
 from typing import Callable, Iterable, Sequence
+import warnings
 
 import numpy as np
 
@@ -39,6 +40,41 @@ class _Code:
     text: str
 
 
+def _safe_comment(value) -> str:
+    """Collapse untrusted display text to one inert Python comment line."""
+
+    text = " ".join(str(value).splitlines())
+    return " ".join(text.replace("\x00", " ").split()).strip()
+
+
+def _compact_numeric_sequence(value) -> str | None:
+    """Represent long uniform numeric axes with three hard-coded numbers."""
+
+    try:
+        array = np.asarray(value)
+    except (TypeError, ValueError):
+        return None
+    if array.ndim != 1 or array.size < 16 or array.dtype.kind not in "iuf":
+        return None
+    numeric = np.asarray(array, dtype=np.float64)
+    if not np.all(np.isfinite(numeric)):
+        return None
+    steps = np.diff(numeric)
+    if steps.size == 0 or not np.all(steps > 0.0):
+        return None
+    expected = np.linspace(numeric[0], numeric[-1], numeric.size, dtype=np.float64)
+    # The recorder is an exact replay recipe, not a visual approximation.  A
+    # tolerance scaled by a large absolute axis can erase a physically real
+    # irregular sample.  Compact only if replaying linspace reproduces every
+    # float64 value bit-for-bit.
+    if not np.array_equal(numeric, expected):
+        return None
+    return (
+        f"np.linspace({_literal(float(numeric[0]))}, "
+        f"{_literal(float(numeric[-1]))}, {int(numeric.size)})"
+    )
+
+
 def _literal(value) -> str:
     """Render deterministic Python literals for resolved GUI parameters."""
 
@@ -49,6 +85,9 @@ def _literal(value) -> str:
     if isinstance(value, np.generic):
         return _literal(value.item())
     if isinstance(value, np.ndarray):
+        compact = _compact_numeric_sequence(value)
+        if compact is not None:
+            return compact
         return _literal(value.tolist())
     if isinstance(value, float):
         if math.isnan(value):
@@ -62,6 +101,9 @@ def _literal(value) -> str:
             body += ","
         return f"({body})"
     if isinstance(value, list):
+        compact = _compact_numeric_sequence(value)
+        if compact is not None:
+            return compact
         return "[" + ", ".join(_literal(item) for item in value) + "]"
     if isinstance(value, dict):
         pairs = [f"{_literal(key)}: {_literal(item)}" for key, item in value.items()]
@@ -203,7 +245,7 @@ except ModuleNotFoundError as exc:
         resolved = str(Path(reference.path).expanduser().resolve())
         self._lines.extend(
             [
-                f"# Load {reference.name}",
+                f"# Load {_safe_comment(reference.name)}",
                 f"{variable} = load_dataset(Path({_literal(resolved)}))",
                 "",
             ]
@@ -215,10 +257,13 @@ except ModuleNotFoundError as exc:
         return self._dataset_vars.get(reference.dataset_id) or self.bind_loaded(reference)
 
     def _skip_unbound(self, operation: str, references: Sequence[DatasetReference]) -> None:
-        names = ", ".join(ref.name for ref in references if not ref.path)
+        names = ", ".join(
+            _safe_comment(ref.name) for ref in references if not ref.path
+        )
         self._lines.extend(
             [
-                f"# {operation} was not recorded: {names or 'an input dataset'} has no replayable source.",
+                f"# {_safe_comment(operation)} was not recorded: "
+                f"{names or 'an input dataset'} has no replayable source.",
                 "# Save that dataset, clear this script, and repeat the operation to capture it.",
                 "",
             ]
@@ -241,7 +286,7 @@ except ModuleNotFoundError as exc:
             return None
         output_var = self._new_dataset_var(output.dataset_id)
         if comment:
-            self._lines.append(f"# {comment}")
+            self._lines.append(f"# {_safe_comment(comment)}")
         call = _call_text(f"{source_var}.{method}", args, kwargs)
         self._lines.extend([f"{output_var} = {call}", ""])
         self._notify()
@@ -263,7 +308,7 @@ except ModuleNotFoundError as exc:
             return None
         output_var = self._new_dataset_var(output.dataset_id)
         if comment:
-            self._lines.append(f"# {comment}")
+            self._lines.append(f"# {_safe_comment(comment)}")
         call_args = tuple(_Code(str(variable)) for variable in variables) + tuple(args)
         call = _call_text(function, call_args, kwargs)
         self._lines.extend([f"{output_var} = {call}", ""])
@@ -286,7 +331,7 @@ except ModuleNotFoundError as exc:
             return ()
         output_vars = tuple(self._new_dataset_var(output.dataset_id) for output in outputs)
         if comment:
-            self._lines.append(f"# {comment}")
+            self._lines.append(f"# {_safe_comment(comment)}")
         call_args = tuple(_Code(str(variable)) for variable in variables) + tuple(args)
         call = _call_text(function, call_args, kwargs)
         self._lines.extend([f"{', '.join(output_vars)} = {call}", ""])
@@ -307,7 +352,11 @@ except ModuleNotFoundError as exc:
             return None
         output_var = self._new_dataset_var(output.dataset_id)
         self._lines.extend(
-            [f"# {comment}", f"{output_var} = {expression(tuple(str(v) for v in variables))}", ""]
+            [
+                f"# {_safe_comment(comment)}",
+                f"{output_var} = {expression(tuple(str(v) for v in variables))}",
+                "",
+            ]
         )
         self._notify()
         return output_var
@@ -320,7 +369,7 @@ except ModuleNotFoundError as exc:
         resolved = str(Path(path).expanduser().resolve())
         self._lines.extend(
             [
-                f"# Save {reference.name}",
+                f"# Save {_safe_comment(reference.name)}",
                 f"{variable}.save(Path({_literal(resolved)}))",
                 "",
             ]
@@ -367,13 +416,14 @@ except ModuleNotFoundError as exc:
             "azimuth_polar",
             "frequency",
             "elevation_sweep",
+            "isar_image",
         }
         mode_key = str(mode).strip().lower()
         if mode_key not in supported:
             self.record_unsupported_plot(
                 mode_key,
                 "the current headless recorder supports rectangular/polar "
-                "azimuth, frequency, and elevation-sweep plots only",
+                "azimuth, frequency, elevation-sweep, and ISAR plots only",
             )
             return None
         variables = [self._ensure(reference) for reference in datasets]
@@ -422,7 +472,8 @@ except ModuleNotFoundError as exc:
         self._current_plot_signature = signature
         self._lines.extend(
             [
-                f"# {str(mode).replace('_', ' ')} plot was not recorded: {reason}.",
+                f"# {_safe_comment(str(mode).replace('_', ' '))} plot was not "
+                f"recorded: {_safe_comment(reason)}.",
                 "# The plot shown in GRIM can still be exported manually.",
                 "",
             ]
@@ -1376,6 +1427,11 @@ def plot_datasets(
     reference_index: int = 0,
     waterfall_style: str = "Surface",
     isar_options: dict[str, object] | None = None,
+    show_colorbar: bool = True,
+    shared_colorbar: bool = True,
+    square_aspect: bool = False,
+    color_limits: tuple[float, float] | None = None,
+    color_step: float = 0.0,
 ):
     """Create a Matplotlib Figure from resolved physical selector values.
 
@@ -1396,12 +1452,16 @@ def plot_datasets(
         "azimuth_polar",
         "frequency",
         "elevation_sweep",
+        "isar_image",
     }
     if mode_key not in supported_modes:
         raise ValueError(
             f"Unsupported headless plot mode {mode!r}; supported modes are "
-            "azimuth_rect, azimuth_polar, frequency, and elevation_sweep"
+            "azimuth_rect, azimuth_polar, frequency, elevation_sweep, and "
+            "isar_image"
         )
+    if mode_key == "isar_image" and len(selected) != 1:
+        raise ValueError("ISAR headless plotting requires exactly one dataset")
     try:
         reference_position = int(reference_index)
     except (TypeError, ValueError) as exc:
@@ -1423,6 +1483,7 @@ def plot_datasets(
     if not az_values or not el_values or not freq_values:
         raise ValueError("azimuths, elevations, and frequencies cannot be empty")
     compatible_count = 0
+    style_axes = None
 
     figure = Figure(figsize=(10.0, 6.0), dpi=100, facecolor="white")
     FigureCanvasAgg(figure)
@@ -1725,10 +1786,16 @@ def plot_datasets(
         axes.set_ylabel("Down-Range (m)")
 
     elif mode_key == "isar_image":
-        from plot_modes.isar_mode import form_isar
+        from plot_modes.isar_mode import _length_unit, form_isar
 
         dataset = selected[0][1]
         options = dict(isar_options or {})
+        # This helper produces a rendered plot, not a scientific result
+        # artifact. Formation remains full fidelity, then the same
+        # peak-preserving display reduction as the GUI bounds image/log
+        # temporaries. Complex images are intentionally not retained here.
+        options["decimate_display"] = True
+        options["retain_complex"] = False
         az_idx = _indices(dataset.azimuths, az_values)
         fr_idx = _indices(dataset.frequencies, freq_values)
         el_idx = _indices(dataset.elevations, [el_values[0]])[0]
@@ -1741,20 +1808,160 @@ def plot_datasets(
             polarization_index=pol_idx,
             **options,
         )
+        compatible_count = 1
         figure.clear()
         axes_values = figure.subplots(1, len(bands), squeeze=False)[0]
-        for axis, band in zip(axes_values, bands):
-            magnitude = np.asarray(band["magnitude"])
-            display = magnitude if scale == "linear" else 20.0 * np.log10(np.maximum(magnitude, 1.0e-15))
-            axis.imshow(
+        style_axes = list(axes_values)
+        displays = []
+        for band in bands:
+            magnitude = np.asarray(band["magnitude"], dtype=np.float32)
+            intensity = np.empty_like(magnitude, dtype=np.float32)
+            np.multiply(magnitude, magnitude, out=intensity)
+            if str(scale).strip().lower() != "linear":
+                # Match the GUI's defined display floor exactly: image
+                # intensity at/below 1e-12 is shown as -120 dB.
+                np.maximum(intensity, np.float32(1.0e-12), out=intensity)
+                np.log10(intensity, out=intensity)
+                intensity *= np.float32(10.0)
+            displays.append(intensity)
+
+        clamp = None
+        if color_limits is not None:
+            values = np.asarray(color_limits, dtype=float).reshape(-1)
+            if (
+                values.size != 2
+                or not np.all(np.isfinite(values))
+                or not values[0] < values[1]
+            ):
+                raise ValueError("color_limits must be two finite increasing values")
+            clamp = (float(values[0]), float(values[1]))
+        shared_limits = (
+            plot_common.finite_data_limits(displays)
+            if bool(shared_colorbar) and clamp is None
+            else None
+        )
+        plot_vmin = clamp[0] if clamp is not None else (
+            shared_limits[0] if shared_limits is not None else None
+        )
+        plot_vmax = clamp[1] if clamp is not None else (
+            shared_limits[1] if shared_limits is not None else None
+        )
+
+        meshes = []
+        for axis, band, display in zip(axes_values, bands, displays):
+            mesh = axis.imshow(
                 display.T,
                 extent=[band["x_range"][0], band["x_range"][-1], band["y_range"][0], band["y_range"][-1]],
                 origin="lower",
                 aspect="auto",
+                interpolation="nearest",
                 cmap=colormap,
+                vmin=plot_vmin,
+                vmax=plot_vmax,
             )
-            axis.set_xlabel("Cross-Range")
-            axis.set_ylabel("Down-Range")
+            if bool(square_aspect):
+                axis.set_aspect("equal", adjustable="datalim")
+            meshes.append(mesh)
+
+        unit_name, _unit_scale = _length_unit(options.get("length_unit", "m"))
+        elevation_native = float(np.asarray(dataset.elevations)[el_idx])
+        elevation_deg = float(
+            plot_common.convert_axis_values(
+                [elevation_native],
+                "elevation",
+                plot_common.axis_unit(dataset, "elevation"),
+                "deg",
+            )[0]
+        )
+        elevation_name = plot_common.angular_axis_name(dataset, "elevation")
+        reconstruction = str(options.get("reconstruction", "fast")).strip().lower()
+        if reconstruction in {"sparse", "l1", "sparse-l1"}:
+            reconstruction_label = "Sparse L1 (Experimental)"
+        elif reconstruction in {"accurate", "cartesian", "pfa-accurate"}:
+            reconstruction_label = "Cartesian PFA"
+        else:
+            reconstruction_label = "Fast PFA"
+        composite_sublooks = max(
+            (int(band.get("composite", 0)) for band in bands), default=0
+        )
+        if composite_sublooks:
+            reconstruction_label += (
+                f" | Wide-Aperture Composite ({composite_sublooks} looks)"
+            )
+        title = (
+            f"ISAR Image | {elevation_name} {elevation_deg:g} deg | "
+            f"Pol {dataset.polarizations[pol_idx]} | {reconstruction_label}"
+        )
+        if len(bands) > 1:
+            figure.suptitle(title)
+            for axis, band in zip(axes_values, bands):
+                axis.set_title(
+                    f"{float(band['az_values'][0]):g}°–"
+                    f"{float(band['az_values'][-1]):g}°"
+                )
+        else:
+            axes_values[0].set_title(title)
+
+        horizontal_projection = abs(elevation_deg) > 1.0e-9
+        if composite_sublooks:
+            x_label = f"Cross-Range at 0° ({unit_name})"
+            y_label = f"Down-Range at 0° ({unit_name})"
+        elif horizontal_projection:
+            x_label = f"Horizontal Cross-Range ({unit_name})"
+            y_label = f"Horizontal Range ({unit_name})"
+        else:
+            x_label = f"Cross-Range ({unit_name})"
+            y_label = f"Range ({unit_name})"
+        for axis in axes_values:
+            axis.set_xlabel(x_label)
+        axes_values[0].set_ylabel(y_label)
+
+        colorbars = []
+        if bool(show_colorbar) and meshes:
+            if bool(shared_colorbar):
+                colorbars.append(figure.colorbar(meshes[-1], ax=list(axes_values)))
+            else:
+                colorbars.extend(
+                    figure.colorbar(mesh, ax=axis)
+                    for axis, mesh in zip(axes_values, meshes)
+                )
+            label = (
+                "Image Intensity (linear)"
+                if str(scale).strip().lower() == "linear"
+                else "Image Intensity (dB)"
+            )
+            try:
+                tick_step = float(color_step)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("color_step must be finite and nonnegative") from exc
+            if not np.isfinite(tick_step) or tick_step < 0.0:
+                raise ValueError("color_step must be finite and nonnegative")
+            for colorbar in colorbars:
+                colorbar.set_label(label)
+                if tick_step > 0.0:
+                    low, high = colorbar.mappable.get_clim()
+                    first = math.ceil(low / tick_step) * tick_step
+                    tick_count = int(math.floor((high - first) / tick_step)) + 1
+                    if 0 < tick_count <= 1000:
+                        colorbar.set_ticks(first + tick_step * np.arange(tick_count))
+
+        sparse_results = [
+            band for band in bands if band.get("sparse_iterations") is not None
+        ]
+        if sparse_results and not all(
+            bool(band.get("sparse_converged", False)) for band in sparse_results
+        ):
+            worst_gap = max(
+                float(band.get("sparse_relative_duality_gap", float("inf")))
+                for band in sparse_results
+            )
+            warnings.warn(
+                "ISAR sparse reconstruction did not certify convergence for "
+                f"every band (worst relative duality gap {worst_gap:.3g}); "
+                "treat the image as diagnostic, not quantitatively final.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         axes = axes_values[0]
     else:
         raise ValueError(f"Unsupported plot mode: {mode!r}")
@@ -1765,7 +1972,7 @@ def plot_datasets(
             "None of the selected datasets contains every requested plot axis value"
         )
 
-    for axis in figure.axes:
+    for axis in (style_axes if style_axes is not None else figure.axes):
         axis.grid(bool(show_grid))
         handles, labels = axis.get_legend_handles_labels()
         if show_legend and handles:

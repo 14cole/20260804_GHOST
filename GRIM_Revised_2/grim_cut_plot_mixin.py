@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from grim_dataset import RcsGrid
+from isar_artifact import build_isar_manifest
 from plot_modes import (
     az_vs_range_mode,
     azimuth_polar_mode,
@@ -100,9 +101,11 @@ def _selected_polarization_axis_availability(
 
 class PlotOpsMixin:
     def _on_param_selection_changed(self) -> None:
+        self._invalidate_isar_result()
         self._maybe_autoplot()
 
     def _on_polarization_selection_changed(self) -> None:
+        self._invalidate_isar_result()
         if self.active_dataset is None:
             return
         selected_pol = sorted(self._selected_indices(self.list_pol))
@@ -235,6 +238,7 @@ class PlotOpsMixin:
         # dataset selections. Fall back to a render only when no live mapped
         # artist exists (for example, before the first image was drawn).
         cmap = self._effective_colormap()
+        self._update_current_python_plot_style()
         updated = False
         seen: set[int] = set()
         for ax in self.plot_figure.axes:
@@ -529,6 +533,7 @@ class PlotOpsMixin:
         return self.plot_text_color or self.application_palette["text"]
 
     def _apply_plot_theme(self) -> None:
+        self._update_current_python_plot_style()
         self.plot_figure.set_facecolor(self._current_plot_bg())
         axes = self.plot_axes or [self.plot_ax]
         for ax in axes:
@@ -631,10 +636,15 @@ class PlotOpsMixin:
         self.plot_axes = None
         self._style_plot_axes()
         self._apply_plot_limits()
+        if getattr(self, "btn_export_isar_result", None) is not None:
+            # Clear is a view-only action: keep a valid numerical artifact, but
+            # never let Export Plot treat the newly blank canvas as the last
+            # completed ISAR figure.
+            self._invalidate_isar_figure()
         recorder = getattr(self, "python_recorder", None)
         if recorder is not None:
             recorder.invalidate_current_plot()
-        self._python_last_successful_plot_spec = None
+        self.last_python_plot_spec = None
 
     def _single_selection_index(self, widget: QListWidget, label: str) -> int | None:
         selected = sorted(self._selected_indices(widget))
@@ -1382,13 +1392,101 @@ class PlotOpsMixin:
     # thread, coalesce bursts of requests (spinbox keystrokes, scrubbing).
     # ------------------------------------------------------------------
 
+    def _isar_result_export_button(self):
+        button = getattr(self, "btn_export_isar_result", None)
+        if button is not None:
+            return button
+        contexts = getattr(self, "_plot_contexts", {}) or {}
+        context = contexts.get("isar")
+        return getattr(context, "btn_export_isar_result", None)
+
+    def _invalidate_isar_figure(self) -> None:
+        """Mark the visible ISAR canvas stale without discarding valid arrays."""
+
+        self._isar_view_revision = int(
+            getattr(self, "_isar_view_revision", 0)
+        ) + 1
+        self._last_isar_completed_view_revision = None
+        self._last_isar_figure_token = None
+
+    def _invalidate_isar_result(self) -> None:
+        """Invalidate source/settings-bound ISAR state immediately.
+
+        This is intentionally independent of the ordinary plotting render
+        generation: the Plotting and ISAR tabs own different canvases.
+        """
+
+        cancel_event = getattr(self, "_isar_cancel_event", None)
+        if cancel_event is not None:
+            cancel_event.set()
+        self._isar_input_revision = int(
+            getattr(self, "_isar_input_revision", 0)
+        ) + 1
+        self._invalidate_isar_figure()
+        self._last_isar_artifact = None
+        self._last_isar_completed_input_revision = None
+        export_result = self._isar_result_export_button()
+        if export_result is not None:
+            export_result.setEnabled(False)
+
+    def _isar_numerical_result_is_current(self) -> bool:
+        return bool(
+            getattr(self, "_last_isar_artifact", None) is not None
+            and getattr(self, "_last_isar_completed_input_revision", None)
+            == getattr(self, "_isar_input_revision", 0)
+        )
+
+    def _isar_figure_is_current(self) -> bool:
+        return bool(
+            getattr(self, "_last_isar_completed_view_revision", None)
+            == getattr(self, "_isar_view_revision", 0)
+            and getattr(self, "_last_isar_figure_token", None)
+            is self.plot_figure
+        )
+
     def _isar_submit(self, params: dict) -> None:
+        # Do not let a prior canvas/result masquerade as the settings that are
+        # now pending in the worker.
+        queued = "isar_input_revision" in params
+        if queued:
+            if (
+                params.get("isar_input_revision")
+                != getattr(self, "_isar_input_revision", 0)
+                or params.get("isar_view_revision")
+                != getattr(self, "_isar_view_revision", 0)
+            ):
+                self.status.showMessage(
+                    "Queued ISAR request discarded because its inputs or "
+                    "settings changed before it started. Click Apply ISAR "
+                    "Settings to form the current recipe."
+                )
+                return
+        if not getattr(self, "_isar_busy", False):
+            dataset_job_active = getattr(self, "_background_job_active", None)
+            if callable(dataset_job_active) and dataset_job_active():
+                self.status.showMessage(
+                    "A dataset import, operation, save, or export is still running. "
+                    "Wait for it to finish before starting ISAR reconstruction."
+                )
+                return
+        if not queued:
+            self._invalidate_isar_result()
+            params["isar_input_revision"] = getattr(
+                self, "_isar_input_revision", 0
+            )
+            params["isar_view_revision"] = getattr(
+                self, "_isar_view_revision", 0
+            )
+        params.setdefault(
+            "_record_python_request",
+            bool(getattr(self, "_python_record_next_isar", False)),
+        )
         cancel_event = threading.Event()
         params["cancel_check"] = cancel_event.is_set
         if getattr(self, "_isar_busy", False):
             # Latest request wins; it launches as soon as the current one lands.
             current_cancel = getattr(self, "_isar_cancel_event", None)
-            if current_cancel is not None:
+            if queued and current_cancel is not None:
                 current_cancel.set()
             old_pending = getattr(self, "_isar_pending", None)
             if old_pending is not None:
@@ -1397,13 +1495,6 @@ class PlotOpsMixin:
                     old_check.set()
             params["_cancel_event"] = cancel_event
             self._isar_pending = params
-            return
-        dataset_job_active = getattr(self, "_background_job_active", None)
-        if callable(dataset_job_active) and dataset_job_active():
-            self.status.showMessage(
-                "A dataset import, operation, save, or export is still running. "
-                "Wait for it to finish before starting ISAR reconstruction."
-            )
             return
         self._isar_busy = True
         self._isar_cancel_event = cancel_event
@@ -1417,6 +1508,22 @@ class PlotOpsMixin:
         def work(params=params, signals=signals):
             try:
                 result = isar_mode.compute_bands(params)
+                if not isinstance(result, str):
+                    band_results, elapsed = result
+                    manifest = None
+                    manifest_error = None
+                    try:
+                        manifest = build_isar_manifest(
+                            params["dataset"], params, band_results, elapsed
+                        )
+                    except (KeyError, TypeError, ValueError) as exc:
+                        manifest_error = str(exc)
+                    result = (
+                        band_results,
+                        elapsed,
+                        manifest,
+                        manifest_error,
+                    )
             except Exception as exc:  # surface, don't kill the worker silently
                 result = f"ISAR computation failed: {exc}"
             signals.done.emit(params, result)
@@ -1438,23 +1545,55 @@ class PlotOpsMixin:
         elif (
             params.get("dataset") is not self.active_dataset
             or params.get("figure_token") is not self.plot_figure
-            or params.get("render_generation")
-            != getattr(self, "_plot_render_generation", 0)
+            or params.get("isar_input_revision")
+            != getattr(self, "_isar_input_revision", 0)
+            or params.get("isar_view_revision")
+            != getattr(self, "_isar_view_revision", 0)
         ):
             self.status.showMessage("ISAR result discarded (view changed while computing).")
             ok = False
         else:
-            band_results, elapsed = result
+            if len(result) == 4:
+                band_results, elapsed, manifest, manifest_error = result
+            else:  # compatibility for direct unit harnesses
+                band_results, elapsed = result
+                manifest = None
+                manifest_error = None
             isar_mode.display_results(self, params, band_results, elapsed)
-            # ISAR is intentionally unsupported by the MVP recorder. Freeze
-            # that fact after every async render, but add a comment only when
-            # the user explicitly requested the plot; automatic updates stay
-            # out of the script.
+            self._last_isar_figure_generation = params.get("render_generation")
+            self._last_isar_completed_input_revision = params.get(
+                "isar_input_revision"
+            )
+            self._last_isar_completed_view_revision = params.get(
+                "isar_view_revision"
+            )
+            self._last_isar_figure_token = params.get("figure_token")
+            if manifest is None and manifest_error is None:
+                try:
+                    manifest = build_isar_manifest(
+                        params["dataset"], params, band_results, elapsed
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    manifest_error = str(exc)
+            if manifest is None:
+                self._last_isar_artifact = None
+                self._note_plot_render(
+                    f"ISAR result export unavailable: {manifest_error}."
+                )
+            else:
+                self._last_isar_artifact = (band_results, manifest)
+                export_result = self._isar_result_export_button()
+                if export_result is not None:
+                    export_result.setEnabled(True)
+            # Freeze the exact worker-captured recipe after every successful
+            # async render, but emit it only for an explicit user request;
+            # automatic refreshes stay out of the script.
             self._record_python_plot(
                 "isar_image",
-                emit=bool(getattr(self, "_python_record_pending_isar", False)),
+                resolved=self._resolved_isar_python_plot(params),
+                datasets_override=[("ISAR Dataset", params["dataset"])],
+                emit=bool(params.get("_record_python_request", False)),
             )
-            self._python_record_pending_isar = False
         drain_import = getattr(self, "_start_next_pending_import_batch", None)
         if callable(drain_import) and drain_import():
             if pending is not None:
@@ -1470,8 +1609,6 @@ class PlotOpsMixin:
         if pending is not None:
             self._isar_submit(pending)
             return
-        if not ok:
-            self._python_record_pending_isar = False
         # Cine mode: keep stepping while Play stays toggled and renders succeed.
         play_btn = getattr(self, "btn_isar_ap_play", None)
         if ok and play_btn is not None and play_btn.isChecked():
@@ -1577,6 +1714,7 @@ class PlotOpsMixin:
             mesh.set_clim(zmin, zmax)
         for colorbar in self.plot_colorbars or []:
             self._apply_colorbar_ticks(colorbar)
+        self._update_current_python_plot_style()
         self.plot_canvas.draw_idle()
 
     def _fit_polar_x_range(self) -> tuple[float, float]:
@@ -2014,6 +2152,7 @@ class PlotOpsMixin:
         renderers call the method without it and use the active toggle.
         """
         show = bool(self.chk_plot_legend.isChecked()) if checked is None else bool(checked)
+        self._update_current_python_plot_style(show_legend=show)
         axes = self.plot_axes or [self.plot_ax]
         for ax in axes:
             legend = ax.get_legend()
@@ -2037,16 +2176,17 @@ class PlotOpsMixin:
         if checked is not None:
             self.plot_canvas.draw_idle()
 
-    def _on_explicit_plot_clicked(self, mode: str) -> None:
-        """Track the one async plot; synchronous renders capture themselves."""
+    def _on_explicit_isar_plot_clicked(self, _checked: bool = False) -> None:
+        """Form one ISAR request with recorder intent scoped to that request."""
 
-        if mode == "isar_image":
-            # ISAR finishes on the GUI thread after a worker result arrives.
-            # A validation failure never starts that worker and is not recorded.
-            self._python_record_pending_isar = bool(
-                getattr(self, "_isar_busy", False)
-            )
-            return
+        self._python_record_next_isar = True
+        try:
+            self._plot_isar_image()
+        finally:
+            self._python_record_next_isar = False
+
+    def _on_explicit_plot_clicked(self, mode: str) -> None:
+        """Emit a synchronous plot after its renderer reports success."""
         if "updated" in str(self.status.currentMessage()).lower():
             self._emit_last_successful_python_plot()
 
@@ -2055,6 +2195,53 @@ class PlotOpsMixin:
 
         if "updated" in str(self.status.currentMessage()).lower():
             self._record_python_plot(mode, emit=False)
+
+    def _update_current_python_plot_style(
+        self, *, show_legend: bool | None = None
+    ) -> None:
+        """Overlay live view-only controls on this canvas's frozen recipe."""
+
+        spec = getattr(self, "last_python_plot_spec", None)
+        if not spec or spec[0] != "supported":
+            return
+        parameters = dict(spec[4])
+        parameters["colormap"] = self._effective_colormap()
+        parameters["show_grid"] = self._plot_grid_enabled()
+        parameters["show_legend"] = (
+            bool(self.chk_plot_legend.isChecked())
+            if show_legend is None
+            else bool(show_legend)
+        )
+        if spec[3] == "isar_image":
+            parameters.update(self._current_isar_python_display_style())
+        self.last_python_plot_spec = (*spec[:4], parameters)
+
+    def _current_isar_python_display_style(self) -> dict[str, object]:
+        """Capture GUI display controls supported by headless ISAR replay."""
+
+        zmin = float(self.spin_plot_zmin.value())
+        zmax = float(self.spin_plot_zmax.value())
+        color_limits = (zmin, zmax) if zmin < zmax else None
+        meshes = [
+            mesh
+            for mesh in getattr(self, "_isar_meshes", None) or []
+            if getattr(mesh, "axes", None) is not None
+        ]
+        if meshes:
+            mesh_limits = [tuple(float(value) for value in mesh.get_clim()) for mesh in meshes]
+            if all(limits == mesh_limits[0] for limits in mesh_limits[1:]):
+                color_limits = mesh_limits[0]
+            else:
+                # Per-band automatic normalization has no single explicit
+                # clamp; replay it by leaving color_limits unset.
+                color_limits = None
+        return {
+            "show_colorbar": bool(self.chk_colorbar.isChecked()),
+            "shared_colorbar": bool(self.chk_colorbar_shared.isChecked()),
+            "square_aspect": bool(self.chk_isar_square.isChecked()),
+            "color_limits": color_limits,
+            "color_step": float(self.spin_plot_zstep.value()),
+        }
 
     def _record_python_plot(
         self,
@@ -2074,15 +2261,16 @@ class PlotOpsMixin:
             "azimuth_polar",
             "frequency",
             "elevation_sweep",
+            "isar_image",
         }
         if mode not in supported_modes:
             spec = (
                 "unsupported",
                 mode,
-                "this MVP records rectangular/polar azimuth, frequency, and "
-                "elevation-sweep plots only",
+                "the recorder supports rectangular/polar azimuth, frequency, "
+                "elevation-sweep, and ISAR plots only",
             )
-            self._python_last_successful_plot_spec = spec
+            self.last_python_plot_spec = spec
             if emit:
                 recorder.record_unsupported_plot(spec[1], spec[2])
             return
@@ -2092,7 +2280,7 @@ class PlotOpsMixin:
                 mode,
                 "PBP rendering does not yet have a matching headless implementation",
             )
-            self._python_last_successful_plot_spec = spec
+            self.last_python_plot_spec = spec
             if emit:
                 recorder.record_unsupported_plot(spec[1], spec[2])
             return
@@ -2103,7 +2291,7 @@ class PlotOpsMixin:
                 "Hold overlays depend on prior plot state and are intentionally "
                 "outside this simple headless recorder",
             )
-            self._python_last_successful_plot_spec = spec
+            self.last_python_plot_spec = spec
             if emit:
                 recorder.record_unsupported_plot(spec[1], spec[2])
             return
@@ -2161,6 +2349,8 @@ class PlotOpsMixin:
             "polar_zero": self._polar_zero_location(),
         }
         parameters.update(override)
+        if mode == "isar_image":
+            parameters.update(self._current_isar_python_display_style())
         spec = (
             "supported",
             tuple(references),
@@ -2168,7 +2358,7 @@ class PlotOpsMixin:
             mode,
             parameters,
         )
-        self._python_last_successful_plot_spec = spec
+        self.last_python_plot_spec = spec
         if emit:
             recorder.record_plot(
                 spec[1],
@@ -2177,11 +2367,55 @@ class PlotOpsMixin:
                 parameters=spec[4],
             )
 
+    @staticmethod
+    def _resolved_isar_python_plot(params: dict) -> dict[str, object]:
+        """Freeze the physical selectors and formation recipe that succeeded.
+
+        ISAR completes asynchronously, so reading the live widgets here could
+        record settings the user changed after the worker started.  Everything
+        needed for replay is instead taken from the worker's captured params.
+        """
+
+        dataset = params["dataset"]
+        azimuth_indices = sorted(
+            {int(index) for band in params["bands"] for index in band}
+        )
+        frequency_indices = [int(index) for index in params["freq_indices_sorted"]]
+        target = params.get("az_target_deg")
+        options: dict[str, object] = {
+            "window": str(params["window_name"]),
+            "reconstruction": str(params["recon"]),
+            "length_unit": str(params["unit_name"]),
+            "aperture_center_degrees": params.get("az_center_deg"),
+            "azimuth_target_degrees": (
+                None if target is None else np.asarray(target, dtype=float).tolist()
+            ),
+            "l1_strength": float(params["l1_strength"]),
+            "l1_iterations": int(params["l1_iters"]),
+            "flip_x": bool(params["flip_x"]),
+            "flip_y": bool(params["flip_y"]),
+            "legacy_metadata_attested": bool(
+                params.get("legacy_metadata_attested", False)
+            ),
+        }
+        return {
+            "azimuths": np.asarray(dataset.azimuths)[azimuth_indices].tolist(),
+            "elevations": [
+                np.asarray(dataset.elevations)[int(params["elev_idx"])].item()
+            ],
+            "frequencies": np.asarray(dataset.frequencies)[frequency_indices].tolist(),
+            "polarization": str(
+                np.asarray(dataset.polarizations)[int(params["pol_idx"])]
+            ),
+            "phase": False,
+            "isar_options": options,
+        }
+
     def _emit_last_successful_python_plot(self) -> bool:
         """Emit the frozen spec corresponding to the visible plot canvas."""
 
         recorder = getattr(self, "python_recorder", None)
-        spec = getattr(self, "_python_last_successful_plot_spec", None)
+        spec = getattr(self, "last_python_plot_spec", None)
         if recorder is None or not spec:
             if recorder is not None:
                 recorder.invalidate_current_plot()

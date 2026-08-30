@@ -15,11 +15,65 @@ import numpy as np
 
 from . import common
 from .isar_mode import (
+    _MAX_INTERP_COMPLEX_CELLS,
+    _apply_resample_plan,
     _decimate_display_max,
-    _resample_complex_uniform,
     _length_unit,
+    _uniform_resample_plan,
     _unit_to_hz_scale,
 )
+
+
+def _prepare_uniform_frequency_history(
+    frequency_hz: np.ndarray,
+    complex_history: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Gap-aware range-processing grid and per-row measurement weights.
+
+    Interpolation is allowed only between nearby acquired frequencies. A large
+    missing band and any interpolation touching an unknown complex sample stay
+    zero-weighted rather than becoming apparently measured phase history.
+    """
+
+    frequency_hz = np.asarray(frequency_hz, dtype=float)
+    history = np.asarray(complex_history)
+    if history.ndim != 2 or history.shape[1] != frequency_hz.size:
+        raise ValueError(
+            "azimuth/range phase history must have shape (azimuth, frequency)"
+        )
+    maximum_frequency_samples = max(
+        frequency_hz.size,
+        _MAX_INTERP_COMPLEX_CELLS // max(history.shape[0], 1),
+    )
+    plan = _uniform_resample_plan(
+        frequency_hz,
+        max_output_samples=maximum_frequency_samples,
+    )
+    finite = np.isfinite(history)
+    clean = np.nan_to_num(
+        history,
+        copy=True,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).astype(np.complex64, copy=False)
+    uniform_history = _apply_resample_plan(
+        frequency_hz, clean, axis=1, plan=plan
+    )
+    interpolated_validity = _apply_resample_plan(
+        frequency_hz,
+        finite.astype(np.float32),
+        axis=1,
+        plan=plan,
+    )
+    weights = (interpolated_validity >= 1.0 - 1.0e-6).astype(np.float32)
+    uniform_history = np.asarray(uniform_history, dtype=np.complex64) * weights
+    return (
+        np.asarray(plan["target"], dtype=float),
+        uniform_history,
+        weights,
+        dict(plan["info"]),
+    )
 
 
 def _range_display_values(dataset, magnitude: np.ndarray, *, linear: bool) -> np.ndarray:
@@ -96,20 +150,24 @@ def render(self) -> None:
             "elevation/pitch, frequency, and polarization values."
         )
         return
-    rcs_slice = np.where(np.isfinite(rcs_slice), rcs_slice, 0.0)
-
-    # IFFT along freq requires uniform freq spacing — match what ISAR does.
+    # IFFT along frequency requires a uniform grid. Preserve missing bands and
+    # unknown phase as zero-weight observations; never bridge them as data.
     freq_unit = str(self.active_dataset.units.get("frequency", "ghz"))
     freq_hz = freq_values * _unit_to_hz_scale(freq_unit)
-    freq_hz_uniform, rcs_slice, fr_nonuniformity = _resample_complex_uniform(
-        freq_hz, rcs_slice, axis=1
-    )
+    try:
+        freq_hz_uniform, rcs_slice, sample_weights, frequency_sampling = (
+            _prepare_uniform_frequency_history(freq_hz, rcs_slice)
+        )
+    except ValueError as exc:
+        self.status.showMessage(f"Az vs Down-Range blocked: {exc}")
+        return
+    fr_nonuniformity = float(frequency_sampling["non_uniformity"])
     n_freq = freq_hz_uniform.size
     df = float(np.mean(np.diff(freq_hz_uniform)))
 
     # Window over freq (re-uses ISAR window selector).
     win_freq = self._isar_window(n_freq)
-    rcs_windowed = rcs_slice * win_freq
+    rcs_windowed = rcs_slice * win_freq[None, :] * sample_weights
 
     # Range processing: IFFT and shift so range=0 sits at array center.
     range_image = np.fft.ifft(rcs_windowed, axis=1)
@@ -118,9 +176,17 @@ def render(self) -> None:
     # Coherent-gain normalisation keeps a unit-amplitude point response near
     # 0 dB re 1. It is deliberately not labeled dBsm/dBke: the IFFT image is
     # a processing product, not an RCS sample on the source grid.
-    coh = float(np.mean(win_freq))
-    if coh > 0.0:
-        range_image = range_image / coh
+    coherent_gain = np.sum(
+        sample_weights * win_freq[None, :], axis=1
+    ) / float(n_freq)
+    usable_rows = coherent_gain > 0.0
+    if not np.any(usable_rows):
+        self.status.showMessage(
+            "No azimuth row has enough finite, supported phase history for range processing."
+        )
+        return
+    range_image[usable_rows] /= coherent_gain[usable_rows, None]
+    range_image[~usable_rows] = np.nan + 1j * np.nan
 
     units_combo = getattr(self, "combo_isar_units", None)
     unit_name, unit_scale = _length_unit(
@@ -137,7 +203,7 @@ def render(self) -> None:
     pn_widget = getattr(self, "chk_isar_peak_normalize", None)
     peak_norm = bool(pn_widget.isChecked()) if pn_widget else False
     if peak_norm:
-        peak = float(magnitude.max())
+        peak = float(np.nanmax(magnitude))
         if peak > 0.0:
             magnitude = magnitude / peak
 
@@ -232,4 +298,13 @@ def render(self) -> None:
     note = ""
     if fr_nonuniformity >= 1e-3:
         note = f" — resampled frequency (Δ-spread {fr_nonuniformity*100:.1f}%)"
+    gap_count = int(frequency_sampling.get("gap_count", 0))
+    if gap_count:
+        unsupported = 100.0 * float(
+            frequency_sampling.get("unsupported_fraction", 0.0)
+        )
+        note += (
+            f" — {gap_count} missing frequency band(s) kept zero-weighted "
+            f"({unsupported:.1f}% unsupported grid)"
+        )
     self._show_plot_status(f"Az vs Down-Range updated{note}.")

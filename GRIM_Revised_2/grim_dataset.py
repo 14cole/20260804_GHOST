@@ -3,6 +3,7 @@ from dataclasses import replace
 import hashlib
 import json
 import csv
+import math
 import operator
 import os
 import re
@@ -285,12 +286,115 @@ _ANGLE_UNITS = {
     "radians": "rad",
 }
 
+# Metadata producers have historically used several names for the same
+# acquisition fact.  These are semantic families, not independent optional
+# strings: a calibration ID under one alias must be checked against the other
+# aliases, and a monostatic declaration must not coexist with a bistatic one.
+# Identity-like fields that describe different facts (for example a
+# calibration run and a calibration version) deliberately remain separate.
+_ACQUISITION_METADATA_FAMILIES = (
+    (
+        "amplitude_convention",
+        "amplitude convention",
+        "text",
+        ("amplitude_convention",),
+    ),
+    (
+        "complex_field_domain",
+        "complex-field domain",
+        "text",
+        ("complex_field_domain",),
+    ),
+    (
+        "range_phase_law",
+        "two-way range-phase convention",
+        "range_phase",
+        ("range_phase_convention", "phase_law"),
+    ),
+    (
+        "acquisition_geometry",
+        "measurement geometry",
+        "geometry",
+        (
+            "measurement_geometry",
+            "acquisition_geometry",
+            "scattering_geometry",
+            "radar_geometry",
+            "measurement_domain",
+            "field_domain",
+            "range_type",
+            "wavefront_geometry",
+        ),
+    ),
+    (
+        "motion_state",
+        "motion-compensation/phase-center state",
+        "motion",
+        (
+            "motion_compensation",
+            "motion_compensated",
+            "phase_center_stability",
+            "phase_center_motion",
+            "range_alignment",
+        ),
+    ),
+    (
+        "calibration_identifier",
+        "calibration ID",
+        "identity",
+        ("calibration_id", "calibration_identifier"),
+    ),
+    (
+        "calibration_chain_id",
+        "calibration-chain ID",
+        "identity",
+        ("calibration_chain_id",),
+    ),
+    (
+        "calibration_run_id",
+        "calibration-run ID",
+        "identity",
+        ("calibration_run_id",),
+    ),
+    (
+        "calibration_version",
+        "calibration version",
+        "identity",
+        ("calibration_version",),
+    ),
+    (
+        "measurement_setup_identifier",
+        "measurement-setup ID",
+        "identity",
+        ("measurement_setup_id", "radar_setup_id"),
+    ),
+    (
+        "fixture_id",
+        "fixture ID",
+        "identity",
+        ("fixture_id",),
+    ),
+    (
+        "static_setup",
+        "static-setup declaration",
+        "setup_state",
+        ("static_setup",),
+    ),
+)
+
+_SUPPORT_REFERENCE_METADATA_FIELDS = tuple(
+    key
+    for _family, _label, _kind, keys in _ACQUISITION_METADATA_FAMILIES
+    for key in keys
+)
+
 # Dense joins use a bounded advanced-index block and then transfer ownership of
 # their already-sanitized output into RcsGrid. The singleton prevents callers
 # from bypassing constructor sanitation with a public-looking boolean switch.
 _JOIN_MERGE_BLOCK_CELLS = 262_144
 _PIO_WRITE_BLOCK_CELLS = 262_144
 _RAW_COMPLEX_VALIDATION_BLOCK_CELLS = 262_144
+_COHERENT_OPERATION_BLOCK_CELLS = 262_144
 # Text/binary legacy readers expand sparse row sets into dense Cartesian grids.
 # Keep a direct-call safety ceiling even when the GUI's broader batch-memory
 # planner is bypassed. Callers handling a deliberately larger verified file
@@ -351,6 +455,62 @@ def _default_dense_import_limit_bytes():
     # Match GRIM's other dense dataset workflows: never let one legacy import
     # reserve more than half of currently available physical memory.
     return max(1, int(available * 0.5))
+
+
+def _coherent_working_set_limit_bytes(maximum_working_bytes):
+    """Return the reviewed cap for a dense coherent arithmetic operation."""
+
+    if maximum_working_bytes is None:
+        raw_limit_mb = os.environ.get("GRIM_COHERENT_WORKING_SET_MB")
+        if raw_limit_mb is None:
+            return _default_dense_import_limit_bytes()
+        try:
+            limit = operator.index(int(raw_limit_mb)) * 1024**2
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "GRIM_COHERENT_WORKING_SET_MB must be a positive integer"
+            ) from exc
+    else:
+        if isinstance(maximum_working_bytes, (bool, np.bool_)):
+            raise TypeError("maximum_working_bytes must be a positive integer")
+        try:
+            limit = operator.index(maximum_working_bytes)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TypeError(
+                "maximum_working_bytes must be a positive integer"
+            ) from exc
+    if limit <= 0:
+        raise ValueError("coherent-operation working-set limit must be positive")
+    return int(limit)
+
+
+def _bounded_grid_selections(shape, maximum_cells):
+    """Yield basic-slice tiles whose Cartesian size is bounded."""
+
+    dimensions = tuple(int(value) for value in shape)
+    if not dimensions or any(value <= 0 for value in dimensions):
+        raise ValueError("bounded grid selection requires positive dimensions")
+    maximum_cells = int(maximum_cells)
+    if maximum_cells <= 0:
+        raise ValueError("maximum_cells must be positive")
+
+    block_shape = [1] * len(dimensions)
+    remaining = maximum_cells
+    for axis in range(len(dimensions) - 1, -1, -1):
+        width = min(dimensions[axis], max(1, remaining))
+        block_shape[axis] = width
+        remaining = max(1, remaining // width)
+    block_counts = tuple(
+        (extent + width - 1) // width
+        for extent, width in zip(dimensions, block_shape)
+    )
+    for block_index in np.ndindex(*block_counts):
+        yield tuple(
+            slice(index * width, min(extent, (index + 1) * width))
+            for index, width, extent in zip(
+                block_index, block_shape, dimensions
+            )
+        )
 
 
 def _checked_dense_import_allocation(
@@ -757,6 +917,205 @@ def _real_storage_dtype(*values):
     return np.float32
 
 
+def _physical_grid_content_sha256(grid, *, namespace):
+    """Bind provenance to axes, conventions, and the complex field actually used.
+
+    The authoritative GHOST real/imaginary payload can differ from the modeled
+    power/phase pair (for example after float32 underflow), so hash the complex
+    response through :meth:`RcsGrid.rcs_slice` in bounded azimuth blocks.  This
+    helper deliberately excludes arbitrary descriptive metadata: labels and
+    history may change without changing the physical subtraction/calibration.
+    """
+
+    digest = hashlib.sha256()
+    digest.update(str(namespace).encode("utf-8") + b"\0")
+
+    def _update_array(label, values):
+        contiguous = np.ascontiguousarray(values)
+        digest.update(str(label).encode("ascii") + b"\0")
+        digest.update(str(contiguous.shape).encode("ascii") + b"\0")
+        digest.update(str(contiguous.dtype).encode("ascii") + b"\0")
+        digest.update(contiguous.tobytes(order="C"))
+
+    for label, values in (
+        ("azimuth", np.asarray(grid.azimuths, dtype=np.float64)),
+        ("elevation", np.asarray(grid.elevations, dtype=np.float64)),
+        ("frequency", np.asarray(grid.frequencies, dtype=np.float64)),
+    ):
+        _update_array(label, values)
+
+    digest.update(b"authoritative-complex-field\0")
+    digest.update(str(grid.rcs_power.shape).encode("ascii") + b"\0")
+    read_complex, _real_dtype = grid._bounded_complex_slice_reader()
+    for selection in _bounded_grid_selections(
+        grid.rcs_power.shape, _COHERENT_OPERATION_BLOCK_CELLS
+    ):
+        field = np.asarray(
+            read_complex(selection),
+            dtype=np.complex128,
+        )
+        _update_array("field-real", field.real)
+        _update_array("field-imag", field.imag)
+
+    digest.update(
+        json.dumps(
+            [str(value) for value in grid.polarizations.tolist()],
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    digest.update(
+        json.dumps(
+            dict(grid.units or {}),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
+    convention_metadata = {
+        key: grid._declared_scalar_metadata(key)
+        for key in (
+            "phase_reference",
+            "time_convention",
+            "polarization_basis",
+            "amplitude_convention",
+        )
+    }
+    digest.update(
+        json.dumps(
+            convention_metadata,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    return digest.hexdigest()
+
+
+def _support_reference_qa(target_with_support, support_reference, difference):
+    """Return bounded-memory diagnostics for an exact complex difference.
+
+    These are unweighted sums over the common finite sample support, not a
+    physical angular/frequency integral.  The complex coherence is therefore
+    an acquisition-similarity diagnostic; it is deliberately not labelled a
+    measure of how much support scattering was physically removed.
+    """
+
+    energy_terms = {
+        "pre_target_plus_support": [],
+        "subtracted_support_reference": [],
+        "post_support_referenced_difference": [],
+        "algebraic_closure_residual": [],
+    }
+    cross_real_terms = []
+    cross_imag_terms = []
+    common_count = 0
+    read_target, _target_dtype = target_with_support._bounded_complex_slice_reader()
+    read_support, _support_dtype = support_reference._bounded_complex_slice_reader()
+    read_difference, _difference_dtype = difference._bounded_complex_slice_reader()
+    for selection in _bounded_grid_selections(
+        target_with_support.rcs_power.shape, _COHERENT_OPERATION_BLOCK_CELLS
+    ):
+        target = np.asarray(read_target(selection), dtype=np.complex128)
+        support = np.asarray(read_support(selection), dtype=np.complex128)
+        post = np.asarray(read_difference(selection), dtype=np.complex128)
+        common = np.isfinite(target) & np.isfinite(support) & np.isfinite(post)
+        if not np.any(common):
+            continue
+        target = target[common]
+        support = support[common]
+        post = post[common]
+        closure = target - support - post
+        common_count += int(target.size)
+        energy_terms["pre_target_plus_support"].append(
+            float(np.vdot(target, target).real)
+        )
+        energy_terms["subtracted_support_reference"].append(
+            float(np.vdot(support, support).real)
+        )
+        energy_terms["post_support_referenced_difference"].append(
+            float(np.vdot(post, post).real)
+        )
+        energy_terms["algebraic_closure_residual"].append(
+            float(np.vdot(closure, closure).real)
+        )
+        cross = np.vdot(support, target)
+        cross_real_terms.append(float(cross.real))
+        cross_imag_terms.append(float(cross.imag))
+
+    def _bounded_fsum(values):
+        try:
+            total = float(math.fsum(values))
+        except (OverflowError, ValueError):
+            return float("nan")
+        return total if np.isfinite(total) else float("nan")
+
+    energies = {
+        key: _bounded_fsum(values) for key, values in energy_terms.items()
+    }
+    cross = complex(
+        _bounded_fsum(cross_real_terms), _bounded_fsum(cross_imag_terms)
+    )
+    pre_energy = energies["pre_target_plus_support"]
+    support_energy = energies["subtracted_support_reference"]
+    post_energy = energies["post_support_referenced_difference"]
+
+    def _safe_db_ratio(numerator, denominator):
+        if not (
+            np.isfinite(numerator)
+            and np.isfinite(denominator)
+            and numerator > 0.0
+            and denominator > 0.0
+        ):
+            return None
+        return float(10.0 * np.log10(numerator / denominator))
+
+    coherence = None
+    coherence_phase_deg = None
+    coherence_meaningful = bool(
+        common_count >= 2
+        and np.isfinite(pre_energy)
+        and np.isfinite(support_energy)
+        and pre_energy > 0.0
+        and support_energy > 0.0
+        and np.isfinite(cross)
+    )
+    if coherence_meaningful:
+        normalization = np.sqrt(pre_energy) * np.sqrt(support_energy)
+        coherence = float(abs(cross) / normalization)
+        # Roundoff can put a mathematically bounded value a few ulps over one.
+        coherence = min(1.0, max(0.0, coherence))
+        coherence_phase_deg = float(np.rad2deg(np.angle(cross)))
+
+    def _finite_or_none(value):
+        return float(value) if np.isfinite(value) else None
+
+    return {
+        "energy_metric": (
+            "unweighted_sum_of_squared_complex_sample_magnitudes_on_common_"
+            "finite_support"
+        ),
+        "total_sample_count": int(target_with_support.rcs_power.size),
+        "common_finite_sample_count": int(common_count),
+        "excluded_sample_count": int(
+            target_with_support.rcs_power.size - common_count
+        ),
+        "energy_sum_linear": {
+            key: _finite_or_none(value) for key, value in energies.items()
+        },
+        "post_to_pre_energy_db": _safe_db_ratio(post_energy, pre_energy),
+        "reference_to_pre_energy_db": _safe_db_ratio(
+            support_energy, pre_energy
+        ),
+        "complex_coherence": coherence,
+        "complex_coherence_phase_deg": coherence_phase_deg,
+        "complex_coherence_meaningful": coherence_meaningful,
+        "complex_coherence_definition": (
+            "abs(sum(conj(support_reference)*target_plus_support)) / "
+            "sqrt(sum(abs(support_reference)^2)*"
+            "sum(abs(target_plus_support)^2))"
+        ),
+    }
+
+
 class RcsGrid:
     """Container for gridded RCS data with axis metadata and helpers."""
 
@@ -970,13 +1329,27 @@ class RcsGrid:
         imag = np.asarray(imag)
         if real.shape != self.rcs_power.shape or imag.shape != self.rcs_power.shape:
             return None
-        modeled = np.isfinite(self.rcs_power)
-        raw_finite = np.isfinite(real) & np.isfinite(imag)
         # A raw pair is all-or-nothing authority.  Missing raw data must not
         # turn an otherwise valid power/phase cell into NaN, and stray raw data
         # must not resurrect a response cell explicitly marked missing.
-        if np.any(modeled != raw_finite):
-            return None
+        # Validate in bounded flat blocks.  The former whole-grid masks could
+        # transiently reserve three extra bytes per sample, and callers such as
+        # content hashing may validate very large solver grids repeatedly.
+        for start in range(
+            0, self.rcs_power.size, _RAW_COMPLEX_VALIDATION_BLOCK_CELLS
+        ):
+            stop = min(
+                self.rcs_power.size,
+                start + _RAW_COMPLEX_VALIDATION_BLOCK_CELLS,
+            )
+            # ``flat`` produces at most one bounded copy even for a transformed
+            # negative-stride passthrough array; ``reshape`` could silently copy
+            # the entire non-contiguous field before validation began.
+            modeled = np.isfinite(self.rcs_power.flat[start:stop])
+            raw_finite = np.isfinite(real.flat[start:stop])
+            raw_finite &= np.isfinite(imag.flat[start:stop])
+            if np.any(modeled != raw_finite):
+                return None
         return real, imag
 
     def _drop_malformed_raw_metadata(self, extra):
@@ -991,12 +1364,9 @@ class RcsGrid:
                 extra.pop(key, None)
         return extra
 
-    def _authoritative_raw_amplitude(self, selection=None):
-        """Return a solver-provided raw field when its normalization is known."""
+    def _authoritative_raw_amplitude_from_pair(self, pair, selection=None):
+        """Normalize one previously validated raw real/imaginary pair."""
 
-        pair = self._complete_authoritative_raw_arrays()
-        if pair is None:
-            return None
         real, imag = pair
         quantity = self.linear_quantity()
         if selection is None:
@@ -1029,6 +1399,48 @@ class RcsGrid:
         if quantity == "sigma_3d":
             return raw * np.sqrt(4.0 * np.pi)
         return None
+
+    def _authoritative_raw_amplitude(self, selection=None):
+        """Return a solver-provided raw field when its normalization is known."""
+
+        pair = self._complete_authoritative_raw_arrays()
+        if pair is None:
+            return None
+        return self._authoritative_raw_amplitude_from_pair(pair, selection)
+
+    def _bounded_complex_slice_reader(self):
+        """Return a bounded field reader and its real precision.
+
+        The authoritative raw-pair contract is validated once when the reader
+        is created, instead of rescanning the entire grid for every azimuth
+        block.  Every returned slice is newly allocated and may be used as an
+        in-place arithmetic work buffer by internal dense operations.
+        """
+
+        pair = self._complete_authoritative_raw_arrays()
+        quantity = self.linear_quantity()
+        if pair is not None and quantity in {"sigma_2d", "sigma_3d"}:
+            if quantity == "sigma_2d":
+                freq_hz = self._frequency_value_to_hz(self.frequencies)
+                k0 = (2.0 * np.pi * np.asarray(freq_hz, dtype=float)) / C0
+                if np.any(~np.isfinite(k0)) or np.any(k0 <= 0.0):
+                    pair = None
+            if pair is not None:
+                return (
+                    lambda selection: self._authoritative_raw_amplitude_from_pair(
+                        pair, selection
+                    ),
+                    np.dtype(np.float64),
+                )
+        real_dtype = np.dtype(
+            _real_storage_dtype(self.rcs_power, self.rcs_phase)
+        )
+        return (
+            lambda selection: self._complex_from_power_phase(
+                self.rcs_power[selection], self.rcs_phase[selection]
+            ),
+            real_dtype,
+        )
 
     @property
     def rcs(self):
@@ -1982,7 +2394,11 @@ class RcsGrid:
             value = raw.reshape(-1)[0]
             if isinstance(value, np.generic):
                 value = value.item()
-            text = str(value or "").strip()
+            # Boolean/numeric False and 0 are meaningful declarations for
+            # fields such as motion_compensated.  ``value or ""`` silently
+            # erased them and could turn an explicit unsafe state into missing
+            # legacy metadata.
+            text = "" if value is None else str(value).strip()
             if text:
                 declared.append(text)
         if key == "time_convention":
@@ -2588,6 +3004,367 @@ class RcsGrid:
                     "phase centers and conventions are compatible"
                 )
 
+    def _assert_acquisition_metadata_compatible(
+        self,
+        other,
+        *,
+        operation_label,
+        left_role,
+        right_role,
+        schema,
+        excluded_families=(),
+    ):
+        """Compare acquisition declarations by physical meaning, not key name.
+
+        Several importers use equivalent aliases (for example
+        ``calibration_id`` and ``calibration_identifier``).  Treating each key
+        independently lets crossed aliases evade comparison and also misses
+        contradictions inside one dataset.  This helper consolidates every
+        family into canonical semantic dimensions before comparing inputs.
+        """
+
+        if not isinstance(other, RcsGrid):
+            raise TypeError("other must be an RcsGrid")
+        operation = str(operation_label or "").strip()
+        left_name = str(left_role or "").strip()
+        right_name = str(right_role or "").strip()
+        contract_schema = str(schema or "").strip()
+        if not operation or not left_name or not right_name or not contract_schema:
+            raise ValueError("acquisition metadata contract labels cannot be blank")
+        if left_name == right_name:
+            raise ValueError("acquisition metadata contract roles must be distinct")
+        excluded = {str(value).strip() for value in tuple(excluded_families)}
+        known_families = {
+            family for family, _label, _kind, _keys in _ACQUISITION_METADATA_FAMILIES
+        }
+        unknown_exclusions = sorted(excluded - known_families)
+        if unknown_exclusions:
+            raise ValueError(
+                "unknown acquisition metadata families excluded from contract: "
+                + ", ".join(unknown_exclusions)
+            )
+
+        def normalized(value: str) -> str:
+            return re.sub(
+                r"[^a-z0-9]+", " ", str(value or "").strip().casefold()
+            ).strip()
+
+        def identity(value: str) -> str:
+            # Punctuation can be significant in an externally assigned ID.
+            return " ".join(str(value or "").strip().casefold().split())
+
+        def canonical(key: str, value: str, kind: str, role: str) -> dict[str, str]:
+            semantic = normalized(value)
+            words = set(semantic.split())
+            if words.intersection(
+                {
+                    "unknown",
+                    "unspecified",
+                    "undetermined",
+                    "unverified",
+                    "arbitrary",
+                }
+            ):
+                raise ValueError(
+                    f"{operation} cannot use explicitly unverified metadata: "
+                    f"{role} declares {key}={value!r}"
+                )
+
+            if kind == "identity":
+                return {"identity": identity(value)}
+            if kind == "text":
+                return {"value": semantic}
+            if kind == "range_phase":
+                compact = str(value).casefold()
+                compact = compact.replace("−", "-").replace("–", "-")
+                compact = re.sub(r"[\s*·^{}()\[\]_=~]+", "", compact)
+                matches = re.findall(
+                    r"(?:exp|e)([+-])j2(?:\.0+)?kr", compact
+                )
+                if "negativetwowayrangephase" in compact:
+                    matches.append("-")
+                if "positivetwowayrangephase" in compact:
+                    matches.append("+")
+                signs = {"negative" if match == "-" else "positive" for match in matches}
+                if len(signs) > 1:
+                    raise ValueError(
+                        f"{role} contains a contradictory two-way range-phase "
+                        f"declaration: {key}={value!r}"
+                    )
+                if signs:
+                    return {"two_way_sign": next(iter(signs))}
+                if key == "range_phase_convention":
+                    raise ValueError(
+                        f"{role} declares an unrecognized two-way range-phase "
+                        f"convention: {key}={value!r}; expected "
+                        "S~exp(-j*2*k*R) or S~exp(+j*2*k*R)"
+                    )
+                # ``phase_law`` often carries time-convention text only. That
+                # evidence is checked by the coherent metadata contract, but it
+                # does not establish a two-way range sign here.
+                return {}
+            if kind == "geometry":
+                dimensions: dict[str, str] = {}
+                topologies = set()
+                if "multistatic" in words:
+                    topologies.add("multistatic")
+                if "bistatic" in words:
+                    topologies.add("bistatic")
+                if "quasi monostatic" in semantic or "quasimonostatic" in words:
+                    topologies.add("quasi_monostatic")
+                elif "not monostatic" in semantic:
+                    topologies.add("non_monostatic")
+                elif "monostatic" in words:
+                    topologies.add("monostatic")
+                if len(topologies) > 1:
+                    raise ValueError(
+                        f"{role} contains a contradictory measurement geometry "
+                        f"declaration: {key}={value!r}"
+                    )
+                if topologies:
+                    dimensions["scattering_configuration"] = next(iter(topologies))
+
+                far_field = bool(
+                    "far field" in semantic
+                    or "farfield" in words
+                    or "far zone" in semantic
+                    or "farzone" in words
+                    or "fraunhofer" in words
+                    or "plane wave" in semantic
+                    or "radiation zone" in semantic
+                    or semantic in {"far", "ff"}
+                )
+                near_field = bool(
+                    "near field" in semantic
+                    or "nearfield" in words
+                    or "near zone" in semantic
+                    or "nearzone" in words
+                    or "fresnel" in words
+                    or "reactive near" in semantic
+                    or semantic in {"near", "nf"}
+                )
+                if far_field and near_field:
+                    raise ValueError(
+                        f"{role} contains a contradictory measurement geometry "
+                        f"declaration: {key}={value!r}"
+                    )
+                if far_field or near_field:
+                    dimensions["propagation_regime"] = (
+                        "far_field" if far_field else "near_field"
+                    )
+                # A producer-specific geometry phrase is still evidence.  Keep
+                # it as an opaque semantic dimension so two aliases cannot make
+                # unrelated declarations look compatible merely by changing keys.
+                return dimensions or {"opaque": semantic}
+
+            if kind == "motion":
+                positive_state_key = key != "phase_center_motion"
+                if semantic in {"1", "true", "yes"}:
+                    return {"state": "stable" if positive_state_key else "unsafe"}
+                if semantic in {"0", "false", "no", "none", "n a", "na"}:
+                    return {"state": "unsafe" if positive_state_key else "stable"}
+                safe = bool(
+                    "no motion" in semantic
+                    or "without motion" in semantic
+                    or "no drift" in semantic
+                    or words.intersection(
+                        {
+                            "compensated",
+                            "stable",
+                            "static",
+                            "fixed",
+                            "aligned",
+                            "corrected",
+                        }
+                    )
+                )
+                unsafe = bool(
+                    words.intersection(
+                        {
+                            "uncompensated",
+                            "unstable",
+                            "moving",
+                            "varying",
+                            "variable",
+                            "misaligned",
+                        }
+                    )
+                    or (
+                        any(word.startswith("drift") for word in words)
+                        and "no drift" not in semantic
+                        and "without drift" not in semantic
+                    )
+                    or "not compensated" in semantic
+                    or "not stable" in semantic
+                    or "not static" in semantic
+                    or "not fixed" in semantic
+                    or "not aligned" in semantic
+                    or "motion present" in semantic
+                )
+                if safe and unsafe:
+                    raise ValueError(
+                        f"{role} contains a contradictory motion-state declaration: "
+                        f"{key}={value!r}"
+                    )
+                if safe or unsafe:
+                    return {"state": "stable" if safe else "unsafe"}
+                return {"opaque": semantic}
+
+            if kind == "setup_state":
+                if semantic in {"1", "true", "yes", "same", "unchanged"}:
+                    return {"state": "stable"}
+                if semantic in {"0", "false", "no", "different", "changed"}:
+                    return {"state": "unsafe"}
+                safe = bool(words.intersection({"static", "fixed", "unchanged"}))
+                unsafe = bool(
+                    words.intersection({"changed", "different", "reconfigured"})
+                    or "not static" in semantic
+                    or "not fixed" in semantic
+                )
+                if safe and unsafe:
+                    raise ValueError(
+                        f"{role} contains a contradictory static-setup declaration: "
+                        f"{key}={value!r}"
+                    )
+                if safe or unsafe:
+                    return {"state": "stable" if safe else "unsafe"}
+                return {"opaque": semantic}
+            raise RuntimeError(f"unsupported acquisition metadata kind {kind!r}")
+
+        def collect(grid, family, label, kind, keys, role):
+            raw_by_key: dict[str, str] = {}
+            canonical_by_key: dict[str, dict[str, str]] = {}
+            dimensions: dict[str, str] = {}
+            dimension_sources: dict[str, str] = {}
+            for key in keys:
+                raw = grid._declared_scalar_metadata(key)
+                if not raw:
+                    continue
+                values = canonical(key, raw, kind, role)
+                raw_by_key[key] = raw
+                canonical_by_key[key] = values
+                for dimension, value in values.items():
+                    prior = dimensions.get(dimension)
+                    if prior is not None and prior != value:
+                        prior_key = dimension_sources[dimension]
+                        raise ValueError(
+                            f"{role} contains contradictory {label} declarations: "
+                            f"{prior_key}={raw_by_key[prior_key]!r} conflicts with "
+                            f"{key}={raw!r}"
+                        )
+                    dimensions[dimension] = value
+                    dimension_sources[dimension] = key
+            if kind == "motion" and dimensions.get("state") == "unsafe":
+                raise ValueError(
+                    f"{operation} requires stable/aligned acquisitions; "
+                    f"{role} declares {label}: {raw_by_key!r}"
+                )
+            if kind == "setup_state" and dimensions.get("state") == "unsafe":
+                raise ValueError(
+                    f"{operation} requires an unchanged static setup; "
+                    f"{role} declares {label}: {raw_by_key!r}"
+                )
+            return {
+                "declared_by_key": raw_by_key,
+                "canonical_by_key": canonical_by_key,
+                "canonical_dimensions": dimensions,
+            }
+
+        matching: dict[str, str] = {}
+        missing: dict[str, list[str]] = {}
+        semantic_families = {}
+        for family, label, kind, keys in _ACQUISITION_METADATA_FAMILIES:
+            if family in excluded:
+                continue
+            left = collect(self, family, label, kind, keys, left_name)
+            right = collect(other, family, label, kind, keys, right_name)
+            left_dimensions = left["canonical_dimensions"]
+            right_dimensions = right["canonical_dimensions"]
+            for dimension in sorted(set(left_dimensions).intersection(right_dimensions)):
+                if left_dimensions[dimension] != right_dimensions[dimension]:
+                    raise ValueError(
+                        f"{operation} requires matching explicit {label}; "
+                        f"{left_name} declares {left['declared_by_key']!r}, while "
+                        f"{right_name} declares {right['declared_by_key']!r} "
+                        f"({dimension} mismatch)"
+                    )
+
+            all_dimensions_set = set(left_dimensions).union(right_dimensions)
+            if kind == "range_phase":
+                # The family is physically incomplete until the two-way sign is
+                # explicit on each acquisition; a general assumptions
+                # attestation may cover absence but never an opposite sign.
+                all_dimensions_set.add("two_way_sign")
+            all_dimensions = sorted(all_dimensions_set)
+            if not all_dimensions:
+                missing[family] = [left_name, right_name]
+            else:
+                for dimension in all_dimensions:
+                    absent = []
+                    if dimension not in left_dimensions:
+                        absent.append(left_name)
+                    if dimension not in right_dimensions:
+                        absent.append(right_name)
+                    if absent:
+                        missing[f"{family}.{dimension}"] = absent
+
+            # Propagate only declarations from the left input whose complete
+            # semantic content is explicitly present and equal on the right.
+            # The general acquisition attestation may cover missing facts, but
+            # it must not fabricate a declaration on the result.
+            for key, raw in left["declared_by_key"].items():
+                values = left["canonical_by_key"][key]
+                if values and all(
+                    right_dimensions.get(dimension) == value
+                    for dimension, value in values.items()
+                ):
+                    matching[key] = raw
+
+            semantic_families[family] = {
+                "label": label,
+                "aliases": list(keys),
+                "declarations_by_role": {
+                    left_name: left["declared_by_key"],
+                    right_name: right["declared_by_key"],
+                },
+                "canonical_dimensions_by_role": {
+                    left_name: left_dimensions,
+                    right_name: right_dimensions,
+                },
+            }
+
+        return {
+            "schema": contract_schema,
+            "checked_fields": [
+                key
+                for family, _label, _kind, keys in _ACQUISITION_METADATA_FAMILIES
+                if family not in excluded
+                for key in keys
+            ],
+            "excluded_families": sorted(excluded),
+            "semantic_families": semantic_families,
+            "matching_explicit_declarations": matching,
+            "missing_declarations_by_role": missing,
+            "missing_declarations_covered_by_user_attestation": bool(missing),
+            "explicit_contradictions_allowed": False,
+        }
+
+    def _assert_support_reference_metadata_compatible(self, other):
+        """Reject explicit acquisition/setup contradictions for support subtraction.
+
+        Missing declarations remain covered by the workflow's required
+        acquisition attestation.  Explicit declarations are compared across
+        their semantic alias families and can never be waived by a checkbox.
+        """
+
+        return self._assert_acquisition_metadata_compatible(
+            other,
+            operation_label="support-referenced subtraction",
+            left_role="target_plus_support",
+            right_role="support_only_reference",
+            schema="grim.support-reference-metadata-contract.v3",
+        )
+
     def _coherent_attestation_provenance(
         self,
         others,
@@ -2689,6 +3466,7 @@ class RcsGrid:
         *,
         coherent=False,
         coherent_metadata_attested=False,
+        _scan_phase_samples=True,
     ):
         """Validate another grid for element-wise operations.
 
@@ -2715,14 +3493,17 @@ class RcsGrid:
             raise ValueError("polarization axis mismatch")
         self._assert_physical_metadata_compatible(other)
         if coherent:
-            for label, grid in (("left", self), ("right", other)):
-                missing = np.isfinite(grid.rcs_power) & ~np.isfinite(grid.rcs_phase)
-                if np.any(missing):
-                    raise ValueError(
-                        f"coherent operation requires phase; {label} grid has "
-                        f"{int(np.count_nonzero(missing))} finite-power sample(s) "
-                        "with unknown phase"
-                    )
+            if not isinstance(_scan_phase_samples, (bool, np.bool_)):
+                raise TypeError("_scan_phase_samples must be True or False")
+            if _scan_phase_samples:
+                for label, grid in (("left", self), ("right", other)):
+                    missing = np.isfinite(grid.rcs_power) & ~np.isfinite(grid.rcs_phase)
+                    if np.any(missing):
+                        raise ValueError(
+                            f"coherent operation requires phase; {label} grid has "
+                            f"{int(np.count_nonzero(missing))} finite-power sample(s) "
+                            "with unknown phase"
+                        )
             self._assert_coherent_metadata_compatible(
                 other, metadata_attested=coherent_metadata_attested
             )
@@ -3338,7 +4119,13 @@ class RcsGrid:
             extra=extra,
         )
 
-    def coherent_subtract(self, other, *, metadata_attested=False):
+    def coherent_subtract(
+        self,
+        other,
+        *,
+        metadata_attested=False,
+        maximum_working_bytes=None,
+    ):
         """Coherently subtract two grids (complex difference).
 
         Use when phases are aligned and you want field-level subtraction.
@@ -3347,6 +4134,11 @@ class RcsGrid:
             other: Another RcsGrid with identical axes.
             metadata_attested: Explicit confirmation for missing/unspecified
                 field-convention metadata. Never overrides explicit conflicts.
+            maximum_working_bytes: Optional cap for the newly retained result
+                arrays plus bounded arithmetic/QA scratch. By default GRIM uses
+                half of currently available physical memory (or the reviewed
+                fallback); ``GRIM_COHERENT_WORKING_SET_MB`` can set a process-
+                wide cap.
 
         Returns:
             New RcsGrid with rcs = self.rcs - other.rcs.
@@ -3356,7 +4148,89 @@ class RcsGrid:
             coherent=True,
             coherent_metadata_attested=metadata_attested,
         )
-        rcs_out = self.rcs - other.rcs
+        def response_precision_upper_bound(grid):
+            raw_real = (grid.extra or {}).get("rcs_amp_real")
+            raw_imag = (grid.extra or {}).get("rcs_amp_imag")
+            if raw_real is not None and raw_imag is not None:
+                if (
+                    np.asarray(raw_real).shape == grid.rcs_power.shape
+                    and np.asarray(raw_imag).shape == grid.rcs_power.shape
+                ):
+                    # Authoritative solver amplitude is normalized in float64.
+                    # This shape-only upper bound deliberately runs before the
+                    # O(N) finite-pair validation and is conservative if a
+                    # malformed pair later falls back to float32 power/phase.
+                    return np.dtype(np.float64)
+            return np.dtype(_real_storage_dtype(grid.rcs_power, grid.rcs_phase))
+
+        left_real_dtype = response_precision_upper_bound(self)
+        right_real_dtype = response_precision_upper_bound(other)
+        real_dtype = np.dtype(
+            np.float64
+            if max(left_real_dtype.itemsize, right_real_dtype.itemsize) > 4
+            else np.float32
+        )
+        complex_dtype = np.dtype(
+            np.complex128 if real_dtype == np.dtype(np.float64) else np.complex64
+        )
+        cell_count = int(self.rcs_power.size)
+        block_cells = min(cell_count, _COHERENT_OPERATION_BLOCK_CELLS)
+        retained_bytes = 2 * real_dtype.itemsize * cell_count
+        # The block estimate covers both complex operands, an optional writable
+        # copy, finite masks, magnitude/phase ufunc scratch, and the larger
+        # post-subtraction QA/hash tile.  Inputs are already resident and are
+        # intentionally excluded from this incremental operation budget.
+        scratch_bytes = block_cells * (
+            12 * complex_dtype.itemsize + 8 * real_dtype.itemsize
+        )
+        estimated_peak_bytes = retained_bytes + scratch_bytes
+        limit_bytes = _coherent_working_set_limit_bytes(maximum_working_bytes)
+        if (
+            retained_bytes > np.iinfo(np.intp).max
+            or estimated_peak_bytes > np.iinfo(np.intp).max
+        ):
+            raise MemoryError(
+                "coherent subtraction result exceeds this Python/NumPy build's "
+                "addressable allocation size"
+            )
+        if estimated_peak_bytes > limit_bytes:
+            raise MemoryError(
+                "coherent subtraction needs an estimated "
+                f"{estimated_peak_bytes / 1024**2:.1f} MiB working set "
+                f"({retained_bytes / 1024**2:.1f} MiB retained result plus "
+                f"{scratch_bytes / 1024**2:.1f} MiB bounded scratch), above "
+                f"the {limit_bytes / 1024**2:.1f} MiB limit. Crop the common "
+                "grid or deliberately raise maximum_working_bytes / "
+                "GRIM_COHERENT_WORKING_SET_MB on a machine with verified "
+                "headroom."
+            )
+
+        # Validate authoritative raw-pair semantics only after the byte gate;
+        # a rejected oversized operation must not scan either numerical field.
+        read_left, _left_reader_dtype = self._bounded_complex_slice_reader()
+        read_right, _right_reader_dtype = other._bounded_complex_slice_reader()
+        power_out = np.empty(self.rcs_power.shape, dtype=real_dtype)
+        phase_out = np.empty(self.rcs_power.shape, dtype=real_dtype)
+        for selection in _bounded_grid_selections(
+            self.rcs_power.shape, _COHERENT_OPERATION_BLOCK_CELLS
+        ):
+            left = np.asarray(read_left(selection), dtype=complex_dtype)
+            if not left.flags.writeable or not left.flags.owndata:
+                left = np.array(left, dtype=complex_dtype, copy=True)
+            right = np.asarray(read_right(selection), dtype=complex_dtype)
+            np.subtract(left, right, out=left)
+            power_block = power_out[selection]
+            phase_block = phase_out[selection]
+            with np.errstate(invalid="ignore", over="ignore"):
+                np.hypot(left.real, left.imag, out=power_block)
+                np.multiply(power_block, power_block, out=power_block)
+                np.arctan2(left.imag, left.real, out=phase_block)
+            invalid = ~np.isfinite(left.real)
+            invalid |= ~np.isfinite(left.imag)
+            invalid |= ~np.isfinite(power_block)
+            power_block[invalid] = np.nan
+            phase_block[invalid] = np.nan
+
         history, attestation_extra = self._coherent_attestation_provenance(
             (other,),
             operation="coherent-subtract",
@@ -3373,11 +4247,161 @@ class RcsGrid:
             self.elevations,
             self.frequencies,
             self.polarizations,
-            rcs_out,
+            rcs_power=power_out,
+            rcs_phase=phase_out,
             rcs_domain="power_phase",
             history=history,
             extra=extra,
+            _adopt_clean_arrays=True,
         )
+
+    def support_referenced_difference(
+        self,
+        support_reference,
+        *,
+        metadata_attested=False,
+        assumptions_attested=False,
+        target_label=None,
+        support_label=None,
+        maximum_working_bytes=None,
+    ):
+        """Return an exact target-plus-support minus support-only field.
+
+        This guided wrapper intentionally delegates all numerical work and
+        compatibility enforcement to :meth:`coherent_subtract`.  It adds role-
+        explicit, content-bound provenance and QA diagnostics so the result
+        cannot be mistaken for a generic operand-order subtraction.
+
+        The result is a *support-referenced difference*.  It is not guaranteed
+        to equal the target's free-space response because target/support
+        coupling, shadowing, and multiple-bounce terms are not recoverable from
+        two measurements by subtraction.
+        """
+
+        for option_name, option_value in (
+            ("metadata_attested", metadata_attested),
+            ("assumptions_attested", assumptions_attested),
+        ):
+            if not isinstance(option_value, (bool, np.bool_)):
+                raise TypeError(f"{option_name} must be True or False")
+        if not assumptions_attested:
+            raise ValueError(
+                "support-referenced difference requires confirmation that the "
+                "target+support and support-only acquisitions share calibration, "
+                "phase center/reference, coordinates, polarization basis, and "
+                "static setup, and that coupling cannot be reconstructed"
+            )
+        if not isinstance(support_reference, RcsGrid):
+            raise TypeError("support_reference must be an RcsGrid")
+        if support_reference is self:
+            raise ValueError(
+                "target+support and support-only roles must use different datasets"
+            )
+        if "support_reference_difference_json" in (self.extra or {}):
+            raise ValueError(
+                "target dataset is already a support-referenced difference; use "
+                "the original target+support acquisition to avoid accidental "
+                "chained subtraction"
+            )
+        if "support_reference_difference_json" in (
+            support_reference.extra or {}
+        ):
+            raise ValueError(
+                "support-only reference is already a support-referenced "
+                "difference; use the original support-only acquisition"
+            )
+
+        support_metadata_contract = (
+            self._assert_support_reference_metadata_compatible(support_reference)
+        )
+
+        # This is the sole numerical operation. It enforces exact axes,
+        # quantities/units, coordinate conventions, finite coherent phase, and
+        # declared field-convention compatibility before subtracting.
+        difference = self.coherent_subtract(
+            support_reference,
+            metadata_attested=bool(metadata_attested),
+            maximum_working_bytes=maximum_working_bytes,
+        )
+        target_name = str(
+            target_label or self.source_path or "target+support acquisition"
+        )
+        support_name = str(
+            support_label
+            or support_reference.source_path
+            or "support-only reference"
+        )
+        qa = _support_reference_qa(self, support_reference, difference)
+        if int(qa["common_finite_sample_count"]) == 0:
+            raise ValueError(
+                "support-referenced difference has no common finite complex "
+                "samples after exact subtraction"
+            )
+        content_namespace = "grim.physical-grid-content.v1"
+        target_sha256 = _physical_grid_content_sha256(
+            self, namespace=content_namespace
+        )
+        support_sha256 = _physical_grid_content_sha256(
+            support_reference, namespace=content_namespace
+        )
+        result_sha256 = _physical_grid_content_sha256(
+            difference, namespace=content_namespace
+        )
+        provenance = {
+            "schema": "grim.support-reference-difference.v1",
+            "mode": "exact_complex_subtraction",
+            "formula": "A_difference=A_target_plus_support-A_support_reference",
+            "axis_policy": (
+                "identical_axes_units_quantities_and_noncontradictory_explicit_"
+                "acquisition_metadata; no_interpolation"
+            ),
+            "target_plus_support": target_name,
+            "target_plus_support_content_sha256": target_sha256,
+            "support_only_reference": support_name,
+            "support_only_reference_content_sha256": support_sha256,
+            "result_content_sha256": result_sha256,
+            "content_hash_schema": content_namespace,
+            "user_assumptions_attested": True,
+            "metadata_attestation_used": bool(metadata_attested),
+            "support_metadata_contract": support_metadata_contract,
+            "interpretation": "support_referenced_complex_difference",
+            "not_free_space_target": True,
+            "unrecoverable_effects": [
+                "target_support_coupling",
+                "support_shadowing",
+                "target_support_multiple_bounce_scattering",
+                "acquisition_drift_or_misregistration",
+            ],
+            "qa": qa,
+        }
+        difference.extra = dict(difference.extra or {})
+        for key, value in support_metadata_contract[
+            "matching_explicit_declarations"
+        ].items():
+            if key != "complex_field_domain":
+                difference.extra[key] = value
+        difference.extra["support_reference_difference_json"] = json.dumps(
+            provenance,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        difference.extra["complex_field_domain"] = (
+            "support_referenced_complex_difference"
+        )
+        history_entry = (
+            "Support-referenced difference (exact complex subtraction): "
+            f"target+support={target_name}; support-only={support_name}; "
+            "identical axes, no interpolation; QA/content hashes recorded; "
+            "not a reconstructed free-space target response"
+        )
+        difference.history = (
+            f"{difference.history}\n{history_entry}"
+            if difference.history
+            else history_entry
+        )
+        difference.source_path = None
+        return difference
 
     def incoherent_add(self, other):
         """Incoherently add two grids (magnitude sum).
@@ -4132,6 +5156,12 @@ class RcsGrid:
         "assembly_provenance_json",
         "coherent_metadata_attestation_json",
     })
+    _DERIVED_PROVENANCE_EXTRA_KEYS = frozenset({
+        # Durable lineage for the guided exact complex subtraction workflow.
+        # The record is intentionally retained by later sample transforms, but
+        # its content hashes continue to identify the original two inputs.
+        "support_reference_difference_json",
+    })
     _RAW_AMPLITUDE_EXTRA_KEYS = ("rcs_amp_real", "rcs_amp_imag")
 
     def _safe_derived_scalar_extra(self, *, include_field_conventions=True):
@@ -4145,6 +5175,7 @@ class RcsGrid:
 
         allowed = set(self._COORDINATE_LINEAGE_EXTRA_KEYS)
         allowed.update(self._ASSEMBLY_LINEAGE_EXTRA_KEYS)
+        allowed.update(self._DERIVED_PROVENANCE_EXTRA_KEYS)
         if include_field_conventions:
             allowed.update(self._FIELD_CONVENTION_EXTRA_KEYS)
         result = {}
@@ -4386,6 +5417,7 @@ class RcsGrid:
         history=None,
         units=None,
         extra=None,
+        _adopt_clean_arrays=False,
     ):
         if extra is None:
             # Safe future-proof fallback.  Current operations pass one of the
@@ -4408,6 +5440,9 @@ class RcsGrid:
             history=history if history is not None else self.history,
             units=dict(self.units if units is None else units),
             extra=extra,
+            _adopt_clean_arrays=(
+                _ADOPT_CLEAN_ARRAYS_TOKEN if _adopt_clean_arrays else None
+            ),
         )
 
     def _power_from_values(self, rcs_value):

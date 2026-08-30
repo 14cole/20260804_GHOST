@@ -780,9 +780,11 @@ class PlotRendererIntegrationTests(unittest.TestCase):
         isar_mode.display_results(harness, params, bands, 0.01)
         clims = [mesh.get_clim() for mesh in harness._isar_meshes]
         self.assertEqual(clims[0], clims[1])
-        np.testing.assert_allclose(clims[0], [0.0, 20.0], atol=1.0e-12)
+        # First-render auto-fit uses the GUI's 60 dB peak-relative dynamic
+        # range, and that same single normalization must govern every band.
+        np.testing.assert_allclose(clims[0], [-40.0, 20.0], atol=1.0e-12)
 
-    def test_stale_isar_result_is_rejected_by_render_generation(self):
+    def test_stale_isar_result_is_rejected_by_isar_input_revision(self):
         dataset = _grid()
         harness = _RendererHarness(
             [("dataset", dataset)],
@@ -792,18 +794,147 @@ class PlotRendererIntegrationTests(unittest.TestCase):
                 "frequency": dataset.frequencies,
             },
         )
-        harness._start_plot_render()
+        harness._isar_input_revision = 1
+        harness._isar_view_revision = 1
         params = {
             "dataset": dataset,
             "figure_token": harness.plot_figure,
-            "render_generation": harness._plot_render_generation,
+            "isar_input_revision": 1,
+            "isar_view_revision": 1,
         }
         harness._isar_busy = True
-        harness._start_plot_render()
+        harness._invalidate_isar_result()
         with mock.patch.object(isar_mode, "display_results") as display:
             harness._on_isar_compute_done(params, ([], 0.0))
         display.assert_not_called()
         self.assertIn("discarded", harness.status.message.lower())
+
+    def test_queued_isar_recipe_is_not_rebound_after_deferred_edit(self):
+        dataset = _grid()
+        harness = _RendererHarness(
+            [("dataset", dataset)],
+            selections={
+                "azimuth": dataset.azimuths,
+                "elevation": [0.0],
+                "frequency": dataset.frequencies,
+            },
+        )
+        harness._isar_busy = False
+        harness._isar_input_revision = 5
+        harness._isar_view_revision = 7
+        harness._isar_submit(
+            {
+                "isar_input_revision": 4,
+                "isar_view_revision": 6,
+            }
+        )
+        self.assertFalse(harness._isar_busy)
+        self.assertIn("queued isar request discarded", harness.status.message.lower())
+
+    def test_isar_recorder_intent_is_bound_to_the_accepted_request(self):
+        dataset = _grid()
+        harness = _RendererHarness(
+            [("dataset", dataset)],
+            selections={
+                "azimuth": dataset.azimuths,
+                "elevation": [0.0],
+                "frequency": dataset.frequencies,
+            },
+        )
+        current_cancel = mock.Mock()
+        harness._isar_busy = True
+        harness._isar_cancel_event = current_cancel
+        harness._isar_pending = None
+        harness._isar_input_revision = 2
+        harness._isar_view_revision = 3
+        harness._python_record_next_isar = True
+
+        harness._isar_submit({})
+
+        current_cancel.set.assert_called_once_with()
+        self.assertTrue(harness._isar_pending["_record_python_request"])
+        harness._python_record_next_isar = False
+        self.assertTrue(harness._isar_pending["_record_python_request"])
+
+    def test_blocked_isar_submit_preserves_current_result(self):
+        dataset = _grid()
+        harness = _RendererHarness(
+            [("dataset", dataset)],
+            selections={
+                "azimuth": dataset.azimuths,
+                "elevation": [0.0],
+                "frequency": dataset.frequencies,
+            },
+        )
+        artifact = object()
+        harness._isar_busy = False
+        harness._isar_input_revision = 8
+        harness._isar_view_revision = 9
+        harness._last_isar_artifact = artifact
+        harness._background_job_active = lambda: True
+
+        harness._isar_submit({})
+
+        self.assertIs(harness._last_isar_artifact, artifact)
+        self.assertEqual(harness._isar_input_revision, 8)
+        self.assertEqual(harness._isar_view_revision, 9)
+        self.assertIn("dataset import", harness.status.message.lower())
+
+    def test_invalidation_cancels_active_isar_worker(self):
+        dataset = _grid()
+        harness = _RendererHarness(
+            [("dataset", dataset)],
+            selections={
+                "azimuth": dataset.azimuths,
+                "elevation": [0.0],
+                "frequency": dataset.frequencies,
+            },
+        )
+        cancel = mock.Mock()
+        harness._isar_cancel_event = cancel
+
+        harness._invalidate_isar_result()
+
+        cancel.set.assert_called_once_with()
+
+    def test_live_style_edits_update_frozen_isar_recorder_spec(self):
+        dataset = _grid()
+        harness = _RendererHarness(
+            [("dataset", dataset)],
+            selections={
+                "azimuth": dataset.azimuths,
+                "elevation": [0.0],
+                "frequency": dataset.frequencies,
+            },
+        )
+        harness.chk_plot_grid_visible = _Checked(False)
+        harness.chk_plot_legend = _Checked(False)
+        harness.chk_colorbar = _Checked(True)
+        harness.chk_colorbar_shared = _Checked(False)
+        harness.chk_isar_square = _Checked(True)
+        harness.spin_plot_zmin = _Spin(-45.0)
+        harness.spin_plot_zmax = _Spin(5.0)
+        harness.spin_plot_zstep = _Spin(10.0)
+        harness._effective_colormap = lambda: "cividis"
+        harness.last_python_plot_spec = (
+            "supported",
+            ("dataset-ref",),
+            ("dataset",),
+            "isar_image",
+            {"colormap": "viridis", "show_grid": True},
+        )
+
+        harness._update_current_python_plot_style()
+
+        parameters = harness.last_python_plot_spec[4]
+        self.assertEqual(parameters["colormap"], "cividis")
+        self.assertFalse(parameters["show_grid"])
+        self.assertFalse(parameters["show_legend"])
+        self.assertTrue(parameters["show_colorbar"])
+        self.assertFalse(parameters["shared_colorbar"])
+        self.assertTrue(parameters["square_aspect"])
+        self.assertEqual(parameters["color_limits"], (-45.0, 5.0))
+        self.assertEqual(parameters["color_step"], 10.0)
 
     def test_linear_isar_peak_drop_uses_intensity_db_ratio(self):
         dataset = _grid()

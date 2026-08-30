@@ -77,3 +77,5 @@ class PlotContext:
     plot_grid_color: str | None
     plot_text_color: str | None
     last_plot_mode: str | None
+    btn_export_isar_result: QToolButton | None = None
+    last_python_plot_spec: tuple | None = None

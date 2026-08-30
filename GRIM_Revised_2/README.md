@@ -108,7 +108,7 @@ panels, and explicit ticks. Line and magnitude-image reduction retain bucket
 extrema; oversized phase images stop with a request to narrow the axes rather
 than applying a nonphysical scalar phase reduction. These display limits do not
 change stored samples or reported full-resolution statistics. Overlap,
-statistics, interpolation, medianization, Range Cal, native `.grim` saves,
+statistics, interpolation, medianization, Range Cal, Support Ref -, native `.grim` saves,
 dataset loading, and CSV export run in the dataset worker so large jobs do not
 freeze the GUI. High-memory dataset work and ISAR reconstruction are serialized
 to protect process memory; files dropped during ISAR are queued and load when
@@ -127,6 +127,103 @@ subtraction/division use the displayed operand order. Delta-dB and coherent
 division require exactly two operands. Join merges equal or
 complementary finite overlaps and rejects conflicts; it never silently applies
 a hidden first/last-wins rule.
+
+## ISAR formation and numerical results
+
+The ISAR tab forms a static-scene, far-field, monostatic image from calibrated
+complex phase history referenced to one fixed origin. Frequency units must be
+explicitly declared as Hz, kHz, MHz, or GHz. Explicit near-field, bistatic,
+quasi-/pseudo-monostatic, unknown-geometry, drifting-reference, or
+uncompensated-motion metadata fails closed. A legacy attestation can supply
+genuinely missing declarations after review, but it cannot override an explicit
+incompatibility. The same contract also binds the two-way range law: an explicit
+`S~exp(+j*2*k*R)` declaration is blocked under the default axes unless both
+Flip X and Flip Y are deliberately enabled and checked against a known
+asymmetric target.
+
+Fast PFA is the interactive narrow-look path; Accurate Cartesian PFA removes
+the remaining range-curvature approximation for supported apertures. Sparse L1
+is labeled **experimental**: it is a fixed-lambda sparse image reconstruction,
+not target/contaminant classification, BPDN noise removal, pylon removal, or
+bird removal. Its status reports convergence, residual, objective/duality gap,
+support, and debias diagnostics. A strong unwanted scatterer can remain while a
+weak wanted scatterer is suppressed. Wide selections use a labeled nonlinear
+max-look composite of narrow subapertures and are qualitative rather than a
+single coherent 360-degree reconstruction.
+
+Nonuniform samples are interpolated only within acquired support. Missing
+frequency or azimuth sectors are placed on the uniform working grid with zero
+measurement weight; GRIM reports their count, size, unsupported fraction, and
+resulting phase coverage. It never turns a large unmeasured sector into
+fully-observed synthetic samples. An excessive expansion stops with guidance to
+form contiguous bands separately.
+
+**Export ISAR Result** saves the latest completed full-resolution image as a
+transactional `.isar.npz` artifact. Coherent looks include the complex image and
+distance axes, with magnitude derived losslessly on load instead of stored as a
+redundant second image. Magnitude-only wide composites retain their magnitude
+array. Storage adaptively skips slow ZIP compression for noise-like complex data
+and uses it when a bounded sample predicts useful savings, including for flipped
+or strided images. Every artifact includes a versioned JSON manifest with
+selected-source content digests, source history/conventions, formation settings,
+attestation state, coverage, sampling, and sparse diagnostics. Save and load
+preflight array headers, normalized working bytes, band/cell counts, and
+recursively bounded metadata before numerical extraction; complex axes,
+post-cast overflow, malformed legacy magnitude, object payloads, duplicate/path
+members, and oversized manifests fail closed. Wide max-look composites
+explicitly record that no complex image exists.
+
+Export Plot and numerical-result export are disabled while a newer formation is
+pending, so a previous canvas cannot be mistaken for current settings. Clearing
+the canvas invalidates only the picture export, not a still-valid numerical
+artifact. Plotting-tab renders use an independent freshness counter and cannot
+invalidate a still-current ISAR result. The Python recorder captures the exact
+accepted worker-start recipe and current display style for headless replay,
+rather than rereading controls that changed while the worker ran. Headless ISAR
+uses the GUI's peak-preserving display bound, -120 dB intensity floor, physical
+unit/frame labels, color scale, and aspect settings. Long selector and
+interpolation axes are emitted as compact hard-coded
+`numpy.linspace(start, stop, count)` expressions only when that expression
+reproduces every float64 value exactly.
+
+`isar_bpde.py` provides a tested headless foundation for future physical
+component separation: named implicit dictionaries, cross-component coherence
+screening, and residual-constrained complex BPDN that returns every component
+phase history and the residual. Its direct point-scatterer dictionary is a
+bounded reference operator for reviewed small problems: phase blocks are
+reused only inside explicit cell, payload-byte, and block-count budgets, and an
+uncached oversized iterative solve is gated both per dictionary and in
+aggregate unless the caller deliberately opts in. The BPDN solve is internally
+amplitude-normalized and reports convergence only after both scaled feasibility
+and primal/dual fixed-point checks pass. PDHG steps use a certified operator-norm
+upper bound (the tighter safe dense bound when available), while the power-method
+value remains a diagnostic only. Workload gates include normalization,
+identifiability sampling, norm estimation, solver, diagnostic, and final
+reconstruction passes.
+Production-scale point dictionaries remain deferred until a validated NUFFT
+operator is available. The current identifiability report samples atom-to-atom
+coherence; it is not a proof that component spans are distinguishable and can
+miss an omitted duplicate atom. Reviewed dictionaries and stronger
+sparsity-/span-aware certification remain mandatory before physical removal
+claims.
+BPDE is intentionally not exposed as a generic GUI cleanup button. A
+target/support/cavity name has no classification power by itself; dictionaries
+must be physically justified, distinguishable, and validated against
+target-only, contaminant-only, combined, and measured cases.
+`isar_repeats.py` similarly defines explicit acquisition IDs/timestamps and a
+non-destructive repeat-domain outlier screen for future transient studies. It
+does not overload azimuth as slow time and does not delete or label candidates
+as birds. Every sweep must declare compatible two-way range-phase sign through
+`range_phase_convention` or `phase_law`, or a legacy attestation must explicitly
+cover a genuinely missing declaration; an opposite sign is never attestable.
+Repeat loading is preallocated, robust statistics use bounded scratch blocks,
+and both stack creation and screening fail before allocation when their
+estimated retained result exceeds `maximum_working_bytes` (or the
+`GRIM_REPEAT_WORKING_SET_MB` workstation limit). `axis_tolerance` is an
+absolute tolerance in the already-matched declared axis units; for example,
+datasets declared in GHz receive a GHz tolerance, not an Hz tolerance.
+The reusable ISAR preprocessing cache is byte-bounded and synchronized so
+independent headless image formations may run concurrently.
 
 ### Audit / QA
 
@@ -511,11 +608,12 @@ do not place a password on a Plink command line.
 ## Python recorder
 
 The Python tab shows a readable script for successful dataset manipulations,
-dataset saves, and supported rectangular/polar azimuth, frequency, and
-elevation-sweep plot creation/export. PBP, Hold overlays, and other plot modes
-are noted in a comment rather than emitted as falsely equivalent code. Use **Copy** or
-**Save As…** to run the same work headlessly. The recorder ignores selection
-gestures, tab changes, zoom/pan, and non-dataset tool workflows.
+dataset saves, and supported rectangular/polar azimuth, frequency,
+elevation-sweep, and ISAR plot creation/export. PBP, Hold overlays, and other
+plot modes are noted in a comment rather than emitted as falsely equivalent
+code. Use **Copy** or **Save As…** to run the same work headlessly. The recorder
+ignores selection gestures, tab changes, zoom/pan, and non-dataset tool
+workflows.
 
 Crop / Slice, Regrid, Stitch, and phase wrapping are replayed with explicit
 `crop_dataset`, `regrid_axis`, `stitch_datasets`, and `wrap_phase`/`RcsGrid`
@@ -657,6 +755,39 @@ as a finite 3-D range-calibration standard. A symmetric cylinder's theoretical
 cross-pol response is zero, so use/slice to VV and HH unless the selected
 standard supplies a valid nonzero cross-pol reference. Range-calibrated outputs preserve
 the complex result and provenance but drop stale solver/certification metadata.
+
+## Support-referenced complex difference
+
+Use **Dataset Operations → Calibration → Support Ref -** when two phase-
+coherent acquisitions represent (1) the target on its support and (2) the
+support by itself. Select both rows, assign those roles explicitly, and confirm
+that calibration, phase center/reference, coordinates, polarization basis, and
+the static acquisition setup are common. GRIM then performs exactly
+
+```text
+A_difference = A_target_plus_support - A_support_only
+```
+
+The operation requires identical axes, units, physical quantities, coordinate
+frames, and coherent conventions; it never interpolates or regrids. Explicit
+metadata conflicts fail closed, including opposite two-way range-phase signs
+declared through `range_phase_convention`/`phase_law` aliases. Missing
+phase-reference/time/basis/acquisition declarations require a recorded user
+attestation. Before adding the result, GRIM shows the common finite coverage,
+before/reference/after complex sample-energy sums, algebraic closure residual,
+and normalized complex input coherence. The subtraction writes fresh
+power/phase arrays in bounded tiles and refuses an unsafe estimated working set
+before reading numerical tiles. Direct callers may set `maximum_working_bytes`;
+`GRIM_COHERENT_WORKING_SET_MB` sets a process-wide cap. The output is a new
+unsaved row with content hashes for both inputs and the result, QA, role labels,
+and assumptions in durable `.grim` provenance. The Python tab records the same
+`support_referenced_difference(...)` call for headless replay.
+
+This is intentionally called a **support-referenced difference**, not pylon
+removal or a free-space target reconstruction. Two-file subtraction cannot
+recover target/support coupling, support shadowing, multiple-bounce terms, or
+acquisition drift. Those limitations remain even when the algebraic closure
+residual is zero.
 
 ## Headless interface
 
