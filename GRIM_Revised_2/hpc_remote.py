@@ -754,6 +754,214 @@ class HpcRemoteClient:
             )
         return result
 
+    def query_run_completion(
+        self,
+        remote_cli_path: str,
+        remote_run_directory: str,
+        *,
+        python_executable: str = "python3",
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Return manifest-exact completion evidence for one staged HPC run.
+
+        A terminal scheduler state proves only that Slurm stopped running the
+        job.  It does not prove that every output declared by the run manifest
+        was published.  The remote ``run-status`` operation performs that
+        inventory check beside the run and returns a small, read-only JSON
+        document.  This method validates the fields used for GUI safety before
+        allowing callers to rely on it.
+        """
+
+        remote_run_directory = _validate_remote_path(
+            remote_run_directory, "remote run directory"
+        )
+        result = self.invoke_hpc_bundle(
+            remote_cli_path,
+            ("run-status", remote_run_directory),
+            python_executable=python_executable,
+            timeout=timeout,
+        )
+        expected_schema = "ghost.hpc.run-status.v1"
+        if result.schema != expected_schema:
+            raise ProtocolError(
+                "remote hpc_bundle returned unsupported run-status schema "
+                f"{result.schema!r}; expected {expected_schema!r}"
+            )
+        payload = dict(result.payload)
+        if payload.get("ok") is not True:
+            raise ProtocolError("remote run-status 'ok' must be true")
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ProtocolError("remote run-status 'run_id' must be nonempty text")
+        solver_schema = payload.get("solver_schema")
+        supported_solver_schemas = {
+            "ghost.hpc.2d-run.v1",
+            "ghost.hpc.2d-run.v2",
+            "ghost.hpc.bor-run.v1",
+        }
+        if solver_schema not in supported_solver_schemas:
+            raise ProtocolError(
+                "remote run-status has an unsupported solver schema "
+                f"{solver_schema!r}"
+            )
+        if type(payload.get("complete")) is not bool:
+            raise ProtocolError("remote run-status 'complete' must be a boolean")
+        for name in (
+            "unit_complete",
+            "unit_exact",
+            "attestation_verified",
+            "publication_verified",
+        ):
+            if type(payload.get(name)) is not bool:
+                raise ProtocolError(
+                    f"remote run-status {name!r} must be a boolean"
+                )
+        for name in ("attestation_error", "publication_error"):
+            if not isinstance(payload.get(name), str):
+                raise ProtocolError(
+                    f"remote run-status {name!r} must be text"
+                )
+
+        counts: dict[str, int] = {}
+        for name in (
+            "n_units",
+            "n_done",
+            "pending",
+            "n_derived_expected",
+            "n_derived_done",
+        ):
+            value = payload.get(name)
+            if type(value) is not int or value < 0:
+                raise ProtocolError(
+                    f"remote run-status {name!r} must be a non-negative integer"
+                )
+            counts[name] = value
+        if counts["n_done"] > counts["n_units"]:
+            raise ProtocolError(
+                "remote run-status reports more completed units than expected"
+            )
+        if counts["pending"] != counts["n_units"] - counts["n_done"]:
+            raise ProtocolError(
+                "remote run-status pending count does not match its unit counts"
+            )
+        if counts["n_derived_done"] > counts["n_derived_expected"]:
+            raise ProtocolError(
+                "remote run-status reports more derived outputs than expected"
+            )
+        if solver_schema == "ghost.hpc.bor-run.v1":
+            if counts["n_derived_expected"] < 1:
+                raise ProtocolError(
+                    "remote BoR run-status must declare a published body output"
+                )
+        elif counts["n_derived_expected"] != 0:
+            raise ProtocolError(
+                "remote 2-D run-status cannot declare BoR publication outputs"
+            )
+
+        inventory_names = (
+            "missing",
+            "unexpected",
+            "derived_expected",
+            "derived_done",
+            "derived_missing",
+            "derived_unexpected",
+        )
+        for name in inventory_names:
+            value = payload.get(name)
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() for item in value
+            ):
+                raise ProtocolError(
+                    f"remote run-status {name!r} must be a list of paths"
+                )
+            if len(set(value)) != len(value):
+                raise ProtocolError(
+                    f"remote run-status {name!r} contains duplicate paths"
+                )
+            if any(
+                item != item.strip()
+                or item.startswith("/")
+                or "\\" in item
+                or any(part in {"", ".", ".."} for part in item.split("/"))
+                for item in value
+            ):
+                raise ProtocolError(
+                    f"remote run-status {name!r} contains an unsafe relative path"
+                )
+        if len(payload["missing"]) != counts["pending"]:
+            raise ProtocolError(
+                "remote run-status missing inventory does not match pending count"
+            )
+        if set(payload["missing"]) & set(payload["unexpected"]):
+            raise ProtocolError(
+                "remote run-status unit inventories are internally inconsistent"
+            )
+        if len(payload["derived_expected"]) != counts["n_derived_expected"]:
+            raise ProtocolError(
+                "remote run-status derived expected inventory does not match its count"
+            )
+        if len(payload["derived_done"]) != counts["n_derived_done"]:
+            raise ProtocolError(
+                "remote run-status derived completed inventory does not match its count"
+            )
+        if len(payload["derived_missing"]) != (
+            counts["n_derived_expected"] - counts["n_derived_done"]
+        ):
+            raise ProtocolError(
+                "remote run-status derived missing inventory does not match its counts"
+            )
+        derived_expected = set(payload["derived_expected"])
+        derived_done = set(payload["derived_done"])
+        derived_missing = set(payload["derived_missing"])
+        derived_unexpected = set(payload["derived_unexpected"])
+        if (
+            not derived_done.issubset(derived_expected)
+            or not derived_missing.issubset(derived_expected)
+            or derived_done & derived_missing
+            or derived_done | derived_missing != derived_expected
+            or derived_unexpected & derived_expected
+        ):
+            raise ProtocolError(
+                "remote run-status derived inventories are internally inconsistent"
+            )
+        unit_exact = (
+            counts["n_done"] == counts["n_units"]
+            and not payload["missing"]
+            and not payload["unexpected"]
+        )
+        if payload["unit_exact"] is not unit_exact:
+            raise ProtocolError(
+                "remote run-status unit-exact flag contradicts its inventory"
+            )
+        if payload["attestation_verified"] and (
+            not unit_exact or payload["attestation_error"]
+        ):
+            raise ProtocolError(
+                "remote run-status attestation flag contradicts its evidence"
+            )
+        unit_complete = unit_exact and payload["attestation_verified"]
+        if payload["unit_complete"] is not unit_complete:
+            raise ProtocolError(
+                "remote run-status unit-complete flag contradicts its attestations"
+            )
+        derived_exact = (
+            counts["n_derived_done"] == counts["n_derived_expected"]
+            and not payload["derived_missing"]
+            and not payload["derived_unexpected"]
+        )
+        if payload["publication_verified"] and (
+            not derived_exact or payload["publication_error"]
+        ):
+            raise ProtocolError(
+                "remote run-status publication flag contradicts its derived inventory"
+            )
+        complete = unit_complete and payload["publication_verified"]
+        if payload["complete"] is not complete:
+            raise ProtocolError(
+                "remote run-status complete flag contradicts its verified inventory"
+            )
+        return payload
+
     def query_squeue(
         self, job_ids: Sequence[str | int], *, timeout: float | None = None
     ) -> tuple[JobStatus, ...]:

@@ -11,12 +11,16 @@ explicitly for survey work. Survey results retain the algebraic quality gate
 but are marked as uncertified base-mesh fields in their metadata.
 """
 
+import copy
 import ctypes
+import hashlib
 from importlib import machinery
+import json
 import math
 import os
 import platform
 import re
+import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +53,11 @@ except ImportError:
     from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
-from geometry_io import build_geometry_snapshot, parse_geometry
+from geometry_io import (
+    build_geometry_snapshot,
+    material_filename_from_row,
+    parse_geometry,
+)
 from grim_io import (
     _ensure_grim_ext,
     _suffix_for_incidence,
@@ -365,6 +373,146 @@ def _result_plot_groups(
     return groups
 
 
+def _stable_sha256(path: 'str') -> 'str':
+    """Hash one regular file and reject an ordinary concurrent rewrite."""
+
+    source = Path(path)
+    before = source.stat()
+    digest = hashlib.sha256()
+    with source.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    after = source.stat()
+    before_key = (
+        int(before.st_size),
+        int(before.st_mtime_ns),
+        int(before.st_ctime_ns),
+    )
+    after_key = (
+        int(after.st_size),
+        int(after.st_mtime_ns),
+        int(after.st_ctime_ns),
+    )
+    if before_key != after_key:
+        raise RuntimeError(
+            f"{source} changed while it was being read. Wait for the write to "
+            "finish, then retry."
+        )
+    return digest.hexdigest()
+
+
+def _snapshot_sha256(snapshot: 'Dict[str, Any]') -> 'str':
+    """Return a deterministic identity for the immutable geometry payload."""
+
+    payload = json.dumps(
+        snapshot,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _material_input_sha256(
+    snapshot: 'Dict[str, Any]', base_dir: 'str'
+) -> 'Dict[str, str]':
+    """Seal every material sidecar read by a background density solve."""
+
+    identities: 'Dict[str, str]' = {}
+    for table_name in ("ibcs", "dielectrics"):
+        for row in snapshot.get(table_name, []) or []:
+            filename = material_filename_from_row(list(row))
+            if not filename:
+                continue
+            path = os.path.abspath(os.path.join(base_dir, filename))
+            identities[path] = _stable_sha256(path)
+    return identities
+
+
+def _verify_input_sha256(identities: 'Dict[str, str]') -> 'None':
+    """Fail closed when a geometry/material input changed during a job."""
+
+    for path, expected in identities.items():
+        try:
+            observed = _stable_sha256(path)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"Input changed during the boundary-density calculation: {path}. "
+                "No output was published."
+            ) from exc
+        if observed != expected:
+            raise RuntimeError(
+                f"Input changed during the boundary-density calculation: {path}. "
+                "No output was published."
+            )
+
+
+def _stage_json_output(
+    destination: 'str', payload: 'Dict[str, Any]'
+) -> 'str':
+    """Write and sync JSON beside its destination without publishing it."""
+
+    output = os.path.abspath(destination)
+    parent = os.path.dirname(output) or os.getcwd()
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(output)}.", suffix=".tmp", dir=parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                payload,
+                stream,
+                allow_nan=False,
+                ensure_ascii=False,
+                indent=2,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return temporary
+
+
+def _publish_staged_json(
+    temporary: 'str',
+    destination: 'str',
+    *,
+    expect_absent: 'bool',
+    expected_sha256: 'Optional[str]',
+) -> 'None':
+    """Revalidate the reviewed destination, then atomically replace it."""
+
+    output = os.path.abspath(destination)
+    if expect_absent:
+        if os.path.exists(output):
+            raise RuntimeError(
+                f"{output}: output was created while boundary densities were "
+                "being computed; the newer file was not overwritten."
+            )
+    else:
+        if not os.path.isfile(output):
+            raise RuntimeError(
+                f"{output}: reviewed output was removed or replaced while "
+                "boundary densities were being computed."
+            )
+        if expected_sha256 is None or _stable_sha256(output) != expected_sha256:
+            raise RuntimeError(
+                f"{output}: output changed while boundary densities were being "
+                "computed; the newer file was not overwritten."
+            )
+    os.replace(temporary, output)
+
+
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=6, height=5, dpi=100):
         self.fig = Figure(figsize=(width, height), dpi=dpi)
@@ -378,6 +526,7 @@ class MplCanvas(FigureCanvas):
 class _SolveWorker(QObject):
     progress = Signal(int, str)
     finished = Signal(object, str)
+    canceled = Signal(str)
     error = Signal(str)
 
     def __init__(
@@ -504,13 +653,136 @@ class _SolveWorker(QObject):
                 result = self._run_bor()
             else:
                 result = self._run_2d(self.snapshot, self._on_progress)
+            if self.abort_event is not None and self.abort_event.is_set():
+                raise InterruptedError("Solve canceled by user.")
+        except InterruptedError as exc:
+            self.canceled.emit(str(exc) or "Solve canceled by user.")
+            return
         except Exception as exc:
+            if self.abort_event is not None and self.abort_event.is_set():
+                self.canceled.emit("Solve canceled by user.")
+                return
             self.error.emit(str(exc))
             return
         metadata = dict(result.get("metadata", {}) or {})
         metadata.setdefault("geometry_units_in", self.units)
         result["metadata"] = metadata
         self.finished.emit(result, self.source_path)
+
+
+class _BoundaryDensityWorker(QObject):
+    """Compute and stage one immutable VV/HH density diagnostic off-thread."""
+
+    progress = Signal(int, str)
+    finished = Signal(int, object, str)
+    canceled = Signal(int, str)
+    error = Signal(int, str)
+
+    def __init__(
+        self,
+        *,
+        run_id: 'int',
+        snapshot: 'Dict[str, Any]',
+        source_path: 'str',
+        base_dir: 'str',
+        frequency_ghz: 'float',
+        elevation_deg: 'float',
+        units: 'str',
+        output_path: 'str',
+        snapshot_sha256: 'str',
+        input_sha256: 'Dict[str, str]',
+        abort_event: 'threading.Event',
+    ) -> 'None':
+        super().__init__()
+        self.run_id = int(run_id)
+        self.snapshot = snapshot
+        self.source_path = str(source_path)
+        self.base_dir = str(base_dir)
+        self.frequency_ghz = float(frequency_ghz)
+        self.elevation_deg = float(elevation_deg)
+        self.units = str(units)
+        self.output_path = str(output_path)
+        self.snapshot_sha256 = str(snapshot_sha256)
+        self.input_sha256 = dict(input_sha256)
+        self.abort_event = abort_event
+
+    def _check_canceled(self) -> 'None':
+        if self.abort_event.is_set():
+            raise InterruptedError(
+                "Boundary-density calculation canceled by user."
+            )
+
+    @Slot()
+    def run(self) -> 'None':
+        temporary = ""
+        try:
+            channels = {}
+            for index, (label, polarization) in enumerate(
+                (("VV", "TE"), ("HH", "TM"))
+            ):
+                self._check_canceled()
+                self.progress.emit(
+                    index * 45,
+                    f"Computing {label} boundary-integral density...",
+                )
+                channels[label] = compute_boundary_densities(
+                    geometry_snapshot=self.snapshot,
+                    frequency_ghz=self.frequency_ghz,
+                    elevation_deg=self.elevation_deg,
+                    polarization=polarization,
+                    geometry_units=self.units,
+                    material_base_dir=self.base_dir,
+                    cfie_alpha=0.0,
+                    abort_event=self.abort_event,
+                )
+            self._check_canceled()
+            result = {
+                "polarizations": ["VV", "HH"],
+                "frequency_ghz": self.frequency_ghz,
+                "cut_angle_deg": self.elevation_deg,
+                "geometry_units_in": self.units,
+                "density_coordinate_units": "meters",
+                "geometry_source_path": self.source_path,
+                "geometry_snapshot_sha256": self.snapshot_sha256,
+                "input_files_sha256": dict(self.input_sha256),
+                "channels": channels,
+            }
+            self.progress.emit(92, "Staging boundary-density JSON...")
+            temporary = _stage_json_output(self.output_path, result)
+            self._check_canceled()
+            summary = {
+                "element_count": int(channels["VV"].get("element_count", 0)),
+                "formulations": ", ".join(
+                    f"{label}={channels[label].get('formulation', '?')}"
+                    for label in ("VV", "HH")
+                ),
+            }
+        except InterruptedError as exc:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+            self.canceled.emit(
+                self.run_id,
+                str(exc) or "Boundary-density calculation canceled by user.",
+            )
+            return
+        except Exception as exc:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+            if self.abort_event.is_set():
+                self.canceled.emit(
+                    self.run_id,
+                    "Boundary-density calculation canceled by user.",
+                )
+                return
+            self.error.emit(self.run_id, str(exc))
+            return
+        self.finished.emit(self.run_id, summary, temporary)
 
 
 class SolverTab(QWidget):
@@ -532,6 +804,13 @@ class SolverTab(QWidget):
         self._active_solve_run_id: 'Optional[int]' = None
         self._is_solving: 'bool' = False
         self._abort_event: 'Optional[threading.Event]' = None
+        self._pending_density_context: 'Optional[Dict[str, Any]]' = None
+        self._density_thread: 'Optional[QThread]' = None
+        self._density_worker: 'Optional[_BoundaryDensityWorker]' = None
+        self._density_abort_event: 'Optional[threading.Event]' = None
+        self._density_run_serial: 'int' = 0
+        self._active_density_run_id: 'Optional[int]' = None
+        self._is_computing_density: 'bool' = False
         self._plot_theme: 'Optional[Dict[str, str]]' = None
         self._last_result_stale: 'bool' = False
 
@@ -569,6 +848,9 @@ class SolverTab(QWidget):
         pending = self._pending_solve_context
         if pending is not None and bool(pending.get("uses_geometry_tab", False)):
             pending["geometry_stale"] = True
+        density = self._pending_density_context
+        if density is not None and bool(density.get("uses_geometry_tab", False)):
+            density["geometry_stale"] = True
         if (
             self.last_result is not None
             and self.last_solve_context is not None
@@ -586,8 +868,36 @@ class SolverTab(QWidget):
             "Export Last Result (Stale)" if stale else "Export Last Result"
         )
         self.btn_export.setEnabled(
-            not self._is_solving and self.last_result is not None and not stale
+            not self._job_is_active()
+            and self.last_result is not None
+            and not stale
         )
+
+    @staticmethod
+    def _thread_is_running(thread: 'Optional[QThread]') -> 'bool':
+        if thread is None:
+            return False
+        try:
+            probe = getattr(thread, "isRunning", None)
+            return bool(callable(probe) and probe())
+        except RuntimeError:
+            # A deferred-delete Qt wrapper can briefly outlive its C++ object.
+            return False
+
+    def _job_is_active(self) -> 'bool':
+        """Include terminal QThread teardown before controls may re-enable."""
+
+        return bool(
+            self._is_solving
+            or self._is_computing_density
+            or self._thread_is_running(self._solve_thread)
+            or self._thread_is_running(self._density_thread)
+        )
+
+    def job_is_running(self) -> 'bool':
+        """Include worker shutdown windows so a host cannot destroy QThreads."""
+
+        return self._job_is_active()
 
     def _result_is_current_for_export(
         self,
@@ -969,18 +1279,19 @@ class SolverTab(QWidget):
         self.btn_advanced_settings.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
 
     def _update_mode_enables(self):
+        busy = self._job_is_active()
         freq_discrete = self.cmb_freq_mode.currentIndex() == 0
         elev_discrete = self.cmb_elev_mode.currentIndex() == 0
 
-        self.edit_freq_list.setEnabled(freq_discrete)
-        self.edit_freq_start.setEnabled(not freq_discrete)
-        self.edit_freq_stop.setEnabled(not freq_discrete)
-        self.edit_freq_step.setEnabled(not freq_discrete)
+        self.edit_freq_list.setEnabled(not busy and freq_discrete)
+        self.edit_freq_start.setEnabled(not busy and not freq_discrete)
+        self.edit_freq_stop.setEnabled(not busy and not freq_discrete)
+        self.edit_freq_step.setEnabled(not busy and not freq_discrete)
 
-        self.edit_elev_list.setEnabled(elev_discrete)
-        self.edit_elev_start.setEnabled(not elev_discrete)
-        self.edit_elev_stop.setEnabled(not elev_discrete)
-        self.edit_elev_step.setEnabled(not elev_discrete)
+        self.edit_elev_list.setEnabled(not busy and elev_discrete)
+        self.edit_elev_start.setEnabled(not busy and not elev_discrete)
+        self.edit_elev_stop.setEnabled(not busy and not elev_discrete)
+        self.edit_elev_step.setEnabled(not busy and not elev_discrete)
 
     def _parse_list(self, text: 'str', field_name: 'str') -> 'List[float]':
         tokens = [tok for tok in re.split(r"[,\s]+", text.strip()) if tok]
@@ -1050,15 +1361,55 @@ class SolverTab(QWidget):
             "Elevations",
         )
 
+    @staticmethod
+    def _load_geometry_file_for_solver(
+        path: 'str',
+    ) -> 'Tuple[Dict[str, Any], str, str, str]':
+        """Parse and identify the same stable bytes from an explicit .geo."""
+
+        source_path = os.path.abspath(path)
+        source = Path(source_path)
+        before = source.stat()
+        raw = source.read_bytes()
+        after = source.stat()
+        before_key = (
+            int(before.st_size),
+            int(before.st_mtime_ns),
+            int(before.st_ctime_ns),
+        )
+        after_key = (
+            int(after.st_size),
+            int(after.st_mtime_ns),
+            int(after.st_ctime_ns),
+        )
+        if before_key != after_key:
+            raise RuntimeError(
+                f"{source_path} changed while it was being read. Wait for the "
+                "write to finish, then retry."
+            )
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise UnicodeError(
+                f"Geometry file is not valid UTF-8: {source_path}"
+            ) from exc
+        title, segments, ibcs_entries, dielectric_entries = parse_geometry(text)
+        snapshot = build_geometry_snapshot(
+            title, segments, ibcs_entries, dielectric_entries
+        )
+        return (
+            snapshot,
+            source_path,
+            os.path.dirname(source_path),
+            hashlib.sha256(raw).hexdigest(),
+        )
+
     def _load_geometry_for_solver(self) -> 'Tuple[Dict[str, Any], str, str]':
         path = self.edit_geo_path.text().strip()
         if path:
-            with open(path, "r") as f:
-                text = f.read()
-            title, segments, ibcs_entries, dielectric_entries = parse_geometry(text)
-            snapshot = build_geometry_snapshot(title, segments, ibcs_entries, dielectric_entries)
-            source_path = os.path.abspath(path)
-            base_dir = os.path.dirname(source_path)
+            snapshot, source_path, base_dir, _source_sha256 = (
+                self._load_geometry_file_for_solver(path)
+            )
             return snapshot, source_path, base_dir
 
         if self.geometry_tab is None:
@@ -1075,39 +1426,54 @@ class SolverTab(QWidget):
         base_dir = os.path.dirname(source_path) if source_path else os.getcwd()
         return snapshot, source_path, base_dir
 
-    def _set_solving_state(self, solving: 'bool'):
-        self._is_solving = solving
+    def _apply_job_state(self) -> 'None':
+        busy = self._job_is_active()
         is_bor = (self.cmb_solver_kind.currentData() == "bor")
-        enable_2d_quality_thresholds = not solving and not is_bor
-        self.btn_run.setEnabled(not solving)
+        enable_2d_quality_thresholds = not busy and not is_bor
+        self.btn_run.setEnabled(not busy)
         self._sync_export_state()
-        self.btn_currents.setEnabled(not solving and not is_bor)
-        self.btn_browse_geo.setEnabled(not solving)
-        self.btn_use_tab.setEnabled(not solving)
-        self.btn_browse_output.setEnabled(not solving)
-        self.edit_geo_path.setEnabled(not solving)
-        self.edit_output.setEnabled(not solving)
-        self.cmb_solver_kind.setEnabled(not solving)
-        self.cmb_units.setEnabled(not solving)
-        self.cmb_scatter_mode.setEnabled(not solving and not is_bor)
-        self.edit_cfie_alpha.setEnabled(not solving and is_bor)
-        self.cmb_freq_mode.setEnabled(not solving)
-        self.cmb_elev_mode.setEnabled(not solving)
-        self.edit_freq_list.setEnabled(not solving and self.cmb_freq_mode.currentIndex() == 0)
-        self.edit_elev_list.setEnabled(not solving and self.cmb_elev_mode.currentIndex() == 0)
-        self.edit_freq_start.setEnabled(not solving and self.cmb_freq_mode.currentIndex() != 0)
-        self.edit_freq_stop.setEnabled(not solving and self.cmb_freq_mode.currentIndex() != 0)
-        self.edit_freq_step.setEnabled(not solving and self.cmb_freq_mode.currentIndex() != 0)
-        self.edit_elev_start.setEnabled(not solving and self.cmb_elev_mode.currentIndex() != 0)
-        self.edit_elev_stop.setEnabled(not solving and self.cmb_elev_mode.currentIndex() != 0)
-        self.edit_elev_step.setEnabled(not solving and self.cmb_elev_mode.currentIndex() != 0)
-        self.chk_export_after_solve.setEnabled(not solving)
-        self.chk_mesh_certification.setEnabled(not solving)
+        self.btn_currents.setEnabled(not busy and not is_bor)
+        self.btn_browse_geo.setEnabled(not busy)
+        self.btn_use_tab.setEnabled(not busy)
+        self.btn_browse_output.setEnabled(not busy)
+        self.edit_geo_path.setEnabled(not busy)
+        self.edit_output.setEnabled(not busy)
+        self.cmb_solver_kind.setEnabled(not busy)
+        self.cmb_units.setEnabled(not busy)
+        self.cmb_scatter_mode.setEnabled(not busy and not is_bor)
+        self.edit_obs_angles.setEnabled(not busy and not is_bor)
+        self.edit_cfie_alpha.setEnabled(not busy and is_bor)
+        self.cmb_freq_mode.setEnabled(not busy)
+        self.cmb_elev_mode.setEnabled(not busy)
+        self._update_mode_enables()
+        self.chk_export_after_solve.setEnabled(not busy)
+        self.chk_mesh_certification.setEnabled(not busy)
+        self.btn_advanced_settings.setEnabled(not busy)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_warnings_max.setEnabled(enable_2d_quality_thresholds)
-        self.btn_run.setText("Solving..." if solving else "Run Solver")
-        self.btn_cancel.setEnabled(solving)
+        self.btn_run.setText("Solving..." if self._is_solving else "Run Solver")
+        self.btn_currents.setText(
+            "Computing..."
+            if self._is_computing_density
+            else "Boundary Densities"
+        )
+        active_abort = None
+        if self._is_solving:
+            active_abort = self._abort_event
+        elif self._is_computing_density:
+            active_abort = self._density_abort_event
+        self.btn_cancel.setEnabled(
+            active_abort is not None and not active_abort.is_set()
+        )
+
+    def _set_solving_state(self, solving: 'bool') -> 'None':
+        self._is_solving = bool(solving)
+        self._apply_job_state()
+
+    def _set_density_state(self, computing: 'bool') -> 'None':
+        self._is_computing_density = bool(computing)
+        self._apply_job_state()
 
     def _on_scatter_mode_changed(self, _index: 'int' = 0) -> 'None':
         is_bistatic = (self.cmb_scatter_mode.currentData() == "bistatic")
@@ -1129,23 +1495,30 @@ class SolverTab(QWidget):
             # CFIE is a real BoR-only control. Do not let its hidden value
             # poison a subsequent 2-D solve.
             self.edit_cfie_alpha.setText("0.0")
-        self.cmb_scatter_mode.setEnabled(not is_bor)
-        self.edit_cfie_alpha.setEnabled(is_bor)
-        self.btn_currents.setEnabled(not is_bor and not self._is_solving)
-        self.edit_quality_residual_max.setEnabled(not is_bor)
-        self.edit_quality_condition_max.setEnabled(not is_bor)
-        self.edit_quality_warnings_max.setEnabled(not is_bor)
         self.lbl_solve_method.setText(
             "BoR-MoM (azimuthal modes)" if is_bor else "Linear / Galerkin")
+        self._apply_job_state()
 
     def _compute_currents(self) -> 'None':
         """Compute boundary-integral densities at first freq/elev and save JSON."""
-        if self._is_solving:
-            QMessageBox.information(self, "Boundary Densities", "Solver is running. Please wait.")
+        if self._job_is_active():
+            QMessageBox.information(
+                self,
+                "Boundary Densities",
+                "A solver task is already running. Please wait or cancel it.",
+            )
             return
 
         try:
-            snapshot, source_path, base_dir = self._load_geometry_for_solver()
+            explicit_path = self.edit_geo_path.text().strip()
+            if explicit_path:
+                snapshot, source_path, base_dir, source_sha256 = (
+                    self._load_geometry_file_for_solver(explicit_path)
+                )
+            else:
+                snapshot, source_path, base_dir = self._load_geometry_for_solver()
+                source_sha256 = None
+            snapshot = copy.deepcopy(snapshot)
             frequencies = self._collect_frequency_values()
             elevations = self._collect_elevation_values()
             if not frequencies:
@@ -1153,63 +1526,240 @@ class SolverTab(QWidget):
             if not elevations:
                 raise ValueError("Need at least one elevation.")
             units = str(self.cmb_units.currentText() or "inches")
-        except Exception as exc:
-            QMessageBox.critical(self, "Boundary Density Error", str(exc))
-            return
-
-        self.lbl_status.setText("Computing boundary-integral densities...")
-        try:
-            channels = {}
-            for label, polarization in (("VV", "TE"), ("HH", "TM")):
-                channels[label] = compute_boundary_densities(
-                    geometry_snapshot=snapshot,
-                    frequency_ghz=frequencies[0],
-                    elevation_deg=elevations[0],
-                    polarization=polarization,
-                    geometry_units=units,
-                    material_base_dir=base_dir,
-                    cfie_alpha=0.0,
+            if str(self.cmb_solver_kind.currentData() or "2d") != "2d":
+                raise ValueError(
+                    "Boundary densities are currently available for the 2-D "
+                    "solver only."
                 )
-            result = {
-                "polarizations": ["VV", "HH"],
-                "frequency_ghz": float(frequencies[0]),
-                "cut_angle_deg": float(elevations[0]),
-                "channels": channels,
-            }
+            snapshot_digest = _snapshot_sha256(snapshot)
+            input_sha256 = _material_input_sha256(snapshot, base_dir)
+            uses_geometry_tab = not bool(explicit_path)
+            if not uses_geometry_tab and source_path and source_sha256:
+                input_sha256[os.path.abspath(source_path)] = source_sha256
         except Exception as exc:
             QMessageBox.critical(self, "Boundary Density Error", str(exc))
-            self.lbl_status.setText(f"Boundary-density solve failed: {exc}")
             return
 
-        import json
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Save Boundary Densities", "boundary_densities_vv_hh.json", "JSON Files (*.json)",
         )
         if not save_path:
-            self.lbl_status.setText("Boundary densities computed (not saved).")
+            self.lbl_status.setText("Boundary-density calculation canceled before start.")
+            return
+        save_path = os.path.abspath(save_path)
+        if not os.path.splitext(save_path)[1]:
+            save_path += ".json"
+        try:
+            if not self._confirm_boundary_density_replacement(save_path):
+                self.lbl_status.setText(
+                    "Boundary-density calculation canceled before start."
+                )
+                return
+            if os.path.exists(save_path) and not os.path.isfile(save_path):
+                raise ValueError(f"Boundary-density output is not a file: {save_path}")
+            expect_absent = not os.path.exists(save_path)
+            expected_output_sha256 = (
+                None if expect_absent else _stable_sha256(save_path)
+            )
+            output_parent = os.path.dirname(save_path) or os.getcwd()
+            if not os.path.isdir(output_parent):
+                raise FileNotFoundError(
+                    f"Output folder does not exist: {output_parent}"
+                )
+        except Exception as exc:
+            QMessageBox.critical(self, "Boundary Density Error", str(exc))
             return
 
-        try:
-            with open(save_path, "w") as f:
-                json.dump(result, f, indent=2)
-            n_elem = channels["VV"].get("element_count", 0)
-            formulations = ", ".join(
-                f"{label}={channels[label].get('formulation', '?')}"
-                for label in ("VV", "HH")
+        abort_event = threading.Event()
+        self._density_abort_event = abort_event
+        self._density_run_serial += 1
+        run_id = self._density_run_serial
+        self._active_density_run_id = run_id
+        self._pending_density_context = {
+            "uses_geometry_tab": uses_geometry_tab,
+            "geometry_stale": False,
+            "input_sha256": dict(input_sha256),
+            "output_path": save_path,
+            "expect_output_absent": expect_absent,
+            "expected_output_sha256": expected_output_sha256,
+        }
+
+        thread = QThread(self)
+        worker = _BoundaryDensityWorker(
+            run_id=run_id,
+            snapshot=snapshot,
+            source_path=source_path,
+            base_dir=base_dir,
+            frequency_ghz=float(frequencies[0]),
+            elevation_deg=float(elevations[0]),
+            units=units,
+            output_path=save_path,
+            snapshot_sha256=snapshot_digest,
+            input_sha256=input_sha256,
+            abort_event=abort_event,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_density_progress)
+        worker.finished.connect(self._on_density_finished)
+        worker.canceled.connect(self._on_density_canceled)
+        worker.error.connect(self._on_density_error)
+        worker.finished.connect(thread.quit)
+        worker.canceled.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.canceled.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(
+            lambda completed_run_id=run_id: self._on_density_thread_finished(
+                completed_run_id
             )
-            self.lbl_status.setText(
-                f"Boundary densities saved: {save_path} "
-                f"({n_elem} elements, {formulations})"
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Save Error", str(exc))
+        )
+
+        self._density_thread = thread
+        self._density_worker = worker
+        self.progress.setValue(0)
+        self.lbl_status.setText(
+            "Starting boundary-density calculation in the background..."
+        )
+        self._set_density_state(True)
+        thread.start()
+
+    def _confirm_boundary_density_replacement(self, path: 'str') -> 'bool':
+        if not os.path.exists(path):
+            return True
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        answer = QMessageBox.question(
+            self,
+            "Replace Existing Boundary Densities?",
+            f"The output already exists:\n\n  {path}\n\nReplace it?",
+            buttons.Yes | buttons.No,
+            buttons.No,
+        )
+        return answer == buttons.Yes
 
     def _cancel_solver(self):
-        """Signal the running solver to abort."""
-        if self._abort_event is not None:
-            self._abort_event.set()
-            self.lbl_status.setText("Cancelling...")
+        """Signal the active solver-tab calculation to abort."""
+        if self._is_computing_density and self._density_abort_event is not None:
+            self._density_abort_event.set()
+            self.lbl_status.setText(
+                "Canceling boundary-density calculation... The current dense "
+                "linear-algebra step must finish before cancellation completes."
+            )
             self.btn_cancel.setEnabled(False)
+        elif self._is_solving and self._abort_event is not None:
+            self._abort_event.set()
+            self.lbl_status.setText("Canceling solve...")
+            self.btn_cancel.setEnabled(False)
+
+    @Slot(int, str)
+    def _on_density_progress(self, pct: 'int', message: 'str') -> 'None':
+        self.progress.setValue(max(0, min(100, int(pct))))
+        if message:
+            self.lbl_status.setText(message)
+
+    @Slot(int, object, str)
+    def _on_density_finished(
+        self, run_id: 'int', summary: 'Dict[str, Any]', temporary: 'str'
+    ) -> 'None':
+        try:
+            if self._active_density_run_id != int(run_id):
+                return
+            context = self._pending_density_context
+            if context is None:
+                raise RuntimeError(
+                    "Boundary-density job context was lost; no output was published."
+                )
+            if (
+                self._density_abort_event is not None
+                and self._density_abort_event.is_set()
+            ):
+                self.progress.setValue(0)
+                self.lbl_status.setText(
+                    "Boundary-density calculation canceled; no output was published."
+                )
+                return
+            if bool(context.get("geometry_stale", False)):
+                self.progress.setValue(0)
+                self.lbl_status.setText(
+                    "Geometry changed during the boundary-density calculation; "
+                    "the stale output was not published."
+                )
+                QMessageBox.warning(
+                    self,
+                    "Boundary Densities Not Saved",
+                    "Geometry changed while boundary densities were being "
+                    "computed. Run the calculation again for the current geometry.",
+                )
+                return
+            _verify_input_sha256(dict(context.get("input_sha256", {})))
+            output_path = str(context["output_path"])
+            _publish_staged_json(
+                temporary,
+                output_path,
+                expect_absent=bool(context["expect_output_absent"]),
+                expected_sha256=context.get("expected_output_sha256"),
+            )
+            temporary = ""
+            self.progress.setValue(100)
+            self.lbl_status.setText(
+                f"Boundary densities saved: {output_path} "
+                f"({int(summary.get('element_count', 0))} elements, "
+                f"{summary.get('formulations', '')})"
+            )
+        except Exception as exc:
+            self.progress.setValue(0)
+            self.lbl_status.setText(f"Boundary-density output not saved: {exc}")
+            QMessageBox.warning(self, "Boundary Density Save Error", str(exc))
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+            if self._active_density_run_id == int(run_id):
+                self._pending_density_context = None
+                self._set_density_state(False)
+
+    @Slot(int, str)
+    def _on_density_canceled(self, run_id: 'int', _message: 'str') -> 'None':
+        if self._active_density_run_id != int(run_id):
+            return
+        self._pending_density_context = None
+        self.progress.setValue(0)
+        self.lbl_status.setText(
+            "Boundary-density calculation canceled; no output was published."
+        )
+        self._set_density_state(False)
+
+    @Slot(int, str)
+    def _on_density_error(self, run_id: 'int', message: 'str') -> 'None':
+        if self._active_density_run_id != int(run_id):
+            return
+        if (
+            self._density_abort_event is not None
+            and self._density_abort_event.is_set()
+        ):
+            self._on_density_canceled(
+                int(run_id), "Boundary-density calculation canceled by user."
+            )
+            return
+        self._pending_density_context = None
+        self.progress.setValue(0)
+        self.lbl_status.setText(f"Boundary-density calculation failed: {message}")
+        QMessageBox.critical(self, "Boundary Density Error", message)
+        self._set_density_state(False)
+
+    @Slot(int)
+    def _on_density_thread_finished(self, run_id: 'int') -> 'None':
+        if self._active_density_run_id != int(run_id):
+            return
+        self._density_worker = None
+        self._density_thread = None
+        self._density_abort_event = None
+        self._active_density_run_id = None
+        self._apply_job_state()
 
     @Slot(int, str)
     def _on_solver_progress(self, pct: 'int', message: 'str'):
@@ -1219,6 +1769,11 @@ class SolverTab(QWidget):
 
     @Slot(object, str)
     def _on_solver_finished(self, result: 'Dict[str, Any]', source_path: 'str'):
+        # A completion can already be queued when the user clicks Cancel.
+        # Honor that request before publishing/displaying the returned field.
+        if self._abort_event is not None and self._abort_event.is_set():
+            self._on_solver_canceled("Solve canceled by user.")
+            return
         self.last_result = result
         self.last_source_path = source_path
         self.last_solve_context = self._pending_solve_context
@@ -1326,26 +1881,39 @@ class SolverTab(QWidget):
 
     @Slot(str)
     def _on_solver_error(self, message: 'str'):
+        if self._abort_event is not None and self._abort_event.is_set():
+            self._on_solver_canceled("Solve canceled by user.")
+            return
         self._pending_solve_context = None
         self.progress.setValue(0)
         self.lbl_status.setText(f"Solve failed: {message}")
         QMessageBox.critical(self, "Solver Error", message)
         self._set_solving_state(False)
 
+    @Slot(str)
+    def _on_solver_canceled(self, _message: 'str') -> 'None':
+        """Treat an operator cancellation as a normal terminal state."""
+
+        self._pending_solve_context = None
+        self.progress.setValue(0)
+        self.lbl_status.setText("Solve canceled; no result was published.")
+        self._set_solving_state(False)
+
     @Slot(int)
     def _on_solver_thread_finished(self, run_id: 'int'):
-        # _on_solver_finished/_on_solver_error re-enable Run before QThread has
-        # necessarily emitted finished. If a new run starts in that window,
-        # the old thread must not clear the new run's worker/cancel handles.
+        # A queued terminal signal can race QThread.finished. Only the matching
+        # run may clear its worker/cancel handles; controls remain disabled while
+        # the thread itself still reports running.
         if self._active_solve_run_id != int(run_id):
             return
         self._solve_worker = None
         self._solve_thread = None
         self._abort_event = None
         self._active_solve_run_id = None
+        self._apply_job_state()
 
     def _run_solver(self):
-        if self._is_solving:
+        if self._job_is_active():
             return
         try:
             frequencies = self._collect_frequency_values()
@@ -1439,10 +2007,13 @@ class SolverTab(QWidget):
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_solver_progress)
         worker.finished.connect(self._on_solver_finished)
+        worker.canceled.connect(self._on_solver_canceled)
         worker.error.connect(self._on_solver_error)
         worker.finished.connect(thread.quit)
+        worker.canceled.connect(thread.quit)
         worker.error.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        worker.canceled.connect(worker.deleteLater)
         worker.error.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(
@@ -1506,8 +2077,12 @@ class SolverTab(QWidget):
         return [written]
 
     def _export_last_result(self):
-        if self._is_solving:
-            QMessageBox.information(self, "Export", "Solver is currently running. Please wait for completion.")
+        if self._job_is_active():
+            QMessageBox.information(
+                self,
+                "Export",
+                "A solver task is currently running. Please wait for completion.",
+            )
             return
         if not self.last_result:
             QMessageBox.information(self, "Export", "No solver result exists yet. Run the solver first.")

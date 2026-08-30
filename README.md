@@ -1,8 +1,8 @@
 # GRIM integrated RCS workbench
 
 This branch is the single-folder distribution of GRIM, GHOST, and FREDDY.
-GRIM is the main desktop application. Its tabs are **Plotting | ISAR | PPT |
-Assembly | GHOST | FREDDY | Runs | Python**. GHOST supplies the 2-D and body-of-revolution RCS
+GRIM is the main desktop application. Its tabs are **Plotting | ISAR | FREDDY |
+GHOST | Assembly | PPT | Runs | Python**. GHOST supplies the 2-D and body-of-revolution RCS
 solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.

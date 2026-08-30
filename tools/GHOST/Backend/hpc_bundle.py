@@ -323,9 +323,6 @@ class _StageLease:
                         return None
                     raise
             elif msvcrt is not None:  # pragma: no cover - Windows-only branch
-                if os.fstat(fd).st_size == 0:
-                    os.write(fd, b"\0")
-                    os.fsync(fd)
                 os.lseek(fd, 0, os.SEEK_SET)
                 try:
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
@@ -338,6 +335,15 @@ class _StageLease:
                         os.close(fd)
                         return None
                     raise
+                # Lock byte zero before initializing an empty guard.  If two
+                # Windows processes both seed a first-use file before either
+                # owns the byte range, the winner can make the loser's write
+                # fail with PermissionError instead of ordinary nonblocking
+                # lock contention.
+                if os.fstat(fd).st_size == 0:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.write(fd, b"\0")
+                    os.fsync(fd)
             else:  # pragma: no cover - every supported platform has one API
                 raise BundleError("No supported advisory file-lock API is available.")
             return fd
@@ -1656,6 +1662,63 @@ def _parse_geometry_argument(value: str) -> Dict[str, str]:
     return {"role": role.strip(), "path": path.strip()}
 
 
+def inspect_hpc_run(run_directory: os.PathLike[str] | str) -> Dict[str, Any]:
+    """Return the solver's manifest-exact, attested completion state.
+
+    This command is deliberately read-only and JSON-safe so a Windows GRIM
+    client can ask the Linux login node whether a terminal Slurm job actually
+    published every promised artifact before enabling download.
+    """
+
+    from hpc_common import run_status
+
+    run_dir = Path(run_directory).expanduser().resolve()
+    status = run_status(run_dir)
+
+    def _relative(paths: Sequence[os.PathLike[str] | str]) -> List[str]:
+        relative = []
+        for value in paths:
+            path = Path(value).resolve()
+            try:
+                name = path.relative_to(run_dir).as_posix()
+            except ValueError as exc:
+                raise ValueError(
+                    "HPC completion inventory escaped the run directory."
+                ) from exc
+            relative.append(name)
+        return relative
+
+    manifest = status["manifest"]
+    derived_expected = _relative(status["derived_expected"])
+    derived_done = _relative(status["derived_done"])
+    derived_missing = _relative(status["derived_missing"])
+    derived_unexpected = _relative(status["derived_unexpected"])
+    return {
+        "ok": True,
+        "schema": "ghost.hpc.run-status.v1",
+        "run_id": str(manifest.get("run_id", run_dir.name)),
+        "solver_schema": str(manifest["schema"]),
+        "complete": bool(status["complete"]),
+        "unit_complete": bool(status["unit_complete"]),
+        "unit_exact": bool(status["unit_exact"]),
+        "attestation_verified": bool(status["attestation_verified"]),
+        "attestation_error": str(status["attestation_error"]),
+        "n_units": int(status["n_units"]),
+        "n_done": int(status["n_done"]),
+        "pending": int(status["pending"]),
+        "missing": _relative(status["missing"]),
+        "unexpected": _relative(status["unexpected"]),
+        "publication_verified": bool(status["publication_verified"]),
+        "publication_error": str(status["publication_error"]),
+        "n_derived_expected": len(derived_expected),
+        "n_derived_done": len(derived_done),
+        "derived_expected": derived_expected,
+        "derived_done": derived_done,
+        "derived_missing": derived_missing,
+        "derived_unexpected": derived_unexpected,
+    }
+
+
 def _json_output(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, sort_keys=True, allow_nan=False))
 
@@ -1689,6 +1752,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "recover", help="Read a stage result or recover its submitted job IDs."
     )
     recover_parser.add_argument("stage_directory")
+
+    status_parser = subparsers.add_parser(
+        "run-status",
+        help="Verify exact attested outputs for a staged solver run.",
+    )
+    status_parser.add_argument("run_directory")
 
     args = parser.parse_args(argv)
     try:
@@ -1724,8 +1793,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 run_driver=args.run_driver,
                 submit=args.submit,
             )
-        else:
+        elif args.command == "recover":
             payload = recover_staged_bundle(args.stage_directory)
+        else:
+            payload = inspect_hpc_run(args.run_directory)
         _json_output(payload)
         return 0 if payload.get("ok", True) else 1
     except (ValueError, OSError) as exc:

@@ -8,6 +8,8 @@ import copy
 import shlex
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1536,6 +1538,99 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 ),
                 expected,
             )
+
+    def test_hpc_bor_publication_is_elected_once_across_workers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory) / "run"
+            results_dir = run_dir / "results"
+            results_dir.mkdir(parents=True)
+            manifest = {
+                "schema": "ghost.hpc.bor-run.v1",
+                "unit_output_dir": "results/by_frequency",
+                "units": [
+                    {
+                        "geometry_stem": "body",
+                        "frequency_ghz": 1.0,
+                        "polarization": polarization,
+                    }
+                    for polarization in ("VV", "HH")
+                ],
+                "n_units": 2,
+            }
+            (run_dir / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            publication = results_dir / "body.grim"
+            publish_started = threading.Event()
+            allow_publish = threading.Event()
+            published = threading.Event()
+            calls = []
+            calls_lock = threading.Lock()
+
+            def fake_status(_run_dir):
+                done = publication.is_file() and published.is_set()
+                return {
+                    "unit_complete": True,
+                    "complete": done,
+                    "derived_expected": (publication,),
+                    "derived_done": (publication,) if done else (),
+                    "publication_error": "",
+                }
+
+            def fake_publish(_run_dir, require_complete=True):
+                self.assertTrue(require_complete)
+                with calls_lock:
+                    calls.append(threading.get_ident())
+                publish_started.set()
+                self.assertTrue(allow_publish.wait(2.0))
+                publication.write_bytes(b"published")
+                published.set()
+                return 1, 0
+
+            outcomes = []
+            errors = []
+
+            def run_publisher():
+                try:
+                    outcomes.append(
+                        run_hpc_bor_monostatic._publish_monostatic_coordinated(
+                            run_dir, 60.0, poll_seconds=0.005
+                        )
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            environment = {
+                "SLURM_JOB_ID": "",
+                "SLURM_ARRAY_JOB_ID": "",
+                "SLURM_ARRAY_TASK_ID": "",
+                "SLURM_CLUSTER_NAME": "",
+                "SLURM_RESTART_COUNT": "0",
+            }
+            with (
+                mock.patch.dict("os.environ", environment, clear=False),
+                mock.patch.object(hpc_common, "run_status", side_effect=fake_status),
+                mock.patch.object(
+                    run_hpc_bor_monostatic,
+                    "publish_monostatic",
+                    side_effect=fake_publish,
+                ),
+            ):
+                first = threading.Thread(target=run_publisher)
+                second = threading.Thread(target=run_publisher)
+                first.start()
+                self.assertTrue(publish_started.wait(2.0))
+                second.start()
+                time.sleep(0.05)
+                self.assertEqual(len(calls), 1)
+                allow_publish.set()
+                first.join(timeout=2.0)
+                second.join(timeout=2.0)
+
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(calls), 1)
+            self.assertCountEqual(outcomes, [(1, 0), (0, 1)])
 
     def test_scaled_stable_lu_is_not_rejected_by_rhs_residual_alone(self):
         rng = np.random.default_rng(1)

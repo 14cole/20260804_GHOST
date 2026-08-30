@@ -56,8 +56,10 @@ class GhostWorkspace(QTabWidget):
             self.setTabText(index, "Geometry*" if dirty else "Geometry")
 
     def solve_is_running(self) -> bool:
-        thread = getattr(self.solver_tab, "_solve_thread", None)
-        return bool(thread is not None and thread.isRunning())
+        # Retain the historical name for unified-host compatibility.  Both a
+        # field solve and a boundary-density diagnostic own a QThread whose
+        # destruction must be blocked during application close.
+        return bool(self.solver_tab.job_is_running())
 
     def attach_material_artifact(
         self, artifact_kind: str, csv_path: str
@@ -74,6 +76,8 @@ class GhostWorkspace(QTabWidget):
     def request_close(self, parent=None) -> bool:
         """Resolve unsaved native geometry before a host closes."""
 
+        if self.solve_is_running():
+            return False
         return bool(self.geometry_tab.request_close(parent or self))
 
 
@@ -102,8 +106,8 @@ class GhostMainWindow(QMainWindow):
         if self.workspace.solve_is_running():
             QMessageBox.warning(
                 self,
-                "Solver Still Running",
-                "A solve is still running. Click Cancel in the Solver tab, "
+                "Solver Task Still Running",
+                "A solver task is still running. Click Cancel in the Solver tab, "
                 "wait for cancellation to finish, and then close GHOST.",
             )
             self.tabs.setCurrentWidget(self.solver_tab)

@@ -146,7 +146,9 @@ slice, you can:
   only the units that were mid-flight.
 
 There is no benefit to matching `N_NODES` to the unit count. More tasks than
-units simply means some exit immediately.
+units gives Slurm more redundant workers, but every started worker remains at
+the completion barrier until the manifest's outputs exist; it cannot report
+success merely because all remaining units were claimed by peers.
 
 ### Cores and memory per node
 
@@ -325,7 +327,9 @@ against the mean load. The mean is the wrong yardstick when one unit costs more
 than an even share, or when you ask for more nodes than you have units: a
 perfect plan still shows a large max/mean ratio there, and reading that as
 imbalance would send you tuning a scheduler that is already optimal. If more
-slots than units were requested, the report says how many will exit immediately.
+slots than units were requested, the report identifies idle slots in the
+initial plan; those workers can still join the steal pool and completion
+barrier if Slurm starts them.
 
 For comparison, index round-robin on a four-frequency sweep across four slots
 lands at 2.13× optimal — roughly twice the node-hours for the same sweep.
@@ -352,17 +356,23 @@ left to other tasks=40.  0.2 s elapsed
 Every unit still gets solved, but on one node instead of ten.
 `tests/test_hpc_scheduling.py::test_no_task_starvation` covers it.
 
-Claims themselves are `O_CREAT | O_EXCL` files in `<run_dir>/claims/`, which is
-atomic on any filesystem a run directory lives on, so no coordinating process
-is needed.
+Claims live in `<run_dir>/claims/`. Creation and replacement are serialized by
+a stable, kernel-owned advisory operation lock and fenced by an owner token
+plus generation. The run directory therefore must be on a cluster filesystem
+whose advisory locks and atomic same-directory replacement are coherent across
+nodes; no separate scheduler daemon is needed.
 
 A claim carries a heartbeat. If a task dies, its claims go quiet and become
 stealable after `CLAIM_STALE_SECONDS` (default 3600 for 2-D, 7200 for BoR — set
-it comfortably above your longest single unit). The result file remains the real
-idempotency guard, so the worst case for a wrongly stolen unit is that it is
-solved twice and written once.
+it comfortably above your longest single unit). A Slurm requeue of the exact
+same job/array task may recover its own fresh orphan immediately when
+`SLURM_RESTART_COUNT` advances; a different task remains fenced until the
+heartbeat becomes stale. Workers revisit deferred units and do not exit zero
+until every exact output exists. Final completion also verifies embedded run
+attestations, so a same-named file from another run is not accepted.
 
-To force a completely fresh sweep, delete `claims/`.
+To force a completely fresh sweep, create a new run. Delete `claims/` only when
+no worker from the old run can still be alive.
 
 ### What lands in results/
 
@@ -391,7 +401,10 @@ verified restart state. Once every frequency for a geometry exists,
 `results/<geometry>.grim` is published with the requested radar-frame
 azimuth/elevation/frequency VV/HH/VH arrays and the embedded BoR aspect field
 plus outer profile needed for coherent feature placement. Final publication
-performs no additional field solve and can be rerun explicitly with:
+performs no additional field solve. One cross-node publication claim elects a
+single builder; peers wait for and verify its exact run-bound products, and a
+dead publisher is recoverable like a solve unit. Publication can be rerun
+explicitly with:
 
 ```bash
 python Backend/run_hpc_bor_monostatic.py --publish /path/to/run_dir
@@ -426,9 +439,11 @@ overhead.
 
 A unit whose result already exists is re-dispatched for its attestation check
 rather than skipped on filename alone, but only by the task that owns it in the
-plan — so across a restart every output is verified exactly once, not once per
-node. A mismatch fails loudly instead of silently reusing a file produced from
-different inputs or a different solver build.
+plan — so the first restart pass distributes that work rather than making each
+node repeat it. Before a worker reports success, the manifest-exact set and
+embedded attestations are checked again. A mismatch fails loudly instead of
+silently reusing a file produced from different inputs or a different solver
+build.
 
 ---
 

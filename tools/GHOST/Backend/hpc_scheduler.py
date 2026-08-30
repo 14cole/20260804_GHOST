@@ -769,18 +769,20 @@ def slot_plan_summary(
 # -----------------------------------------------------------------------------
 
 class ClaimBroker:
-    """Atomic cross-node unit claiming, with steal-on-stale recovery.
+    """Fenced cross-node unit claiming, with steal-on-stale recovery.
 
-    ``O_CREAT | O_EXCL`` is atomic on every filesystem a cluster will put a run
-    directory on, which is all the coordination a sweep needs: no scheduler
-    process, no message passing, and array tasks that can join or die freely.
+    A stable advisory operation lock serializes claim creation/replacement;
+    owner tokens and generations fence former holders.  The shared run
+    filesystem must provide cluster-coherent advisory locks and atomic
+    same-directory replacement.  No scheduler process or message passing is
+    needed, and array tasks can join or die freely.
 
     Claims carry a heartbeat (the file's mtime, refreshed by
     :meth:`start_heartbeat`).  A claim whose heartbeat has gone quiet for
     ``stale_seconds`` belongs to a task that was killed or preempted, and any
-    other task may take it over.  The result file remains the real idempotency
-    guard, so the worst case for a mistakenly stolen unit is that it is solved
-    twice and written once.
+    other task may take it over.  The exact Slurm requeue successor may use the
+    scheduler restart generation to recover its own fresh orphan immediately;
+    unrelated live peers remain fenced.
     """
 
     def __init__(
@@ -798,6 +800,23 @@ class ClaimBroker:
         if not math.isfinite(self.heartbeat_seconds) or self.heartbeat_seconds <= 0.0:
             raise ValueError("heartbeat_seconds must be positive and finite.")
         self.owner_token = uuid.uuid4().hex
+        self._slurm_job_id = str(os.environ.get("SLURM_JOB_ID", "")).strip()
+        self._slurm_array_job_id = str(
+            os.environ.get("SLURM_ARRAY_JOB_ID", "")
+        ).strip()
+        self._slurm_array_task_id = str(
+            os.environ.get("SLURM_ARRAY_TASK_ID", "")
+        ).strip()
+        self._slurm_cluster_name = str(
+            os.environ.get("SLURM_CLUSTER_NAME", "")
+        ).strip()
+        try:
+            restart_count = int(str(
+                os.environ.get("SLURM_RESTART_COUNT", "0")
+            ).strip())
+        except (TypeError, ValueError, OverflowError):
+            restart_count = -1
+        self._slurm_restart_count = restart_count
         self._held: 'Dict[str, Tuple[Path, str, int]]' = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -933,10 +952,45 @@ class ClaimBroker:
             "generation": int(generation),
             "host": socket.gethostname(),
             "pid": os.getpid(),
-            "job": os.environ.get("SLURM_JOB_ID", ""),
-            "array_task": os.environ.get("SLURM_ARRAY_TASK_ID", ""),
+            "job": self._slurm_job_id,
+            "array_job": self._slurm_array_job_id,
+            "array_task": self._slurm_array_task_id,
+            "cluster": self._slurm_cluster_name,
+            "restart_count": max(0, self._slurm_restart_count),
             "claimed_at": time.time(),
         }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _is_requeued_successor(
+        self, document: 'Optional[Dict[str, Any]]'
+    ) -> 'bool':
+        """Return whether this process is Slurm's fenced restart of the owner.
+
+        A fresh claim normally belongs to a live peer and must never be stolen.
+        Slurm requeues are the one safe exception: the scheduler does not start
+        restart N+1 for an array task until restart N has ended, and exposes the
+        monotonically increasing ``SLURM_RESTART_COUNT`` as a fencing value.
+        Requiring the exact job/task/cluster identity plus a strictly newer
+        restart count prevents an ordinary peer (or two local processes with
+        blank Slurm variables) from using this fast takeover path.
+        """
+
+        if not document or not self._slurm_job_id or self._slurm_restart_count <= 0:
+            return False
+        try:
+            prior_restart = int(document.get("restart_count", 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if prior_restart < 0 or self._slurm_restart_count <= prior_restart:
+            return False
+        return (
+            str(document.get("job", "")).strip() == self._slurm_job_id
+            and str(document.get("array_job", "")).strip()
+            == self._slurm_array_job_id
+            and str(document.get("array_task", "")).strip()
+            == self._slurm_array_task_id
+            and str(document.get("cluster", "")).strip()
+            == self._slurm_cluster_name
+        )
 
     def _matches(self, path: 'Path', token: 'str', generation: 'int') -> 'bool':
         return self._identity(self._read_document(path)) == (token, generation)
@@ -993,7 +1047,11 @@ class ClaimBroker:
         temporary: 'Optional[Path]' = None
         try:
             existing = self._read_document(path)
-            if path.exists() and not self._is_stale(path):
+            if (
+                path.exists()
+                and not self._is_stale(path)
+                and not self._is_requeued_successor(existing)
+            ):
                 return False
             _old_token, old_generation = self._identity(existing)
             generation = old_generation + 1 if path.exists() else 1
@@ -1248,6 +1306,63 @@ class MemoryAwareDispatcher:
                     on_error(key, exc)
             if not progressed:
                 time.sleep(self.poll_seconds)
+
+    def run_until_outputs_complete(
+        self,
+        candidates: 'Sequence[Dict[str, Any]]',
+        prepare: 'Callable[[Dict[str, Any]], Optional[Tuple[str, float, Any]]]',
+        on_result: 'Callable[[str, Any], None]',
+        on_error: 'Callable[[str, BaseException], None]',
+        output_ready: 'Callable[[Dict[str, Any]], bool]',
+        resource_request: 'Optional[Callable[[Dict[str, Any]], Tuple[float, int]]]' = None,
+        should_stop: 'Optional[Callable[[], bool]]' = None,
+        retry_seconds: 'float' = 5.0,
+        on_wait: 'Optional[Callable[[int, int], None]]' = None,
+        sleep: 'Callable[[float], None]' = time.sleep,
+    ) -> 'Tuple[Dict[str, Any], ...]':
+        """Keep revisiting deferred claims until every expected output exists.
+
+        ``run`` intentionally treats a unit held by another task as deferred.
+        A single pass is not enough after a task dies: its fresh lease can make
+        every peer skip the unit and exit before stale takeover becomes legal.
+        This completion loop keeps workers alive, without stealing from a live
+        owner, until the peer publishes the output or the lease becomes
+        reclaimable.  A Slurm restart of the same task is fenced separately by
+        :meth:`ClaimBroker._is_requeued_successor` and can reclaim immediately.
+
+        The returned tuple is empty on success.  ``should_stop`` lets a driver
+        stop retrying after a real solve failure and exit nonzero with the
+        remaining units instead of looping forever on deterministic bad input.
+        """
+
+        delay = float(retry_seconds)
+        if not math.isfinite(delay) or delay <= 0.0:
+            raise ValueError("retry_seconds must be positive and finite.")
+        round_index = 0
+        while True:
+            missing = tuple(unit for unit in candidates if not output_ready(unit))
+            if not missing:
+                return ()
+            if should_stop is not None and should_stop():
+                return missing
+
+            self.run(
+                missing,
+                prepare,
+                on_result,
+                on_error,
+                resource_request,
+            )
+            missing = tuple(unit for unit in candidates if not output_ready(unit))
+            if not missing:
+                return ()
+            if should_stop is not None and should_stop():
+                return missing
+
+            round_index += 1
+            if on_wait is not None:
+                on_wait(len(missing), round_index)
+            sleep(delay)
 
     def _run_with_backfill(
         self,

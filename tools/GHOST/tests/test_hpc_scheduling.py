@@ -31,6 +31,8 @@ import time
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "Backend"
 sys.path.insert(0, str(BACKEND))
@@ -247,6 +249,69 @@ def test_claims():
         check(contenders[1].try_claim("unit-paused"),
               "claim takeover proceeds after the paused owner releases its lock")
 
+        # Slurm can requeue an array task immediately, well before an hour-old
+        # stale lease expires.  The scheduler's restart count is a fencing
+        # generation: only the exact same job/array task may use it.
+        requeue_dir = Path(tmp) / "requeue-claims"
+        identity = {
+            "SLURM_JOB_ID": "81001",
+            "SLURM_ARRAY_JOB_ID": "81001",
+            "SLURM_ARRAY_TASK_ID": "4",
+            "SLURM_CLUSTER_NAME": "test-cluster",
+        }
+        with mock.patch.dict(
+            os.environ, {**identity, "SLURM_RESTART_COUNT": "0"}, clear=False
+        ):
+            original_task = hpc_scheduler.ClaimBroker(
+                requeue_dir, stale_seconds=3600.0
+            )
+        check(original_task.try_claim("fresh-orphan"),
+              "original Slurm task owns the fresh orphan fixture")
+        orphan_path = requeue_dir / "fresh-orphan.claim"
+        original_mtime = orphan_path.stat().st_mtime_ns
+        with mock.patch.dict(
+            os.environ, {**identity, "SLURM_RESTART_COUNT": "1"}, clear=False
+        ):
+            restarted_task = hpc_scheduler.ClaimBroker(
+                requeue_dir, stale_seconds=3600.0
+            )
+        check(restarted_task.try_claim("fresh-orphan"),
+              "the exact requeued task immediately reclaims its fresh orphan")
+        restarted_document = json.loads(orphan_path.read_text(encoding="utf-8"))
+        check(restarted_document["generation"] == 2
+              and restarted_document["restart_count"] == 1,
+              "immediate requeue takeover advances both fencing generations")
+        restarted_mtime = orphan_path.stat().st_mtime_ns
+        original_task._heartbeat_once()
+        original_task.abandon("fresh-orphan")
+        check(orphan_path.is_file()
+              and orphan_path.stat().st_mtime_ns == restarted_mtime
+              and restarted_mtime >= original_mtime,
+              "the dead generation cannot refresh or abandon its successor")
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                **identity,
+                "SLURM_ARRAY_TASK_ID": "5",
+                "SLURM_RESTART_COUNT": "2",
+            },
+            clear=False,
+        ):
+            live_peer = hpc_scheduler.ClaimBroker(
+                requeue_dir, stale_seconds=3600.0
+            )
+        check(not live_peer.try_claim("fresh-orphan"),
+              "a different array task cannot steal a fresh live claim")
+        with mock.patch.dict(
+            os.environ, {**identity, "SLURM_RESTART_COUNT": "1"}, clear=False
+        ):
+            duplicate_restart = hpc_scheduler.ClaimBroker(
+                requeue_dir, stale_seconds=3600.0
+            )
+        check(not duplicate_restart.try_claim("fresh-orphan"),
+              "the same restart generation cannot steal from its live peer")
+
         check(broker.try_claim("unit-abandon-busy"),
               "busy-abandon fixture claim succeeds")
         abandon_path = Path(tmp) / "claims" / "unit-abandon-busy.claim"
@@ -334,6 +399,106 @@ class _FakePool:
     def apply_async(self, fn, args):
         self.order.append(args[0])
         return _FakeHandle(fn(*args))
+
+
+def test_completion_barrier():
+    """Deferred claims wait for output and exact requeues recover at once."""
+
+    print("\ncompletion barrier / immediate requeue")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        identity = {
+            "SLURM_JOB_ID": "92001",
+            "SLURM_ARRAY_JOB_ID": "92001",
+            "SLURM_ARRAY_TASK_ID": "2",
+            "SLURM_CLUSTER_NAME": "test-cluster",
+        }
+        with mock.patch.dict(
+            os.environ, {**identity, "SLURM_RESTART_COUNT": "0"}, clear=False
+        ):
+            dead = hpc_scheduler.ClaimBroker(
+                root / "claims", stale_seconds=3600.0
+            )
+        check(dead.try_claim("unit"), "killed-task fixture has a fresh lease")
+        with mock.patch.dict(
+            os.environ, {**identity, "SLURM_RESTART_COUNT": "1"}, clear=False
+        ):
+            successor = hpc_scheduler.ClaimBroker(
+                root / "claims", stale_seconds=3600.0
+            )
+
+        output = root / "unit.grim"
+        dispatcher = hpc_scheduler.MemoryAwareDispatcher(
+            _FakePool(), budget_gb=1.0, max_concurrent=1, poll_seconds=0.0
+        )
+
+        def prepare(_unit):
+            if not successor.try_claim("unit"):
+                return None
+            return (
+                "unit", 0.1,
+                (lambda path: Path(path).write_text("done", encoding="utf-8"),
+                 (str(output),)),
+            )
+
+        def on_result(key, _value):
+            successor.release(key)
+
+        slept = []
+        remaining = dispatcher.run_until_outputs_complete(
+            [{"name": "unit"}],
+            prepare,
+            on_result,
+            lambda _key, exc: (_ for _ in ()).throw(exc),
+            lambda _unit: output.is_file(),
+            retry_seconds=1.0,
+            sleep=lambda seconds: slept.append(seconds),
+        )
+        check(not remaining and output.is_file() and not slept,
+              "a requeued task recovers and publishes before any stale wait")
+
+        # A genuine live peer remains fenced.  The completion barrier may not
+        # return success merely because prepare declined its claim; it waits
+        # until that peer's expected output becomes visible.
+        peer_output = root / "peer.grim"
+        peer_claims = root / "peer-claims"
+        owner = hpc_scheduler.ClaimBroker(peer_claims, stale_seconds=3600.0)
+        waiter = hpc_scheduler.ClaimBroker(peer_claims, stale_seconds=3600.0)
+        check(owner.try_claim("peer"), "live-peer fixture owns its unit")
+        solve_calls = []
+
+        def prepare_peer(_unit):
+            if not waiter.try_claim("peer"):
+                return None
+            solve_calls.append("stolen")
+            return ("peer", 0.1, (lambda: None, ()))
+
+        remaining = dispatcher.run_until_outputs_complete(
+            [{"name": "peer"}],
+            prepare_peer,
+            lambda _key, _value: None,
+            lambda _key, exc: (_ for _ in ()).throw(exc),
+            lambda _unit: peer_output.is_file(),
+            retry_seconds=1.0,
+            sleep=lambda _seconds: peer_output.write_text(
+                "peer done", encoding="utf-8"
+            ),
+        )
+        check(not remaining and not solve_calls and peer_output.is_file(),
+              "a worker waits for its live peer instead of stealing or exiting")
+
+        stopped = dispatcher.run_until_outputs_complete(
+            [{"name": "missing"}],
+            lambda _unit: None,
+            lambda _key, _value: None,
+            lambda _key, _exc: None,
+            lambda _unit: False,
+            should_stop=lambda: True,
+            retry_seconds=1.0,
+            sleep=lambda _seconds: None,
+        )
+        check(len(stopped) == 1,
+              "a failed worker returns its missing inventory for nonzero exit")
 
 
 def test_memory_admission():
@@ -978,6 +1143,37 @@ def test_end_to_end():
         check(len(units) == expected_units, "every grim reads back cleanly")
         check(all(u["amp"].size for u in units),
               "complex amplitudes were preserved in every grim")
+
+        # Exact filenames alone are not completion.  Mutate the embedded run
+        # binding while preserving an otherwise readable NPZ and prove both
+        # the status endpoint and a worker fail closed.
+        with np.load(sample, allow_pickle=False) as stored:
+            tampered = {key: np.array(stored[key], copy=True)
+                        for key in stored.files}
+        audit_raw = np.asarray(tampered["solver_metadata_json"]).reshape(()).item()
+        if isinstance(audit_raw, bytes):
+            audit_raw = audit_raw.decode("utf-8")
+        audit = json.loads(str(audit_raw))
+        audit_metadata = audit.get("metadata", audit)
+        audit_metadata["output_attestation"]["run_id"] = "wrong-run"
+        tampered["solver_metadata_json"] = np.asarray(
+            json.dumps(audit, sort_keys=True, separators=(",", ":"))
+        )
+        temporary = sample.with_name(f".{sample.name}.tampered")
+        with temporary.open("wb") as stream:
+            np.savez_compressed(stream, **tampered)
+        os.replace(temporary, sample)
+
+        untrusted = hpc_common.run_status(run_dir)
+        check(not untrusted["complete"]
+              and not untrusted["attestation_verified"]
+              and "run_id" in untrusted["attestation_error"],
+              "run_status rejects a complete-looking file with wrong attestation")
+        corrupt_restart = _run(
+            driver, ["--worker", str(run_dir), "0", "0"]
+        )
+        check(corrupt_restart.returncode != 0,
+              "a worker cannot exit success with an untrusted expected output")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -986,6 +1182,7 @@ def main():
     test_balance()
     test_windows_lock_initialization()
     test_claims()
+    test_completion_barrier()
     test_memory_admission()
     test_memory_cpu_backfill()
     test_formulation_resource_plan()

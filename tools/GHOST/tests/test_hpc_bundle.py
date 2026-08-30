@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -18,11 +19,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
+
 
 BACKEND = Path(__file__).resolve().parent.parent / "Backend"
 sys.path.insert(0, str(BACKEND))
 
 import hpc_bundle  # noqa: E402
+import hpc_common  # noqa: E402
+import feature_sum  # noqa: E402
+import workflow_provenance  # noqa: E402
 
 
 def _write_geometry(root: Path, name: str = "body.geo", *, sidecar: bool = True) -> Path:
@@ -73,6 +79,223 @@ class PortableBundleTests(unittest.TestCase):
             },
         )
         return target, request
+
+    def _minimal_run(self, *, solver: str = "2d") -> tuple[Path, dict]:
+        run_dir = self.temporary / f"run_status_{solver}"
+        run_dir.mkdir()
+        common = {
+            "run_id": run_dir.name,
+            "solver_source_sha256": "a" * 64,
+            "runtime_environment_sha256": "b" * 64,
+            "solver_config": {"geometry_units": "meters"},
+        }
+        if solver == "2d":
+            units = [{
+                "geometry": "/tmp/body.geo",
+                "geometry_stem": "body",
+                "geometry_input_sha256": "c" * 64,
+                "frequency_ghz": 1.0,
+                "polarizations": ["VV", "HH"],
+                "role": "FRD",
+            }]
+            manifest = {
+                **common,
+                "schema": "ghost.hpc.2d-run.v2",
+                "unit_output_dir": "results",
+                "azimuths_deg": [0.0],
+                "units": units,
+                "n_units": len(units),
+            }
+        else:
+            units = [
+                {
+                    "geometry": "/tmp/body.geo",
+                    "geometry_stem": "body",
+                    "geometry_input_sha256": "c" * 64,
+                    "frequency_ghz": 1.0,
+                    "polarization": polarization,
+                }
+                for polarization in ("VV", "HH")
+            ]
+            manifest = {
+                **common,
+                "schema": "ghost.hpc.bor-run.v1",
+                "unit_output_dir": "results/by_frequency",
+                "aspects_deg": [0.0],
+                "units": units,
+                "n_units": len(units),
+            }
+        (run_dir / "manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        return run_dir, manifest
+
+    def test_run_status_requires_exact_attested_unit_inventory(self) -> None:
+        run_dir, _manifest = self._minimal_run(solver="2d")
+        expected = run_dir / "results" / "FRD" / "1.000GHz_body.grim"
+        expected.parent.mkdir(parents=True)
+        expected.write_bytes(b"unit")
+
+        with mock.patch.object(
+            hpc_common, "require_hpc_output_attestations", return_value=None
+        ):
+            complete = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertTrue(complete["complete"])
+        self.assertTrue(complete["attestation_verified"])
+        self.assertEqual(complete["n_done"], 1)
+        self.assertEqual(complete["missing"], [])
+
+        unexpected = run_dir / "results" / "unexpected.grim"
+        unexpected.write_bytes(b"extra")
+        with mock.patch.object(
+            hpc_common, "require_hpc_output_attestations", return_value=None
+        ):
+            extra = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertFalse(extra["complete"])
+        self.assertEqual(extra["unexpected"], ["results/unexpected.grim"])
+        unexpected.unlink()
+
+        with mock.patch.object(
+            hpc_common,
+            "require_hpc_output_attestations",
+            side_effect=ValueError("wrong embedded run attestation"),
+        ):
+            untrusted = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertFalse(untrusted["complete"])
+        self.assertFalse(untrusted["attestation_verified"])
+        self.assertIn("wrong embedded run attestation", untrusted["attestation_error"])
+
+        with mock.patch.object(
+            hpc_common, "require_hpc_output_attestations", return_value=None
+        ):
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                returncode = hpc_bundle.main(["run-status", str(run_dir)])
+        self.assertEqual(returncode, 0)
+        self.assertEqual(
+            json.loads(stdout.getvalue())["schema"],
+            "ghost.hpc.run-status.v1",
+        )
+
+    def test_bor_run_status_requires_verified_publication(self) -> None:
+        run_dir, manifest = self._minimal_run(solver="bor")
+        unit_root = run_dir / "results" / "by_frequency"
+        unit_root.mkdir(parents=True)
+        for polarization in ("VV", "HH"):
+            (unit_root / f"{polarization}_1.000GHz_body.grim").write_bytes(b"unit")
+
+        with mock.patch.object(
+            hpc_common, "require_hpc_output_attestations", return_value=None
+        ):
+            missing = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertTrue(missing["unit_complete"])
+        self.assertFalse(missing["complete"])
+        self.assertEqual(missing["derived_missing"], ["results/body.grim"])
+
+        publication = run_dir / "results" / "body.grim"
+        publication.write_bytes(b"published")
+        run_spec = "d" * 64
+        payload = {
+            "geometry_input_sha256": manifest["units"][0][
+                "geometry_input_sha256"
+            ],
+            "solver_source_sha256": manifest["solver_source_sha256"],
+            "runtime_environment_sha256": manifest[
+                "runtime_environment_sha256"
+            ],
+            "run_solve_spec_sha256": run_spec,
+        }
+        with (
+            mock.patch.object(
+                hpc_common, "require_hpc_output_attestations", return_value=None
+            ),
+            mock.patch.object(feature_sum, "_load_grim", return_value=payload),
+            mock.patch.object(feature_sum, "load_body_grim", return_value={}),
+            mock.patch.object(
+                workflow_provenance,
+                "manifest_solve_spec_fingerprint",
+                return_value=run_spec,
+            ),
+        ):
+            complete = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertTrue(complete["complete"])
+        self.assertTrue(complete["publication_verified"])
+        self.assertEqual(complete["n_derived_done"], 1)
+
+        wrong_payload = dict(payload, run_solve_spec_sha256="wrong-run")
+        with (
+            mock.patch.object(
+                hpc_common, "require_hpc_output_attestations", return_value=None
+            ),
+            mock.patch.object(
+                feature_sum, "_load_grim", return_value=wrong_payload
+            ),
+            mock.patch.object(feature_sum, "load_body_grim", return_value={}),
+            mock.patch.object(
+                workflow_provenance,
+                "manifest_solve_spec_fingerprint",
+                return_value=run_spec,
+            ),
+        ):
+            wrong_run = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertFalse(wrong_run["complete"])
+        self.assertIn("does not match this run", wrong_run["publication_error"])
+
+    def test_bor_run_status_reads_real_run_bound_body_grim(self) -> None:
+        run_dir, manifest = self._minimal_run(solver="bor")
+        unit_root = run_dir / "results" / "by_frequency"
+        unit_root.mkdir(parents=True)
+        for polarization in ("VV", "HH"):
+            (unit_root / f"{polarization}_1.000GHz_body.grim").write_bytes(b"unit")
+
+        amplitude = 1.0 / math.sqrt(4.0 * math.pi)
+        bodies = {1.0: {
+            "theta_deg": np.asarray([0.0, 90.0, 180.0]),
+            "amp_vv": np.asarray([amplitude] * 3, dtype=complex),
+            "amp_hh": np.asarray([amplitude] * 3, dtype=complex),
+        }}
+        profile = np.asarray([[0.0, 1.0], [0.2, 0.0], [0.0, -1.0]])
+        run_spec = workflow_provenance.manifest_solve_spec_fingerprint(manifest)
+        metadata = {
+            "geometry_input_sha256": manifest["units"][0][
+                "geometry_input_sha256"
+            ],
+            "solver_source_sha256": manifest["solver_source_sha256"],
+            "runtime_environment_sha256": manifest[
+                "runtime_environment_sha256"
+            ],
+            "run_solve_spec_sha256": run_spec,
+        }
+        publication = run_dir / "results" / "body.grim"
+        feature_sum.save_monostatic_grim(
+            bodies,
+            profile,
+            str(publication),
+            azimuths_deg=[0.0, 90.0],
+            elevations_deg=[0.0],
+            artifact_metadata=metadata,
+        )
+        with mock.patch.object(
+            hpc_common, "require_hpc_output_attestations", return_value=None
+        ):
+            complete = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertTrue(complete["complete"])
+        self.assertTrue(complete["publication_verified"])
+
+        feature_sum.save_monostatic_grim(
+            bodies,
+            profile,
+            str(publication),
+            azimuths_deg=[0.0, 90.0],
+            elevations_deg=[0.0],
+            artifact_metadata={**metadata, "run_solve_spec_sha256": "wrong-run"},
+        )
+        with mock.patch.object(
+            hpc_common, "require_hpc_output_attestations", return_value=None
+        ):
+            rejected = hpc_bundle.inspect_hpc_run(run_dir)
+        self.assertFalse(rejected["complete"])
+        self.assertIn("does not match this run", rejected["publication_error"])
 
     def test_create_is_relative_complete_and_self_documenting(self) -> None:
         target, request = self._create_2d()
@@ -324,6 +547,69 @@ class PortableBundleTests(unittest.TestCase):
             json.loads(Path(first["stage_dir"], "stage_result.json").read_text()),
             first,
         )
+
+    def test_windows_stage_guard_initialization_locks_before_seeding(self) -> None:
+        class OrderedWindowsLock:
+            LK_NBLCK = 1
+            LK_UNLCK = 2
+
+            def __init__(self, events, *, unavailable=False):
+                self.events = events
+                self.unavailable = unavailable
+
+            def locking(self, fd, mode, count):
+                self.events.append("unlock" if mode == self.LK_UNLCK else "lock")
+                self.assertion = (os.fstat(fd).st_size, count)
+                if self.unavailable and mode == self.LK_NBLCK:
+                    raise OSError(hpc_bundle.errno.EACCES, "lock held")
+
+        guard_path = self.temporary / "windows-first-use.guard"
+        events = []
+        fake_lock = OrderedWindowsLock(events)
+        real_write = os.write
+
+        def record_write(fd, payload):
+            events.append("write")
+            return real_write(fd, payload)
+
+        with (
+            mock.patch.object(hpc_bundle, "fcntl", None),
+            mock.patch.object(hpc_bundle, "msvcrt", fake_lock),
+            mock.patch.object(hpc_bundle.os, "write", side_effect=record_write),
+        ):
+            fd = hpc_bundle._StageLease._try_lock_file(guard_path)
+            self.assertIsNotNone(fd)
+            self.assertEqual(events[:2], ["lock", "write"])
+            self.assertEqual(fake_lock.assertion, (0, 1))
+            hpc_bundle._StageLease._unlock_file(fd)
+        self.assertEqual(guard_path.read_bytes(), b"\0")
+        self.assertEqual(events[-1], "unlock")
+
+        # A losing first-use contender must neither seed the file nor leak the
+        # descriptor it opened; it reports ordinary nonblocking unavailability.
+        busy_path = self.temporary / "windows-busy-first-use.guard"
+        captured_fds = []
+        busy_events = []
+        busy_lock = OrderedWindowsLock(busy_events, unavailable=True)
+        real_open = os.open
+
+        def record_open(*args, **kwargs):
+            opened_fd = real_open(*args, **kwargs)
+            captured_fds.append(opened_fd)
+            return opened_fd
+
+        with (
+            mock.patch.object(hpc_bundle, "fcntl", None),
+            mock.patch.object(hpc_bundle, "msvcrt", busy_lock),
+            mock.patch.object(hpc_bundle.os, "open", side_effect=record_open),
+            mock.patch.object(hpc_bundle.os, "write", wraps=real_write) as write,
+        ):
+            result = hpc_bundle._StageLease._try_lock_file(busy_path)
+        self.assertIsNone(result)
+        self.assertEqual(busy_events, ["lock"])
+        write.assert_not_called()
+        with self.assertRaises(OSError):
+            os.fstat(captured_fds[-1])
 
     def test_concurrent_stage_submit_has_one_driver_invocation(self) -> None:
         target, _request = self._create_2d()

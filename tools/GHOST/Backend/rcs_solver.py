@@ -9879,6 +9879,7 @@ def compute_boundary_densities(
     material_base_dir: 'Optional[str]' = None,
     cfie_alpha: 'float' = CFIE_ALPHA_DEFAULT,
     max_panels: 'int' = MAX_PANELS_DEFAULT,
+    abort_event: 'Optional[threading.Event]' = None,
 ) -> 'Dict[str, Any]':
     """
     Compute formulation-specific boundary-integral unknowns for visualization.
@@ -9889,6 +9890,13 @@ def compute_boundary_densities(
     and the formulation used for a single-frequency, single-angle debug solve.
     """
 
+    def check_abort() -> 'None':
+        if abort_event is not None and abort_event.is_set():
+            raise InterruptedError(
+                "Boundary-density calculation canceled by user."
+            )
+
+    check_abort()
     cfie_alpha = _validate_disabled_2d_cfie_alpha(cfie_alpha)
     pol = _normalize_polarization(polarization)
     unit_scale = _unit_scale_to_meters(geometry_units)
@@ -9902,17 +9910,21 @@ def compute_boundary_densities(
     k0 = 2.0 * math.pi * freq_hz / C0
 
     preflight = validate_geometry_snapshot_for_solver(geometry_snapshot, base_dir=base_dir, meters_scale=unit_scale)
+    check_abort()
     materials = MaterialLibrary.from_entries(
         geometry_snapshot.get("ibcs", []) or [],
         geometry_snapshot.get("dielectrics", []) or [],
         base_dir=base_dir,
     )
+    check_abort()
     lambda_min, mesh_max_index, mesh_material_flags = _mesh_wavelength_for_snapshot(
         geometry_snapshot, materials, frequency_ghz
     )
     panels = _build_panels(geometry_snapshot, unit_scale, lambda_min, max_panels=max_panels)
+    check_abort()
     preview_infos = _build_coupled_panel_info(panels, materials, frequency_ghz, pol, k0)
     mesh, _ = _build_linear_mesh_interface_aware(panels, preview_infos)
+    check_abort()
     coupled_infos = _build_linear_coupled_infos(mesh, materials, frequency_ghz, pol, k0)
     _assert_no_type1_sheet(coupled_infos)
     _assert_air_exterior(coupled_infos)
@@ -9936,6 +9948,7 @@ def compute_boundary_densities(
     use_robin = _is_all_robin(coupled_infos)
 
     resources = _dense_formulation_resources(mesh, coupled_infos, pol)
+    check_abort()
     est_gb = _estimate_memory_gb(
         resources["nodes"],
         use_cfie=False,
@@ -9961,8 +9974,10 @@ def compute_boundary_densities(
 
     if use_multi:
         # Multi-region: extract exterior SLP density.
+        check_abort()
         _, _, _, ext_density = _solve_multi_region_indirect(
             mesh, coupled_infos, pol, k0, elev_arr)
+        check_abort()
         sigma_nodes = ext_density[:, 0]
         density = np.asarray([
             0.5 * (sigma_nodes[e.node_ids[0]] + sigma_nodes[e.node_ids[1]])
@@ -9982,10 +9997,13 @@ def compute_boundary_densities(
         _, K0 = _assemble_linear_operator_matrices(
             mesh, k0, False, compute_single_layer=False
         )
+        check_abort()
         S1, Kp1 = _assemble_linear_operator_matrices(
             mesh, k1, True, compute_single_layer=True
         )
+        check_abort()
         D0 = _assemble_linear_hypersingular_matrix(mesh, k0)
+        check_abort()
         M = _assemble_linear_mass_matrix(mesh)
         a = np.zeros((2*nnodes, 2*nnodes), dtype=np.complex128)
         a[:nnodes,:nnodes] = 0.5*M+K0; a[:nnodes,nnodes:] = -S1
@@ -9995,7 +10013,9 @@ def compute_boundary_densities(
             ids = np.asarray(elem.node_ids, dtype=int)
             rhs[ids] += _linear_element_incident_load_many(elem, k0, elev_arr)[:,0]
             rhs[nnodes+ids] -= _linear_element_incident_dn_load_many(elem, k0, elev_arr)[:,0]
+        check_abort()
         sol = np.linalg.solve(a, rhs)
+        check_abort()
         mu_nodes = sol[:nnodes]
         density = np.asarray([
             0.5*(mu_nodes[e.node_ids[0]]+mu_nodes[e.node_ids[1]])
@@ -10011,10 +10031,13 @@ def compute_boundary_densities(
         a_sys, alpha_elements, pec_node = _assemble_robin_bie_system(
             mesh, coupled_infos, pol, k0
         )
+        check_abort()
         rhs = _robin_bie_rhs_many(
             mesh, alpha_elements, pec_node, pol, k0, elev_arr
         )
+        check_abort()
         sigma_nodes = np.linalg.solve(a_sys, rhs)[:, 0]
+        check_abort()
         density = np.asarray([
             0.5*(sigma_nodes[e.node_ids[0]]+sigma_nodes[e.node_ids[1]])
             for e in mesh.elements
@@ -10044,6 +10067,8 @@ def compute_boundary_densities(
         "frequency_ghz": float(frequency_ghz),
         "elevation_deg": float(elevation_deg),
         "polarization": pol,
+        "coordinate_units": "meters",
+        "length_units": "meters",
         "mesh_wavelength_m": float(lambda_min),
         "mesh_max_refractive_index": float(mesh_max_index),
         "mesh_material_flags": list(mesh_material_flags),

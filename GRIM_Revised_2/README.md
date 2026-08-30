@@ -466,9 +466,13 @@ GRIM records the bundle ID and expected remote `stage_result.json` before the
 upload begins. If SSH drops while `sbatch` is running, the run is marked
 **SUBMISSION UNKNOWN** rather than submitted again; use **Refresh** to recover
 the stage result and any job IDs. Refresh also shows recent submission and
-SLURM task logs. Results become downloadable only after SLURM reports a
-terminal state, and GRIM refuses to merge them into an existing local
-`results` folder. The **Remote Python** field defaults to `python3`; point it at
+SLURM task logs. A terminal scheduler state alone is not treated as success:
+Refresh invokes the Linux bundle helper's read-only `run-status` check and
+requires the exact manifest output set, valid embedded unit attestations, and
+(for BoR) every readable, run-bound published body GRIM. Download repeats that
+remote check immediately before transfer, and GRIM refuses to merge results
+into an existing local `results` folder. The **Remote Python** field defaults
+to `python3`; point it at
 the cluster virtual-environment interpreter when the default environment does
 not contain GHOST's dependencies.
 

@@ -2860,8 +2860,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         if self.ghost_integration.solve_is_running():
             QMessageBox.warning(
                 self,
-                "Solver Still Running",
-                "A GHOST solve is still running. Click Cancel in the GHOST "
+                "GHOST Task Still Running",
+                "A GHOST solve or boundary-density task is still running. "
+                "Click Cancel in the GHOST "
                 "Solver tab, wait for cancellation to finish, and then close GRIM.",
             )
             self.main_tabs.setCurrentWidget(self.ghost_integration)

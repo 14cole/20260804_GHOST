@@ -106,6 +106,29 @@ class _FakeRemoteClient:
         )
         self.stage_exception: Exception | None = None
         self.stage_result = None
+        self.completion_result = {
+            "schema": "ghost.hpc.run-status.v1",
+            "ok": True,
+            "complete": True,
+            "n_units": 6,
+            "n_done": 6,
+            "pending": 0,
+            "missing": [],
+            "unexpected": [],
+            "unit_complete": True,
+            "unit_exact": True,
+            "attestation_verified": True,
+            "attestation_error": "",
+            "publication_verified": True,
+            "publication_error": "",
+            "n_derived_expected": 0,
+            "n_derived_done": 0,
+            "derived_expected": [],
+            "derived_done": [],
+            "derived_missing": [],
+            "derived_unexpected": [],
+        }
+        self.completion_exception: Exception | None = None
 
     def test_connection(self):
         self.calls.append(("test",))
@@ -188,6 +211,25 @@ class _FakeRemoteClient:
     def query_jobs(self, job_ids):
         self.calls.append(("query", tuple(job_ids)))
         return self.statuses
+
+    def query_run_completion(
+        self,
+        remote_cli,
+        remote_run_directory,
+        *,
+        python_executable="python3",
+    ):
+        self.calls.append(
+            (
+                "run-status",
+                remote_cli,
+                remote_run_directory,
+                python_executable,
+            )
+        )
+        if self.completion_exception is not None:
+            raise self.completion_exception
+        return dict(self.completion_result)
 
     def tail_log(self, remote_path, *, lines):
         self.calls.append(("tail", remote_path, lines))
@@ -553,10 +595,93 @@ class RunsWorkspaceTests(unittest.TestCase):
 
         run = self.workspace.tracked_runs[0]
         self.assertEqual(run.state, "COMPLETED")
+        self.assertIs(run.results_complete, True)
+        self.assertEqual((run.results_present, run.results_expected), (6, 6))
+        self.assertTrue(self.workspace.btn_download.isEnabled())
+        self.assertIn(
+            (
+                "run-status",
+                "/cluster/GHOST/Backend/hpc_bundle.py",
+                "/cluster/grim/workspaces/rcs_runs/run_20260101_010101",
+                "python3",
+            ),
+            self.remote_client.calls,
+        )
         self.assertIn("solver progress", self.workspace.log_view.toPlainText())
         self.assertIn("frequency complete", self.workspace.log_view.toPlainText())
         self.assertFalse(self.workspace.job_is_running())
         self.assertIsNone(self.workspace.busy_operation())
+
+    def test_terminal_scheduler_state_with_missing_outputs_fails_closed(self) -> None:
+        self._configure_2d_request()
+        self._configure_connection()
+        self.workspace.run_name_edit.setText("survey_incomplete")
+        self.assertTrue(self.workspace.upload_and_submit())
+        _wait_for_idle(self.app, self.workspace)
+        self.workspace.jobs_table.selectRow(0)
+        self.remote_client.statuses = (
+            SimpleNamespace(job_id="321", state="COMPLETED"),
+            SimpleNamespace(job_id="654", state="COMPLETED"),
+        )
+        self.remote_client.completion_result = {
+            "schema": "ghost.hpc.run-status.v1",
+            "ok": True,
+            "complete": False,
+            "n_units": 6,
+            "n_done": 5,
+            "pending": 1,
+            "missing": ["results/unit_006.grim"],
+            "unexpected": [],
+            "unit_complete": False,
+            "unit_exact": False,
+            "attestation_verified": False,
+            "attestation_error": "",
+            "publication_verified": True,
+            "publication_error": "",
+            "n_derived_expected": 0,
+            "n_derived_done": 0,
+            "derived_expected": [],
+            "derived_done": [],
+            "derived_missing": [],
+            "derived_unexpected": [],
+        }
+
+        self.assertTrue(self.workspace.refresh_selected_run())
+        _wait_for_idle(self.app, self.workspace)
+
+        run = self.workspace.tracked_runs[0]
+        self.assertEqual(run.state, "INCOMPLETE")
+        self.assertIs(run.results_complete, False)
+        self.assertEqual((run.results_present, run.results_expected), (5, 6))
+        self.assertIn("SLURM COMPLETED", run.progress)
+        self.assertIn("1 missing", run.progress)
+        self.assertFalse(self.workspace.btn_download.isEnabled())
+        self.assertFalse(self.workspace.btn_cancel.isEnabled())
+
+    def test_terminal_scheduler_state_with_status_query_failure_fails_closed(self) -> None:
+        self._configure_2d_request()
+        self._configure_connection()
+        self.workspace.run_name_edit.setText("survey_unverified")
+        self.assertTrue(self.workspace.upload_and_submit())
+        _wait_for_idle(self.app, self.workspace)
+        self.workspace.jobs_table.selectRow(0)
+        self.remote_client.statuses = (
+            SimpleNamespace(job_id="321", state="COMPLETED"),
+            SimpleNamespace(job_id="654", state="COMPLETED"),
+        )
+        self.remote_client.completion_exception = RuntimeError(
+            "run manifest is temporarily unreadable"
+        )
+
+        self.assertTrue(self.workspace.refresh_selected_run())
+        _wait_for_idle(self.app, self.workspace)
+
+        run = self.workspace.tracked_runs[0]
+        self.assertEqual(run.state, "INCOMPLETE")
+        self.assertIs(run.results_complete, False)
+        self.assertIn("verification failed", run.progress)
+        self.assertIn("temporarily unreadable", run.progress)
+        self.assertFalse(self.workspace.btn_download.isEnabled())
 
     def test_refresh_does_not_terminalize_mixed_failed_and_running_jobs(self) -> None:
         self._configure_2d_request()
@@ -624,6 +749,7 @@ class RunsWorkspaceTests(unittest.TestCase):
         self.assertTrue(self.workspace.upload_and_submit())
         _wait_for_idle(self.app, self.workspace)
         self.workspace.tracked_runs[0].state = "COMPLETED"
+        self.workspace.tracked_runs[0].results_complete = True
         self.workspace._render_runs(select_run_id="survey_download")
         self.workspace.jobs_table.selectRow(0)
         destination = self.root / "downloaded"
@@ -640,6 +766,13 @@ class RunsWorkspaceTests(unittest.TestCase):
         download = next(
             call for call in self.remote_client.calls if call[0] == "download"
         )
+        run_status_index = next(
+            index
+            for index, call in enumerate(self.remote_client.calls)
+            if call[0] == "run-status"
+        )
+        download_index = self.remote_client.calls.index(download)
+        self.assertLess(run_status_index, download_index)
         self.assertEqual(
             download[1],
             "/cluster/grim/workspaces/rcs_runs/run_20260101_010101/results",
@@ -648,6 +781,80 @@ class RunsWorkspaceTests(unittest.TestCase):
         self.assertIn(
             str(destination / "results"), self.workspace.status_label.text()
         )
+
+    def test_download_rejects_stale_cached_completion_before_transfer(self) -> None:
+        self._configure_2d_request()
+        self._configure_connection()
+        self.workspace.run_name_edit.setText("survey_stale_download")
+        self.assertTrue(self.workspace.upload_and_submit())
+        _wait_for_idle(self.app, self.workspace)
+        run = self.workspace.tracked_runs[0]
+        run.state = "COMPLETED"
+        run.results_complete = True
+        self.workspace._render_runs(select_run_id=run.run_id)
+        self.workspace.jobs_table.selectRow(0)
+        self.remote_client.completion_result.update(
+            complete=False,
+            n_done=5,
+            pending=1,
+            missing=["results/unit_006.grim"],
+            unit_complete=False,
+            unit_exact=False,
+            attestation_verified=False,
+        )
+        destination = self.root / "stale_download"
+        destination.mkdir()
+
+        with mock.patch.object(
+            QFileDialog,
+            "getExistingDirectory",
+            return_value=str(destination),
+        ):
+            self.assertTrue(self.workspace.download_selected_results())
+        _wait_for_idle(self.app, self.workspace)
+
+        self.assertTrue(
+            any(call[0] == "run-status" for call in self.remote_client.calls)
+        )
+        self.assertFalse(
+            any(call[0] == "download" for call in self.remote_client.calls)
+        )
+        self.assertEqual(run.state, "INCOMPLETE")
+        self.assertIs(run.results_complete, False)
+        self.assertEqual((run.results_present, run.results_expected), (5, 6))
+        self.assertIn("no files were downloaded", self.workspace.last_error)
+
+    def test_download_blocks_when_fresh_completion_query_errors(self) -> None:
+        self._configure_2d_request()
+        self._configure_connection()
+        self.workspace.run_name_edit.setText("survey_download_query_error")
+        self.assertTrue(self.workspace.upload_and_submit())
+        _wait_for_idle(self.app, self.workspace)
+        run = self.workspace.tracked_runs[0]
+        run.state = "COMPLETED"
+        run.results_complete = True
+        self.workspace._render_runs(select_run_id=run.run_id)
+        self.workspace.jobs_table.selectRow(0)
+        self.remote_client.completion_exception = RuntimeError(
+            "completion protocol unavailable"
+        )
+        destination = self.root / "query_error_download"
+        destination.mkdir()
+
+        with mock.patch.object(
+            QFileDialog,
+            "getExistingDirectory",
+            return_value=str(destination),
+        ):
+            self.assertTrue(self.workspace.download_selected_results())
+        _wait_for_idle(self.app, self.workspace)
+
+        self.assertFalse(
+            any(call[0] == "download" for call in self.remote_client.calls)
+        )
+        self.assertEqual(run.state, "INCOMPLETE")
+        self.assertIs(run.results_complete, False)
+        self.assertIn("verification failed", self.workspace.last_error)
 
     def test_download_waits_for_terminal_state_and_refuses_local_merge(self) -> None:
         self._configure_2d_request()
@@ -662,9 +869,16 @@ class RunsWorkspaceTests(unittest.TestCase):
         chooser.assert_not_called()
         self.assertIn("terminal state", self.workspace.last_error)
 
+        self.workspace.tracked_runs[0].state = "COMPLETED"
+        self.workspace._render_runs(select_run_id="survey_safe_download")
+        with mock.patch.object(QFileDialog, "getExistingDirectory") as chooser:
+            self.assertFalse(self.workspace.download_selected_results())
+        chooser.assert_not_called()
+        self.assertIn("manifest-exact output inventory", self.workspace.last_error)
+
         destination = self.root / "collision"
         (destination / "results").mkdir(parents=True)
-        self.workspace.tracked_runs[0].state = "COMPLETED"
+        self.workspace.tracked_runs[0].results_complete = True
         self.workspace._render_runs(select_run_id="survey_safe_download")
         with mock.patch.object(
             QFileDialog, "getExistingDirectory", return_value=str(destination)
@@ -674,6 +888,38 @@ class RunsWorkspaceTests(unittest.TestCase):
         self.assertFalse(
             any(call[0] == "download" for call in self.remote_client.calls)
         )
+
+    def test_tracked_run_completion_evidence_is_backward_compatible_and_persisted(self) -> None:
+        legacy = TrackedRun.from_json_value(
+            {
+                "run_id": "legacy_complete",
+                "solver": "2d",
+                "state": "COMPLETED",
+            }
+        )
+        self.assertIsNone(legacy.results_complete)
+
+        current = TrackedRun(
+            run_id="verified_complete",
+            solver="bor",
+            state="COMPLETED",
+            results_complete=True,
+            results_expected=14,
+            results_present=14,
+        )
+        restored = TrackedRun.from_json_value(current.to_json_value())
+        self.assertIs(restored.results_complete, True)
+        self.assertEqual((restored.results_present, restored.results_expected), (14, 14))
+
+        malformed = current.to_json_value()
+        malformed.update(
+            results_complete="yes",
+            results_expected=-1,
+            results_present=True,
+        )
+        sanitized = TrackedRun.from_json_value(malformed)
+        self.assertIsNone(sanitized.results_complete)
+        self.assertEqual((sanitized.results_present, sanitized.results_expected), (0, 0))
 
     def test_bundle_chooser_distinguishes_existing_bundle_from_parent(self) -> None:
         parent = self.root / "exports"

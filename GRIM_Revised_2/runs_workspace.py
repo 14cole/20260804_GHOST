@@ -70,6 +70,7 @@ _TERMINAL_STATES = frozenset(
         "TIMEOUT",
     }
 )
+_RUN_TERMINAL_STATES = _TERMINAL_STATES | {"INCOMPLETE"}
 
 
 def _utc_now_text() -> str:
@@ -88,6 +89,12 @@ def _normalize_slurm_state(value: Any) -> str:
 
 def _is_terminal_state(value: Any) -> bool:
     return _normalize_slurm_state(value) in _TERMINAL_STATES
+
+
+def _is_run_terminal_state(value: Any) -> bool:
+    """Include GRIM's local fail-closed terminal result state."""
+
+    return _normalize_slurm_state(value) in _RUN_TERMINAL_STATES
 
 
 def _plain_mapping(value: Any) -> dict[str, Any]:
@@ -197,6 +204,9 @@ class TrackedRun:
     remote_results: str = ""
     remote_log: str = ""
     local_bundle: str = ""
+    results_complete: bool | None = None
+    results_expected: int = 0
+    results_present: int = 0
     updated_utc: str = field(default_factory=_utc_now_text)
     connection: dict[str, Any] = field(default_factory=dict)
 
@@ -222,6 +232,15 @@ class TrackedRun:
             for name in ConnectionValues.__dataclass_fields__
             if name in raw_connection
         }
+        raw_complete = value.get("results_complete")
+        results_complete = (
+            raw_complete if type(raw_complete) is bool else None
+        )
+
+        def saved_count(name: str) -> int:
+            candidate = value.get(name, 0)
+            return candidate if type(candidate) is int and candidate >= 0 else 0
+
         return cls(
             run_id=run_id,
             solver=str(value.get("solver", "2d")),
@@ -237,6 +256,9 @@ class TrackedRun:
             remote_results=str(value.get("remote_results", "")),
             remote_log=str(value.get("remote_log", "")),
             local_bundle=str(value.get("local_bundle", "")),
+            results_complete=results_complete,
+            results_expected=saved_count("results_expected"),
+            results_present=saved_count("results_present"),
             updated_utc=str(value.get("updated_utc", "")) or _utc_now_text(),
             connection=connection,
         )
@@ -258,6 +280,14 @@ class _OperationWorker(QObject):
             self.failed.emit(exc)
             return
         self.succeeded.emit(result)
+
+
+class _DownloadVerificationError(RuntimeError):
+    """The fresh pre-transfer manifest inventory was not authoritative."""
+
+    def __init__(self, message: str, completion: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.completion = dict(completion or {})
 
 
 class RunsWorkspace(QWidget):
@@ -1261,6 +1291,38 @@ class RunsWorkspace(QWidget):
                     )
                     remote_log = str(payload.get("log_path") or remote_log or "")
             statuses = client.query_jobs(job_ids) if job_ids else ()
+            reported_by_id = {
+                str(_read_member(status, "job_id", "")).strip():
+                _normalize_slurm_state(_read_member(status, "state", "UNKNOWN"))
+                for status in statuses or ()
+                if str(_read_member(status, "job_id", "")).strip()
+            }
+            scheduler_terminal = bool(job_ids) and all(
+                _is_terminal_state(reported_by_id.get(job_id, "UNKNOWN"))
+                for job_id in job_ids
+            )
+            completion = None
+            completion_error = ""
+            if scheduler_terminal:
+                if not remote_run_dir:
+                    completion_error = (
+                        "The remote run directory is unknown, so its output "
+                        "inventory could not be verified."
+                    )
+                elif not run.remote_cli:
+                    completion_error = (
+                        "The remote hpc_bundle path is unknown, so its output "
+                        "inventory could not be verified."
+                    )
+                else:
+                    try:
+                        completion = client.query_run_completion(
+                            run.remote_cli,
+                            remote_run_dir,
+                            python_executable=values.python_executable,
+                        )
+                    except Exception as exc:
+                        completion_error = str(exc).strip() or type(exc).__name__
             logs: list[str] = []
             if remote_log:
                 try:
@@ -1282,6 +1344,8 @@ class RunsWorkspace(QWidget):
             return {
                 "stage_result": stage_result,
                 "statuses": statuses,
+                "completion": completion,
+                "completion_error": completion_error,
                 "log": "\n".join(logs),
             }
 
@@ -1328,10 +1392,23 @@ class RunsWorkspace(QWidget):
         if not run.remote_results:
             self._show_error("The selected run has no recorded remote results folder.")
             return False
-        if not _is_terminal_state(run.state):
+        if not _is_run_terminal_state(run.state):
             self._show_error(
                 "Results can be downloaded after SLURM reports a terminal state. "
                 "Refresh the selected run first."
+            )
+            return False
+        if run.results_complete is not True:
+            self._show_error(
+                "The remote run's manifest-exact output inventory has not passed. "
+                "Refresh the selected run; downloads remain disabled when outputs "
+                "are missing or remote verification fails."
+            )
+            return False
+        if not run.remote_cli or not run.remote_run_dir:
+            self._show_error(
+                "The remote CLI or run directory is missing, so GRIM cannot "
+                "re-verify this run before download. Refresh the selected run."
             )
             return False
         directory = QFileDialog.getExistingDirectory(
@@ -1349,14 +1426,42 @@ class RunsWorkspace(QWidget):
         values = ConnectionValues(**run.connection)
 
         def operation() -> Any:
-            return self._remote_client(values).download_results(
-                run.remote_results, directory
-            )
+            client = self._remote_client(values)
+            try:
+                completion = client.query_run_completion(
+                    run.remote_cli,
+                    run.remote_run_dir,
+                    python_executable=values.python_executable,
+                )
+            except Exception as exc:
+                detail = str(exc).strip() or type(exc).__name__
+                raise _DownloadVerificationError(
+                    "Fresh remote output verification failed; no files were "
+                    f"downloaded: {detail}"
+                ) from exc
+            if completion.get("complete") is not True:
+                missing = completion.get("missing", ())
+                unexpected = completion.get("unexpected", ())
+                derived_missing = completion.get("derived_missing", ())
+                detail = (
+                    f"{completion.get('n_done', 0)}/{completion.get('n_units', 0)} "
+                    f"unit outputs, {len(missing)} missing, "
+                    f"{len(unexpected)} unexpected, and "
+                    f"{len(derived_missing)} derived outputs missing"
+                )
+                raise _DownloadVerificationError(
+                    "The fresh remote manifest inventory is incomplete "
+                    f"({detail}); no files were downloaded.",
+                    completion,
+                )
+            transfer = client.download_results(run.remote_results, directory)
+            return {"completion": completion, "transfer": transfer}
 
         return self._start_operation(
             "download",
             operation,
             lambda result: self._download_succeeded(run.run_id, directory, result),
+            failure_handler=lambda exc: self._download_failed(run.run_id, exc),
         )
 
     # ------------------------------------------------------------------
@@ -1702,8 +1807,90 @@ class RunsWorkspace(QWidget):
                 f"{job_id}: {state}" if job_id else state
                 for job_id, state in (*pairs, *extra_pairs)
             )
+            if all_terminal:
+                scheduler_state = run.state
+                scheduler_progress = run.progress
+                completion = _plain_mapping(value.get("completion"))
+                completion_error = str(value.get("completion_error") or "").strip()
+                expected = completion.get("n_units", 0)
+                present = completion.get("n_done", 0)
+                run.results_expected = (
+                    expected if type(expected) is int and expected >= 0 else 0
+                )
+                run.results_present = (
+                    present if type(present) is int and present >= 0 else 0
+                )
+                run.results_complete = completion.get("complete") is True
+                if run.results_complete:
+                    run.progress = (
+                        f"{scheduler_progress}; remote manifest verified "
+                        f"({run.results_present}/{run.results_expected} unit outputs)"
+                    )
+                else:
+                    run.state = "INCOMPLETE"
+                    if completion_error:
+                        result_detail = (
+                            "remote output verification failed: " + completion_error
+                        )
+                    elif completion:
+                        missing = completion.get("missing", ())
+                        unexpected = completion.get("unexpected", ())
+                        details = [
+                            f"{run.results_present}/{run.results_expected} unit outputs"
+                        ]
+                        if isinstance(missing, (list, tuple)) and missing:
+                            details.append(f"{len(missing)} missing")
+                        if isinstance(unexpected, (list, tuple)) and unexpected:
+                            details.append(f"{len(unexpected)} unexpected")
+                        derived_missing = completion.get("derived_missing", ())
+                        derived_unexpected = completion.get(
+                            "derived_unexpected", ()
+                        )
+                        if (
+                            isinstance(derived_missing, (list, tuple))
+                            and derived_missing
+                        ):
+                            details.append(
+                                f"{len(derived_missing)} derived outputs missing"
+                            )
+                        if (
+                            isinstance(derived_unexpected, (list, tuple))
+                            and derived_unexpected
+                        ):
+                            details.append(
+                                f"{len(derived_unexpected)} derived outputs unexpected"
+                            )
+                        attestation_error = str(
+                            completion.get("attestation_error") or ""
+                        ).strip()
+                        publication_error = str(
+                            completion.get("publication_error") or ""
+                        ).strip()
+                        if attestation_error:
+                            details.append("unit attestation failed: " + attestation_error)
+                        if publication_error:
+                            details.append("publication check failed: " + publication_error)
+                        result_detail = (
+                            "remote manifest incomplete ("
+                            + ", ".join(details)
+                            + ")"
+                        )
+                    else:
+                        result_detail = "remote output verification returned no evidence"
+                    run.progress = (
+                        f"SLURM {scheduler_state}: {scheduler_progress}; {result_detail}"
+                    )
+            else:
+                # A prior successful inventory must never remain authoritative
+                # if Slurm later reports the run active or incompletely known.
+                run.results_complete = None
+                run.results_expected = 0
+                run.results_present = 0
         elif stage_object is None:
             run.progress = "No scheduler record returned"
+            run.results_complete = None
+            run.results_expected = 0
+            run.results_present = 0
         run.updated_utc = _utc_now_text()
         log = value.get("log", "")
         if log:
@@ -1723,13 +1910,47 @@ class RunsWorkspace(QWidget):
         self.save_settings()
 
     def _download_succeeded(self, run_id: str, directory: str, result: Any) -> None:
-        self._append_log(str(result))
+        payload = _plain_mapping(result)
+        completion = _plain_mapping(payload.get("completion"))
+        transfer = payload.get("transfer", result)
+        run = self._tracked_runs[run_id]
+        run.results_complete = completion.get("complete") is True
+        expected = completion.get("n_units", 0)
+        present = completion.get("n_done", 0)
+        run.results_expected = expected if type(expected) is int and expected >= 0 else 0
+        run.results_present = present if type(present) is int and present >= 0 else 0
+        run.updated_utc = _utc_now_text()
+        self._append_log(str(transfer))
         local_path = str(
-            _read_member(result, "local_path", "")
+            _read_member(transfer, "local_path", "")
             or (Path(directory) / "results")
         )
+        self._render_runs(select_run_id=run_id)
+        self.save_settings()
         self._set_status(f"Downloaded {run_id} results to {local_path}.")
         self.results_downloaded.emit(local_path)
+
+    def _download_failed(self, run_id: str, exc: Exception) -> None:
+        message = str(exc).strip() or type(exc).__name__
+        if isinstance(exc, _DownloadVerificationError):
+            run = self._tracked_runs[run_id]
+            prior_state = run.state
+            completion = exc.completion
+            run.state = "INCOMPLETE"
+            run.results_complete = False
+            expected = completion.get("n_units", 0)
+            present = completion.get("n_done", 0)
+            run.results_expected = (
+                expected if type(expected) is int and expected >= 0 else 0
+            )
+            run.results_present = (
+                present if type(present) is int and present >= 0 else 0
+            )
+            run.progress = f"SLURM {prior_state}; download blocked: {message}"
+            run.updated_utc = _utc_now_text()
+            self._render_runs(select_run_id=run_id)
+            self.save_settings()
+        self._show_error(message)
 
     # ------------------------------------------------------------------
     # Small UI helpers
@@ -1769,7 +1990,7 @@ class RunsWorkspace(QWidget):
                 has_run
                 and selected
                 and selected.job_ids
-                and not _is_terminal_state(selected.state)
+                and not _is_run_terminal_state(selected.state)
             )
         )
         self.btn_download.setEnabled(
@@ -1777,7 +1998,8 @@ class RunsWorkspace(QWidget):
                 has_run
                 and selected
                 and selected.remote_results
-                and _is_terminal_state(selected.state)
+                and _is_run_terminal_state(selected.state)
+                and selected.results_complete is True
             )
         )
 

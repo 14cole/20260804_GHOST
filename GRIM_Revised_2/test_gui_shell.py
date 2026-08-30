@@ -404,6 +404,17 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 "Python",
             ],
         )
+        documented_order = "**" + " | ".join(labels) + "**"
+        repository_root = Path(__file__).resolve().parents[1]
+        for readme in (repository_root / "README.md", Path(__file__).with_name("README.md")):
+            documented_text = " ".join(
+                readme.read_text(encoding="utf-8").split()
+            )
+            self.assertIn(
+                documented_order,
+                documented_text,
+                f"{readme} does not document the application's actual tab order",
+            )
 
         self.assertEqual(
             self.window.main_tabs.indexOf(self.window.freddy_integration), 2

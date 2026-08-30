@@ -153,15 +153,200 @@ def latest_run_dir(output_dir: 'os.PathLike') -> 'Path':
     return runs[-1]
 
 
+def _expected_unit_output_paths(
+    run_dir: 'Path', manifest: 'Dict[str, Any]'
+) -> 'tuple':
+    """Return the unit-output root and exact manifest-derived result paths."""
+
+    if not isinstance(manifest, dict):
+        raise ValueError("HPC manifest must be a JSON object.")
+    schema = str(manifest.get("schema", ""))
+    if schema not in {
+        "ghost.hpc.2d-run.v1",
+        "ghost.hpc.2d-run.v2",
+        "ghost.hpc.bor-run.v1",
+    }:
+        raise ValueError(f"HPC manifest has an unsupported schema {schema!r}.")
+    units = manifest.get("units")
+    n_units = manifest.get("n_units")
+    if (
+        not isinstance(units, list)
+        or not units
+        or isinstance(n_units, bool)
+        or not isinstance(n_units, int)
+        or n_units != len(units)
+    ):
+        raise ValueError("HPC manifest n_units does not match a nonempty unit inventory.")
+
+    relative_root = str(manifest.get("unit_output_dir", "results"))
+    root_path = Path(relative_root)
+    if (
+        not relative_root
+        or root_path.is_absolute()
+        or any(part in ("", ".", "..") for part in root_path.parts)
+    ):
+        raise ValueError("HPC manifest unit_output_dir is not a safe relative path.")
+    results_dir = run_dir / root_path
+    expected = []
+    seen = set()
+    for unit in units:
+        if not isinstance(unit, dict):
+            raise ValueError("Every HPC unit must be an object.")
+        name, _polarizations = _unit_output_contract(unit, schema)
+        role = str(unit.get("role", "")).strip().upper()
+        if role and (
+            role in {".", ".."}
+            or Path(role).name != role
+            or "/" in role
+            or "\\" in role
+        ):
+            raise ValueError("HPC unit has an unsafe result role.")
+        relative = Path(role) / name if role else Path(name)
+        key = relative.as_posix()
+        if key in seen:
+            raise ValueError("HPC manifest contains colliding result paths.")
+        seen.add(key)
+        expected.append(results_dir / relative)
+    return results_dir, tuple(expected)
+
+
 def run_status(run_dir: 'os.PathLike') -> 'Dict[str, Any]':
-    """How far along a run is, from the manifest and what is on disk."""
-    import json
-    run_dir = Path(run_dir)
-    man = json.loads((run_dir / "manifest.json").read_text())
-    done = sorted((run_dir / "results").rglob("*.grim"))
-    return {"run_dir": run_dir, "n_units": int(man["n_units"]),
-            "n_done": len(done), "manifest": man, "done": done,
-            "pending": int(man["n_units"]) - len(done)}
+    """Return fail-closed, manifest-exact completion for one HPC run.
+
+    A filename is not proof that a solve finished.  Once the exact expected
+    unit set is present, every unit's embedded attestation is verified against
+    the immutable run manifest.  BoR runs additionally require one readable,
+    run-bound published body product per geometry; the per-frequency files are
+    restart records, not the user-facing completion contract.
+    """
+
+    run_dir = Path(run_dir).expanduser().resolve()
+    manifest_path = run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    results_dir, expected = _expected_unit_output_paths(run_dir, manifest)
+    expected_set = set(expected)
+    done = tuple(sorted(path for path in expected if path.is_file()))
+    missing = tuple(sorted(expected_set - set(done)))
+    actual = tuple(sorted(results_dir.rglob("*.grim"))) if results_dir.is_dir() else ()
+    unexpected = tuple(sorted(set(actual) - expected_set))
+    unit_exact = not missing and not unexpected
+    attestation_verified = False
+    attestation_error = ""
+    if unit_exact:
+        try:
+            require_hpc_output_attestations(run_dir, manifest)
+        except Exception as exc:
+            # A corrupt NPZ may raise BadZipFile/EOFError rather than
+            # ValueError.  Completion is a read-only health report, so retain
+            # the diagnostic and fail closed instead of crashing a Runs-tab
+            # refresh before it can show the scheduler state.
+            attestation_error = f"{type(exc).__name__}: {exc}"
+        else:
+            attestation_verified = True
+    unit_complete = unit_exact and attestation_verified
+
+    derived_root = run_dir / "results"
+    derived_expected = ()
+    derived_done = ()
+    derived_missing = ()
+    derived_unexpected = ()
+    publication_verified = True
+    publication_error = ""
+    if manifest.get("schema") == "ghost.hpc.bor-run.v1":
+        stems = sorted({str(unit["geometry_stem"]) for unit in manifest["units"]})
+        derived_expected = tuple(derived_root / f"{stem}.grim" for stem in stems)
+        expected_publications = set(derived_expected)
+        derived_done = tuple(
+            sorted(path for path in derived_expected if path.is_file())
+        )
+        derived_missing = tuple(
+            sorted(expected_publications - set(derived_done))
+        )
+        actual_publications = (
+            tuple(sorted(derived_root.glob("*.grim")))
+            if derived_root.is_dir()
+            else ()
+        )
+        derived_unexpected = tuple(
+            sorted(set(actual_publications) - expected_publications)
+        )
+        publication_verified = False
+        if not derived_missing and not derived_unexpected:
+            try:
+                from feature_sum import _load_grim, load_body_grim
+                from workflow_provenance import manifest_solve_spec_fingerprint
+
+                run_spec = manifest_solve_spec_fingerprint(manifest)
+                units_by_stem = {}
+                for unit in manifest["units"]:
+                    units_by_stem.setdefault(str(unit["geometry_stem"]), unit)
+                for path in derived_expected:
+                    payload = _load_grim(str(path))
+                    # This checks the embedded compact body model in addition
+                    # to the ordinary radar-grid GRIM fields loaded above.
+                    load_body_grim(str(path), loaded_grim=payload)
+                    source_unit = units_by_stem[path.stem]
+                    expected_metadata = {
+                        "geometry_input_sha256": str(
+                            source_unit["geometry_input_sha256"]
+                        ),
+                        "solver_source_sha256": str(
+                            manifest["solver_source_sha256"]
+                        ),
+                        "runtime_environment_sha256": str(
+                            manifest["runtime_environment_sha256"]
+                        ),
+                        "run_solve_spec_sha256": run_spec,
+                    }
+                    for field, wanted in expected_metadata.items():
+                        if field not in payload:
+                            raise ValueError(
+                                f"{path.name}: published BoR product is missing "
+                                f"run-binding metadata {field!r}."
+                            )
+                        raw = np.asarray(payload[field])
+                        if raw.size != 1:
+                            raise ValueError(
+                                f"{path.name}: published BoR metadata {field!r} "
+                                "must be scalar."
+                            )
+                        actual_value = raw.reshape(-1)[0]
+                        if isinstance(actual_value, bytes):
+                            actual_value = actual_value.decode("utf-8")
+                        if str(actual_value) != wanted:
+                            raise ValueError(
+                                f"{path.name}: published BoR metadata {field!r} "
+                                "does not match this run."
+                            )
+            except Exception as exc:
+                publication_error = f"{type(exc).__name__}: {exc}"
+            else:
+                publication_verified = True
+
+    complete = unit_complete and publication_verified
+    return {
+        "run_dir": run_dir,
+        "unit_output_dir": results_dir,
+        "n_units": len(expected),
+        "n_done": len(done),
+        "manifest": manifest,
+        "done": done,
+        "missing": missing,
+        "unexpected": unexpected,
+        "pending": len(missing),
+        "unit_exact": unit_exact,
+        "attestation_verified": attestation_verified,
+        "attestation_error": attestation_error,
+        "unit_complete": unit_complete,
+        "derived_root": derived_root,
+        "derived_expected": derived_expected,
+        "derived_done": derived_done,
+        "derived_missing": derived_missing,
+        "derived_unexpected": derived_unexpected,
+        "publication_verified": publication_verified,
+        "publication_error": publication_error,
+        "complete": complete,
+    }
 
 
 def require_hpc_run_provenance(

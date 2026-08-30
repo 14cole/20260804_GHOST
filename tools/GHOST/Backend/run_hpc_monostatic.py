@@ -1072,13 +1072,13 @@ def worker(run_dir_str, submission_index, task_index):
     import rcs_solver  # noqa: F401
     import grim_io     # noqa: F401
 
-    done = {p.name for p in (run_dir / "results").rglob("*.grim")}
     broker = hpc_scheduler.ClaimBroker(
         run_dir / "claims", stale_seconds=float(CLAIM_STALE_SECONDS)
     )
     broker.start_heartbeat()
 
     counters = {"written": 0, "skipped": 0, "failed": 0, "passed": 0}
+    peer_units = set()
     started = time.time()
     total = len(candidates)
 
@@ -1093,7 +1093,7 @@ def worker(run_dir_str, submission_index, task_index):
             (_solve_and_export_star,
              ((unit, context, str(run_dir), assembly_threads),)),
         )
-        if name in done:
+        if _unit_output_path(run_dir, unit).is_file():
             # An already-written result is dispatched, not skipped outright, so
             # its attestation is verified before the run is called complete --
             # that check is what makes reusing an interrupted run safe. Only
@@ -1101,12 +1101,16 @@ def worker(run_dir_str, submission_index, task_index):
             # output is verified exactly once and no claim is needed (the check
             # is read-only and the result is already final).
             if name not in mine:
-                counters["passed"] += 1
+                peer_units.add(name)
+                counters["passed"] = len(peer_units)
                 return None
             return dispatch
         if not broker.try_claim(name):
-            counters["passed"] += 1
+            peer_units.add(name)
+            counters["passed"] = len(peer_units)
             return None
+        peer_units.discard(name)
+        counters["passed"] = len(peer_units)
         return dispatch
 
     def _finished():
@@ -1165,15 +1169,53 @@ def worker(run_dir_str, submission_index, task_index):
                 dispatcher.run(
                     steal_units, _prepare, _on_result, _on_error, _resources
                 )
+            def _output_ready(unit):
+                return _unit_output_path(run_dir, unit).is_file()
+
+            def _waiting_for_outputs(missing_count, round_index):
+                if round_index == 1 or round_index % 60 == 0:
+                    print(
+                        f"  Waiting for {missing_count} peer-owned output(s); "
+                        "live claims remain fenced and orphan claims will be retried.",
+                        flush=True,
+                    )
+
+            remaining = dispatcher.run_until_outputs_complete(
+                candidates,
+                _prepare,
+                _on_result,
+                _on_error,
+                _output_ready,
+                _resources,
+                should_stop=lambda: counters["failed"] > 0,
+                retry_seconds=1.0,
+                on_wait=_waiting_for_outputs,
+            )
         finally:
             broker.stop_heartbeat()
 
     elapsed = time.time() - started
     print(f"\n  Slot complete. wrote={counters['written']}, "
           f"skipped={counters['skipped']}, failed={counters['failed']}, "
-          f"left to other tasks={counters['passed']}.  {elapsed:.1f} s elapsed.")
+          f"observed on peer tasks={counters['passed']}.  {elapsed:.1f} s elapsed.")
     if counters["failed"]:
         raise SystemExit(1)
+    if remaining:
+        raise SystemExit(
+            f"ERROR: worker stopped with {len(remaining)} expected output(s) missing."
+        )
+    from hpc_common import run_status
+    completion = run_status(run_dir)
+    if not completion["complete"]:
+        integrity = (
+            completion["attestation_error"]
+            or f"missing={len(completion['missing'])}, "
+               f"unexpected={len(completion['unexpected'])}"
+        )
+        raise SystemExit(
+            "ERROR: worker cannot report success because the manifest-exact "
+            f"attested result set is incomplete ({integrity})."
+        )
 
 
 # --- entry point -----------------------------------------------------------

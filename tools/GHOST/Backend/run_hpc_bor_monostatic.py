@@ -370,6 +370,81 @@ def publish_monostatic(run_dir_str, require_complete=True):
     return written, 0
 
 
+def _publish_monostatic_coordinated(
+    run_dir, stale_seconds, poll_seconds=1.0
+):
+    # type: (Path, float, float) -> Tuple[int, int]
+    """Elect exactly one cross-node BoR publisher and verify its artifacts.
+
+    Every worker reaches this barrier after all frequency units exist.  A
+    claim is needed even though final writes are atomic: node-local PIDs can
+    collide in the shared temporary filename, and rebuilding a full radar
+    grid on every node is expensive.  Live publishers remain fenced; a dead
+    publisher is recovered by the ordinary stale lease or immediately by the
+    exact Slurm requeue successor.
+    """
+
+    from hpc_common import _expected_unit_output_paths, run_status
+
+    run_dir = Path(run_dir).resolve()
+    manifest = _manifest_for(run_dir)
+    _expected_unit_output_paths(run_dir, manifest)
+    expected = {
+        run_dir / "results" / f"{stem}.grim"
+        for stem in {
+            str(unit["geometry_stem"]) for unit in manifest["units"]
+        }
+    }
+    broker = hpc_scheduler.ClaimBroker(
+        run_dir / "claims", stale_seconds=float(stale_seconds)
+    )
+    broker.start_heartbeat()
+    claim_key = "__publish_monostatic__"
+    try:
+        while True:
+            actual = (
+                set((run_dir / "results").glob("*.grim"))
+                if (run_dir / "results").is_dir()
+                else set()
+            )
+            if actual == expected:
+                completed = run_status(run_dir)
+                if completed["complete"]:
+                    return 0, len(completed["derived_done"])
+
+            if broker.try_claim(claim_key):
+                try:
+                    initial = run_status(run_dir)
+                    if not initial["unit_complete"]:
+                        detail = (
+                            initial["attestation_error"]
+                            or "unit result inventory is incomplete"
+                        )
+                        raise ValueError(
+                            "Cannot publish BoR products before the exact "
+                            f"attested unit set is complete: {detail}"
+                        )
+                    result = publish_monostatic(
+                        str(run_dir), require_complete=True
+                    )
+                    completed = run_status(run_dir)
+                    if not completed["complete"]:
+                        detail = (
+                            completed["publication_error"]
+                            or "published BoR result inventory is incomplete"
+                        )
+                        raise ValueError(detail)
+                except BaseException:
+                    broker.abandon(claim_key)
+                    raise
+                else:
+                    broker.release(claim_key)
+                    return result
+            time.sleep(float(poll_seconds))
+    finally:
+        broker.stop_heartbeat()
+
+
 def _paired_solve_units(output_units):
     # type: (List[Dict[str, Any]]) -> List[Dict[str, Any]]
     """Keep manifest outputs separate while co-solving compatible channels."""
@@ -1067,6 +1142,7 @@ def worker(run_dir_str, job_index, node_index):
 
     t0 = time.time()
     counters = {"written": 0, "skipped": 0, "failed": 0, "passed": 0}
+    peer_units = set()
     total = len(candidates)
 
     def _prepare(unit):
@@ -1087,12 +1163,16 @@ def worker(run_dir_str, job_index, node_index):
             # filename, but only on the slot that owns the unit, so each result
             # is re-checked once per run instead of once per node.
             if key not in mine_keys:
-                counters["passed"] += 1
+                peer_units.add(key)
+                counters["passed"] = len(peer_units)
                 return None
             return dispatch
         if not broker.try_claim(key):
-            counters["passed"] += 1
+            peer_units.add(key)
+            counters["passed"] = len(peer_units)
             return None
+        peer_units.discard(key)
+        counters["passed"] = len(peer_units)
         return dispatch
 
     def _done():
@@ -1132,30 +1212,60 @@ def worker(run_dir_str, job_index, node_index):
         )
         try:
             dispatcher.run(candidates, _prepare, _on_result, _on_error)
+            def _output_ready(unit):
+                return all(
+                    _unit_output_path(run_dir, channel).is_file()
+                    for channel in unit["channel_units"]
+                )
+
+            def _waiting_for_outputs(missing_count, round_index):
+                if round_index == 1 or round_index % 60 == 0:
+                    print(
+                        f"  Waiting for {missing_count} peer-owned physical "
+                        "unit(s); live claims remain fenced and orphan claims "
+                        "will be retried.",
+                        flush=True,
+                    )
+
+            remaining = dispatcher.run_until_outputs_complete(
+                candidates,
+                _prepare,
+                _on_result,
+                _on_error,
+                _output_ready,
+                should_stop=lambda: counters["failed"] > 0,
+                retry_seconds=1.0,
+                on_wait=_waiting_for_outputs,
+            )
         finally:
             broker.stop_heartbeat()
 
     elapsed = time.time() - t0
     print(f"\n  Slot complete. wrote={counters['written']}, "
           f"skipped={counters['skipped']}, failed={counters['failed']}, "
-          f"left to other tasks={counters['passed']}.  {elapsed:.1f} s elapsed.")
+          f"observed on peer tasks={counters['passed']}.  {elapsed:.1f} s elapsed.")
     if counters["failed"]:
         raise SystemExit(1)
+    if remaining:
+        raise SystemExit(
+            f"ERROR: worker stopped with {len(remaining)} expected physical "
+            "unit(s) missing."
+        )
     try:
-        n_written, n_skipped = publish_monostatic(
-            str(run_dir), require_complete=False
+        n_written, n_skipped = _publish_monostatic_coordinated(
+            run_dir, float(CLAIM_STALE_SECONDS)
         )
         if n_written or n_skipped:
             print(
                 f"  Monostatic GRIMs: {n_written} written, {n_skipped} "
-                f"already present in {run_dir / 'results'}/",
+                f"already verified in {run_dir / 'results'}/",
                 flush=True,
             )
     except Exception:
-        print("      [warn] monostatic publication failed:", flush=True)
+        print("      [error] monostatic publication failed:", flush=True)
         for line in traceback.format_exc().rstrip().splitlines():
             print(f"        {line}", flush=True)
-
+        raise SystemExit(1)
 
 def _pool_initializer(blas_threads):
     # type: (int) -> None

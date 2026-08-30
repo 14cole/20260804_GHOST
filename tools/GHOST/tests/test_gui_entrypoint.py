@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -174,6 +176,258 @@ class TestGuiEntrypoint(unittest.TestCase):
             self.assertIsNone(solver._active_solve_run_id)
         finally:
             workspace.close()
+
+    def test_boundary_density_button_starts_worker_without_gui_thread_compute(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            snapshot = {
+                "title": "test",
+                "segment_count": 1,
+                "segments": [],
+                "ibcs": [],
+                "dielectrics": [],
+            }
+            with tempfile.TemporaryDirectory() as folder:
+                output = str(Path(folder) / "densities.json")
+                with (
+                    mock.patch.object(
+                        solver,
+                        "_load_geometry_for_solver",
+                        return_value=(snapshot, "", folder),
+                    ),
+                    mock.patch.object(
+                        solver, "_collect_frequency_values", return_value=[2.0]
+                    ),
+                    mock.patch.object(
+                        solver, "_collect_elevation_values", return_value=[15.0]
+                    ),
+                    mock.patch(
+                        "solver_tab.QFileDialog.getSaveFileName",
+                        return_value=(output, "JSON Files (*.json)"),
+                    ),
+                    mock.patch("solver_tab.QThread.start") as start,
+                    mock.patch(
+                        "solver_tab.compute_boundary_densities"
+                    ) as compute,
+                ):
+                    solver._compute_currents()
+
+                start.assert_called_once()
+                compute.assert_not_called()
+                self.assertTrue(solver._is_computing_density)
+                self.assertFalse(solver.btn_run.isEnabled())
+                self.assertTrue(solver.btn_cancel.isEnabled())
+                snapshot["segment_count"] = 99
+                self.assertEqual(
+                    solver._density_worker.snapshot["segment_count"], 1
+                )
+                run_id = solver._active_density_run_id
+                self.assertIsNotNone(run_id)
+                solver._on_density_canceled(int(run_id), "test cleanup")
+                solver._on_density_thread_finished(int(run_id))
+        finally:
+            workspace.close()
+
+    def test_solve_cancellation_is_normal_state_without_critical_dialog(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            solver._pending_solve_context = {"uses_geometry_tab": True}
+            solver._is_solving = True
+            with mock.patch("solver_tab.QMessageBox.critical") as critical:
+                solver._on_solver_canceled("Solve cancelled by user.")
+
+            critical.assert_not_called()
+            self.assertFalse(solver._is_solving)
+            self.assertIsNone(solver._pending_solve_context)
+            self.assertEqual(solver.progress.value(), 0)
+            self.assertIn("canceled", solver.lbl_status.text().lower())
+        finally:
+            workspace.close()
+
+    def test_queued_solve_completion_is_discarded_after_cancel_request(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            prior_result = {"samples": [{"prior": True}]}
+            solver.last_result = prior_result
+            solver._pending_solve_context = {"uses_geometry_tab": True}
+            solver._is_solving = True
+            solver._abort_event = threading.Event()
+            solver._abort_event.set()
+            with (
+                mock.patch.object(solver, "_populate_results_table") as table,
+                mock.patch.object(solver, "_plot_results") as plot,
+                mock.patch("solver_tab.QMessageBox.critical") as critical,
+            ):
+                solver._on_solver_finished(
+                    {"samples": [{"new": True}], "metadata": {}}, "body.geo"
+                )
+
+            self.assertIs(solver.last_result, prior_result)
+            table.assert_not_called()
+            plot.assert_not_called()
+            critical.assert_not_called()
+            self.assertFalse(solver._is_solving)
+            self.assertIn("canceled", solver.lbl_status.text().lower())
+            solver._abort_event = None
+        finally:
+            workspace.close()
+
+    def test_queued_solver_error_after_cancel_is_not_a_critical_failure(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            solver._pending_solve_context = {"uses_geometry_tab": True}
+            solver._is_solving = True
+            solver._abort_event = threading.Event()
+            solver._abort_event.set()
+            with mock.patch("solver_tab.QMessageBox.critical") as critical:
+                solver._on_solver_error("linear solve failed during shutdown")
+
+            critical.assert_not_called()
+            self.assertFalse(solver._is_solving)
+            self.assertIn("canceled", solver.lbl_status.text().lower())
+            solver._abort_event = None
+        finally:
+            workspace.close()
+
+    def test_geometry_edit_discards_staged_boundary_density_output(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            with tempfile.TemporaryDirectory() as folder:
+                output = str(Path(folder) / "densities.json")
+                # Import after BACKEND is installed on sys.path above.
+                import solver_tab
+
+                staged = solver_tab._stage_json_output(output, {"value": 1})
+                solver._active_density_run_id = 3
+                solver._density_abort_event = threading.Event()
+                solver._is_computing_density = True
+                solver._pending_density_context = {
+                    "uses_geometry_tab": True,
+                    "geometry_stale": False,
+                    "input_sha256": {},
+                    "output_path": output,
+                    "expect_output_absent": True,
+                    "expected_output_sha256": None,
+                }
+                workspace.geometry_tab.geometry_changed.emit()
+                self.assertTrue(
+                    solver._pending_density_context["geometry_stale"]
+                )
+                with mock.patch("solver_tab.QMessageBox.warning") as warning:
+                    solver._on_density_finished(
+                        3,
+                        {"element_count": 1, "formulations": "test"},
+                        staged,
+                    )
+
+                warning.assert_called_once()
+                self.assertFalse(Path(output).exists())
+                self.assertFalse(Path(staged).exists())
+                self.assertFalse(solver._is_computing_density)
+                self.assertIn("stale", solver.lbl_status.text().lower())
+        finally:
+            workspace.close()
+
+    def test_queued_density_error_after_cancel_is_not_a_critical_failure(self):
+        workspace = GhostWorkspace()
+        try:
+            solver = workspace.solver_tab
+            solver._active_density_run_id = 8
+            solver._pending_density_context = {"uses_geometry_tab": True}
+            solver._is_computing_density = True
+            solver._density_abort_event = threading.Event()
+            solver._density_abort_event.set()
+            with mock.patch("solver_tab.QMessageBox.critical") as critical:
+                solver._on_density_error(8, "staging failed during shutdown")
+
+            critical.assert_not_called()
+            self.assertFalse(solver._is_computing_density)
+            self.assertIn("canceled", solver.lbl_status.text().lower())
+            solver._density_abort_event = None
+            solver._active_density_run_id = None
+        finally:
+            workspace.close()
+
+    def test_standalone_close_blocks_during_boundary_density_worker(self):
+        window = GhostMainWindow()
+        try:
+            window.solver_tab._is_computing_density = True
+            event = QCloseEvent()
+            with mock.patch.object(QMessageBox, "warning") as warning:
+                window.closeEvent(event)
+
+            warning.assert_called_once()
+            self.assertFalse(event.isAccepted())
+            self.assertIs(window.tabs.currentWidget(), window.solver_tab)
+        finally:
+            window.solver_tab._is_computing_density = False
+            window.close()
+
+    def test_worker_teardown_keeps_starts_disabled_and_close_blocked(self):
+        class LiveThread:
+            def __init__(self):
+                self.running = True
+
+            def isRunning(self):
+                return self.running
+
+        for kind in ("solve", "density"):
+            with self.subTest(kind=kind):
+                window = GhostMainWindow()
+                try:
+                    solver = window.solver_tab
+                    live = LiveThread()
+                    if kind == "solve":
+                        solver._solve_thread = live
+                        solver._active_solve_run_id = 41
+                    else:
+                        solver._density_thread = live
+                        solver._active_density_run_id = 42
+                    # This models the result/cancel slot having completed while
+                    # QThread has not emitted finished yet.
+                    solver._is_solving = False
+                    solver._is_computing_density = False
+                    solver._apply_job_state()
+
+                    self.assertTrue(window.workspace.solve_is_running())
+                    self.assertFalse(solver.btn_run.isEnabled())
+                    self.assertFalse(solver.btn_currents.isEnabled())
+                    self.assertFalse(solver.btn_cancel.isEnabled())
+                    with (
+                        mock.patch.object(
+                            solver, "_load_geometry_for_solver"
+                        ) as load_geometry,
+                        mock.patch("solver_tab.QMessageBox.information"),
+                    ):
+                        solver._run_solver()
+                        solver._compute_currents()
+                    load_geometry.assert_not_called()
+
+                    event = QCloseEvent()
+                    with mock.patch.object(QMessageBox, "warning") as warning:
+                        window.closeEvent(event)
+                    warning.assert_called_once()
+                    self.assertFalse(event.isAccepted())
+
+                    live.running = False
+                    if kind == "solve":
+                        solver._on_solver_thread_finished(41)
+                    else:
+                        solver._on_density_thread_finished(42)
+                    self.assertFalse(window.workspace.solve_is_running())
+                    self.assertTrue(solver.btn_run.isEnabled())
+                finally:
+                    # Ensure the synthetic thread never blocks test teardown.
+                    if kind == "solve":
+                        window.solver_tab._solve_thread = None
+                    else:
+                        window.solver_tab._density_thread = None
+                    window.close()
 
     def test_automatic_export_rechecks_stale_after_confirmation(self):
         workspace = GhostWorkspace()

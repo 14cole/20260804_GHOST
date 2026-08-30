@@ -460,6 +460,166 @@ class HpcBundleTests(unittest.TestCase):
 
         self.assertEqual(result.run_id, "bundle-a1")
 
+    def test_run_completion_uses_read_only_bundle_status_contract(self) -> None:
+        payload = {
+            "schema": "ghost.hpc.run-status.v1",
+            "ok": True,
+            "run_id": "run-42",
+            "solver_schema": "ghost.hpc.2d-run.v2",
+            "complete": True,
+            "n_units": 12,
+            "n_done": 12,
+            "pending": 0,
+            "missing": [],
+            "unexpected": [],
+            "unit_complete": True,
+            "unit_exact": True,
+            "attestation_verified": True,
+            "attestation_error": "",
+            "publication_verified": True,
+            "publication_error": "",
+            "n_derived_expected": 0,
+            "n_derived_done": 0,
+            "derived_expected": [],
+            "derived_done": [],
+            "derived_missing": [],
+            "derived_unexpected": [],
+        }
+        runner = FakeRunner(completed(json.dumps(payload)))
+        client = HpcRemoteClient(ConnectionConfig.openssh_alias("cluster"), runner)
+
+        result = client.query_run_completion(
+            "/opt/grim/Backend/hpc_bundle.py",
+            "/scratch/grim/runs/run 42",
+            python_executable="/opt/grim/venv/bin/python",
+            timeout=17,
+        )
+
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["n_done"], 12)
+        self.assertEqual(
+            shlex.split(runner.calls[0][0][-1]),
+            [
+                "/opt/grim/venv/bin/python",
+                "/opt/grim/Backend/hpc_bundle.py",
+                "run-status",
+                "/scratch/grim/runs/run 42",
+            ],
+        )
+        self.assertEqual(runner.calls[0][1], 17)
+
+    def test_run_completion_rejects_malformed_or_inconsistent_evidence(self) -> None:
+        base = {
+            "schema": "ghost.hpc.run-status.v1",
+            "ok": True,
+            "run_id": "run-42",
+            "solver_schema": "ghost.hpc.2d-run.v2",
+            "complete": False,
+            "n_units": 3,
+            "n_done": 2,
+            "pending": 1,
+            "missing": ["results/unit_003.grim"],
+            "unexpected": [],
+            "unit_complete": False,
+            "unit_exact": False,
+            "attestation_verified": False,
+            "attestation_error": "",
+            "publication_verified": True,
+            "publication_error": "",
+            "n_derived_expected": 0,
+            "n_derived_done": 0,
+            "derived_expected": [],
+            "derived_done": [],
+            "derived_missing": [],
+            "derived_unexpected": [],
+        }
+        cases = (
+            ({**base, "schema": "ghost.hpc.run-status.v0"}, "schema"),
+            ({**base, "run_id": ""}, "run_id"),
+            ({**base, "solver_schema": "ghost.hpc.unknown"}, "solver schema"),
+            (
+                {**base, "solver_schema": "ghost.hpc.bor-run.v1"},
+                "declare a published body output",
+            ),
+            ({**base, "complete": 1}, "complete"),
+            ({**base, "unit_complete": 1}, "unit_complete"),
+            ({**base, "n_done": 4}, "more completed"),
+            ({**base, "pending": 0}, "pending count"),
+            ({**base, "missing": "unit_003.grim"}, "list of paths"),
+            ({**base, "missing": []}, "missing inventory"),
+            (
+                {**base, "missing": ["../results/unit_003.grim"]},
+                "unsafe relative path",
+            ),
+            (
+                {
+                    **base,
+                    "complete": True,
+                    "n_done": 3,
+                    "pending": 0,
+                    "missing": [],
+                    "unit_exact": True,
+                },
+                "complete flag contradicts",
+            ),
+            (
+                {
+                    **base,
+                    "solver_schema": "ghost.hpc.bor-run.v1",
+                    "n_derived_expected": 1,
+                    "derived_expected": ["results/body.grim"],
+                },
+                "derived missing inventory",
+            ),
+        )
+        for payload, message in cases:
+            with self.subTest(message=message):
+                client = HpcRemoteClient(
+                    ConnectionConfig.openssh_alias("cluster"),
+                    FakeRunner(completed(json.dumps(payload))),
+                )
+                with self.assertRaisesRegex(ProtocolError, message):
+                    client.query_run_completion(
+                        "/opt/hpc_bundle.py", "/scratch/runs/run-42"
+                    )
+
+    def test_run_completion_accepts_coherent_incomplete_bor_publication(self) -> None:
+        payload = {
+            "schema": "ghost.hpc.run-status.v1",
+            "ok": True,
+            "run_id": "run-bor",
+            "solver_schema": "ghost.hpc.bor-run.v1",
+            "complete": False,
+            "unit_complete": True,
+            "unit_exact": True,
+            "attestation_verified": True,
+            "attestation_error": "",
+            "publication_verified": False,
+            "publication_error": "",
+            "n_units": 2,
+            "n_done": 2,
+            "pending": 0,
+            "missing": [],
+            "unexpected": [],
+            "n_derived_expected": 1,
+            "n_derived_done": 0,
+            "derived_expected": ["results/body.grim"],
+            "derived_done": [],
+            "derived_missing": ["results/body.grim"],
+            "derived_unexpected": [],
+        }
+        client = HpcRemoteClient(
+            ConnectionConfig.openssh_alias("cluster"),
+            FakeRunner(completed(json.dumps(payload))),
+        )
+
+        result = client.query_run_completion(
+            "/opt/hpc_bundle.py", "/scratch/runs/run-bor"
+        )
+
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["derived_missing"], ["results/body.grim"])
+
     def test_stage_defaults_to_long_transfer_timeout_for_driver_planning(self) -> None:
         payload = self._stage_payload()
         runner = FakeRunner(completed(json.dumps(payload)))
