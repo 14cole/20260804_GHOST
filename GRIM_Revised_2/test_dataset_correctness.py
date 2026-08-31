@@ -627,6 +627,27 @@ class DatasetCorrectnessTests(unittest.TestCase):
             np.testing.assert_array_equal(output.rcs_power, source.rcs_power[selection])
             np.testing.assert_array_equal(output.rcs_phase, source.rcs_phase[selection])
 
+    def test_overlap_keeps_each_response_quantity_without_requiring_a_match(self):
+        three_d = self._indexed_grid(
+            [0.0, 1.0], [0.0], [1.0], ["VV"], 100.0
+        )
+        two_d = self._indexed_grid(
+            [0.0, 1.0], [0.0], [1.0], ["VV"], 200.0
+        )
+        three_d.units.update(
+            {"rcs_linear_quantity": "sigma_3d", "rcs_log_unit": "dBsm"}
+        )
+        two_d.units.update(
+            {"rcs_linear_quantity": "sigma_2d", "rcs_log_unit": "dBke"}
+        )
+
+        outputs = RcsGrid.overlap_many(three_d, two_d)
+
+        self.assertEqual(outputs[0].linear_quantity(), "sigma_3d")
+        self.assertEqual(outputs[1].linear_quantity(), "sigma_2d")
+        np.testing.assert_array_equal(outputs[0].rcs_power, three_d.rcs_power)
+        np.testing.assert_array_equal(outputs[1].rcs_power, two_d.rcs_power)
+
     def test_overlap_many_intersects_finite_cells_across_every_grid(self):
         grids = [
             self._indexed_grid([0.0, 1.0], [0.0], [1.0, 2.0], ["HH", "VV"], offset)

@@ -131,6 +131,89 @@ def axis_label(reference, axis: str) -> str:
     return f"{angular_axis_name(reference, axis)} ({axis_unit(reference, axis)})"
 
 
+def _declared_coherent_metadata(dataset, key: str) -> str:
+    """Return one producer declaration without inventing a default."""
+
+    declared_getter = getattr(dataset, "_declared_scalar_metadata", None)
+    if callable(declared_getter):
+        try:
+            raw = declared_getter(key)
+        except (TypeError, ValueError):
+            # Conflicting or malformed provenance must not suppress a
+            # read-only plot whose numeric arrays are otherwise usable.
+            return f"<unusable {key} declaration>"
+    else:
+        raw = (dataset.units or {}).get(key, (dataset.extra or {}).get(key, ""))
+    return str(raw or "").strip()
+
+
+def _canonical_coherent_metadata(dataset, key: str, value: str) -> str:
+    if key == "time_convention":
+        canonicalizer = getattr(dataset, "_canonical_time_convention", None)
+        if callable(canonicalizer):
+            return str(canonicalizer(value))
+    return " ".join(str(value).split()).casefold()
+
+
+def coherent_metadata_plot_warnings(named_datasets) -> tuple[str, ...]:
+    """Describe assumptions made by a read-only multi-dataset phase plot.
+
+    Producer provenance is useful context, but it is not numeric plot data.
+    A phase overlay therefore remains available when a declaration is absent
+    or differs.  The returned notes make that assumption visible without
+    claiming that unlike phase references have somehow been reconciled.
+    """
+
+    if len(named_datasets) < 2:
+        return ()
+    notes = []
+    for key, label in (
+        ("phase_reference", "phase reference"),
+        ("time_convention", "time convention"),
+        ("polarization_basis", "polarization basis"),
+    ):
+        declared = []
+        missing = []
+        for name, dataset in named_datasets:
+            raw = _declared_coherent_metadata(dataset, key)
+            if not raw:
+                missing.append(str(name))
+                continue
+            declared.append(
+                (
+                    str(name),
+                    raw,
+                    _canonical_coherent_metadata(dataset, key, raw),
+                )
+            )
+        unusable = [
+            name for name, raw, _canonical in declared if raw.startswith("<unusable ")
+        ]
+        usable_declared = [
+            item for item in declared if not item[1].startswith("<unusable ")
+        ]
+        distinct = {canonical for _name, _raw, canonical in usable_declared}
+        if unusable:
+            notes.append(
+                f"{label} metadata is conflicting or malformed for "
+                f"{', '.join(unusable)}; values are plotted as stored"
+            )
+        if len(distinct) > 1:
+            details = ", ".join(
+                f"{name}={raw!r}" for name, raw, _ in usable_declared
+            )
+            notes.append(
+                f"{label} declarations differ ({details}); values are plotted "
+                "as stored without phase-reference conversion"
+            )
+        if missing:
+            notes.append(
+                f"{label} is unspecified for {', '.join(missing)}; a common "
+                "convention is assumed only for display"
+            )
+    return tuple(notes)
+
+
 def validate_plot_datasets(named_datasets, *, phase: bool, linear: bool) -> None:
     """Fail before rendering incompatible physical quantities or coordinates.
 
@@ -199,34 +282,13 @@ def validate_plot_datasets(named_datasets, *, phase: bool, linear: bool) -> None
             )
             raise ValueError(f"mixed logarithmic quantity units cannot share a plot ({details})")
 
-    if phase and len(named_datasets) > 1:
-        # Explicit disagreements are unsafe; absent legacy metadata remains
-        # plotable so old files are not turned into an unnecessary blocker.
-        for key, label in (
-            ("phase_reference", "phase references"),
-            ("time_convention", "time conventions"),
-            ("polarization_basis", "polarization bases"),
-        ):
-            values = set()
-            for _name, dataset in named_datasets:
-                declared_getter = getattr(dataset, "_declared_scalar_metadata", None)
-                if callable(declared_getter):
-                    raw = declared_getter(key)
-                else:
-                    raw = (dataset.units or {}).get(
-                        key, (dataset.extra or {}).get(key, "")
-                    )
-                text = str(raw or "").strip()
-                if not text:
-                    continue
-                if key == "time_convention":
-                    canonicalizer = getattr(dataset, "_canonical_time_convention", None)
-                    text = canonicalizer(text) if callable(canonicalizer) else text.casefold()
-                else:
-                    text = " ".join(text.split()).casefold()
-                values.add(text)
-            if len(values) > 1:
-                raise ValueError(f"selected datasets declare incompatible {label}")
+    if phase:
+        for note in coherent_metadata_plot_warnings(named_datasets):
+            warnings.warn(
+                "Phase overlay metadata note: " + note,
+                UserWarning,
+                stacklevel=2,
+            )
 
 
 def missing_coherent_metadata(named_datasets) -> tuple[str, ...]:
@@ -235,11 +297,7 @@ def missing_coherent_metadata(named_datasets) -> tuple[str, ...]:
     missing = []
     for key in ("phase_reference", "time_convention", "polarization_basis"):
         for _name, dataset in named_datasets:
-            getter = getattr(dataset, "_declared_scalar_metadata", None)
-            value = getter(key) if callable(getter) else (dataset.units or {}).get(
-                key, (dataset.extra or {}).get(key, "")
-            )
-            if not str(value or "").strip():
+            if not _declared_coherent_metadata(dataset, key):
                 missing.append(key)
                 break
     return tuple(missing)

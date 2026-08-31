@@ -632,6 +632,7 @@ class PlotOpsMixin:
         self._remove_colorbar()
         self.plot_figure.clear()
         self.plot_figure._grim_line_plot_signature = None
+        self.plot_figure._grim_held_phase_datasets = []
         self.plot_ax = self.plot_figure.add_subplot(111)
         self.plot_axes = None
         self._style_plot_axes()
@@ -759,6 +760,9 @@ class PlotOpsMixin:
         except ValueError as exc:
             self.status.showMessage(f"Plot blocked: {exc}.")
             return None
+        if self._button_checked(self.btn_phase):
+            for note in plot_common.coherent_metadata_plot_warnings(datasets):
+                self._note_plot_render("Phase provenance note: " + note + ".")
         return plot_common.reference_dataset(datasets, self.active_dataset)
 
     def _line_plot_signature(self, mode: str, projection: str, reference, datasets):
@@ -766,27 +770,9 @@ class PlotOpsMixin:
 
         phase = self._button_checked(self.btn_phase)
         if phase:
-            coherent_metadata = []
-            for key in ("phase_reference", "time_convention", "polarization_basis"):
-                declared = set()
-                for _name, dataset in datasets:
-                    getter = getattr(dataset, "_declared_scalar_metadata", None)
-                    raw = getter(key) if callable(getter) else (dataset.units or {}).get(
-                        key, (dataset.extra or {}).get(key, "")
-                    )
-                    text = str(raw or "").strip()
-                    if key == "time_convention" and text:
-                        canonicalizer = getattr(dataset, "_canonical_time_convention", None)
-                        text = (
-                            canonicalizer(text)
-                            if callable(canonicalizer)
-                            else text.casefold()
-                        )
-                    else:
-                        text = " ".join(text.split()).casefold()
-                    declared.add(text)
-                coherent_metadata.append((key, tuple(sorted(declared))))
-            ordinate = ("phase", "deg", tuple(coherent_metadata))
+            # Hold compares what is drawn on the axes. Phase provenance is
+            # displayed as a warning, not treated as an ordinate incompatibility.
+            ordinate = ("phase", "deg")
         else:
             quantity = str(datasets[0][1].linear_quantity()).strip().lower()
             display_unit = (
@@ -867,6 +853,20 @@ class PlotOpsMixin:
             self.plot_ax.clear()
             self._style_plot_axes()
         figure._grim_line_plot_signature = signature
+        if self._button_checked(self.btn_phase):
+            prior_phase_datasets = (
+                list(getattr(figure, "_grim_held_phase_datasets", []))
+                if hold and has_content
+                else []
+            )
+            combined_phase_datasets = prior_phase_datasets + list(datasets)
+            figure._grim_held_phase_datasets = combined_phase_datasets
+            for note in plot_common.coherent_metadata_plot_warnings(
+                combined_phase_datasets
+            ):
+                self._note_plot_render("Phase provenance note: " + note + ".")
+        else:
+            figure._grim_held_phase_datasets = []
         return True
 
     def _axis_selection_for_dataset(self, reference, dataset, axis: str, values):
@@ -2394,9 +2394,6 @@ class PlotOpsMixin:
             "l1_iterations": int(params["l1_iters"]),
             "flip_x": bool(params["flip_x"]),
             "flip_y": bool(params["flip_y"]),
-            "legacy_metadata_attested": bool(
-                params.get("legacy_metadata_attested", False)
-            ),
         }
         return {
             "azimuths": np.asarray(dataset.azimuths)[azimuth_indices].tolist(),

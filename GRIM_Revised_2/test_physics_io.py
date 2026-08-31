@@ -26,7 +26,7 @@ class TestPhysicsAndIo(unittest.TestCase):
             },
         )
 
-    def test_units_and_unknown_phase_block_coherent_arithmetic(self):
+    def test_units_and_absent_complex_samples_block_coherent_arithmetic(self):
         ghz = self._grid(units={"frequency": "GHz"})
         hz = self._grid(units={"frequency": "Hz"})
         with self.assertRaisesRegex(ValueError, "frequency unit mismatch"):
@@ -37,7 +37,7 @@ class TestPhysicsAndIo(unittest.TestCase):
             rcs_power=np.ones((1, 1, 1, 1)),
             units=ghz.units,
         )
-        with self.assertRaisesRegex(ValueError, "requires phase"):
+        with self.assertRaisesRegex(ValueError, "no common usable complex samples"):
             ghz.coherent_add(power_only)
 
     def test_mixed_assembly_has_no_invented_phase(self):

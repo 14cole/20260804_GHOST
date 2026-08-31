@@ -150,7 +150,6 @@ class TestIsarCoreSafety(unittest.TestCase):
 
     def test_semantically_unsafe_phase_reference_cannot_be_attested_away(self):
         for phase_reference in (
-            "unknown",
             "drifting phase center",
             "uncompensated range reference",
         ):
@@ -159,10 +158,15 @@ class TestIsarCoreSafety(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "not a verified fixed phase center"):
                     isar_mode.form_isar(grid, legacy_metadata_attested=True)
 
-    def test_unrecognized_phase_reference_cannot_be_attested_away(self):
-        grid = self._grid(extra={"phase_reference": "banana reference"})
-        with self.assertRaisesRegex(ValueError, "not a verified fixed phase center"):
-            isar_mode.form_isar(grid, legacy_metadata_attested=True)
+    def test_unrecognized_phase_reference_is_recorded_as_user_assumed(self):
+        for phase_reference in ("unknown", "banana reference", "N/A"):
+            with self.subTest(phase_reference=phase_reference):
+                grid = self._grid(extra={"phase_reference": phase_reference})
+                bands, _elapsed = isar_mode.form_isar(grid)
+                self.assertIn(
+                    "a fixed phase reference/center",
+                    bands[0]["isar_contract_undeclared_fields"],
+                )
 
     def test_explicit_near_field_and_bistatic_geometry_are_rejected(self):
         cases = (
@@ -178,7 +182,6 @@ class TestIsarCoreSafety(unittest.TestCase):
                 "far-field pseudomonostatic",
                 "verify and declare",
             ),
-            ("measurement_geometry", "unknown", "verify and declare"),
         )
         for key, value, message in cases:
             with self.subTest(key=key, value=value):
@@ -188,17 +191,27 @@ class TestIsarCoreSafety(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     isar_mode.form_isar(grid, legacy_metadata_attested=True)
 
-    def test_unrecognized_or_negated_geometry_is_rejected(self):
-        for value in ("banana geometry", "not monostatic; Fresnel zone"):
-            with self.subTest(value=value):
-                grid = self._grid(
-                    extra={
-                        "phase_reference": "fixed origin",
-                        "measurement_geometry": value,
-                    }
-                )
-                with self.assertRaisesRegex(ValueError, "geometry|far-field"):
-                    isar_mode.form_isar(grid, legacy_metadata_attested=True)
+    def test_unrecognized_geometry_is_recorded_but_known_incompatible_is_rejected(self):
+        grid = self._grid(
+            extra={
+                "phase_reference": "fixed origin",
+                "measurement_geometry": "banana geometry",
+            }
+        )
+        bands, _elapsed = isar_mode.form_isar(grid)
+        self.assertIn(
+            "far-field monostatic acquisition geometry",
+            bands[0]["isar_contract_undeclared_fields"],
+        )
+
+        incompatible = self._grid(
+            extra={
+                "phase_reference": "fixed origin",
+                "measurement_geometry": "not monostatic; Fresnel zone",
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "geometry|far-field"):
+            isar_mode.form_isar(incompatible)
 
     def test_explicit_far_field_monostatic_geometry_is_accepted(self):
         grid = self._grid(
@@ -207,10 +220,9 @@ class TestIsarCoreSafety(unittest.TestCase):
                 "measurement_geometry": "far-field monostatic",
             }
         )
-        bands, _elapsed = isar_mode.form_isar(
-            grid, legacy_metadata_attested=True
-        )
+        bands, _elapsed = isar_mode.form_isar(grid)
         self.assertEqual(len(bands), 1)
+        self.assertTrue(bands[0]["isar_contract_user_assumed"])
 
     def test_frequency_domain_metadata_is_not_mistaken_for_propagation_zone(self):
         grid = self._grid()
@@ -278,15 +290,20 @@ class TestIsarCoreSafety(unittest.TestCase):
                         grid, legacy_metadata_attested=True
                     )
 
-    def test_unrecognized_motion_metadata_is_rejected(self):
-        grid = self._grid(
-            extra={
-                "phase_reference": "fixed origin",
-                "motion_compensation": "banana state",
-            }
-        )
-        with self.assertRaisesRegex(ValueError, "unrecognized motion state"):
-            isar_mode.form_isar(grid, legacy_metadata_attested=True)
+    def test_unrecognized_motion_metadata_is_recorded_as_user_assumed(self):
+        for declaration in ("banana state", "N/A"):
+            with self.subTest(declaration=declaration):
+                grid = self._grid(
+                    extra={
+                        "phase_reference": "fixed origin",
+                        "motion_compensation": declaration,
+                    }
+                )
+                bands, _elapsed = isar_mode.form_isar(grid)
+                self.assertIn(
+                    "a stable or motion-compensated phase center",
+                    bands[0]["isar_contract_undeclared_fields"],
+                )
 
     def test_missing_geometry_metadata_remains_legacy_compatible(self):
         grid = self._grid(
@@ -297,26 +314,22 @@ class TestIsarCoreSafety(unittest.TestCase):
             },
             extra={},
         )
-        bands, _elapsed = isar_mode.form_isar(
-            grid, legacy_metadata_attested=True
-        )
+        bands, _elapsed = isar_mode.form_isar(grid)
         self.assertEqual(len(bands), 1)
+        self.assertTrue(bands[0]["isar_contract_user_assumed"])
 
-    def test_phase_and_time_alone_do_not_attest_geometry_or_motion(self):
+    def test_phase_and_time_alone_record_geometry_and_motion_assumptions(self):
         grid = self._grid(
             extra={
                 "phase_reference": "fixed origin",
                 "range_phase_convention": "S~exp(-j*2*k*R)",
             }
         )
-        with self.assertRaisesRegex(
-            ValueError, "far-field monostatic acquisition geometry"
-        ):
-            isar_mode.form_isar(grid)
-        bands, _elapsed = isar_mode.form_isar(
-            grid, legacy_metadata_attested=True
-        )
+        bands, _elapsed = isar_mode.form_isar(grid)
         self.assertEqual(len(bands), 1)
+        undeclared = bands[0]["isar_contract_undeclared_fields"]
+        self.assertIn("far-field monostatic acquisition geometry", undeclared)
+        self.assertIn("a stable or motion-compensated phase center", undeclared)
 
     def test_explicit_opposite_range_phase_requires_both_axis_flips(self):
         grid = self._grid()

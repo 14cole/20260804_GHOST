@@ -401,6 +401,14 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         item.setSelected(True)
         widget.setCurrentItem(item)
 
+    def test_merge_actions_explain_strict_and_policy_workflows(self) -> None:
+        self.assertEqual(self.window.btn_join.text(), "Strict Merge")
+        self.assertEqual(self.window.btn_stitch.text(), "Merge Overlaps...")
+        self.assertIn("without interpolation", self.window.btn_join.toolTip())
+        self.assertIn("conflicting finite overlap", self.window.btn_join.toolTip())
+        self.assertIn("without interpolation", self.window.btn_stitch.toolTip())
+        self.assertIn("resolve conflicting overlaps", self.window.btn_stitch.toolTip())
+
     def test_audit_publishes_core_statuses_and_matching_summary_counts(self) -> None:
         healthy = _axis_grid([0.0], 1.0)
         healthy.units.update(
@@ -409,6 +417,7 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             polarization_basis="V/H",
         )
         warning = _axis_grid([0.0], 2.0)
+        warning.rcs_phase.flat[0] = np.nan
         invalid = _axis_grid([0.0], 3.0)
         invalid.rcs_power.flat[0] = -1.0
         for name, dataset in (
@@ -435,7 +444,7 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             "Dataset audit complete: 1 pass, 1 warning, 1 fail.",
         )
 
-    def test_stitch_review_uses_exact_core_report_counts(self) -> None:
+    def test_stitch_auto_adds_and_status_uses_exact_core_report_counts(self) -> None:
         self.window._add_dataset_row(
             _axis_grid([0.0, 1.0], 1.0), "First", "Loaded", ""
         )
@@ -444,13 +453,7 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         )
         self._select_rows_in_order(0, 1)
 
-        with (
-            mock.patch("grim_cut_dataset_mixin.StitchDialog") as dialog_type,
-            mock.patch(
-                "grim_cut_dataset_mixin.QMessageBox.question",
-                return_value=QMessageBox.Yes,
-            ) as question,
-        ):
+        with mock.patch("grim_cut_dataset_mixin.StitchDialog") as dialog_type:
             dialog = dialog_type.return_value
             dialog.exec.return_value = QDialog.Accepted
             dialog.get_params.return_value = {
@@ -460,17 +463,14 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             self.window._stitch_selected_datasets()
             self._wait_for_background()
 
-        review = question.call_args.args[2]
+        status = self.window.status.currentMessage()
         for expected in (
-            "Contributing finite samples: 4",
-            "Finite stitched output cells: 3",
-            "Missing union-grid cells: 0",
-            "Overlapping output cells: 1",
-            "Equivalent overlaps: 0",
-            "Conflicting overlaps resolved by policy: 1",
-            "Maximum contributors to one cell: 2",
+            "1 overlap cell(s)",
+            "1 conflict(s) resolved by priority-first",
+            "0 missing output cell(s)",
+            "maximum 2 contributor(s) per cell",
         ):
-            self.assertIn(expected, review)
+            self.assertIn(expected, status)
         self.assertEqual(self.window.table.rowCount(), 3)
         stitched = self.window.table.item(2, 0).data(Qt.UserRole)
         np.testing.assert_array_equal(stitched.azimuths, [0.0, 1.0, 2.0])

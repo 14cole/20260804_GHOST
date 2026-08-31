@@ -280,9 +280,8 @@ def _parser():
         "--attest-coherent-metadata",
         action="store_true",
         help=(
-            "attest that coherent-add or coherent-mean stitch inputs with missing "
-            "declarations share one phase center, phasor time convention, and "
-            "polarization basis"
+            "legacy compatibility option: record an explicit user attestation "
+            "for missing coherent metadata; operations no longer require it"
         ),
     )
     return parser

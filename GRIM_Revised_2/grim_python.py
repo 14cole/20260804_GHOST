@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import json
 import math
 import os
 from pathlib import Path
@@ -992,6 +993,7 @@ def coherent_divide(
         denominator,
         coherent=True,
         coherent_metadata_attested=metadata_attested,
+        _scan_phase_samples=False,
     )
     shape = tuple(int(value) for value in numerator.rcs_power.shape)
     raw_response = (
@@ -1043,6 +1045,17 @@ def coherent_divide(
             quotient.real,
             out=result_phase[selection],
         )
+        finite_result = np.isfinite(power_block) & np.isfinite(
+            result_phase[selection]
+        )
+        power_block[~finite_result] = np.nan
+        result_phase[selection][~finite_result] = np.nan
+    usable_count = int(np.count_nonzero(np.isfinite(result_power)))
+    if usable_count == 0:
+        raise ValueError(
+            "coherent division has no common usable complex samples with a "
+            "nonzero denominator"
+        )
     units = dict(numerator.units or {})
     units["rcs_log_unit"] = "dB"
     units["rcs_linear_quantity"] = "power_ratio"
@@ -1051,9 +1064,10 @@ def coherent_divide(
     # that describe the numerator rather than this derived result.
     extra = {}
     for key in ("time_convention", "polarization_basis"):
-        value = numerator._declared_scalar_metadata(key)
-        if value:
-            extra[key] = value
+        left_value = numerator._declared_scalar_metadata(key)
+        right_value = denominator._declared_scalar_metadata(key)
+        if left_value and right_value:
+            extra[key] = left_value
     history, attestation_extra = numerator._coherent_attestation_provenance(
         (denominator,),
         operation="coherent-divide",
@@ -1067,6 +1081,17 @@ def coherent_divide(
         # record captures compatibility without manufacturing a replacement.
         attestation_extra.pop("phase_reference", None)
         extra.update(attestation_extra)
+    extra["coherent_sample_qa_json"] = json.dumps(
+        {
+            "schema": "grim.coherent-sample-qa.v1",
+            "operation": "coherent-divide",
+            "total_sample_count": int(result_power.size),
+            "usable_sample_count": usable_count,
+            "masked_sample_count": int(result_power.size - usable_count),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     extra["amplitude_convention"] = "complex field ratio"
     return RcsGrid(
         numerator.azimuths,
@@ -1302,7 +1327,7 @@ def wedge_to_conic(
     if mode_key != "regrid":
         raise ValueError("mode must be 'regrid'")
     return dataset.convert_wedge_to_conic(
-        attest_wedge_axes=True,
+        attest_wedge_axes=False,
         assume_missing_cross_pol_zero=assume_missing_cross_pol_zero,
     )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -91,16 +92,23 @@ class TestIsarRepeatContract(unittest.TestCase):
 
         first, second = self._sweeps([field, field])
         second.grid.extra.pop("range_phase_convention")
-        with self.assertRaisesRegex(ValueError, "range_phase_convention"):
-            RepeatAcquisitionStack([first, second])
-        attested = RepeatAcquisitionStack(
-            [first, second], legacy_metadata_attested=True
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assumed = RepeatAcquisitionStack([first, second])
+        self.assertIn(
+            "range_phase_convention",
+            "\n".join(str(item.message) for item in caught),
         )
         self.assertIn(
             "range_phase_convention",
-            attested.metadata_contract["missing_declarations_by_acquisition"][
+            assumed.metadata_contract["missing_declarations_by_acquisition"][
                 "run-1"
             ],
+        )
+        self.assertTrue(
+            assumed.metadata_contract[
+                "missing_declarations_treated_as_user_assumptions"
+            ]
         )
 
     def test_semantic_alias_families_accept_equivalent_crossed_keys(self):
@@ -175,7 +183,7 @@ class TestIsarRepeatContract(unittest.TestCase):
                 [first, second, third], legacy_metadata_attested=True
             )
 
-    def test_legacy_attestation_covers_only_missing_metadata(self):
+    def test_missing_metadata_is_warned_and_recorded_without_attestation(self):
         field = np.ones((3, 4), dtype=np.complex128)
         first, second = self._sweeps([field, field])
         for sweep in (first, second):
@@ -184,15 +192,21 @@ class TestIsarRepeatContract(unittest.TestCase):
             sweep.grid.extra.pop("phase_reference")
             sweep.grid.extra.pop("polarization_basis")
             sweep.grid.units.pop("time_convention")
-        with self.assertRaisesRegex(ValueError, "metadata is incomplete"):
-            RepeatAcquisitionStack([first, second])
-
-        stack = RepeatAcquisitionStack(
-            [first, second], legacy_metadata_attested=True
-        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            stack = RepeatAcquisitionStack([first, second])
         contract = stack.metadata_contract
-        self.assertTrue(contract["legacy_metadata_attested"])
+        self.assertFalse(contract["legacy_metadata_attested"])
+        self.assertFalse(contract["legacy_metadata_attestation_required"])
         self.assertFalse(contract["declarations_inferred"])
+        self.assertTrue(contract["missing_declarations_treated_as_user_assumptions"])
+        self.assertFalse(
+            contract["missing_declarations_covered_by_user_attestation"]
+        )
+        self.assertIn(
+            "being compared as requested",
+            "\n".join(str(item.message) for item in caught),
+        )
         self.assertIn(
             "phase_reference",
             contract["missing_declarations_by_acquisition"]["run-0"],
@@ -204,6 +218,31 @@ class TestIsarRepeatContract(unittest.TestCase):
             RepeatAcquisitionStack(
                 [first, second], legacy_metadata_attested=True
             )
+
+    def test_unknown_coherent_and_range_metadata_is_assumed_not_rejected(self):
+        field = np.ones((3, 4), dtype=np.complex128)
+        first, second = self._sweeps([field, field])
+        second.grid.extra["phase_reference"] = "unknown"
+        second.grid.extra["polarization_basis"] = "unspecified"
+        second.grid.units["time_convention"] = "unverified"
+        second.grid.extra["range_phase_convention"] = "vendor native range phase"
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            stack = RepeatAcquisitionStack([first, second])
+
+        missing = stack.metadata_contract["missing_declarations_by_acquisition"][
+            "run-1"
+        ]
+        self.assertIn("phase_reference", missing)
+        self.assertIn("polarization_basis", missing)
+        self.assertIn("time_convention", missing)
+        self.assertIn("range_phase_convention", missing)
+        profile = stack.metadata_contract["metadata_profiles"]["run-1"]
+        self.assertEqual(
+            profile["unrecognized_declarations"]["phase_reference"], "unknown"
+        )
+        self.assertIn("incomplete or unrecognized", str(caught[0].message))
 
         first, second = self._sweeps([field, field])
         second.grid.extra["motion_compensation"] = "uncompensated"

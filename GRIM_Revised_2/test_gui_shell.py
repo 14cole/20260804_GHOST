@@ -498,28 +498,6 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertIs(self.window.active_dataset, first_row_dataset)
         self.assertEqual(self.window._isar_input_revision, revision)
 
-    def test_dataset_identity_change_clears_legacy_isar_attestation(self) -> None:
-        first = _grid(1.0)
-        second = _grid(2.0)
-        self.window._add_dataset_row(first, "First", "", "first.grim")
-        self.window._add_dataset_row(second, "Second", "", "second.grim")
-        first_row_dataset = self.window.table.item(0, 0).data(Qt.UserRole)
-        self.window.table.setCurrentCell(0, 0)
-        self.app.processEvents()
-        attestation = self.window._plot_contexts[
-            "isar"
-        ].chk_isar_legacy_phase_attestation
-        attestation.setChecked(True)
-        self.assertIs(
-            getattr(attestation, "_attested_dataset", None), first_row_dataset
-        )
-
-        self.window.table.setCurrentCell(1, 0)
-        self.app.processEvents()
-
-        self.assertFalse(attestation.isChecked())
-        self.assertIsNone(getattr(attestation, "_attested_dataset", None))
-
     def test_tabs_have_one_canonical_assembly_workspace(self) -> None:
         labels = [
             self.window.main_tabs.tabText(index)
@@ -830,19 +808,20 @@ class UnifiedGuiShellTest(unittest.TestCase):
         entries = [("DUT", _grid()), ("Measured cylinder", _grid()), ("Exact", _grid())]
         dialog = RangeCalibrationDialog(entries, parent=self.window)
         ok_button = dialog.buttons.button(QDialogButtonBox.Ok)
+        self.assertTrue(ok_button.isEnabled())
+        dialog.combo_exact.setCurrentIndex(dialog.combo_measured.currentIndex())
         self.assertFalse(ok_button.isEnabled())
         dialog.combo_measured.setCurrentIndex(1)
         dialog.combo_exact.setCurrentIndex(2)
         dialog.spin_offset_m.setValue(0.125)
         dialog.chk_broadcast.setChecked(True)
-        dialog.chk_attest.setChecked(True)
         self.assertTrue(ok_button.isEnabled())
         params = dialog.get_params()
         self.assertEqual(params["measured"][0], "Measured cylinder")
         self.assertEqual(params["exact"][0], "Exact")
         self.assertAlmostEqual(params["range_offset_m"], 0.125)
         self.assertTrue(params["allow_singleton_angular_broadcast"])
-        self.assertTrue(params["convention_attested"])
+        self.assertFalse(params["convention_attested"])
         dialog.deleteLater()
 
     def test_support_reference_button_and_dialog_make_roles_and_limits_explicit(self) -> None:
@@ -854,20 +833,17 @@ class UnifiedGuiShellTest(unittest.TestCase):
         entries = [("Vehicle on support", _grid(3.0)), ("Support only", _grid(1.0))]
         dialog = SupportReferenceDifferenceDialog(entries, parent=self.window)
         ok_button = dialog.buttons.button(QDialogButtonBox.Ok)
-        self.assertFalse(ok_button.isEnabled())
+        self.assertTrue(ok_button.isEnabled())
         self.assertIn("Exact axes", dialog.compatibility_label.text())
         self.assertIn("calibration ID", dialog.compatibility_label.text())
         self.assertIn(
             "no explicit declaration contradicts", dialog.compatibility_label.text()
         )
-        dialog.chk_acquisition.setChecked(True)
-        dialog.chk_interaction.setChecked(True)
-        self.assertTrue(ok_button.isEnabled())
         params = dialog.get_params()
         self.assertEqual(params["target"][0], "Vehicle on support")
         self.assertEqual(params["support"][0], "Support only")
-        self.assertTrue(params["metadata_attested"])
-        self.assertTrue(params["assumptions_attested"])
+        self.assertFalse(params["metadata_attested"])
+        self.assertFalse(params["assumptions_attested"])
 
         dialog.combo_support.setCurrentIndex(0)
         self.assertFalse(ok_button.isEnabled())
@@ -925,16 +901,9 @@ class UnifiedGuiShellTest(unittest.TestCase):
                 "_try_start_background_job",
                 side_effect=_run_worker_now,
             ),
-            mock.patch.object(
-                grim_cut_dataset_mixin.QMessageBox,
-                "question",
-                return_value=QMessageBox.Yes,
-            ) as review,
         ):
             self.window.btn_support_reference.click()
 
-        self.assertEqual(review.call_count, 1)
-        self.assertIn("not proof of a free-space", review.call_args.args[2])
         self.assertEqual(self.window.table.rowCount(), 3)
         result_item = self.window.table.item(2, 0)
         self.assertEqual(
@@ -949,7 +918,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertTrue(provenance["not_free_space_target"])
         recorded = self.window.python_recorder.script
         self.assertIn(".support_referenced_difference(", recorded)
-        self.assertIn("assumptions_attested=True", recorded)
+        self.assertNotIn("assumptions_attested", recorded)
         self.assertIn("target_label='Vehicle on support'", recorded)
 
     def test_sentri_elevation_button_is_explicit_and_converts_selected_data(self) -> None:
@@ -1869,13 +1838,15 @@ class UnifiedGuiShellTest(unittest.TestCase):
             converted_gc.great_circle_coordinate_convention(), GRIM_GC_CONVENTION
         )
 
-    def test_conic_gc_dialog_is_symmetric_and_legacy_attestation_is_explicit(self):
+    def test_conic_gc_dialog_is_symmetric_without_attestation_gate(self):
         conic_dialog = ConicGCDialog(source_coordinate_system="conic")
         self.assertEqual(
             conic_dialog.get_params()["direction"], "conic_to_gc"
         )
         self.assertFalse(conic_dialog._radio_regrid.isEnabled())
-        self.assertFalse(conic_dialog._chk_attest_legacy.isEnabled())
+        self.assertFalse(
+            conic_dialog.get_params()["attest_legacy_ptm_convention"]
+        )
         conic_dialog.deleteLater()
 
         legacy_dialog = ConicGCDialog(
@@ -1885,23 +1856,20 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertEqual(
             legacy_dialog.get_params()["direction"], "gc_to_conic"
         )
-        self.assertTrue(legacy_dialog._chk_attest_legacy.isEnabled())
-        legacy_dialog._chk_attest_legacy.setChecked(True)
-        self.assertTrue(
+        self.assertFalse(
             legacy_dialog.get_params()["attest_legacy_ptm_convention"]
         )
         legacy_dialog.deleteLater()
 
-    def test_wedge_dialog_requires_axis_attestation_and_only_offers_regrid(self):
+    def test_wedge_dialog_records_axis_assumption_and_only_offers_regrid(self):
         dialog = WedgeConicDialog()
         self.assertEqual(dialog.get_params()["mode"], "regrid")
         self.assertFalse(dialog.get_params()["attest_wedge_axes"])
         self.assertFalse(
             dialog.get_params()["assume_missing_cross_pol_zero"]
         )
-        dialog._chk_attest_axes.setChecked(True)
         dialog._chk_cross_zero.setChecked(True)
-        self.assertTrue(dialog.get_params()["attest_wedge_axes"])
+        self.assertFalse(dialog.get_params()["attest_wedge_axes"])
         self.assertTrue(
             dialog.get_params()["assume_missing_cross_pol_zero"]
         )

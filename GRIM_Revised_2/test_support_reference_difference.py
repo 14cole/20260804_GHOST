@@ -139,11 +139,15 @@ class SupportReferenceDifferenceTest(unittest.TestCase):
             result.rcs.reshape(-1), [2.0 + 0.0j, 0.0 + 1.0j]
         )
 
-    def test_requires_roles_assumptions_and_exact_compatible_axes(self) -> None:
+    def test_requires_distinct_roles_and_exact_compatible_axes(self) -> None:
         combined = _grid([2.0 + 0.0j, 2.0 + 0.0j])
         support = _grid([1.0 + 0.0j, 1.0 + 0.0j])
-        with self.assertRaisesRegex(ValueError, "requires confirmation"):
-            combined.support_referenced_difference(support)
+        result = combined.support_referenced_difference(support)
+        provenance = json.loads(result.extra["support_reference_difference_json"])
+        self.assertTrue(
+            provenance["operation_selected_as_assumption_of_compatible_acquisition"]
+        )
+        self.assertFalse(provenance["user_assumptions_attested"])
         with self.assertRaisesRegex(ValueError, "different datasets"):
             combined.support_referenced_difference(
                 combined, assumptions_attested=True
@@ -368,23 +372,15 @@ class SupportReferenceDifferenceTest(unittest.TestCase):
                 metadata_attested=True,
             )
 
-    def test_missing_declarations_require_explicit_metadata_attestation(self) -> None:
+    def test_missing_declarations_are_recorded_as_assumptions(self) -> None:
         combined = _grid([2.0 + 0.0j, 2.0 + 0.0j])
         support = _grid([1.0 + 0.0j, 1.0 + 0.0j])
         support.extra.pop("phase_reference")
-        with self.assertRaisesRegex(ValueError, "matching phase references"):
-            combined.support_referenced_difference(
-                support, assumptions_attested=True
-            )
-        result = combined.support_referenced_difference(
-            support,
-            assumptions_attested=True,
-            metadata_attested=True,
-        )
+        result = combined.support_referenced_difference(support)
         provenance = json.loads(result.extra["support_reference_difference_json"])
-        self.assertTrue(provenance["metadata_attestation_used"])
-        attestation = json.loads(result.extra["coherent_metadata_attestation_json"])
-        self.assertEqual(attestation["operation"], "coherent-subtract")
+        self.assertFalse(provenance["metadata_attestation_used"])
+        assumption = json.loads(result.extra["coherent_metadata_assumption_json"])
+        self.assertEqual(assumption["operation"], "coherent-subtract")
 
     def test_missing_samples_are_reported_and_provenance_roundtrips(self) -> None:
         combined = _grid([2.0 + 0.0j, np.nan + 1j * np.nan])
@@ -406,15 +402,19 @@ class SupportReferenceDifferenceTest(unittest.TestCase):
             loaded.extra["support_reference_difference_json"]
         ).reshape(()).item()
         self.assertEqual(json.loads(str(loaded_raw)), provenance)
-        with self.assertRaisesRegex(ValueError, "already a support-referenced"):
-            loaded.support_referenced_difference(
-                support, assumptions_attested=True
-            )
+        chained = loaded.support_referenced_difference(support)
+        chained_provenance = json.loads(
+            chained.extra["support_reference_difference_json"]
+        )
+        self.assertEqual(
+            chained_provenance["chained_support_difference_input_roles"],
+            ["target_plus_support"],
+        )
 
         all_missing = _grid(
             [np.nan + 1j * np.nan, np.nan + 1j * np.nan]
         )
-        with self.assertRaisesRegex(ValueError, "no common finite complex samples"):
+        with self.assertRaisesRegex(ValueError, "no common usable complex samples"):
             all_missing.support_referenced_difference(
                 support, assumptions_attested=True
             )
@@ -431,10 +431,9 @@ class SupportReferenceDifferenceTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "requires phase"):
             combined._assert_compatible(support, coherent=True)
-        with self.assertRaisesRegex(ValueError, "requires phase"):
-            combined.support_referenced_difference(
-                support, assumptions_attested=True
-            )
+        result = combined.support_referenced_difference(support)
+        provenance = json.loads(result.extra["support_reference_difference_json"])
+        self.assertEqual(provenance["qa"]["common_finite_sample_count"], 1)
 
 
 if __name__ == "__main__":

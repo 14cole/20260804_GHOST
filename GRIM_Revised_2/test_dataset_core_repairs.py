@@ -661,13 +661,47 @@ class CoreOperationTests(unittest.TestCase):
         np.testing.assert_array_equal(aligned.azimuths, target.azimuths)
         np.testing.assert_array_equal(aligned.rcs_power.ravel(), [20.0, 10.0])
 
-    def test_coherent_metadata_requires_reference_or_attestation(self):
+    def test_align_only_requires_coordinate_metadata_compatibility(self):
+        source = _grid(
+            power=[1.0, 2.0],
+            azimuths=(0.0, 1.0),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBsm",
+                "rcs_linear_quantity": "sigma_3d",
+            },
+        )
+        target = _grid(
+            power=[3.0, 4.0],
+            azimuths=(0.0, 1.0),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_log_unit": "dBke",
+                "rcs_linear_quantity": "sigma_2d",
+            },
+        )
+
+        self.assertIs(source.align_to(target, mode="exact"), source)
+        intersected = source.align_to(target, mode="intersect")
+        self.assertEqual(intersected.linear_quantity(), "sigma_3d")
+        np.testing.assert_array_equal(intersected.rcs_power, source.rcs_power)
+
+    def test_coherent_metadata_missing_is_recorded_without_blocking(self):
         left = _grid()
         right = _grid()
         left.source_path = "left.grim"
         left.history = "loaded left"
-        with self.assertRaisesRegex(ValueError, "nonblank phase reference"):
-            left.coherent_add(right)
+        assumed = left.coherent_add(right)
+        np.testing.assert_allclose(assumed.rcs_power, 4.0)
+        assumption = json.loads(
+            assumed.extra["coherent_metadata_assumption_json"]
+        )
+        self.assertFalse(assumption["user_attested"])
+        self.assertIn("phase_reference", assumption["missing_declarations_by_input"])
         added = left.coherent_add(right, metadata_attested=True)
         np.testing.assert_allclose(added.rcs_power, 4.0)
         self.assertEqual(added.source_path, "left.grim")
@@ -700,11 +734,12 @@ class CoreOperationTests(unittest.TestCase):
         )
 
         known = _grid(extra={"phase_reference": "origin A"})
-        with self.assertRaisesRegex(ValueError, "phase references"):
-            known.coherent_add(right)
+        one_sided = known.coherent_add(right)
+        self.assertNotIn("phase_reference", one_sided.extra)
+        self.assertIn("coherent_source_conventions_json", one_sided.extra)
         known.coherent_add(right, metadata_attested=True)
         adopted = right.coherent_add(known, metadata_attested=True)
-        self.assertEqual(adopted._phase_reference(), "origin A")
+        self.assertEqual(adopted._phase_reference(), "")
 
         conflicting_known = _grid(extra={"phase_reference": "origin B"})
         with self.assertRaisesRegex(ValueError, "matching phase reference"):

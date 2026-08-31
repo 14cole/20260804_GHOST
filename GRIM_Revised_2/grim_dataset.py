@@ -1871,7 +1871,7 @@ class RcsGrid:
                 add_issue(
                     warnings_out,
                     "missing_coherent_phase",
-                    "finite power samples with missing phase block coherent operations",
+                    "finite power samples with missing phase are masked by coherent operations",
                     count=phase_metric["power_without_phase_count"],
                 )
             if phase_metric["phase_without_power_count"]:
@@ -1899,7 +1899,6 @@ class RcsGrid:
                 metadata_metric[f"{key}_unit"] = None
                 add_issue(errors, f"unsupported_{key}_unit", str(exc))
 
-        coherent_metadata_complete = True
         for key in ("phase_reference", "time_convention", "polarization_basis"):
             try:
                 value = self._declared_scalar_metadata(key)
@@ -1909,12 +1908,12 @@ class RcsGrid:
             declared = bool(value)
             metadata_metric[key] = value or None
             metadata_metric[f"{key}_declared"] = declared
-            coherent_metadata_complete &= declared
             if not declared:
                 add_issue(
-                    warnings_out,
-                    f"missing_{key}",
-                    f"{key.replace('_', ' ')} is not declared",
+                    info,
+                    f"unspecified_{key}",
+                    f"{key.replace('_', ' ')} is not declared; coherent operations "
+                    "record this as an assumption",
                 )
         try:
             metadata_metric["linear_quantity"] = self.linear_quantity()
@@ -2135,15 +2134,13 @@ class RcsGrid:
             and not phase_metric.get("outside_declared_wrap_count", 0)
         )
         coherent_phase_ready = bool(
-            structural_ready and phase_metric.get("power_without_phase_count", 0) == 0
+            structural_ready and phase_metric.get("finite_complex_count", 0) > 0
         )
         metrics["readiness"].update(
             {
                 "incoherent_arithmetic": structural_ready,
                 "strict_join": structural_ready,
-                "coherent_arithmetic": bool(
-                    coherent_phase_ready and coherent_metadata_complete
-                ),
+                "coherent_arithmetic": coherent_phase_ready,
                 "interpolation": bool(
                     structural_ready and axes_strictly_increasing
                 ),
@@ -2520,18 +2517,21 @@ class RcsGrid:
         measured wedge tilts and a complete turntable revolution are required.
         """
 
+        declared_source_system = self._declared_scalar_metadata(
+            "angular_coordinate_system"
+        )
         source_system = self.angular_coordinate_system()
         if source_system == "great_circle":
             raise ValueError(
                 "Wedge-to-Conic requires turntable-angle/wedge-tilt axes, not "
                 "a great-circle dataset"
             )
-        if source_system != "wedge_turntable" and not attest_wedge_axes:
+        if declared_source_system and source_system != "wedge_turntable":
             raise ValueError(
-                "The source is not tagged wedge_turntable. Explicitly attest "
-                "that azimuth is fixed-world-z turntable angle phi and "
-                "elevation is body-y wedge pitch tau."
+                "Wedge-to-Conic cannot override an explicit non-wedge angular "
+                f"coordinate system {declared_source_system!r}"
             )
+        assumed_wedge_axes = not bool(declared_source_system)
 
         az_unit = self._canonical_unit(
             (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
@@ -2680,6 +2680,18 @@ class RcsGrid:
                 "wedge_to_conic_cross_pol_treatment": cross_note,
             }
         )
+        if assumed_wedge_axes:
+            converted_extra["wedge_axes_assumption_json"] = json.dumps(
+                {
+                    "schema": "grim.wedge-axes-assumption.v1",
+                    "operation_requested": True,
+                    "source_coordinate_declaration_missing": True,
+                    "assumed_axes": WEDGE_TURNTABLE_CONVENTION,
+                    "legacy_user_attested": bool(attest_wedge_axes),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         geometric_supported = (
             (query_tau >= tau_sorted[0] - 1.0e-9)
             & (query_tau <= tau_sorted[-1] + 1.0e-9)
@@ -2692,6 +2704,8 @@ class RcsGrid:
             f"Jones C^T*S*C rotation ({cross_note}); no extrapolation; "
             f"normal-grid geometric coverage {coverage:.1f}%"
         )
+        if assumed_wedge_axes:
+            history_entry += "; untagged source axes assumed from requested operation"
         history = (
             f"{self.history}\n{history_entry}" if self.history else history_entry
         )
@@ -2723,8 +2737,9 @@ class RcsGrid:
         conic coordinates and it requires a full complex scattering-matrix
         basis rotation.
 
-        An unmarked legacy PTM is accepted only when the caller explicitly
-        attests that it uses GRIM's aspect sign/origin and V/H convention.
+        Selecting the conversion for an unmarked legacy PTM records the GRIM
+        aspect/basis convention as an operation assumption. Explicitly tagged
+        incompatible great-circle conventions remain unsupported.
         """
 
         direction = str(direction or "").strip().lower()
@@ -2795,17 +2810,10 @@ class RcsGrid:
                 if convention != LEGACY_PTM_GC_CONVENTION:
                     raise ValueError(
                         "unsupported great-circle coordinate convention "
-                        f"{convention!r}; only GRIM_GC_V1 or an explicitly "
-                        "attested unmarked legacy PTM is supported"
+                        f"{convention!r}; only GRIM_GC_V1 or an unmarked "
+                        "legacy PTM is supported"
                     )
-                if not attest_legacy_ptm_convention:
-                    raise ValueError(
-                        "legacy PTM great-circle convention is unmarked: its "
-                        "aspect sign/origin and V/H basis are unspecified. "
-                        "Explicitly attest the GRIM GC convention before "
-                        "performing this relabel"
-                    )
-                convention_note = "user-attested legacy PTM as GRIM_GC_V1"
+                convention_note = "unmarked legacy PTM assumed GRIM_GC_V1"
             else:
                 convention_note = "declared GRIM_GC_V1"
         else:
@@ -2847,6 +2855,22 @@ class RcsGrid:
             converted_extra, "convert-equatorial-conic-great-circle"
         )
         converted_extra.pop("assembly_angular_coordinate_contract", None)
+        if (
+            direction == "gc_to_conic"
+            and self.great_circle_coordinate_convention()
+            == LEGACY_PTM_GC_CONVENTION
+        ):
+            converted_extra["great_circle_conversion_assumption_json"] = json.dumps(
+                {
+                    "schema": "grim.great-circle-conversion-assumption.v1",
+                    "operation_requested": True,
+                    "source_convention_unmarked": True,
+                    "assumed_convention": GRIM_GC_CONVENTION,
+                    "legacy_user_attested": bool(attest_legacy_ptm_convention),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
 
         converted_units = copy.deepcopy(self.units or {})
         if direction == "conic_to_gc":
@@ -2896,7 +2920,15 @@ class RcsGrid:
             extra=converted_extra,
         )
 
-    def _assert_physical_metadata_compatible(self, other):
+    def _assert_axis_metadata_compatible(self, other):
+        """Require coordinates to share units and the same angular frame.
+
+        This is the compatibility contract for operations that only align or
+        crop coordinates and keep each dataset's response values separate.
+        Response quantity and logarithmic display metadata are intentionally
+        irrelevant to those operations.
+        """
+
         if not isinstance(other, RcsGrid):
             raise TypeError("other must be an RcsGrid")
         for key, aliases, default in (
@@ -2908,16 +2940,6 @@ class RcsGrid:
             right = other._supported_unit(key, aliases, default)
             if left != right:
                 raise ValueError(f"{key} unit mismatch: {left} != {right}")
-        if self.linear_quantity() != other.linear_quantity():
-            raise ValueError(
-                "RCS linear quantity mismatch: "
-                f"{self.linear_quantity()} != {other.linear_quantity()}"
-            )
-        if self.default_log_unit().lower() != other.default_log_unit().lower():
-            raise ValueError(
-                f"RCS log unit mismatch: {self.default_log_unit()} != "
-                f"{other.default_log_unit()}"
-            )
         left_angles = self.angular_coordinate_system()
         right_angles = other.angular_coordinate_system()
         if left_angles != right_angles:
@@ -2943,17 +2965,67 @@ class RcsGrid:
                     f"roll/tilt {left_orientation} != {right_orientation} deg"
                 )
 
+    def _assert_physical_metadata_compatible(self, other):
+        self._assert_axis_metadata_compatible(other)
+        if self.linear_quantity() != other.linear_quantity():
+            raise ValueError(
+                "RCS linear quantity mismatch: "
+                f"{self.linear_quantity()} != {other.linear_quantity()}"
+            )
+        if self.default_log_unit().lower() != other.default_log_unit().lower():
+            raise ValueError(
+                f"RCS log unit mismatch: {self.default_log_unit()} != "
+                f"{other.default_log_unit()}"
+            )
+
+    @staticmethod
+    def _metadata_placeholder(value):
+        words = set(
+            re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).split()
+        )
+        return bool(
+            words.intersection(
+                {"unknown", "unspecified", "undetermined", "unverified", "arbitrary"}
+            )
+        )
+
+    def _coherent_source_convention_values(self, key):
+        """Return explicit source declarations without promoting one-sided data."""
+
+        values = []
+        direct = self._declared_scalar_metadata(key)
+        if direct and not self._metadata_placeholder(direct):
+            values.append(direct)
+        raw = (self.extra or {}).get("coherent_source_conventions_json")
+        if raw is not None:
+            try:
+                if isinstance(raw, np.ndarray):
+                    raw = raw.reshape(()).item()
+                record = json.loads(str(raw))
+                stored = record.get("declared_values", {}).get(key, [])
+                if isinstance(stored, list):
+                    values.extend(
+                        str(value).strip()
+                        for value in stored
+                        if str(value).strip()
+                        and not self._metadata_placeholder(value)
+                    )
+            except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+                # Malformed lineage is non-authoritative provenance. Direct
+                # declarations still participate in the physical comparison.
+                pass
+        return values
+
     def _assert_coherent_metadata_compatible(
         self, other, *, metadata_attested=False
     ):
         """Validate convention metadata needed for field-level arithmetic.
 
-        Explicitly contradictory declarations are never overridable.  A
-        one-sided declaration is blocked by default because an unspecified
-        convention is not proof of compatibility; a GUI confirmation can pass
-        ``metadata_attested=True`` after the user verifies the sources.  Phase
-        references are stricter: two blank legacy references also require that
-        explicit attestation.
+        Explicitly contradictory declarations are never overridable. Missing
+        and one-sided declarations are allowed: requesting the coherent
+        operation is treated as the user's intent to combine the available
+        complex samples, and the derived result records the assumption without
+        inventing convention values.
         """
 
         if not isinstance(metadata_attested, (bool, np.bool_)):
@@ -2976,32 +3048,16 @@ class RcsGrid:
             ),
         )
         for key, label, canonicalize in fields:
-            left_raw = self._declared_scalar_metadata(key)
-            right_raw = other._declared_scalar_metadata(key)
-            if left_raw and right_raw:
-                if canonicalize(left_raw) != canonicalize(right_raw):
-                    raise ValueError(
-                        f"coherent operation requires matching {label}; got "
-                        f"{left_raw!r} and {right_raw!r}"
-                    )
-                continue
-            if (left_raw or right_raw) and not metadata_attested:
+            left_values = self._coherent_source_convention_values(key)
+            right_values = other._coherent_source_convention_values(key)
+            normalized = {
+                canonicalize(value) for value in (*left_values, *right_values)
+            }
+            if len(normalized) > 1:
                 raise ValueError(
                     f"coherent operation requires matching {label}; got "
-                    f"{left_raw or '<unspecified>'!r} and "
-                    f"{right_raw or '<unspecified>'!r}. Confirm the unspecified "
-                    "dataset convention explicitly before overriding this check"
-                )
-            if (
-                key == "phase_reference"
-                and not left_raw
-                and not right_raw
-                and not metadata_attested
-            ):
-                raise ValueError(
-                    "coherent operation requires a nonblank phase reference "
-                    "for both datasets, or explicit confirmation that their "
-                    "phase centers and conventions are compatible"
+                    f"{left_values or ['<unspecified>']!r} and "
+                    f"{right_values or ['<unspecified>']!r}"
                 )
 
     def _assert_acquisition_metadata_compatible(
@@ -3065,10 +3121,11 @@ class RcsGrid:
                     "arbitrary",
                 }
             ):
-                raise ValueError(
-                    f"{operation} cannot use explicitly unverified metadata: "
-                    f"{role} declares {key}={value!r}"
-                )
+                # Foreign producers commonly serialize an explicit placeholder
+                # instead of omitting an unavailable declaration. It carries no
+                # physical assertion and is therefore treated as missing, not as
+                # a contradiction.
+                return {}
 
             if kind == "identity":
                 return {"identity": identity(value)}
@@ -3094,11 +3151,7 @@ class RcsGrid:
                 if signs:
                     return {"two_way_sign": next(iter(signs))}
                 if key == "range_phase_convention":
-                    raise ValueError(
-                        f"{role} declares an unrecognized two-way range-phase "
-                        f"convention: {key}={value!r}; expected "
-                        "S~exp(-j*2*k*R) or S~exp(+j*2*k*R)"
-                    )
+                    return {}
                 # ``phase_law`` often carries time-convention text only. That
                 # evidence is checked by the coherent metadata contract, but it
                 # does not establish a two-way range sign here.
@@ -3152,10 +3205,7 @@ class RcsGrid:
                     dimensions["propagation_regime"] = (
                         "far_field" if far_field else "near_field"
                     )
-                # A producer-specific geometry phrase is still evidence.  Keep
-                # it as an opaque semantic dimension so two aliases cannot make
-                # unrelated declarations look compatible merely by changing keys.
-                return dimensions or {"opaque": semantic}
+                return dimensions
 
             if kind == "motion":
                 positive_state_key = key != "phase_center_motion"
@@ -3208,7 +3258,7 @@ class RcsGrid:
                     )
                 if safe or unsafe:
                     return {"state": "stable" if safe else "unsafe"}
-                return {"opaque": semantic}
+                return {}
 
             if kind == "setup_state":
                 if semantic in {"1", "true", "yes", "same", "unchanged"}:
@@ -3228,7 +3278,7 @@ class RcsGrid:
                     )
                 if safe or unsafe:
                     return {"state": "stable" if safe else "unsafe"}
-                return {"opaque": semantic}
+                return {}
             raise RuntimeError(f"unsupported acquisition metadata kind {kind!r}")
 
         def collect(grid, family, label, kind, keys, role):
@@ -3345,16 +3395,17 @@ class RcsGrid:
             "semantic_families": semantic_families,
             "matching_explicit_declarations": matching,
             "missing_declarations_by_role": missing,
-            "missing_declarations_covered_by_user_attestation": bool(missing),
+            "missing_declarations_covered_by_operation_assumption": bool(missing),
+            "missing_declarations_covered_by_user_attestation": False,
             "explicit_contradictions_allowed": False,
         }
 
     def _assert_support_reference_metadata_compatible(self, other):
         """Reject explicit acquisition/setup contradictions for support subtraction.
 
-        Missing declarations remain covered by the workflow's required
-        acquisition attestation.  Explicit declarations are compared across
-        their semantic alias families and can never be waived by a checkbox.
+        Missing declarations are recorded as assumptions. Explicit declarations
+        are compared across their semantic alias families and can never be
+        waived by an operation choice.
         """
 
         return self._assert_acquisition_metadata_compatible(
@@ -3372,18 +3423,16 @@ class RcsGrid:
         operation,
         metadata_attested,
     ):
-        """Return durable metadata for one explicit coherent attestation.
+        """Return durable metadata for coherent assumptions or legacy attestation.
 
-        The record captures the user's compatibility statement, not guessed
-        convention values. Any declarations copied to the result already
-        existed on the left input.
+        Missing declarations never manufacture convention values. The record
+        states that the requested coherent operation proceeded with those facts
+        unspecified; the legacy ``metadata_attested=True`` API remains accepted
+        for saved scripts and records its stronger user statement.
         """
 
         if not isinstance(metadata_attested, (bool, np.bool_)):
             raise TypeError("metadata_attested must be True or False")
-        if not metadata_attested:
-            return None, None
-
         inputs = (self, *tuple(others))
         fields = (
             "phase_reference",
@@ -3395,18 +3444,32 @@ class RcsGrid:
             missing_indices = [
                 index
                 for index, grid in enumerate(inputs, start=1)
-                if not grid._declared_scalar_metadata(key)
+                if (
+                    not grid._declared_scalar_metadata(key)
+                    or grid._metadata_placeholder(
+                        grid._declared_scalar_metadata(key)
+                    )
+                )
             ]
             if missing_indices:
                 missing[key] = missing_indices
 
+        if not missing and not metadata_attested:
+            return None, None
+
         operation_name = str(operation).strip().lower().replace("_", "-")
+        user_attested = bool(metadata_attested)
         record = {
-            "schema": "grim.coherent-metadata-attestation.v1",
+            "schema": (
+                "grim.coherent-metadata-attestation.v1"
+                if user_attested
+                else "grim.coherent-metadata-assumption.v1"
+            ),
             "operation": operation_name,
             "input_count": len(inputs),
-            "user_attested": True,
-            "attested_scope": [
+            "user_attested": user_attested,
+            "operation_requested_with_unspecified_metadata": bool(missing),
+            "assumed_scope": [
                 "phase_reference_or_center",
                 "phasor_time_convention",
                 "polarization_basis",
@@ -3414,24 +3477,36 @@ class RcsGrid:
             "missing_declarations_by_input": missing,
             "declarations_inferred": False,
         }
-        history_entry = (
-            f"User-attested coherent metadata compatibility ({operation_name}, "
-            f"{len(inputs)} inputs): compatible phase reference/center, phasor "
-            "time convention, and polarization basis where declarations were "
-            "unspecified; no convention values inferred"
-        )
+        if user_attested:
+            history_entry = (
+                f"User-attested coherent metadata compatibility ({operation_name}, "
+                f"{len(inputs)} inputs): compatible phase reference/center, phasor "
+                "time convention, and polarization basis where declarations were "
+                "unspecified; no convention values inferred"
+            )
+        else:
+            history_entry = (
+                f"Coherent operation used available complex samples ({operation_name}, "
+                f"{len(inputs)} inputs): missing convention metadata recorded as "
+                "unspecified; no convention values inferred"
+            )
         prior_history = str(self.history or "").strip()
         history = (
             f"{prior_history}\n{history_entry}" if prior_history else history_entry
         )
 
         extra = {}
+        source_declarations = {}
         for key in fields:
             declared_values = []
+            direct_values = []
             for grid in inputs:
-                declared = grid._declared_scalar_metadata(key)
-                if declared:
-                    declared_values.append(declared)
+                declared_values.extend(
+                    grid._coherent_source_convention_values(key)
+                )
+                direct = grid._declared_scalar_metadata(key)
+                if direct and not grid._metadata_placeholder(direct):
+                    direct_values.append(direct)
             if key == "time_convention":
                 normalized = {
                     self._canonical_time_convention(value)
@@ -3448,11 +3523,39 @@ class RcsGrid:
                     "declarations across every input"
                 )
             if declared_values:
+                unique_values = []
+                seen = set()
+                for value in declared_values:
+                    canonical = (
+                        self._canonical_time_convention(value)
+                        if key == "time_convention"
+                        else " ".join(value.split()).casefold()
+                    )
+                    if canonical not in seen:
+                        unique_values.append(value)
+                        seen.add(canonical)
+                source_declarations[key] = unique_values
+            if len(direct_values) == len(inputs):
                 # This is an exact declaration from an input, not a value
-                # manufactured by the attestation. Carrying it forward also
+                # manufactured by the assumption. Carrying it forward also
                 # prevents a later chained operation from hiding a conflict.
-                extra[key] = declared_values[0]
-        extra["coherent_metadata_attestation_json"] = json.dumps(
+                extra[key] = direct_values[0]
+        if source_declarations:
+            extra["coherent_source_conventions_json"] = json.dumps(
+                {
+                    "schema": "grim.coherent-source-conventions.v1",
+                    "declared_values": source_declarations,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        record_key = (
+            "coherent_metadata_attestation_json"
+            if user_attested
+            else "coherent_metadata_assumption_json"
+        )
+        extra[record_key] = json.dumps(
             record,
             sort_keys=True,
             separators=(",", ":"),
@@ -3529,10 +3632,10 @@ class RcsGrid:
         ``A_out = A_dut * A_exact * exp(-j*4*pi*f*dR/c) / A_measured``.
 
         ``dR`` is positive when the measured calibration target is farther
-        from the radar than the DUT/reference plane.  The caller must attest
-        that the DUT and measured calibration share an acquisition chain and
-        that the exact response has the intended phase center.  No frequency
-        or angular interpolation is performed.
+        from the radar than the DUT/reference plane. Selecting the measured
+        and exact roles expresses the user's calibration intent; unavailable
+        acquisition metadata is recorded as assumed rather than blocking the
+        calculation. No frequency or angular interpolation is performed.
         """
 
         measured_calibration, exact_reference = self._ensure_grids(
@@ -3553,17 +3656,15 @@ class RcsGrid:
             raise ValueError("range offset must be a finite distance in meters") from exc
         if not np.isfinite(offset_m):
             raise ValueError("range offset must be a finite distance in meters")
-        if not bool(convention_attested):
-            raise ValueError(
-                "range calibration requires confirmation that DUT/measured-cal "
-                "share one acquisition and phase convention and that the exact "
-                "reference uses the intended phase center"
-            )
-        if "range_calibration_json" in self.extra:
-            raise ValueError(
-                "dataset already contains Range Cal provenance; use the original "
-                "measurement to avoid accidental double calibration"
-            )
+        prior_calibration_raw = (self.extra or {}).get("range_calibration_json")
+        prior_calibration = None
+        if prior_calibration_raw is not None:
+            try:
+                if isinstance(prior_calibration_raw, np.ndarray):
+                    prior_calibration_raw = prior_calibration_raw.reshape(()).item()
+                prior_calibration = json.loads(str(prior_calibration_raw))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                prior_calibration = {"unparsed_record": str(prior_calibration_raw)}
         if maximum_correction_gain_db is None:
             gain_limit_db = None
         else:
@@ -3787,16 +3888,11 @@ class RcsGrid:
         exact_finite = np.isfinite(exact_amp)
         dut_finite = np.isfinite(dut_amp)
         measured_zero = np.isfinite(measured_amp) & (np.abs(measured_amp) == 0.0)
-        if np.any(measured_zero):
-            raise ValueError(
-                "measured calibration contains a zero/null sample and cannot "
-                "define a complex calibration factor"
-            )
 
         # A zero exact response is valid: it means the calibrated field is
         # exactly zero at that bin. Missing DUT/reference bins remain sparse
         # NaNs rather than aborting an otherwise usable calibration grid.
-        valid_reference = measured_finite & exact_finite
+        valid_reference = measured_finite & exact_finite & ~measured_zero
         correction = np.full(
             np.broadcast_shapes(exact_amp.shape, measured_amp.shape),
             np.nan + 1j * np.nan,
@@ -3816,17 +3912,11 @@ class RcsGrid:
         correction_gain_db[positive_correction] = (
             20.0 * np.log10(correction_magnitude[positive_correction])
         )
-        if gain_limit_db is not None and np.any(
-            correction_gain_db > gain_limit_db
-        ):
+        excessive = np.zeros(correction.shape, dtype=bool)
+        if gain_limit_db is not None:
             excessive = correction_gain_db > gain_limit_db
-            count = int(np.count_nonzero(excessive))
-            observed = float(np.nanmax(correction_gain_db))
-            raise ValueError(
-                f"{count} calibration factor(s) exceed the user limit of "
-                f"{gain_limit_db:g} dB (maximum {observed:g} dB); inspect the "
-                "measured-calibration noise floor/nulls or raise the limit explicitly"
-            )
+            correction[excessive] = np.nan + 1j * np.nan
+            valid_correction &= ~excessive
         try:
             correction_for_dut = np.broadcast_to(correction, dut_amp.shape)
             with np.errstate(over="ignore", invalid="ignore"):
@@ -3839,28 +3929,25 @@ class RcsGrid:
             raise ValueError(
                 f"calibration produced shape {output_amp.shape}, expected {dut_amp.shape}"
             )
-        valid_output = dut_finite & np.isfinite(correction_for_dut)
+        candidate_output = dut_finite & np.isfinite(correction_for_dut)
+        finite_output_amp = np.isfinite(output_amp)
+        overflowed_complex_count = int(
+            np.count_nonzero(candidate_output & ~finite_output_amp)
+        )
+        valid_output = candidate_output & finite_output_amp
+        output_power = np.full(output_amp.shape, np.nan, dtype=np.float64)
+        with np.errstate(over="ignore", invalid="ignore"):
+            output_power[valid_output] = np.abs(output_amp[valid_output]) ** 2
+        overflowed_power = valid_output & ~np.isfinite(output_power)
+        overflowed_power_count = int(np.count_nonzero(overflowed_power))
+        valid_output &= ~overflowed_power
+        output_amp = np.array(output_amp, copy=True)
+        output_amp[~valid_output] = np.nan + 1j * np.nan
+        output_power[~valid_output] = np.nan
         if not np.any(valid_output):
             raise ValueError(
                 "range calibration has no calibratable bins after masking "
-                "missing DUT/measured/exact complex samples"
-            )
-        unexpected_nonfinite = valid_output & ~np.isfinite(output_amp)
-        if np.any(unexpected_nonfinite):
-            raise ValueError(
-                "range calibration overflowed a valid complex output sample"
-            )
-        try:
-            with np.errstate(over="raise", invalid="raise"):
-                output_power = np.full(output_amp.shape, np.nan, dtype=np.float64)
-                output_power[valid_output] = np.abs(output_amp[valid_output]) ** 2
-        except FloatingPointError as exc:
-            raise ValueError(
-                "range calibration magnitude overflows finite sigma_3d power"
-            ) from exc
-        if np.any(valid_output & ~np.isfinite(output_power)):
-            raise ValueError(
-                "range calibration magnitude does not produce finite sigma_3d power"
+                "missing, zero-denominator, over-limit, or overflowed samples"
             )
 
         finite_gain = correction_gain_db[np.isfinite(correction_gain_db)]
@@ -3874,6 +3961,14 @@ class RcsGrid:
             "missing_reference_bin_count": int(
                 np.count_nonzero(~valid_reference)
             ),
+            "zero_measured_denominator_bin_count": int(
+                np.count_nonzero(measured_zero)
+            ),
+            "over_limit_correction_bin_count": int(
+                np.count_nonzero(excessive)
+            ),
+            "overflowed_complex_output_bin_count": overflowed_complex_count,
+            "overflowed_power_output_bin_count": overflowed_power_count,
             "masked_output_bin_count": int(np.count_nonzero(~valid_output)),
         }
         measured_name = str(
@@ -3976,7 +4071,10 @@ class RcsGrid:
             "singleton_angular_broadcast": bool(
                 bool(allow_singleton_angular_broadcast)
             ),
-            "user_convention_attested": True,
+            "operation_selected_as_convention_assumption": True,
+            "user_convention_attested": bool(convention_attested),
+            "input_was_previously_range_calibrated": prior_calibration is not None,
+            "prior_range_calibration": prior_calibration,
             "measured_calibration": measured_name,
             "measured_calibration_content_sha256": measured_sha256,
             "exact_reference": exact_name,
@@ -4000,7 +4098,7 @@ class RcsGrid:
         exact_phase_reference = exact_reference._phase_reference()
         extra["phase_reference"] = (
             "range-calibrated complex substitution; exact reference="
-            f"{exact_phase_reference or '<user-attested phase center>'}; "
+            f"{exact_phase_reference or '<unspecified phase center>'}; "
             f"exact_content_sha256={exact_sha256}; "
             f"delta_R={offset_m:.12g} m positive away from radar; "
             "exp(+j*omega*t), S(range)~exp(-j*2*k*R)"
@@ -4010,7 +4108,8 @@ class RcsGrid:
             "complex substitution"
         )
         history_entry = (
-            f"Range Cal complex substitution: measured={measured_name}; "
+            f"Range Cal{' re-calibration' if prior_calibration is not None else ''} "
+            f"complex substitution: measured={measured_name}; "
             f"exact={exact_name}; delta_R={offset_m:.12g} m positive away "
             "from radar; no interpolation; "
             f"masked_output_bins={gain_summary['masked_output_bin_count']}"
@@ -4040,8 +4139,8 @@ class RcsGrid:
 
         Args:
             other: Another RcsGrid with identical axes.
-            metadata_attested: Explicit confirmation for missing/unspecified
-                field-convention metadata. Never overrides explicit conflicts.
+            metadata_attested: Legacy optional user-attestation record. Missing
+                metadata is allowed without it; explicit conflicts still fail.
 
         Returns:
             New RcsGrid with rcs = self.rcs + other.rcs.
@@ -4050,8 +4149,15 @@ class RcsGrid:
             other,
             coherent=True,
             coherent_metadata_attested=metadata_attested,
+            _scan_phase_samples=False,
         )
         rcs_out = self.rcs + other.rcs
+        usable = np.isfinite(rcs_out.real) & np.isfinite(rcs_out.imag)
+        usable_count = int(np.count_nonzero(usable))
+        if usable_count == 0:
+            raise ValueError(
+                "coherent addition has no common usable complex samples"
+            )
         history, attestation_extra = self._coherent_attestation_provenance(
             (other,),
             operation="coherent-add",
@@ -4062,6 +4168,17 @@ class RcsGrid:
             operation="coherent-add",
             coherent=True,
             attestation_extra=attestation_extra,
+        )
+        extra["coherent_sample_qa_json"] = json.dumps(
+            {
+                "schema": "grim.coherent-sample-qa.v1",
+                "operation": "coherent-add",
+                "total_sample_count": int(rcs_out.size),
+                "usable_sample_count": usable_count,
+                "masked_sample_count": int(rcs_out.size - usable_count),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
         return self._new_grid(
             self.azimuths,
@@ -4081,8 +4198,8 @@ class RcsGrid:
 
         Args:
             *grids: One or more RcsGrid instances.
-            metadata_attested: Explicit confirmation for missing/unspecified
-                field-convention metadata. Never overrides explicit conflicts.
+            metadata_attested: Legacy optional user-attestation record. Missing
+                metadata is allowed without it; explicit conflicts still fail.
 
         Returns:
             New RcsGrid with rcs = self.rcs + sum(grid.rcs).
@@ -4095,8 +4212,15 @@ class RcsGrid:
                 grid,
                 coherent=True,
                 coherent_metadata_attested=metadata_attested,
+                _scan_phase_samples=False,
             )
             total = total + grid.rcs
+        usable = np.isfinite(total.real) & np.isfinite(total.imag)
+        usable_count = int(np.count_nonzero(usable))
+        if usable_count == 0:
+            raise ValueError(
+                "coherent addition has no common usable complex samples"
+            )
         history, attestation_extra = self._coherent_attestation_provenance(
             grids,
             operation="coherent-add-many",
@@ -4107,6 +4231,17 @@ class RcsGrid:
             operation="coherent-add-many",
             coherent=True,
             attestation_extra=attestation_extra,
+        )
+        extra["coherent_sample_qa_json"] = json.dumps(
+            {
+                "schema": "grim.coherent-sample-qa.v1",
+                "operation": "coherent-add-many",
+                "total_sample_count": int(total.size),
+                "usable_sample_count": usable_count,
+                "masked_sample_count": int(total.size - usable_count),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
         return self._new_grid(
             self.azimuths,
@@ -4132,8 +4267,8 @@ class RcsGrid:
 
         Args:
             other: Another RcsGrid with identical axes.
-            metadata_attested: Explicit confirmation for missing/unspecified
-                field-convention metadata. Never overrides explicit conflicts.
+            metadata_attested: Legacy optional user-attestation record. Missing
+                metadata is allowed without it; explicit conflicts still fail.
             maximum_working_bytes: Optional cap for the newly retained result
                 arrays plus bounded arithmetic/QA scratch. By default GRIM uses
                 half of currently available physical memory (or the reviewed
@@ -4147,6 +4282,7 @@ class RcsGrid:
             other,
             coherent=True,
             coherent_metadata_attested=metadata_attested,
+            _scan_phase_samples=False,
         )
         def response_precision_upper_bound(grid):
             raw_real = (grid.extra or {}).get("rcs_amp_real")
@@ -4211,6 +4347,7 @@ class RcsGrid:
         read_right, _right_reader_dtype = other._bounded_complex_slice_reader()
         power_out = np.empty(self.rcs_power.shape, dtype=real_dtype)
         phase_out = np.empty(self.rcs_power.shape, dtype=real_dtype)
+        usable_count = 0
         for selection in _bounded_grid_selections(
             self.rcs_power.shape, _COHERENT_OPERATION_BLOCK_CELLS
         ):
@@ -4230,6 +4367,12 @@ class RcsGrid:
             invalid |= ~np.isfinite(power_block)
             power_block[invalid] = np.nan
             phase_block[invalid] = np.nan
+            usable_count += int(np.count_nonzero(~invalid))
+
+        if usable_count == 0:
+            raise ValueError(
+                "coherent subtraction has no common usable complex samples"
+            )
 
         history, attestation_extra = self._coherent_attestation_provenance(
             (other,),
@@ -4241,6 +4384,17 @@ class RcsGrid:
             operation="coherent-subtract",
             coherent=True,
             attestation_extra=attestation_extra,
+        )
+        extra["coherent_sample_qa_json"] = json.dumps(
+            {
+                "schema": "grim.coherent-sample-qa.v1",
+                "operation": "coherent-subtract",
+                "total_sample_count": int(cell_count),
+                "usable_sample_count": int(usable_count),
+                "masked_sample_count": int(cell_count - usable_count),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
         return self._new_grid(
             self.azimuths,
@@ -4284,32 +4438,17 @@ class RcsGrid:
         ):
             if not isinstance(option_value, (bool, np.bool_)):
                 raise TypeError(f"{option_name} must be True or False")
-        if not assumptions_attested:
-            raise ValueError(
-                "support-referenced difference requires confirmation that the "
-                "target+support and support-only acquisitions share calibration, "
-                "phase center/reference, coordinates, polarization basis, and "
-                "static setup, and that coupling cannot be reconstructed"
-            )
         if not isinstance(support_reference, RcsGrid):
             raise TypeError("support_reference must be an RcsGrid")
         if support_reference is self:
             raise ValueError(
                 "target+support and support-only roles must use different datasets"
             )
+        chained_inputs = []
         if "support_reference_difference_json" in (self.extra or {}):
-            raise ValueError(
-                "target dataset is already a support-referenced difference; use "
-                "the original target+support acquisition to avoid accidental "
-                "chained subtraction"
-            )
-        if "support_reference_difference_json" in (
-            support_reference.extra or {}
-        ):
-            raise ValueError(
-                "support-only reference is already a support-referenced "
-                "difference; use the original support-only acquisition"
-            )
+            chained_inputs.append("target_plus_support")
+        if "support_reference_difference_json" in (support_reference.extra or {}):
+            chained_inputs.append("support_only_reference")
 
         support_metadata_contract = (
             self._assert_support_reference_metadata_compatible(support_reference)
@@ -4361,8 +4500,10 @@ class RcsGrid:
             "support_only_reference_content_sha256": support_sha256,
             "result_content_sha256": result_sha256,
             "content_hash_schema": content_namespace,
-            "user_assumptions_attested": True,
+            "operation_selected_as_assumption_of_compatible_acquisition": True,
+            "user_assumptions_attested": bool(assumptions_attested),
             "metadata_attestation_used": bool(metadata_attested),
+            "chained_support_difference_input_roles": chained_inputs,
             "support_metadata_contract": support_metadata_contract,
             "interpretation": "support_referenced_complex_difference",
             "not_free_space_target": True,
@@ -4395,6 +4536,11 @@ class RcsGrid:
             "identical axes, no interpolation; QA/content hashes recorded; "
             "not a reconstructed free-space target response"
         )
+        if chained_inputs:
+            history_entry += (
+                "; warning: chained support-difference input role(s)="
+                + ",".join(chained_inputs)
+            )
         difference.history = (
             f"{difference.history}\n{history_entry}"
             if difference.history
@@ -4596,10 +4742,21 @@ class RcsGrid:
         """
         if not isinstance(other, RcsGrid):
             raise TypeError("other must be an RcsGrid")
-        self._assert_physical_metadata_compatible(other)
+        self._assert_axis_metadata_compatible(other)
 
         if mode == "exact":
-            self._assert_compatible(other)
+            if self.rcs_power.shape != other.rcs_power.shape:
+                raise ValueError(
+                    f"rcs shape {other.rcs_power.shape} != {self.rcs_power.shape}"
+                )
+            for name, left, right in (
+                ("azimuth", self.azimuths, other.azimuths),
+                ("elevation", self.elevations, other.elevations),
+                ("frequency", self.frequencies, other.frequencies),
+                ("polarization", self.polarizations, other.polarizations),
+            ):
+                if not np.array_equal(left, right):
+                    raise ValueError(f"{name} axis mismatch")
             return self
         if mode not in ("intersect", "interp"):
             raise ValueError("mode must be 'exact', 'intersect', or 'interp'")
@@ -5155,12 +5312,18 @@ class RcsGrid:
         "feature_provenance_json",
         "assembly_provenance_json",
         "coherent_metadata_attestation_json",
+        "coherent_metadata_assumption_json",
+        "coherent_source_conventions_json",
     })
     _DERIVED_PROVENANCE_EXTRA_KEYS = frozenset({
         # Durable lineage for the guided exact complex subtraction workflow.
         # The record is intentionally retained by later sample transforms, but
         # its content hashes continue to identify the original two inputs.
         "support_reference_difference_json",
+        "coherent_sample_qa_json",
+        "coherent_metadata_assumption_json",
+        "merge_metadata_assumption_json",
+        "coherent_source_conventions_json",
     })
     _RAW_AMPLITUDE_EXTRA_KEYS = ("rcs_amp_real", "rcs_amp_imag")
 
@@ -5369,6 +5532,35 @@ class RcsGrid:
             )
 
         if coherent:
+            # A convention declaration belongs on the combined artifact only
+            # when every source declared the same value. A one-sided value is
+            # evidence about that source, not proof about all output samples.
+            for key in (
+                "phase_reference",
+                "time_convention",
+                "polarization_basis",
+            ):
+                values = [
+                    grid._declared_scalar_metadata(key) for grid in sources
+                ]
+                if any(not value for value in values):
+                    extra.pop(key, None)
+                    continue
+                if key == "time_convention":
+                    normalized = {
+                        self._canonical_time_convention(value)
+                        for value in values
+                    }
+                else:
+                    normalized = {
+                        " ".join(value.split()).casefold() for value in values
+                    }
+                if len(normalized) == 1:
+                    extra[key] = values[0]
+                else:
+                    # The compatibility preflight normally rejects this. Keep
+                    # the metadata policy defensive for internal callers.
+                    extra.pop(key, None)
             if "body_plus_features" in roles:
                 extra["assembly_response_role"] = "body_plus_features"
             elif source_roles and all(
@@ -6013,9 +6205,9 @@ class RcsGrid:
         [0, 360) degree azimuth axis and sorted.  There is no interpolation and
         no phase change.
 
-        The operation deliberately requires SENTRi convention metadata.  This
-        prevents an ordinary GRIM elevation axis from being flipped by an
-        accidentally clicked format-specific button.
+        Explicitly incompatible elevation metadata is rejected. If convention
+        metadata is absent, selecting this format-specific operation records
+        the native-SENTRi assumption instead of blocking the conversion.
         """
 
         native_tag = "sentri_theta_top_zero"
@@ -6033,13 +6225,12 @@ class RcsGrid:
 
         if convention == grim_tag:
             raise ValueError("dataset already uses GRIM signed elevation")
-        if convention != native_tag and not source_format.casefold().startswith(
-            "sentri"
-        ):
+        if convention and convention != native_tag:
             raise ValueError(
-                "dataset is not marked as native SENTRi elevation; load a "
-                "SENTRi table before using this conversion"
+                "SENTRi coordinate conversion cannot override explicit "
+                f"elevation convention {convention!r}"
             )
+        assumed_native_convention = not bool(convention)
 
         elevation_unit = self._canonical_unit(
             units.get("elevation"), _ANGLE_UNITS, "deg"
@@ -6143,6 +6334,18 @@ class RcsGrid:
             "GRIM elevation = 90 deg - native SENTRi theta; "
             "azimuth=wrapped phi"
         )
+        if assumed_native_convention:
+            converted_extra["sentri_coordinate_assumption_json"] = json.dumps(
+                {
+                    "schema": "grim.sentri-coordinate-assumption.v1",
+                    "operation_requested": True,
+                    "source_format": source_format or None,
+                    "source_elevation_convention_missing": True,
+                    "assumed_convention": native_tag,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         prior_history = str(self.history or "").strip()
         history_entry = (
             "Convert native SENTRi coordinates to GRIM conic angles "
@@ -6150,6 +6353,8 @@ class RcsGrid:
             "stable-sorted axes and sample arrays; no interpolation or phase "
             "change"
         )
+        if assumed_native_convention:
+            history_entry += "; untagged source convention assumed from operation"
         history = (
             f"{prior_history}\n{history_entry}" if prior_history else history_entry
         )
@@ -6423,77 +6628,67 @@ class RcsGrid:
             raise ValueError("too many input grids for stitch contributor counts")
         ref = grids[0]
 
-        def scalar_convention_extra(grid):
-            return {
-                key: grid.extra[key]
-                for key in (
-                    "phase_reference",
-                    "time_convention",
-                    "polarization_basis",
-                )
-                if key in grid.extra
-            }
+        convention_fields = (
+            (
+                "phase_reference",
+                "phase references",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+            (
+                "time_convention",
+                "time conventions",
+                ref._canonical_time_convention,
+            ),
+            (
+                "polarization_basis",
+                "polarization bases",
+                lambda value: " ".join(value.split()).casefold(),
+            ),
+        )
 
-        # Stitch creates one physical dataset, so even the priority and power
-        # policies require the same convention compatibility as strict Join.
-        for grid in grids[1:]:
-            ref._assert_physical_metadata_compatible(grid)
-            left_ref = ref._phase_reference()
-            right_ref = grid._phase_reference()
-            if left_ref != right_ref and (left_ref or right_ref):
-                if policy != "coherent-mean" or not bool(metadata_attested):
-                    raise ValueError(
-                        "cannot stitch grids with different phase references"
-                    )
-            for key, label, canonicalize in (
-                (
-                    "time_convention",
-                    "time conventions",
-                    ref._canonical_time_convention,
-                ),
-                (
-                    "polarization_basis",
-                    "polarization bases",
-                    lambda value: " ".join(value.split()).casefold(),
-                ),
-            ):
-                left_value = ref._declared_scalar_metadata(key)
-                right_value = grid._declared_scalar_metadata(key)
-                if (
-                    (left_value or right_value)
-                    and canonicalize(left_value) != canonicalize(right_value)
-                    and (policy != "coherent-mean" or not bool(metadata_attested))
-                ):
-                    raise ValueError(
-                        f"cannot stitch grids with different {label}: "
-                        f"{left_value or '<unspecified>'!r} != "
-                        f"{right_value or '<unspecified>'!r}"
-                    )
-
-        if policy == "coherent-mean":
-            missing_declarations = {}
-            for input_index, grid in enumerate(grids, start=1):
-                for key in (
-                    "phase_reference",
-                    "time_convention",
-                    "polarization_basis",
-                ):
-                    if not grid._declared_scalar_metadata(key):
-                        missing_declarations.setdefault(key, []).append(input_index)
-            if missing_declarations and not bool(metadata_attested):
+        metadata_assumptions = {}
+        preserved_conventions = {}
+        for key, label, canonicalize in convention_fields:
+            values = [grid._declared_scalar_metadata(key) for grid in grids]
+            values = [
+                "" if grid._metadata_placeholder(value) else value
+                for grid, value in zip(grids, values)
+            ]
+            nonblank = [value for value in values if value]
+            normalized = {canonicalize(value) for value in nonblank}
+            if len(normalized) > 1:
                 rendered = ", ".join(
-                    key.replace("_", " ") for key in missing_declarations
+                    f"input {index}={value or '<unspecified>'!r}"
+                    for index, value in enumerate(values, start=1)
                 )
                 raise ValueError(
-                    "coherent-mean stitch requires declared coherent metadata "
-                    f"({rendered}) or metadata_attested=True"
+                    f"cannot stitch grids with different explicit {label}: {rendered}"
                 )
+            if nonblank and len(nonblank) == len(grids):
+                preserved_conventions[key] = nonblank[0]
+            elif len(nonblank) != len(grids):
+                metadata_assumptions[key] = [
+                    index
+                    for index, value in enumerate(values, start=1)
+                    if not value
+                ]
+
+        def scalar_convention_extra():
+            return dict(preserved_conventions)
+
+        # Stitch creates one physical dataset. Missing declarations remain
+        # unspecified on that result; explicit physical conflicts still stop.
+        for grid in grids[1:]:
+            ref._assert_physical_metadata_compatible(grid)
+
+        if policy == "coherent-mean":
             for grid in grids[1:]:
                 ref._assert_coherent_metadata_compatible(
                     grid, metadata_attested=bool(metadata_attested)
                 )
 
         expected_shapes = []
+        coherent_missing_phase_count = 0
         for input_index, grid in enumerate(grids, start=1):
             input_phase_wrap = str(
                 (grid.units or {}).get("phase_wrap", "")
@@ -6592,12 +6787,7 @@ class RcsGrid:
                     "negative power sample(s); minimum is "
                     f"{minimum_negative:.17g}"
                 )
-            if missing_coherent_phase_count:
-                raise ValueError(
-                    f"coherent-mean stitch requires finite phase; input "
-                    f"{input_index} has {missing_coherent_phase_count} finite-power "
-                    "sample(s) with missing phase"
-                )
+            coherent_missing_phase_count += missing_coherent_phase_count
 
         if len(grids) == 1:
             az_union = np.array(ref.azimuths, copy=True)
@@ -6725,6 +6915,8 @@ class RcsGrid:
                             block_power = incoming_power[source]
                             block_phase = incoming_phase[source]
                             valid = np.isfinite(block_power)
+                            if policy == "coherent-mean":
+                                valid &= np.isfinite(block_phase)
                             if not np.any(valid):
                                 continue
 
@@ -6742,10 +6934,9 @@ class RcsGrid:
                                     | ~np.isfinite(incoming_field.imag)
                                 )
                                 if np.any(invalid_field):
-                                    raise ValueError(
-                                        "coherent-mean stitch encountered a nonfinite "
-                                        "authoritative complex field for finite power"
-                                    )
+                                    valid &= ~invalid_field
+                                    if not np.any(valid):
+                                        continue
 
                             if np.any(overlap):
                                 if policy == "power-mean":
@@ -6958,12 +7149,21 @@ class RcsGrid:
             "equal_count": int(equal_count),
             "conflict_count": int(conflict_count),
             "max_contributors": int(max_contributors),
+            "masked_missing_phase_sample_count": int(
+                coherent_missing_phase_count
+            ),
+            "metadata_assumptions": metadata_assumptions,
             "tolerance": float(tolerance),
             "estimated_peak_bytes": int(estimated_peak_bytes),
             "count_semantics": (
                 "union-grid cells; contributing_count is finite input samples"
             ),
         }
+
+        if policy == "coherent-mean" and output_finite_count == 0:
+            raise ValueError(
+                "coherent-mean stitch has no usable complex samples"
+            )
 
         if policy == "coherent-mean":
             attested_history, attested_extra = ref._coherent_attestation_provenance(
@@ -6979,11 +7179,25 @@ class RcsGrid:
             output_extra = (
                 dict(attested_extra)
                 if attested_extra is not None
-                else scalar_convention_extra(ref)
+                else scalar_convention_extra()
             )
         else:
             base_history = str(ref.history or "").strip()
-            output_extra = scalar_convention_extra(ref)
+            output_extra = scalar_convention_extra()
+        if metadata_assumptions:
+            output_extra["merge_metadata_assumption_json"] = json.dumps(
+                {
+                    "schema": "grim.merge-metadata-assumption.v1",
+                    "operation": "overlap-merge",
+                    "policy": policy,
+                    "input_count": len(grids),
+                    "unspecified_declarations_by_input": metadata_assumptions,
+                    "declarations_inferred": False,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
         history_entry = (
             f"Stitch ({policy}, inputs={len(grids)}): "
             f"overlap={overlap_count}, equal={equal_count}, "
@@ -6992,6 +7206,12 @@ class RcsGrid:
         history = (
             f"{base_history}\n{history_entry}" if base_history else history_entry
         )
+        if metadata_assumptions:
+            assumption_entry = (
+                "Overlap merge retained unspecified metadata: "
+                + ", ".join(sorted(metadata_assumptions))
+            )
+            history = f"{history}\n{assumption_entry}"
         provenance = dict(report)
         provenance.update(
             {
@@ -7126,22 +7346,45 @@ class RcsGrid:
         )
         for grid in grids[1:]:
             ref._assert_physical_metadata_compatible(grid)
-            for key, label, canonicalize in scalar_metadata_fields:
-                left_value = ref._declared_scalar_metadata(key)
-                right_value = grid._declared_scalar_metadata(key)
-                if (
-                    (left_value or right_value)
-                    and canonicalize(left_value) != canonicalize(right_value)
-                ):
-                    raise ValueError(
-                        f"cannot join grids with different {label}: "
-                        f"{left_value or '<unspecified>'!r} != "
-                        f"{right_value or '<unspecified>'!r}"
-                    )
+
+        metadata_assumptions = {}
+        for key, label, canonicalize in scalar_metadata_fields:
+            declared = [grid._declared_scalar_metadata(key) for grid in grids]
+            declared = [
+                "" if grid._metadata_placeholder(value) else value
+                for grid, value in zip(grids, declared)
+            ]
+            nonblank = [value for value in declared if value]
+            normalized = {canonicalize(value) for value in nonblank}
+            if len(normalized) > 1:
+                rendered = ", ".join(
+                    f"input {index}={value or '<unspecified>'!r}"
+                    for index, value in enumerate(declared, start=1)
+                )
+                raise ValueError(
+                    f"cannot join grids with different explicit {label}: {rendered}"
+                )
+            if nonblank and len(nonblank) != len(grids):
+                metadata_assumptions[key] = {
+                    "declared_input_indices": [
+                        index
+                        for index, value in enumerate(declared, start=1)
+                        if value
+                    ],
+                    "unspecified_input_indices": [
+                        index
+                        for index, value in enumerate(declared, start=1)
+                        if not value
+                    ],
+                }
 
         preserved_scalar_extra = {}
         for key, _label, canonicalize in scalar_metadata_fields:
             declared = [grid._declared_scalar_metadata(key) for grid in grids]
+            declared = [
+                "" if grid._metadata_placeholder(value) else value
+                for grid, value in zip(grids, declared)
+            ]
             nonblank = [value for value in declared if value]
             if not nonblank:
                 continue
@@ -7418,10 +7661,31 @@ class RcsGrid:
         del finite
 
         output_extra = dict(preserved_scalar_extra)
+        if metadata_assumptions:
+            output_extra["merge_metadata_assumption_json"] = json.dumps(
+                {
+                    "schema": "grim.merge-metadata-assumption.v1",
+                    "operation": "strict-merge",
+                    "input_count": len(grids),
+                    "one_sided_declarations": metadata_assumptions,
+                    "declarations_inferred": False,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
         if preserve_raw_amplitude:
             output_extra["rcs_amp_real"] = joined_raw_real
             output_extra["rcs_amp_imag"] = joined_raw_imag
             output_extra["raw_complex_amplitude_preserved"] = True
+
+        history = str(ref.history or "").strip()
+        if metadata_assumptions:
+            note = (
+                "Strict merge allowed one-sided metadata as unspecified: "
+                + ", ".join(sorted(metadata_assumptions))
+            )
+            history = f"{history}\n{note}" if history else note
 
         return cls(
             az_union,
@@ -7432,7 +7696,7 @@ class RcsGrid:
             rcs_phase=joined_phase,
             rcs_domain="power_phase",
             source_path=ref.source_path,
-            history=ref.history,
+            history=history,
             units=dict(ref.units),
             extra=output_extra,
             _adopt_clean_arrays=_ADOPT_CLEAN_ARRAYS_TOKEN,
@@ -7456,7 +7720,7 @@ class RcsGrid:
         if len(grids) == 1:
             return [grids[0]]
         for grid in grids[1:]:
-            grids[0]._assert_physical_metadata_compatible(grid)
+            grids[0]._assert_axis_metadata_compatible(grid)
 
         az_common, az_indices = cls._common_axis_alignment(
             [grid.azimuths for grid in grids], tol=tol
@@ -8712,9 +8976,11 @@ class RcsGrid:
         The checked-in reader is a hand-transcribed structural port without a
         trusted Xpatch/MATLAB absolute-normalization fixture.  Consequently its
         samples are deliberately tagged as a dimensionless power ratio, not
-        sigma3D/dBsm. This keeps plotting available while quantity checks and
-        missing phase-reference metadata quarantine the file from PTM/PIO,
-        range calibration, and coherent vehicle Assembly.
+        sigma3D/dBsm. This keeps plotting and stored-phase inspection available.
+        Missing convention metadata is recorded as an assumption; the unresolved
+        dimensional quantity still prevents PTM/PIO export, range calibration,
+        and coherent vehicle Assembly until a reviewed conversion establishes
+        sigma_3d or sigma_2d units.
         """
         import read_ss
 

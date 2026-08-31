@@ -354,16 +354,6 @@ def _text_intersection(axis_values: Sequence[np.ndarray]) -> tuple[str, ...]:
 
 
 def _phase_capability(datasets: tuple[NamedGrid, ...]) -> tuple[bool, str, str]:
-    references = [dataset.grid._phase_reference() for dataset in datasets]
-    if any(not reference for reference in references):
-        missing = ", ".join(
-            dataset.name
-            for dataset, reference in zip(datasets, references)
-            if not reference
-        )
-        return False, "", f"Phase reference is unspecified for: {missing}."
-    if len(set(references)) != 1:
-        return False, "", "Selected datasets have different phase references."
     missing_phase = [
         dataset.name
         for dataset in datasets
@@ -372,28 +362,52 @@ def _phase_capability(datasets: tuple[NamedGrid, ...]) -> tuple[bool, str, str]:
     if missing_phase:
         return (
             False,
-            references[0],
+            "",
             "No finite stored phase is available for: " + ", ".join(missing_phase) + ".",
         )
-    return True, references[0], ""
+    references = [dataset.grid._phase_reference() for dataset in datasets]
+    missing_reference = [
+        dataset.name
+        for dataset, reference in zip(datasets, references)
+        if not reference
+    ]
+    declared_references = {reference for reference in references if reference}
+    notes = []
+    if missing_reference:
+        notes.append(
+            "Phase reference is unspecified for " + ", ".join(missing_reference)
+        )
+    if len(declared_references) > 1:
+        notes.append(
+            "Selected datasets declare different phase references; phase is plotted "
+            "as stored without reference conversion"
+        )
+    common_reference = (
+        next(iter(declared_references))
+        if len(declared_references) == 1 and not missing_reference
+        else ""
+    )
+    return True, common_reference, ". ".join(notes) + ("." if notes else "")
 
 
 def _polar_capability(datasets: tuple[NamedGrid, ...]) -> tuple[bool, str]:
+    notes = []
     for dataset in datasets:
         system = dataset.grid.angular_coordinate_system()
         if system == "great_circle":
             convention = dataset.grid.great_circle_coordinate_convention()
             if convention == LEGACY_PTM_GC_CONVENTION:
-                return (
-                    False,
-                    f"{dataset.name!r} is unmarked legacy great-circle data; its "
-                    "azimuth sign/origin and polarization basis are not established.",
+                notes.append(
+                    f"{dataset.name!r} is unmarked legacy great-circle data; polar "
+                    "placement uses its stored aspect angles without inferring a "
+                    "calibrated compass orientation"
                 )
+                continue
             if convention != GRIM_GC_CONVENTION:
                 return False, f"{dataset.name!r} uses unsupported great-circle convention {convention!r}."
         elif system != "conic":
             return False, f"{dataset.name!r} uses unsupported angular coordinate system {system!r}."
-    return True, ""
+    return True, ". ".join(notes) + ("." if notes else "")
 
 
 def get_plot_availability(
@@ -442,8 +456,8 @@ def _validate_quantity(quantity: str, availability: PlotAvailability) -> Quantit
         raise ValueError("Plot quantity must be 'magnitude' or 'phase'.")
     if value == "phase" and not availability.phase_available:
         raise ValueError(
-            "Phase plotting requires finite stored phase and the same explicit, "
-            f"nonblank phase reference for every dataset. {availability.phase_reason}"
+            "Phase plotting requires finite stored phase. "
+            f"{availability.phase_reason}"
         )
     return value  # type: ignore[return-value]
 

@@ -1147,8 +1147,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Incoherent +", "btn_incoherent_add"),
             ("Incoherent -", "btn_incoherent_sub"),
             ("Δ dB", "btn_dbdiff"),
-            ("Join", "btn_join"),
-            ("Stitch", "btn_stitch"),
+            ("Strict Merge", "btn_join"),
+            ("Merge Overlaps...", "btn_stitch"),
             ("Overlap", "btn_overlap"),
         ))
         _ops_pad("Transform", (
@@ -1240,12 +1240,14 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "correct infinities, not a floor."
             ),
             "btn_join": (
-                "Build one union grid from all selected datasets. Equal or complementary "
-                "samples merge; conflicting finite samples stop the operation."
+                "Union existing axis bins without interpolation using a fixed 1e-6 "
+                "native-axis tolerance. Equal or complementary samples merge; any "
+                "conflicting finite overlap stops the operation."
             ),
             "btn_stitch": (
-                "Build a union grid using an explicit overlap policy. GRIM reports equal "
-                "and conflicting overlaps for review before adding the result."
+                "Union existing axis bins without interpolation, then deliberately "
+                "resolve conflicting overlaps by selection priority, linear-power "
+                "average, or coherent-field average. GRIM reports the outcome first."
             ),
             "btn_audit": (
                 "Run a read-only dataset quality report covering axes, units, missing "
@@ -1722,7 +1724,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                     (context.chk_isar_aperture, "toggled"),
                     (context.spin_isar_ap_center, "valueChanged"),
                     (context.spin_isar_ap_width, "valueChanged"),
-                    (context.chk_isar_legacy_phase_attestation, "toggled"),
                 ):
                     getattr(widget, signal_name).connect(
                         self._invalidate_isar_result
@@ -1736,13 +1737,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                     getattr(widget, signal_name).connect(
                         self._invalidate_isar_figure
                     )
-                context.chk_isar_legacy_phase_attestation.toggled.connect(
-                    lambda checked, widget=context.chk_isar_legacy_phase_attestation: setattr(
-                        widget,
-                        "_attested_dataset",
-                        self.active_dataset if checked else None,
-                    )
-                )
                 context.btn_isar_apply.clicked.connect(self._on_isar_window_changed)
                 context.btn_isar_ap_prev.clicked.connect(self._on_isar_ap_prev)
                 context.btn_isar_ap_next.clicked.connect(self._on_isar_ap_next)
@@ -2299,25 +2293,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(btn_isar_apply, row, 2, 1, 4)
         row += 1
 
-        chk_isar_legacy_phase_attestation = QCheckBox(
-            "Attest Legacy ISAR Contract"
-        )
-        chk_isar_legacy_phase_attestation.setToolTip(
-            "Only for an unmarked legacy conic dataset whose source has been "
-            "reviewed. By checking this, you attest that its complex samples "
-            "are far-field monostatic, have a stationary or motion-compensated "
-            "fixed phase reference/center, use exp(+j*omega*t), and follow "
-            "S~exp(-j*2*k*R). This cannot override native SENTRi theta, "
-            "great-circle coordinates, or an explicitly incompatible time "
-            "convention. Prefer adding durable metadata to the dataset."
-            " The attestation is bound to the active dataset and clears when "
-            "the dataset changes."
-        )
-        settings_layout.addWidget(
-            chk_isar_legacy_phase_attestation, row, 0, 1, 6
-        )
-        row += 1
-
         isar_settings_layout = settings_layout
         settings_layout = common_settings_layout
         row = common_row
@@ -2495,7 +2470,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             btn_isar_peak_scale=btn_isar_peak_scale,
             spin_isar_peak_drop=spin_isar_peak_drop,
             chk_isar_square=chk_isar_square,
-            chk_isar_legacy_phase_attestation=chk_isar_legacy_phase_attestation,
             btn_isar_apply=btn_isar_apply,
             btn_plot_bg=btn_plot_bg,
             btn_plot_grid=btn_plot_grid,

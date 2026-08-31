@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -137,20 +138,19 @@ class EquatorialConicGcTests(unittest.TestCase):
         )
         self.assertEqual(converted.units["azimuth"], "rad")
 
-    def test_unmarked_legacy_ptm_requires_explicit_attestation(self):
+    def test_unmarked_legacy_ptm_records_operation_assumption(self):
         source = self._grid(
             coordinate_system="great_circle",
             azimuths=(-90.0, 0.0, 90.0),
             convention=LEGACY_PTM_GC_CONVENTION,
         )
-        with self.assertRaisesRegex(ValueError, "aspect sign/origin"):
-            source.convert_equatorial_conic_gc("gc_to_conic")
-
-        converted = source.convert_equatorial_conic_gc(
-            "gc_to_conic", attest_legacy_ptm_convention=True
-        )
+        converted = source.convert_equatorial_conic_gc("gc_to_conic")
         self.assertEqual(converted.angular_coordinate_system(), "conic")
-        self.assertIn("user-attested legacy PTM", converted.history)
+        self.assertIn("unmarked legacy PTM assumed GRIM_GC_V1", converted.history)
+        assumption = json.loads(
+            converted.extra["great_circle_conversion_assumption_json"]
+        )
+        self.assertFalse(assumption["legacy_user_attested"])
 
         other = self._grid(
             coordinate_system="great_circle",

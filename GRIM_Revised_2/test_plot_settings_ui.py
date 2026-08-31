@@ -103,7 +103,9 @@ class PlotSettingsUiTest(unittest.TestCase):
         self.assertFalse(plot_section.isVisible())
         self.assertTrue(isar_section.isVisible())
         self.assertTrue(self.isar_context.combo_isar_recon.isVisible())
-        self.assertTrue(self.isar_context.chk_isar_legacy_phase_attestation.isVisible())
+        self.assertFalse(
+            hasattr(self.isar_context, "chk_isar_legacy_phase_attestation")
+        )
         self.assertTrue(self._label(isar_popup, "Image dB").isVisible())
         self.assertFalse(self._label(isar_popup, "Plot X Min").isVisible())
         self.assertGreater(isar_popup.scroll_area.verticalScrollBar().maximum(), 0)

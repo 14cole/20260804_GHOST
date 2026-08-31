@@ -1,6 +1,8 @@
 """Synthetic physics regressions for ISAR image formation."""
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -299,17 +301,26 @@ class TestIsarPhysics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "great-circle aspect/pitch"):
             form_isar(grid)
 
-    def test_incompatible_or_unknown_time_convention_is_not_attestable(self):
-        for convention in ("exp(-jwt)", "vendor convention unknown"):
-            with self.subTest(convention=convention):
-                grid = self._preflight_grid(
-                    units={"time_convention": convention},
-                    extra={"phase_reference": "fixed origin"},
-                )
-                with self.assertRaisesRegex(ValueError, r"requires the exp\(\+j\*omega\*t\)"):
-                    form_isar(grid, legacy_metadata_attested=True)
+    def test_incompatible_time_convention_is_rejected(self):
+        grid = self._preflight_grid(
+            units={"time_convention": "exp(-jwt)"},
+            extra={"phase_reference": "fixed origin"},
+        )
+        with self.assertRaisesRegex(ValueError, r"requires the exp\(\+j\*omega\*t\)"):
+            form_isar(grid)
 
-    def test_legacy_phase_metadata_requires_explicit_attestation(self):
+    def test_unknown_time_convention_is_recorded_as_user_assumed(self):
+        grid = self._preflight_grid(
+            units={"time_convention": "vendor convention unknown"},
+            extra={"phase_reference": "fixed origin"},
+        )
+        bands, _elapsed = form_isar(grid)
+        self.assertIn(
+            "the exp(+j*omega*t) time convention",
+            bands[0]["isar_contract_undeclared_fields"],
+        )
+
+    def test_legacy_phase_metadata_is_user_assumed_and_recorded(self):
         azimuth = np.linspace(-2.0, 2.0, 17)
         frequency = np.linspace(8.0, 9.0, 19)
         grid = RcsGrid(
@@ -320,21 +331,39 @@ class TestIsarPhysics(unittest.TestCase):
             rcs=np.ones((17, 1, 19, 1), dtype=np.complex64),
             units={"frequency": "GHz"},
         )
-        with self.assertRaisesRegex(ValueError, "Attest Legacy ISAR Contract"):
-            form_isar(grid)
-        bands, _elapsed = form_isar(grid, legacy_metadata_attested=True)
+        bands, _elapsed = form_isar(grid)
         self.assertEqual(len(bands), 1)
+        self.assertTrue(bands[0]["isar_contract_user_assumed"])
+        self.assertIn(
+            "far-field monostatic acquisition geometry",
+            bands[0]["isar_contract_undeclared_fields"],
+        )
+
+    def test_pio_round_trip_forms_isar_with_recorded_user_assumptions(self):
+        source = self._preflight_grid(
+            units={"time_convention": "exp(+jwt)"},
+            extra={"phase_reference": "fixed origin"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = source.save_pio(Path(directory) / "legacy.pio")
+            loaded = RcsGrid.load_pio(path)
+            bands, _elapsed = form_isar(loaded)
+        self.assertEqual(len(bands), 1)
+        self.assertTrue(bands[0]["isar_contract_user_assumed"])
+        self.assertIn(
+            "far-field monostatic acquisition geometry",
+            bands[0]["isar_contract_undeclared_fields"],
+        )
 
     def test_time_convention_text_alone_is_not_a_phase_center(self):
         grid = self._preflight_grid(
             extra={"phase_reference": "exp(+jwt)"},
         )
-        with self.assertRaisesRegex(ValueError, "fixed phase reference/center"):
-            form_isar(grid)
-        self.assertIsNone(
-            isar_mode._isar_preflight_error(
-                grid, legacy_metadata_attested=True
-            )
+        bands, _elapsed = form_isar(grid)
+        self.assertTrue(bands[0]["isar_contract_user_assumed"])
+        self.assertIn(
+            "a fixed phase reference/center",
+            bands[0]["isar_contract_undeclared_fields"],
         )
 
 

@@ -262,31 +262,28 @@ class PythonDatasetHelperTest(unittest.TestCase):
             atol=1.0e-12,
         )
 
-    def test_coherent_divide_requires_explicit_unknown_metadata_attestation(self):
+    def test_coherent_divide_records_unknown_metadata_without_blocking(self):
         numerator = _grid(values=(4.0, 4.0, 4.0, 4.0))
         denominator = _grid(values=(1.0, 1.0, 1.0, 1.0))
         numerator.source_path = "numerator.grim"
         numerator.history = "loaded numerator"
 
-        with self.assertRaisesRegex(ValueError, "phase reference"):
-            coherent_divide(numerator, denominator)
         with self.assertRaisesRegex(TypeError, "must be True or False"):
             coherent_divide(numerator, denominator, metadata_attested="false")
-        result = coherent_divide(
-            numerator, denominator, metadata_attested=True
-        )
+        result = coherent_divide(numerator, denominator)
 
         np.testing.assert_allclose(result.rcs_power, 4.0)
         self.assertEqual(result.linear_quantity(), "power_ratio")
         self.assertNotIn("phase_reference", result.extra)
         self.assertEqual(result.source_path, "numerator.grim")
         self.assertIn("loaded numerator", result.history)
-        self.assertIn("User-attested coherent metadata", result.history)
+        self.assertIn("missing convention metadata recorded", result.history)
         attestation = json.loads(
-            result.extra["coherent_metadata_attestation_json"]
+            result.extra["coherent_metadata_assumption_json"]
         )
         self.assertEqual(attestation["operation"], "coherent-divide")
         self.assertFalse(attestation["declarations_inferred"])
+        self.assertFalse(attestation["user_attested"])
         self.assertEqual(
             attestation["missing_declarations_by_input"]["phase_reference"],
             [1, 2],

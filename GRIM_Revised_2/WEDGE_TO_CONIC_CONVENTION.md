@@ -66,9 +66,10 @@ query. It never interpolates dB values or wrapped phase.
 - The wedge acquisition cannot cover every normal conic look. In particular,
   nonzero-elevation side aspects require wedge pitch approaching +/-90 degrees.
   Unsupported output cells remain `NaN`; there is no extrapolation.
-- The dialog requires the user to attest that its axes follow the physical
-  convention above. Datasets explicitly tagged `wedge_turntable` satisfy the
-  same convention programmatically.
+- Selecting Wedge-to-Conic states the requested axis interpretation. An
+  untagged source records that interpretation as an assumption; an explicitly
+  incompatible coordinate-system tag is rejected. Datasets tagged
+  `wedge_turntable` already declare the convention programmatically.
 
 The independent release regressions are in `test_wedge_conversion.py` and use
 an object-fixed complex dyadic oracle rather than replaying the production

@@ -265,7 +265,6 @@ class PythonRecorderTests(unittest.TestCase):
                 "polarization": "VV",
                 "isar_options": {
                     "azimuth_target_degrees": target.tolist(),
-                    "legacy_metadata_attested": True,
                 },
             },
         )

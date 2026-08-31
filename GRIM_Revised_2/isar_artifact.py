@@ -494,6 +494,15 @@ def build_isar_manifest(
             "l1_iterations": int(params["l1_iters"]),
             "flip_x": bool(params["flip_x"]),
             "flip_y": bool(params["flip_y"]),
+            "isar_contract_user_assumed": bool(
+                params.get("isar_contract_assumptions", ())
+            ),
+            "isar_contract_undeclared_fields": [
+                str(value)
+                for value in params.get("isar_contract_assumptions", ())
+            ],
+            # Retain the former key so older artifact readers do not need a
+            # schema fork. New GUI formations never require attestation.
             "legacy_metadata_attested": bool(
                 params.get("legacy_metadata_attested", False)
             ),

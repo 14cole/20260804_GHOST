@@ -309,6 +309,30 @@ class CropDatasetReplayTests(unittest.TestCase):
 
 
 class DatasetAuditTests(unittest.TestCase):
+    def test_metadata_free_complex_grid_is_ready_with_assumption_notes(self):
+        shape = (2, 1, 2, 1)
+        grid = RcsGrid(
+            [0.0, 1.0],
+            [0.0],
+            [8.0, 9.0],
+            ["HH"],
+            rcs_power=np.ones(shape),
+            rcs_phase=np.zeros(shape),
+            units=dict(_UNITS),
+            extra={},
+        )
+
+        report = grid.audit()
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["warnings"], [])
+        self.assertTrue(report["metrics"]["readiness"]["coherent_arithmetic"])
+        self.assertTrue(report["metrics"]["readiness"]["frequency_transform"])
+        info_codes = {item["code"] for item in report["info"]}
+        self.assertIn("unspecified_phase_reference", info_codes)
+        self.assertIn("unspecified_time_convention", info_codes)
+        self.assertIn("unspecified_polarization_basis", info_codes)
+
     def test_healthy_audit_is_strict_json_and_non_mutating(self):
         shape = (2, 1, 3, 1)
         grid = RcsGrid(
@@ -383,7 +407,8 @@ class DatasetAuditTests(unittest.TestCase):
         self.assertIn("missing_coherent_phase", warning_codes)
         self.assertIn("nonuniform_frequency", warning_codes)
         self.assertIn("conflicting_azimuth_seam", warning_codes)
-        self.assertIn("missing_phase_reference", warning_codes)
+        info_codes = {item["code"] for item in report["info"]}
+        self.assertIn("unspecified_phase_reference", info_codes)
         self.assertEqual(report["metrics"]["seam"]["conflict_cell_count"], 1)
         self.assertFalse(report["metrics"]["readiness"]["incoherent_arithmetic"])
         self.assertFalse(report["metrics"]["readiness"]["coherent_arithmetic"])
@@ -487,21 +512,28 @@ class StitchManyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "conflicting finite samples"):
             RcsGrid.join_many(self.first, self.last)
 
-    def test_coherent_mean_requires_phase_and_metadata_or_attestation(self):
+    def test_coherent_mean_masks_missing_phase_and_records_missing_metadata(self):
         missing_phase = _line_grid(
             [0.0, 1.0], [1.0, 4.0], [0.0, np.nan]
         )
-        with self.assertRaisesRegex(ValueError, "requires finite phase"):
-            RcsGrid.stitch_many(
-                missing_phase, self.first, policy="coherent-mean"
-            )
+        masked, masked_report = RcsGrid.stitch_many(
+            missing_phase,
+            self.first,
+            policy="coherent-mean",
+            return_report=True,
+        )
+        self.assertEqual(masked_report["masked_missing_phase_sample_count"], 1)
+        self.assertGreater(int(np.isfinite(masked.rcs_power).sum()), 0)
 
         unknown_a = _line_grid([0.0], [1.0], [0.0], extra={})
         unknown_b = _line_grid([0.0], [1.0], [0.0], extra={})
-        with self.assertRaisesRegex(ValueError, "requires declared coherent metadata"):
-            RcsGrid.stitch_many(
-                unknown_a, unknown_b, policy="coherent-mean"
-            )
+        assumed = RcsGrid.stitch_many(
+            unknown_a, unknown_b, policy="coherent-mean"
+        )
+        assumption = json.loads(
+            assumed.extra["coherent_metadata_assumption_json"]
+        )
+        self.assertFalse(assumption["user_attested"])
         attested = RcsGrid.stitch_many(
             unknown_a,
             unknown_b,
@@ -519,13 +551,48 @@ class StitchManyTests(unittest.TestCase):
         opposite_extra["time_convention"] = "exp(+jwt)"
         opposite = _line_grid([1.0, 2.0], [9.0, 16.0], [0.0, 0.0], extra=opposite_extra)
 
-        with self.assertRaisesRegex(ValueError, "matching time conventions"):
+        with self.assertRaisesRegex(ValueError, "different explicit time conventions"):
             RcsGrid.stitch_many(
                 self.first,
                 opposite,
                 policy="coherent-mean",
                 metadata_attested=True,
             )
+
+    def test_merge_allows_one_sided_and_placeholder_metadata(self):
+        declared = _line_grid([0.0], [1.0], [0.0], extra=_COHERENT_EXTRA)
+        unspecified = _line_grid([1.0], [4.0], [0.0], extra={})
+        placeholder = _line_grid(
+            [2.0],
+            [9.0],
+            [0.0],
+            extra={
+                "phase_reference": "unknown",
+                "time_convention": "unverified",
+                "polarization_basis": "unspecified",
+            },
+        )
+
+        joined = RcsGrid.join_many(declared, unspecified, placeholder)
+        self.assertNotIn("phase_reference", joined.extra)
+        join_assumption = json.loads(
+            joined.extra["merge_metadata_assumption_json"]
+        )
+        self.assertIn(
+            "phase_reference", join_assumption["one_sided_declarations"]
+        )
+
+        stitched = RcsGrid.stitch_many(
+            declared, unspecified, placeholder, policy="priority-first"
+        )
+        self.assertNotIn("phase_reference", stitched.extra)
+        stitch_assumption = json.loads(
+            stitched.extra["merge_metadata_assumption_json"]
+        )
+        self.assertIn(
+            "phase_reference",
+            stitch_assumption["unspecified_declarations_by_input"],
+        )
 
     def test_memory_cap_policy_validation_and_physical_units(self):
         with self.assertRaises(MemoryError):

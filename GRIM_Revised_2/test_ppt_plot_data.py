@@ -367,7 +367,7 @@ class PptPlotDataTests(unittest.TestCase):
                 polarization="VV",
             )
 
-    def test_phase_uses_stored_phase_preserves_nan_gaps_and_requires_reference(self):
+    def test_phase_uses_stored_values_and_reference_differences_are_notes(self):
         phase = np.asarray([0.0, np.nan, np.pi]).reshape(3, 1, 1, 1)
         grid = _grid(frequencies=(1.0,), phase=phase)
         spec = build_azimuth_specs(
@@ -388,21 +388,38 @@ class PptPlotDataTests(unittest.TestCase):
         availability = get_plot_availability(
             [("Phase", grid), ("Other", other_reference)]
         )
-        self.assertFalse(availability.phase_available)
-        with self.assertRaisesRegex(ValueError, "phase reference"):
-            build_azimuth_specs(
-                [("Phase", grid), ("Other", other_reference)],
-                frequencies=[1.0],
-                elevation=0.0,
-                polarization="VV",
-                quantity="phase",
-            )
+        self.assertTrue(availability.phase_available)
+        self.assertIn("different phase references", availability.phase_reason)
+        specs = build_azimuth_specs(
+            [("Phase", grid), ("Other", other_reference)],
+            frequencies=[1.0],
+            elevation=0.0,
+            polarization="VV",
+            quantity="phase",
+        )
+        self.assertEqual(len(specs[0].series), 2)
 
-    def test_blank_phase_reference_is_not_silently_accepted(self):
+    def test_blank_phase_reference_is_a_nonblocking_availability_note(self):
         grid = _grid(frequencies=(1.0,), phase_reference="")
-        with self.assertRaisesRegex(ValueError, "nonblank phase reference"):
+        availability = get_plot_availability([("Unknown reference", grid)])
+        self.assertTrue(availability.phase_available)
+        self.assertIn("unspecified", availability.phase_reason)
+        spec = build_frequency_spec(
+            [("Unknown reference", grid)],
+            azimuth=0.0,
+            elevation=0.0,
+            polarization="VV",
+            quantity="phase",
+        )
+        self.assertEqual(spec.y_label, "Phase (deg)")
+
+    def test_phase_export_still_requires_at_least_one_finite_phase_sample(self):
+        grid = _grid(frequencies=(1.0,), phase=np.nan, phase_reference="")
+        availability = get_plot_availability([("No phase", grid)])
+        self.assertFalse(availability.phase_available)
+        with self.assertRaisesRegex(ValueError, "finite stored phase"):
             build_frequency_spec(
-                [("Unknown reference", grid)],
+                [("No phase", grid)],
                 azimuth=0.0,
                 elevation=0.0,
                 polarization="VV",
@@ -482,22 +499,23 @@ class PptPlotDataTests(unittest.TestCase):
                 polarization="VV",
             )
 
-    def test_unmarked_legacy_great_circle_is_rejected_for_polar_only(self):
+    def test_unmarked_legacy_great_circle_polar_uses_stored_angles_with_note(self):
         legacy = _grid(
             frequencies=(1.0,),
             coordinate_system="great_circle",
             gc_convention=None,
         )
         availability = get_plot_availability([("Legacy PTM", legacy)])
-        self.assertFalse(availability.polar_available)
-        with self.assertRaisesRegex(ValueError, "unmarked legacy great-circle"):
-            build_azimuth_specs(
-                [("Legacy PTM", legacy)],
-                frequencies=[1.0],
-                elevation=0.0,
-                polarization="VV",
-                kind="azimuth_polar",
-            )
+        self.assertTrue(availability.polar_available)
+        self.assertIn("stored aspect angles", availability.polar_reason)
+        legacy_polar = build_azimuth_specs(
+            [("Legacy PTM", legacy)],
+            frequencies=[1.0],
+            elevation=0.0,
+            polarization="VV",
+            kind="azimuth_polar",
+        )[0]
+        self.assertEqual(legacy_polar.kind, "azimuth_polar")
         # Rectangular display does not assert an unknown compass orientation.
         self.assertEqual(
             build_azimuth_specs(

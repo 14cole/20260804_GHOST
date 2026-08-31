@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import re
+import warnings
 from typing import Iterable
 
 import numpy as np
@@ -51,6 +52,32 @@ _OPTIONAL_EXACT_FIELDS = (
 _REPEAT_EXCLUDED_ACQUISITION_FAMILIES = ("calibration_run_id",)
 _DEFAULT_REPEAT_WORKING_SET_MB = 2048
 _REPEAT_STATISTICS_SCRATCH_BYTES = 64 * 1024**2
+_AMBIGUOUS_METADATA_WORDS = frozenset(
+    {"unknown", "unspecified", "undetermined", "unverified", "arbitrary"}
+)
+
+
+def _metadata_is_ambiguous(value) -> bool:
+    words = set(
+        re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().casefold()).split()
+    )
+    return bool(words.intersection(_AMBIGUOUS_METADATA_WORDS))
+
+
+def _repeat_coherent_declaration(grid: RcsGrid, key: str) -> tuple[str, str]:
+    """Return (raw, canonical) for usable metadata, otherwise blank values."""
+
+    raw = grid._declared_scalar_metadata(key)
+    if not raw or _metadata_is_ambiguous(raw):
+        return "", ""
+    if key == "time_convention":
+        canonical = grid._canonical_time_convention(raw)
+        # Opaque producer wording is provenance, not proof of a convention.
+        if canonical not in {"+jwt", "-jwt"}:
+            return "", ""
+    else:
+        canonical = " ".join(raw.casefold().split())
+    return raw, canonical
 
 
 def _repeat_working_set_limit_bytes(maximum_working_bytes) -> int:
@@ -128,11 +155,15 @@ def _repeat_range_phase_profile(grid: RcsGrid) -> dict:
 
     signs = set()
     declarations = {}
+    unrecognized = {}
     for key in _RANGE_PHASE_METADATA_KEYS:
         declared = grid._declared_scalar_metadata(key)
         if not declared:
             continue
         declarations[key] = declared
+        if _metadata_is_ambiguous(declared):
+            unrecognized[key] = declared
+            continue
         compact = str(declared).casefold()
         compact = compact.replace("−", "-").replace("–", "-")
         compact = re.sub(r"[\s*·^{}()\[\]_=~]+", "", compact)
@@ -143,15 +174,13 @@ def _repeat_range_phase_profile(grid: RcsGrid) -> dict:
             matches.append("+")
         signs.update(-1 if match == "-" else 1 for match in matches)
         if key == "range_phase_convention" and not matches:
-            raise ValueError(
-                "range_phase_convention is explicit but does not declare "
-                "S~exp(-j*2*k*R) or S~exp(+j*2*k*R)"
-            )
+            unrecognized[key] = declared
     if len(signs) > 1:
         raise ValueError("contradictory two-way range-phase declarations")
     return {
         "sign": next(iter(signs), None),
         "declared_by_key": declarations,
+        "unrecognized_by_key": unrecognized,
     }
 
 
@@ -269,6 +298,7 @@ class RepeatAcquisitionStack:
                 "range_phase": {},
                 "optional_exact_fields": {},
                 "semantic_families": {},
+                "unrecognized_declarations": {},
             }
             for sweep in values
         }
@@ -289,25 +319,14 @@ class RepeatAcquisitionStack:
                 else:
                     missing_by_acquisition[sweep.acquisition_id].add(key)
             for key in _REQUIRED_COHERENT_FIELDS:
-                declared = sweep.grid._declared_scalar_metadata(key)
+                original = sweep.grid._declared_scalar_metadata(key)
+                declared, _canonical = _repeat_coherent_declaration(sweep.grid, key)
                 if declared:
-                    normalized = " ".join(declared.casefold().split())
-                    if set(normalized.split()).intersection(
-                        {
-                            "unknown",
-                            "unspecified",
-                            "undetermined",
-                            "unverified",
-                            "arbitrary",
-                        }
-                    ):
-                        raise ValueError(
-                            f"repeat acquisition {sweep.acquisition_id!r} declares "
-                            f"explicitly unverified {key} metadata: {declared!r}"
-                        )
                     profile["coherent_fields"][key] = declared
                 else:
                     missing_by_acquisition[sweep.acquisition_id].add(key)
+                    if original:
+                        profile["unrecognized_declarations"][key] = original
             try:
                 range_phase = _repeat_range_phase_profile(sweep.grid)
             except ValueError as exc:
@@ -316,39 +335,39 @@ class RepeatAcquisitionStack:
                     f"two-way range-phase metadata: {exc}"
                 ) from exc
             profile["range_phase"] = range_phase
+            if range_phase["unrecognized_by_key"]:
+                profile["unrecognized_declarations"].update(
+                    range_phase["unrecognized_by_key"]
+                )
             if range_phase["sign"] is None:
                 missing_by_acquisition[sweep.acquisition_id].add(
                     "range_phase_convention"
                 )
             for key in _OPTIONAL_EXACT_FIELDS:
                 declared = sweep.grid._declared_scalar_metadata(key)
-                if declared:
+                if declared and not _metadata_is_ambiguous(declared):
                     profile["optional_exact_fields"][key] = declared
+                elif declared:
+                    profile["unrecognized_declarations"][key] = declared
+                    missing_by_acquisition[sweep.acquisition_id].add(key)
 
         for left_index, left_sweep in enumerate(values[:-1]):
             for right_sweep in values[left_index + 1 :]:
                 left_grid = left_sweep.grid
                 right_grid = right_sweep.grid
-                try:
-                    # True here covers only missing coherent declarations; this
-                    # method still rejects every explicit contradiction.  The
-                    # stack's own legacy gate below decides whether omissions
-                    # are permitted and records that decision durably.
-                    left_grid._assert_coherent_metadata_compatible(
-                        right_grid, metadata_attested=True
-                    )
-                except ValueError as exc:
-                    detail = str(exc)
-                    if "phase references" in detail:
-                        detail = "phase_reference metadata mismatch: " + detail
-                    elif "time conventions" in detail:
-                        detail = "time_convention metadata mismatch: " + detail
-                    elif "polarization bases" in detail:
-                        detail = "polarization_basis metadata mismatch: " + detail
-                    raise ValueError(
-                        f"repeat acquisitions {left_sweep.acquisition_id!r} and "
-                        f"{right_sweep.acquisition_id!r} disagree: {detail}"
-                    ) from exc
+                for key, label in (
+                    ("phase_reference", "phase references"),
+                    ("time_convention", "time conventions"),
+                    ("polarization_basis", "polarization bases"),
+                ):
+                    left_raw, left_value = _repeat_coherent_declaration(left_grid, key)
+                    right_raw, right_value = _repeat_coherent_declaration(right_grid, key)
+                    if left_value and right_value and left_value != right_value:
+                        raise ValueError(
+                            f"repeat acquisitions {left_sweep.acquisition_id!r} and "
+                            f"{right_sweep.acquisition_id!r} disagree: {key} metadata "
+                            f"mismatch in {label} ({left_raw!r} != {right_raw!r})"
+                        )
 
                 left_range_phase = profiles[left_sweep.acquisition_id][
                     "range_phase"
@@ -433,6 +452,10 @@ class RepeatAcquisitionStack:
                 for key in _OPTIONAL_EXACT_FIELDS:
                     left = left_grid._declared_scalar_metadata(key)
                     right = right_grid._declared_scalar_metadata(key)
+                    if left and _metadata_is_ambiguous(left):
+                        left = ""
+                    if right and _metadata_is_ambiguous(right):
+                        right = ""
                     if left and right:
                         if " ".join(left.casefold().split()) != " ".join(
                             right.casefold().split()
@@ -480,19 +503,19 @@ class RepeatAcquisitionStack:
             for acquisition_id, facts in missing_by_acquisition.items()
             if facts
         }
-        if durable_missing and not bool(legacy_metadata_attested):
+        if durable_missing:
             details = "; ".join(
                 f"{acquisition_id}: {', '.join(facts)}"
                 for acquisition_id, facts in durable_missing.items()
             )
-            raise ValueError(
-                "repeat-acquisition metadata is incomplete ("
+            warnings.warn(
+                "Repeat-acquisition metadata is incomplete or unrecognized ("
                 + details
-                + "). Declare the missing facts, or set "
-                "legacy_metadata_attested=True only after verifying that every "
-                "repeat used compatible units, geometry, phase reference/time "
-                "convention, two-way range-phase law, polarization basis, and "
-                "stable phase center"
+                + "). The numeric sweeps are being compared as requested; "
+                "undeclared facts are recorded as user assumptions and no "
+                "missing declaration is inferred.",
+                UserWarning,
+                stacklevel=2,
             )
 
         self.sweeps = values
@@ -500,14 +523,16 @@ class RepeatAcquisitionStack:
         self.metadata_contract = {
             "schema": "grim.repeat-acquisition-metadata-contract.v2",
             "legacy_metadata_attested": bool(legacy_metadata_attested),
+            "legacy_metadata_attestation_required": False,
             "acquisition_ids": [sweep.acquisition_id for sweep in values],
             "required_unit_fields": list(_REQUIRED_UNIT_KEYS),
             "required_coherent_fields": list(_REQUIRED_COHERENT_FIELDS),
             "range_phase_metadata_aliases": list(_RANGE_PHASE_METADATA_KEYS),
             "metadata_profiles": profiles,
             "missing_declarations_by_acquisition": durable_missing,
+            "missing_declarations_treated_as_user_assumptions": bool(durable_missing),
             "missing_declarations_covered_by_user_attestation": bool(
-                durable_missing
+                durable_missing and legacy_metadata_attested
             ),
             "declarations_inferred": False,
             "explicit_contradictions_allowed": False,

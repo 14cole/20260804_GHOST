@@ -1056,18 +1056,26 @@ def _isar_preflight_error(
     legacy_metadata_attested=False,
     flip_x: bool = False,
     flip_y: bool = False,
+    undeclared_out: list[str] | None = None,
 ) -> str | None:
     """Return a user-facing reason that ``dataset`` is unsafe for ISAR.
 
     The implemented k-space geometry is GRIM conic azimuth/elevation and the
     IFFT sign assumes ``exp(+j*omega*t)`` with a monostatic phase history
-    proportional to ``exp(-j*2*k*R)``.  Missing declarations on a legacy file
-    can be covered by an explicit per-render attestation; contradictory or
-    unsupported declarations cannot.
+    proportional to ``exp(-j*2*k*R)``. Missing declarations on a legacy file
+    are recorded as user assumptions instead of blocking formation;
+    contradictory or unsupported declarations still fail closed.
+
+    ``legacy_metadata_attested`` remains accepted for compatibility with
+    previously recorded scripts but is no longer required. When supplied,
+    ``undeclared_out`` receives human-readable names for contract declarations
+    that were absent from the source dataset.
     """
 
     if not isinstance(legacy_metadata_attested, (bool, np.bool_)):
         raise TypeError("legacy_metadata_attested must be True or False")
+    if undeclared_out is not None and not isinstance(undeclared_out, list):
+        raise TypeError("undeclared_out must be a list or None")
     if not isinstance(flip_x, (bool, np.bool_)) or not isinstance(
         flip_y, (bool, np.bool_)
     ):
@@ -1098,9 +1106,8 @@ def _isar_preflight_error(
         joined = " ".join(words)
         return bool(
             word_set.intersection({
-                "unknown", "unspecified", "undetermined", "unverified",
-                "unfixed", "unstable", "varying", "variable", "moving",
-                "uncompensated", "arbitrary",
+                "none", "unfixed", "unstable", "varying", "variable",
+                "moving", "uncompensated", "arbitrary",
             })
             or (
                 any(word.startswith("drift") for word in words)
@@ -1112,6 +1119,11 @@ def _isar_preflight_error(
                 for phrase in ("not fixed", "not compensated", "not aligned")
             )
         )
+
+    def placeholder_semantics(value: str) -> bool:
+        """Treat common vendor placeholders as absent, not physical claims."""
+
+        return normalized_semantics(value) in {"na", "n a", "not applicable"}
 
     def recognized_far_field(value: str) -> bool:
         semantic = normalized_semantics(value)
@@ -1165,14 +1177,15 @@ def _isar_preflight_error(
             or "reactive near" in semantic
         )
 
-    # Explicit incompatible geometry is authoritative and cannot be waived by
-    # the legacy checkbox.  Missing geometry remains attestable for legacy
-    # files, preserving the existing workflow.
+    # Explicit incompatible geometry remains authoritative. Missing or
+    # placeholder geometry is recorded below as a user-owned assumption.
     monostatic_declared = False
     far_field_declared = False
     for key in _ISAR_GEOMETRY_METADATA_KEYS:
         declared = _declared_scalar_metadata(dataset, key)
         if not declared:
+            continue
+        if placeholder_semantics(declared):
             continue
         semantic = normalized_semantics(declared)
         if any(word in semantic.split() for word in ("bistatic", "multistatic")):
@@ -1197,10 +1210,10 @@ def _isar_preflight_error(
         geometry_identity_key = key in _ISAR_GEOMETRY_IDENTITY_KEYS
         if geometry_identity_key:
             if "monostatic" not in semantic.split():
-                return (
-                    f"{key} declares unrecognized geometry {declared!r}; use an "
-                    "explicit far-field monostatic declaration"
-                )
+                # Producer-specific, unknown, or otherwise unrecognized text
+                # is ambiguous rather than a known physical contradiction.
+                # Record the standard monostatic assumption below.
+                continue
             monostatic_declared = True
             if recognized_far_field(declared):
                 far_field_declared = True
@@ -1211,10 +1224,9 @@ def _isar_preflight_error(
             # establish far-field propagation below.
             continue
         else:
-            return (
-                f"{key} declares unrecognized field domain {declared!r}; use an "
-                "explicit far-field/Fraunhofer declaration"
-            )
+            # Unknown producer vocabulary is not proof of an incompatible
+            # propagation domain. Treat it as undeclared and user-assumed.
+            continue
     # ``complex_field_domain`` records the algebraic meaning of a complex
     # response (for example a support-referenced difference or a feature
     # delta), not necessarily its propagation zone.  Preserve those valid
@@ -1249,6 +1261,8 @@ def _isar_preflight_error(
         declared = _declared_scalar_metadata(dataset, key)
         if not declared:
             continue
+        if placeholder_semantics(declared):
+            continue
         semantic = normalized_semantics(declared)
         # Most keys assert a positive safe state (compensated/stable/aligned),
         # while phase_center_motion asserts the opposite physical quantity.
@@ -1277,10 +1291,9 @@ def _isar_preflight_error(
             )
         )
         if not explicitly_safe:
-            return (
-                f"{key} declares unrecognized motion state {declared!r}; explicitly "
-                "declare a stable, static, aligned, or motion-compensated phase center"
-            )
+            # Unknown producer vocabulary is not proof of actual motion.
+            # Treat it as an undeclared stable-center assumption.
+            continue
         stable_motion_declared = True
 
     def canonical_angular(value) -> str:
@@ -1340,6 +1353,8 @@ def _isar_preflight_error(
         )
 
     phase_reference = _declared_scalar_metadata(dataset, "phase_reference")
+    if placeholder_semantics(phase_reference):
+        phase_reference = ""
     declared_time = _declared_scalar_metadata(dataset, "time_convention")
     declared_time_key = (
         _canonical_time_convention(dataset, declared_time) if declared_time else ""
@@ -1358,16 +1373,9 @@ def _isar_preflight_error(
         or "calibrated reference" in semantic_phase
     )
 
-    if phase_reference and not phase_has_fixed_reference and not phase_declares_time:
-        return (
-            f"phase reference {phase_reference!r} is not a verified fixed "
-            "phase center; declare a fixed origin/phase center or calibrate "
-            "and motion-compensate before ISAR"
-        )
     if phase_reference and (
         semantic_phase in {
-            "none", "na", "unknown", "unspecified", "undetermined",
-            "unverified", "arbitrary", "n a",
+            "none", "na", "arbitrary", "n a",
         }
         or unsafe_semantics(phase_reference)
     ):
@@ -1376,13 +1384,13 @@ def _isar_preflight_error(
             "phase center; calibrate/motion-compensate before ISAR"
         )
 
-    if declared_time and declared_time_key != _ISAR_TIME_CONVENTION:
+    if declared_time and declared_time_key == "-jwt":
         return (
             "ISAR requires the exp(+j*omega*t) time convention; dataset declares "
             f"{declared_time!r}. Convert/conjugate the phase history explicitly "
             "before imaging"
         )
-    if phase_declares_time and phase_time_key != _ISAR_TIME_CONVENTION:
+    if phase_declares_time and phase_time_key == "-jwt":
         return (
             "ISAR requires the exp(+j*omega*t) time convention, but the phase "
             f"reference declares {phase_reference!r}. Convert/conjugate the phase "
@@ -1413,17 +1421,14 @@ def _isar_preflight_error(
         missing.append("a stable or motion-compensated phase center")
     if not phase_has_fixed_reference:
         missing.append("a fixed phase reference/center")
-    if not declared_time and not phase_declares_time:
+    if declared_time_key != _ISAR_TIME_CONVENTION and not (
+        phase_declares_time and phase_time_key == _ISAR_TIME_CONVENTION
+    ):
         missing.append("the exp(+j*omega*t) time convention")
     if range_phase_sign is None:
         missing.append("the S~exp(-j*2*k*R) two-way range-phase convention")
-    if missing and not bool(legacy_metadata_attested):
-        return (
-            "legacy ISAR metadata is incomplete (missing " + " and ".join(missing)
-            + "). Declare it in the dataset, or deliberately enable 'Attest Legacy "
-            "ISAR Contract' after verifying far-field monostatic geometry, a stable "
-            "phase center, exp(+j*omega*t), and S~exp(-j*2*k*R)"
-        )
+    if undeclared_out is not None:
+        undeclared_out.extend(missing)
     return None
 
 
@@ -2818,6 +2823,11 @@ def compute_bands(params: dict):
             result["display_decimated"] = result["magnitude"].shape != original_shape
             if _cancel_requested(cancel_check):
                 return "ISAR computation superseded."
+        contract_assumptions = tuple(
+            str(value) for value in params.get("isar_contract_assumptions", ())
+        )
+        result["isar_contract_user_assumed"] = bool(contract_assumptions)
+        result["isar_contract_undeclared_fields"] = list(contract_assumptions)
         band_results.append(result)
     return band_results, time.perf_counter() - t_start
 
@@ -2855,16 +2865,17 @@ def form_isar(
     ``decimate_display=True`` applies the GUI's peak-preserving display-only
     reduction to magnitude after full-resolution formation. It must remain
     false for scientific result export.
-    ``legacy_metadata_attested=True`` is a deliberate assertion that an
-    otherwise-unmarked legacy conic dataset uses a fixed phase center,
-    ``exp(+j*omega*t)``, and ``S~exp(-j*2*k*R)``. It never overrides an
-    explicitly incompatible coordinate or time-convention declaration.
+    ``legacy_metadata_attested`` is retained only for backward compatibility
+    with older recorded scripts. Missing legacy convention metadata is now a
+    recorded user assumption; explicit incompatibilities are still rejected.
     """
+    contract_assumptions: list[str] = []
     preflight_error = _isar_preflight_error(
         dataset,
         legacy_metadata_attested=legacy_metadata_attested,
         flip_x=bool(flip_x),
         flip_y=bool(flip_y),
+        undeclared_out=contract_assumptions,
     )
     if preflight_error is not None:
         raise ValueError(f"ISAR blocked: {preflight_error}")
@@ -2960,6 +2971,7 @@ def form_isar(
         "flip_y": bool(flip_y),
         "retain_complex": bool(retain_complex),
         "decimate_display": bool(decimate_display),
+        "isar_contract_assumptions": contract_assumptions,
     })
     if isinstance(result, str):
         raise ValueError(result)
@@ -2978,32 +2990,17 @@ def render(self) -> None:
     if self._preflight_plot_datasets([("Dataset", self.active_dataset)]) is None:
         return
 
-    legacy_attestation_widget = getattr(
-        self, "chk_isar_legacy_phase_attestation", None
-    )
     flip_x_widget = getattr(self, "chk_isar_flip_x", None)
     flip_x = bool(flip_x_widget.isChecked()) if flip_x_widget is not None else False
     flip_y_widget = getattr(self, "chk_isar_flip_y", None)
     flip_y = bool(flip_y_widget.isChecked()) if flip_y_widget is not None else False
-    if (
-        legacy_attestation_widget is not None
-        and legacy_attestation_widget.isChecked()
-        and getattr(legacy_attestation_widget, "_attested_dataset", None)
-        is not self.active_dataset
-    ):
-        # An attestation is source-specific. Never let a checked box silently
-        # carry from one active dataset to another.
-        legacy_attestation_widget.setChecked(False)
-    legacy_metadata_attested = bool(
-        legacy_attestation_widget.isChecked()
-        if legacy_attestation_widget is not None else False
-    )
+    contract_assumptions: list[str] = []
     try:
         preflight_error = _isar_preflight_error(
             self.active_dataset,
-            legacy_metadata_attested=legacy_metadata_attested,
             flip_x=flip_x,
             flip_y=flip_y,
+            undeclared_out=contract_assumptions,
         )
     except (TypeError, ValueError) as exc:
         self.status.showMessage(f"ISAR blocked: invalid convention metadata: {exc}.")
@@ -3277,7 +3274,7 @@ def render(self) -> None:
         # worker result. Wide max-look composites explicitly report that no
         # physically meaningful complex image exists.
         "retain_complex": True,
-        "legacy_metadata_attested": legacy_metadata_attested,
+        "isar_contract_assumptions": contract_assumptions,
     })
 
 
@@ -3512,10 +3509,11 @@ def display_results(self, params: dict, band_results: list, elapsed: float) -> N
     if n_bands > 1:
         parts.append(f" ({n_bands} bands)")
     notes = []
-    if params.get("legacy_metadata_attested"):
+    contract_assumptions = tuple(params.get("isar_contract_assumptions", ()))
+    if contract_assumptions:
         notes.append(
-            "legacy ISAR contract user-attested as far-field monostatic, "
-            "stable fixed-center exp(+j*omega*t)"
+            "undeclared ISAR conventions user-assumed: "
+            + ", ".join(str(value) for value in contract_assumptions)
         )
     if composite_subs:
         notes.append(

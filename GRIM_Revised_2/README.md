@@ -124,19 +124,23 @@ order. Long selections are abbreviated in the panel while the full order stays
 available in its tooltip, and the operations panel scrolls on shorter displays.
 `Ctrl+O` opens datasets, `Ctrl+Shift+O` performs Overlap, and ordered
 subtraction/division use the displayed operand order. Delta-dB and coherent
-division require exactly two operands. Join merges equal or
-complementary finite overlaps and rejects conflicts; it never silently applies
-a hidden first/last-wins rule.
+division require exactly two operands. **Strict Merge** unions existing bins
+without interpolation, merges equal or complementary finite overlaps, and
+rejects conflicts; it never silently applies a hidden first/last-wins rule.
 
 ## ISAR formation and numerical results
 
 The ISAR tab forms a static-scene, far-field, monostatic image from calibrated
 complex phase history referenced to one fixed origin. Frequency units must be
 explicitly declared as Hz, kHz, MHz, or GHz. Explicit near-field, bistatic,
-quasi-/pseudo-monostatic, unknown-geometry, drifting-reference, or
-uncompensated-motion metadata fails closed. A legacy attestation can supply
-genuinely missing declarations after review, but it cannot override an explicit
-incompatibility. The same contract also binds the two-way range law: an explicit
+quasi-/pseudo-monostatic, drifting-reference, or
+uncompensated-motion metadata fails closed. Genuinely missing legacy convention
+metadata and unknown producer vocabulary do not block formation: GRIM treats
+them as user-owned assumptions and records every undeclared contract field in
+the completed result and artifact.
+This is especially important for Pioneer PIO, whose interchange header cannot
+carry the full acquisition contract. The same contract also binds the two-way
+range law: an explicit
 `S~exp(+j*2*k*R)` declaration is blocked under the default axes unless both
 Flip X and Flip Y are deliberately enabled and checked against a known
 asymmetric target.
@@ -166,7 +170,8 @@ array. Storage adaptively skips slow ZIP compression for noise-like complex data
 and uses it when a bounded sample predicts useful savings, including for flipped
 or strided images. Every artifact includes a versioned JSON manifest with
 selected-source content digests, source history/conventions, formation settings,
-attestation state, coverage, sampling, and sparse diagnostics. Save and load
+user-assumed undeclared convention fields, coverage, sampling, and sparse
+diagnostics. Save and load
 preflight array headers, normalized working bytes, band/cell counts, and
 recursively bounded metadata before numerical extraction; complex axes,
 post-cast overflow, malformed legacy magnitude, object payloads, duplicate/path
@@ -213,9 +218,9 @@ target-only, contaminant-only, combined, and measured cases.
 `isar_repeats.py` similarly defines explicit acquisition IDs/timestamps and a
 non-destructive repeat-domain outlier screen for future transient studies. It
 does not overload azimuth as slow time and does not delete or label candidates
-as birds. Every sweep must declare compatible two-way range-phase sign through
-`range_phase_convention` or `phase_law`, or a legacy attestation must explicitly
-cover a genuinely missing declaration; an opposite sign is never attestable.
+as birds. Recognized two-way range-phase declarations must agree across sweeps.
+Missing, placeholder, and producer-specific unrecognized declarations are
+recorded as assumptions and warnings; a definite opposite sign is still rejected.
 Repeat loading is preallocated, robust statistics use bounded scratch blocks,
 and both stack creation and screening fail before allocation when their
 estimated retained result exceeds `maximum_working_bytes` (or the
@@ -232,7 +237,9 @@ information, and metrics for axis validity, array shape, missing power and
 phase, metadata declarations, azimuth seam consistency, frequency uniformity,
 and coherent-operation readiness. It neither repairs nor normalizes the source
 dataset, and a passing structural audit is not a solver-accuracy or physical
-validation certificate. Select multiple rows to inspect them independently.
+validation certificate. Missing phase-center/time/basis declarations are
+informational assumptions, not Audit failures; coherent readiness depends on
+usable complex samples. Select multiple rows to inspect them independently.
 
 ### Crop / Slice and Regrid
 
@@ -250,15 +257,17 @@ largest grid point that does not exceed stop. Every target coordinate must be
 inside the source extent; GRIM does not extrapolate. Cells with usable phase
 are interpolated as a complex field, while magnitude-only cells use linear
 power interpolation and keep phase unknown. Regridding to a coarser spacing is
-not an anti-alias filter, so the GUI asks for confirmation before that form of
-downsampling.
+not an anti-alias filter. The GUI reports that fact in status and performs the
+requested regrid without a second prompt.
 
-### Stitch
+### Strict Merge and Merge Overlaps
 
-**Stitch** forms the union of all four axes and fills finite samples according
-to one named overlap policy. Unlike strict **Join**, it may resolve conflicting
-finite overlaps, but only under the policy shown in the dialog and recorded in
-provenance. Input order is significant for the priority policies:
+Both operations form the union of all four axes using existing coordinates;
+neither interpolates samples. **Strict Merge** is the fail-closed choice for
+complementary shards: any conflicting finite overlap stops the operation.
+**Merge Overlaps...** is the deliberate conflict-resolution workflow and fills
+finite samples according to one named policy shown in its dialog and recorded
+in provenance. Input order is significant for the priority policies:
 
 - `priority-first` keeps the first finite power/phase sample as one atomic
   sample; later inputs still fill missing cells.
@@ -266,14 +275,15 @@ provenance. Input order is significant for the priority policies:
 - `power-mean` averages repeated finite samples in linear power. Phase remains
   available in single-source cells and becomes unknown in cells with multiple
   contributors.
-- `coherent-mean` averages the complex fields. It requires finite phase and
-  compatible phase-reference, time-convention, and polarization-basis metadata;
-  legacy missing declarations require an explicit attestation.
+- `coherent-mean` averages usable complex fields. Samples with finite power but
+  missing phase are masked individually and counted. Explicitly conflicting
+  phase-reference, time-convention, or polarization-basis declarations stop the
+  merge; missing or one-sided declarations are recorded as unspecified.
 
-Before the GUI adds the result, it reports contributing samples, overlapping
-cells, equivalent overlaps, and conflicts resolved by the policy. The result's
+The GUI adds the reversible unsaved result directly and reports overlap,
+missing, contributor, and resolved-conflict counts in status. The result's
 history and `grim.stitch-provenance.v1` record retain the policy, tolerance,
-counts, attestation state, and input sources.
+counts, metadata assumptions, and input sources.
 
 ### Phase and azimuth wrapping
 
@@ -618,7 +628,7 @@ workflows.
 Crop / Slice, Regrid, Stitch, and phase wrapping are replayed with explicit
 `crop_dataset`, `regrid_axis`, `stitch_datasets`, and `wrap_phase`/`RcsGrid`
 calls. Recorded crop ranges, explicit regrid coordinates, stitch operand order
-and policy, metadata attestation, and wrap interval are therefore visible in
+and policy, metadata assumptions, and wrap interval are therefore visible in
 the script. Audit is diagnostic rather than a dataset mutation, so it is not
 added to the manipulation chain; use the headless `--audit` report when a
 machine-readable replay check is required.
@@ -740,13 +750,15 @@ on the same frequency axis. Every DUT polarization must exist in both
 references; extra reference channels are ignored. Angular axes must match exactly;
 a singleton calibration look may be broadcast only when the user explicitly
 enables it. GRIM performs no interpolation, averaging, phase unwrapping, or
-automatic range estimation. Calibration nulls, missing phase, and incompatible
-quantities fail closed. A user-visible maximum correction-gain gate catches
-near-null/noise-floor calibration bins. The calculation runs in GRIM's dataset
+automatic range estimation. Calibration nulls, missing complex samples, and
+corrections above the selected gain limit are masked per bin and counted; the
+operation stops only if no calibratable bins remain. Incompatible axes, units,
+quantities, or an explicit opposite phase sign still fail. The calculation runs in GRIM's dataset
 worker so large sweeps do not block the GUI, and GRIM will not close while it is
-active. The operation assumes additive background/support
-scattering was already removed and that the DUT and measured calibrator share
-one acquisition chain. The user confirms those assumptions in the dialog.
+active. Selecting the measured and exact roles expresses the calibration intent.
+Unavailable acquisition or phase-center metadata is recorded as assumed rather
+than requiring a checkbox. Recalibration is allowed and retains the prior Range
+Cal record in provenance.
 
 The exact response is supplied as a dataset so a cylinder, sphere, dihedral,
 or another appropriate standard can be used. GHOST's analytical cylinder
@@ -760,22 +772,22 @@ the complex result and provenance but drop stale solver/certification metadata.
 
 Use **Dataset Operations → Calibration → Support Ref -** when two phase-
 coherent acquisitions represent (1) the target on its support and (2) the
-support by itself. Select both rows, assign those roles explicitly, and confirm
-that calibration, phase center/reference, coordinates, polarization basis, and
-the static acquisition setup are common. GRIM then performs exactly
+support by itself. Select both rows and assign those roles explicitly. That
+selection expresses the subtraction intent; missing acquisition declarations
+are recorded as assumptions. GRIM then performs exactly
 
 ```text
 A_difference = A_target_plus_support - A_support_only
 ```
 
-The operation requires identical axes, units, physical quantities, coordinate
-frames, and coherent conventions; it never interpolates or regrids. Explicit
+The operation requires identical axes, units, physical quantities, and coordinate
+frames; it never interpolates or regrids. Explicit
 metadata conflicts fail closed, including opposite two-way range-phase signs
 declared through `range_phase_convention`/`phase_law` aliases. Missing
-phase-reference/time/basis/acquisition declarations require a recorded user
-attestation. Before adding the result, GRIM shows the common finite coverage,
-before/reference/after complex sample-energy sums, algebraic closure residual,
-and normalized complex input coherence. The subtraction writes fresh
+phase-reference/time/basis/acquisition declarations do not block. GRIM adds the
+unsaved result directly, reports finite coverage and QA in status, and stores
+before/reference/after energy, closure, and coherence diagnostics in provenance.
+The subtraction writes fresh
 power/phase arrays in bounded tiles and refuses an unsafe estimated working set
 before reading numerical tiles. Direct callers may set `maximum_working_bytes`;
 `GRIM_COHERENT_WORKING_SET_MB` sets a process-wide cap. The output is a new
@@ -793,24 +805,23 @@ residual is zero.
 
 ```powershell
 grim-headless a.grim b.grim --operation coherent-add -o sum.grim
-grim-headless a.grim b.grim --operation coherent-add --attest-coherent-metadata -o sum.grim
 grim-headless --folder results --pattern "*.grim" --operation join -o joined.grim
 grim-headless first.grim second.grim --operation stitch --stitch-policy priority-first --tol 1e-6 -o stitched.grim
-grim-headless repeated-1.grim repeated-2.grim --operation stitch --stitch-policy coherent-mean --attest-coherent-metadata -o coherent-mean.grim
+grim-headless repeated-1.grim repeated-2.grim --operation stitch --stitch-policy coherent-mean -o coherent-mean.grim
 grim-headless a.grim b.grim --audit
 grim-headless --folder results --pattern "*.grim" --audit -o audit.json
 ```
 
-Coherent operations require compatible axes, units, phase reference,
-polarizations, and dimensional RCS quantity. A 2-D `sigma_2d` field cannot be
+Coherent operations require compatible axes, units, polarizations, dimensional
+RCS quantity, and at least one common usable complex sample. A 2-D `sigma_2d` field cannot be
 coherently added directly to a 3-D `sigma_3d` body; it must first go through
-the line-expansion placement workflow. When legacy inputs do not declare a
-phase center, time convention, or polarization basis, headless coherent work
-fails closed unless `--attest-coherent-metadata` is supplied. That switch is an
-explicit statement that the missing declarations are physically common; it
-never overrides a declared mismatch. Attested outputs retain a structured
-attestation record and history entry without fabricating phase-center, time, or
-polarization-basis values that were absent from the inputs.
+the line-expansion placement workflow. When inputs do not declare a phase
+center, time convention, or polarization basis, coherent work uses the
+available complex samples, masks unusable cells, and records missing facts
+without fabricating values. Only explicit declared convention mismatches stop.
+`--attest-coherent-metadata` remains only for backward compatibility when a
+script deliberately records a stronger user statement; it is not required and
+cannot override a conflict.
 
 Headless stitch accepts the same `priority-first`, `priority-last`,
 `power-mean`, and `coherent-mean` policies as the GUI. `--tol` controls numeric

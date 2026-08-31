@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -433,8 +434,28 @@ class SentriReaderTest(unittest.TestCase):
             rcs=np.ones((1, 1, 1, 1), dtype=np.complex128),
             units={"elevation": "deg", "frequency": "GHz"},
         )
-        with self.assertRaisesRegex(ValueError, "not marked as native SENTRi"):
-            generic.convert_sentri_elevation_to_grim()
+        assumed = generic.convert_sentri_elevation_to_grim()
+        np.testing.assert_array_equal(assumed.elevations, [90.0])
+        assumption = json.loads(
+            assumed.extra["sentri_coordinate_assumption_json"]
+        )
+        self.assertTrue(assumption["source_elevation_convention_missing"])
+
+        explicitly_other = RcsGrid(
+            [0.0],
+            [0.0],
+            [1.0],
+            ["VV"],
+            rcs=np.ones((1, 1, 1, 1), dtype=np.complex128),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "elevation_coordinate_convention": "producer_other_frame",
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "cannot override explicit"):
+            explicitly_other.convert_sentri_elevation_to_grim()
 
         nearly_duplicate = RcsGrid(
             [0.0],

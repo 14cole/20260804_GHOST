@@ -814,11 +814,11 @@ InterpolateDialog = RegridDialog
 
 
 class StitchDialog(QDialog):
-    """Choose an explicit overlap policy for a union-grid stitch."""
+    """Choose an explicit overlap policy for a union-grid merge."""
 
     def __init__(self, operand_names, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Stitch Datasets")
+        self.setWindowTitle("Merge Overlapping Datasets")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
         operands = QLabel("Operand order: " + " → ".join(map(str, operand_names)))
@@ -864,7 +864,7 @@ class StitchDialog(QDialog):
         self._tolerance_help = tolerance_help
 
         preview = QLabel(
-            "GRIM computes the stitched result and overlap report in the background, "
+            "GRIM computes the merged result and overlap report in the background, "
             "then shows the resolved/equal/conflicting counts before adding it."
         )
         preview.setWordWrap(True)
@@ -1104,13 +1104,13 @@ class RangeCalibrationDialog(QDialog):
         self.spin_gain_limit_db.setValue(60.0)
         self.spin_gain_limit_db.setSuffix(" dB")
         self.spin_gain_limit_db.setToolTip(
-            "Reject calibration bins whose |Aexact/Ameasured| correction exceeds "
-            "this level. This catches measured-calibration nulls/noise-floor bins."
+            "Mask calibration bins whose |Aexact/Ameasured| correction exceeds "
+            "this level. Other usable bins are still calibrated."
         )
         self.chk_gain_limit.toggled.connect(self.spin_gain_limit_db.setEnabled)
         gain_row.addWidget(self.chk_gain_limit)
         gain_row.addWidget(self.spin_gain_limit_db)
-        form.addWidget(QLabel("Calibration validity gate:"), 3, 0)
+        form.addWidget(QLabel("Calibration bin masking:"), 3, 0)
         form.addLayout(gain_row, 3, 1)
         layout.addLayout(form)
 
@@ -1130,15 +1130,13 @@ class RangeCalibrationDialog(QDialog):
         )
         layout.addWidget(self.chk_broadcast)
 
-        self.chk_attest = QCheckBox(
-            "I confirm the acquisition, phase-center, and background assumptions."
+        assumption_note = QLabel(
+            "Selecting these roles requests complex calibration. Missing acquisition "
+            "or phase-center declarations are recorded as assumptions; explicit "
+            "incompatible units, axes, quantities, or phase signs still stop the job."
         )
-        self.chk_attest.setToolTip(
-            "DUT and measured calibration share one acquisition/phase convention; "
-            "the exact response uses the intended phase center; additive "
-            "background/support scattering has already been removed."
-        )
-        layout.addWidget(self.chk_attest)
+        assumption_note.setWordWrap(True)
+        layout.addWidget(assumption_note)
 
         self.validation_label = QLabel("")
         self.validation_label.setWordWrap(True)
@@ -1147,7 +1145,8 @@ class RangeCalibrationDialog(QDialog):
         warning = QLabel(
             "The exact response must be complex sigma₃D/dBsm data. A finite "
             "cylinder's 3-D reference must be supplied; GRIM will not substitute "
-            "GHOST's infinite 2-D cylinder solution. Calibration nulls are rejected."
+            "GHOST's infinite 2-D cylinder solution. Invalid/null correction bins "
+            "are masked and reported."
         )
         warning.setWordWrap(True)
         layout.addWidget(warning)
@@ -1160,26 +1159,22 @@ class RangeCalibrationDialog(QDialog):
         layout.addWidget(self.buttons)
         self.combo_measured.currentIndexChanged.connect(self._update_validity)
         self.combo_exact.currentIndexChanged.connect(self._update_validity)
-        self.chk_attest.toggled.connect(self._update_validity)
         self._update_validity()
 
     def _update_validity(self, *_args) -> None:
         same_reference = (
             self.combo_measured.currentIndex() == self.combo_exact.currentIndex()
         )
-        attested = self.chk_attest.isChecked()
         ok_button = self.buttons.button(QDialogButtonBox.Ok)
-        ok_button.setEnabled(not same_reference and attested)
+        ok_button.setEnabled(not same_reference)
         if same_reference:
             self.validation_label.setText(
                 "Choose different datasets for measured calibration and exact reference."
             )
-        elif not attested:
-            self.validation_label.setText(
-                "Confirm the calibration assumptions to enable Range Cal."
-            )
         else:
-            self.validation_label.setText("Ready to apply complex Range Cal.")
+            self.validation_label.setText(
+                "Ready. Missing provenance will be recorded as assumed, not blocked."
+            )
 
     def get_params(self) -> dict:
         measured_index = int(self.combo_measured.currentIndex())
@@ -1189,7 +1184,7 @@ class RangeCalibrationDialog(QDialog):
             "exact": self._entries[exact_index],
             "range_offset_m": float(self.spin_offset_m.value()),
             "allow_singleton_angular_broadcast": self.chk_broadcast.isChecked(),
-            "convention_attested": self.chk_attest.isChecked(),
+            "convention_attested": False,
             "maximum_correction_gain_db": (
                 float(self.spin_gain_limit_db.value())
                 if self.chk_gain_limit.isChecked()
@@ -1237,25 +1232,19 @@ class SupportReferenceDifferenceDialog(QDialog):
         self.compatibility_label.setObjectName("supportReferenceCompatibility")
         layout.addWidget(self.compatibility_label)
 
-        assumptions_box = QGroupBox("2. Confirm the measurement contract")
-        assumptions_layout = QVBoxLayout(assumptions_box)
-        self.chk_acquisition = QCheckBox(
-            "I confirm both acquisitions use the same calibration, phase "
-            "center/reference, coordinates,\npolarization basis, and static setup."
+        interpretation = QLabel(
+            "The selected roles request exact complex subtraction. Missing acquisition "
+            "metadata is recorded as assumed. The result is support-referenced, not a "
+            "reconstructed free-space target: coupling, shadowing, multiple bounce, "
+            "and acquisition drift cannot be recovered from two files."
         )
-        self.chk_interaction = QCheckBox(
-            "I understand the result is support-referenced, not a reconstructed "
-            "free-space target:\ncoupling, shadowing, multiple bounce, and drift "
-            "cannot be recovered by two-file subtraction."
-        )
-        assumptions_layout.addWidget(self.chk_acquisition)
-        assumptions_layout.addWidget(self.chk_interaction)
-        layout.addWidget(assumptions_box)
+        interpretation.setWordWrap(True)
+        layout.addWidget(interpretation)
 
         note = QLabel(
-            "The output is added as a new unsaved row only after QA review. "
-            "Neither input is modified. Complex sample-energy and coherence "
-            "metrics are diagnostic; they do not prove physical support removal."
+            "The output is added as a new unsaved row after calculation. Neither "
+            "input is modified. QA metrics and assumptions are stored with the "
+            "result; they do not prove physical support removal."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -1269,8 +1258,6 @@ class SupportReferenceDifferenceDialog(QDialog):
 
         self.combo_target.currentIndexChanged.connect(self._update_validity)
         self.combo_support.currentIndexChanged.connect(self._update_validity)
-        self.chk_acquisition.toggled.connect(self._update_validity)
-        self.chk_interaction.toggled.connect(self._update_validity)
         self._update_validity()
 
     def _selected_entries(self):
@@ -1289,7 +1276,6 @@ class SupportReferenceDifferenceDialog(QDialog):
         target_entry, support_entry = self._selected_entries()
         valid = False
         message = "Select two different datasets."
-        metadata_attested = False
         if target_entry is not None and support_entry is not None:
             if self.combo_target.currentIndex() == self.combo_support.currentIndex():
                 message = (
@@ -1304,7 +1290,7 @@ class SupportReferenceDifferenceDialog(QDialog):
                     target._assert_compatible(
                         support,
                         coherent=True,
-                        coherent_metadata_attested=bool(missing),
+                        coherent_metadata_attested=False,
                         _scan_phase_samples=False,
                     )
                     acquisition_contract = target._assert_support_reference_metadata_compatible(
@@ -1320,7 +1306,6 @@ class SupportReferenceDifferenceDialog(QDialog):
                             "missing_declarations_by_role", {}
                         )
                     )
-                    metadata_attested = bool(missing or acquisition_missing)
                     valid = True
                     if missing or acquisition_missing:
                         coherent_labels = ", ".join(
@@ -1356,8 +1341,8 @@ class SupportReferenceDifferenceDialog(QDialog):
                             "contradicts the other input. "
                             "The full finite-phase sample scan will run in the "
                             "background before subtraction. "
-                            "The following missing declarations will be covered by "
-                            "your recorded acquisition attestation: "
+                            "The following missing declarations will be recorded "
+                            "as operation assumptions: "
                             + "; ".join(missing_sections)
                             + "."
                         )
@@ -1368,25 +1353,17 @@ class SupportReferenceDifferenceDialog(QDialog):
                             "basis are compatible. Full finite-phase sample QA will "
                             "run in the background before subtraction."
                         )
-        self._metadata_attested = metadata_attested
         self.compatibility_label.setText(message)
         ok = self.buttons.button(QDialogButtonBox.Ok)
-        ok.setEnabled(
-            valid
-            and self.chk_acquisition.isChecked()
-            and self.chk_interaction.isChecked()
-        )
+        ok.setEnabled(valid)
 
     def get_params(self) -> dict:
         target_entry, support_entry = self._selected_entries()
         return {
             "target": target_entry,
             "support": support_entry,
-            "metadata_attested": bool(self._metadata_attested),
-            "assumptions_attested": bool(
-                self.chk_acquisition.isChecked()
-                and self.chk_interaction.isChecked()
-            ),
+            "metadata_attested": False,
+            "assumptions_attested": False,
         }
 
 
@@ -1645,29 +1622,13 @@ class ConicGCDialog(QDialog):
         mode_layout.addWidget(self._radio_regrid)
         layout.addWidget(mode_group)
 
-        self._chk_attest_legacy = QCheckBox(
-            "For an unmarked legacy PTM, I confirm aspect +90° is conic "
-            "azimuth +90° and its V/H basis follows GRIM_GC_V1"
+        convention_note = QLabel(
+            "For an unmarked legacy PTM, choosing GC→Conic records GRIM_GC_V1 "
+            "as an operation assumption. Explicitly incompatible convention tags "
+            "remain unsupported."
         )
-        self._chk_attest_legacy.setToolTip(
-            "The legacy PTM bytes do not define aspect sign/origin or the H/V "
-            "basis. Leave this clear unless the producing tool's convention is known."
-        )
-        source_is_unmarked_gc = (
-            canonical_angular_coordinate_system(source_coordinate_system)
-            == "great_circle"
-            and str(source_gc_convention or "").strip().lower()
-            in {"", "legacy_ptm_unspecified"}
-        )
-        self._chk_attest_legacy.setEnabled(
-            self._radio_g2c.isChecked() and source_is_unmarked_gc
-        )
-        self._radio_g2c.toggled.connect(
-            lambda checked: self._chk_attest_legacy.setEnabled(
-                bool(checked) and source_is_unmarked_gc
-            )
-        )
-        layout.addWidget(self._chk_attest_legacy)
+        convention_note.setWordWrap(True)
+        layout.addWidget(convention_note)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -1680,7 +1641,7 @@ class ConicGCDialog(QDialog):
                 "conic_to_gc" if self._radio_c2g.isChecked() else "gc_to_conic"
             ),
             "mode": "relabel",
-            "attest_legacy_ptm_convention": self._chk_attest_legacy.isChecked(),
+            "attest_legacy_ptm_convention": False,
         }
 
 
@@ -1708,11 +1669,13 @@ class WedgeConicDialog(QDialog):
             "azimuth sweep; two or more measured tilts are required."
         ))
 
-        self._chk_attest_axes = QCheckBox(
-            "I confirm azimuth is rotation about fixed world +z and elevation "
-            "is article pitch about body +y before turntable rotation."
+        axes_note = QLabel(
+            "Choosing this operation treats azimuth as rotation about fixed world "
+            "+z and elevation as article pitch about body +y. If the source lacks "
+            "an axis tag, that assumption is stored with the converted dataset."
         )
-        layout.addWidget(self._chk_attest_axes)
+        axes_note.setWordWrap(True)
+        layout.addWidget(axes_note)
         self._chk_cross_zero = QCheckBox(
             "Assume missing VH/HV is exactly zero (only use when justified)."
         )
@@ -1726,7 +1689,7 @@ class WedgeConicDialog(QDialog):
     def get_params(self) -> dict:
         return {
             "mode": "regrid",
-            "attest_wedge_axes": self._chk_attest_axes.isChecked(),
+            "attest_wedge_axes": False,
             "assume_missing_cross_pol_zero": self._chk_cross_zero.isChecked(),
         }
 
@@ -2457,7 +2420,7 @@ class _RangeCalibrationWorker(QObject):
                             "allow_singleton_angular_broadcast", False
                         )
                     ),
-                    convention_attested=True,
+                    convention_attested=False,
                     measured_label=self._measured_name,
                     exact_label=self._exact_name,
                     maximum_correction_gain_db=self._params.get(
@@ -2820,8 +2783,8 @@ class DatasetOpsMixin:
         self.status.showMessage(f"Exported {len(paths)} dataset(s) to CSV.")
 
     def _on_join_worker_progress(self, done_count: int, total_count: int, _: str) -> None:
-        self._set_background_progress(done_count, total_count, "Joining")
-        self.status.showMessage(f"Joining datasets... {done_count}/{total_count}")
+        self._set_background_progress(done_count, total_count, "Strict merge")
+        self.status.showMessage(f"Strict merge... {done_count}/{total_count}")
 
     def _on_join_worker_finished(self, payload: dict[str, object]) -> None:
         names = self._pending_join_names or []
@@ -2831,19 +2794,19 @@ class DatasetOpsMixin:
 
         ok = bool(payload.get("ok", False))
         if not ok:
-            self.status.showMessage(str(payload.get("error", "Join failed.")))
+            self.status.showMessage(str(payload.get("error", "Strict merge failed.")))
             return
 
         merged = payload.get("merged")
         if not isinstance(merged, RcsGrid):
-            self.status.showMessage("Join failed: worker produced invalid output.")
+            self.status.showMessage("Strict merge failed: worker produced invalid output.")
             return
 
         if not names:
             names = ["Dataset"]
         new_name = " | ".join(names)
-        history = f"Join (equal/complementary overlaps merged; conflicts rejected): {new_name}"
-        output_name = f"Join[{new_name}]"
+        history = f"Strict Merge (equal/complementary overlaps merged; conflicts rejected): {new_name}"
+        output_name = f"Strict Merge[{new_name}]"
         output_id = self._add_dataset_row(merged, output_name, history, file_name="")
         recorder = getattr(self, "python_recorder", None)
         if recorder is not None and input_refs:
@@ -2852,10 +2815,10 @@ class DatasetOpsMixin:
                 "join_datasets",
                 input_refs,
                 kwargs={"tol": 1.0e-6},
-                comment="Join datasets on their union axes",
+                comment="Strictly merge datasets on their union axes",
             )
         self.status.showMessage(
-            "Join created. Equal or complementary overlaps were merged; "
+            "Strict merge created. Equal or complementary overlaps were merged; "
             "conflicting finite samples would have stopped the operation."
         )
 
@@ -2926,7 +2889,6 @@ class DatasetOpsMixin:
                             f"    {variables[2]},\n"
                             f"    {offset_m!r},\n"
                             f"    allow_singleton_angular_broadcast={allow_broadcast!r},\n"
-                            f"    convention_attested=True,\n"
                             f"    measured_label={measured_label!r},\n"
                             f"    exact_label={exact_label!r},\n"
                             f"    maximum_correction_gain_db={gain_limit!r},\n"
@@ -3184,18 +3146,6 @@ class DatasetOpsMixin:
             invalidate_isar = getattr(self, "_invalidate_isar_result", None)
             if callable(invalidate_isar):
                 invalidate_isar()
-            contexts = getattr(self, "_plot_contexts", {}) or {}
-            isar_context = contexts.get("isar")
-            attestation = getattr(
-                isar_context, "chk_isar_legacy_phase_attestation", None
-            )
-            if attestation is not None:
-                was_blocked = attestation.blockSignals(True)
-                try:
-                    attestation.setChecked(False)
-                    setattr(attestation, "_attested_dataset", None)
-                finally:
-                    attestation.blockSignals(was_blocked)
 
         selected = self.table.selectionModel().selectedRows()
         self._update_dataset_selection_order([idx.row() for idx in selected])
@@ -3590,12 +3540,11 @@ class DatasetOpsMixin:
         datasets: list[tuple[str, RcsGrid]],
         operation_name: str,
     ) -> bool | None:
-        """Return whether unknown coherent metadata was explicitly attested.
+        """Report missing coherent metadata without blocking the operation.
 
-        ``False`` means all required metadata was already declared. ``True``
-        means the user explicitly attested the missing declarations. ``None``
-        means the operation was cancelled. Explicit metadata conflicts are
-        still rejected by :class:`RcsGrid`, regardless of this attestation.
+        The selected operation itself expresses coherent intent. The numeric
+        core records missing declarations as assumptions and still rejects
+        explicit physical conflicts.
         """
 
         labels = _COHERENT_METADATA_LABELS
@@ -3606,26 +3555,12 @@ class DatasetOpsMixin:
         if not missing:
             return False
 
-        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
-        missing_text = "\n".join(f"• {labels[key]}" for key in labels if key in missing)
-        answer = QMessageBox.question(
-            self,
-            "Confirm Coherent Metadata",
-            f"{operation_name} requires a common physical phase definition, but "
-            "the selected datasets do not declare:\n\n"
-            f"{missing_text}\n\n"
-            "Continue only if you know these datasets use the same phase center, "
-            "time convention, and polarization basis. This attestation will be "
-            "recorded in the output dataset history and Python script.",
-            buttons.Yes | buttons.No,
-            buttons.No,
+        missing_text = ", ".join(labels[key] for key in labels if key in missing)
+        self.status.showMessage(
+            f"{operation_name}: {missing_text} unspecified; proceeding with "
+            "available complex samples and recording the assumption."
         )
-        if answer != buttons.Yes:
-            self.status.showMessage(
-                f"{operation_name} cancelled: coherent metadata was not attested."
-            )
-            return None
-        return True
+        return False
 
     def _combine_datasets_add(
         self,
@@ -3836,41 +3771,6 @@ class DatasetOpsMixin:
                 if coherence is not None and coherence_phase is not None
                 else "not meaningful (fewer than two common samples or zero energy)"
             )
-            review = (
-                f"Target + support: {target_name}\n"
-                f"Support-only reference: {support_name}\n\n"
-                f"Common finite samples: {common:,} / {total:,}\n"
-                f"Excluded/missing samples: {excluded:,}\n"
-                "Unweighted complex sample-energy sums:\n"
-                "  Before (target + support): "
-                f"{_metric(energies['pre_target_plus_support'])}\n"
-                "  Support-only reference: "
-                f"{_metric(energies['subtracted_support_reference'])}\n"
-                "  After (support-referenced difference): "
-                f"{_metric(energies['post_support_referenced_difference'])}\n"
-                "  Algebraic closure residual: "
-                f"{_metric(energies['algebraic_closure_residual'])}\n"
-                "After / before: "
-                f"{_metric(qa.get('post_to_pre_energy_db'), suffix=' dB')}\n"
-                f"Complex input coherence: {coherence_text}\n\n"
-                "These are subtraction QA diagnostics, not proof of a free-space "
-                "target response. Target/support coupling, shadowing, multiple "
-                "bounce, and acquisition drift remain unrecoverable.\n\n"
-                "Add this result as a new unsaved dataset?"
-            )
-            answer = QMessageBox.question(
-                self,
-                "Review Support-Referenced Difference",
-                review,
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                self.status.showMessage(
-                    "Support-referenced difference reviewed but not added; "
-                    "input datasets were unchanged."
-                )
-                return
             output_id = self._add_dataset_row(
                 result, output_name, "", file_name=""
             )
@@ -3881,8 +3781,7 @@ class DatasetOpsMixin:
                     input_refs,
                     lambda variables: (
                         f"{variables[0]}.support_referenced_difference("
-                        f"{variables[1]}, metadata_attested="
-                        f"{metadata_attested!r}, assumptions_attested=True, "
+                        f"{variables[1]}, "
                         f"target_label={target_name!r}, "
                         f"support_label={support_name!r})"
                     ),
@@ -3892,7 +3791,10 @@ class DatasetOpsMixin:
                     ),
                 )
             self.status.showMessage(
-                f"Support-referenced difference created: {output_name} (unsaved)."
+                f"Support-referenced difference created: {output_name} (unsaved); "
+                f"usable {common:,}/{total:,}, masked {excluded:,}, "
+                f"after/before {_metric(qa.get('post_to_pre_energy_db'), suffix=' dB')}, "
+                f"coherence {coherence_text}."
             )
 
         if self._start_background_callable(
@@ -3965,12 +3867,12 @@ class DatasetOpsMixin:
     def _join_selected_datasets(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
-            empty_message="Select two or more datasets to join.",
+            empty_message="Select two or more datasets to strictly merge.",
         )
         if datasets is None:
             return
         if len(datasets) < 2:
-            self.status.showMessage("Select at least 2 datasets to join.")
+            self.status.showMessage("Select at least 2 datasets to strictly merge.")
             return
 
         names = [name for name, _ in datasets]
@@ -3978,21 +3880,21 @@ class DatasetOpsMixin:
         worker = _JoinDatasetsWorker(grids, tol=1e-6)
         worker.progress.connect(self._on_join_worker_progress)
         worker.finished.connect(self._on_join_worker_finished)
-        if not self._try_start_background_job("Dataset join", worker):
+        if not self._try_start_background_job("Strict dataset merge", worker):
             return
         self._pending_join_names = names
         self._pending_join_references = self._python_input_references(datasets)
-        self.status.showMessage(f"Joining datasets... 0/{len(grids)}")
+        self.status.showMessage(f"Strict merge... 0/{len(grids)}")
 
     def _stitch_selected_datasets(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
-            empty_message="Select two or more datasets to stitch.",
+            empty_message="Select two or more datasets with overlaps to merge.",
         )
         if datasets is None:
             return
         if len(datasets) < 2:
-            self.status.showMessage("Select at least 2 datasets to stitch.")
+            self.status.showMessage("Select at least 2 datasets to merge.")
             return
 
         dialog = StitchDialog([name for name, _dataset in datasets], parent=self)
@@ -4005,10 +3907,7 @@ class DatasetOpsMixin:
         tolerance = float(params["tol"])
         metadata_attested = False
         if policy == "coherent-mean":
-            attestation = self._confirm_coherent_metadata(datasets, "Coherent Stitch")
-            if attestation is None:
-                return
-            metadata_attested = bool(attestation)
+            self._confirm_coherent_metadata(datasets, "Coherent overlap merge")
 
         names = [name for name, _dataset in datasets]
         grids = [dataset for _name, dataset in datasets]
@@ -4034,32 +3933,9 @@ class DatasetOpsMixin:
             finite_output = int(report.get("output_finite_count", 0) or 0)
             missing_output = int(report.get("missing_count", 0) or 0)
             max_contributors = int(report.get("max_contributors", 0) or 0)
-            review = (
-                f"Policy: {policy}\n"
-                f"Contributing finite samples: {contributors:,}\n"
-                f"Finite stitched output cells: {finite_output:,}\n"
-                f"Missing union-grid cells: {missing_output:,}\n"
-                f"Overlapping output cells: {overlap:,}\n"
-                f"Equivalent overlaps: {equal:,}\n"
-                f"Conflicting overlaps resolved by policy: {conflicting:,}\n"
-                f"Maximum contributors to one cell: {max_contributors:,}\n\n"
-                "Add this stitched dataset?"
-            )
-            answer = QMessageBox.question(
-                self,
-                "Review Stitch",
-                review,
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                self.status.showMessage(
-                    "Stitch reviewed and cancelled; no dataset was added."
-                )
-                return
-            output_name = " ⊕ ".join(names) + f" [Stitch {policy}]"
+            output_name = " ⊕ ".join(names) + f" [Merge {policy}]"
             history = (
-                f"Stitch ({policy}, tol={tolerance:g}, overlap={overlap}, "
+                f"Merge Overlaps ({policy}, tol={tolerance:g}, overlap={overlap}, "
                 f"conflicts={conflicting}): " + " -> ".join(names)
             )
             output_id = self._add_dataset_row(
@@ -4074,18 +3950,19 @@ class DatasetOpsMixin:
                     kwargs={
                         "policy": policy,
                         "tol": tolerance,
-                        "metadata_attested": metadata_attested,
                     },
-                    comment=f"Stitch {len(datasets)} datasets using {policy}",
+                    comment=f"Merge {len(datasets)} overlapping datasets using {policy}",
                 )
             self.status.showMessage(
-                f"Stitch created 1 dataset from {len(datasets)} operands; "
-                f"reviewed {overlap:,} overlap cell(s)."
+                f"Overlap merge created 1 dataset from {len(datasets)} operands; "
+                f"{overlap:,} overlap cell(s), {conflicting:,} conflict(s) "
+                f"resolved by {policy}, {missing_output:,} missing output cell(s), "
+                f"maximum {max_contributors:,} contributor(s) per cell."
             )
 
-        if self._start_background_callable("Dataset stitch", compute, publish):
+        if self._start_background_callable("Dataset overlap merge", compute, publish):
             self.status.showMessage(
-                f"Stitching {len(datasets)} datasets and analyzing overlaps..."
+                f"Merging {len(datasets)} datasets and analyzing overlaps..."
             )
 
     def _overlap_selected_datasets(self) -> None:
@@ -5285,20 +5162,10 @@ class DatasetOpsMixin:
                 return
 
         if downsampled:
-            answer = QMessageBox.question(
-                self,
-                "Review Regrid Downsampling",
-                "The requested step is coarser than the source spacing for: "
+            self.status.showMessage(
+                "Regrid will sample a coarser grid without anti-alias filtering for: "
                 + _compact_item_summary(downsampled)
-                + "\n\nRegrid performs complex linear interpolation, not an anti-alias "
-                "low-pass filter. Continue only when retaining values on this coarser "
-                "grid is intentional.",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
             )
-            if answer != QMessageBox.Yes:
-                self.status.showMessage("Regrid cancelled before downsampling.")
-                return
 
         source_references = [
             self._python_reference_for_dataset(dataset)
@@ -5927,13 +5794,6 @@ class DatasetOpsMixin:
                 "exact references in the dialog without selecting their table rows."
             )
             return
-        if not params["convention_attested"]:
-            self.status.showMessage(
-                "Range Cal: confirm the acquisition, phase-center, and background "
-                "statement before applying complex calibration."
-            )
-            return
-
         target_refs = self._python_input_references(targets) or []
         measured_ref = self._python_reference_for_dataset(measured)
         exact_ref = self._python_reference_for_dataset(exact)
@@ -6266,11 +6126,6 @@ class DatasetOpsMixin:
             return
         params = dlg.get_params()
         mode = params["mode"]
-        if not params["attest_wedge_axes"]:
-            self.status.showMessage(
-                "Wedge→Conic cancelled: confirm the physical axis convention."
-            )
-            return
         assume_cross_zero = params["assume_missing_cross_pol_zero"]
         source_references = [
             self._python_reference_for_dataset(dataset)
@@ -6352,7 +6207,7 @@ class DatasetOpsMixin:
         """Run the tested physical direction/Jones conversion."""
 
         result = dataset.convert_wedge_to_conic(
-            attest_wedge_axes=True,
+            attest_wedge_axes=False,
             assume_missing_cross_pol_zero=assume_missing_cross_pol_zero,
         )
         return result, "normal conic", "; inverse-mapped complex Jones re-grid"

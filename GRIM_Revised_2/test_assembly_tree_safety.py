@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QAbstractItemView, QApplication
 
 from assembly_tree import (
     AssemblyTree,
+    BuildDialog,
     _ASSEMBLY_PROVENANCE_KEY,
     _ASSEMBLY_BASE_SHA256_KEY,
     _ASSEMBLY_BASE_RESPONSE_SHA256_KEY,
@@ -847,7 +848,13 @@ class AssemblyTreeSafetyTests(unittest.TestCase):
         for key in stale_dynamic:
             self.assertNotIn(key, result.units)
 
-    def test_unknown_coherent_metadata_requires_recorded_attestation(self):
+    def test_build_dialog_has_no_coherent_attestation_gate(self):
+        dialog = BuildDialog()
+
+        self.assertFalse(hasattr(dialog, "chk_coherent_attestation"))
+        self.assertFalse(hasattr(dialog, "coherent_metadata_attested"))
+
+    def test_unknown_coherent_metadata_is_allowed_and_recorded(self):
         _tree, root, leaves = self._root_with(
             ("left", _grid(1.0)),
             ("right", _grid(2.0)),
@@ -855,33 +862,56 @@ class AssemblyTreeSafetyTests(unittest.TestCase):
         for leaf in leaves:
             _set_node_mode(leaf, _MODE_COH)
 
-        with self.assertRaisesRegex(ValueError, "one common vehicle frame"):
-            build_assembly_grid(root, axis_mode="strict")
-
-        result, history = build_assembly_grid(
-            root,
-            axis_mode="strict",
-            coherent_metadata_attested=True,
-        )
+        result, history = build_assembly_grid(root, axis_mode="strict")
         self.assertAlmostEqual(float(result.rcs_power.item()), 9.0)
-        self.assertIn("coherent_metadata_attestation_json", result.extra)
-        attestation = json.loads(
-            result.extra["coherent_metadata_attestation_json"]
+        self.assertIn("coherent_metadata_assumption_json", result.extra)
+        assumption = json.loads(
+            result.extra["coherent_metadata_assumption_json"]
         )
-        self.assertEqual(attestation["operation"], "assembly-field-add")
-        self.assertIn("common_vehicle_frame", attestation["attested_scope"])
-        self.assertIn("common_attitude", attestation["attested_scope"])
-        self.assertIn("one vehicle frame", history)
+        self.assertEqual(assumption["operation"], "assembly-field-add")
+        self.assertIn("common_vehicle_frame", assumption["assumed_scope"])
+        self.assertIn("common_attitude", assumption["assumed_scope"])
+        self.assertEqual(
+            assumption["missing_metadata_input_indices_1_based"],
+            {
+                "phase_reference": [1, 2],
+                "polarization_basis": [1, 2],
+                "time_convention": [1, 2],
+            },
+        )
+        self.assertIn("Field + assumption", history)
         provenance = json.loads(result.extra[_ASSEMBLY_PROVENANCE_KEY])
-        self.assertTrue(provenance["coherent_metadata_attested"])
+        self.assertFalse(provenance["coherent_metadata_attested"])
+        self.assertTrue(provenance["coherent_registration_assumed"])
+        self.assertEqual(
+            provenance["coherent_registration_basis"], "Field + role selection"
+        )
 
-    def test_matching_coherent_labels_do_not_bypass_vehicle_frame_attestation(self):
+    def test_matching_coherent_labels_build_without_attestation(self):
         _tree, root, _leaves = self._root_with(
             ("left", _grid(1.0, extra=_coherent_extra())),
             ("right", _grid(2.0, extra=_coherent_extra())),
         )
 
-        with self.assertRaisesRegex(ValueError, "matching metadata labels"):
+        result, _history = build_assembly_grid(root, axis_mode="strict")
+
+        self.assertAlmostEqual(float(result.rcs_power.item()), 9.0)
+        assumption = json.loads(
+            result.extra["coherent_metadata_assumption_json"]
+        )
+        self.assertEqual(
+            assumption["missing_metadata_input_indices_1_based"], {}
+        )
+
+    def test_explicit_coherent_convention_conflict_still_blocks(self):
+        left_extra = _coherent_extra()
+        right_extra = _coherent_extra(time_convention="exp(-jwt)")
+        _tree, root, _leaves = self._root_with(
+            ("left", _grid(1.0, extra=left_extra)),
+            ("right", _grid(2.0, extra=right_extra)),
+        )
+
+        with self.assertRaisesRegex(ValueError, "matching time conventions"):
             build_assembly_grid(root, axis_mode="strict")
 
     def test_interpolation_is_refused_when_any_field_input_is_present(self):

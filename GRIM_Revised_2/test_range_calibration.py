@@ -159,16 +159,20 @@ class RangeCalibrationTest(unittest.TestCase):
         )
         np.testing.assert_allclose(result.rcs, dut.rcs)
 
-    def test_requires_explicit_broadcast_and_convention_attestation(self) -> None:
+    def test_requires_explicit_broadcast_but_not_metadata_attestation(self) -> None:
         dut = _grid(1.0 + 0.0j, azimuths=(-10.0, 10.0))
         measured = _grid(1.0 + 0.0j)
         exact = _grid(1.0 + 0.0j)
-        with self.assertRaisesRegex(ValueError, "requires confirmation"):
-            dut.range_calibrate(measured, exact, 0.0)
         with self.assertRaisesRegex(ValueError, "broadcast confirmation"):
-            dut.range_calibrate(
-                measured, exact, 0.0, convention_attested=True
-            )
+            dut.range_calibrate(measured, exact, 0.0)
+        result = dut.range_calibrate(
+            measured,
+            exact,
+            0.0,
+            allow_singleton_angular_broadcast=True,
+        )
+        provenance = json.loads(result.extra["range_calibration_json"])
+        self.assertFalse(provenance["user_convention_attested"])
 
         for option_name, options in (
             ("convention_attested", {"convention_attested": "false"}),
@@ -240,7 +244,7 @@ class RangeCalibrationTest(unittest.TestCase):
         np.testing.assert_array_equal(zeroed.rcs_power, 0.0)
 
         null_measured = _grid(0.0 + 0.0j)
-        with self.assertRaisesRegex(ValueError, "zero/null"):
+        with self.assertRaisesRegex(ValueError, "no calibratable bins"):
             dut.range_calibrate(
                 null_measured, exact, 0.0, convention_attested=True
             )
@@ -266,7 +270,7 @@ class RangeCalibrationTest(unittest.TestCase):
         # Conversely, an actual raw denominator zero remains invalid even if
         # the stored power array incorrectly says it is positive.
         measured_raw_zero = self._grid_with_authoritative_raw(1.0, 0.0 + 0.0j)
-        with self.assertRaisesRegex(ValueError, "zero/null"):
+        with self.assertRaisesRegex(ValueError, "no calibratable bins"):
             dut.range_calibrate(
                 measured_raw_zero, exact, 0.0, convention_attested=True
             )
@@ -286,15 +290,24 @@ class RangeCalibrationTest(unittest.TestCase):
                 measured_wrong_sign, exact, 0.0, convention_attested=True
             )
 
-        weak_measured = _grid(1.0e-4 + 0.0j)
-        with self.assertRaisesRegex(ValueError, "exceed the user limit"):
-            dut.range_calibrate(
-                weak_measured,
-                exact,
-                0.0,
-                convention_attested=True,
-                maximum_correction_gain_db=60.0,
-            )
+        weak_measured = _grid(1.0 + 0.0j)
+        weak_measured.rcs_power.flat[0] = 1.0e-8
+        weak_measured.rcs_phase.flat[0] = 0.0
+        masked = dut.range_calibrate(
+            weak_measured,
+            exact,
+            0.0,
+            maximum_correction_gain_db=60.0,
+        )
+        self.assertTrue(np.isnan(masked.rcs_power.flat[0]))
+        self.assertEqual(int(np.isfinite(masked.rcs_power).sum()), 3)
+        masked_provenance = json.loads(masked.extra["range_calibration_json"])
+        self.assertEqual(
+            masked_provenance["correction_gain_db"][
+                "over_limit_correction_bin_count"
+            ],
+            1,
+        )
         allowed = dut.range_calibrate(
             weak_measured,
             exact,
@@ -302,7 +315,7 @@ class RangeCalibrationTest(unittest.TestCase):
             convention_attested=True,
             maximum_correction_gain_db=None,
         )
-        np.testing.assert_allclose(np.abs(allowed.rcs), 1.0e4)
+        self.assertAlmostEqual(float(np.abs(allowed.rcs.flat[0])), 1.0e4)
 
         unsupported_unit = _grid(1.0 + 0.0j)
         unsupported_unit.units["frequency"] = "THz"
@@ -349,10 +362,10 @@ class RangeCalibrationTest(unittest.TestCase):
             json.loads(loaded_metadata)["schema"],
             "grim.range-calibration.v1",
         )
-        with self.assertRaisesRegex(ValueError, "double calibration"):
-            loaded.range_calibrate(
-                measured, exact, 0.0, convention_attested=True
-            )
+        recalibrated = loaded.range_calibrate(measured, exact, 0.0)
+        recalibration = json.loads(recalibrated.extra["range_calibration_json"])
+        self.assertTrue(recalibration["input_was_previously_range_calibrated"])
+        self.assertIsInstance(recalibration["prior_range_calibration"], dict)
 
     def test_blank_exact_phase_centers_get_content_bound_references(self) -> None:
         dut = _grid(1.0 + 0.0j)

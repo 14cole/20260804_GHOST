@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
@@ -174,20 +175,56 @@ class PlotRendererHelperTests(unittest.TestCase):
         self.assertEqual(common.axis_label(great_circle, "azimuth"), "Aspect (deg)")
         self.assertEqual(common.axis_label(great_circle, "elevation"), "Pitch (deg)")
 
-    def test_explicit_phase_metadata_disagreement_is_blocked(self):
+    def test_phase_metadata_disagreement_warns_without_blocking_read_only_plot(self):
         left = _grid(phase_reference="nose")
         right = _grid(phase_reference="scene-center")
-        with self.assertRaisesRegex(ValueError, "phase references"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             common.validate_plot_datasets(
                 [("left", left), ("right", right)], phase=True, linear=False
             )
+        rendered = "\n".join(str(item.message) for item in caught)
+        self.assertIn("phase reference declarations differ", rendered)
+        self.assertIn("plotted as stored without phase-reference conversion", rendered)
+
         left.units["time_convention"] = "exp(+jwt)"
         right.units["time_convention"] = "exp(-jwt)"
         right.extra["phase_reference"] = "nose"
-        with self.assertRaisesRegex(ValueError, "time conventions"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             common.validate_plot_datasets(
                 [("left", left), ("right", right)], phase=True, linear=False
             )
+        self.assertIn(
+            "time convention declarations differ",
+            "\n".join(str(item.message) for item in caught),
+        )
+
+    def test_missing_phase_overlay_metadata_warns_without_blocking(self):
+        left = _grid()
+        right = _grid()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            common.validate_plot_datasets(
+                [("left", left), ("right", right)], phase=True, linear=False
+            )
+        rendered = "\n".join(str(item.message) for item in caught)
+        self.assertIn("phase reference is unspecified", rendered)
+        self.assertIn("common convention is assumed only for display", rendered)
+
+    def test_conflicting_internal_phase_metadata_warns_without_blocking(self):
+        left = _grid(phase_reference="nose")
+        left.units["phase_reference"] = "scene center"
+        right = _grid(phase_reference="nose")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            common.validate_plot_datasets(
+                [("left", left), ("right", right)], phase=True, linear=False
+            )
+        self.assertIn(
+            "phase reference metadata is conflicting or malformed for left",
+            "\n".join(str(item.message) for item in caught),
+        )
 
     def test_phase_p50_and_envelope_respect_wrap_seam(self):
         samples = np.asarray([[179.0, -179.0], [-179.0, 179.0]])
@@ -636,7 +673,7 @@ class PlotRendererIntegrationTests(unittest.TestCase):
         self.assertIn("hold blocked", harness.status.message.lower())
         self.assertEqual(len(harness.plot_ax.lines), 1)
 
-    def test_hold_phase_signature_includes_coherent_metadata(self):
+    def test_hold_phase_allows_provenance_difference_with_warning(self):
         first = _grid(phase_reference="nose")
         second = _grid(phase_reference="scene-center")
         harness = _RendererHarness(
@@ -653,8 +690,9 @@ class PlotRendererIntegrationTests(unittest.TestCase):
         harness._named_datasets = [("second", second)]
         harness.active_dataset = second
         azimuth_rect_mode.render(harness)
-        self.assertIn("hold blocked", harness.status.message.lower())
-        self.assertEqual(len(harness.plot_ax.lines), 1)
+        self.assertNotIn("hold blocked", harness.status.message.lower())
+        self.assertIn("phase provenance note", harness.status.message.lower())
+        self.assertEqual(len(harness.plot_ax.lines), 2)
 
     def test_auto_plot_does_not_append_transient_hold_selections(self):
         dataset = _grid()

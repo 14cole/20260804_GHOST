@@ -51,6 +51,10 @@ class TestIsarArtifact(unittest.TestCase):
             "l1_iters": 100,
             "flip_x": False,
             "flip_y": False,
+            "isar_contract_assumptions": [
+                "far-field monostatic acquisition geometry",
+                "a stable or motion-compensated phase center",
+            ],
             "legacy_metadata_attested": False,
         }
         complex_image = np.asarray([[1 + 2j, 3 + 4j]], dtype=np.complex64)
@@ -71,6 +75,11 @@ class TestIsarArtifact(unittest.TestCase):
         manifest = build_isar_manifest(dataset, params, bands, 0.25)
         self.assertEqual(manifest["schema"], ISAR_ARTIFACT_SCHEMA)
         self.assertNotIn("large_passthrough", manifest["source"]["metadata"])
+        self.assertTrue(manifest["formation"]["isar_contract_user_assumed"])
+        self.assertEqual(
+            manifest["formation"]["isar_contract_undeclared_fields"],
+            params["isar_contract_assumptions"],
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = save_isar_artifact(Path(directory) / "result", bands, manifest)
             self.assertTrue(str(path).endswith(".isar.npz"))

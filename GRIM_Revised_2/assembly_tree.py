@@ -103,9 +103,18 @@ _RESPONSE_ROLE_FEATURES_ONLY_DELTA = "features_only_delta"
 _RESPONSE_ROLE_COHERENT_SUM = "coherent_field_sum"
 _RESPONSE_ROLE_INCOHERENT_SUM = "incoherent_power_sum"
 _RESPONSE_ROLE_MIXED_SUM = "coherent_field_plus_incoherent_power"
+_COHERENT_FIELD_ROLE_ASSUMPTION = (
+    "Field + selection treats each response as already registered in one "
+    "vehicle frame with a common phase center, attitude, and earth V/H basis."
+)
 _COHERENT_VEHICLE_FRAME_ATTESTATION = (
     "Every Field + response was solved or translated into one vehicle frame "
     "with a common phase center, common attitude, and common earth V/H basis."
+)
+_COHERENT_REGISTRATION_KEYS = (
+    "phase_reference",
+    "time_convention",
+    "polarization_basis",
 )
 _KNOWN_RESPONSE_ROLES = {
     _RESPONSE_ROLE_BODY_PLUS_FEATURES,
@@ -154,6 +163,7 @@ _DYNAMIC_RESULT_METADATA_KEYS = {
     "rcs_amp_real",
     "rcs_amp_imag",
     "raw_complex_amplitude_preserved",
+    "coherent_metadata_assumption_json",
 }
 
 
@@ -2811,13 +2821,11 @@ class AssemblyTreePanel(QWidget):
         if dlg.exec() != QDialog.Accepted:
             return
         axis_mode = dlg.axis_mode()
-        coherent_metadata_attested = dlg.coherent_metadata_attested()
 
         try:
             grid, history = build_assembly_grid(
                 item,
                 axis_mode=axis_mode,
-                coherent_metadata_attested=coherent_metadata_attested,
             )
         except Exception as exc:
             self._notify(f"Build failed: {exc}")
@@ -2923,19 +2931,14 @@ class BuildDialog(QDialog):
         layout.addWidget(self._radio_interp)
         layout.addWidget(self._radio_strict)
 
-        self.chk_coherent_attestation = QCheckBox(
-            "I attest every Field + response was solved or translated into "
-            "the same vehicle frame, with one phase center, attitude, and "
-            "V/H basis."
+        field_note = QLabel(
+            "Field + is an explicit coherent-add request. Those responses are "
+            "treated as already registered to one vehicle frame and phase "
+            "center. Missing convention labels are recorded as unknown and do "
+            "not block the build; explicit conflicts still stop it."
         )
-        self.chk_coherent_attestation.setToolTip(
-            "Required whenever a build contains two or more Field + inputs, "
-            "even when their metadata labels match. This confirms physical "
-            "registration in one vehicle frame, not merely matching text. "
-            "Explicitly conflicting declarations can never be overridden; "
-            "the confirmation is recorded in provenance and history."
-        )
-        layout.addWidget(self.chk_coherent_attestation)
+        field_note.setWordWrap(True)
+        layout.addWidget(field_note)
 
         btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btn_box.accepted.connect(self.accept)
@@ -2948,10 +2951,6 @@ class BuildDialog(QDialog):
         if self._radio_strict.isChecked():
             return "strict"
         return "intersect"
-
-    def coherent_metadata_attested(self) -> bool:
-        return bool(self.chk_coherent_attestation.isChecked())
-
 
 def _intersect_numeric_axes(arrays, tol: float = 1e-6) -> np.ndarray:
     """Intersect a list of numeric 1-D arrays element-wise, with absolute
@@ -3195,7 +3194,20 @@ def _align_grids_for_assembly(
     raise ValueError(f"unknown axis_mode {axis_mode!r}")
 
 
-def _validate_coherent_sources(grids, *, metadata_attested: bool) -> None:
+def _validate_coherent_sources(
+    grids, *, metadata_attested: bool
+) -> dict[str, list[int]]:
+    """Validate explicit Field + contradictions and report unknown labels.
+
+    Choosing Field + is the user's coherent-registration declaration. Files
+    imported from other tools therefore do not need GRIM-specific convention
+    metadata merely to participate. When labels are present they remain
+    authoritative: contradictory declarations are still a hard error.
+
+    ``metadata_attested`` remains accepted for headless/API compatibility but
+    no longer changes the policy.
+    """
+
     if not isinstance(metadata_attested, (bool, np.bool_)):
         raise TypeError("coherent_metadata_attested must be True or False")
     for grid in grids:
@@ -3205,19 +3217,41 @@ def _validate_coherent_sources(grids, *, metadata_attested: bool) -> None:
                 "used as a coherent pre-aligned Field + child"
             )
     if len(grids) < 2:
-        return
-    if not metadata_attested:
-        raise ValueError(
-            "two or more Field + responses require explicit attestation that "
-            "every coherent child was solved or translated into one common "
-            "vehicle frame, phase center, attitude, and earth V/H basis; "
-            "matching metadata labels alone are not proof of registration"
-        )
-    reference = grids[0]
-    for grid in grids[1:]:
-        reference._assert_coherent_metadata_compatible(
-            grid, metadata_attested=metadata_attested
-        )
+        return {}
+
+    missing_by_field: dict[str, list[int]] = {}
+    labels = {
+        "phase_reference": "phase references",
+        "time_convention": "time conventions",
+        "polarization_basis": "polarization bases",
+    }
+    for key in _COHERENT_REGISTRATION_KEYS:
+        values = [_declared_extra_scalar(grid, key) for grid in grids]
+        declared = [
+            (index, value)
+            for index, value in enumerate(values)
+            if value is not None
+            and (not isinstance(value, str) or bool(value.strip()))
+        ]
+        canonical = {
+            _canonical_metadata_value(key, value) for _index, value in declared
+        }
+        if len(canonical) > 1:
+            descriptions = ", ".join(
+                f"input {index + 1}={value!r}" for index, value in declared
+            )
+            raise ValueError(
+                f"coherent Field + requires matching {labels[key]}; got "
+                f"{descriptions}"
+            )
+        missing = [
+            index + 1
+            for index, value in enumerate(values)
+            if value is None or (isinstance(value, str) and not value.strip())
+        ]
+        if missing:
+            missing_by_field[key] = missing
+    return missing_by_field
 
 
 def _result_response_role(
@@ -3393,24 +3427,54 @@ def _combined_semantic_extra(
         ),
         "feature_delta_only": feature_delta_only,
         "feature_component_signatures": sorted(component_signatures),
+        # The legacy headless/API flag remains recordable, but is never needed
+        # to pass validation. The GUI uses Field + selection as coherent intent.
         "coherent_metadata_attested": bool(
             coherent_metadata_attested and len(source_coh_grids) > 1
         ),
+        "coherent_registration_assumed": len(source_coh_grids) > 1,
+        "coherent_registration_basis": "Field + role selection",
     }
     extra[_ASSEMBLY_PROVENANCE_KEY] = json.dumps(
         record, sort_keys=True, separators=(",", ":"), allow_nan=False
     )
 
-    if coherent_metadata_attested and len(source_coh_grids) > 1:
-        _history, attested_extra = source_coh_grids[0]._coherent_attestation_provenance(
-            source_coh_grids[1:],
-            operation="assembly-field-add",
-            metadata_attested=True,
+    if len(source_coh_grids) > 1:
+        missing_by_field = _validate_coherent_sources(
+            source_coh_grids,
+            metadata_attested=False,
         )
-        if attested_extra:
-            raw_record = attested_extra.get(
-                "coherent_metadata_attestation_json"
+        assumption_record = {
+            "schema": "grim.assembly-coherent-assumption.v1",
+            "operation": "assembly-field-add",
+            "basis": "Field + role selection",
+            "input_count": len(source_coh_grids),
+            "assumed_scope": [
+                "common_vehicle_frame",
+                "common_phase_center",
+                "common_attitude",
+                "common_earth_vh_basis",
+            ],
+            "missing_metadata_input_indices_1_based": missing_by_field,
+            "statement": _COHERENT_FIELD_ROLE_ASSUMPTION,
+        }
+        extra["coherent_metadata_assumption_json"] = json.dumps(
+            assumption_record,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if coherent_metadata_attested:
+            _history, attested_extra = (
+                source_coh_grids[0]._coherent_attestation_provenance(
+                    source_coh_grids[1:],
+                    operation="assembly-field-add",
+                    metadata_attested=True,
+                )
             )
+            raw_record = (
+                attested_extra or {}
+            ).get("coherent_metadata_attestation_json")
             if raw_record:
                 attestation_record = json.loads(raw_record)
                 attestation_record["attested_scope"] = [
@@ -3431,7 +3495,8 @@ def _combined_semantic_extra(
                         allow_nan=False,
                     )
                 )
-            extra.update(attested_extra)
+            if attested_extra:
+                extra.update(attested_extra)
     return extra
 
 
@@ -3636,6 +3701,10 @@ def build_assembly_grid(
     children to a common axis grid per `axis_mode`, and combine coherent+
     incoherent contributions as in `_combine_children`.
 
+    Field + is the coherent-registration declaration. The legacy
+    ``coherent_metadata_attested`` argument is retained for compatible saved
+    scripts and optional provenance only; it is not required to build.
+
     Returns (grid, history_string). Both are None / "" if the subtree has
     no loaded data.
     """
@@ -3732,5 +3801,11 @@ def build_assembly_grid(
         parts.append("incoh[" + " + ".join(h for h, _ in incoh) + "]")
     history = f"Σ {node.text(0)} ({axis_mode}): " + " ⊕ ".join(parts)
     if len(coh) > 1:
-        history += " | User attestation: " + _COHERENT_VEHICLE_FRAME_ATTESTATION
+        if coherent_metadata_attested:
+            history += (
+                " | Optional user attestation: "
+                + _COHERENT_VEHICLE_FRAME_ATTESTATION
+            )
+        else:
+            history += " | Field + assumption: " + _COHERENT_FIELD_ROLE_ASSUMPTION
     return result, history
