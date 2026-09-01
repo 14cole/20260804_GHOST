@@ -66,6 +66,10 @@ class PlotContext:
     btn_plot_grid: QToolButton
     btn_plot_text: QToolButton
     chk_plot_legend: QToolButton
+    compare_sector_bar: QFrame
+    spin_compare_az_min: QDoubleSpinBox
+    spin_compare_az_max: QDoubleSpinBox
+    chk_compare_show_all_azimuths: QCheckBox
     hover_readout: QLabel
     plot_figure: Figure
     plot_canvas: FigureCanvas

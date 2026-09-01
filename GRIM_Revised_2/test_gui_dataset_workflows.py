@@ -835,6 +835,70 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             self.window.status.currentMessage(),
         )
 
+    def test_percentile_button_reduces_azimuth_with_default_90(self) -> None:
+        azimuths = np.asarray([-30.0, -10.0, 10.0, 30.0])
+        base_power = np.asarray(
+            [
+                [[[1.0]], [[10.0]]],
+                [[[2.0]], [[20.0]]],
+                [[[3.0]], [[30.0]]],
+                [[[100.0]], [[40.0]]],
+            ]
+        )
+        for name, scale in (("First", 1.0), ("Second", 2.0)):
+            power = scale * base_power
+            dataset = RcsGrid(
+                azimuths,
+                [-5.0, 5.0],
+                [10.0],
+                ["VV"],
+                rcs_power=power,
+                rcs_phase=np.zeros_like(power),
+                units={
+                    "azimuth": "deg",
+                    "elevation": "deg",
+                    "frequency": "GHz",
+                    "rcs_log_unit": "dBsm",
+                    "rcs_linear_quantity": "sigma_3d",
+                },
+            )
+            self.window._add_dataset_row(dataset, name, "Loaded", "")
+        self._select_rows_in_order(0, 1)
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.QInputDialog.getDouble",
+            return_value=(90.0, True),
+        ) as prompt:
+            self.window._percentile_selected()
+            self._wait_for_background()
+
+        self.assertEqual(prompt.call_args.args[3], 90.0)
+        self.assertEqual(self.window.table.rowCount(), 4)
+        for row, scale in ((2, 1.0), (3, 2.0)):
+            result = self.window.table.item(row, 0).data(Qt.UserRole)
+            self.assertEqual(result.rcs_power.shape, (4, 2, 1, 1))
+            np.testing.assert_allclose(result.azimuths, azimuths)
+            expected = np.nanpercentile(
+                scale * base_power[:, :, 0, 0],
+                90.0,
+                axis=0,
+                keepdims=True,
+            )
+            np.testing.assert_allclose(
+                result.rcs_power[:, :, 0, 0],
+                np.broadcast_to(expected, (azimuths.size, expected.shape[1])),
+            )
+            self.assertTrue(np.all(np.isnan(result.rcs_phase)))
+            self.assertIn("[p90 az]", self.window.table.item(row, 0).text())
+        self.assertIn(
+            "Percentile created 2 dataset",
+            self.window.status.currentMessage(),
+        )
+        self.assertIn(
+            "p90 statistics on linear power",
+            self.window.python_recorder.script,
+        )
+
     def test_dataset_add_runs_off_the_gui_thread(self) -> None:
         left = _axis_grid([0.0, 1.0], 1.0)
         right = _axis_grid([0.0, 1.0], 2.0)

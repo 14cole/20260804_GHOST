@@ -208,7 +208,7 @@ PLOT_OPS_SPECS = {
             ("Frequency", "frequency"),
             ("Elevation Sweep", "elevation_sweep"),
             ("Waterfall", "waterfall"),
-            ("Compare", "compare"),
+            ("RF Compare", "compare"),
         ),
         (
             ("Fit X", "fit_x"),
@@ -993,6 +993,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
         # ---------- Datasets section (top, grows to fill the dock) ----------
         sec_datasets = CollapsibleSection("Datasets")
+        sec_datasets.setObjectName("datasetsSection")
         sec_datasets.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         dataset_actions = QHBoxLayout()
@@ -1035,19 +1036,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.setMinimumHeight(160)
         sec_datasets.addWidget(self.table, 1)
-        self.lbl_dataset_selection_summary = QLabel(
-            "Active dataset: none | Operand order: none"
-        )
-        self.lbl_dataset_selection_summary.setObjectName("secondaryText")
-        self.lbl_dataset_selection_summary.setWordWrap(True)
-        self.lbl_dataset_selection_summary.setToolTip(
-            "The active row drives the parameter lists and plotting. For ordered "
-            "operations, operands are evaluated in the order shown here."
-        )
-        sec_datasets.addWidget(self.lbl_dataset_selection_summary)
 
         # ---------- Parameters section (single 4-column strip) ----------
         sec_params = CollapsibleSection("Parameters")
+        sec_params.setObjectName("parametersSection")
+        sec_params.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         params_grid = QGridLayout()
         params_grid.setHorizontalSpacing(10)
         params_grid.setVerticalSpacing(4)
@@ -1137,9 +1130,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 grid.setColumnStretch(c, 1)
             ops_content_layout.addLayout(grid)
 
-        _ops_pad("Inspect", (
-            ("Audit / QA", "btn_audit"),
-        ), cols=1)
         _ops_pad("Combine", (
             ("Coherent +", "btn_coherent_add"),
             ("Coherent -", "btn_coherent_sub"),
@@ -1154,6 +1144,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         _ops_pad("Transform", (
             ("Crop / Slice", "btn_slice"),
             ("Stats", "btn_stats"),
+            ("Percentile", "btn_percentile"),
             ("Align", "btn_align"),
             ("Regrid", "btn_interpolate"),
             ("Mirror", "btn_mirror"),
@@ -1249,10 +1240,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "resolve conflicting overlaps by selection priority, linear-power "
                 "average, or coherent-field average. GRIM reports the outcome first."
             ),
-            "btn_audit": (
-                "Run a read-only dataset quality report covering axes, units, missing "
-                "samples, phase readiness, seams, and frequency-grid uniformity."
-            ),
             "btn_slice": (
                 "Crop using selected parameter values or numeric min/max/stride controls. "
                 "The active row supplies reference values; GRIM converts compatible "
@@ -1263,6 +1250,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "Reduce selected axes using a statistic on linear power (not dB). "
                 "Compact output is the default; broadcast only when a full-size "
                 "repeated grid is explicitly needed."
+            ),
+            "btn_percentile": (
+                "Replace every azimuth sample in each selected dataset with the "
+                "user-entered linear-power percentile across azimuth. The default "
+                "is the 90th percentile; all original axes are preserved."
             ),
             "btn_align": (
                 "Align every later operand to the first operand's coordinates. Matching "
@@ -1309,8 +1301,21 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         for attr, tooltip in operation_tooltips.items():
             getattr(self, attr).setToolTip(tooltip)
 
-        dock_layout.addWidget(sec_datasets, 1)
-        dock_layout.addWidget(sec_params)
+        # The vertical handle directly controls the balance between the
+        # dataset table and parameter lists. Moving it upward gives Parameters
+        # more height; moving it downward gives Datasets more height.
+        self.dataset_parameter_splitter = QSplitter(Qt.Vertical)
+        self.dataset_parameter_splitter.setObjectName(
+            "datasetParameterSplitter"
+        )
+        self.dataset_parameter_splitter.setChildrenCollapsible(False)
+        self.dataset_parameter_splitter.setHandleWidth(8)
+        self.dataset_parameter_splitter.addWidget(sec_datasets)
+        self.dataset_parameter_splitter.addWidget(sec_params)
+        self.dataset_parameter_splitter.setStretchFactor(0, 3)
+        self.dataset_parameter_splitter.setStretchFactor(1, 2)
+        self.dataset_parameter_splitter.setSizes([480, 260])
+        dock_layout.addWidget(self.dataset_parameter_splitter, 1)
         ops_content_layout.addStretch(1)
 
         # Dock the shared Dataset Operations panel between the control dock and
@@ -1626,8 +1631,8 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_incoherent_sub.clicked.connect(self._incoherent_sub_selected)
         self.btn_dbdiff.clicked.connect(self._dbdiff_selected)
         self.btn_slice.clicked.connect(self._slice_selected)
-        self.btn_audit.clicked.connect(self._audit_selected_datasets)
         self.btn_stats.clicked.connect(self._statistics_selected)
+        self.btn_percentile.clicked.connect(self._percentile_selected)
         self.btn_join.clicked.connect(self._join_selected_datasets)
         self.btn_stitch.clicked.connect(self._stitch_selected_datasets)
         self.btn_overlap.clicked.connect(self._overlap_selected_datasets)
@@ -2367,6 +2372,50 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         for spine in plot_ax.spines.values():
             spine.set_color(palette["border"])
         plot_canvas.draw_idle()
+
+        compare_sector_bar = QFrame()
+        compare_sector_bar.setObjectName("compareSectorBar")
+        compare_sector_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        compare_sector_layout = QHBoxLayout(compare_sector_bar)
+        compare_sector_layout.setContentsMargins(8, 3, 8, 3)
+        compare_sector_layout.setSpacing(6)
+        compare_sector_layout.addWidget(QLabel("Statistics sector:"))
+        compare_sector_layout.addWidget(QLabel("Min azimuth"))
+        spin_compare_az_min = QDoubleSpinBox()
+        spin_compare_az_min.setObjectName("compareAzimuthMin")
+        spin_compare_az_min.setRange(-1.0e9, 1.0e9)
+        spin_compare_az_min.setDecimals(6)
+        spin_compare_az_min.setMaximumWidth(130)
+        spin_compare_az_min.setKeyboardTracking(False)
+        compare_sector_layout.addWidget(spin_compare_az_min)
+        compare_sector_layout.addWidget(QLabel("Max azimuth"))
+        spin_compare_az_max = QDoubleSpinBox()
+        spin_compare_az_max.setObjectName("compareAzimuthMax")
+        spin_compare_az_max.setRange(-1.0e9, 1.0e9)
+        spin_compare_az_max.setDecimals(6)
+        spin_compare_az_max.setMaximumWidth(130)
+        spin_compare_az_max.setKeyboardTracking(False)
+        compare_sector_layout.addWidget(spin_compare_az_max)
+        chk_compare_show_all_azimuths = QCheckBox("Show all azimuths")
+        chk_compare_show_all_azimuths.setObjectName("compareShowAllAzimuths")
+        chk_compare_show_all_azimuths.setChecked(False)
+        chk_compare_show_all_azimuths.setToolTip(
+            "Display the complete common azimuth sweep while keeping RF agreement "
+            "statistics limited to the Min/Max azimuth sector."
+        )
+        compare_sector_layout.addWidget(chk_compare_show_all_azimuths)
+        compare_sector_layout.addStretch(1)
+        compare_sector_bar.setVisible(False)
+        spin_compare_az_min.editingFinished.connect(
+            self._on_compare_sector_controls_changed
+        )
+        spin_compare_az_max.editingFinished.connect(
+            self._on_compare_sector_controls_changed
+        )
+        chk_compare_show_all_azimuths.toggled.connect(
+            self._on_compare_sector_controls_changed
+        )
+        plot_layout.addWidget(compare_sector_bar)
         plot_layout.addWidget(plot_canvas, 1)
         hover_readout = QLabel("x: --   y: --")
         hover_readout.setObjectName("hoverReadout")
@@ -2397,6 +2446,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             if role in ("hold", "auto_plot", "auto_scale", "pbp", "phase", "zoom_box", "pan"):
                 btn.setCheckable(True)
             plot_controls[role] = btn
+            if role == "compare":
+                btn.setToolTip(
+                    "RF-aware agreement for exactly two datasets. For an azimuth "
+                    "sweep, Min/Max controls define the statistics sector; Show all "
+                    "azimuths expands only the displayed traces. Reports concordance, "
+                    "linear and dB error, peak alignment, and local-sector agreement."
+                )
             return btn
 
         # Legend toggle sits at the head of the toolbar (left of Hold); it
@@ -2475,6 +2531,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             btn_plot_grid=btn_plot_grid,
             btn_plot_text=btn_plot_text,
             chk_plot_legend=chk_plot_legend,
+            compare_sector_bar=compare_sector_bar,
+            spin_compare_az_min=spin_compare_az_min,
+            spin_compare_az_max=spin_compare_az_max,
+            chk_compare_show_all_azimuths=chk_compare_show_all_azimuths,
             hover_readout=hover_readout,
             plot_figure=plot_figure,
             plot_canvas=plot_canvas,

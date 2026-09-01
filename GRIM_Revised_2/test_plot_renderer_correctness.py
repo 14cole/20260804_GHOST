@@ -263,6 +263,51 @@ class PlotRendererHelperTests(unittest.TestCase):
         )
         self.assertIsNone(compare_mode._determine_sweep_axis([0], [0], [1]))
 
+    def test_rf_agreement_is_perfect_for_identical_linear_power(self):
+        x = np.arange(12, dtype=float)
+        power = np.geomspace(1.0e-4, 10.0, x.size)
+        result = compare_mode.rf_agreement_statistics(x, power, power.copy())
+        self.assertAlmostEqual(result.score, 100.0)
+        self.assertAlmostEqual(result.linear_ccc, 1.0)
+        self.assertAlmostEqual(result.log_ccc, 1.0)
+        self.assertAlmostEqual(result.linear_nrmse, 0.0)
+        self.assertAlmostEqual(result.mae_db, 0.0)
+        self.assertEqual(len(result.sectors), 4)
+
+    def test_rf_agreement_penalizes_gain_error_that_pearson_misses(self):
+        x = np.arange(12, dtype=float)
+        left = np.linspace(1.0, 12.0, x.size)
+        right = 2.0 * left
+        pearson = float(np.corrcoef(left, right)[0, 1])
+        result = compare_mode.rf_agreement_statistics(x, left, right)
+        self.assertAlmostEqual(pearson, 1.0)
+        self.assertLess(result.linear_ccc, 0.9)
+        self.assertLess(result.score, 90.0)
+        self.assertAlmostEqual(result.median_db_delta, -10.0 * np.log10(2.0))
+
+    def test_rf_agreement_exposes_local_sector_failure(self):
+        x = np.arange(18, dtype=float)
+        left = 2.0 + np.sin(x / 2.0) ** 2
+        right = left.copy()
+        right[6:9] = right[6:9][::-1] * 0.02
+        result = compare_mode.rf_agreement_statistics(x, left, right)
+        self.assertLess(result.worst_sector.score, result.score)
+        self.assertEqual(
+            (result.worst_sector.start, result.worst_sector.stop),
+            (6.0, 8.0),
+        )
+
+    def test_phase_agreement_respects_wrap_and_constant_bias(self):
+        x = np.arange(6, dtype=float)
+        left = np.asarray([179.0, -179.0, 178.0, -178.0, 177.0, -177.0])
+        wrapped_equal = left + 360.0
+        equal = compare_mode.phase_agreement_statistics(x, left, wrapped_equal)
+        biased = compare_mode.phase_agreement_statistics(x, left, left - 90.0)
+        self.assertAlmostEqual(equal.score, 100.0)
+        self.assertAlmostEqual(equal.circular_rms, 0.0)
+        self.assertAlmostEqual(biased.score, 50.0)
+        self.assertAlmostEqual(biased.mean_error, 90.0)
+
     def test_decimation_caps_lines_and_preserves_narrow_peak(self):
         x = np.arange(100_000, dtype=float)
         y = np.zeros_like(x)
@@ -517,6 +562,12 @@ class _Checked:
     def isChecked(self):
         return self.checked
 
+    def setChecked(self, checked):
+        self.checked = bool(checked)
+
+    def blockSignals(self, _blocked):
+        pass
+
 
 class _Combo:
     def __init__(self, data):
@@ -538,6 +589,21 @@ class _Spin:
 
     def blockSignals(self, _blocked):
         pass
+
+    def setRange(self, minimum, maximum):
+        self.minimum = float(minimum)
+        self.maximum = float(maximum)
+
+    def setSuffix(self, suffix):
+        self.suffix = str(suffix)
+
+
+class _Visible:
+    def __init__(self):
+        self.visible = False
+
+    def setVisible(self, visible):
+        self.visible = bool(visible)
 
 
 class _Status:
@@ -1090,6 +1156,88 @@ class PlotRendererIntegrationTests(unittest.TestCase):
         self.assertIn("updated", harness.status.message.lower())
         residual = harness.plot_figure.axes[1].lines[-1].get_ydata()
         np.testing.assert_allclose(residual, [-2.0, 2.0, -2.0, 2.0, -2.0])
+        phase_title = harness.plot_figure.axes[0].get_title()
+        self.assertIn("Overall phase match", phase_title)
+        self.assertIn("Average phase difference", phase_title)
+        self.assertIn("Typical phase error", phase_title)
+        for vague_label in ("Phasor", "coherence", "RMS"):
+            self.assertNotIn(vague_label, phase_title)
+
+    def test_compare_reports_rf_agreement_instead_of_pearson(self):
+        left = _grid()
+        right = _grid()
+        left.rcs_power[:, 0, 0, 0] = [1.0, 2.0, 4.0, 3.0, 1.0]
+        right.rcs_power[:, 0, 0, 0] = [1.0, 2.2, 3.8, 2.7, 1.1]
+        harness = _RendererHarness(
+            [("left", left), ("right", right)],
+            selections={
+                "azimuth": left.azimuths,
+                "elevation": [0.0],
+                "frequency": [9.0],
+            },
+        )
+        compare_mode.render(harness)
+        title = harness.plot_figure.axes[0].get_title()
+        self.assertIn("Overall match", title)
+        self.assertIn("Strong-return agreement", title)
+        self.assertIn("Full-pattern agreement", title)
+        self.assertIn("Power error", title)
+        self.assertIn("95% of points within", title)
+        self.assertNotIn("Corr:", title)
+        for vague_label in ("CCC", "NRMSE", "MAE", "P95"):
+            self.assertNotIn(vague_label, title)
+        self.assertNotIn("Weakest sub-sector", title)
+        self.assertEqual(len(harness.plot_figure.axes[1].patches), 0)
+
+    def test_compare_sector_bounds_control_statistics_and_show_all_only_display(self):
+        left = _grid()
+        right = _grid()
+        left.rcs_power[:, 0, 0, 0] = [50.0, 1.0, 2.0, 3.0, 50.0]
+        right.rcs_power[:, 0, 0, 0] = [0.1, 1.0, 2.0, 3.0, 0.1]
+        harness = _RendererHarness(
+            [("left", left), ("right", right)],
+            selections={
+                "azimuth": [-1.0, 0.0, 1.0],
+                "elevation": [0.0],
+                "frequency": [9.0],
+            },
+        )
+        harness.compare_sector_bar = _Visible()
+        harness.spin_compare_az_min = _Spin()
+        harness.spin_compare_az_max = _Spin()
+        harness.chk_compare_show_all_azimuths = _Checked(False)
+
+        compare_mode.render(harness)
+        self.assertTrue(harness.compare_sector_bar.visible)
+        self.assertEqual(harness.spin_compare_az_min.value(), -1.0)
+        self.assertEqual(harness.spin_compare_az_max.value(), 1.0)
+        np.testing.assert_allclose(
+            harness.plot_figure.axes[0].lines[0].get_xdata(),
+            [-1.0, 0.0, 1.0],
+        )
+        self.assertIn("Overall match: 100.0/100", harness.plot_figure.axes[0].get_title())
+        sector_patch = harness.plot_figure.axes[1].patches[0]
+        self.assertAlmostEqual(sector_patch.get_x(), -1.0)
+        self.assertAlmostEqual(sector_patch.get_width(), 2.0)
+
+        harness.chk_compare_show_all_azimuths.checked = True
+        compare_mode.render(harness)
+        np.testing.assert_allclose(
+            harness.plot_figure.axes[0].lines[0].get_xdata(),
+            [-2.0, -1.0, 0.0, 1.0, 2.0],
+        )
+        residual = harness.plot_figure.axes[1].lines[-1]
+        np.testing.assert_allclose(
+            residual.get_xdata(),
+            [-2.0, -1.0, 0.0, 1.0, 2.0],
+        )
+        title = harness.plot_figure.axes[0].get_title()
+        self.assertIn("Overall match: 100.0/100", title)
+        self.assertIn("Statistics range: -1 to 1 deg", title)
+        self.assertNotIn("Weakest sub-sector", title)
+        sector_patch = harness.plot_figure.axes[1].patches[0]
+        self.assertAlmostEqual(sector_patch.get_x(), -1.0)
+        self.assertAlmostEqual(sector_patch.get_width(), 2.0)
 
     def test_frequency_phase_p50_is_circular_across_unit_converted_grids(self):
         reference = _grid()

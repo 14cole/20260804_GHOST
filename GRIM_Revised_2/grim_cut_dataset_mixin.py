@@ -4304,6 +4304,36 @@ class DatasetOpsMixin:
                 f"Cropping {len(plans)} dataset(s) in the background..."
             )
 
+    def _percentile_selected(self) -> None:
+        """Replace every azimuth sample with its azimuth-percentile value."""
+
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select one or more datasets for percentile reduction.",
+        )
+        if datasets is None:
+            return
+        percentile, accepted = QInputDialog.getDouble(
+            self,
+            "Azimuth Percentile",
+            "Linear-power percentile across azimuth (0-100):",
+            90.0,
+            0.0,
+            100.0,
+            1,
+        )
+        if not accepted:
+            return
+        self._create_statistics_datasets(
+            datasets,
+            statistic="percentile",
+            percentile=float(percentile),
+            axes=("azimuth",),
+            broadcast_reduced=True,
+            operation_title="Percentile",
+            output_qualifier=" az",
+        )
+
     def _statistics_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
@@ -4324,6 +4354,27 @@ class DatasetOpsMixin:
         if not axes:
             self.status.showMessage("Select at least one axis for statistics reduction.")
             return
+        self._create_statistics_datasets(
+            datasets,
+            statistic=statistic,
+            percentile=percentile,
+            axes=axes,
+            broadcast_reduced=bool(broadcast_reduced),
+        )
+
+    def _create_statistics_datasets(
+        self,
+        datasets,
+        *,
+        statistic,
+        percentile,
+        axes,
+        broadcast_reduced,
+        operation_title="Statistics",
+        output_qualifier="",
+    ) -> None:
+        """Preflight and run a linear-power statistics reduction."""
+
         stat_label = f"p{percentile:g}" if statistic == "percentile" else statistic
 
         axis_numbers = {
@@ -4373,7 +4424,7 @@ class DatasetOpsMixin:
         memory_limit = _derived_grid_memory_limit()
         if estimated_peak > memory_limit:
             self.status.showMessage(
-                "Statistics blocked before allocation: estimated working set "
+                f"{operation_title} blocked before allocation: estimated working set "
                 f"{_format_bytes(estimated_peak)} exceeds the current safety "
                 f"limit {_format_bytes(memory_limit)}. Reduce fewer datasets at "
                 "once or keep compact output enabled."
@@ -4407,9 +4458,10 @@ class DatasetOpsMixin:
             results, skipped = payload
             for dataset_index, name, stat_grid in results:
                 history = (
-                    f"Statistics ({stat_label}, linear power, axes={axes}): {name}"
+                    f"{operation_title} ({stat_label}, linear power, axes={axes}): "
+                    f"{name}"
                 )
-                output_name = f"{name} [{stat_label}]"
+                output_name = f"{name} [{stat_label}{output_qualifier}]"
                 output_id = self._add_dataset_row(
                     stat_grid, output_name, history, file_name=""
                 )
@@ -4433,19 +4485,19 @@ class DatasetOpsMixin:
                     )
             produced = len(results)
             if produced == 0:
-                self.status.showMessage("Statistics created 0 datasets.")
+                self.status.showMessage(f"{operation_title} created 0 datasets.")
             elif skipped:
                 self.status.showMessage(
-                    f"Statistics created {produced} dataset(s). Skipped: "
+                    f"{operation_title} created {produced} dataset(s). Skipped: "
                     + ", ".join(skipped)
                 )
             else:
                 self.status.showMessage(
-                    f"Statistics created {produced} dataset(s)."
+                    f"{operation_title} created {produced} dataset(s)."
                 )
 
         if self._start_background_callable(
-            "Dataset statistics", compute, publish
+            f"Dataset {operation_title.lower()}", compute, publish
         ):
             self.status.showMessage(
                 f"Computing {stat_label} linear-power statistics for "

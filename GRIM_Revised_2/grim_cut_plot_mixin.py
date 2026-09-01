@@ -626,6 +626,7 @@ class PlotOpsMixin:
         self._style_plot_axes()
 
     def _clear_plot(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         self._plot_render_generation = (
             int(getattr(self, "_plot_render_generation", 0)) + 1
         )
@@ -2190,6 +2191,17 @@ class PlotOpsMixin:
         if "updated" in str(self.status.currentMessage()).lower():
             self._emit_last_successful_python_plot()
 
+    def _set_compare_sector_controls_visible(self, visible: bool) -> None:
+        controls = getattr(self, "compare_sector_bar", None)
+        if controls is not None:
+            controls.setVisible(bool(visible))
+
+    def _on_compare_sector_controls_changed(self, *_args) -> None:
+        """Re-render Compare after a committed sector/display change."""
+
+        if getattr(self, "last_plot_mode", None) == "compare":
+            self._plot_compare()
+
     def _capture_successful_python_plot(self, mode: str) -> None:
         """Freeze the semantic spec without recording automatic re-plots."""
 
@@ -2429,35 +2441,42 @@ class PlotOpsMixin:
         return True
 
     def _plot_azimuth_rect(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         azimuth_rect_mode.render(self)
         self._capture_successful_python_plot("azimuth_rect")
         self._maybe_autoscale()
 
     def _plot_azimuth_polar(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         azimuth_polar_mode.render(self)
         self._capture_successful_python_plot("azimuth_polar")
         self._maybe_autoscale()
 
     def _plot_frequency(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         frequency_mode.render(self)
         self._capture_successful_python_plot("frequency")
         self._maybe_autoscale()
 
     def _plot_elevation_sweep(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         elevation_sweep_mode.render(self)
         self._capture_successful_python_plot("elevation_sweep")
         self._maybe_autoscale()
 
     def _plot_isar_image(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         isar_mode.render(self)
         self._maybe_autoscale()
 
     def _plot_az_vs_range(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         az_vs_range_mode.render(self)
         self._capture_successful_python_plot("az_vs_range")
         self._maybe_autoscale()
 
     def _plot_waterfall(self) -> None:
+        self._set_compare_sector_controls_visible(False)
         waterfall_mode.render(self)
         self._capture_successful_python_plot("waterfall")
         self._maybe_autoscale()

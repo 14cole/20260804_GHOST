@@ -97,11 +97,29 @@ GHz or degree/radian storage; GRIM converts selections and labels without
 changing their files. Conic and great-circle charts, different great-circle
 frames, different physical quantities (`sigma_3d`, `sigma_2d`, or ratio), and
 different logarithmic conventions cannot be overlaid as though they were the
-same ordinate. Compare uses one explicit sweep per dataset, matches coordinates
-one-to-one, and computes residual statistics from every common finite sample.
-Phase medians and residuals use circular arithmetic at the ±180° seam. A phase
+same ordinate. RF Compare uses one explicit selected azimuth, elevation, or
+frequency sector per dataset and matches coordinates one-to-one. Its 0–100 RF
+Agreement Index replaces Pearson correlation with agreement measures for strong
+returns, the full pattern, normalized power error, and local-sector agreement.
+The plot presents these as plain-language percentages rather than statistical
+acronyms. It also reports the typical first-minus-second level difference,
+average level error, a bound containing 95% of point errors, peak-coordinate
+shift, and the active statistics range. Statistics
+use every common finite sample even when the displayed lines are decimated.
+Phase comparisons are labeled as overall phase match, average phase alignment,
+difference consistency, average phase difference, typical phase error, and the
+weakest sub-sector, with wrap-safe calculations at the ±180° seam. A phase
 comparison with undeclared phase-center/time/basis metadata remains viewable
 for legacy data, but the status message states the physical assumption.
+
+For azimuth RF Compare, a compact row above the plot sets the Min and Max
+azimuth statistics bounds. The bounds initialize to the actual minimum and
+maximum selected in the Azimuth parameter list. **Show all azimuths** defaults
+off, so the plot initially shows only that sector. Turning it on displays the
+complete common azimuth sweep for both datasets and the residual, but every
+reported statistic remains restricted to the entered Min/Max sector.
+The yellow region marks that entered statistics range only when it is narrower
+than the full common azimuth span; a full-span comparison has no highlight.
 
 Rendering caps the number of visible lines, points, image cells, waterfall
 panels, and explicit ticks. Line and magnitude-image reduction retain bucket
@@ -119,11 +137,18 @@ power—not on already-logarithmic dB samples—and creates compact reduced grid
 default; repeating a statistic across the original grid is an explicit,
 memory-preflighted opt-in.
 
-The selection summary below the dataset table shows the active row and operand
-order. Long selections are abbreviated in the panel while the full order stays
-available in its tooltip, and the operations panel scrolls on shorter displays.
-`Ctrl+O` opens datasets, `Ctrl+Shift+O` performs Overlap, and ordered
-subtraction/division use the displayed operand order. Delta-dB and coherent
+The simple **Percentile** dataset operation is a shortcut for the common case:
+it asks for a percentile (90 by default), computes it across azimuth on linear
+power, and creates one result per selected dataset. Every original azimuth bin
+is replaced by that percentile value at its elevation/frequency/polarization,
+so all axes and their coordinates are preserved. As with other incoherent
+statistics, coherent phase is undefined.
+
+The divider between Datasets and Parameters can be dragged vertically: dragging
+it upward enlarges the parameter lists and reduces the dataset table, while
+dragging it downward does the reverse. The active row continues to drive the
+parameter lists. `Ctrl+O` opens datasets, `Ctrl+Shift+O` performs Overlap, and
+ordered subtraction/division use selection order. Delta-dB and coherent
 division require exactly two operands. **Join** unions existing bins
 without interpolation, merges equal or complementary finite overlaps, and
 rejects conflicts; it never silently applies a hidden first/last-wins rule.
@@ -229,17 +254,6 @@ absolute tolerance in the already-matched declared axis units; for example,
 datasets declared in GHz receive a GHz tolerance, not an Hz tolerance.
 The reusable ISAR preprocessing cache is byte-bounded and synchronized so
 independent headless image formations may run concurrently.
-
-### Audit / QA
-
-**Audit / QA** is read-only. It reports an overall status plus errors, warnings,
-information, and metrics for axis validity, array shape, missing power and
-phase, metadata declarations, azimuth seam consistency, frequency uniformity,
-and coherent-operation readiness. It neither repairs nor normalizes the source
-dataset, and a passing structural audit is not a solver-accuracy or physical
-validation certificate. Missing phase-center/time/basis declarations are
-informational assumptions, not Audit failures; coherent readiness depends on
-usable complex samples. Select multiple rows to inspect them independently.
 
 ### Crop / Slice and Regrid
 

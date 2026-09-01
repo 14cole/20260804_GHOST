@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
+    QLabel,
     QMessageBox,
     QToolButton,
     QVBoxLayout,
@@ -388,6 +389,55 @@ class UnifiedGuiShellTest(unittest.TestCase):
             time.sleep(0.005)
         self.app.processEvents()
         self.assertFalse(self.window._background_job_active())
+
+    def test_dataset_and_parameters_share_a_draggable_vertical_splitter(self) -> None:
+        splitter = self.window.dataset_parameter_splitter
+        self.assertEqual(splitter.orientation(), Qt.Vertical)
+        self.assertEqual(splitter.count(), 2)
+        self.assertEqual(splitter.widget(0).objectName(), "datasetsSection")
+        self.assertEqual(splitter.widget(1).objectName(), "parametersSection")
+        self.assertFalse(splitter.childrenCollapsible())
+        self.assertTrue(splitter.isAncestorOf(self.window.table))
+        self.assertTrue(splitter.isAncestorOf(self.window.list_az))
+        self.assertFalse(hasattr(self.window, "lbl_dataset_selection_summary"))
+
+        self.window.show()
+        self.app.processEvents()
+        splitter.setSizes([220, 440])
+        self.app.processEvents()
+        parameters_larger = splitter.sizes()
+        self.assertGreater(parameters_larger[1], parameters_larger[0])
+        splitter.setSizes([440, 220])
+        self.app.processEvents()
+        datasets_larger = splitter.sizes()
+        self.assertGreater(datasets_larger[0], datasets_larger[1])
+
+    def test_dataset_operations_hide_inspect_and_audit_controls(self) -> None:
+        audit_buttons = [
+            button
+            for button in self.window.findChildren(QToolButton)
+            if button.text() == "Audit / QA"
+        ]
+        inspect_categories = [
+            label
+            for label in self.window.findChildren(QLabel)
+            if label.objectName() == "opsCategory" and label.text() == "Inspect"
+        ]
+        self.assertEqual(audit_buttons, [])
+        self.assertEqual(inspect_categories, [])
+        self.assertFalse(hasattr(self.window, "btn_audit"))
+
+    def test_compare_sector_bar_is_compact_hidden_and_defaults_show_all_off(self) -> None:
+        context = self.window._plot_contexts["plotting"]
+        self.assertEqual(context.compare_sector_bar.objectName(), "compareSectorBar")
+        self.assertTrue(context.compare_sector_bar.isHidden())
+        self.assertEqual(context.spin_compare_az_min.objectName(), "compareAzimuthMin")
+        self.assertEqual(context.spin_compare_az_max.objectName(), "compareAzimuthMax")
+        self.assertEqual(
+            context.chk_compare_show_all_azimuths.text(),
+            "Show all azimuths",
+        )
+        self.assertFalse(context.chk_compare_show_all_azimuths.isChecked())
 
     def test_isar_exports_are_bound_to_isar_inputs_not_other_plot_renders(self) -> None:
         self.window._activate_plot_tab("isar")
