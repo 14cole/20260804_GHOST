@@ -124,7 +124,7 @@ order. Long selections are abbreviated in the panel while the full order stays
 available in its tooltip, and the operations panel scrolls on shorter displays.
 `Ctrl+O` opens datasets, `Ctrl+Shift+O` performs Overlap, and ordered
 subtraction/division use the displayed operand order. Delta-dB and coherent
-division require exactly two operands. **Strict Merge** unions existing bins
+division require exactly two operands. **Join** unions existing bins
 without interpolation, merges equal or complementary finite overlaps, and
 rejects conflicts; it never silently applies a hidden first/last-wins rule.
 
@@ -260,10 +260,10 @@ power interpolation and keep phase unknown. Regridding to a coarser spacing is
 not an anti-alias filter. The GUI reports that fact in status and performs the
 requested regrid without a second prompt.
 
-### Strict Merge and Merge Overlaps
+### Join and Merge Overlaps
 
 Both operations form the union of all four axes using existing coordinates;
-neither interpolates samples. **Strict Merge** is the fail-closed choice for
+neither interpolates samples. **Join** is the fail-closed choice for
 complementary shards: any conflicting finite overlap stops the operation.
 **Merge Overlaps...** is the deliberate conflict-resolution workflow and fills
 finite samples according to one named policy shown in its dialog and recorded
@@ -656,8 +656,12 @@ Generic theta/phi TXT input requires a unit-bearing column header and either an
 explicit `frequency_ghz=` argument or a unit-qualified filename such as
 `f=10GHz`; headerless column order and unitless filename numbers are not guessed.
 Pioneer PIO input likewise requires explicit X/Y axis units, and any explicit
-Elevation value must carry ElevationUnits. Descending axes are accepted only
-when strictly monotonic and are reversed together with their sample matrix.
+Elevation value must carry ElevationUnits. A closed full-turn azimuth sweep is
+stored half-open: GRIM keeps the opening measurement and removes the repeated
+closing row by periodic equivalence, even when the seam is an arbitrary measured
+angle such as -178.84 degrees rather than exactly 0/360 or -180/+180. PIO export
+applies the same rule. Other descending axes are accepted only when strictly
+monotonic and are reversed together with their sample matrix.
 
 `RcsGrid.read_SENTRi()` (also exposed as `grim_headless.read_SENTRi()`) is the
 named CREATE-RF SENTRi entry point. It strictly recognizes the two schemas in

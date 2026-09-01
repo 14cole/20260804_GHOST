@@ -403,6 +403,74 @@ _DENSE_IMPORT_FALLBACK_LIMIT_BYTES = 2 * 1024**3
 _ADOPT_CLEAN_ARRAYS_TOKEN = object()
 
 
+def _pio_remove_closed_azimuth_endpoint(values, unit):
+    """Return one physical turn of a PIO azimuth axis, without its closer.
+
+    Range data often starts at an arbitrary turntable position and repeats that
+    direction after one revolution.  The closing coordinate may therefore be
+    ``181.16`` for an opening coordinate of ``-178.84``, or a writer may wrap
+    it back to ``-178.84``.  Detect the full-turn trajectory rather than
+    special-casing 0/360 or -180/+180.  The opening sample is authoritative;
+    the repeated closing row is removed even when a second measurement differs.
+    """
+
+    axis = np.asarray(values, dtype=float)
+    if axis.ndim != 1 or axis.size < 2:
+        return axis, False
+
+    period = 2.0 * np.pi if unit == "rad" else 360.0
+    half_period = 0.5 * period
+    scale = max(1.0, float(np.max(np.abs(axis))), period)
+    tolerance = max(
+        float(np.deg2rad(1.0e-7)) if unit == "rad" else 1.0e-7,
+        8.0 * np.finfo(np.float32).eps * scale,
+    )
+
+    raw_steps = np.diff(axis)
+    periodic_steps = np.remainder(raw_steps + half_period, period) - half_period
+    # At exactly half a turn, modulo chooses the negative representative.
+    # Retain the acquisition direction expressed by the source axis.
+    positive_half_turn = (
+        np.isclose(periodic_steps, -half_period, rtol=0.0, atol=tolerance)
+        & (raw_steps > 0.0)
+    )
+    periodic_steps[positive_half_turn] = half_period
+
+    increasing = bool(np.all(periodic_steps > 0.0))
+    descending = bool(np.all(periodic_steps < 0.0))
+    unwrapped = np.concatenate(
+        (axis[:1], axis[0] + np.cumsum(periodic_steps, dtype=float))
+    )
+    trajectory_span = float(unwrapped[-1] - unwrapped[0])
+    raw_span = float(axis[-1] - axis[0])
+    endpoint_residual = float(
+        np.remainder(raw_span + half_period, period) - half_period
+    )
+    same_direction = abs(endpoint_residual) <= tolerance
+    full_turn = (
+        abs(abs(trajectory_span) - period) <= tolerance
+        or abs(abs(raw_span) - period) <= tolerance
+    )
+    direct_two_point_turn = (
+        axis.size == 2 and abs(abs(raw_span) - period) <= tolerance
+    )
+    if not (
+        same_direction
+        and full_turn
+        and (increasing or descending or direct_two_point_turn)
+    ):
+        return axis, False
+
+    raw_prefix_steps = np.diff(axis[:-1])
+    raw_prefix_monotonic = bool(
+        axis.size <= 2
+        or np.all(raw_prefix_steps > 0.0)
+        or np.all(raw_prefix_steps < 0.0)
+    )
+    unique_axis = axis[:-1] if raw_prefix_monotonic else unwrapped[:-1]
+    return np.asarray(unique_axis, dtype=float).copy(), True
+
+
 def _available_import_memory_bytes():
     """Best-effort available physical memory without a hard dependency."""
 
@@ -7682,7 +7750,7 @@ class RcsGrid:
         history = str(ref.history or "").strip()
         if metadata_assumptions:
             note = (
-                "Strict merge allowed one-sided metadata as unspecified: "
+                "Join allowed one-sided metadata as unspecified: "
                 + ", ".join(sorted(metadata_assumptions))
             )
             history = f"{history}\n{note}" if history else note
@@ -11077,6 +11145,11 @@ class RcsGrid:
               ElevationUnits (defaulting to the X angular unit for legacy files)
             - polarization is taken from the `polarity` header/footer field, or
               inferred from HH/VV/VH/HV in the filename.
+
+        A closed full-turn azimuth sweep is stored half-open in GRIM.  Its
+        repeated closing row is removed based on one-period equivalence to the
+        opening angle, so the seam may occur at any measured angle rather than
+        only at 0/360 or -180/+180.  The opening measurement is retained.
         """
         header: dict[str, str] = {}
         footer: dict[str, str] = {}
@@ -11335,6 +11408,33 @@ class RcsGrid:
         xvals = _build_axis("x", int(xsize))
         yvals = _build_axis("y", int(ysize))
 
+        xname = (header.get("xname") or "").strip().lower()
+        yname = (header.get("yname") or "").strip().lower()
+        if not (xname in ("azimuth", "position") and yname == "frequency"):
+            raise ValueError(
+                f"Unsupported PIO axes (xname={xname!r}, yname={yname!r}); "
+                "expected azimuth/position vs frequency"
+            )
+
+        xunit_raw = header.get("xunits")
+        if xunit_raw is None or not str(xunit_raw).strip():
+            raise ValueError(
+                "PIO header missing XUnits; azimuth values cannot be safely "
+                "interpreted as degrees or radians"
+            )
+        xunit = cls._canonical_unit(xunit_raw, _ANGLE_UNITS, "deg")
+        if xunit not in {"deg", "rad"}:
+            raise ValueError(
+                f"Unsupported PIO azimuth unit: {header.get('xunits')!r}; "
+                "expected degrees or radians"
+            )
+
+        closing_azimuth = float(xvals[-1])
+        opening_azimuth = float(xvals[0])
+        xvals, dropped_closing_azimuth = _pio_remove_closed_azimuth_endpoint(
+            xvals, xunit
+        )
+
         descending_axes = {}
         for axis_name, values in (("X", xvals), ("Y", yvals)):
             if np.any(~np.isfinite(values)):
@@ -11347,9 +11447,6 @@ class RcsGrid:
                     f"PIO {axis_name} axis must be strictly monotonic without duplicates"
                 )
             descending_axes[axis_name] = descending
-
-        xname = (header.get("xname") or "").strip().lower()
-        yname = (header.get("yname") or "").strip().lower()
 
         if data_type == "complex":
             real_samples = rawdata[0::2]
@@ -11371,6 +11468,8 @@ class RcsGrid:
         data_2d = np.asarray(complex_arr, dtype=complex_dtype).reshape(
             (int(xsize), int(ysize)), order="F"
         )
+        if dropped_closing_azimuth:
+            data_2d = data_2d[:-1, :]
         # Descending range sweeps are valid Pioneer input.  Canonicalize them
         # into the increasing GRIM axis order while applying the identical
         # reversal to the corresponding data dimension.
@@ -11381,24 +11480,6 @@ class RcsGrid:
             yvals = yvals[::-1].copy()
             data_2d = data_2d[:, ::-1]
 
-        if not (xname in ("azimuth", "position") and yname == "frequency"):
-            raise ValueError(
-                f"Unsupported PIO axes (xname={xname!r}, yname={yname!r}); "
-                "expected azimuth/position vs frequency"
-            )
-
-        xunit_raw = header.get("xunits")
-        if xunit_raw is None or not str(xunit_raw).strip():
-            raise ValueError(
-                "PIO header missing XUnits; azimuth values cannot be safely "
-                "interpreted as degrees or radians"
-            )
-        xunit = cls._canonical_unit(xunit_raw, _ANGLE_UNITS, "deg")
-        if xunit not in {"deg", "rad"}:
-            raise ValueError(
-                f"Unsupported PIO azimuth unit: {header.get('xunits')!r}; "
-                "expected degrees or radians"
-            )
         yunit_raw = header.get("yunits")
         if yunit_raw is None or not str(yunit_raw).strip():
             raise ValueError(
@@ -11482,6 +11563,12 @@ class RcsGrid:
 
         prior_log = header.get("log") or footer.get("log") or ""
         history_parts = [f"Loaded Pioneer file: {path}"]
+        if dropped_closing_azimuth:
+            history_parts.append(
+                "removed repeated closing azimuth "
+                f"{closing_azimuth:.12g} {xunit} for opening azimuth "
+                f"{opening_azimuth:.12g} {xunit}"
+            )
         if prior_log:
             history_parts.append(f"prior log: {prior_log}")
         history = " | ".join(history_parts)
@@ -11506,7 +11593,9 @@ class RcsGrid:
 
         Round-trips with `load_pio`: a grid loaded from a .pio file and saved
         back via this method produces the same complex samples within the
-        selected on-disk precision.
+        selected on-disk precision.  If the input grid itself contains a
+        repeated full-turn closing azimuth, export omits that closing row using
+        the same angle-independent rule as the loader.
 
         Args:
             path: Output path. `.pio` is appended if missing.
@@ -11579,8 +11668,6 @@ class RcsGrid:
 
         azimuths = np.asarray(self.azimuths, dtype=float)
         frequencies = np.asarray(self.frequencies, dtype=float)
-        xsize = int(azimuths.size)
-        ysize = int(frequencies.size)
         for axis_name, values in (
             ("azimuth", azimuths),
             ("frequency", frequencies),
@@ -11593,6 +11680,27 @@ class RcsGrid:
                 raise ValueError(
                     f"save_pio: {axis_name} axis contains nonfinite coordinates"
                 )
+
+        xunits = self._canonical_unit(
+            (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
+        )
+        if xunits not in {"deg", "rad"}:
+            raise ValueError(
+                "save_pio: azimuth unit must be degrees or radians; got "
+                f"{(self.units or {}).get('azimuth')!r}"
+            )
+        azimuths, dropped_closing_azimuth = _pio_remove_closed_azimuth_endpoint(
+            azimuths, xunits
+        )
+        source_azimuth_slice = (
+            slice(None, -1) if dropped_closing_azimuth else slice(None)
+        )
+        xsize = int(azimuths.size)
+        ysize = int(frequencies.size)
+        for axis_name, values in (
+            ("azimuth", azimuths),
+            ("frequency", frequencies),
+        ):
             differences = np.diff(values)
             if values.size > 1 and not (
                 np.all(differences > 0.0) or np.all(differences < 0.0)
@@ -11606,21 +11714,13 @@ class RcsGrid:
             )
 
         # complex_slice[i, j] = complex sample at azimuths[i], frequencies[j]
-        power_slice = self.rcs_power[:, el_idx, :, pol_idx]
-        phase_slice = self.rcs_phase[:, el_idx, :, pol_idx]
+        power_slice = self.rcs_power[source_azimuth_slice, el_idx, :, pol_idx]
+        phase_slice = self.rcs_phase[source_azimuth_slice, el_idx, :, pol_idx]
         phase_missing = np.isfinite(power_slice) & ~np.isfinite(phase_slice)
         if np.any(phase_missing):
             raise ValueError(
                 "save_pio: complex PIO export requires phase for every finite-power "
                 f"sample; {int(np.count_nonzero(phase_missing))} sample(s) lack phase"
-            )
-        xunits = self._canonical_unit(
-            (self.units or {}).get("azimuth"), _ANGLE_UNITS, "deg"
-        )
-        if xunits not in {"deg", "rad"}:
-            raise ValueError(
-                "save_pio: azimuth unit must be degrees or radians; got "
-                f"{(self.units or {}).get('azimuth')!r}"
             )
         elevation_units = self._canonical_unit(
             (self.units or {}).get("elevation"), _ANGLE_UNITS, "deg"
@@ -11735,7 +11835,7 @@ class RcsGrid:
                     complex_block = np.asarray(
                         self.rcs_slice(
                             (
-                                slice(None),
+                                source_azimuth_slice,
                                 el_idx,
                                 slice(start, stop),
                                 pol_idx,

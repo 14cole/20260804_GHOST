@@ -2783,8 +2783,8 @@ class DatasetOpsMixin:
         self.status.showMessage(f"Exported {len(paths)} dataset(s) to CSV.")
 
     def _on_join_worker_progress(self, done_count: int, total_count: int, _: str) -> None:
-        self._set_background_progress(done_count, total_count, "Strict merge")
-        self.status.showMessage(f"Strict merge... {done_count}/{total_count}")
+        self._set_background_progress(done_count, total_count, "Join")
+        self.status.showMessage(f"Join... {done_count}/{total_count}")
 
     def _on_join_worker_finished(self, payload: dict[str, object]) -> None:
         names = self._pending_join_names or []
@@ -2794,19 +2794,19 @@ class DatasetOpsMixin:
 
         ok = bool(payload.get("ok", False))
         if not ok:
-            self.status.showMessage(str(payload.get("error", "Strict merge failed.")))
+            self.status.showMessage(str(payload.get("error", "Join failed.")))
             return
 
         merged = payload.get("merged")
         if not isinstance(merged, RcsGrid):
-            self.status.showMessage("Strict merge failed: worker produced invalid output.")
+            self.status.showMessage("Join failed: worker produced invalid output.")
             return
 
         if not names:
             names = ["Dataset"]
         new_name = " | ".join(names)
-        history = f"Strict Merge (equal/complementary overlaps merged; conflicts rejected): {new_name}"
-        output_name = f"Strict Merge[{new_name}]"
+        history = f"Join (equal/complementary overlaps merged; conflicts rejected): {new_name}"
+        output_name = f"Join[{new_name}]"
         output_id = self._add_dataset_row(merged, output_name, history, file_name="")
         recorder = getattr(self, "python_recorder", None)
         if recorder is not None and input_refs:
@@ -2815,10 +2815,10 @@ class DatasetOpsMixin:
                 "join_datasets",
                 input_refs,
                 kwargs={"tol": 1.0e-6},
-                comment="Strictly merge datasets on their union axes",
+                comment="Join datasets on their union axes; reject conflicting overlaps",
             )
         self.status.showMessage(
-            "Strict merge created. Equal or complementary overlaps were merged; "
+            "Join created. Equal or complementary overlaps were merged; "
             "conflicting finite samples would have stopped the operation."
         )
 
@@ -3867,12 +3867,12 @@ class DatasetOpsMixin:
     def _join_selected_datasets(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
-            empty_message="Select two or more datasets to strictly merge.",
+            empty_message="Select two or more datasets to join.",
         )
         if datasets is None:
             return
         if len(datasets) < 2:
-            self.status.showMessage("Select at least 2 datasets to strictly merge.")
+            self.status.showMessage("Select at least 2 datasets to join.")
             return
 
         names = [name for name, _ in datasets]
@@ -3880,11 +3880,11 @@ class DatasetOpsMixin:
         worker = _JoinDatasetsWorker(grids, tol=1e-6)
         worker.progress.connect(self._on_join_worker_progress)
         worker.finished.connect(self._on_join_worker_finished)
-        if not self._try_start_background_job("Strict dataset merge", worker):
+        if not self._try_start_background_job("Dataset join", worker):
             return
         self._pending_join_names = names
         self._pending_join_references = self._python_input_references(datasets)
-        self.status.showMessage(f"Strict merge... 0/{len(grids)}")
+        self.status.showMessage(f"Join... 0/{len(grids)}")
 
     def _stitch_selected_datasets(self) -> None:
         datasets = self._selected_datasets_ordered(

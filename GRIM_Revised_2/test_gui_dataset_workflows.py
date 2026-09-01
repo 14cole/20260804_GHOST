@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PySide6.QtCore import QItemSelectionModel, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import QDialog, QMessageBox
 
@@ -401,13 +402,22 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         item.setSelected(True)
         widget.setCurrentItem(item)
 
-    def test_merge_actions_explain_strict_and_policy_workflows(self) -> None:
-        self.assertEqual(self.window.btn_join.text(), "Strict Merge")
+    def test_join_and_merge_actions_explain_their_overlap_workflows(self) -> None:
+        self.assertEqual(self.window.btn_join.text(), "Join")
         self.assertEqual(self.window.btn_stitch.text(), "Merge Overlaps...")
         self.assertIn("without interpolation", self.window.btn_join.toolTip())
         self.assertIn("conflicting finite overlap", self.window.btn_join.toolTip())
         self.assertIn("without interpolation", self.window.btn_stitch.toolTip())
         self.assertIn("resolve conflicting overlaps", self.window.btn_stitch.toolTip())
+
+    def test_open_and_overlap_have_distinct_discoverable_shortcuts(self) -> None:
+        shortcuts = {
+            shortcut.key().toString(QKeySequence.SequenceFormat.PortableText)
+            for shortcut in self.window.findChildren(QShortcut)
+        }
+        self.assertIn("Ctrl+O", shortcuts)
+        self.assertIn("Ctrl+Shift+O", shortcuts)
+        self.assertIn("Ctrl+Shift+O", self.window.btn_overlap.toolTip())
 
     def test_audit_publishes_core_statuses_and_matching_summary_counts(self) -> None:
         healthy = _axis_grid([0.0], 1.0)

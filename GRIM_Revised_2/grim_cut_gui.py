@@ -1147,7 +1147,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Incoherent +", "btn_incoherent_add"),
             ("Incoherent -", "btn_incoherent_sub"),
             ("Δ dB", "btn_dbdiff"),
-            ("Strict Merge", "btn_join"),
+            ("Join", "btn_join"),
             ("Merge Overlaps...", "btn_stitch"),
             ("Overlap", "btn_overlap"),
         ))
@@ -1171,7 +1171,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_overlap.setToolTip(
             "Crop every selected dataset to the common axis values and finite "
             "cells shared by all selected datasets. Selection order does not "
-            "choose a reference dataset."
+            "choose a reference dataset. Shortcut: Ctrl+Shift+O."
         )
         self.btn_range_cal.setToolTip(
             "Complex substitution calibration using loaded measured-cal and "

@@ -940,6 +940,74 @@ class PioStreamingTests(unittest.TestCase):
         # only roundoff from the polar/cartesian conversion (not reordering).
         np.testing.assert_allclose(restored.rcs, values, rtol=1.0e-14, atol=1.0e-13)
 
+    def test_pio_removes_arbitrary_angle_closed_sweep_endpoint(self):
+        samples = np.asarray(
+            [10.0 + 1.0j, 20.0 + 2.0j, 30.0 + 3.0j, 40.0 + 4.0j,
+             99.0 + 9.0j],
+            dtype=np.complex64,
+        )
+        payload = np.empty(samples.size * 2, dtype="<f4")
+        payload[0::2] = samples.real
+        payload[1::2] = samples.imag
+        with tempfile.TemporaryDirectory() as directory:
+            for label, closing in (
+                ("unwrapped", "181.16"),
+                ("wrapped", "-178.84"),
+                ("wrapped-rounded", "-178.8399"),
+            ):
+                with self.subTest(closing=closing):
+                    path = os.path.join(directory, f"arbitrary-{label}.pio")
+                    self._write_pio_fixture(
+                        path,
+                        xsize="5",
+                        xvals=f"-178.84:-90:0:90:{closing}",
+                        payload=payload.tobytes(),
+                    )
+                    loaded = RcsGrid.load_pio(path)
+                    np.testing.assert_allclose(
+                        loaded.azimuths, [-178.84, -90.0, 0.0, 90.0]
+                    )
+                    np.testing.assert_allclose(
+                        loaded.rcs[:, 0, 0, 0], samples[:-1],
+                        rtol=1.0e-6, atol=1.0e-6,
+                    )
+                    self.assertIn("removed repeated closing azimuth", loaded.history)
+
+    def test_pio_writer_omits_arbitrary_angle_closed_sweep_endpoint(self):
+        samples = np.asarray(
+            [10.0 + 1.0j, 20.0 + 2.0j, 30.0 + 3.0j, 40.0 + 4.0j,
+             99.0 + 9.0j],
+            dtype=np.complex64,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for label, closing in (
+                ("unwrapped", 181.16),
+                ("wrapped", -178.84),
+            ):
+                with self.subTest(closing=closing):
+                    grid = RcsGrid(
+                        [-178.84, -90.0, 0.0, 90.0, closing],
+                        [0.0],
+                        [10.0],
+                        ["VV"],
+                        rcs=samples[:, None, None, None],
+                    )
+                    path = grid.save_pio(
+                        os.path.join(directory, f"arbitrary-{label}.pio")
+                    )
+                    with open(path, "rb") as stream:
+                        header = stream.read().split(b"Offset=", 1)[0]
+                    loaded = RcsGrid.load_pio(path)
+
+                    self.assertIn(b"XSize=4\n", header)
+                    np.testing.assert_allclose(
+                        loaded.azimuths, [-178.84, -90.0, 0.0, 90.0]
+                    )
+                    np.testing.assert_allclose(
+                        loaded.rcs[:, 0, 0, 0], samples[:-1],
+                        rtol=1.0e-6, atol=1.0e-6,
+                    )
+
     def test_pio_rejects_offset_into_header_before_decoding_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "header-as-data.pio")
