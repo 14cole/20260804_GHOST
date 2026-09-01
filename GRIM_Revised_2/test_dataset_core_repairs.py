@@ -1112,6 +1112,25 @@ class PioStreamingTests(unittest.TestCase):
             ):
                 RcsGrid.load_pio(path)
 
+    def test_pio_accepts_rounded_axis_summaries_when_xvals_are_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "rounded-axis-summary.pio")
+            self._write_pio_fixture(
+                path,
+                xsize="2",
+                xvals="-18.2184:-17.2184",
+                xstart="-18.218",
+                xstop="-17.218",
+                xstep="1",
+                payload=np.asarray(
+                    [1.0, 0.0, 2.0, 0.0], dtype="<f4"
+                ).tobytes(),
+            )
+            loaded = RcsGrid.load_pio(path)
+
+        np.testing.assert_allclose(loaded.azimuths, [-18.2184, -17.2184])
+        np.testing.assert_allclose(loaded.rcs.real.ravel(), [1.0, 2.0])
+
     def test_pio_descending_axis_is_canonicalized_with_its_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "descending.pio")

@@ -11326,6 +11326,32 @@ class RcsGrid:
             start = header.get(f"{prefix}start")
             stop = header.get(f"{prefix}stop")
             step = header.get(f"{prefix}step")
+
+            def _summary_tolerance(raw_text, *numeric_values):
+                """Honor the decimal precision of a redundant PIO summary."""
+
+                text = str(raw_text).strip()
+                match = re.fullmatch(
+                    r"[+-]?(?:(?:\d+)(?:\.(\d*))?|\.(\d+))"
+                    r"(?:[eE]([+-]?\d+))?",
+                    text,
+                )
+                decimal_digits = len(
+                    (match.group(1) or match.group(2) or "") if match else ""
+                )
+                exponent = int(match.group(3) or 0) if match else 0
+                printed_resolution = (
+                    10.0 ** (exponent - decimal_digits) if match else 0.0
+                )
+                scale = max(
+                    1.0,
+                    *(abs(float(value)) for value in numeric_values),
+                )
+                return max(
+                    0.5 * printed_resolution,
+                    8.0 * np.finfo(np.float32).eps * scale,
+                )
+
             parsed = {}
             for field_name, raw_value in (
                 (f"{prefix}start", start),
@@ -11354,19 +11380,21 @@ class RcsGrid:
                 # writers commonly include scalar summaries as well. Refuse a
                 # contradictory header instead of silently choosing one axis.
                 comparisons = (
-                    (f"{prefix.upper()}Start", start_f, float(vals[0])),
-                    (f"{prefix.upper()}Stop", stop_f, float(vals[-1])),
+                    (f"{prefix.upper()}Start", start, start_f, float(vals[0])),
+                    (f"{prefix.upper()}Stop", stop, stop_f, float(vals[-1])),
                 )
-                for label, declared, actual in comparisons:
+                for label, raw_declared, declared, actual in comparisons:
                     if declared is None:
                         continue
-                    scale = max(1.0, abs(declared), abs(actual))
-                    if not np.isclose(
-                        declared, actual, rtol=1.0e-10, atol=1.0e-12 * scale
-                    ):
+                    tolerance = _summary_tolerance(
+                        raw_declared, declared, actual
+                    )
+                    if abs(declared - actual) > tolerance:
                         raise ValueError(
-                            f"PIO {label}={declared:g} conflicts with explicit "
-                            f"{prefix.upper()}Vals endpoint {actual:g}"
+                            f"PIO {label}={declared:.17g} conflicts with explicit "
+                            f"{prefix.upper()}Vals endpoint {actual:.17g}; "
+                            f"difference {abs(declared - actual):.6g} exceeds "
+                            f"the summary precision tolerance {tolerance:.6g}"
                         )
                 if step_f is not None:
                     summary_step = (
@@ -11374,17 +11402,16 @@ class RcsGrid:
                         if size == 1
                         else float(vals[-1] - vals[0]) / float(size - 1)
                     )
-                    scale = max(1.0, abs(step_f), abs(summary_step))
-                    if not np.isclose(
-                        step_f,
-                        summary_step,
-                        rtol=1.0e-10,
-                        atol=1.0e-12 * scale,
-                    ):
+                    tolerance = _summary_tolerance(
+                        step, step_f, summary_step
+                    )
+                    if abs(step_f - summary_step) > tolerance:
                         raise ValueError(
-                            f"PIO {prefix.upper()}Step={step_f:g} conflicts "
+                            f"PIO {prefix.upper()}Step={step_f:.17g} conflicts "
                             f"with explicit {prefix.upper()}Vals summary step "
-                            f"{summary_step:g}"
+                            f"{summary_step:.17g}; difference "
+                            f"{abs(step_f - summary_step):.6g} exceeds the "
+                            f"summary precision tolerance {tolerance:.6g}"
                         )
                 return vals
             if start_f is not None and step_f is not None:
