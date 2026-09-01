@@ -9108,6 +9108,7 @@ class RcsGrid:
 
         ss_imono = int(data.get("imono", 1))
         ss_angle_source = str(data.get("angle_source", "incident"))
+        ss_azimuth_seam_restored = bool(data.get("azimuth_seam_restored", False))
         extra = {}
         if ss_imono == 2:
             if ss_angle_source == "observation":
@@ -9200,6 +9201,7 @@ class RcsGrid:
         extra.update(
             {
                 "source_format": "Xpatch SS",
+                "ss_azimuth_seam_restored": ss_azimuth_seam_restored,
                 "ss_absolute_normalization_status": (
                     "unverified; loaded as dimensionless relative power"
                 ),
@@ -9223,7 +9225,9 @@ class RcsGrid:
             rcs_domain="power_phase",
             source_path=path,
             history=(f"Loaded Xpatch .ss ({n_sig} signals, {n_freq} freqs, "
-                     f"{ss_angle_source} angles, imono={ss_imono}): {path}"),
+                     f"{ss_angle_source} angles, imono={ss_imono}"
+                     f"{', restored +180 azimuth seam' if ss_azimuth_seam_restored else ''}"
+                     f"): {path}"),
             units={
                 "azimuth": "deg", "elevation": "deg", "frequency": "GHz",
                 "rcs_log_unit": "dB", "rcs_linear_quantity": "power_ratio",

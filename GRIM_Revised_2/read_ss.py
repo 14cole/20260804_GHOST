@@ -218,7 +218,13 @@ def _self_check():
                              "check a count/type column (not a name typo).")
     looked_up = {
         "HDRA": (HDRA, ("edge_diff", "iqmatrix", "ibspsave")),
-        "HDRC": (HDRC, ("maxfreq", "ifreq", "nfreq", "imono", "freq1", "freq2")),
+        "HDRC": (
+            HDRC,
+            (
+                "maxfreq", "ifreq", "nfreq", "imono", "freq1", "freq2",
+                "rp071", "rp072", "nrp07", "phiob1", "phiob2", "nphiob",
+            ),
+        ),
         "HDRDMIN": (HDRDMIN, ("azinc", "elinc", "azobs", "elobs")),
     }
     for tbl, (table, names) in looked_up.items():
@@ -240,6 +246,49 @@ def scan_hdrc_offset(raw, num_freqs, lo=600, hi=2400):
     rel = _field_offset(HDRC, "maxfreq")
     hi = min(hi, raw.size - rel - 4)
     return [o for o in range(lo, hi) if _i4(raw, o + rel) == num_freqs]
+
+
+def _restore_declared_azimuth_seam(values, start, stop, steps, atol=5e-5):
+    """Restore the signed 180-degree seam to the header-C scan interval.
+
+    Header-D sometimes stores the physical +180-degree endpoint as -180 even
+    when header-C declares a uniform nonnegative scan ending at +180.  Keeping
+    that storage representation would sort the endpoint ahead of a 0..179
+    sweep and introduce an artificial 179-degree plotting gap.
+
+    Only the exactly equivalent +/-180 seam is changed, and only when the
+    uniform-scan metadata unambiguously contains one representation but not the
+    other.  Discrete scans (steps < 0) and genuinely signed intervals retain
+    their recorded coordinates.
+    """
+    restored = np.asarray(values, dtype=float).copy()
+    try:
+        declared_start = float(start)
+        declared_stop = float(stop)
+        declared_steps = int(steps)
+    except (TypeError, ValueError, OverflowError):
+        return restored, False
+
+    if (
+        declared_steps < 0
+        or not np.all(np.isfinite([declared_start, declared_stop]))
+    ):
+        return restored, False
+
+    lower = min(declared_start, declared_stop)
+    upper = max(declared_start, declared_stop)
+    contains_positive = lower - atol <= 180.0 <= upper + atol
+    contains_negative = lower - atol <= -180.0 <= upper + atol
+
+    changed = np.zeros(restored.shape, dtype=bool)
+    if contains_positive and not contains_negative:
+        changed = np.isclose(restored, -180.0, rtol=0.0, atol=atol)
+        restored[changed] = 180.0
+    elif contains_negative and not contains_positive:
+        changed = np.isclose(restored, 180.0, rtol=0.0, atol=atol)
+        restored[changed] = -180.0
+
+    return restored, bool(np.any(changed))
 
 
 def read_ss(path, verbose=True):
@@ -458,6 +507,25 @@ def read_ss(path, verbose=True):
     else:
         az, el, angle_source = az_inc, el_inc, "incident"
 
+    if angle_source == "observation":
+        declared_azimuth = (
+            float(hdrc["phiob1"][0]),
+            float(hdrc["phiob2"][0]),
+            int(hdrc["nphiob"][0]),
+        )
+    else:
+        declared_azimuth = (
+            float(hdrc["rp071"][0]),
+            float(hdrc["rp072"][0]),
+            int(hdrc["nrp07"][0]),
+        )
+    az, azimuth_seam_restored = _restore_declared_azimuth_seam(
+        az,
+        start=declared_azimuth[0],
+        stop=declared_azimuth[1],
+        steps=declared_azimuth[2],
+    )
+
     match = (num_freqs_global == maxfreq)
     result = {
         "az": np.asarray(az), "el": np.asarray(el),
@@ -465,6 +533,10 @@ def read_ss(path, verbose=True):
         "maxfreq": maxfreq, "ifreq": ifreq, "imono": imono,
         "az_inc": az_inc, "el_inc": el_inc, "az_obs": az_obs, "el_obs": el_obs,
         "angle_source": angle_source,
+        "declared_azimuth_start": declared_azimuth[0],
+        "declared_azimuth_stop": declared_azimuth[1],
+        "declared_azimuth_steps": declared_azimuth[2],
+        "azimuth_seam_restored": azimuth_seam_restored,
         "vv": np.asarray(pol["vv"]), "vh": np.asarray(pol["vh"]),   # (nsig, num_freqs)
         "hv": np.asarray(pol["hv"]), "hh": np.asarray(pol["hh"]),
         "header_c": hdrc, "freq_axis_ok": match,
@@ -488,6 +560,12 @@ def read_ss(path, verbose=True):
                   + (" ..." if len(cands) > 16 else ""))
         print(f"  ifreq             : {ifreq}   freq1={freq1:.6g}  freq2={freq2:.6g}   imono={imono}")
         print(f"  angle source      : {angle_source}  (incident n_uniq={n_inc}, observation n_uniq={n_obs})")
+        if azimuth_seam_restored:
+            print(
+                "  azimuth seam      : restored header-D -180 to declared "
+                f"header-C +180 (scan {declared_azimuth[0]:g}.."
+                f"{declared_azimuth[1]:g})"
+            )
         print(f"    azinc {_nuniq(az_inc):>4} uniq [{az_inc.min():.3f}..{az_inc.max():.3f}]   "
               f"azobs {_nuniq(az_obs):>4} uniq [{az_obs.min():.3f}..{az_obs.max():.3f}]")
         print(f"    elinc {_nuniq(el_inc):>4} uniq [{el_inc.min():.3f}..{el_inc.max():.3f}]   "

@@ -39,6 +39,7 @@ def build_ss(
     mode,
     sweep_values=None,
     pre_frequency_padding=0,
+    declared_azimuth_range=None,
 ):
     """Write a synthetic .ss. `flags` -> header-B size; `mode` in {incident, observation}."""
     size_a = R._table_bytes(R.HDRA)            # 648
@@ -82,6 +83,14 @@ def build_ss(
         cf("freq1", freq1); cf("freq2", freq2)
         ci("imono", 1 if mode == "incident" else 2)
         ci("maxaspects", nsig); ci("maxang", nsig); ci("maxfreqang", nfreq * nsig)
+        if declared_azimuth_range is not None:
+            declared_start, declared_stop = declared_azimuth_range
+            if mode == "incident":
+                cf("rp071", declared_start); cf("rp072", declared_stop)
+                ci("nrp07", max(nsig - 1, 0))
+            else:
+                cf("phiob1", declared_start); cf("phiob2", declared_stop)
+                ci("nphiob", max(nsig - 1, 0))
         # --- explicit freq block (ifreq==2), right before header-D ---
         if ifreq == 2:
             fb = nbytesb - freqblock
@@ -281,6 +290,44 @@ class TestSsParsing(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "angular coordinate collision"):
                 RcsGrid.load_ss(path)
+
+    def test_restores_positive_180_endpoint_declared_by_uniform_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stored_sweep = np.concatenate((np.arange(180.0), [-180.0]))
+            for mode in ("incident", "observation"):
+                with self.subTest(mode=mode):
+                    path = os.path.join(tmp, f"positive-half-scan-{mode}.ss")
+                    build_ss(
+                        path, 181, 1, 1, 9.0, 9.0,
+                        dict(edge_diff=False, iqmatrix=False, ibspsave=1),
+                        mode,
+                        sweep_values=stored_sweep,
+                        declared_azimuth_range=(0.0, 180.0),
+                    )
+
+                    parsed = R.read_ss(path, verbose=False)
+                    np.testing.assert_array_equal(parsed["az"], np.arange(181.0))
+                    self.assertTrue(parsed["azimuth_seam_restored"])
+
+                    converted = RcsGrid.load_ss(path)
+                    np.testing.assert_array_equal(converted.azimuths, np.arange(181.0))
+                    self.assertTrue(converted.extra["ss_azimuth_seam_restored"])
+                    self.assertIn("restored +180 azimuth seam", converted.history)
+
+    def test_preserves_negative_180_endpoint_of_signed_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "signed-half-scan.ss")
+            build_ss(
+                path, 3, 1, 1, 9.0, 9.0,
+                dict(edge_diff=False, iqmatrix=False, ibspsave=1),
+                "incident",
+                sweep_values=[-180.0, -90.0, 0.0],
+                declared_azimuth_range=(-180.0, 0.0),
+            )
+
+            parsed = R.read_ss(path, verbose=False)
+            np.testing.assert_array_equal(parsed["az"], [-180.0, -90.0, 0.0])
+            self.assertFalse(parsed["azimuth_seam_restored"])
 
     def test_ss_to_grim_round_trip_preserves_ghz_axes_and_complex_samples(self):
         with tempfile.TemporaryDirectory() as tmp:
