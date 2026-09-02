@@ -4285,8 +4285,7 @@ if GUI_AVAILABLE:
             outer.setSpacing(6)
 
             intro = QLabel(
-                "Place point scatterers and expanded line sources on a clean body, "
-                "check them in 3-D, then save one coherent response.",
+                "Build one coherent body + features response in three steps.",
                 self,
             )
             intro.setWordWrap(True)
@@ -4294,12 +4293,12 @@ if GUI_AVAILABLE:
             outer.addWidget(intro)
 
             self.workflow_steps_label = QLabel(
-                "1  Body   ›   2  Place   ›   3  Map   ›   4  Review",
+                "Choose the body, map feature responses, then validate and run.",
                 self,
             )
-            self.workflow_steps_label.setWordWrap(False)
+            self.workflow_steps_label.setWordWrap(True)
             self.workflow_steps_label.setObjectName("featureWorkflowSteps")
-            outer.addWidget(self.workflow_steps_label)
+            self.workflow_steps_label.setVisible(False)
             self.next_step_label = QLabel(self)
             self.next_step_label.setObjectName("featureNextStep")
             self.next_step_label.setWordWrap(True)
@@ -4351,24 +4350,54 @@ if GUI_AVAILABLE:
             )
             recipe_actions.addWidget(self.save_recipe_as_button)
             recipe_layout.addLayout(recipe_actions)
-            outer.addWidget(recipe_group)
+            self.recipe_section = _DisclosureSection(
+                "Reusable recipe (optional)", self, expanded=False
+            )
+            self.recipe_section.addWidget(recipe_group)
+            outer.addWidget(self.recipe_section)
 
-            scroll = QScrollArea(self)
-            scroll.setObjectName("featureAssemblyScroll")
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-            scroll.setAutoFillBackground(False)
-            scroll.viewport().setAutoFillBackground(False)
-            scroll.setWidgetResizable(True)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            content = QWidget(scroll)
-            content.setObjectName("featureAssemblyContent")
-            content.setAutoFillBackground(False)
-            self.form_content = content
-            content_layout = QVBoxLayout(content)
-            content_layout.setContentsMargins(0, 0, 0, 0)
-            content_layout.setSpacing(7)
+            self.workflow_tabs = QTabWidget(self)
+            self.workflow_tabs.setObjectName("featureWorkflowTabs")
+            self.body_step_page = QWidget(self.workflow_tabs)
+            self.map_step_page = QWidget(self.workflow_tabs)
+            self.review_step_page = QWidget(self.workflow_tabs)
 
-            body_group = QGroupBox("1  Choose the body", content)
+            def _step_scroll(page: QWidget, object_name: str):
+                page_layout = QVBoxLayout(page)
+                page_layout.setContentsMargins(0, 0, 0, 0)
+                scroll = QScrollArea(page)
+                scroll.setObjectName(object_name)
+                scroll.setFrameShape(QFrame.Shape.NoFrame)
+                scroll.setAutoFillBackground(False)
+                scroll.viewport().setAutoFillBackground(False)
+                scroll.setWidgetResizable(True)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                content = QWidget(scroll)
+                content.setObjectName("featureAssemblyContent")
+                content.setAutoFillBackground(False)
+                content_layout = QVBoxLayout(content)
+                content_layout.setContentsMargins(0, 0, 0, 0)
+                content_layout.setSpacing(7)
+                scroll.setWidget(content)
+                page_layout.addWidget(scroll, 1)
+                return content, content_layout, page_layout
+
+            body_content, body_content_layout, self.body_page_layout = _step_scroll(
+                self.body_step_page, "featureBodyScroll"
+            )
+            map_content, map_content_layout, self.map_page_layout = _step_scroll(
+                self.map_step_page, "featureMapScroll"
+            )
+            review_content, review_content_layout, self.review_page_layout = _step_scroll(
+                self.review_step_page, "featureReviewScroll"
+            )
+            self.form_content = self.workflow_tabs
+            self.workflow_tabs.addTab(self.body_step_page, "Body (1)")
+            self.workflow_tabs.addTab(self.map_step_page, "Map Features (2)")
+            self.workflow_tabs.addTab(self.review_step_page, "Review (3)")
+            outer.addWidget(self.workflow_tabs, 1)
+
+            body_group = QGroupBox("Body response and geometry", body_content)
             body_group.setObjectName("featureStepCard")
             body_form = QFormLayout(body_group)
             body_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -4465,9 +4494,10 @@ if GUI_AVAILABLE:
             self.body_preview_help.setWordWrap(True)
             self.body_preview_help.setObjectName("featureHint")
             body_form.addRow("", self.body_preview_help)
-            content_layout.addWidget(body_group)
+            body_content_layout.addWidget(body_group)
+            body_content_layout.addStretch(1)
 
-            feature_group = QGroupBox("2–3  Add placements and map responses", content)
+            feature_group = QGroupBox("Placements and feature responses", map_content)
             feature_group.setObjectName("featureStepCard")
             feature_layout = QVBoxLayout(feature_group)
             units_row = QHBoxLayout()
@@ -4707,9 +4737,10 @@ if GUI_AVAILABLE:
             )
             summary_row.addWidget(self.copy_spatial_selection_button)
             feature_layout.addLayout(summary_row)
-            content_layout.addWidget(feature_group)
+            map_content_layout.addWidget(feature_group)
+            map_content_layout.addStretch(1)
 
-            advanced = QWidget(content)
+            advanced = QWidget(review_content)
             advanced_form = QFormLayout(advanced)
             advanced_form.setContentsMargins(8, 8, 8, 8)
             advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -4792,14 +4823,14 @@ if GUI_AVAILABLE:
             advanced_form.addRow("", self.reset_qa_defaults_button)
             self.advanced_section = _DisclosureSection(
                 "Advanced placement checks · defaults active",
-                content,
+                review_content,
                 expanded=False,
             )
             self.advanced_section.addWidget(advanced)
             self.advanced_section.header.setToolTip(
                 "The displayed defaults remain active while this section is collapsed."
             )
-            content_layout.addWidget(self.advanced_section)
+            review_content_layout.addWidget(self.advanced_section)
 
             self.preview_help_label = QLabel(
                 "Preview Geometry is visual QA only. Validate Placements additionally "
@@ -4810,24 +4841,46 @@ if GUI_AVAILABLE:
                 "changes only the display. Spatial "
                 "Feature Configuration → Use controls which parsed instances enter "
                 "preview, validation, response loading, and build.",
-                content,
+                review_content,
             )
             self.preview_help_label.setWordWrap(True)
             self.preview_guide = _DisclosureSection(
-                "How to read the 3-D preview", content, expanded=False
+                "How to read the 3-D preview", review_content, expanded=False
             )
             self.preview_guide.addWidget(self.preview_help_label)
-            content_layout.addWidget(self.preview_guide)
+            review_content_layout.addWidget(self.preview_guide)
 
-            review_group = QGroupBox("4  Review and save", content)
+            review_group = QGroupBox("Readiness and output", review_content)
             review_group.setObjectName("featureStepCard")
             review_form = QFormLayout(review_group)
             review_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             review_form.addRow("Output response:", self.output_picker)
+            self.readiness_checklist = QTreeWidget(review_group)
+            self.readiness_checklist.setObjectName("featureReadinessChecklist")
+            self.readiness_checklist.setHeaderLabels(["Requirement", "Status"])
+            self.readiness_checklist.setRootIsDecorated(True)
+            self.readiness_checklist.setAlternatingRowColors(True)
+            self.readiness_checklist.setSelectionMode(
+                QAbstractItemView.SelectionMode.NoSelection
+            )
+            self.readiness_checklist.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.readiness_checklist.header().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.Stretch
+            )
+            self.readiness_checklist.header().setSectionResizeMode(
+                1, QHeaderView.ResizeMode.ResizeToContents
+            )
+            self.readiness_checklist.setMinimumHeight(245)
+            self.readiness_checklist.setToolTip(
+                "Updates immediately when an Assembly input, mapping, option, or "
+                "validation result changes. Every required row must be ready before "
+                "the final run is enabled."
+            )
+            review_form.addRow("Run checklist:", self.readiness_checklist)
             self.readiness_label = QLabel(review_group)
             self.readiness_label.setObjectName("featureReadiness")
             self.readiness_label.setWordWrap(True)
-            review_form.addRow("Ready check:", self.readiness_label)
+            self.readiness_label.setVisible(False)
             self.build_summary_label = QLabel(review_group)
             self.build_summary_label.setObjectName("featureBuildSummary")
             self.build_summary_label.setWordWrap(True)
@@ -4854,7 +4907,11 @@ if GUI_AVAILABLE:
             )
             self.model_scope_label.setWordWrap(True)
             self.model_scope_label.setObjectName("featureHint")
-            review_form.addRow("Physics scope:", self.model_scope_label)
+            self.model_scope_section = _DisclosureSection(
+                "Physics scope", review_group, expanded=False
+            )
+            self.model_scope_section.addWidget(self.model_scope_label)
+            review_form.addRow("", self.model_scope_section)
             self.validation_qa_label = QLabel(
                 "Run Validate placements to see a row for every enabled point "
                 "and line path.",
@@ -4917,10 +4974,7 @@ if GUI_AVAILABLE:
                 "same instance in Spatial Feature Configuration."
             )
             review_form.addRow("", self.validation_qa_table)
-            content_layout.addWidget(review_group)
-            content_layout.addStretch(1)
-            scroll.setWidget(content)
-            outer.addWidget(scroll, 1)
+            review_content_layout.addWidget(review_group)
 
             self.status_label = QLabel(
                 "No Assembly operation is running.",
@@ -4930,7 +4984,7 @@ if GUI_AVAILABLE:
             self.status_label.setWordWrap(True)
             self.status_label.setFrameShape(QFrame.Shape.StyledPanel)
             self.status_label.setMargin(6)
-            outer.addWidget(self.status_label)
+            self.review_page_layout.addWidget(self.status_label)
 
             operation_row = QHBoxLayout()
             self.operation_progress = QProgressBar(self)
@@ -4953,7 +5007,7 @@ if GUI_AVAILABLE:
             self.cancel_operation_button.setVisible(False)
             self.cancel_operation_button.setEnabled(False)
             operation_row.addWidget(self.cancel_operation_button)
-            outer.addLayout(operation_row)
+            self.review_page_layout.addLayout(operation_row)
 
             action_row = QHBoxLayout()
             self.input_preview_button = QPushButton("Preview geometry", self)
@@ -4975,7 +5029,14 @@ if GUI_AVAILABLE:
             action_row.addWidget(self.input_preview_button)
             action_row.addWidget(self.preview_button)
             action_row.addWidget(self.build_button)
-            outer.addLayout(action_row)
+            self.review_page_layout.addLayout(action_row)
+            review_content_layout.addStretch(1)
+            self._busy_form_widgets = (
+                body_group,
+                feature_group,
+                self.advanced_section,
+                review_group,
+            )
 
             self.status_changed.connect(self.status_label.setText)
             self.recipe_name_edit.textEdited.connect(self._recipe_metadata_changed)
@@ -5707,6 +5768,39 @@ if GUI_AVAILABLE:
             )
             return estimate
 
+        def _set_readiness_checklist(self, groups) -> None:
+            """Render the live, grouped run gate shown on the Review step."""
+
+            tree = self.readiness_checklist
+            tree.setUpdatesEnabled(False)
+            try:
+                tree.clear()
+                for group_label, requirements in groups:
+                    required_rows = [row for row in requirements if row[2]]
+                    group_ready = bool(required_rows) and all(
+                        bool(row[1]) for row in required_rows
+                    )
+                    group = QTreeWidgetItem(
+                        [
+                            str(group_label),
+                            "✓ Ready" if group_ready else "○ Action needed",
+                        ]
+                    )
+                    group.setData(0, Qt.ItemDataRole.UserRole, bool(group_ready))
+                    tree.addTopLevelItem(group)
+                    for label, ready, required in requirements:
+                        if not required:
+                            status = "— Not required"
+                        else:
+                            status = "✓ Ready" if ready else "○ Needed"
+                        child = QTreeWidgetItem([str(label), status])
+                        child.setData(0, Qt.ItemDataRole.UserRole, bool(ready))
+                        child.setData(1, Qt.ItemDataRole.UserRole, bool(required))
+                        group.addChild(child)
+                    group.setExpanded(True)
+            finally:
+                tree.setUpdatesEnabled(True)
+
         def _update_workflow_readiness(self) -> None:
             """Keep the compact step summary and actions honest and actionable."""
 
@@ -6139,6 +6233,66 @@ if GUI_AVAILABLE:
             self.readiness_label.setText(
                 "   ".join(("✓" if ok else "○") + " " + label for ok, label in checks)
             )
+            warnings_reviewed = bool(
+                not self._validation_warning_count
+                or self.validation_warning_ack.isChecked()
+            )
+            self._set_readiness_checklist(
+                (
+                    (
+                        "Body (1)",
+                        (
+                            ("GHOST feature backend", service_ready, True),
+                            ("Clean-body response", body_ready, True),
+                            (
+                                "Surface mesh",
+                                surface_ready,
+                                bool(surface_selected or surface_required),
+                            ),
+                            (
+                                "Surface mesh units",
+                                surface_units_ready,
+                                bool(surface_selected),
+                            ),
+                            (
+                                "Reviewed solve ↔ mesh binding",
+                                binding_status.ready,
+                                bool(binding_status.required),
+                            ),
+                        ),
+                    ),
+                    (
+                        "Map Features (2)",
+                        (
+                            ("Placement CSV selected", has_placements, True),
+                            ("Placement coordinate units", placement_units_ready, True),
+                            ("Placement CSV read", scans_current, True),
+                            ("At least one feature enabled", has_enabled_features, True),
+                            ("Every dataset_id mapped", mappings_complete, True),
+                            ("Mapped response files available", response_files_ready, True),
+                            ("Host material / coating IDs", host_material_ready, True),
+                        ),
+                    ),
+                    (
+                        "Review (3)",
+                        (
+                            ("Advanced settings valid", settings_ready, True),
+                            ("Output response selected", output_ready, True),
+                            ("Placements validated", validation_current, True),
+                            (
+                                "Body mesh certificate",
+                                validation_current,
+                                bool(certified_body_profile),
+                            ),
+                            (
+                                "Validation warnings reviewed",
+                                warnings_reviewed,
+                                bool(self._validation_warning_count),
+                            ),
+                        ),
+                    ),
+                )
+            )
 
             if not service_ready:
                 next_step = (
@@ -6226,10 +6380,6 @@ if GUI_AVAILABLE:
                         line_selected and existing_file(values.line_locations_csv),
                     )
                 )
-            )
-            warnings_reviewed = bool(
-                not self._validation_warning_count
-                or self.validation_warning_ack.isChecked()
             )
             self.scan_button.setEnabled(not busy and service_ready and has_placements)
             self.input_preview_button.setEnabled(
@@ -7042,7 +7192,10 @@ if GUI_AVAILABLE:
             )
 
         def _set_busy(self, busy: bool) -> None:
-            self.form_content.setEnabled(not busy)
+            # Keep step navigation, progress, and cooperative cancellation live
+            # while preventing edits that would invalidate the running plan.
+            for widget in self._busy_form_widgets:
+                widget.setEnabled(not busy)
             self.load_recipe_button.setEnabled(not busy)
             self.save_recipe_as_button.setEnabled(not busy)
             if busy:

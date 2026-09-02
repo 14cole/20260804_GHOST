@@ -648,36 +648,48 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertEqual(emitted, [("assembled", marker, "request-1")])
 
     def test_workspace_separates_placement_from_dataset_combination(self):
-        from PySide6.QtWidgets import QLabel
+        from PySide6.QtWidgets import QTabWidget, QVBoxLayout, QWidget
         from assembly_tree import AssemblyTreePanel
 
         panel = AssemblyTreePanel()
         workspace = AssemblyWorkspace(assembly_tree_panel=panel)
 
-        self.assertEqual(workspace.left_tabs.count(), 2)
-        self.assertEqual(workspace.left_tabs.tabText(0), "Place Features")
-        self.assertEqual(
-            workspace.left_tabs.tabText(1), "Datasets + Preview Layers"
-        )
-        self.assertIs(panel.parentWidget(), workspace.combine_visibility_tab)
+        self.assertIsNone(workspace.left_tabs)
+        self.assertIs(panel.parentWidget(), workspace.preview_layers_dialog)
         self.assertTrue(workspace.cmb_display_units.isEnabled())
         self.assertFalse(workspace.cmb_body_render.isEnabled())
         self.assertFalse(workspace.sld_body_opacity.isEnabled())
         self.assertFalse(workspace.cmb_triangle_detail.isEnabled())
         self.assertFalse(workspace.chk_interaction_lod.isEnabled())
 
-        controls = QLabel("feature controls")
+        controls = QWidget()
+        controls_layout = QVBoxLayout(controls)
+        controls.workflow_tabs = QTabWidget(controls)
+        controls.body_step_page = QWidget(controls.workflow_tabs)
+        controls.map_step_page = QWidget(controls.workflow_tabs)
+        controls.review_step_page = QWidget(controls.workflow_tabs)
+        controls.workflow_tabs.addTab(controls.body_step_page, "Body (1)")
+        controls.workflow_tabs.addTab(controls.map_step_page, "Map Features (2)")
+        controls.workflow_tabs.addTab(controls.review_step_page, "Review (3)")
+        controls_layout.addWidget(controls.workflow_tabs)
         workspace.set_feature_controls(controls)
+        self.assertEqual(
+            [
+                workspace.left_tabs.tabText(index)
+                for index in range(workspace.left_tabs.count())
+            ],
+            ["Body (1)", "Map Features (2)", "Review (3)"],
+        )
         self.assertIs(
-            workspace.left_tabs.currentWidget(), workspace.place_features_tab
+            workspace.left_tabs.currentWidget(), controls.body_step_page
         )
         self.assertFalse(workspace.feature_controls_host.isHidden())
         self.assertIs(controls.parentWidget(), workspace.feature_controls_host)
 
         workspace.btn_preview_layers.click()
-        self.assertIs(
-            workspace.left_tabs.currentWidget(), workspace.combine_visibility_tab
-        )
+        self.assertTrue(workspace.preview_layers_dialog.isVisible())
+        self.assertIs(workspace.left_tabs.currentWidget(), controls.body_step_page)
+        workspace.preview_layers_dialog.close()
 
     @staticmethod
     def _feature_plan():

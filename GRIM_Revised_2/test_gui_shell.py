@@ -612,11 +612,11 @@ class UnifiedGuiShellTest(unittest.TestCase):
         left_tabs = self.window.assembly_workspace.left_tabs
         self.assertEqual(
             [left_tabs.tabText(index) for index in range(left_tabs.count())],
-            ["Place Features", "Datasets + Preview Layers"],
+            ["Body (1)", "Map Features (2)", "Review (3)"],
         )
         self.assertIs(
             left_tabs.currentWidget(),
-            self.window.assembly_workspace.place_features_tab,
+            self.window.feature_assembly_panel.body_step_page,
         )
 
     def test_clear_rebuilds_one_full_plot_axis_and_limits_keep_small_values(self):

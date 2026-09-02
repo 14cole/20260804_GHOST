@@ -1676,6 +1676,40 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_three_step_tabs_and_review_checklist_track_body_file_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder) / "body.grim"
+            _write_minimal_base_grim(base, embedded_bor=True)
+            panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+            try:
+                self.assertEqual(
+                    [
+                        panel.workflow_tabs.tabText(index)
+                        for index in range(panel.workflow_tabs.count())
+                    ],
+                    ["Body (1)", "Map Features (2)", "Review (3)"],
+                )
+
+                def checklist_status(requirement):
+                    tree = panel.readiness_checklist
+                    for group_index in range(tree.topLevelItemCount()):
+                        group = tree.topLevelItem(group_index)
+                        for child_index in range(group.childCount()):
+                            child = group.child(child_index)
+                            if child.text(0) == requirement:
+                                return child.text(1)
+                    self.fail(f"missing checklist requirement {requirement!r}")
+
+                self.assertEqual(checklist_status("Clean-body response"), "○ Needed")
+                panel.base_picker.set_path(str(base))
+                panel._update_workflow_readiness()
+                self.assertEqual(checklist_status("Clean-body response"), "✓ Ready")
+                panel.base_picker.set_path("")
+                panel._update_workflow_readiness()
+                self.assertEqual(checklist_status("Clean-body response"), "○ Needed")
+            finally:
+                _close_panel_without_prompt(panel)
+
     def test_fresh_panel_requires_unit_choices_and_shows_interpreted_mesh_size(self):
         with tempfile.TemporaryDirectory() as folder:
             surface = Path(folder) / "vehicle.stl"
@@ -2435,6 +2469,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel._set_busy(True)
 
             self.assertFalse(panel.cancel_operation_button.isHidden())
+            self.assertTrue(panel.cancel_operation_button.isEnabled())
             self.assertEqual(
                 panel.cancel_operation_button.text(), "Cancel validation"
             )

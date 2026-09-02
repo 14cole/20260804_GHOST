@@ -36,6 +36,7 @@ try:  # Keep the pure scene model importable in headless/minimal environments.
     from PySide6.QtWidgets import (
         QCheckBox,
         QComboBox,
+        QDialog,
         QHBoxLayout,
         QLabel,
         QPushButton,
@@ -1855,8 +1856,8 @@ if GUI_AVAILABLE:
             )
             self.btn_preview_layers = QPushButton("Preview layers")
             self.btn_preview_layers.setToolTip(
-                "Open the dataset tree, where Show boxes control body, point, "
-                "line, and frame visibility without changing the RCS build."
+                "Open advanced whole-dataset combination and preview visibility "
+                "without interrupting the three-step feature workflow."
             )
             self.lbl_legend = QLabel(self._legend_html("#94a3b8"))
             self.lbl_status = QLabel(
@@ -1984,37 +1985,36 @@ if GUI_AVAILABLE:
             left_layout.setContentsMargins(0, 0, 0, 0)
             left_layout.setSpacing(6)
 
-            self.left_tabs = QTabWidget(left_host)
-            self.place_features_tab = QWidget(self.left_tabs)
-            place_layout = QVBoxLayout(self.place_features_tab)
-            place_layout.setContentsMargins(8, 8, 8, 8)
-            place_layout.setSpacing(6)
-            self.feature_controls_host = QWidget(self.place_features_tab)
+            self.feature_controls_host = QWidget(left_host)
             self.feature_controls_layout = QVBoxLayout(self.feature_controls_host)
             self.feature_controls_layout.setContentsMargins(0, 0, 0, 0)
             self.feature_controls_host.setVisible(False)
-            place_layout.addWidget(self.feature_controls_host, 1)
+            left_layout.addWidget(self.feature_controls_host, 1)
 
-            self.combine_visibility_tab = QWidget(self.left_tabs)
-            combine_layout = QVBoxLayout(self.combine_visibility_tab)
+            # Feature Assembly owns the visible Body / Map Features / Review
+            # tabs. Keep advanced whole-response arithmetic available from the
+            # toolbar without competing with that primary workflow.
+            self.preview_layers_dialog = QDialog(self)
+            self.preview_layers_dialog.setWindowTitle(
+                "Datasets and Preview Layers"
+            )
+            self.preview_layers_dialog.setModal(False)
+            self.preview_layers_dialog.resize(720, 760)
+            combine_layout = QVBoxLayout(self.preview_layers_dialog)
             combine_layout.setContentsMargins(8, 8, 8, 8)
             combine_layout.setSpacing(6)
             combine_help = QLabel(
-                "Combine Datasets adds or subtracts whole GRIM responses. It is "
-                "separate from placing point and line features. Use controls "
-                "which response branches Build Platform includes; Show controls "
-                "only the 3-D preview. Duplicate a branch to make an independent "
-                "trade-study variant without deleting the baseline."
+                "Advanced: combine complete GRIM responses or change which layers "
+                "are visible in the 3-D preview. This does not replace the Body, "
+                "Map Features, and Review workflow.",
+                self.preview_layers_dialog,
             )
             combine_help.setWordWrap(True)
             combine_layout.addWidget(combine_help)
             combine_layout.addWidget(self.assembly_tree_panel, 1)
-
-            self.left_tabs.addTab(self.place_features_tab, "Place Features")
-            self.left_tabs.addTab(
-                self.combine_visibility_tab, "Datasets + Preview Layers"
-            )
-            left_layout.addWidget(self.left_tabs, 1)
+            self.combine_visibility_tab = self.preview_layers_dialog
+            self.left_tabs = None
+            self.place_features_tab = None
             splitter.addWidget(left_host)
 
             viewer = QWidget(self)
@@ -2036,11 +2036,7 @@ if GUI_AVAILABLE:
             self._opacity_timer.setInterval(120)
             self._opacity_timer.timeout.connect(self._apply_body_rendering)
             self.btn_fit_visible.clicked.connect(self.scene_canvas.fit_visible)
-            self.btn_preview_layers.clicked.connect(
-                lambda _checked=False: self.left_tabs.setCurrentWidget(
-                    self.combine_visibility_tab
-                )
-            )
+            self.btn_preview_layers.clicked.connect(self._show_preview_layers)
             self.cmb_display_units.currentIndexChanged.connect(
                 self._apply_display_units
             )
@@ -2805,6 +2801,13 @@ if GUI_AVAILABLE:
         def fit_visible(self) -> None:
             self.scene_canvas.fit_visible()
 
+        def _show_preview_layers(self, _checked: bool = False) -> None:
+            """Show the secondary dataset/layer editor without changing steps."""
+
+            self.preview_layers_dialog.show()
+            self.preview_layers_dialog.raise_()
+            self.preview_layers_dialog.activateWindow()
+
         def set_feature_service(
             self,
             service: FeatureBuildService | Callable[[object], Any] | None,
@@ -2814,7 +2817,7 @@ if GUI_AVAILABLE:
             self._feature_service = service
 
         def set_feature_controls(self, widget: QWidget | None) -> None:
-            """Install or clear a controller-owned point/line setup widget."""
+            """Install or clear the controller-owned three-step feature workflow."""
 
             while self.feature_controls_layout.count():
                 entry = self.feature_controls_layout.takeAt(0)
@@ -2823,10 +2826,15 @@ if GUI_AVAILABLE:
                     old_widget.setParent(None)
             if widget is None:
                 self.feature_controls_host.setVisible(False)
+                self.left_tabs = None
+                self.place_features_tab = None
                 return
             self.feature_controls_layout.addWidget(widget)
             self.feature_controls_host.setVisible(True)
-            self.left_tabs.setCurrentWidget(self.place_features_tab)
+            self.left_tabs = getattr(widget, "workflow_tabs", None)
+            self.place_features_tab = getattr(widget, "body_step_page", None)
+            if self.left_tabs is not None and self.place_features_tab is not None:
+                self.left_tabs.setCurrentWidget(self.place_features_tab)
 
         @staticmethod
         def _normalize_feature_result(value: Any) -> FeatureBuildResult:

@@ -2669,7 +2669,7 @@ class AssemblyTreePanel(QWidget):
             return
         if _is_preview_item(item):
             self._notify(
-                "Feature preview nodes are regenerated from Place Features and "
+                "Feature preview nodes are regenerated from Map Features (2) and "
                 "cannot be duplicated here. Duplicate a response branch instead."
             )
             return

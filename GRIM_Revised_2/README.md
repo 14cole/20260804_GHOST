@@ -312,10 +312,14 @@ collapse onto the same wrapped coordinate.
 
 ## Assembly
 
-Assembly keeps spatial feature placement under **Place Features** and
-whole-response arithmetic under **Datasets + Preview Layers**, so a point
-or line coupon cannot be confused with a complete platform response. The 3-D
-view remains visible beside both workflows and uses the vehicle CAD frame:
+Assembly presents spatial feature placement as three focused tabs:
+**Body (1)**, **Map Features (2)**, and **Review (3)**. Review contains the
+live run checklist, output, placement QA, validation, and final assembly action;
+the checklist updates whenever an input, mapping, option, or validation result
+changes. Whole-response arithmetic and display visibility remain available from
+the **Preview layers** button as an advanced secondary window, so a point or
+line coupon cannot be confused with a complete platform response. The 3-D
+view remains visible beside the workflow and uses the vehicle CAD frame:
 `+x` right, `+y` nose, and `+z` up.
 
 The feature form uses the exact strict CSV contracts used by GHOST's local and
@@ -378,7 +382,8 @@ Warnings remain prominent rather than disappearing into the log. Mesh QA also
 reports open edges, nonmanifold edges, duplicate facets, and inconsistent
 winding; these are warnings because an intentionally open skin can still be a
 valid placement surface, but they deserve review before enabling shadowing.
-**Assemble validated & save** is locked until the exact current configuration
+On **Review (3)**, **Assemble validated & save** is locked until every required
+checklist row is ready and the exact current configuration
 has completed Validate placements. It never performs an unreviewed validation
 on the way to publication. If validation returns applicability or compatibility
 warnings, the operator must review them and apply the one-validation warning

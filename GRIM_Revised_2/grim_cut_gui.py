@@ -359,7 +359,8 @@ def build_qss(palette: Mapping[str, object]) -> str:
         border-radius: 4px; padding: 2px 6px; font-family: "Consolas","Courier New",monospace; font-size: 11px;
     }}
     QScrollArea#controlDock {{ background: {palette['win_bg']}; border: none; }}
-    QScrollArea#featureAssemblyScroll {{ background: {palette['panel_bg']}; border: none; }}
+    QScrollArea#featureBodyScroll, QScrollArea#featureMapScroll,
+    QScrollArea#featureReviewScroll {{ background: {palette['panel_bg']}; border: none; }}
     QScrollArea#plotSettingsScroll {{ background: {palette['panel_bg']}; border: none; }}
     QScrollArea#runsControlsScroll, QScrollArea#pptControlsScroll {{
         background: {palette['panel_bg']}; border: none;
@@ -382,7 +383,8 @@ def build_qss(palette: Mapping[str, object]) -> str:
     }}
     QGroupBox#featureStepCard QLabel, QGroupBox#featureStepCard QLineEdit,
     QGroupBox#featureStepCard QComboBox, QGroupBox#featureStepCard QCheckBox,
-    QGroupBox#featureStepCard QPushButton, QGroupBox#featureStepCard QTableWidget {{
+    QGroupBox#featureStepCard QPushButton, QGroupBox#featureStepCard QTableWidget,
+    QGroupBox#featureStepCard QTreeWidget {{
         font-weight: 400;
     }}
     QLabel#featureHint, QLabel#featureCsvSummary {{ color: {palette['muted']}; padding: 1px 2px; }}
@@ -396,6 +398,10 @@ def build_qss(palette: Mapping[str, object]) -> str:
     }}
     QLabel#featureReadiness {{
         font-family: "Consolas","Courier New",monospace; padding: 4px 1px;
+    }}
+    QTreeWidget#featureReadinessChecklist {{
+        background: {palette['panel_bg']}; border: 1px solid {palette['border']};
+        border-radius: 5px;
     }}
     QLabel#featureAssemblyStatus {{
         background: {palette['head_bg']}; border: 1px solid {palette['border']};
