@@ -107,7 +107,18 @@ GHz or degree/radian storage; GRIM converts selections and labels without
 changing their files. Conic and great-circle charts, different great-circle
 frames, different physical quantities (`sigma_3d`, `sigma_2d`, or ratio), and
 different logarithmic conventions cannot be overlaid as though they were the
-same ordinate. RF Compare uses one explicit selected azimuth, elevation, or
+same ordinate. To correct a file-format coordinate assumption, select the
+datasets and use **Geometry & Units → Set Coordinates** (also on the dataset
+right-click menu). Choose **Azimuth / Elevation (Conic)** or **Aspect / Pitch
+(Great Circle)**. The action creates and selects copies for plotting, preserving
+all angle values, sample order, power, and phase. For example, select matching
+PIO and PTM data and choose Azimuth / Elevation to overlay both as elevation
+cuts. The declaration supports nonzero cuts and every polarization; it performs
+no geometric conversion. Great-circle declarations include convention and
+roll/tilt fields. Save the corrected copies as `.grim` to retain the choice.
+The Python recorder uses `grid.set_angular_coordinate_system(...)` for replay.
+
+RF Compare uses one explicit selected azimuth, elevation, or
 frequency sector per dataset and matches coordinates one-to-one. Its 0–100 RF
 Agreement Index replaces Pearson correlation with agreement measures for strong
 returns, the full pattern, normalized power error, and local-sector agreement.
@@ -705,8 +716,10 @@ named CREATE-RF SENTRi entry point. It strictly recognizes the two schemas in
 the team's `READ_SENTRi.m`: compact MHz `pp/tt/pt/tp` columns and descriptive
 Hz `PhiScat/ThetaScat` columns. SENTRi is not treated as CST. Its mapping is
 native `elevation=Theta`, and GRIM stores the reported coherent phase with its
-original sign. Closed 0°/360° and -180°/+180° sweeps are deduplicated at their
-canonical seam azimuth, with the source 360° or +180° closing record taking
+original sign. Phi sweeps contained within 0°–180° retain the positive 180°
+endpoint, so a 0°–180° import stays in that order in the GUI. Other sweeps use
+the signed [-180°, 180°) interval. Closed 0°/360° and -180°/+180° sweeps are
+deduplicated at their canonical seam azimuth, with the source 360° or +180° closing record taking
 precedence regardless of row order. The four channels map to `VV=tt`, `HV=pt`,
 `VH=tp`, and `HH=pp`. Generic unitless theta/phi tables are not guessed to be
 SENTRi. The normal two-row export—parameter names followed by an explicit
@@ -760,8 +773,10 @@ elevation/polarization slice. Use **Export as → PTM (.ptm)…** from the datas
 context menu. The interpreted legacy framing requires a 3-D `sigma_3d` field,
 phase, a uniform aspect axis, a positive strictly increasing uniform frequency
 axis, at least 37 frequency samples,
-and a documented `VV`, `HH`, `VH`, or `HV` polarization. PTM is a great-circle
-cut format. A grid already tagged great-circle may carry any of those four
+and a documented `VV`, `HH`, `VH`, or `HV` polarization. PTM import assumes a
+great-circle cut; **Set Coordinates** overrides this assumption when the user
+knows the file contains azimuth/elevation data. A grid already tagged
+great-circle may carry any of those four
 polarizations. Direct export of conic data is limited to unrotated VV/HH at
 zero elevation, where GRIM defines signed GC aspect equal to conic azimuth;
 conic VH/HV remains rejected because an external PTM's H/V signs are not

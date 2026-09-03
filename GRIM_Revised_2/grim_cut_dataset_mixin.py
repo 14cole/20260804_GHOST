@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QObject, QThread, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -47,6 +47,8 @@ from PySide6.QtWidgets import (
 
 from grim_dataset import (
     C0,
+    GRIM_GC_CONVENTION,
+    LEGACY_PTM_GC_CONVENTION,
     RcsGrid,
     canonical_angular_coordinate_system,
     wedge_to_conic_geometry_deg,
@@ -1564,6 +1566,69 @@ class ExtrusionLengthDialog(QDialog):
 
     def display_text(self) -> str:
         return f"{float(self._spin.value()):g} {self._combo.currentText()}"
+
+
+class CoordinateSystemDialog(QDialog):
+    """Let the user correct an imported coordinate interpretation."""
+
+    def __init__(self, reference: RcsGrid, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Set Coordinates")
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Choose what the stored angles represent, regardless of file format. "
+            "Creates selected copies with unchanged angle values, sample order, "
+            "power, and phase. This does not perform a coordinate conversion."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self._system = QComboBox()
+        self._system.addItem("Azimuth / Elevation (Conic)", "conic")
+        self._system.addItem("Aspect / Pitch (Great Circle)", "great_circle")
+        self._system.setCurrentIndex(
+            max(0, self._system.findData(reference.angular_coordinate_system()))
+        )
+        layout.addWidget(self._system)
+        self._gc_options = QGroupBox("Great-circle frame")
+        frame_layout = QGridLayout(self._gc_options)
+        self._convention = QComboBox()
+        self._convention.addItem("PTM / unspecified", LEGACY_PTM_GC_CONVENTION)
+        self._convention.addItem("GRIM convention", GRIM_GC_CONVENTION)
+        self._convention.setCurrentIndex(max(
+            0, self._convention.findData(reference.great_circle_coordinate_convention())
+        ))
+        frame_layout.addWidget(QLabel("Convention"), 0, 0)
+        frame_layout.addWidget(self._convention, 0, 1)
+        roll, tilt = reference.angular_frame_orientation_deg()
+        self._roll, self._tilt = QDoubleSpinBox(), QDoubleSpinBox()
+        for row, label, spin, value in (
+            (1, "Roll (deg)", self._roll, roll),
+            (2, "Tilt (deg)", self._tilt, tilt),
+        ):
+            spin.setRange(-360.0, 360.0)
+            spin.setDecimals(6)
+            spin.setValue(value)
+            frame_layout.addWidget(QLabel(label), row, 0)
+            frame_layout.addWidget(spin, row, 1)
+        layout.addWidget(self._gc_options)
+        self._system.currentIndexChanged.connect(self._update_frame_options)
+        self._update_frame_options()
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_frame_options(self, *_args) -> None:
+        self._gc_options.setVisible(self._system.currentData() == "great_circle")
+
+    def get_params(self) -> dict:
+        params = {"coordinate_system": self._system.currentData()}
+        if params["coordinate_system"] == "great_circle":
+            params.update(
+                gc_convention=self._convention.currentData(),
+                roll_deg=self._roll.value(), tilt_deg=self._tilt.value(),
+            )
+        return params
 
 
 class ConicGCDialog(QDialog):
@@ -4966,6 +5031,7 @@ class DatasetOpsMixin:
         action_export_pio = export_menu.addAction("Pioneer (.pio)…")
         action_export_ptm = export_menu.addAction("PTM (.ptm)…")
         action_export_csv = export_menu.addAction("CSV…")
+        action_coordinates = menu.addAction("Set Coordinates…")
         action_delete = menu.addAction("Delete")
         menu.addSeparator()
         action_color = menu.addAction("Text Color…")
@@ -4979,6 +5045,8 @@ class DatasetOpsMixin:
             self._export_ptm_selected()
         elif action == action_export_csv:
             self._export_csv_selected()
+        elif action == action_coordinates:
+            self._set_coordinates_selected()
         elif action == action_delete:
             self._delete_selected_datasets()
         elif action == action_color:
@@ -6074,6 +6142,61 @@ class DatasetOpsMixin:
             operation,
             publish,
             start_message=f"Converting {len(datasets)} dataset(s) to dBsm...",
+        )
+
+    def _set_coordinates_selected(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select one or more datasets to set their coordinates.",
+        )
+        if datasets is None:
+            return
+        reference = next(
+            (grid for _name, grid in datasets if grid is self.active_dataset),
+            datasets[0][1],
+        )
+        dialog = CoordinateSystemDialog(reference, parent=self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        params = dialog.get_params()
+        label = "Az/El" if params["coordinate_system"] == "conic" else "Aspect/Pitch"
+        references = [self._python_reference_for_dataset(grid) for _name, grid in datasets]
+
+        def operation(_index, _name, dataset):
+            return dataset.set_angular_coordinate_system(**params)
+
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            new_rows = []
+            for source_index, name, result in results:
+                output_name = f"{name} [{label}]"
+                new_rows.append(self.table.rowCount())
+                output_id = self._add_dataset_row(result, output_name, "", file_name="")
+                if recorder is not None and references[source_index] is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        references[source_index], "set_angular_coordinate_system",
+                        kwargs=params, comment=f"Declare {label} coordinates for {name}",
+                    )
+            if new_rows:
+                selection = self.table.selectionModel()
+                self.table.clearSelection()
+                for row in new_rows:
+                    selection.select(
+                        self.table.model().index(row, 0),
+                        QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                    )
+                selection.setCurrentIndex(
+                    self.table.model().index(new_rows[0], 0), QItemSelectionModel.NoUpdate
+                )
+            message = f"Set Coordinates created and selected {len(results)} {label} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "Set Coordinates", datasets, operation, publish,
+            start_message=f"Setting coordinates for {len(datasets)} dataset(s)...",
         )
 
     def _convert_conic_gc_selected(self) -> None:

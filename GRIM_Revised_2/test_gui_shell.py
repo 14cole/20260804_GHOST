@@ -971,6 +971,64 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertNotIn("assumptions_attested", recorded)
         self.assertIn("target_label='Vehicle on support'", recorded)
 
+    def test_set_coordinates_selects_matching_copies_and_updates_gui_labels(self) -> None:
+        from plot_modes.common import validate_plot_datasets
+
+        source = _grid()
+        source.elevations[:] = 7.5
+        ptm = source.set_angular_coordinate_system("great_circle")
+        self.window._add_dataset_row(source, "PIO", "", "same.pio")
+        self.window._add_dataset_row(ptm, "PTM", "", "same.ptm")
+        self.window.table.selectAll()
+        with mock.patch.object(grim_cut_dataset_mixin, "CoordinateSystemDialog") as dialog:
+            dialog.return_value.exec.return_value = QDialog.Accepted
+            dialog.return_value.get_params.return_value = {"coordinate_system": "conic"}
+            self.window.btn_set_coordinates.click()
+        self._wait_for_background()
+
+        self.assertEqual(self.window.table.rowCount(), 4)
+        self.assertEqual(
+            sorted(index.row() for index in self.window.table.selectionModel().selectedRows()),
+            [2, 3],
+        )
+        self.assertEqual(self.window.lbl_az.text(), "Azimuth (deg)")
+        self.assertEqual(self.window.lbl_elev.text(), "Elevation (deg)")
+        validate_plot_datasets(self.window._selected_datasets(), phase=False, linear=False)
+        self.assertIn(
+            "set_angular_coordinate_system(coordinate_system='conic')",
+            self.window.python_recorder.script,
+        )
+        for row in (2, 3):
+            result = self.window.table.item(row, 0).data(Qt.UserRole)
+            np.testing.assert_array_equal(result.elevations, source.elevations)
+            np.testing.assert_array_equal(result.rcs_power, source.rcs_power)
+        self.assertEqual(
+            self.window.table.item(1, 0).data(Qt.UserRole).angular_coordinate_system(),
+            "great_circle",
+        )
+
+    def test_set_coordinates_cancel_keeps_original_rows(self) -> None:
+        self.window._add_dataset_row(_grid(), "PIO", "", "same.pio")
+        self.window.table.selectRow(0)
+        with mock.patch.object(grim_cut_dataset_mixin, "CoordinateSystemDialog") as dialog:
+            dialog.return_value.exec.return_value = QDialog.Rejected
+            self.window.btn_set_coordinates.click()
+        self.assertEqual(self.window.table.rowCount(), 1)
+        self.assertFalse(self.window._background_job_active())
+
+    def test_coordinate_dialog_exposes_both_interpretations(self) -> None:
+        source = _grid().set_angular_coordinate_system(
+            "great_circle", roll_deg=1.25, tilt_deg=-2.5
+        )
+        dialog = grim_cut_dataset_mixin.CoordinateSystemDialog(source)
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual(dialog.get_params()["coordinate_system"], "great_circle")
+        self.assertEqual(dialog.get_params()["roll_deg"], 1.25)
+        self.assertEqual(dialog.get_params()["tilt_deg"], -2.5)
+        dialog._system.setCurrentIndex(dialog._system.findData("conic"))
+        self.assertEqual(dialog.get_params(), {"coordinate_system": "conic"})
+        self.assertTrue(dialog._gc_options.isHidden())
+
     def test_sentri_elevation_button_is_explicit_and_converts_selected_data(self) -> None:
         self.assertEqual(self.window.btn_sentri_elevation.text(), "SENTRi El→GRIM")
         tooltip = self.window.btn_sentri_elevation.toolTip()
@@ -1206,6 +1264,32 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertEqual(
             self.window.table.item(0, 1).toolTip(), container
         )
+
+    def test_sentri_positive_half_sweep_is_displayed_in_source_range(self) -> None:
+        from grim_headless import load_dataset
+        from test_sentri_io import COMPACT_HEADER, COMPACT_UNITS
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "sentri_half_sweep.csv"
+            path.write_text(
+                COMPACT_HEADER + "\n" + COMPACT_UNITS + "\n"
+                + "\n".join(
+                    f"1000,90,{phi},0,0,0,0,0,0,0,0" for phi in range(181)
+                ) + "\n",
+                encoding="utf-8",
+            )
+            dataset = load_dataset(str(path))
+            self.window._add_dataset_row(
+                dataset, "SENTRi half sweep", dataset.history, str(path)
+            )
+            self.window.table.selectRow(0)
+            self.app.processEvents()
+
+            displayed = [
+                float(self.window.list_az.item(index).text())
+                for index in range(self.window.list_az.count())
+            ]
+            self.assertEqual(displayed, list(range(181)))
 
     def test_parameter_headers_follow_units_and_axes_are_editable(self) -> None:
         dataset = _grid()

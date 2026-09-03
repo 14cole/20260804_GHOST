@@ -175,6 +175,63 @@ class SentriReaderTest(unittest.TestCase):
         grid = load_dataset(path)
         np.testing.assert_allclose(grid.azimuths, [90.0])
 
+    def test_positive_half_sweep_keeps_180_and_sample_alignment(self) -> None:
+        azimuths = np.arange(181, dtype=float)
+        for header, units, frequency in (
+            (COMPACT_HEADER, COMPACT_UNITS, 1000),
+            (DESCRIPTIVE_HEADER, DESCRIPTIVE_UNITS, 1000000000),
+        ):
+            for descending in (False, True):
+                with self.subTest(header=header, descending=descending):
+                    angles = azimuths[::-1] if descending else azimuths
+                    rows = [
+                        f"{frequency},90,{phi:g},"
+                        f"{phi / 100},0,0,{phi:g},-10,10,-20,20"
+                        for phi in angles
+                    ]
+                    path = self._write(
+                        ".csv", header + "\n" + units + "\n"
+                        + "\n".join(rows) + "\n"
+                    )
+                    grid = load_dataset(path)
+
+                    np.testing.assert_array_equal(grid.azimuths, azimuths)
+                    np.testing.assert_allclose(
+                        grid.rcs_power[:, 0, 0, 3], 10.0 ** (azimuths / 1000)
+                    )
+                    np.testing.assert_allclose(
+                        grid.rcs_phase[:, 0, 0, 0], np.deg2rad(azimuths)
+                    )
+                    self.assertIn("phi retained in [0, 180]", grid.history)
+
+    def test_positive_half_sweep_normalizes_endpoint_roundoff(self) -> None:
+        for phi in (179.9999999995, 180.0, 180.0000000005):
+            with self.subTest(phi=phi):
+                path = self._write(
+                    ".csv", COMPACT_HEADER
+                    + "\n1000,90,-0.0000000005,0,0,0,0,0,0,0,0"
+                    + f"\n1000,90,{phi:.10f},1,0,0,0,0,0,0,0\n"
+                )
+                grid = RcsGrid.read_SENTRi(path)
+                np.testing.assert_array_equal(grid.azimuths, [0.0, 180.0])
+                np.testing.assert_allclose(
+                    grid.rcs_power[:, 0, 0, 3], [1.0, 10.0 ** 0.1]
+                )
+
+    def test_sweeps_outside_positive_half_keep_signed_wrapping(self) -> None:
+        for source, expected in (
+            ([-180, -90, 0, 90, 180], [-180, -90, 0, 90]),
+            ([0, 90, 180, 270, 360], [-180, -90, 0, 90]),
+            ([-1, 0, 180], [-180, -1, 0]),
+        ):
+            with self.subTest(source=source):
+                rows = [f"1000,90,{phi},0,0,0,0,0,0,0,0" for phi in source]
+                path = self._write(
+                    ".csv", COMPACT_HEADER + "\n" + "\n".join(rows) + "\n"
+                )
+                grid = RcsGrid.read_SENTRi(path)
+                np.testing.assert_array_equal(grid.azimuths, expected)
+
     def test_signed_seam_always_uses_positive_180_degree_record(self) -> None:
         row = "1000,90,{phi},0,0,0,0,0,0,0,0"
         matching = self._write(

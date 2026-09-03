@@ -256,20 +256,30 @@ def validate_plot_datasets(named_datasets, *, phase: bool, linear: bool) -> None
         details = ", ".join(
             f"{name}={dataset.angular_coordinate_system()}" for name, dataset in named_datasets
         )
-        raise ValueError(f"mixed angular coordinate systems cannot share a plot ({details})")
+        raise ValueError(
+            f"mixed angular coordinate systems cannot share a plot ({details}). "
+            "If the files contain the same coordinate system, select them and use "
+            "Geometry & Units > Set Coordinates to correct the import interpretation."
+        )
 
     if next(iter(coordinate_systems)) == "great_circle":
         conventions = {
             dataset.great_circle_coordinate_convention() for _, dataset in named_datasets
         }
         if len(conventions) != 1:
-            raise ValueError("great-circle datasets use different aspect/pitch conventions")
+            raise ValueError(
+                "great-circle datasets use different aspect/pitch conventions. "
+                "Use Geometry & Units > Set Coordinates to declare their convention."
+            )
         orientations = [dataset.angular_frame_orientation_deg() for _, dataset in named_datasets]
         if any(
             not np.allclose(orientations[0], orientation, rtol=0.0, atol=1.0e-7)
             for orientation in orientations[1:]
         ):
-            raise ValueError("great-circle datasets use different roll/tilt frames")
+            raise ValueError(
+                "great-circle datasets use different roll/tilt frames. "
+                "Use Geometry & Units > Set Coordinates to declare their frame."
+            )
 
     # Linear plots already share the same modeled physical quantity. In a dB
     # plot, also require a common log convention so dB, dBsm, and dBke are not

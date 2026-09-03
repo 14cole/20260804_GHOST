@@ -1076,6 +1076,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "target or remove target/support interaction terms."
         )
         _ops_pad("Geometry & Units", (
+            ("Set Coordinates", "btn_set_coordinates"),
             ("El→Az360", "btn_el_to_az360"),
             ("Swap El/Az", "btn_swap_el_az"),
             ("SENTRi El→GRIM", "btn_sentri_elevation"),
@@ -1084,6 +1085,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Conic ↔ GC (0°)", "btn_conic_gc"),
             ("Wedge → Conic", "btn_wedge_to_conic"),
         ))
+        self.btn_set_coordinates.setToolTip(
+            "Declare selected datasets as Azimuth/Elevation or Aspect/Pitch, "
+            "regardless of file format. Creates selected copies with unchanged "
+            "numeric axes, power, and phase; no coordinate conversion."
+        )
         self.btn_sentri_elevation.setToolTip(
             "Convert selected native SENTRi polar Theta to GRIM signed "
             "elevation: elevation = 90° - Theta (0° waterline, +90° "
@@ -1550,6 +1556,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_duplicate.clicked.connect(self._duplicate_selected)
         self.btn_el_to_az360.clicked.connect(self._elevation_to_azimuth_360_selected)
         self.btn_swap_el_az.clicked.connect(self._swap_elevation_azimuth_selected)
+        self.btn_set_coordinates.clicked.connect(self._set_coordinates_selected)
         self.btn_sentri_elevation.clicked.connect(
             self._convert_sentri_elevation_selected
         )

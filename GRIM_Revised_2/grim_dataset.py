@@ -2560,6 +2560,83 @@ class RcsGrid:
             values.append(value)
         return tuple(values)
 
+    def set_angular_coordinate_system(
+        self, coordinate_system, *,
+        gc_convention=LEGACY_PTM_GC_CONVENTION, roll_deg=0.0, tilt_deg=0.0,
+    ):
+        """Declare the meaning of existing angles and return an independent copy.
+
+        This explicitly overrides import assumptions; it is not a geometric
+        conversion. Numeric axes, sample order, polarizations, power, and phase
+        are preserved exactly, including nonzero cuts and cross-polar channels.
+        Great-circle declarations also specify their convention and frame.
+        """
+        target = canonical_angular_coordinate_system(coordinate_system)
+        if not str(coordinate_system or "").strip() or target not in {
+            "conic", "great_circle"
+        }:
+            raise ValueError("coordinate_system must be conic or great_circle")
+        if target == "great_circle":
+            gc_convention = str(gc_convention).strip().lower()
+            if gc_convention not in {LEGACY_PTM_GC_CONVENTION, GRIM_GC_CONVENTION}:
+                raise ValueError("unsupported great-circle convention")
+            roll_deg, tilt_deg = float(roll_deg), float(tilt_deg)
+            if not np.isfinite([roll_deg, tilt_deg]).all():
+                raise ValueError("great-circle roll and tilt must be finite")
+
+        source_system = self.angular_coordinate_system()
+        declaration = {
+            "schema": "grim.angular-coordinate-declaration.v1",
+            "source_system": source_system,
+            "source_gc_convention": (
+                self.great_circle_coordinate_convention()
+                if source_system == "great_circle" else None
+            ),
+            "source_orientation_deg": self.angular_frame_orientation_deg(),
+            "target_system": target,
+            "numeric_data_changed": False,
+        }
+        # A pure declaration must not reclean arrays, wrap phase, or reorder
+        # coordinates through the constructor. Own the copied arrays so later
+        # edits cannot mutate the imported source.
+        result = copy.deepcopy(self)
+        for container in (result.units, result.extra):
+            for key in (
+                "great_circle_coordinate_convention", "angular_roll_deg",
+                "angular_tilt_deg", "ptm_roll", "ptm_tilt", "ptm_cut_type",
+                "ptm_cut_type_source", "elevation_coordinate_convention",
+                "sentri_elevation_convention", "sentri_coordinate_mapping",
+                "assembly_angular_coordinate_contract",
+            ):
+                container.pop(key, None)
+            container["angular_coordinate_system"] = target
+        if target == "great_circle":
+            for container in (result.units, result.extra):
+                container["great_circle_coordinate_convention"] = gc_convention
+            result.units.update(angular_roll_deg=roll_deg, angular_tilt_deg=tilt_deg)
+            declaration.update(
+                gc_convention=gc_convention, roll_deg=roll_deg, tilt_deg=tilt_deg
+            )
+        for key in (
+            "solver_metadata_json", "production_mesh_certification_json",
+            "source_body_mesh_certification_json",
+        ):
+            result.extra.pop(key, None)
+        self._invalidate_assembly_sampling_hash(result.extra, "set-angular-coordinates")
+        result.extra["angular_coordinate_declaration_json"] = json.dumps(
+            declaration, sort_keys=True, separators=(",", ":")
+        )
+        label = "azimuth/elevation (conic)" if target == "conic" else (
+            f"aspect/pitch (great_circle; {gc_convention}; "
+            f"roll={roll_deg:g}, tilt={tilt_deg:g} deg)"
+        )
+        entry = (
+            f"User declared coordinates: {source_system} -> {label}; "
+            "numeric axes and samples unchanged; no coordinate conversion"
+        )
+        result.history = f"{self.history}\n{entry}" if self.history else entry
+        return result
+
     def great_circle_coordinate_convention(self):
         """Return the declared great-circle chart/basis convention.
 
@@ -5379,6 +5456,7 @@ class RcsGrid:
     })
     _COORDINATE_LINEAGE_EXTRA_KEYS = frozenset({
         "source_format",
+        "angular_coordinate_declaration_json",
         "angular_coordinate_system",
         "great_circle_coordinate_convention",
         "elevation_coordinate_convention",
@@ -9547,7 +9625,9 @@ class RcsGrid:
         SENTRi's reported polar ``Theta`` is stored unchanged so importing a
         file never silently changes its geometry.  The explicit
         :meth:`convert_sentri_elevation_to_grim` operation maps that native
-        top-down convention to GRIM elevation when requested.  Reported
+        top-down convention to GRIM elevation when requested.  Phi sweeps
+        contained in [0, 180] retain their positive endpoint; other sweeps
+        use the signed [-180, 180) azimuth interval.  Reported
         E-field phase is stored with its original sign, so each sample is
         reconstructed as
         ``10**(dBsm/20) * exp(+1j*deg2rad(phase_deg))``.  These format-specific
@@ -9736,6 +9816,7 @@ class RcsGrid:
         seen_source = {}
         used_zero_360_precedence = False
         used_signed_180_precedence = False
+        positive_half_sweep = True
         for row_idx, row in enumerate(
             rows[data_start_idx:], start=data_start_idx + 1
         ):
@@ -9772,6 +9853,9 @@ class RcsGrid:
                 raw_phi_deg = -180.0
             elif abs(raw_phi_deg - 180.0) <= coordinate_tolerance:
                 raw_phi_deg = 180.0
+            positive_half_sweep = (
+                positive_half_sweep and 0.0 <= raw_phi_deg <= 180.0
+            )
             azimuth_deg = _wrap_cst_azimuth_deg(raw_phi_deg)
             if abs(azimuth_deg) <= coordinate_tolerance:
                 azimuth_deg = 0.0
@@ -9903,6 +9987,15 @@ class RcsGrid:
         rows.clear()
         del seen, seen_source
 
+        # Decide from the entire source sweep, independent of row order.
+        # A positive half sweep has no signed seam to merge: keep its +180
+        # endpoint beside 179 instead of sorting it before 0 as -180.
+        # Relabel records before building the axes so power and phase follow.
+        if positive_half_sweep:
+            for index, record in enumerate(records):
+                if record[0] == -180.0:
+                    records[index] = (180.0, *record[1:])
+
         azimuths = np.asarray(sorted({row[0] for row in records}), dtype=float)
         elevations = np.asarray(sorted({row[1] for row in records}), dtype=float)
         frequencies = np.asarray(sorted({row[2] for row in records}), dtype=float)
@@ -9930,8 +10023,12 @@ class RcsGrid:
             power[index] = sample_power
             phase[index] = sample_phase
 
+        phi_mapping = (
+            "phi retained in [0, 180]" if positive_half_sweep
+            else "phi wrapped to [-180, 180)"
+        )
         mapping = (
-            "elevation=theta; phi wrapped to [-180, 180); "
+            f"elevation=theta; {phi_mapping}; "
             "VV=tt/theta-theta, HV=pt/phi-theta, "
             "VH=tp/theta-phi, HH=pp/phi-phi; "
             "stored phase=reported E-field phase"
@@ -9958,7 +10055,11 @@ class RcsGrid:
             extra={
                 "source_format": f"SENTRi {schema_name} RCS table",
                 **SENTRI_FAR_FIELD_METADATA,
-                "sentri_coordinate_mapping": "elevation=theta; azimuth=wrapped phi",
+                "sentri_coordinate_mapping": (
+                    "elevation=theta; azimuth=phi retained in [0, 180]"
+                    if positive_half_sweep
+                    else "elevation=theta; azimuth=wrapped phi"
+                ),
                 "sentri_elevation_convention": "sentri_theta_top_zero",
                 "sentri_zero_360_seam_policy": (
                     "source phi=360 supplies canonical azimuth 0 when both "
