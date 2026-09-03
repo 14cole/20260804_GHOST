@@ -1291,6 +1291,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         self.assertEqual(request.kwargs["normal_tol_deg"], 9.0)
         self.assertFalse(request.kwargs["allow_legacy_base_metadata"])
         self.assertTrue(request.kwargs["require_feature_manifests"])
+        self.assertFalse(request.kwargs["require_body_mesh_certification"])
         self.assertEqual(request.kwargs["expected_host_material"], "PEC")
         self.assertEqual(
             request.kwargs["expected_host_materials"], {"point:fastener": "PEC"}
@@ -1676,7 +1677,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
 
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_three_step_tabs_and_review_checklist_track_body_file_changes(self):
+    def test_input_tabs_and_review_checklist_track_body_file_changes(self):
         with tempfile.TemporaryDirectory() as folder:
             base = Path(folder) / "body.grim"
             _write_minimal_base_grim(base, embedded_bor=True)
@@ -1687,7 +1688,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                         panel.workflow_tabs.tabText(index)
                         for index in range(panel.workflow_tabs.count())
                     ],
-                    ["Body (1)", "Map Features (2)", "Review (3)"],
+                    ["Body", "Point Features", "Line Features", "Review"],
                 )
 
                 def checklist_status(requirement):
@@ -1717,6 +1718,12 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel = FeatureAssemblyPanel(service=_FakeWorkflow())
             try:
                 self.assertEqual(panel.coordinate_units.currentData(), "")
+                panel.line_coordinate_units.setCurrentIndex(
+                    panel.line_coordinate_units.findData("feet")
+                )
+                self.assertEqual(panel.coordinate_units.currentData(), "feet")
+                panel.coordinate_units.setCurrentIndex(0)
+                self.assertEqual(panel.line_coordinate_units.currentData(), "")
                 self.assertEqual(panel.surface_units.currentData(), "")
                 panel.set_surface_mesh(str(surface))
                 self.assertIn(
@@ -2139,10 +2146,12 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertIn("No Assembly operation", panel.status_label.text())
         self.assertFalse(panel.advanced_section.header.isChecked())
         self.assertTrue(panel.skin_tol.isEnabled())
-        self.assertEqual(panel.validation_profile.currentData()[0], "production")
+        self.assertEqual(panel.validation_profile.currentData()[0], "external")
         self.assertEqual(
-            panel._validation_profile_flags(), (False, True, True)
+            panel._validation_profile_flags(), (False, True, False)
         )
+        self.assertFalse(panel.body_geometry_section.header.isChecked())
+        self.assertFalse(panel.feature_selection_section.header.isChecked())
         self.assertEqual(panel.skin_tol.suffix().strip(), "mm")
         self.assertAlmostEqual(panel.skin_tol.value(), 1.0)
         self.assertLessEqual(panel.skin_tol.singleStep(), 0.01)
@@ -2247,11 +2256,13 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel._update_workflow_readiness()
             self.assertIn("✓ valid body GRIM", panel.readiness_label.text())
             self.assertIn("surface mesh", panel.next_step_label.text())
+            self.assertTrue(panel.body_geometry_section.header.isChecked())
 
             panel.base_picker.set_path(str(embedded))
             panel._update_workflow_readiness()
             self.assertIn("✓ valid body GRIM", panel.readiness_label.text())
             self.assertNotIn("surface mesh", panel.next_step_label.text())
+            self.assertFalse(panel.body_geometry_section.header.isChecked())
 
             panel.base_picker.set_path(str(malformed))
             panel._update_workflow_readiness()

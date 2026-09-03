@@ -661,16 +661,21 @@ class AssemblyGuiTests(unittest.TestCase):
         self.assertFalse(workspace.sld_body_opacity.isEnabled())
         self.assertFalse(workspace.cmb_triangle_detail.isEnabled())
         self.assertFalse(workspace.chk_interaction_lod.isEnabled())
+        self.assertTrue(workspace.display_options.isHidden())
+        workspace.btn_display_options.click()
+        self.assertFalse(workspace.display_options.isHidden())
 
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
         controls.workflow_tabs = QTabWidget(controls)
         controls.body_step_page = QWidget(controls.workflow_tabs)
-        controls.map_step_page = QWidget(controls.workflow_tabs)
+        controls.point_step_page = QWidget(controls.workflow_tabs)
+        controls.line_step_page = QWidget(controls.workflow_tabs)
         controls.review_step_page = QWidget(controls.workflow_tabs)
-        controls.workflow_tabs.addTab(controls.body_step_page, "Body (1)")
-        controls.workflow_tabs.addTab(controls.map_step_page, "Map Features (2)")
-        controls.workflow_tabs.addTab(controls.review_step_page, "Review (3)")
+        controls.workflow_tabs.addTab(controls.body_step_page, "Body")
+        controls.workflow_tabs.addTab(controls.point_step_page, "Point Features")
+        controls.workflow_tabs.addTab(controls.line_step_page, "Line Features")
+        controls.workflow_tabs.addTab(controls.review_step_page, "Review")
         controls_layout.addWidget(controls.workflow_tabs)
         workspace.set_feature_controls(controls)
         self.assertEqual(
@@ -678,7 +683,7 @@ class AssemblyGuiTests(unittest.TestCase):
                 workspace.left_tabs.tabText(index)
                 for index in range(workspace.left_tabs.count())
             ],
-            ["Body (1)", "Map Features (2)", "Review (3)"],
+            ["Body", "Point Features", "Line Features", "Review"],
         )
         self.assertIs(
             workspace.left_tabs.currentWidget(), controls.body_step_page

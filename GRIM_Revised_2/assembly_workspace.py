@@ -1857,7 +1857,7 @@ if GUI_AVAILABLE:
             self.btn_preview_layers = QPushButton("Preview layers")
             self.btn_preview_layers.setToolTip(
                 "Open advanced whole-dataset combination and preview visibility "
-                "without interrupting the three-step feature workflow."
+                "without interrupting the feature workflow."
             )
             self.lbl_legend = QLabel(self._legend_html("#94a3b8"))
             self.lbl_status = QLabel(
@@ -1870,15 +1870,27 @@ if GUI_AVAILABLE:
             toolbar.addWidget(title)
             toolbar.addStretch(1)
             toolbar.addWidget(self.lbl_legend)
+            self.btn_display_options = QPushButton("View options")
+            self.btn_display_options.setCheckable(True)
+            self.btn_display_options.setToolTip(
+                "Adjust display units, body appearance, detail, and orientation arrows."
+            )
+            toolbar.addWidget(self.btn_display_options)
             toolbar.addWidget(self.btn_preview_layers)
             toolbar.addWidget(self.btn_fit_visible)
             outer.addLayout(toolbar)
 
+            self.display_options = QWidget(self)
+            display_layout = QVBoxLayout(self.display_options)
+            display_layout.setContentsMargins(0, 0, 0, 0)
+            self.display_options.setVisible(False)
+            self.btn_display_options.toggled.connect(self.display_options.setVisible)
+            outer.addWidget(self.display_options)
             display_heading = QLabel(
                 "3-D display only \u2014 does not affect RCS"
             )
             display_heading.setStyleSheet("font-weight: 600;")
-            outer.addWidget(display_heading)
+            display_layout.addWidget(display_heading)
 
             display_row = QHBoxLayout()
             display_row.setSpacing(6)
@@ -1916,7 +1928,7 @@ if GUI_AVAILABLE:
             display_row.addWidget(self.sld_body_opacity)
             display_row.addWidget(self.lbl_body_opacity)
             display_row.addStretch(1)
-            outer.addLayout(display_row)
+            display_layout.addLayout(display_row)
 
             detail_row = QHBoxLayout()
             detail_row.setSpacing(6)
@@ -1970,14 +1982,14 @@ if GUI_AVAILABLE:
             detail_row.addWidget(self.sld_orientation_scale)
             detail_row.addWidget(self.lbl_orientation_scale)
             detail_row.addStretch(1)
-            outer.addLayout(detail_row)
+            display_layout.addLayout(detail_row)
 
             self.lbl_body_detail = QLabel(
                 "Display units: meters. No body preview loaded. Original geometry "
                 "is unchanged for validation, shadowing, and assembly."
             )
             self.lbl_body_detail.setWordWrap(True)
-            outer.addWidget(self.lbl_body_detail)
+            display_layout.addWidget(self.lbl_body_detail)
 
             splitter = QSplitter(Qt.Horizontal)
             left_host = QWidget(self)
@@ -1991,7 +2003,7 @@ if GUI_AVAILABLE:
             self.feature_controls_host.setVisible(False)
             left_layout.addWidget(self.feature_controls_host, 1)
 
-            # Feature Assembly owns the visible Body / Map Features / Review
+            # Feature Assembly owns Body / Point Features / Line Features / Review
             # tabs. Keep advanced whole-response arithmetic available from the
             # toolbar without competing with that primary workflow.
             self.preview_layers_dialog = QDialog(self)
@@ -2006,7 +2018,7 @@ if GUI_AVAILABLE:
             combine_help = QLabel(
                 "Advanced: combine complete GRIM responses or change which layers "
                 "are visible in the 3-D preview. This does not replace the Body, "
-                "Map Features, and Review workflow.",
+                "Point Features, Line Features, and Review workflow.",
                 self.preview_layers_dialog,
             )
             combine_help.setWordWrap(True)
@@ -2817,7 +2829,7 @@ if GUI_AVAILABLE:
             self._feature_service = service
 
         def set_feature_controls(self, widget: QWidget | None) -> None:
-            """Install or clear the controller-owned three-step feature workflow."""
+            """Install or clear the controller-owned feature workflow."""
 
             while self.feature_controls_layout.count():
                 entry = self.feature_controls_layout.takeAt(0)

@@ -1430,7 +1430,7 @@ def load_body_solver_diagnostics(
         body = load_body_grim(label, loaded_grim=grim)
     except (OSError, KeyError, TypeError, ValueError) as exc:
         raise ValueError(
-            f"{label}: not a valid BoR body artifact."
+            f"{label}: GHOST BoR solver diagnostics cannot be read: {exc}"
         ) from exc
     try:
         frequencies = [
@@ -1541,15 +1541,21 @@ def require_body_mesh_certification(
 ) -> 'Dict[str, Any]':
     """Audit that a body used the passed dual-channel refined-mesh path.
 
-    The Production Feature Assembly profile calls this authoritatively. A
-    response solved outside the local GHOST certification workflow must use
-    the explicit External/HPC Assembly profile; ordinary file loading remains
-    available because a missing certificate does not by itself corrupt the
-    stored field.
+    The optional certified GHOST BoR profile calls this authoritatively.
+    General body Assembly checks field compatibility without requiring a
+    solver-specific certificate.
     """
 
     label = str(path)
-    loaded = load_body_solver_diagnostics(label, loaded_grim=loaded_grim)
+    try:
+        loaded = load_body_solver_diagnostics(label, loaded_grim=loaded_grim)
+    except ValueError as exc:
+        raise ValueError(
+            f"{label}: the selected validation profile requires a certified "
+            "GHOST BoR body. For another solver's 3-D body response, use the "
+            "General body profile in Advanced placement checks. "
+            f"Diagnostic detail: {exc}"
+        ) from exc
     frequencies = list(loaded["frequencies_ghz"])
     per_frequency = dict(loaded["per_frequency"])
 

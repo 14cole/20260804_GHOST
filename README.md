@@ -200,12 +200,16 @@ py impedance_gui.py
   configure a verified host key plus Pageant/key authentication, or reuse an
   authenticated PuTTY session with SSH connection sharing enabled. The detailed
   commands are in `GRIM_Revised_2/README.md`.
-- Use **Assembly → Place Features** to load the same strict placement CSV used
+- Use **Assembly → Body / Point Features / Line Features** to load the same strict placement CSV used
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
   assembling. Exact headers, examples, and blank-template buttons are built in.
   One point CSV may contain every point family and one line CSV may contain all
   ordered line chains; both files use the shared coordinate-unit selection.
+  New assemblies accept compatible coherent 3-D body GRIMs from any solver.
+  Requiring a certified GHOST BoR body is an optional advanced validation
+  profile. Body geometry opens when a matching mesh is required; **View options**
+  and **Review → Feature selection** hold the occasional display and exclusion controls.
   Here OPN-FRD always means the coherent installed/featured response minus the
   clean-skin response—reversing that subtraction reverses the feature delta.
   The display-only viewer supports meter/inch/foot axes, solid/wireframe body

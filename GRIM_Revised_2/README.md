@@ -322,9 +322,12 @@ collapse onto the same wrapped coordinate.
 
 ## Assembly
 
-Assembly presents spatial feature placement as three focused tabs:
-**Body (1)**, **Map Features (2)**, and **Review (3)**. Review contains the
-live run checklist, output, placement QA, validation, and final assembly action;
+Assembly presents **Body**, **Point Features**, **Line Features**, and **Review**.
+Choose the body dataset, then use either or both feature tabs for a placement
+CSV and its response datasets. The coordinate-unit choice is shared and can be
+changed from either feature tab. Body geometry opens when a matching mesh is
+needed; mesh options, feature exclusions, and placement tolerances are kept in
+collapsed sections. Review contains the live run checklist, output, and placement QA;
 the checklist updates whenever an input, mapping, option, or validation result
 changes. Whole-response arithmetic and display visibility remain available from
 the **Preview layers** button as an advanced secondary window, so a point or
@@ -350,7 +353,7 @@ line_id,dataset_id,segment_index,x1,y1,z1,x2,y2,z2,n1x,n1y,n1z,n2x,n2y,n2z
 Selecting **Preview geometry** parses those same CSVs and displays their
 locations with the selected STL/facet surface or embedded BoR profile before
 an output path or response mapping is required. It is visual QA only.
-After parsing, **Spatial Feature Configuration → Use** presents the clean body,
+Under **Review → Feature selection**, **Spatial Feature Configuration → Use** presents the clean body,
 point families/placements, and line families/paths as a hierarchy. Unchecking
 a family or instance omits it from preview, physical validation, response
 loading, and build; disabled-only response families do not need a mapping.
@@ -369,7 +372,7 @@ different recipe or closing GRIM with recipe edits presents **Save / Discard /
 Cancel**, so a trade-study configuration is not silently lost. Current recipes
 use schema version 4 and record the body-certification policy. Version 1-3
 recipes remain readable, but load with certification disabled, select the
-reviewed external/HPC workflow, and show a warning rather than silently claiming
+general body workflow, and show a warning rather than silently claiming
 Production certification.
 If every feature is unchecked, **Preview geometry** deliberately shows the
 clean body alone; validation and build still require at least one enabled
@@ -378,12 +381,12 @@ The selected clean-body `.grim` is preflighted before it receives a ready check.
 An embedded BoR response may supply its own preview geometry; an external 3-D
 body requires its matching STL/facet mesh. A malformed ZIP or incomplete GRIM
 key set is shown as unready rather than being counted as a body.
-For an external 3-D body, Production also requires a reviewed solve-to-mesh
+For an external 3-D body, strict validation also requires a reviewed solve-to-mesh
 binding. **Bind / refresh...** records the team geometry revision and the
 registration evidence ID against the exact clean-body GRIM, mesh bytes, CAD
 frame, and selected mesh units. **Check binding** verifies those exact inputs.
 The adjacent status clearly reports Missing, Unchecked, Stale, Invalid, or
-Current; Production validation remains locked until the current selection has
+Current; strict validation remains locked until the current selection has
 been checked. Embedded BoR geometry is self-bound and needs no sidecar.
 **Validate placements** then checks the body skin, supplied normals, and mapping
 completeness. The placement-QA table gives every enabled point and line a
@@ -392,7 +395,7 @@ Warnings remain prominent rather than disappearing into the log. Mesh QA also
 reports open edges, nonmanifold edges, duplicate facets, and inconsistent
 winding; these are warnings because an intentionally open skin can still be a
 valid placement surface, but they deserve review before enabling shadowing.
-On **Review (3)**, **Assemble validated & save** is locked until every required
+**Assemble & save** is locked until every required
 checklist row is ready and the exact current configuration
 has completed Validate placements. It never performs an unreviewed validation
 on the way to publication. If validation returns applicability or compatibility
@@ -424,7 +427,7 @@ follows the CSV head-to-tail order and `+b = +t × +n` identifies the coupon's
 signed across-gap axis. Reversing line order is therefore a physical change for
 an asymmetric response, not merely a display change.
 
-The viewer's **3-D display only** controls can show axis ticks in meters,
+The viewer's collapsed **View options** controls can show axis ticks in meters,
 inches, or feet without changing the meter-valued CAD data. The body can be
 drawn as **Solid**, **Solid + edges**, or **Wireframe**, with adjustable
 opacity. **Preview facet detail** limits Matplotlib to 4,000 (Fast), 12,000
@@ -444,14 +447,20 @@ CSV/STL or modify placement validation, shadowing, or the assembled RCS.
 
 Point datasets require compatible 3-D delta channels (VV, HH, and reciprocal
 cross-polarization where used). Line datasets require the TE and TM 2-D delta
-responses consumed by line expansion. The GUI starts in the visibly labeled
-**Production — certified GHOST body (recommended)** profile: clean-body metadata
-is strict, certified feature-library manifests are required, the clean-body
-response must carry a valid body-mesh certificate, and every active response row
-must have an effective host material/coating ID. **External/HPC body — reviewed**
-keeps the strict metadata, manifest, and host-material requirements but records
-an explicit local waiver of the GHOST body certificate for a separately reviewed
-solve/mesh provenance chain. **Legacy compatibility** relaxes those contracts and
+responses consumed by line expansion. New assemblies use **General body —
+compatible 3-D GRIM (default)**. Compatible coherent 3-D body responses can come
+from any solver; a GHOST BoR certificate is not required. Strict field metadata,
+feature-library manifests, and effective host material/coating IDs remain
+required. The optional **Require certified GHOST BoR body** profile under
+**Advanced placement checks** additionally audits that solver's body-mesh
+certificate. Saved recipes retain their explicit profile.
+
+The `.grim` extension identifies a data container, not the physical role of
+its contents. Assembly checks the stored dimensional units, complex-field and
+phase conventions, polarization channels, and radar axes. A 2-D `sigma_2d`
+response cannot be used directly as a 3-D `sigma_3d` body; a suitable 2-D feature
+delta belongs in Line Features for expansion along its placement CSV.
+**Legacy compatibility** relaxes missing-metadata contracts and
 remains visibly unsuitable for Production publication. The global host-material
 field is a convenience default; use per-response row overrides for mixed vehicle
 substrates or coating stacks.

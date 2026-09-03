@@ -599,6 +599,18 @@ class RequestPlanTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "fine-mesh"):
                     feature_workflow.prepare_feature_assembly(request)
 
+    def test_external_body_certificate_error_identifies_optional_profile_and_cause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "external.grim"
+            _write_empty_base(base)
+            with self.assertRaises(ValueError) as caught:
+                feature_sum.require_body_mesh_certification(str(base))
+        message = str(caught.exception)
+        self.assertIn("General body profile", message)
+        self.assertIn("Diagnostic detail:", message)
+        self.assertIn("azimuth_meaning", message)
+        self.assertNotIn("not a valid BoR body artifact", message)
+
     def test_enabled_snapshot_filters_preview_after_strict_parsing(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

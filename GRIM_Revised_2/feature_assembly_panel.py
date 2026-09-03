@@ -64,8 +64,8 @@ FEATURE_RECIPE_SUFFIX = ".assembly.json"
 FEATURE_RECIPE_HASH_LIMIT_BYTES = 16 * 1024 * 1024
 
 VALIDATION_PROFILES = (
-    ("Production — certified GHOST body (recommended)", "production", False, True, True),
-    ("External/HPC body — reviewed", "external", False, True, False),
+    ("Require certified GHOST BoR body", "production", False, True, True),
+    ("General body — compatible 3-D GRIM (default)", "external", False, True, False),
     ("Legacy compatibility", "legacy", True, False, False),
 )
 DEFAULT_SKIN_TOL_MM = 1.0
@@ -514,7 +514,7 @@ class FeatureAssemblyValues:
     normal_tol_deg: float = 15.0
     allow_legacy_base_metadata: bool = False
     require_feature_manifests: bool = True
-    require_body_mesh_certification: bool = True
+    require_body_mesh_certification: bool = False
     expected_host_material: str = ""
     base_dir: str | None = None
     point_datasets: dict[str, str] = field(default_factory=dict)
@@ -3768,13 +3768,18 @@ if GUI_AVAILABLE:
             self.table = QTableWidget(0, 5, self)
             self.table.setHorizontalHeaderLabels(
                 [
-                    "dataset_id",
-                    "OPN − FRD response (.grim)",
-                    "Host material / coating ID",
-                    "Loaded",
+                    "Dataset ID",
+                    "Response (.grim)",
+                    "Host material",
+                    "",
                     "",
                 ]
             )
+            self.table.horizontalHeaderItem(0).setToolTip("dataset_id from the placement CSV")
+            self.table.horizontalHeaderItem(1).setToolTip(
+                "Coherent OPN − FRD feature response (.grim)"
+            )
+            self.table.horizontalHeaderItem(2).setToolTip("Host material / coating ID")
             self.table.setToolTip(
                 "Every dataset_id used by the placement CSV must map to the "
                 "matching coherent OPN-FRD .grim response."
@@ -4285,7 +4290,7 @@ if GUI_AVAILABLE:
             outer.setSpacing(6)
 
             intro = QLabel(
-                "Build one coherent body + features response in three steps.",
+                "Choose a body, add point or line features, then review and assemble.",
                 self,
             )
             intro.setWordWrap(True)
@@ -4359,7 +4364,8 @@ if GUI_AVAILABLE:
             self.workflow_tabs = QTabWidget(self)
             self.workflow_tabs.setObjectName("featureWorkflowTabs")
             self.body_step_page = QWidget(self.workflow_tabs)
-            self.map_step_page = QWidget(self.workflow_tabs)
+            self.point_step_page = QWidget(self.workflow_tabs)
+            self.line_step_page = QWidget(self.workflow_tabs)
             self.review_step_page = QWidget(self.workflow_tabs)
 
             def _step_scroll(page: QWidget, object_name: str):
@@ -4385,19 +4391,23 @@ if GUI_AVAILABLE:
             body_content, body_content_layout, self.body_page_layout = _step_scroll(
                 self.body_step_page, "featureBodyScroll"
             )
-            map_content, map_content_layout, self.map_page_layout = _step_scroll(
-                self.map_step_page, "featureMapScroll"
+            point_page, point_layout, self.point_page_layout = _step_scroll(
+                self.point_step_page, "featurePointScroll"
+            )
+            line_page, line_layout, self.line_page_layout = _step_scroll(
+                self.line_step_page, "featureLineScroll"
             )
             review_content, review_content_layout, self.review_page_layout = _step_scroll(
                 self.review_step_page, "featureReviewScroll"
             )
             self.form_content = self.workflow_tabs
-            self.workflow_tabs.addTab(self.body_step_page, "Body (1)")
-            self.workflow_tabs.addTab(self.map_step_page, "Map Features (2)")
-            self.workflow_tabs.addTab(self.review_step_page, "Review (3)")
+            self.workflow_tabs.addTab(self.body_step_page, "Body")
+            self.workflow_tabs.addTab(self.point_step_page, "Point Features")
+            self.workflow_tabs.addTab(self.line_step_page, "Line Features")
+            self.workflow_tabs.addTab(self.review_step_page, "Review")
             outer.addWidget(self.workflow_tabs, 1)
 
-            body_group = QGroupBox("Body response and geometry", body_content)
+            body_group = QGroupBox("Body response", body_content)
             body_group.setObjectName("featureStepCard")
             body_form = QFormLayout(body_group)
             body_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -4445,7 +4455,17 @@ if GUI_AVAILABLE:
             self.surface_units.setToolTip(
                 "Units of the selected STL/facet surface, independent of the CSV units."
             )
-            body_form.addRow("Clean-body response:", self.base_picker)
+            body_form.addRow("Body dataset:", self.base_picker)
+            body_geometry = QWidget(body_content)
+            geometry_form = QFormLayout(body_geometry)
+            geometry_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            body_content_layout.addWidget(body_group)
+            self.body_geometry_section = _DisclosureSection(
+                "Body geometry and shadowing (optional)", body_content, expanded=False
+            )
+            self.body_geometry_section.addWidget(body_geometry)
+            body_content_layout.addWidget(self.body_geometry_section)
+            body_form = geometry_form
             body_form.addRow("Surface mesh (optional):", self.surface_picker)
             body_form.addRow("Surface mesh units:", self.surface_units)
             self.surface_dimensions_label = QLabel(body_group)
@@ -4485,7 +4505,6 @@ if GUI_AVAILABLE:
             binding_actions.addStretch(1)
             binding_layout.addLayout(binding_actions)
             body_form.addRow("Solve ↔ mesh registration:", binding_box)
-            body_form.addRow("Mesh options:", mesh_options)
             self.body_preview_help = QLabel(
                 "Body preview: selected mesh, or the base file's embedded BoR. "
                 "A 3-D base without embedded geometry needs its matching mesh.",
@@ -4494,34 +4513,45 @@ if GUI_AVAILABLE:
             self.body_preview_help.setWordWrap(True)
             self.body_preview_help.setObjectName("featureHint")
             body_form.addRow("", self.body_preview_help)
-            body_content_layout.addWidget(body_group)
             body_content_layout.addStretch(1)
 
-            feature_group = QGroupBox("Placements and feature responses", map_content)
-            feature_group.setObjectName("featureStepCard")
-            feature_layout = QVBoxLayout(feature_group)
             units_row = QHBoxLayout()
-            units_label = QLabel("All CSV coordinates:", feature_group)
+            units_label = QLabel("CSV coordinate units:", point_page)
             units_label.setBuddy(self.coordinate_units)
             units_row.addWidget(units_label)
             units_row.addWidget(self.coordinate_units, 1)
-            feature_layout.addLayout(units_row)
+            point_layout.addLayout(units_row)
             self.shared_units_label = QLabel(
-                "One point CSV can contain every point family; one line CSV can "
-                "contain every ordered line chain. Both selected CSVs share this unit.",
-                feature_group,
+                "Units apply to both placement CSVs.", point_page,
             )
             self.shared_units_label.setObjectName("featureHint")
             self.shared_units_label.setWordWrap(True)
-            feature_layout.addWidget(self.shared_units_label)
+            point_layout.addWidget(self.shared_units_label)
+            self.line_coordinate_units = QComboBox(line_page)
+            for index in range(self.coordinate_units.count()):
+                self.line_coordinate_units.addItem(
+                    self.coordinate_units.itemText(index),
+                    self.coordinate_units.itemData(index),
+                )
+            self.line_coordinate_units.setToolTip(self.coordinate_units.toolTip())
+            self.coordinate_units.currentIndexChanged.connect(
+                self.line_coordinate_units.setCurrentIndex
+            )
+            self.line_coordinate_units.currentIndexChanged.connect(
+                self.coordinate_units.setCurrentIndex
+            )
+            line_units_row = QHBoxLayout()
+            line_units_row.addWidget(QLabel("CSV coordinate units:", line_page))
+            line_units_row.addWidget(self.line_coordinate_units, 1)
+            line_layout.addLayout(line_units_row)
+            line_layout.addWidget(QLabel("Units apply to both placement CSVs.", line_page))
+
+            feature_group = QWidget(review_content)
+            feature_layout = QVBoxLayout(feature_group)
             self.feature_summary_label = QLabel(feature_group)
             self.feature_summary_label.setObjectName("featureSummary")
             self.feature_summary_label.setWordWrap(True)
             feature_layout.addWidget(self.feature_summary_label)
-            self.feature_tabs = QTabWidget(feature_group)
-
-            point_page = QWidget(self.feature_tabs)
-            point_layout = QVBoxLayout(point_page)
             self.point_csv_picker = _PathPicker(
                 caption="Choose point placement CSV",
                 file_filter="CSV placement file (*.csv);;All files (*)",
@@ -4589,15 +4619,14 @@ if GUI_AVAILABLE:
             point_response_help.setWordWrap(True)
             point_response_help.setObjectName("featureContract")
             point_layout.addWidget(point_response_help)
+            point_response_help.setVisible(False)
+            self.point_format_button.toggled.connect(point_response_help.setVisible)
             self.point_mapping = _DatasetMappingEditor(
                 "Choose a point CSV; one response row will appear per dataset_id.",
                 point_page,
             )
             point_layout.addWidget(self.point_mapping)
-            self.feature_tabs.addTab(point_page, "Point features")
-
-            line_page = QWidget(self.feature_tabs)
-            line_layout = QVBoxLayout(line_page)
+            point_layout.addStretch(1)
             self.line_csv_picker = _PathPicker(
                 caption="Choose line placement CSV",
                 file_filter="CSV placement file (*.csv);;All files (*)",
@@ -4664,13 +4693,14 @@ if GUI_AVAILABLE:
             line_response_help.setWordWrap(True)
             line_response_help.setObjectName("featureContract")
             line_layout.addWidget(line_response_help)
+            line_response_help.setVisible(False)
+            self.line_format_button.toggled.connect(line_response_help.setVisible)
             self.line_mapping = _DatasetMappingEditor(
                 "Choose a line CSV; one response row will appear per dataset_id.",
                 line_page,
             )
             line_layout.addWidget(self.line_mapping)
-            self.feature_tabs.addTab(line_page, "Line features")
-            feature_layout.addWidget(self.feature_tabs)
+            line_layout.addStretch(1)
             scan_row = QHBoxLayout()
             self.scan_button = QPushButton("Refresh selected CSVs", feature_group)
             self.scan_button.setToolTip(
@@ -4737,8 +4767,11 @@ if GUI_AVAILABLE:
             )
             summary_row.addWidget(self.copy_spatial_selection_button)
             feature_layout.addLayout(summary_row)
-            map_content_layout.addWidget(feature_group)
-            map_content_layout.addStretch(1)
+            self.feature_selection_section = _DisclosureSection(
+                "Feature selection (all included by default)", review_content,
+                expanded=False,
+            )
+            self.feature_selection_section.addWidget(feature_group)
 
             advanced = QWidget(review_content)
             advanced_form = QFormLayout(advanced)
@@ -4789,12 +4822,12 @@ if GUI_AVAILABLE:
                         require_body_certification,
                     ),
                 )
-            self.validation_profile.setCurrentIndex(0)
+            self.validation_profile.setCurrentIndex(1)
             self.validation_profile.setToolTip(
-                "Production requires a certified, fine-mesh dual-polarization "
-                "GHOST body and certified feature responses. External/HPC keeps "
-                "strict metadata and feature manifests but explicitly waives the "
-                "local body certificate. Legacy compatibility reports missing "
+                "General body accepts compatible 3-D responses from any solver, "
+                "with strict field metadata and feature manifests. The optional "
+                "GHOST BoR profile additionally requires its mesh certificate. "
+                "Legacy compatibility reports missing "
                 "applicability evidence as review warnings."
             )
             self.expected_host_material = QLineEdit(advanced)
@@ -4827,10 +4860,10 @@ if GUI_AVAILABLE:
                 expanded=False,
             )
             self.advanced_section.addWidget(advanced)
+            self.advanced_section.addWidget(mesh_options)
             self.advanced_section.header.setToolTip(
                 "The displayed defaults remain active while this section is collapsed."
             )
-            review_content_layout.addWidget(self.advanced_section)
 
             self.preview_help_label = QLabel(
                 "Preview Geometry is visual QA only. Validate Placements additionally "
@@ -4848,7 +4881,6 @@ if GUI_AVAILABLE:
                 "How to read the 3-D preview", review_content, expanded=False
             )
             self.preview_guide.addWidget(self.preview_help_label)
-            review_content_layout.addWidget(self.preview_guide)
 
             review_group = QGroupBox("Readiness and output", review_content)
             review_group.setObjectName("featureStepCard")
@@ -4876,7 +4908,10 @@ if GUI_AVAILABLE:
                 "validation result changes. Every required row must be ready before "
                 "the final run is enabled."
             )
-            review_form.addRow("Run checklist:", self.readiness_checklist)
+            self.readiness_section = _DisclosureSection(
+                "Input checklist", review_content, expanded=False
+            )
+            self.readiness_section.addWidget(self.readiness_checklist)
             self.readiness_label = QLabel(review_group)
             self.readiness_label.setObjectName("featureReadiness")
             self.readiness_label.setWordWrap(True)
@@ -4884,7 +4919,7 @@ if GUI_AVAILABLE:
             self.build_summary_label = QLabel(review_group)
             self.build_summary_label.setObjectName("featureBuildSummary")
             self.build_summary_label.setWordWrap(True)
-            review_form.addRow("This build:", self.build_summary_label)
+            review_form.addRow(self.build_summary_label)
             self.work_estimate_label = QLabel(review_group)
             self.work_estimate_label.setObjectName("featureWorkEstimate")
             self.work_estimate_label.setWordWrap(True)
@@ -4896,7 +4931,6 @@ if GUI_AVAILABLE:
                 "uses radar looks/frequencies, enabled features, solver line "
                 "pieces, mesh triangles, and optional body-shadow rays."
             )
-            review_form.addRow("Rough workload:", self.work_estimate_label)
             self.model_scope_label = QLabel(
                 "Model boundary: Assembly coherently superposes reviewed local "
                 "feature deltas. It does not solve body–feature mutual coupling, "
@@ -4908,10 +4942,10 @@ if GUI_AVAILABLE:
             self.model_scope_label.setWordWrap(True)
             self.model_scope_label.setObjectName("featureHint")
             self.model_scope_section = _DisclosureSection(
-                "Physics scope", review_group, expanded=False
+                "Workload and physics scope", review_content, expanded=False
             )
+            self.model_scope_section.addWidget(self.work_estimate_label)
             self.model_scope_section.addWidget(self.model_scope_label)
-            review_form.addRow("", self.model_scope_section)
             self.validation_qa_label = QLabel(
                 "Run Validate placements to see a row for every enabled point "
                 "and line path.",
@@ -4919,7 +4953,7 @@ if GUI_AVAILABLE:
             )
             self.validation_qa_label.setWordWrap(True)
             self.validation_qa_label.setObjectName("featureValidationSummary")
-            review_form.addRow("Placement QA:", self.validation_qa_label)
+            review_form.addRow(self.validation_qa_label)
             self.validation_warning_label = QLabel(review_group)
             self.validation_warning_label.setWordWrap(True)
             self.validation_warning_label.setTextInteractionFlags(
@@ -4927,7 +4961,7 @@ if GUI_AVAILABLE:
             )
             self.validation_warning_label.setObjectName("featureValidationWarning")
             self.validation_warning_label.setVisible(False)
-            review_form.addRow("QA warnings:", self.validation_warning_label)
+            review_form.addRow(self.validation_warning_label)
             self.validation_warning_ack = QCheckBox(
                 "I reviewed and accept these warnings for this output.",
                 review_group,
@@ -4937,7 +4971,7 @@ if GUI_AVAILABLE:
                 "validation. Any input change or re-validation clears it."
             )
             self.validation_warning_ack.setVisible(False)
-            review_form.addRow("Warning waiver:", self.validation_warning_ack)
+            review_form.addRow(self.validation_warning_ack)
             self.validation_qa_table = QTableWidget(0, 6, review_group)
             self.validation_qa_table.setHorizontalHeaderLabels(
                 ["Type", "Instance", "Response ID", "Skin offset", "Normal error", "Result"]
@@ -4973,8 +5007,14 @@ if GUI_AVAILABLE:
                 "look and therefore contributes zero. Click a row to reveal the "
                 "same instance in Spatial Feature Configuration."
             )
-            review_form.addRow("", self.validation_qa_table)
+            self.validation_qa_table.setVisible(False)
+            review_form.addRow(self.validation_qa_table)
             review_content_layout.addWidget(review_group)
+            review_content_layout.addWidget(self.readiness_section)
+            review_content_layout.addWidget(self.feature_selection_section)
+            review_content_layout.addWidget(self.advanced_section)
+            review_content_layout.addWidget(self.model_scope_section)
+            review_content_layout.addWidget(self.preview_guide)
 
             self.status_label = QLabel(
                 "No Assembly operation is running.",
@@ -4984,7 +5024,7 @@ if GUI_AVAILABLE:
             self.status_label.setWordWrap(True)
             self.status_label.setFrameShape(QFrame.Shape.StyledPanel)
             self.status_label.setMargin(6)
-            self.review_page_layout.addWidget(self.status_label)
+            outer.addWidget(self.status_label)
 
             operation_row = QHBoxLayout()
             self.operation_progress = QProgressBar(self)
@@ -5007,7 +5047,7 @@ if GUI_AVAILABLE:
             self.cancel_operation_button.setVisible(False)
             self.cancel_operation_button.setEnabled(False)
             operation_row.addWidget(self.cancel_operation_button)
-            self.review_page_layout.addLayout(operation_row)
+            outer.addLayout(operation_row)
 
             action_row = QHBoxLayout()
             self.input_preview_button = QPushButton("Preview geometry", self)
@@ -5020,7 +5060,7 @@ if GUI_AVAILABLE:
                 "Validate body skin, normals, and response mapping completeness, then "
                 "show the prepared body and features in the 3-D Assembly view."
             )
-            self.build_button = QPushButton("Assemble validated && save", self)
+            self.build_button = QPushButton("Assemble && save", self)
             self.build_button.setToolTip(
                 "Publish the exact current validation: coherently add every enabled "
                 "mapped feature and atomically save the selected output .grim file."
@@ -5029,10 +5069,13 @@ if GUI_AVAILABLE:
             action_row.addWidget(self.input_preview_button)
             action_row.addWidget(self.preview_button)
             action_row.addWidget(self.build_button)
-            self.review_page_layout.addLayout(action_row)
+            outer.addLayout(action_row)
             review_content_layout.addStretch(1)
             self._busy_form_widgets = (
                 body_group,
+                self.body_geometry_section,
+                point_page,
+                line_page,
                 feature_group,
                 self.advanced_section,
                 review_group,
@@ -5925,10 +5968,8 @@ if GUI_AVAILABLE:
 
             if not point_selected:
                 point_text = "No point CSV selected."
-                point_tab = "Point features"
             elif not point_current:
                 point_text = "Point CSV needs refresh."
-                point_tab = "Point features · refresh"
             else:
                 count_label = (
                     f"{point_count} placement(s)"
@@ -5945,14 +5986,11 @@ if GUI_AVAILABLE:
                     )
                 )
                 point_text = f"Point CSV ready — {count_label}; {mapping_label}."
-                point_tab = f"Point features · {point_count or point_ids}"
 
             if not line_selected:
                 line_text = "No line CSV selected."
-                line_tab = "Line features"
             elif not line_current:
                 line_text = "Line CSV needs refresh."
-                line_tab = "Line features · refresh"
             else:
                 count_label = (
                     f"{line_count} path(s), {segment_count} segment(s)"
@@ -5969,16 +6007,13 @@ if GUI_AVAILABLE:
                     )
                 )
                 line_text = f"Line CSV ready — {count_label}; {mapping_label}."
-                line_tab = f"Line features · {line_count or line_ids}"
 
             self.point_csv_summary.setText(point_text)
             self.line_csv_summary.setText(line_text)
-            self.feature_tabs.setTabText(0, point_tab)
-            self.feature_tabs.setTabText(1, line_tab)
-            unit_text = self.coordinate_units.currentText()
+            self.workflow_tabs.setTabToolTip(1, point_text)
+            self.workflow_tabs.setTabToolTip(2, line_text)
             self.shared_units_label.setText(
-                f"Shared units: {unit_text}. One point CSV may contain every point "
-                "family; one line CSV may contain every ordered line chain."
+                "Units apply to both placement CSVs."
             )
 
             selected_parts = []
@@ -6009,8 +6044,7 @@ if GUI_AVAILABLE:
                 )
             elif production_profile:
                 qa_mode = (
-                    "External/HPC — strict metadata and response manifests; "
-                    "local body certificate explicitly waived"
+                    "General body — strict metadata and response manifests"
                 )
             else:
                 qa_mode = (
@@ -6054,14 +6088,14 @@ if GUI_AVAILABLE:
                 else "Choose a point or line placement CSV."
             )
             self.advanced_section.header.setText(
-                "Advanced placement checks · "
+                "Advanced placement checks"
                 + (
-                    "Production certified-body validation"
+                    " · certified BoR"
                     if certified_body_profile
                     else (
-                        "External/HPC reviewed-body validation"
+                        ""
                         if production_profile
-                        else "legacy-library compatibility"
+                        else " · legacy compatibility"
                     )
                 )
             )
@@ -6071,6 +6105,18 @@ if GUI_AVAILABLE:
                 values.base_grim, base_dir=values.base_dir
             )
             body_ready = base_preflight.valid
+            geometry_needed = bool(
+                (body_ready and base_preflight.requires_surface_mesh)
+                or values.surface_mesh or values.shadow
+            )
+            if geometry_needed != getattr(self, "_geometry_needed", False):
+                self.body_geometry_section.header.setChecked(geometry_needed)
+            self._geometry_needed = geometry_needed
+            self.body_geometry_section.header.setText(
+                "Body geometry (required for this response)"
+                if body_ready and base_preflight.requires_surface_mesh
+                else "Body geometry and shadowing (optional)"
+            )
             self.body_preview_help.setText(base_preflight.summary)
             has_placements = point_selected or line_selected
             has_enabled_features = bool(
@@ -6240,7 +6286,7 @@ if GUI_AVAILABLE:
             self._set_readiness_checklist(
                 (
                     (
-                        "Body (1)",
+                        "Body",
                         (
                             ("GHOST feature backend", service_ready, True),
                             ("Clean-body response", body_ready, True),
@@ -6262,7 +6308,7 @@ if GUI_AVAILABLE:
                         ),
                     ),
                     (
-                        "Map Features (2)",
+                        "Point and Line Features",
                         (
                             ("Placement CSV selected", has_placements, True),
                             ("Placement coordinate units", placement_units_ready, True),
@@ -6274,7 +6320,7 @@ if GUI_AVAILABLE:
                         ),
                     ),
                     (
-                        "Review (3)",
+                        "Review",
                         (
                             ("Advanced settings valid", settings_ready, True),
                             ("Output response selected", output_ready, True),
@@ -6776,6 +6822,7 @@ if GUI_AVAILABLE:
             self._validated_plan_current = False
             self._validation_warning_count = 0
             self.validation_qa_table.setRowCount(0)
+            self.validation_qa_table.setVisible(False)
             self.validation_qa_label.setText(str(message))
             self.validation_warning_label.clear()
             self.validation_warning_label.setVisible(False)
@@ -6819,6 +6866,7 @@ if GUI_AVAILABLE:
                     if isinstance(record, Mapping):
                         raw_rows.append((kind, record))
             self.validation_qa_table.setRowCount(len(raw_rows))
+            self.validation_qa_table.setVisible(bool(raw_rows))
             skin_limit = getattr(plan, "skin_limit_m", None)
             try:
                 skin_limit_value = float(skin_limit)
@@ -6962,12 +7010,22 @@ if GUI_AVAILABLE:
                     str(payload[0]), str(payload[1])
                 )
             ):
+                self.workflow_tabs.setCurrentWidget(self.review_step_page)
+                self.feature_selection_section.header.setChecked(True)
                 self.status_changed.emit(
                     f"Selected validated {payload[0]} feature {payload[1]!r} "
                     "in Spatial Feature Configuration."
                 )
 
         def _update_spatial_selection_summary(self) -> None:
+            excluded_count = (
+                len(self.model.values.excluded_point_placement_ids)
+                + len(self.model.values.excluded_line_ids)
+            )
+            self.feature_selection_section.header.setText(
+                f"Feature selection ({excluded_count} excluded)"
+                if excluded_count else "Feature selection (all included by default)"
+            )
             self.spatial_selection_summary.setText(
                 self.model.feature_selection_summary(
                     max_disabled_ids_per_kind=FEATURE_SELECTION_DISPLAY_ID_LIMIT
@@ -7063,6 +7121,7 @@ if GUI_AVAILABLE:
                 "Validation is running. Assembly remains locked until it succeeds."
             )
             self.model.invalidate_prepared_plan()
+            self.workflow_tabs.setCurrentWidget(self.review_step_page)
             self._update_workflow_readiness()
             self._start_operation(
                 "preview",
