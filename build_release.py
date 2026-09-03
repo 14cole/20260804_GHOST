@@ -871,7 +871,7 @@ def run_acceptance_gates(
         raise ReleaseBuildError(
             "Startup diagnostics failed:\n  - " + "\n  - ".join(blockers)
         )
-    expected_native_keys = {"native_fmm", "native_bor"}
+    expected_native_keys = {"native_bor"}
     native_by_key = {
         result.key: result
         for result in diagnostic_results
@@ -1439,7 +1439,7 @@ def _argument_parser() -> argparse.ArgumentParser:
         choices=sorted(NATIVE_POLICIES),
         default="warn",
         help=(
-            "handling when Windows native GHOST accelerators are unavailable "
+            "handling when Windows native GHOST BoR acceleration is unavailable "
             "(default: warn and record in BUILD-INFO.json)"
         ),
     )

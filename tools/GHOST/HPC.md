@@ -563,7 +563,7 @@ Usual causes, in order of likelihood:
    diagnostic prints the Backend directory it actually checked, which is
    usually enough to spot this.
 
-Note that `.so` artifacts count: rebuilding `fmm_near.so` on a different host
+Note that `.so` artifacts count: rebuilding `bor_stream_kernel.so` on a different host
 changes the fingerprint even with identical sources.
 
 Restoring the old tree and resubmitting are both valid; the check exists so a

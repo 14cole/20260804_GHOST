@@ -42,46 +42,10 @@ try:
 except Exception:
     _SCIPY_LINALG = None
 try:
-    from scipy import sparse as _SCIPY_SPARSE
-except Exception:
-    _SCIPY_SPARSE = None
-try:
     from scipy.sparse import linalg as _SCIPY_SPARSE_LINALG
 except Exception:
     _SCIPY_SPARSE_LINALG = None
-_GMRES_KWARGS = None
 
-
-def _gmres_compat(*args, rtol, atol, **kwargs):
-    """scipy.sparse.linalg.gmres across scipy versions (HPC clusters ship
-    very old builds).  Signature history:
-
-      scipy >= 1.12 : rtol + atol   (tol removed in 1.14)
-      1.1 .. 1.11   : tol  + atol
-      < 1.1         : tol only      (no atol; legacy stop at ||r||/||b|| < tol)
-
-    The tolerance intent is preserved in every tier: our call sites always
-    pass atol == rtol, and the legacy relative-only criterion matches that
-    for any nonzero RHS.  The signature is inspected once and cached.
-    """
-
-    global _GMRES_KWARGS
-    if _GMRES_KWARGS is None:
-        import inspect
-        try:
-            params = inspect.signature(_SCIPY_SPARSE_LINALG.gmres).parameters
-            has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD
-                             for p in params.values())
-            _GMRES_KWARGS = ("rtol" if ("rtol" in params or has_kwargs) else "tol",
-                             ("atol" in params) or has_kwargs)
-        except (TypeError, ValueError):
-            _GMRES_KWARGS = ("rtol", True)
-    tol_name, has_atol = _GMRES_KWARGS
-    kw = dict(kwargs)
-    kw[tol_name] = rtol
-    if has_atol:
-        kw["atol"] = atol
-    return _SCIPY_SPARSE_LINALG.gmres(*args, **kw)
 
 try:
     import mpmath as _MPMATH
@@ -4664,39 +4628,6 @@ def _assemble_linear_mass_matrix(mesh: 'LinearMesh') -> 'np.ndarray':
     return m_mat
 
 
-def _assemble_linear_mass_matrix_sparse(mesh: 'LinearMesh'):
-    """Assemble the same consistent mass operator as a real CSR matrix.
-
-    Matrix-free formulations only apply M to complex vectors or extract small
-    interface blocks. Keeping the globally sparse O(N) operator avoids an
-    otherwise unnecessary complex O(N^2) allocation without changing any
-    element coefficient or quadrature.
-    """
-
-    if _SCIPY_SPARSE is None:
-        raise ImportError("Sparse mass assembly requires scipy.sparse.")
-    nnodes = len(mesh.nodes)
-    if not mesh.elements:
-        return _SCIPY_SPARSE.csr_matrix((nnodes, nnodes), dtype=float)
-    node_ids = np.asarray(
-        [elem.node_ids for elem in mesh.elements], dtype=np.int64
-    )
-    lengths = np.asarray(
-        [elem.length for elem in mesh.elements], dtype=float
-    )
-    rows = np.column_stack((
-        node_ids[:, 0], node_ids[:, 0], node_ids[:, 1], node_ids[:, 1]
-    )).reshape(-1)
-    cols = np.column_stack((
-        node_ids[:, 0], node_ids[:, 1], node_ids[:, 0], node_ids[:, 1]
-    )).reshape(-1)
-    data = (
-        lengths[:, None]
-        * np.asarray([1.0 / 3.0, 1.0 / 6.0, 1.0 / 6.0, 1.0 / 3.0])
-    ).reshape(-1)
-    return _SCIPY_SPARSE.coo_matrix(
-        (data, (rows, cols)), shape=(nnodes, nnodes)
-    ).tocsr()
 
 
 def _assemble_linear_weighted_mass_matrix(
@@ -5380,19 +5311,17 @@ def _normalize_rcs_normalization_mode(mode: 'Optional[str]') -> 'str':
     )
 
 def _normalize_public_2d_solver_method(method: 'Any') -> 'str':
-    """Validate the algorithms actually implemented by the public RCS paths."""
+    """Accept the supported direct methods before allocating solver arrays."""
 
     normalized = str(method).strip().lower()
-    if normalized == "gmres":
+    if normalized == "fmm":
         raise ValueError(
-            "solver_method='gmres' is not implemented by the active public "
-            "2-D RCS formulations. Use 'auto'/'direct' for dense LU, or "
-            "'fmm' on a supported TE-Robin or multi-region monostatic case."
+            "The FMM solver has been removed. Use solver_method='auto' or "
+            "'direct' for dense LU."
         )
-    if normalized not in {"auto", "direct", "fmm"}:
+    if normalized not in {"auto", "direct"}:
         raise ValueError(
-            f"Unsupported 2-D solver_method {method!r}; expected 'auto', "
-            "'direct', or 'fmm'."
+            f"Unsupported 2-D solver_method {method!r}; expected 'auto' or 'direct'."
         )
     return normalized
 
@@ -5911,81 +5840,6 @@ def _estimate_memory_gb(
     total = sys_bytes + region_bytes + misc_bytes
     return total / (1024 ** 3)
 
-def _solve_fmm_gmres_columns(
-    operator: 'Any',
-    rhs: 'np.ndarray',
-    angles_deg: 'np.ndarray',
-    *,
-    formulation: 'str',
-    restart: 'int',
-    maxiter: 'int',
-    rtol: 'float',
-    preconditioner: 'Optional[Any]' = None,
-) -> 'np.ndarray':
-    """
-    Solve FMM-backed right-hand sides and fail closed on nonconvergence.
-
-    A nonzero SciPy GMRES ``info`` means the returned iterate is not a
-    certified solution. Projecting it into a far field can look numerically
-    plausible while being physically arbitrary, so FMM callers must not
-    continue after such a status.
-    """
-
-    if _SCIPY_SPARSE_LINALG is None:
-        raise ImportError("FMM solver requires scipy.sparse.linalg for GMRES.")
-
-    rhs_eval = np.asarray(rhs, dtype=np.complex128)
-    if rhs_eval.ndim == 1:
-        rhs_eval = rhs_eval[:, None]
-    angles = np.asarray(angles_deg, dtype=float).reshape(-1)
-    if rhs_eval.shape[1] != angles.size:
-        raise ValueError(
-            f"{formulation} FMM solve received {rhs_eval.shape[1]} RHS column(s) "
-            f"but {angles.size} angle label(s)."
-        )
-
-    solution = np.zeros_like(rhs_eval)
-    for col, angle in enumerate(angles):
-        candidate, info = _gmres_compat(
-            operator,
-            rhs_eval[:, col],
-            rtol=float(rtol),
-            atol=float(rtol),
-            restart=int(restart),
-            maxiter=int(maxiter),
-            M=preconditioner,
-        )
-        candidate = np.asarray(candidate, dtype=np.complex128)
-        if info != 0:
-            try:
-                residual = np.asarray(rhs_eval[:, col] - operator @ candidate)
-                denom = max(float(np.linalg.norm(rhs_eval[:, col])), EPS)
-                rel_residual = float(np.linalg.norm(residual) / denom)
-            except Exception:
-                rel_residual = float("nan")
-            status = (
-                f"iteration limit/status {int(info)}"
-                if int(info) > 0
-                else f"solver breakdown/illegal-input status {int(info)}"
-            )
-            residual_text = (
-                f"{rel_residual:.3e}" if math.isfinite(rel_residual) else "unavailable"
-            )
-            raise RuntimeError(
-                f"Aborting {formulation} FMM solve at elevation {float(angle):g} deg: "
-                f"GMRES did not converge ({status}, relative residual {residual_text}, "
-                f"requested rtol {float(rtol):.1e}, maxiter {int(maxiter)}). "
-                "No unconverged field or RCS was returned. Check geometry/material "
-                "conditioning and mesh resolution; if the dense memory estimate is "
-                "acceptable, retry with solver_method='auto' for a direct solve."
-            )
-        if not np.all(np.isfinite(candidate.real) & np.isfinite(candidate.imag)):
-            raise RuntimeError(
-                f"Aborting {formulation} FMM solve at elevation {float(angle):g} deg: "
-                "GMRES reported convergence but returned non-finite field values."
-            )
-        solution[:, col] = candidate
-    return solution
 
 def _solve_te_robin_mfie(
     mesh: 'LinearMesh',
@@ -6010,10 +5864,11 @@ def _solve_te_robin_mfie(
     the Galerkin observation integral (0 for PEC, nonzero for IBC).
     K' is the adjoint double-layer operator (obs_normal_deriv=True).
 
-    When solver_method="fmm", uses FMM-accelerated GMRES instead of dense LU.
+    Uses dense LU for both solver_method="auto" and "direct".
 
     Returns (rcs_linear, amplitude, residual_norm) arrays over elevations.
     """
+    _normalize_public_2d_solver_method(solver_method)
 
     nnodes = len(mesh.nodes)
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
@@ -6035,77 +5890,24 @@ def _solve_te_robin_mfie(
             load_u = _linear_element_incident_load_many(elem, k_air=k0, elevations_deg=elev)
             rhs_mfie[ids, :] -= complex(alpha_elements[eidx]) * load_u
 
-    use_fmm = (solver_method.strip().lower() == "fmm")
-    if use_fmm and condition_diagnostics is not None:
-        raise ValueError(
-            "compute_condition_number=True is unavailable for the matrix-free "
-            "2-D FMM path. Use solver_method='auto' for a dense diagnostic "
-            "solve, or explicitly disable the condition-number request."
-        )
-    if not use_fmm:
-        # Dense path (original).
-        s_alpha_mat, kp_mat = _assemble_linear_operator_matrices(
-            mesh, k0, obs_normal_deriv=True,
-            obs_order=obs_order, src_order=src_order,
-            compute_single_layer=bool(has_ibc),
-            single_layer_observation_coefficients=(
-                alpha_elements if has_ibc else None
-            ),
-        )
-        mass_mat = _assemble_linear_mass_matrix(mesh)
-        a_mfie = -0.5 * mass_mat + kp_mat
-        if has_ibc:
-            a_mfie += s_alpha_mat
-        _ensure_finite_linear_system(a_mfie, rhs_mfie, label="TE Robin MFIE system")
-        sigma_mat = _solve_dense_system(
-            a_mfie, rhs_mfie, condition_diagnostics,
-            "TE Robin MFIE system",
-        )
-        residual = np.linalg.norm(a_mfie @ sigma_mat - rhs_mfie, axis=0)
-    else:
-        # FMM path.
-        alpha_unique = np.unique(np.round(alpha_elements, decimals=14))
-        if alpha_unique.size > 1:
-            raise ValueError(
-                "Matrix-free TE Robin FMM currently supports only a spatially "
-                "constant Robin coefficient (including pure PEC). Tapered or "
-                "mixed PEC/IBC coefficients require the dense element-weighted "
-                "Galerkin path; no nodal row-scaling approximation was used."
-            )
-        alpha_constant = (
-            complex(alpha_elements[0]) if alpha_elements.size else 0.0 + 0.0j
-        )
-        try:
-            from fmm_helmholtz_2d import FMMOperator
-        except ImportError:
-            raise ImportError("FMM solver requires fmm_helmholtz_2d.py in the Python path.")
-        mass_mat = _assemble_linear_mass_matrix_sparse(mesh)
-        fmm_kp = FMMOperator(mesh, k0, obs_normal_deriv=True, n_digits=6)
-        fmm_s = FMMOperator(mesh, k0, obs_normal_deriv=False, n_digits=6) if has_ibc else None
-
-        def mfie_matvec(x):
-            y = -0.5 * (mass_mat @ x) + fmm_kp.matvec(x)
-            if has_ibc and fmm_s is not None:
-                y += alpha_constant * fmm_s.matvec(x)
-            return y
-
-        if _SCIPY_SPARSE_LINALG is None:
-            raise ImportError("FMM solver requires scipy.sparse.linalg for GMRES.")
-        A_op = _SCIPY_SPARSE_LINALG.LinearOperator(
-            (nnodes, nnodes), matvec=mfie_matvec, dtype=np.complex128)
-        sigma_mat = _solve_fmm_gmres_columns(
-            A_op,
-            rhs_mfie,
-            elev,
-            formulation="TE Robin MFIE",
-            restart=50,
-            maxiter=300,
-            rtol=1.0e-10,
-        )
-        residual = np.zeros(elev.size)
-        for col in range(elev.size):
-            r = rhs_mfie[:, col] - mfie_matvec(sigma_mat[:, col])
-            residual[col] = np.linalg.norm(r)
+    s_alpha_mat, kp_mat = _assemble_linear_operator_matrices(
+        mesh, k0, obs_normal_deriv=True,
+        obs_order=obs_order, src_order=src_order,
+        compute_single_layer=bool(has_ibc),
+        single_layer_observation_coefficients=(
+            alpha_elements if has_ibc else None
+        ),
+    )
+    mass_mat = _assemble_linear_mass_matrix(mesh)
+    a_mfie = -0.5 * mass_mat + kp_mat
+    if has_ibc:
+        a_mfie += s_alpha_mat
+    _ensure_finite_linear_system(a_mfie, rhs_mfie, label="TE Robin MFIE system")
+    sigma_mat = _solve_dense_system(
+        a_mfie, rhs_mfie, condition_diagnostics,
+        "TE Robin MFIE system",
+    )
+    residual = np.linalg.norm(a_mfie @ sigma_mat - rhs_mfie, axis=0)
 
     rhs_norm = np.linalg.norm(rhs_mfie, axis=0)
     rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
@@ -6745,8 +6547,7 @@ def _assemble_robin_bie_system(
     condition on PEC (u = 0 for TE, du/dn = 0 for TM) and shifts the RCS by
     ~9.5 dB everywhere.  A genuine resonance-free indirect scheme needs the
     Brakhage-Werner combined-SOURCE ansatz (double-layer + hypersingular
-    operators) -- only worth building if iterative (GMRES/FMM) solves near
-    dense resonance spectra ever stall; direct solves do not need it.
+    operators); the supported direct solves do not need it.
     The public 2-D entry points reject nonzero ``cfie_alpha`` so this setting
     cannot silently leave the physical operator unchanged.
     """
@@ -7040,8 +6841,9 @@ def _solve_multi_region_indirect(
     - Density on plus_region side:  flux = (+1/2 M + K') * tau
     - Cross-interface operators (source != observer): no +/-1/2 jump.
 
-    When solver_method="fmm", uses FMM-accelerated GMRES instead of dense LU.
+    Uses dense LU for both solver_method="auto" and "direct".
     """
+    _normalize_public_2d_solver_method(solver_method)
     nnodes = len(mesh.nodes)
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
     elements = list(mesh.elements)
@@ -7079,8 +6881,8 @@ def _solve_multi_region_indirect(
                 # backing (pec_plus, TYPE 2 orientation).  For pec_minus
                 # (TYPE 4) the normal points into the dielectric field region
                 # instead, so the flux term flips sign: q - alpha*u = 0.  Bake
-                # the side sign into the stored alpha so the matrix rows, RHS,
-                # FMM matvec, and preconditioner all stay consistent.
+                # the side sign into the stored alpha so the matrix rows
+                # and RHS stay consistent.
                 side_sign = -1.0 if pec_minus else 1.0
                 for ei in eids:
                     z_s = complex(infos[ei].robin_impedance)
@@ -7091,9 +6893,8 @@ def _solve_multi_region_indirect(
                                 pol, rp['eps'], rp['mu'], rp['k'], z_s
                             )
                         )
-                # Retained only for the constant-coefficient FMM matvec.  The
-                # dense path uses robin_alpha_elements inside the weak
-                # observation integral and never row-scales by this array.
+                # Nodal alpha identifies the TM PEC rows below. The weak
+                # observation integral uses robin_alpha_elements directly.
                 for ni, nid in enumerate(nodes):
                     incident = [
                         robin_alpha_elements[ei]
@@ -7121,177 +6922,100 @@ def _solve_multi_region_indirect(
         if ifc['r_p'] >= 0:
             dof_map[(mi, 'plus')] = (n_dof, ifc['n']); n_dof += ifc['n']
 
-    # 4. Operator cache -- dense or FMM depending on solver_method.
-    use_fmm = (isinstance(solver_method, str) and solver_method.strip().lower() == "fmm")
-    if use_fmm and condition_diagnostics is not None:
-        raise ValueError(
-            "compute_condition_number=True is unavailable for the matrix-free "
-            "2-D FMM path. Use solver_method='auto' for a dense diagnostic "
-            "solve, or explicitly disable the condition-number request."
+    # 4. Dense operator cache.
+    M_global = _assemble_linear_mass_matrix(mesh)
+
+
+    op_cache = {}
+    def get_ops(k_val, src_mask):
+        key = (complex(k_val), id(src_mask))
+        if key not in op_cache:
+            S, Kp = _assemble_linear_operator_matrices(
+                mesh, k_val, True, obs_order, src_order,
+                source_element_mask=src_mask,
+            )
+            op_cache[key] = (S, Kp)
+        return op_cache[key]
+
+    weighted_s_cache = {}
+    def get_weighted_s(k_val, src_mask, obs_coeff):
+        coeff_eval = np.asarray(obs_coeff, dtype=np.complex128)
+        key = (complex(k_val), id(src_mask), id(obs_coeff))
+        if not np.any(np.abs(coeff_eval) > EPS):
+            return np.broadcast_to(
+                np.zeros((), dtype=np.complex128),
+                (nnodes, nnodes),
+            )
+        if key not in weighted_s_cache:
+            S_alpha, _ = _assemble_linear_operator_matrices(
+                mesh, k_val, True, obs_order, src_order,
+                source_element_mask=src_mask,
+                compute_double_layer=False,
+                single_layer_observation_coefficients=coeff_eval,
+            )
+            weighted_s_cache[key] = S_alpha
+        return weighted_s_cache[key]
+
+    # Prefetch every unweighted S/K' output and every Robin-weighted S
+    # output in one traversal per distinct wavenumber. Kernel values and
+    # near-pair blocks depend on geometry and k, not on which source mask
+    # or observation coefficient consumes them.
+    _requests_by_k = {}
+    _request_seen = {}
+    for _rid, _mis in region_ifaces.items():
+        _k = complex(region_props[_rid]['k'])
+        _slot = _requests_by_k.setdefault(_k, [])
+        _seen = _request_seen.setdefault(_k, set())
+        for _mi in _mis:
+            _mask = ifaces[_mi]['mask']
+            _token = ("plain", id(_mask))
+            if _token in _seen:
+                continue
+            _seen.add(_token)
+            _slot.append(("plain", _mask, None))
+
+    for _mi, _ifc in enumerate(ifaces):
+        if not (_ifc['pec_minus'] or _ifc['pec_plus']):
+            continue
+        _rid = _ifc['r_p'] if _ifc['pec_minus'] else _ifc['r_m']
+        _k = complex(region_props[_rid]['k'])
+        _slot = _requests_by_k.setdefault(_k, [])
+        _seen = _request_seen.setdefault(_k, set())
+        for _mj in region_ifaces.get(_rid, []):
+            _src_mask = ifaces[_mj]['mask']
+            _obs_coeff = _ifc['robin_alpha_elements']
+            if not np.any(np.abs(_obs_coeff) > EPS):
+                continue
+            _token = ("weighted", id(_src_mask), id(_obs_coeff))
+            if _token in _seen:
+                continue
+            _seen.add(_token)
+            _slot.append(("weighted", _src_mask, _obs_coeff))
+
+    for _k, _requests in _requests_by_k.items():
+        _masks = [request[1] for request in _requests]
+        _coeffs = [request[2] for request in _requests]
+        _want_k = [request[0] == "plain" for request in _requests]
+        _outputs = _assemble_linear_operator_matrices_multi(
+            mesh=mesh,
+            k0=_k,
+            obs_normal_deriv=True,
+            source_element_masks=_masks,
+            obs_order=obs_order,
+            src_order=src_order,
+            compute_double_layer=True,
+            compute_double_layer_many=_want_k,
+            single_layer_observation_coefficients_many=_coeffs,
         )
-    if use_fmm:
-        for ifc in ifaces:
-            if not (ifc['pec_minus'] or ifc['pec_plus']):
-                continue
-            vals = np.asarray(
-                [ifc['robin_alpha_elements'][ei] for ei in ifc['eids']],
-                dtype=np.complex128,
-            )
-            if np.unique(np.round(vals, decimals=14)).size > 1:
-                raise ValueError(
-                    "Multi-region FMM currently supports only a spatially "
-                    "constant Robin coefficient on each PEC-backed interface. "
-                    "Tapered or mixed coefficients require the dense "
-                    "element-weighted Galerkin path; no nodal row-scaling "
-                    "approximation was used."
-                )
-    M_global = (
-        _assemble_linear_mass_matrix_sparse(mesh)
-        if use_fmm
-        else _assemble_linear_mass_matrix(mesh)
-    )
-
-    if use_fmm:
-        try:
-            from fmm_helmholtz_2d import FMMOperator, QuadTree, _build_lists
-        except ImportError as exc:
-            raise ImportError(
-                "Multi-region FMM was explicitly requested, but "
-                "fmm_helmholtz_2d.py is unavailable. Refusing an implicit dense "
-                "fallback because the caller's FMM memory gate does not certify "
-                "that dense allocation is safe; install the FMM backend or retry "
-                "with solver_method='auto' so the dense memory gate is applied."
-            ) from exc
-
-    if not use_fmm:
-        op_cache = {}
-        def get_ops(k_val, src_mask):
-            key = (complex(k_val), id(src_mask))
-            if key not in op_cache:
-                S, Kp = _assemble_linear_operator_matrices(
-                    mesh, k_val, True, obs_order, src_order,
-                    source_element_mask=src_mask,
-                )
-                op_cache[key] = (S, Kp)
-            return op_cache[key]
-
-        weighted_s_cache = {}
-        def get_weighted_s(k_val, src_mask, obs_coeff):
-            coeff_eval = np.asarray(obs_coeff, dtype=np.complex128)
-            key = (complex(k_val), id(src_mask), id(obs_coeff))
-            if not np.any(np.abs(coeff_eval) > EPS):
-                return np.broadcast_to(
-                    np.zeros((), dtype=np.complex128),
-                    (nnodes, nnodes),
-                )
-            if key not in weighted_s_cache:
-                S_alpha, _ = _assemble_linear_operator_matrices(
-                    mesh, k_val, True, obs_order, src_order,
-                    source_element_mask=src_mask,
-                    compute_double_layer=False,
-                    single_layer_observation_coefficients=coeff_eval,
-                )
-                weighted_s_cache[key] = S_alpha
-            return weighted_s_cache[key]
-
-        # Prefetch every unweighted S/K' output and every Robin-weighted S
-        # output in one traversal per distinct wavenumber. Kernel values and
-        # near-pair blocks depend on geometry and k, not on which source mask
-        # or observation coefficient consumes them.
-        _requests_by_k = {}
-        _request_seen = {}
-        for _rid, _mis in region_ifaces.items():
-            _k = complex(region_props[_rid]['k'])
-            _slot = _requests_by_k.setdefault(_k, [])
-            _seen = _request_seen.setdefault(_k, set())
-            for _mi in _mis:
-                _mask = ifaces[_mi]['mask']
-                _token = ("plain", id(_mask))
-                if _token in _seen:
-                    continue
-                _seen.add(_token)
-                _slot.append(("plain", _mask, None))
-
-        for _mi, _ifc in enumerate(ifaces):
-            if not (_ifc['pec_minus'] or _ifc['pec_plus']):
-                continue
-            _rid = _ifc['r_p'] if _ifc['pec_minus'] else _ifc['r_m']
-            _k = complex(region_props[_rid]['k'])
-            _slot = _requests_by_k.setdefault(_k, [])
-            _seen = _request_seen.setdefault(_k, set())
-            for _mj in region_ifaces.get(_rid, []):
-                _src_mask = ifaces[_mj]['mask']
-                _obs_coeff = _ifc['robin_alpha_elements']
-                if not np.any(np.abs(_obs_coeff) > EPS):
-                    continue
-                _token = ("weighted", id(_src_mask), id(_obs_coeff))
-                if _token in _seen:
-                    continue
-                _seen.add(_token)
-                _slot.append(("weighted", _src_mask, _obs_coeff))
-
-        for _k, _requests in _requests_by_k.items():
-            _masks = [request[1] for request in _requests]
-            _coeffs = [request[2] for request in _requests]
-            _want_k = [request[0] == "plain" for request in _requests]
-            _outputs = _assemble_linear_operator_matrices_multi(
-                mesh=mesh,
-                k0=_k,
-                obs_normal_deriv=True,
-                source_element_masks=_masks,
-                obs_order=obs_order,
-                src_order=src_order,
-                compute_double_layer=True,
-                compute_double_layer_many=_want_k,
-                single_layer_observation_coefficients_many=_coeffs,
-            )
-            for (_kind, _mask, _coeff), (_s_mat, _k_mat) in zip(
-                _requests, _outputs
-            ):
-                if _kind == "plain":
-                    op_cache[(_k, id(_mask))] = (_s_mat, _k_mat)
-                else:
-                    weighted_s_cache[
-                        (_k, id(_mask), id(_coeff))
-                    ] = _s_mat
-        def sub(mat, obs_n, src_n):
-            return mat[np.ix_(obs_n, src_n)]
-    else:
-        # Build tree and lists ONCE, share across all FMM operators.
-        _elems = list(mesh.elements)
-        _shared_geom = {
-            'elements': _elems,
-            'centers': np.array([e.center for e in _elems]),
-            'lengths': np.array([e.length for e in _elems]),
-            'normals': np.array([e.normal for e in _elems]),
-            'p0s': np.array([e.p0 for e in _elems]),
-            'segs': np.array([e.p1 - e.p0 for e in _elems]),
-            'node_ids': np.array([e.node_ids for e in _elems], dtype=int),
-        }
-        # Fixed leaf size keeps the FMM near-field O(N). The previous
-        # nnodes//15 heuristic grew the leaf with the mesh, pinning the quadtree
-        # at ~52 leaves for any N, which left the near-field O(N^2) (defeating
-        # the FMM). A constant leaf lets the tree refine so near-field work
-        # stays proportional to N.
-        _max_leaf = 40
-        _shared_tree = QuadTree(_shared_geom['centers'], _max_leaf)
-        _shared_lists = _build_lists(_shared_tree)
-
-        fmm_cache = {}
-        def get_fmm_ops(k_val, src_mask):
-            key = (complex(k_val), tuple(src_mask.tolist()))
-            if key not in fmm_cache:
-                fmm_S = FMMOperator(mesh, k_val, obs_normal_deriv=False,
-                                     source_element_mask=src_mask, n_digits=6,
-                                     _shared_tree=_shared_tree, _shared_lists=_shared_lists,
-                                     _shared_geom=_shared_geom)
-                fmm_Kp = FMMOperator(mesh, k_val, obs_normal_deriv=True,
-                                      source_element_mask=src_mask, n_digits=6,
-                                      _shared_tree=_shared_tree, _shared_lists=_shared_lists,
-                                      _shared_geom=_shared_geom)
-                fmm_cache[key] = (fmm_S, fmm_Kp)
-            return fmm_cache[key]
-
+        for (_kind, _mask, _coeff), (_s_mat, _k_mat) in zip(
+            _requests, _outputs
+        ):
+            if _kind == "plain":
+                op_cache[(_k, id(_mask))] = (_s_mat, _k_mat)
+            else:
+                weighted_s_cache[
+                    (_k, id(_mask), id(_coeff))
+                ] = _s_mat
     # Incident field.
     bu = np.zeros((nnodes, elev.size), dtype=np.complex128)
     bdn = np.zeros((nnodes, elev.size), dtype=np.complex128)
@@ -7300,7 +7024,7 @@ def _solve_multi_region_indirect(
         bu[ids] += _linear_element_incident_load_many(elem, k_air=k0, elevations_deg=elev)
         bdn[ids] += _linear_element_incident_dn_load_many(elem, k_air=k0, elevations_deg=elev)
 
-    # 5. Assemble RHS (shared between dense and FMM paths).
+    # 5. Assemble RHS.
     Brhs = np.zeros((n_dof, elev.size), dtype=np.complex128)
 
     for mi, ifc in enumerate(ifaces):
@@ -7317,23 +7041,18 @@ def _solve_multi_region_indirect(
             tm_pec_mask = (np.abs(alpha) <= EPS) if pol == 'TM' else np.zeros(nm, dtype=bool)
             if region_props[rid].get('has_incident'):
                 # Default: Robin BIE RHS.
-                if use_fmm:
-                    # FMM reached here only for a constant alpha on this
-                    # interface, for which row scaling is the exact weak form.
-                    alpha_bu = alpha[:, None] * bu[obs_n]
-                else:
-                    alpha_bu_global = np.zeros_like(bu)
-                    alpha_e = ifc['robin_alpha_elements']
-                    for ei in ifc['eids']:
-                        elem = elements[ei]
-                        ids = np.asarray(elem.node_ids, dtype=int)
-                        alpha_bu_global[ids] += (
-                            complex(alpha_e[ei])
-                            * _linear_element_incident_load_many(
-                                elem, k_air=k0, elevations_deg=elev
-                            )
+                alpha_bu_global = np.zeros_like(bu)
+                alpha_e = ifc['robin_alpha_elements']
+                for ei in ifc['eids']:
+                    elem = elements[ei]
+                    ids = np.asarray(elem.node_ids, dtype=int)
+                    alpha_bu_global[ids] += (
+                        complex(alpha_e[ei])
+                        * _linear_element_incident_load_many(
+                            elem, k_air=k0, elevations_deg=elev
                         )
-                    alpha_bu = alpha_bu_global[obs_n]
+                    )
+                alpha_bu = alpha_bu_global[obs_n]
                 rhs_block = bdn[obs_n] + alpha_bu
                 # TM PEC override (per row).
                 if np.any(tm_pec_mask):
@@ -7354,320 +7073,110 @@ def _solve_multi_region_indirect(
                 Brhs[d_sigma[0]:d_sigma[0]+nm] += inv_beta * bdn[obs_n]
                 Brhs[d_tau[0]:d_tau[0]+nm]     += bu[obs_n]
 
-    if not use_fmm:
-        # -- Dense assembly path ------------------------------------------
-        Asys = np.zeros((n_dof, n_dof), dtype=np.complex128)
-        def sub(mat, obs_n, src_n):
-            return mat[np.ix_(obs_n, src_n)]
+    Asys = np.zeros((n_dof, n_dof), dtype=np.complex128)
+    def sub(mat, obs_n, src_n):
+        return mat[np.ix_(obs_n, src_n)]
 
-        def _add_robin_block_dense(mi, ifc, dof_side, region_id, jump_sign):
-            dm = dof_map[(mi, dof_side)]
-            obs_n = ifc['nodes']; nm = ifc['n']
-            k_d = region_props[region_id]['k']
-            S_self, Kp_self = get_ops(k_d, ifc['mask'])
-            S_alpha_self = get_weighted_s(
-                k_d, ifc['mask'], ifc['robin_alpha_elements']
+    def _add_robin_block_dense(mi, ifc, dof_side, region_id, jump_sign):
+        dm = dof_map[(mi, dof_side)]
+        obs_n = ifc['nodes']; nm = ifc['n']
+        k_d = region_props[region_id]['k']
+        S_self, Kp_self = get_ops(k_d, ifc['mask'])
+        S_alpha_self = get_weighted_s(
+            k_d, ifc['mask'], ifc['robin_alpha_elements']
+        )
+        M_s = sub(M_global, obs_n, obs_n)
+        alpha = ifc['robin_alpha']
+        # Per-node TM PEC mask: nodes where alpha = 0 and pol = TM use
+        # the EFIE row  S sigma = -u_inc (the Z_s -> 0, alpha -> infty
+        # limit of the Robin BIE divided through by alpha).  Without
+        # this override, alpha = 0 silently collapses to the TE MFIE
+        # row, which is the wrong boundary condition for TM PEC and
+        # produces ~0.3-1.0 dB Mie error.  For TE the alpha = 0 case
+        # already gives the correct MFIE, so no override is needed.
+        tm_pec_mask = (np.abs(alpha) <= EPS) if pol == 'TM' else np.zeros(nm, dtype=bool)
+
+        S_sub = sub(S_self, obs_n, obs_n)
+        Kp_sub = sub(Kp_self, obs_n, obs_n)
+        block = (
+            jump_sign * 0.5 * M_s
+            + Kp_sub
+            + sub(S_alpha_self, obs_n, obs_n)
+        )
+        if np.any(tm_pec_mask):
+            block[tm_pec_mask, :] = S_sub[tm_pec_mask, :]
+        Asys[dm[0]:dm[0]+nm, dm[0]:dm[0]+nm] += block
+
+        for mj in region_ifaces.get(region_id, []):
+            if mj == mi: continue
+            ifj = ifaces[mj]
+            side_j = 'minus' if ifj['r_m'] == region_id else 'plus'
+            dj = dof_map.get((mj, side_j))
+            if dj is None: continue
+            S_x, Kp_x = get_ops(k_d, ifj['mask']); src_n = ifj['nodes']
+            S_alpha_x = get_weighted_s(
+                k_d, ifj['mask'], ifc['robin_alpha_elements']
             )
-            M_s = sub(M_global, obs_n, obs_n)
-            alpha = ifc['robin_alpha']
-            # Per-node TM PEC mask: nodes where alpha = 0 and pol = TM use
-            # the EFIE row  S sigma = -u_inc (the Z_s -> 0, alpha -> infty
-            # limit of the Robin BIE divided through by alpha).  Without
-            # this override, alpha = 0 silently collapses to the TE MFIE
-            # row, which is the wrong boundary condition for TM PEC and
-            # produces ~0.3-1.0 dB Mie error.  For TE the alpha = 0 case
-            # already gives the correct MFIE, so no override is needed.
-            tm_pec_mask = (np.abs(alpha) <= EPS) if pol == 'TM' else np.zeros(nm, dtype=bool)
-
-            S_sub = sub(S_self, obs_n, obs_n)
-            Kp_sub = sub(Kp_self, obs_n, obs_n)
-            block = (
-                jump_sign * 0.5 * M_s
-                + Kp_sub
-                + sub(S_alpha_self, obs_n, obs_n)
+            S_x_sub = sub(S_x, obs_n, src_n)
+            Kp_x_sub = sub(Kp_x, obs_n, src_n)
+            cross_block = (
+                Kp_x_sub + sub(S_alpha_x, obs_n, src_n)
             )
             if np.any(tm_pec_mask):
-                block[tm_pec_mask, :] = S_sub[tm_pec_mask, :]
-            Asys[dm[0]:dm[0]+nm, dm[0]:dm[0]+nm] += block
+                cross_block[tm_pec_mask, :] = S_x_sub[tm_pec_mask, :]
+            Asys[dm[0]:dm[0]+nm, dj[0]:dj[0]+dj[1]] += cross_block
 
-            for mj in region_ifaces.get(region_id, []):
+    for mi, ifc in enumerate(ifaces):
+        r_m, r_p = ifc['r_m'], ifc['r_p']
+        if ifc['pec_minus']:
+            _add_robin_block_dense(mi, ifc, 'plus', r_p, +1.0)
+        elif ifc['pec_plus']:
+            _add_robin_block_dense(mi, ifc, 'minus', r_m, -1.0)
+        else:
+            obs_n = ifc['nodes']; nm = ifc['n']
+            d_sigma = dof_map[(mi, 'minus')]; d_tau = dof_map[(mi, 'plus')]
+            k_m_val = region_props[r_m]['k']; k_p_val = region_props[r_p]['k']
+            if pol == 'TM':
+                beta = complex(region_props[r_p]['mu'] / region_props[r_m]['mu']) if abs(region_props[r_m]['mu']) > EPS else 1.0+0j
+            else:
+                beta = complex(region_props[r_p]['eps'] / region_props[r_m]['eps']) if abs(region_props[r_m]['eps']) > EPS else 1.0+0j
+            if abs(beta) <= EPS: beta = 1.0+0j
+            inv_beta = 1.0 / beta
+            S_m, Kp_m = get_ops(k_m_val, ifc['mask'])
+            S_p, Kp_p = get_ops(k_p_val, ifc['mask'])
+            M_s = sub(M_global, obs_n, obs_n)
+            Asys[d_sigma[0]:d_sigma[0]+nm, d_sigma[0]:d_sigma[0]+nm] += -0.5*M_s + sub(Kp_m, obs_n, obs_n)
+            Asys[d_sigma[0]:d_sigma[0]+nm, d_tau[0]:d_tau[0]+nm]     -= inv_beta*(0.5*M_s + sub(Kp_p, obs_n, obs_n))
+            Asys[d_tau[0]:d_tau[0]+nm, d_sigma[0]:d_sigma[0]+nm]     += sub(S_m, obs_n, obs_n)
+            Asys[d_tau[0]:d_tau[0]+nm, d_tau[0]:d_tau[0]+nm]         -= sub(S_p, obs_n, obs_n)
+            for mj in region_ifaces.get(r_m, []):
                 if mj == mi: continue
-                ifj = ifaces[mj]
-                side_j = 'minus' if ifj['r_m'] == region_id else 'plus'
+                ifj = ifaces[mj]; side_j = 'minus' if ifj['r_m'] == r_m else 'plus'
                 dj = dof_map.get((mj, side_j))
                 if dj is None: continue
-                S_x, Kp_x = get_ops(k_d, ifj['mask']); src_n = ifj['nodes']
-                S_alpha_x = get_weighted_s(
-                    k_d, ifj['mask'], ifc['robin_alpha_elements']
-                )
-                S_x_sub = sub(S_x, obs_n, src_n)
-                Kp_x_sub = sub(Kp_x, obs_n, src_n)
-                cross_block = (
-                    Kp_x_sub + sub(S_alpha_x, obs_n, src_n)
-                )
-                if np.any(tm_pec_mask):
-                    cross_block[tm_pec_mask, :] = S_x_sub[tm_pec_mask, :]
-                Asys[dm[0]:dm[0]+nm, dj[0]:dj[0]+dj[1]] += cross_block
+                S_x, Kp_x = get_ops(k_m_val, ifj['mask']); src_n = ifj['nodes']
+                Asys[d_sigma[0]:d_sigma[0]+nm, dj[0]:dj[0]+dj[1]] += sub(Kp_x, obs_n, src_n)
+                Asys[d_tau[0]:d_tau[0]+nm, dj[0]:dj[0]+dj[1]]     += sub(S_x, obs_n, src_n)
+            for mj in region_ifaces.get(r_p, []):
+                if mj == mi: continue
+                ifj = ifaces[mj]; side_j = 'minus' if ifj['r_m'] == r_p else 'plus'
+                dj = dof_map.get((mj, side_j))
+                if dj is None: continue
+                S_x, Kp_x = get_ops(k_p_val, ifj['mask']); src_n = ifj['nodes']
+                Asys[d_sigma[0]:d_sigma[0]+nm, dj[0]:dj[0]+dj[1]] -= inv_beta * sub(Kp_x, obs_n, src_n)
+                Asys[d_tau[0]:d_tau[0]+nm, dj[0]:dj[0]+dj[1]]     -= sub(S_x, obs_n, src_n)
 
-        for mi, ifc in enumerate(ifaces):
-            r_m, r_p = ifc['r_m'], ifc['r_p']
-            if ifc['pec_minus']:
-                _add_robin_block_dense(mi, ifc, 'plus', r_p, +1.0)
-            elif ifc['pec_plus']:
-                _add_robin_block_dense(mi, ifc, 'minus', r_m, -1.0)
-            else:
-                obs_n = ifc['nodes']; nm = ifc['n']
-                d_sigma = dof_map[(mi, 'minus')]; d_tau = dof_map[(mi, 'plus')]
-                k_m_val = region_props[r_m]['k']; k_p_val = region_props[r_p]['k']
-                if pol == 'TM':
-                    beta = complex(region_props[r_p]['mu'] / region_props[r_m]['mu']) if abs(region_props[r_m]['mu']) > EPS else 1.0+0j
-                else:
-                    beta = complex(region_props[r_p]['eps'] / region_props[r_m]['eps']) if abs(region_props[r_m]['eps']) > EPS else 1.0+0j
-                if abs(beta) <= EPS: beta = 1.0+0j
-                inv_beta = 1.0 / beta
-                S_m, Kp_m = get_ops(k_m_val, ifc['mask'])
-                S_p, Kp_p = get_ops(k_p_val, ifc['mask'])
-                M_s = sub(M_global, obs_n, obs_n)
-                Asys[d_sigma[0]:d_sigma[0]+nm, d_sigma[0]:d_sigma[0]+nm] += -0.5*M_s + sub(Kp_m, obs_n, obs_n)
-                Asys[d_sigma[0]:d_sigma[0]+nm, d_tau[0]:d_tau[0]+nm]     -= inv_beta*(0.5*M_s + sub(Kp_p, obs_n, obs_n))
-                Asys[d_tau[0]:d_tau[0]+nm, d_sigma[0]:d_sigma[0]+nm]     += sub(S_m, obs_n, obs_n)
-                Asys[d_tau[0]:d_tau[0]+nm, d_tau[0]:d_tau[0]+nm]         -= sub(S_p, obs_n, obs_n)
-                for mj in region_ifaces.get(r_m, []):
-                    if mj == mi: continue
-                    ifj = ifaces[mj]; side_j = 'minus' if ifj['r_m'] == r_m else 'plus'
-                    dj = dof_map.get((mj, side_j))
-                    if dj is None: continue
-                    S_x, Kp_x = get_ops(k_m_val, ifj['mask']); src_n = ifj['nodes']
-                    Asys[d_sigma[0]:d_sigma[0]+nm, dj[0]:dj[0]+dj[1]] += sub(Kp_x, obs_n, src_n)
-                    Asys[d_tau[0]:d_tau[0]+nm, dj[0]:dj[0]+dj[1]]     += sub(S_x, obs_n, src_n)
-                for mj in region_ifaces.get(r_p, []):
-                    if mj == mi: continue
-                    ifj = ifaces[mj]; side_j = 'minus' if ifj['r_m'] == r_p else 'plus'
-                    dj = dof_map.get((mj, side_j))
-                    if dj is None: continue
-                    S_x, Kp_x = get_ops(k_p_val, ifj['mask']); src_n = ifj['nodes']
-                    Asys[d_sigma[0]:d_sigma[0]+nm, dj[0]:dj[0]+dj[1]] -= inv_beta * sub(Kp_x, obs_n, src_n)
-                    Asys[d_tau[0]:d_tau[0]+nm, dj[0]:dj[0]+dj[1]]     -= sub(S_x, obs_n, src_n)
-
-        # 6. Solve (dense).
-        _ensure_finite_linear_system(Asys, Brhs, label="multi-region indirect system")
-        sol = _solve_dense_system(
-            Asys, Brhs, condition_diagnostics,
-            "multi-region indirect system",
-        )
-        if sol.ndim == 1: sol = sol.reshape(-1, 1)
-        residual = np.linalg.norm(Asys @ sol - Brhs, axis=0)
-        rhs_norm = np.linalg.norm(Brhs, axis=0)
-        rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
-        max_res = float(np.max(residual / rhs_norm))
-    else:
-        # -- FMM matvec path ----------------------------------------------
-        def _fmm_apply(fmm_op, src_nodes, obs_nodes, x_block):
-            """Embed block density into global, apply FMM, extract obs nodes."""
-            x_global = np.zeros(nnodes, dtype=np.complex128)
-            x_global[src_nodes] = x_block
-            y_global = fmm_op.matvec(x_global)
-            return y_global[obs_nodes]
-
-        # Precompute all FMM operators needed.
-        for mi, ifc in enumerate(ifaces):
-            r_m, r_p = ifc['r_m'], ifc['r_p']
-            if ifc['pec_minus'] and r_p >= 0:
-                get_fmm_ops(region_props[r_p]['k'], ifc['mask'])
-            elif ifc['pec_plus'] and r_m >= 0:
-                get_fmm_ops(region_props[r_m]['k'], ifc['mask'])
-            else:
-                if r_m >= 0: get_fmm_ops(region_props[r_m]['k'], ifc['mask'])
-                if r_p >= 0: get_fmm_ops(region_props[r_p]['k'], ifc['mask'])
-            # Cross-interface operators.
-            for rid in [r_m, r_p]:
-                if rid < 0 or rid not in region_props: continue
-                for mj in region_ifaces.get(rid, []):
-                    if mj == mi: continue
-                    get_fmm_ops(region_props[rid]['k'], ifaces[mj]['mask'])
-
-        def block_matvec(x_vec):
-            """Compute Asys @ x using FMM operators."""
-            y = np.zeros(n_dof, dtype=np.complex128)
-            for mi, ifc in enumerate(ifaces):
-                obs_n = np.array(ifc['nodes'], dtype=int); nm = ifc['n']
-                r_m, r_p = ifc['r_m'], ifc['r_p']
-                alpha = ifc['robin_alpha']
-
-                if ifc['pec_minus'] or ifc['pec_plus']:
-                    dof_side = 'plus' if ifc['pec_minus'] else 'minus'
-                    region_id = r_p if ifc['pec_minus'] else r_m
-                    jump_sign = +1.0 if ifc['pec_minus'] else -1.0
-                    dm = dof_map[(mi, dof_side)]
-                    k_d = region_props[region_id]['k']
-                    fmm_S, fmm_Kp = get_fmm_ops(k_d, ifc['mask'])
-                    M_s = M_global[np.ix_(obs_n, obs_n)]
-                    # Per-node TM PEC mask (see dense path for derivation).
-                    tm_pec_mask = (np.abs(alpha) <= EPS) if pol == 'TM' else np.zeros(nm, dtype=bool)
-                    x_blk = x_vec[dm[0]:dm[0]+nm]
-                    S_y = _fmm_apply(fmm_S, obs_n, obs_n, x_blk)
-                    Kp_y = _fmm_apply(fmm_Kp, obs_n, obs_n, x_blk)
-                    # Default Robin BIE rows: jump*1/2M + K' + alpha*S.
-                    y_block = jump_sign * 0.5 * (M_s @ x_blk) + Kp_y + alpha * S_y
-                    # TM PEC override: those rows use S sigma instead.
-                    if np.any(tm_pec_mask):
-                        y_block[tm_pec_mask] = S_y[tm_pec_mask]
-                    y[dm[0]:dm[0]+nm] += y_block
-                    for mj in region_ifaces.get(region_id, []):
-                        if mj == mi: continue
-                        ifj = ifaces[mj]
-                        side_j = 'minus' if ifj['r_m'] == region_id else 'plus'
-                        dj = dof_map.get((mj, side_j))
-                        if dj is None: continue
-                        src_n = np.array(ifj['nodes'], dtype=int)
-                        fmm_Sx, fmm_Kpx = get_fmm_ops(k_d, ifj['mask'])
-                        x_cross = x_vec[dj[0]:dj[0]+dj[1]]
-                        S_cross = _fmm_apply(fmm_Sx, src_n, obs_n, x_cross)
-                        Kp_cross = _fmm_apply(fmm_Kpx, src_n, obs_n, x_cross)
-                        cross_y = Kp_cross + alpha * S_cross
-                        if np.any(tm_pec_mask):
-                            cross_y[tm_pec_mask] = S_cross[tm_pec_mask]
-                        y[dm[0]:dm[0]+nm] += cross_y
-                else:
-                    # Transmission.
-                    d_sigma = dof_map[(mi, 'minus')]; d_tau = dof_map[(mi, 'plus')]
-                    k_m_val = region_props[r_m]['k']; k_p_val = region_props[r_p]['k']
-                    if pol == 'TM':
-                        beta = complex(region_props[r_p]['mu'] / region_props[r_m]['mu']) if abs(region_props[r_m]['mu']) > EPS else 1.0+0j
-                    else:
-                        beta = complex(region_props[r_p]['eps'] / region_props[r_m]['eps']) if abs(region_props[r_m]['eps']) > EPS else 1.0+0j
-                    if abs(beta) <= EPS: beta = 1.0+0j
-                    inv_beta = 1.0 / beta
-                    fmm_Sm, fmm_Kpm = get_fmm_ops(k_m_val, ifc['mask'])
-                    fmm_Sp, fmm_Kpp = get_fmm_ops(k_p_val, ifc['mask'])
-                    M_s = M_global[np.ix_(obs_n, obs_n)]
-                    x_sig = x_vec[d_sigma[0]:d_sigma[0]+nm]; x_tau = x_vec[d_tau[0]:d_tau[0]+nm]
-                    # Flux row.
-                    y[d_sigma[0]:d_sigma[0]+nm] += (
-                        -0.5*(M_s @ x_sig) + _fmm_apply(fmm_Kpm, obs_n, obs_n, x_sig)
-                        - inv_beta*(0.5*(M_s @ x_tau) + _fmm_apply(fmm_Kpp, obs_n, obs_n, x_tau)))
-                    # Trace row.
-                    y[d_tau[0]:d_tau[0]+nm] += (
-                        _fmm_apply(fmm_Sm, obs_n, obs_n, x_sig)
-                        - _fmm_apply(fmm_Sp, obs_n, obs_n, x_tau))
-                    # Cross from r_minus.
-                    for mj in region_ifaces.get(r_m, []):
-                        if mj == mi: continue
-                        ifj = ifaces[mj]; side_j = 'minus' if ifj['r_m'] == r_m else 'plus'
-                        dj = dof_map.get((mj, side_j))
-                        if dj is None: continue
-                        src_n = np.array(ifj['nodes'], dtype=int)
-                        fmm_Sx, fmm_Kpx = get_fmm_ops(k_m_val, ifj['mask'])
-                        x_cross = x_vec[dj[0]:dj[0]+dj[1]]
-                        y[d_sigma[0]:d_sigma[0]+nm] += _fmm_apply(fmm_Kpx, src_n, obs_n, x_cross)
-                        y[d_tau[0]:d_tau[0]+nm]      += _fmm_apply(fmm_Sx, src_n, obs_n, x_cross)
-                    # Cross from r_plus.
-                    for mj in region_ifaces.get(r_p, []):
-                        if mj == mi: continue
-                        ifj = ifaces[mj]; side_j = 'minus' if ifj['r_m'] == r_p else 'plus'
-                        dj = dof_map.get((mj, side_j))
-                        if dj is None: continue
-                        src_n = np.array(ifj['nodes'], dtype=int)
-                        fmm_Sx, fmm_Kpx = get_fmm_ops(k_p_val, ifj['mask'])
-                        x_cross = x_vec[dj[0]:dj[0]+dj[1]]
-                        y[d_sigma[0]:d_sigma[0]+nm] -= inv_beta * _fmm_apply(fmm_Kpx, src_n, obs_n, x_cross)
-                        y[d_tau[0]:d_tau[0]+nm]      -= _fmm_apply(fmm_Sx, src_n, obs_n, x_cross)
-            return y
-
-        # 6. Build block-diagonal preconditioner from near-field self-interaction.
-        # One dense block per interface (its dof ranges are contiguous by
-        # construction of dof_map), factored independently -- storing the full
-        # (n_dof x n_dof) matrix here would reintroduce the dense-memory
-        # footprint the FMM path exists to avoid.
-        precond_blocks: 'List[Tuple[int, np.ndarray]]' = []  # (dof_start, block)
-        for mi, ifc in enumerate(ifaces):
-            obs_n = np.array(ifc['nodes'], dtype=int); nm = ifc['n']
-            r_m, r_p = ifc['r_m'], ifc['r_p']
-            alpha = ifc['robin_alpha']
-            if ifc['pec_minus'] or ifc['pec_plus']:
-                dof_side = 'plus' if ifc['pec_minus'] else 'minus'
-                region_id = r_p if ifc['pec_minus'] else r_m
-                jump_sign = +1.0 if ifc['pec_minus'] else -1.0
-                dm = dof_map[(mi, dof_side)]
-                k_d = region_props[region_id]['k']
-                fmm_S, fmm_Kp = get_fmm_ops(k_d, ifc['mask'])
-                M_s = M_global[np.ix_(obs_n, obs_n)].toarray()
-                # Per-node TM PEC mask (see dense path for derivation).
-                tm_pec_mask = (np.abs(alpha) <= EPS) if pol == 'TM' else np.zeros(nm, dtype=bool)
-                # Extract dense submatrices from the sparse CSR near-field operators.
-                # csr_matrix[np.ix_(...)] returns a CSR slice; assigning that into a
-                # dense Pdiag block raises "must be real number, not csr_matrix".
-                S_sub = fmm_S._near_mat[np.ix_(obs_n, obs_n)].toarray()
-                Kp_sub = fmm_Kp._near_mat[np.ix_(obs_n, obs_n)].toarray()
-                block = jump_sign * 0.5 * M_s + Kp_sub + alpha[:, None] * S_sub
-                if np.any(tm_pec_mask):
-                    block[tm_pec_mask, :] = S_sub[tm_pec_mask, :]
-                precond_blocks.append((dm[0], block))
-            else:
-                d_sigma = dof_map[(mi, 'minus')]; d_tau = dof_map[(mi, 'plus')]
-                k_m_val = region_props[r_m]['k']; k_p_val = region_props[r_p]['k']
-                if pol == 'TM':
-                    beta = complex(region_props[r_p]['mu'] / region_props[r_m]['mu']) if abs(region_props[r_m]['mu']) > EPS else 1.0+0j
-                else:
-                    beta = complex(region_props[r_p]['eps'] / region_props[r_m]['eps']) if abs(region_props[r_m]['eps']) > EPS else 1.0+0j
-                if abs(beta) <= EPS: beta = 1.0+0j
-                inv_beta = 1.0 / beta
-                fmm_Sm, fmm_Kpm = get_fmm_ops(k_m_val, ifc['mask'])
-                fmm_Sp, fmm_Kpp = get_fmm_ops(k_p_val, ifc['mask'])
-                M_s = M_global[np.ix_(obs_n, obs_n)].toarray()
-                # Dense submatrix extracts -- see comment above for why .toarray() is required.
-                Sm_sub = fmm_Sm._near_mat[np.ix_(obs_n, obs_n)].toarray()
-                Sp_sub = fmm_Sp._near_mat[np.ix_(obs_n, obs_n)].toarray()
-                Kpm_sub = fmm_Kpm._near_mat[np.ix_(obs_n, obs_n)].toarray()
-                Kpp_sub = fmm_Kpp._near_mat[np.ix_(obs_n, obs_n)].toarray()
-                # sigma/tau dof ranges of one interface are contiguous
-                # (d_tau starts right after d_sigma), so the coupled 2x2
-                # block occupies one contiguous diagonal block.
-                blk = np.zeros((2 * nm, 2 * nm), dtype=np.complex128)
-                blk[:nm, :nm] = -0.5 * M_s + Kpm_sub
-                blk[:nm, nm:] = -inv_beta * (0.5 * M_s + Kpp_sub)
-                blk[nm:, :nm] = Sm_sub
-                blk[nm:, nm:] = -Sp_sub
-                precond_blocks.append((d_sigma[0], blk))
-
-        # LU-factor each diagonal block independently.
-        try:
-            from scipy.linalg import lu_factor, lu_solve
-            factored_blocks = [
-                (start, block.shape[0], lu_factor(block))
-                for start, block in precond_blocks
-            ]
-            def precond_matvec(x):
-                y = np.array(x, dtype=np.complex128, copy=True)
-                for start, size, lu in factored_blocks:
-                    y[start:start + size] = lu_solve(lu, x[start:start + size])
-                return y
-            M_precond = _SCIPY_SPARSE_LINALG.LinearOperator(
-                (n_dof, n_dof), matvec=precond_matvec, dtype=np.complex128)
-        except Exception:
-            M_precond = None
-
-        # 7. Solve with preconditioned GMRES.
-        if _SCIPY_SPARSE_LINALG is None:
-            raise ImportError("FMM solver requires scipy.sparse.linalg for GMRES.")
-        A_op = _SCIPY_SPARSE_LINALG.LinearOperator(
-            (n_dof, n_dof), matvec=block_matvec, dtype=np.complex128)
-        sol = _solve_fmm_gmres_columns(
-            A_op,
-            Brhs,
-            elev,
-            formulation="multi-region indirect",
-            restart=80,
-            maxiter=500,
-            rtol=1.0e-10,
-            preconditioner=M_precond,
-        )
-        residual = np.zeros(elev.size)
-        for col in range(elev.size):
-            residual[col] = np.linalg.norm(Brhs[:, col] - block_matvec(sol[:, col]))
-        rhs_norm = np.linalg.norm(Brhs, axis=0)
-        rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
-        max_res = float(np.max(residual / rhs_norm))
+    # 6. Solve (dense).
+    _ensure_finite_linear_system(Asys, Brhs, label="multi-region indirect system")
+    sol = _solve_dense_system(
+        Asys, Brhs, condition_diagnostics,
+        "multi-region indirect system",
+    )
+    if sol.ndim == 1: sol = sol.reshape(-1, 1)
+    residual = np.linalg.norm(Asys @ sol - Brhs, axis=0)
+    rhs_norm = np.linalg.norm(Brhs, axis=0)
+    rhs_norm = np.where(rhs_norm <= EPS, 1.0, rhs_norm)
+    max_res = float(np.max(residual / rhs_norm))
 
     # 7. Extract exterior SLP density mapped to global node IDs.
     ext_rid = next((rid for rid, rp in region_props.items() if rp.get('has_incident')), 0)
@@ -8014,16 +7523,6 @@ def solve_monostatic_rcs_2d_single_polarization(
         _assert_no_type1_sheet_for_mixed(coupled_infos)
         _assert_air_exterior(coupled_infos)
         _assert_supported_te_type2_contours(mesh, coupled_infos, pol)
-        if solver_method == "fmm" and not (
-            (pol == "TE" and _is_all_robin(coupled_infos))
-            or _is_multi_region(coupled_infos)
-        ):
-            raise ValueError(
-                "solver_method='fmm' is implemented only for monostatic "
-                "TE-Robin (PEC/IBC) and multi-region 2-D formulations. "
-                "This geometry/polarization requires solver_method='auto' "
-                "or 'direct'; no dense fallback was performed."
-            )
 
         # Refuse before any formulation allocates its dense operators.  The
         # classifier is shared with the scheduler, including N-DOF sheet and
@@ -8037,14 +7536,8 @@ def solve_monostatic_rcs_2d_single_polarization(
             operator_matrices=resources["operator_matrices"],
             n_rhs=max(1, len(elevations)),
         )
-        fmm_requested = solver_method == "fmm"
-        fmm_capable = (
-            (pol == 'TE' and _is_all_robin(coupled_infos))
-            or _is_multi_region(coupled_infos)
-        )
-        dense_gate_active = not (fmm_requested and fmm_capable)
         memory_limit_gb = _solve_memory_limit_gb()
-        if est_gb > memory_limit_gb and dense_gate_active:
+        if est_gb > memory_limit_gb:
             raise MemoryError(
                 _memory_gate_message(
                     est_gb,
@@ -8056,13 +7549,11 @@ def solve_monostatic_rcs_2d_single_polarization(
                     ),
                     (
                         "Reduce panel count or frequency, set an appropriate "
-                        "mesh_reference_ghz, reduce the angle batch, or use "
-                        "solver_method='fmm' for supported TE all-Robin and "
-                        "multi-region problems."
+                        "mesh_reference_ghz, or reduce the angle batch."
                     ),
                 )
             )
-        if est_gb > 8.0 and dense_gate_active:
+        if est_gb > 8.0:
             materials.warn_once(
                 f"Estimated peak memory {est_gb:.1f} GB for "
                 f"{resources['system_dofs']} {resources['formulation']} "
@@ -8442,9 +7933,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         "polarization_export_alias": _primary_alias_for_user_polarization(polarization),
         "rcs_normalization_mode": rcs_norm_mode,
         "formulation": formulation_label,
-        "solver_method": (
-            "fmm_gmres" if solver_method == "fmm" else "dense_lu"
-        ),
+        "solver_method": "dense_lu",
         "solver_method_requested": str(solver_method),
         "residual_norm_max": residual_norm_max,
         "residual_norm_mean": residual_norm_mean,
@@ -8898,12 +8387,6 @@ def solve_bistatic_rcs_2d_single_polarization(
     cfie_alpha = _validate_disabled_2d_cfie_alpha(cfie_alpha)
 
     solver_method = _normalize_public_2d_solver_method(solver_method)
-    if solver_method == "fmm":
-        raise ValueError(
-            "solver_method='fmm' is not implemented by the bistatic 2-D "
-            "path. Use solver_method='auto' or 'direct'; no dense fallback "
-            "was performed."
-        )
     _raise_if_untrusted_math_backends()
     pol = _normalize_polarization(polarization)
     unit_scale = _unit_scale_to_meters(geometry_units)
@@ -9486,16 +8969,12 @@ def _run_certified_2d_pair(
         return _mapped
 
     common = dict(solver_kwargs)
+    common["solver_method"] = _normalize_public_2d_solver_method(
+        common.get("solver_method", "auto")
+    )
     # Certification is intentionally non-optional here.  Both discrete
     # systems must pass their algebraic gate and supply condition telemetry
     # before their complex fields are compared.
-    if str(common.get("solver_method", "auto")).strip().lower() == "fmm":
-        raise ValueError(
-            "Certified 2-D solves require a condition-reporting dense method; "
-            "matrix-free FMM is available only through the low-level "
-            "diagnostic solver until a fail-closed condition certificate is "
-            "implemented. Use solver_method='auto' or 'direct'."
-        )
     common["strict_quality_gate"] = True
     common["compute_condition_number"] = True
 

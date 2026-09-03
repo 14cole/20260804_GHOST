@@ -598,11 +598,12 @@ def render(self) -> None:
     self._style_axes(top_ax)
     self._style_axes(residual_ax)
     self._plot_bounded_line(
-        top_ax, x_a, y_a, color="#4fc3f7", linewidth=1.5, label=label_a
+        top_ax, x_a, y_a, color="#4fc3f7", linewidth=1.5, label=label_a,
+        dataset=datasets[0][1],
     )
     self._plot_bounded_line(
         top_ax, x_b, y_b, color="#ff8a65", linewidth=1.5,
-        linestyle="--", label=label_b,
+        linestyle="--", label=label_b, dataset=datasets[1][1],
     )
     top_ax.set_ylabel(self._display_axis_label(datasets))
     self._update_legend_visibility()

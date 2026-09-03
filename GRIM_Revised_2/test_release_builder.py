@@ -410,7 +410,7 @@ class ReleaseBuilderTests(unittest.TestCase):
                 forbidden_terms="pass",
                 dependency_lock="pass",
                 native_policy="warn",
-                native_status="native_fmm=WARN",
+                native_status="native_bor=WARN",
             ),
             constraints_sha256="c" * 64,
         )
@@ -451,7 +451,7 @@ class ReleaseBuilderTests(unittest.TestCase):
 
     def test_native_require_policy_blocks_fallback_release(self) -> None:
         diagnostic = SimpleNamespace(
-            key="native_fmm",
+            key="native_bor",
             status="WARN",
             summary="fallback",
             blocks_startup=False,
@@ -478,7 +478,7 @@ class ReleaseBuilderTests(unittest.TestCase):
                 summary="loaded",
                 blocks_startup=False,
             )
-            for key in ("native_fmm", "native_bor")
+            for key in ("native_bor",)
         ]
         with (
             mock.patch.object(build_release, "_validate_utf8_payload"),

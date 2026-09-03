@@ -42,6 +42,7 @@ GRIM_STARTUP_FILES = (
     "grim_dataset.py",
     "grim_diagnostics.py",
     "grim_headless.py",
+    "grim_palette.py",
     "grim_python.py",
     "isar_artifact.py",
     "grim_cut_dataset_mixin.py",
@@ -88,7 +89,6 @@ GHOST_SENTINELS = (
     "hpc_scheduler.py",
     "run_hpc_bor_monostatic.py",
     "run_hpc_monostatic.py",
-    "fmm_helmholtz_2d.py",
     "frame.py",
     "line_expand.py",
     "occluder.py",
@@ -388,52 +388,6 @@ def _native_results(
     tag = f"{system_name.lower()}-{machine_name.lower()}"
     extensions = _native_library_extensions(system_name)
     results: list[DiagnosticResult] = []
-
-    cython_origin = _module_spec_origin("fmm_near_cy", backend)
-    if cython_origin is not None and cython_origin.parent == backend:
-        results.append(
-            DiagnosticResult(
-                "native_fmm",
-                "GHOST 2-D near-field acceleration",
-                "PASS",
-                False,
-                f"current-Python Cython extension found: {cython_origin.name}",
-            )
-        )
-    else:
-        fmm_candidates = [
-            backend / f"{base}{extension}"
-            for base in (f"fmm_near.{tag}", "fmm_near")
-            for extension in extensions
-        ]
-        loaded, detail = library_probe(fmm_candidates, ("compute_sk_blocks_batch_q",))
-        if loaded is not None:
-            results.append(
-                DiagnosticResult(
-                    "native_fmm",
-                    "GHOST 2-D near-field acceleration",
-                    "PASS",
-                    False,
-                    f"native library loaded: {loaded.name}",
-                )
-            )
-        else:
-            found = sorted(
-                path.name
-                for path in backend.glob("fmm_near*")
-                if path.suffix.lower() in {".so", ".dll", ".pyd"}
-            )
-            extra = (f"Native files present: {', '.join(found)}.",) if found else ()
-            results.append(
-                DiagnosticResult(
-                    "native_fmm",
-                    "GHOST 2-D near-field acceleration",
-                    "WARN",
-                    False,
-                    "unavailable; the solver remains usable with a much slower fallback",
-                    (detail,) + extra,
-                )
-            )
 
     bor_candidates = tuple(
         backend / f"{base}{extension}"
@@ -778,13 +732,6 @@ def collect_diagnostics(
         results.extend(
             (
                 DiagnosticResult(
-                    "native_fmm",
-                    "GHOST 2-D near-field acceleration",
-                    "SKIP",
-                    False,
-                    "not checked because the selected GHOST backend is incomplete",
-                ),
-                DiagnosticResult(
                     "native_bor",
                     "GHOST BoR streaming acceleration",
                     "SKIP",
@@ -816,15 +763,14 @@ def native_acceleration_status(
 ) -> tuple[bool, tuple[str, ...]]:
     """Report solver acceleration separately from functional readiness.
 
-    The native libraries are optional because their NumPy/SciPy fallbacks are
-    physically equivalent.  Calling a machine simply ``READY`` when both
-    accelerators are absent is nevertheless misleading for vehicle-scale
+    The native BoR library is optional because its NumPy fallback is
+    physically equivalent. Calling a machine simply ``READY`` when this
+    accelerator is absent is nevertheless misleading for vehicle-scale
     work, so the human-facing report exposes that performance limitation
     without turning it into a startup blocker.
     """
 
     expected = {
-        "native_fmm": "GHOST 2-D near-field acceleration",
         "native_bor": "GHOST BoR streaming acceleration",
     }
     native = {

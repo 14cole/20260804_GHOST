@@ -8,6 +8,13 @@ The recommended desktop workflow is the top-level GRIM application. Its
 **GHOST** tab embeds the same `Backend/ghost_gui.py` workspace and the same
 2-D/BoR numerical implementation found here; no solver is duplicated.
 
+The 2-D solver uses direct dense LU. The diagnostic API accepts `auto` and
+`direct`, both of which use the same direct solver and memory checks. FMM and
+its native near-field extension have been removed; older scripts requesting
+`solver_method="fmm"` must select `auto` or `direct`. NumPy and SciPy remain
+required for the direct numerical methods and condition-number checks. BoR's
+optional native streaming kernel remains supported.
+
 ## Standalone GHOST
 
 Run commands from this folder:

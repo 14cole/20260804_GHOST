@@ -18,22 +18,28 @@ except ImportError:  # pragma: no cover - normal on non-Windows systems
     pythoncom = None
     win32com = None
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from grim_palette import (
+    APPLICATION_PALETTES,
+    APPLICATION_PALETTE_SETTINGS_KEY,
+    DEFAULT_APPLICATION_PALETTE,
+    normalize_application_palette_name,
+)
 
 PP_SELECTION_SHAPES = 2
 MSO_FALSE = 0
@@ -81,22 +87,16 @@ def map_profiles_to_targets(
 ) -> list[tuple[ShapeProfile, Any]]:
     """Return deterministic source/target pairs.
 
-    One captured profile broadcasts to all selected target pictures.  Multiple
-    profiles require the same number of targets; silently cycling or truncating
-    pictures would make slide formatting difficult to audit.
+    Equal counts pair in selection order.  When counts differ, ChartHelper's
+    first captured profile broadcasts to every selected target picture.
     """
 
     if not profiles:
         raise ValueError("Capture at least one source picture first.")
     if not targets:
         raise ValueError("Select at least one destination picture in PowerPoint.")
-    if len(profiles) == 1:
-        return [(profiles[0], target) for target in targets]
     if len(profiles) != len(targets):
-        raise ValueError(
-            f"Captured {len(profiles)} pictures but selected {len(targets)} destinations. "
-            "Select the same number, or capture one picture to apply it to all destinations."
-        )
+        return [(profiles[0], target) for target in targets]
     return list(zip(profiles, targets))
 
 
@@ -326,102 +326,123 @@ class PowerPointBridge:
                 self._com_initialized = False
 
 
-def _points_and_inches(value: float) -> str:
-    return f"{value:.1f} pt ({value / 72.0:.2f} in)"
-
-
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    """ChartHelper's compact capture/imprint workflow with GRIM colors."""
+
+    def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
         self.bridge = PowerPointBridge()
         self.captured_profiles: list[ShapeProfile] = []
+        settings = settings if settings is not None else QSettings("GRIM", "GRIM")
+        self.application_palette_name = normalize_application_palette_name(
+            settings.value(APPLICATION_PALETTE_SETTINGS_KEY, DEFAULT_APPLICATION_PALETTE)
+        )
+        self.application_palette = dict(APPLICATION_PALETTES[self.application_palette_name])
 
         self.setWindowTitle("PowerPoint Image Imprinter")
-        self.resize(560, 560)
-        self.setMinimumSize(480, 460)
+        self.resize(350, 300)
+        self.setMinimumSize(350, 300)
         self._build_ui()
         self._apply_styles()
-        self._set_status("Ready — select source pictures in PowerPoint.")
+        self._set_status("Ready")
 
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(18, 18, 18, 18)
-        root.setSpacing(12)
+        root.setSpacing(14)
 
-        title = QLabel("PowerPoint Image Imprinter")
-        title.setObjectName("title")
-        title.setFont(QFont("Segoe UI", 17, QFont.Weight.DemiBold))
-        root.addWidget(title)
-
-        instructions = QLabel(
-            "Capture picture formatting on one slide, select destination pictures "
-            "on another slide, then apply it. One captured picture formats every "
-            "destination; multiple pictures are paired in selection order."
-        )
-        instructions.setWordWrap(True)
-        root.addWidget(instructions)
-
-        options_box = QGroupBox("Apply options")
-        options_layout = QHBoxLayout(options_box)
-        self.chk_location = QCheckBox("Location")
-        self.chk_size = QCheckBox("Size")
-        self.chk_crop = QCheckBox("Crop")
+        options_box = QGroupBox("Imprint Options")
+        options_layout = QVBoxLayout(options_box)
+        options_layout.setSpacing(10)
+        self.chk_location = QCheckBox("Imprint Location")
+        self.chk_size = QCheckBox("Imprint Size")
+        self.chk_crop = QCheckBox("Imprint Crop")
         for checkbox in (self.chk_location, self.chk_size, self.chk_crop):
             checkbox.setChecked(True)
             checkbox.toggled.connect(self._update_apply_enabled)
             options_layout.addWidget(checkbox)
-        options_layout.addStretch(1)
         root.addWidget(options_box)
 
         button_row = QHBoxLayout()
-        self.btn_capture = QPushButton("1  Capture selected")
-        self.btn_apply = QPushButton("2  Apply to selected")
+        button_row.setSpacing(10)
+        self.btn_capture = QPushButton("Capture")
+        self.btn_apply = QPushButton("Imprint")
         self.btn_clear = QPushButton("Clear")
         self.btn_apply.setEnabled(False)
+        self.btn_capture.setToolTip("Capture the selected pictures in PowerPoint.")
+        self.btn_apply.setToolTip(
+            "Imprint the selected destination pictures. Equal counts pair in selection "
+            "order; otherwise the first captured profile is used for every destination."
+        )
         self.btn_capture.clicked.connect(self._capture)
         self.btn_apply.clicked.connect(self._apply)
         self.btn_clear.clicked.connect(self._clear)
-        button_row.addWidget(self.btn_capture)
-        button_row.addWidget(self.btn_apply)
-        button_row.addWidget(self.btn_clear)
+        for button in (self.btn_capture, self.btn_apply, self.btn_clear):
+            button.setMinimumHeight(40)
+            button_row.addWidget(button)
         root.addLayout(button_row)
 
-        captured_label = QLabel("Captured formatting")
-        captured_label.setObjectName("sectionLabel")
-        root.addWidget(captured_label)
-        self.summary = QTextEdit()
-        self.summary.setReadOnly(True)
-        self.summary.setPlaceholderText("No source pictures captured.")
-        root.addWidget(self.summary, 1)
-
-        self.keep_on_top = QCheckBox("Keep helper above PowerPoint")
-        self.keep_on_top.toggled.connect(self._toggle_on_top)
-        root.addWidget(self.keep_on_top)
-
+        self.status_card = QFrame()
+        self.status_card.setObjectName("StatusCard")
+        status_layout = QHBoxLayout(self.status_card)
+        status_layout.setContentsMargins(12, 10, 12, 10)
         self.status = QLabel()
-        self.status.setObjectName("status")
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
-        root.addWidget(self.status)
+        status_layout.addWidget(self.status)
+        root.addWidget(self.status_card)
 
     def _apply_styles(self) -> None:
+        # Stylesheet section: use the same saved palette as the GRIM window.
+        # Set only this helper's font/style so an embedded launch cannot change
+        # the appearance of unrelated application windows.
+        font = QFont(self.font())
+        font.setPointSize(10)
+        self.setFont(font)
+        palette = self.application_palette
         self.setStyleSheet(
-            """
-            QMainWindow { background: #f3f5f8; color: #172033; }
-            QLabel { color: #172033; }
-            QLabel#title { color: #123b67; }
-            QLabel#sectionLabel { font-weight: 600; margin-top: 3px; }
-            QLabel#status { background: #e5edf7; border-radius: 5px; padding: 8px; }
-            QGroupBox { border: 1px solid #bdc9d8; border-radius: 6px;
-                        margin-top: 8px; padding-top: 8px; font-weight: 600; }
-            QGroupBox::title { subcontrol-origin: margin; left: 9px; padding: 0 4px; }
-            QPushButton { background: #1f5f99; color: white; border: none;
-                          border-radius: 5px; padding: 9px 12px; font-weight: 600; }
-            QPushButton:hover { background: #174d7d; }
-            QPushButton:disabled { background: #a9b5c1; }
-            QTextEdit { background: white; border: 1px solid #bdc9d8;
-                        border-radius: 5px; padding: 6px; }
+            f"""
+            QMainWindow, QMessageBox {{ background: {palette['win_bg']}; }}
+            QLabel, QCheckBox {{ color: {palette['text']}; background: transparent; }}
+            QGroupBox {{
+                background: {palette['panel_bg']}; color: {palette['text']};
+                border: 1px solid {palette['border']}; border-radius: 8px;
+                margin-top: 10px; padding: 12px; font-weight: 600;
+            }}
+            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
+            QCheckBox {{ spacing: 8px; }}
+            QCheckBox::indicator {{
+                width: 14px; height: 14px; border-radius: 3px;
+                border: 1px solid {palette['border']}; background: {palette['win_bg']};
+            }}
+            QCheckBox::indicator:checked {{
+                background: {palette['checked_bg']}; border-color: {palette['checked_border']};
+            }}
+            QCheckBox::indicator:hover, QCheckBox:focus {{
+                border: 1px solid {palette['checked_border']};
+            }}
+            QPushButton {{
+                background: {palette['panel_bg']}; color: {palette['text']};
+                border: 1px solid {palette['border']}; border-radius: 6px;
+                padding: 0 8px; font-weight: 600;
+            }}
+            QPushButton:hover, QPushButton:focus {{ border-color: {palette['checked_border']}; }}
+            QPushButton:pressed {{ background: {palette['checked_bg']}; color: white; }}
+            QPushButton:disabled {{
+                background: {palette['head_bg']}; color: {palette['muted']};
+                border-color: {palette['grid']};
+            }}
+            QFrame#StatusCard {{
+                background: {palette['head_bg']}; border: 1px solid {palette['border']};
+                border-radius: 8px;
+            }}
+            QFrame#StatusCard[error="true"] {{ border: 2px solid {palette['checked_border']}; }}
+            QToolTip {{
+                background: {palette['panel_bg']}; color: {palette['text']};
+                border: 1px solid {palette['border']}; padding: 4px;
+            }}
             """
         )
 
@@ -439,12 +460,14 @@ class MainWindow(QMainWindow):
 
     def _set_status(self, message: str, *, error: bool = False) -> None:
         self.status.setText(message)
-        self.status.setProperty("error", error)
-        self.status.setStyleSheet(
-            "background: #fde8e8; color: #8a1c1c; border-radius: 5px; padding: 8px;"
-            if error
-            else ""
-        )
+        self.status_card.setProperty("error", error)
+        self.status_card.style().unpolish(self.status_card)
+        self.status_card.style().polish(self.status_card)
+        self.status_card.update()
+
+    def _update_capture_button_text(self) -> None:
+        count = len(self.captured_profiles)
+        self.btn_capture.setText(f"Capture ({count})" if count else "Capture")
 
     def _capture(self) -> None:
         try:
@@ -453,24 +476,11 @@ class MainWindow(QMainWindow):
             self._show_error(str(exc))
             return
         self.captured_profiles = profiles
-        lines = []
-        for index, profile in enumerate(profiles, start=1):
-            crop_text = (
-                f"L {profile.crop.left:.1f}, T {profile.crop.top:.1f}, "
-                f"R {profile.crop.right:.1f}, B {profile.crop.bottom:.1f} pt"
-                if profile.crop is not None
-                else "unavailable"
-            )
-            lines.append(
-                f"{index}. Slide {profile.slide_index}: {profile.name}\n"
-                f"   Position: {_points_and_inches(profile.left)}, "
-                f"{_points_and_inches(profile.top)}\n"
-                f"   Size: {_points_and_inches(profile.width)} × "
-                f"{_points_and_inches(profile.height)}\n"
-                f"   Crop: {crop_text}"
-            )
-        self.summary.setPlainText("\n\n".join(lines))
+        self._update_capture_button_text()
         suffix = f" Skipped {skipped} non-picture shape(s)." if skipped else ""
+        unavailable = sum(profile.crop is None for profile in profiles)
+        if unavailable:
+            suffix += f" Crop unavailable for {unavailable}; uncheck Imprint Crop to copy location/size."
         self._set_status(f"Captured {len(profiles)} picture profile(s).{suffix}")
         self._update_apply_enabled()
 
@@ -483,27 +493,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_error(str(exc))
             return
-        enabled = ", ".join(
-            name
-            for name, value in (
-                ("location", options.location),
-                ("size", options.size),
-                ("crop", options.crop),
-            )
-            if value
+        mode = (
+            "Paired in selection order."
+            if applied == len(self.captured_profiles)
+            else "Counts differ; used the first captured profile for every destination."
         )
         suffix = f" Skipped {skipped} non-picture shape(s)." if skipped else ""
-        self._set_status(f"Applied {enabled} to {applied} picture(s).{suffix}")
+        self._set_status(f"Imprinted {applied} picture(s). {mode}{suffix}")
 
     def _clear(self) -> None:
         self.captured_profiles = []
-        self.summary.clear()
-        self._set_status("Capture cleared.")
+        self._update_capture_button_text()
+        self._set_status("Ready")
         self._update_apply_enabled()
-
-    def _toggle_on_top(self, checked: bool) -> None:
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
-        self.show()
 
     def _show_error(self, message: str) -> None:
         self._set_status(message, error=True)

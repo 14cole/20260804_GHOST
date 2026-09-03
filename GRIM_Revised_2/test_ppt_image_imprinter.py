@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
+
+from PySide6.QtWidgets import QApplication
 
 from ppt_image_imprinter import (
     ApplyOptions,
     CropProfile,
     MSO_GROUP,
     MSO_PICTURE,
+    MainWindow,
     PowerPointBridge,
     ShapeProfile,
     apply_profile_to_shape,
@@ -107,9 +111,12 @@ class ProfileMappingTests(unittest.TestCase):
         self.assertEqual([target for _, target in pairs], targets)
         self.assertTrue(all(source is profile for source, _ in pairs))
 
-    def test_multiple_profiles_require_equal_target_count(self):
-        with self.assertRaisesRegex(ValueError, "Captured 2 pictures"):
-            map_profiles_to_targets([make_profile("a"), make_profile("b")], [object()])
+    def test_mismatched_counts_use_first_profile_for_every_target(self):
+        profiles = [make_profile("a"), make_profile("b")]
+        for targets in ([object()], [object(), object(), object()]):
+            with self.subTest(target_count=len(targets)):
+                pairs = map_profiles_to_targets(profiles, targets)
+                self.assertEqual(pairs, [(profiles[0], target) for target in targets])
 
     def test_multiple_profiles_map_in_order(self):
         profiles = [make_profile("a"), make_profile("b")]
@@ -185,6 +192,56 @@ class ShapeFormattingTests(unittest.TestCase):
 
         self.assertEqual(capture_profile_from_shape(first), first_before)
         self.assertEqual(capture_profile_from_shape(second), second_before)
+
+
+class ImprinterWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_capture_imprint_options_mismatch_and_clear(self):
+        window = MainWindow(settings=mock.Mock(value=mock.Mock(return_value="Dark")))
+        self.addCleanup(window.close)
+        first = FakeShape("Source A", left=111, top=222, width=80, height=90)
+        second = FakeShape("Source B", left=333, top=444)
+        window.bridge = FakeBridge([first, second])
+        self.assertFalse(window.btn_apply.isEnabled())
+        window.btn_capture.click()
+        self.assertEqual(window.btn_capture.text(), "Capture (2)")
+        self.assertTrue(window.btn_apply.isEnabled())
+
+        targets = [FakeShape("Target", left=1, top=2, width=3, height=4) for _ in range(3)]
+        window.bridge.targets = targets
+        window.chk_size.setChecked(False)
+        window.chk_crop.setChecked(False)
+        window.btn_apply.click()
+        for target in targets:
+            self.assertEqual((target.Left, target.Top), (111, 222))
+            self.assertEqual((target.Width, target.Height), (3, 4))
+        self.assertIn("first captured profile", window.status.text())
+        window.chk_location.setChecked(False)
+        self.assertFalse(window.btn_apply.isEnabled())
+        window.btn_clear.click()
+        self.assertEqual(window.captured_profiles, [])
+        self.assertEqual(window.btn_capture.text(), "Capture")
+        self.assertEqual(window.status.text(), "Ready")
+
+    def test_saved_grim_palette_and_legacy_name_work_without_main_gui(self):
+        from grim_palette import APPLICATION_PALETTES
+
+        for name in (*APPLICATION_PALETTES, "Raytheon-inspired", "unknown"):
+            with self.subTest(name=name):
+                settings = mock.Mock(value=mock.Mock(return_value=name))
+                window = MainWindow(settings=settings)
+                try:
+                    expected = "Raytheon" if name == "Raytheon-inspired" else name
+                    if expected not in APPLICATION_PALETTES:
+                        expected = "Dark"
+                    self.assertEqual(window.application_palette_name, expected)
+                    self.assertIn(APPLICATION_PALETTES[expected]["win_bg"], window.styleSheet())
+                    settings.setValue.assert_not_called()
+                finally:
+                    window.close()
 
 
 if __name__ == "__main__":

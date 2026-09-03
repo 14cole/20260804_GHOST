@@ -73,7 +73,7 @@ class GrimDiagnosticsTests(unittest.TestCase):
         self.assertFalse([result for result in results if result.blocks_startup])
         by_key = {result.key: result for result in results}
         self.assertEqual(by_key["powerpoint"].status, "SKIP")
-        self.assertEqual(by_key["native_fmm"].status, "WARN")
+        self.assertNotIn("native_fmm", by_key)
         self.assertEqual(by_key["native_bor"].status, "WARN")
 
         output = io.StringIO()
@@ -88,9 +88,6 @@ class GrimDiagnosticsTests(unittest.TestCase):
     def test_native_acceleration_is_reported_independently(self) -> None:
         accelerated = [
             diagnostics.DiagnosticResult(
-                "native_fmm", "FMM", "PASS", False, "loaded"
-            ),
-            diagnostics.DiagnosticResult(
                 "native_bor", "BoR", "PASS", False, "loaded"
             ),
         ]
@@ -103,7 +100,7 @@ class GrimDiagnosticsTests(unittest.TestCase):
         self.assertIn("SOLVER PERFORMANCE: ACCELERATED", output.getvalue())
         ready, limitations = diagnostics.native_acceleration_status([])
         self.assertFalse(ready)
-        self.assertEqual(len(limitations), 2)
+        self.assertEqual(len(limitations), 1)
 
     def test_missing_required_ghost_sentinel_returns_nonzero(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -117,7 +114,7 @@ class GrimDiagnosticsTests(unittest.TestCase):
         self.assertTrue(workspace.blocks_startup)
         self.assertIn("rcs_solver.py", " ".join(workspace.details))
         self.assertEqual(
-            next(result for result in results if result.key == "native_fmm").status,
+            next(result for result in results if result.key == "native_bor").status,
             "SKIP",
         )
 
@@ -312,7 +309,7 @@ class GrimDiagnosticsTests(unittest.TestCase):
                 powerpoint_probe=lambda: (False, "not installed"),
             )
 
-        self.assertEqual(len(offered), 2)
+        self.assertEqual(len(offered), 1)
         for candidates in offered:
             self.assertTrue(candidates)
             self.assertTrue(

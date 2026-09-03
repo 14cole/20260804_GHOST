@@ -47,7 +47,7 @@ tests, the separate GHOST CEM-tools suite, the standalone GHOST HPC-scheduling
 and local-driver integration tests, the GHOST ASCII-transfer check,
 and the selected native-acceleration policy. Missing native acceleration is a
 recorded warning by default; pass `--native-policy require` for a
-performance-ready build that must contain the matching native binaries.
+performance-ready build that must contain the matching BoR native library.
 
 The ZIP keeps the complete GRIM, GHOST, and FREDDY tracked source layout,
 assets, and launchers while omitting Git data, untracked files, virtual
@@ -265,11 +265,16 @@ py impedance_gui.py
   first six common frequencies are selected initially; one report is capped at
   60 frequencies (10 azimuth slides) to keep the preview responsive.
 
-The separately shipped **PowerPoint Image Imprinter** is a legacy/manual deck
-formatting helper, not another report generator. It copies the position, size,
-and optional crop of pictures selected in an already-open desktop PowerPoint
-deck. New GRIM dataset reports should use the integrated **PPT** tab; keep the
-imprinter only for aligning images in an existing custom presentation.
+The separately shipped **PowerPoint Image Imprinter** follows the compact
+ChartHelper workflow. Launch `Launch_PowerPoint_Image_Imprinter.bat`, select
+source pictures in an open desktop PowerPoint deck, and click **Capture**.
+Select destination pictures and click **Imprint** to copy the checked
+**Location**, **Size**, and **Crop** properties. Equal counts pair in selection
+order; different counts apply the first captured profile to every destination.
+The Capture button shows the stored count; **Clear** resets it. Pictures inside
+groups are supported, and non-picture shapes are skipped. The helper uses
+GRIM's saved application palette when opened. New dataset reports use the
+integrated **PPT** tab.
 
 FREDDY does not calculate finite-object RCS or produce `.grim` datasets.
 Therefore its CSV outputs are not sent to GRIM's RCS dataset loader. The

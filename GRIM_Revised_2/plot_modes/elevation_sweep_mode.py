@@ -138,7 +138,7 @@ def render(self) -> None:
             if not np.any(np.isfinite(display)):
                 continue
             if rendered < common.MAX_LINE_SERIES:
-                self._plot_bounded_line(self.plot_ax, x_values, display, label=label)
+                self._plot_bounded_line(self.plot_ax, x_values, display, label=label, dataset=dataset)
                 rendered += 1
             else:
                 omitted += 1

@@ -28,6 +28,7 @@ ppt-image-imprinter = "ppt_image_imprinter:main"
 [tool.setuptools]
 package-dir = {"" = "GRIM_Revised_2"}
 py-modules = [
+  "dataset_plot_style",
   "assembly_tree",
   "assembly_workspace",
   "feature_assembly_panel",
@@ -39,6 +40,7 @@ py-modules = [
   "grim_dataset",
   "grim_diagnostics",
   "grim_headless",
+  "grim_palette",
   "grim_python",
   "ghost_integration",
   "hpc_remote",

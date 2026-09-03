@@ -70,7 +70,7 @@ def render(self) -> None:
                 theta = common.convert_axis_values(
                     x_values, "azimuth", angular_unit, "rad"
                 )
-                self._plot_bounded_line(self.plot_ax, theta, display, label=label)
+                self._plot_bounded_line(self.plot_ax, theta, display, label=label, dataset=dataset)
                 rendered += 1
             else:
                 omitted += 1

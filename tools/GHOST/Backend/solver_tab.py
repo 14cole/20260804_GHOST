@@ -12,13 +12,10 @@ but are marked as uncertified base-mesh fields in their metadata.
 """
 
 import copy
-import ctypes
 import hashlib
-from importlib import machinery
 import json
 import math
 import os
-import platform
 import re
 import tempfile
 import threading
@@ -118,73 +115,6 @@ def _planned_export_paths(
         f"{root_no_ext}_{_suffix_for_incidence(value)}.grim"
         for value in incidence_values
     ]
-
-
-def _native_library_available(
-    candidates: 'List[Path]', required_symbols: 'Tuple[str, ...]'
-) -> 'bool':
-    """Return whether one candidate loads and exposes the solver ABI."""
-
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        try:
-            library = ctypes.CDLL(str(candidate))
-        except OSError:
-            continue
-        if all(hasattr(library, symbol) for symbol in required_symbols):
-            return True
-    return False
-
-
-def _native_acceleration_status(
-    backend: 'Path | None' = None,
-) -> 'Tuple[bool, bool, str]':
-    """Return visible FMM/BoR acceleration readiness for the desktop UI."""
-
-    root = Path(backend or Path(__file__).resolve().parent)
-    system_name = platform.system().lower()
-    machine_name = platform.machine().lower()
-    # Never hand a foreign shared-library format to ctypes.  In particular,
-    # loading the checked-in Linux ELF ``fmm_near.so`` with the Windows loader
-    # can block instead of raising OSError promptly.  Generic names remain
-    # supported, but only with extensions the current host can load.
-    if system_name == "windows":
-        extensions = (".dll",)
-    else:
-        extensions = (".so",)
-
-    cython_near = any(
-        (root / f"fmm_near_cy{suffix}").is_file()
-        for suffix in machinery.EXTENSION_SUFFIXES
-    )
-    fmm_candidates = [
-        root / f"{base}{extension}"
-        for base in (
-            f"fmm_near.{system_name}-{machine_name}",
-            "fmm_near",
-        )
-        for extension in extensions
-    ]
-    fmm_ready = cython_near or _native_library_available(
-        fmm_candidates, ("compute_sk_blocks_batch_q",)
-    )
-
-    bor_candidates = [
-        root / f"{base}{extension}"
-        for base in (
-            f"bor_stream_kernel.{system_name}-{machine_name}",
-            "bor_stream_kernel",
-        )
-        for extension in extensions
-    ]
-    bor_ready = _native_library_available(
-        bor_candidates, ("sample_g", "sample_mfie", "sample_ibc")
-    )
-    fmm_text = "native" if fmm_ready else "Python fallback (~100x slower near field)"
-    bor_text = "native" if bor_ready else "NumPy fallback (~2-8x slower assembly)"
-    summary = f"2-D FMM: {fmm_text}.  BoR streaming: {bor_text}."
-    return fmm_ready, bor_ready, summary
 
 
 def _finite_unique_count(
@@ -1099,21 +1029,6 @@ class SolverTab(QWidget):
         options_form.addRow("Scattering Mode", self.cmb_scatter_mode)
         options_form.addRow(self.lbl_obs_angles, self.edit_obs_angles)
         layout.addWidget(options_group)
-
-        performance_group = QGroupBox("Desktop Performance")
-        performance_layout = QVBoxLayout(performance_group)
-        _fmm_ready, _bor_ready, acceleration_summary = (
-            _native_acceleration_status()
-        )
-        self.lbl_acceleration = QLabel(acceleration_summary)
-        self.lbl_acceleration.setWordWrap(True)
-        self.lbl_acceleration.setToolTip(
-            "The numerical result is the same on the fallback paths, but a "
-            "large solve can take much longer. Run Launch_GRIM_Diagnostics.bat "
-            "from the combined folder for paths and platform details."
-        )
-        performance_layout.addWidget(self.lbl_acceleration)
-        layout.addWidget(performance_group)
 
         output_group = QGroupBox("Output")
         output_grid = QGridLayout(output_group)

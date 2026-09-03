@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from grim_dataset import RcsGrid
+from dataset_plot_style import DatasetPlotStyleMixin
 from isar_artifact import build_isar_manifest
 from plot_modes import (
     az_vs_range_mode,
@@ -99,7 +100,7 @@ def _selected_polarization_axis_availability(
     return frequency_available, elevation_available, azimuth_available
 
 
-class PlotOpsMixin:
+class PlotOpsMixin(DatasetPlotStyleMixin):
     def _on_param_selection_changed(self) -> None:
         self._invalidate_isar_result()
         self._maybe_autoplot()
@@ -545,6 +546,7 @@ class PlotOpsMixin:
                     text.set_color(self._current_plot_text())
                 legend.get_frame().set_facecolor(self._current_plot_bg())
                 legend.get_frame().set_edgecolor(self._current_plot_grid())
+                self._sync_dataset_legend(ax)
         for colorbar in self.plot_colorbars:
             label_text = colorbar.ax.get_ylabel() or self._rcs_axis_label()
             colorbar.set_label(label_text, color=self._current_plot_text())
@@ -903,7 +905,7 @@ class PlotOpsMixin:
             phase_degrees=self._button_checked(self.btn_phase)
         )
 
-    def _plot_bounded_line(self, ax, x_values, y_values, *args, **kwargs):
+    def _plot_bounded_line(self, ax, x_values, y_values, *args, dataset=None, **kwargs):
         x_display, y_display, decimated = plot_common.decimate_line(x_values, y_values)
         if decimated:
             self._note_plot_render(
@@ -921,7 +923,11 @@ class PlotOpsMixin:
             # semantic series, not pile identical artists onto a held canvas.
             removed = False
             for existing in list(ax.lines):
-                if existing.get_label() == label:
+                if existing.get_label() == label and (
+                    dataset is None
+                    or getattr(existing, "_grim_dataset_key", None)
+                    == self._dataset_plot_key(dataset)
+                ):
                     existing.remove()
                     removed = True
             if removed:
@@ -940,7 +946,11 @@ class PlotOpsMixin:
                     "Clear the plot before adding different cuts."
                 )
                 return []
-        return ax.plot(x_display, y_display, *args, **kwargs)
+        lines = ax.plot(x_display, y_display, *args, **kwargs)
+        if dataset is not None:
+            for line in lines:
+                self._register_dataset_line(line, dataset)
+        return lines
 
     def _bounded_plot_envelope(self, x_values, lower, upper, count=None):
         result = plot_common.decimate_envelope(x_values, lower, upper, count)
@@ -1172,6 +1182,11 @@ class PlotOpsMixin:
         if button is not MouseButton.LEFT:
             return
         if not self._button_checked(getattr(self, "btn_zoom_box", None)):
+            if getattr(self, "_active_plot_tab", "plotting") == "plotting":
+                line = self._dataset_line_at_event(event)
+                self._highlight_plot_dataset(
+                    getattr(line, "_grim_dataset_key", None)
+                )
             return
         ax = getattr(event, "inaxes", None)
         if ax not in self._zoom_target_axes():
@@ -2171,6 +2186,7 @@ class PlotOpsMixin:
                     legend.remove()
                 legend = ax.legend(handles, labels, **self._legend_kwargs())
             self._configure_legend(legend, ax)
+            self._sync_dataset_legend(ax)
         # Rendering paths call _apply_plot_limits immediately afterward, which
         # already schedules one draw. A direct toolbar toggle still needs a
         # repaint, but draw_idle coalesces it with any pending canvas work.

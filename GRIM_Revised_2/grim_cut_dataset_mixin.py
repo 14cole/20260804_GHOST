@@ -4900,6 +4900,10 @@ class DatasetOpsMixin:
             self.status.showMessage("Saving numerical ISAR result in the background…")
 
     def _on_plot_context_menu(self, pos) -> None:
+        line = self._dataset_line_at_canvas_position(pos)
+        if line is not None:
+            self._show_dataset_plot_style_menu(line, self.plot_canvas.mapToGlobal(pos))
+            return
         menu = QMenu(self)
         action_copy = menu.addAction("Copy Plot")
         action_fit_both = menu.addAction("Fit Both (Reset View)")

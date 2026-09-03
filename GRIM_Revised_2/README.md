@@ -91,6 +91,16 @@ per-process limit after an unusually large grid has been reviewed.
 
 ## Plotting and dataset operations
 
+Click a curve or scatter point in the Plotting canvas to highlight every series
+from that dataset with a light-gray outline and highlight its visible legend
+entries. Legend entries are clickable too; click empty plot space to clear the
+highlight. Right-click a curve, point, or legend entry to change that dataset's
+line width, line type, color, or switch between Line and Scatter. Scatter symbols
+and symbol sizes are also adjustable. Styles apply immediately to the plot and
+legend and remain in effect when replotting or using Hold during the session.
+Each dataset has its own style, so lines and scatters can share a plot. Pan and
+Zoom Box retain their mouse controls while enabled.
+
 The current row is the active dataset: its parameter lists and axis units are
 the display reference. Other selected datasets may use compatible Hz/kHz/MHz/
 GHz or degree/radian storage; GRIM converts selections and labels without

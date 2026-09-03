@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import ctypes
-import importlib.machinery
 import os
 import platform
 import sys
@@ -22,7 +21,6 @@ BACKEND = REPO / "Backend"
 sys.path.insert(0, str(BACKEND))
 
 import feature_sum  # noqa: E402
-import fmm_helmholtz_2d  # noqa: E402
 import bor_streaming  # noqa: E402
 import rcs_solver  # noqa: E402
 
@@ -33,29 +31,36 @@ class NativeLoaderTrustTests(unittest.TestCase):
         self.assertEqual(bor_streaming._native_extensions("Linux"), (".so",))
 
     def test_windows_loader_ignores_checked_in_linux_shared_object(self) -> None:
-        self.assertTrue((BACKEND / "fmm_near.so").is_file())
-        with (
-            mock.patch.object(platform, "system", return_value="Windows"),
-            mock.patch.object(platform, "machine", return_value="AMD64"),
-            mock.patch.object(
-                ctypes,
-                "CDLL",
-                side_effect=AssertionError("foreign .so must not reach ctypes"),
-            ) as loader,
-        ):
-            self.assertIsNone(fmm_helmholtz_2d.FMMOperator._load_native())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "bor_stream_kernel.so").write_bytes(b"foreign")
+            with (
+                mock.patch.object(bor_streaming, "__file__", str(root / "bor_streaming.py")),
+                mock.patch.object(platform, "system", return_value="Windows"),
+                mock.patch.object(platform, "machine", return_value="AMD64"),
+                mock.patch.object(
+                    ctypes,
+                    "CDLL",
+                    side_effect=AssertionError("foreign .so must not reach ctypes"),
+                ) as loader,
+            ):
+                self.assertIsNone(bor_streaming._load_native())
         loader.assert_not_called()
 
     def test_native_candidates_never_come_from_working_directory(self) -> None:
         loaded = []
-        fake_library = SimpleNamespace(compute_sk_blocks_batch_q=object())
+        fake_library = SimpleNamespace(
+            sample_g=mock.Mock(), sample_mfie=mock.Mock(), sample_ibc=mock.Mock()
+        )
         with tempfile.TemporaryDirectory() as directory:
-            untrusted = Path(directory)
-            for suffix in importlib.machinery.EXTENSION_SUFFIXES:
-                (untrusted / ("fmm_near_cy" + suffix)).write_bytes(b"untrusted")
+            trusted = Path(directory) / "backend"
+            untrusted = Path(directory) / "cwd"
+            trusted.mkdir()
+            untrusted.mkdir()
+            (trusted / "bor_stream_kernel.so").write_bytes(b"trusted")
             for name in (
-                "fmm_near.so",
-                "fmm_near.dll",
+                "bor_stream_kernel.so",
+                "bor_stream_kernel.dll",
             ):
                 (untrusted / name).write_bytes(b"untrusted")
 
@@ -63,6 +68,7 @@ class NativeLoaderTrustTests(unittest.TestCase):
             os.chdir(untrusted)
             try:
                 with (
+                    mock.patch.object(bor_streaming, "__file__", str(trusted / "bor_streaming.py")),
                     mock.patch.object(platform, "system", return_value="Linux"),
                     mock.patch.object(platform, "machine", return_value="x86_64"),
                     mock.patch.object(
@@ -73,15 +79,14 @@ class NativeLoaderTrustTests(unittest.TestCase):
                         ),
                     ),
                 ):
-                    kind, library = fmm_helmholtz_2d.FMMOperator._load_native()
+                    library = bor_streaming._load_native()
             finally:
                 os.chdir(previous)
 
-        self.assertEqual(kind, "ctypes")
         self.assertIs(library, fake_library)
         self.assertTrue(loaded)
         self.assertTrue(
-            all(candidate.parent == BACKEND.resolve() for candidate in loaded),
+            all(candidate.parent == trusted.resolve() for candidate in loaded),
             loaded,
         )
 
