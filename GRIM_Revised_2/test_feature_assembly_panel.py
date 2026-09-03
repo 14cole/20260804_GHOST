@@ -252,7 +252,6 @@ def _ready_point_model() -> FeatureAssemblyFormModel:
         skin_tol_m=8.0e-4,
         skin_phase_tol_deg=12.0,
         normal_tol_deg=9.0,
-        expected_host_material="PEC",
     )
     model = FeatureAssemblyFormModel(values)
     model.update_dataset_requirements(
@@ -484,12 +483,9 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 allow_legacy_base_metadata=False,
                 require_feature_manifests=True,
                 require_body_mesh_certification=True,
-                expected_host_material="paint-stack-v3",
                 base_dir=str(root),
                 point_datasets={"fastener": "inputs/fastener.grim"},
                 line_datasets={"seal": "inputs/seal.grim"},
-                point_host_materials={"fastener": "paint-stack-v3"},
-                line_host_materials={"seal": "rubber-seal-host-v1"},
                 excluded_point_placement_ids={"bolt_002"},
                 excluded_line_ids={"rear_door"},
             )
@@ -526,13 +522,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             self.assertFalse(restored.allow_legacy_base_metadata)
             self.assertTrue(restored.require_feature_manifests)
             self.assertTrue(restored.require_body_mesh_certification)
-            self.assertEqual(restored.expected_host_material, "paint-stack-v3")
-            self.assertEqual(
-                restored.point_host_materials, {"fastener": "paint-stack-v3"}
-            )
-            self.assertEqual(
-                restored.line_host_materials, {"seal": "rubber-seal-host-v1"}
-            )
+            self.assertNotIn("expected_host_material", json.loads(saved.read_text(encoding="utf-8"))["values"])
             self.assertEqual(
                 Path(restored.base_grim), (inputs / "body.grim").resolve()
             )
@@ -590,52 +580,21 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported.*version"):
                 read_feature_assembly_recipe(path)
 
-    def test_v1_recipe_migrates_without_inventing_host_material_identity(self):
+
+
+    def test_recipe_requires_current_version_without_migrations(self):
         with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
             recipe = write_feature_assembly_recipe(
-                FeatureAssemblyValues(),
-                root / "legacy",
-                name="Vehicle",
-                variant="Legacy library",
+                FeatureAssemblyValues(), Path(folder) / "recipe",
+                name="Vehicle", variant="Baseline",
             )
             document = json.loads(recipe.read_text(encoding="utf-8"))
-            document["version"] = 1
-            document["values"].pop("expected_host_material")
-            recipe.write_text(json.dumps(document), encoding="utf-8")
-
-            loaded = read_feature_assembly_recipe(recipe)
-
-            self.assertEqual(loaded.values.expected_host_material, "")
-            self.assertTrue(
-                any("predates host material" in value for value in loaded.source_warnings)
-            )
-
-    def test_v2_recipe_migrates_global_host_as_default_with_review_warning(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            recipe = write_feature_assembly_recipe(
-                FeatureAssemblyValues(
-                    point_datasets={"fastener": "fastener.grim"},
-                    expected_host_material="PEC",
-                ),
-                root / "v2",
-                name="Vehicle",
-                variant="One host",
-            )
-            document = json.loads(recipe.read_text(encoding="utf-8"))
-            document["version"] = 2
-            document["values"].pop("point_host_materials")
-            document["values"].pop("line_host_materials")
-            recipe.write_text(json.dumps(document), encoding="utf-8")
-
-            loaded = read_feature_assembly_recipe(recipe)
-
-            self.assertEqual(loaded.values.expected_host_material, "PEC")
-            self.assertEqual(loaded.values.point_host_materials, {})
-            self.assertTrue(
-                any("only one global" in value for value in loaded.source_warnings)
-            )
+            for version in (1, 2, 3, 4, 5.0, True):
+                with self.subTest(version=version):
+                    document["version"] = version
+                    recipe.write_text(json.dumps(document), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "Unsupported Assembly recipe version"):
+                        read_feature_assembly_recipe(recipe)
 
     def test_base_grim_preflight_distinguishes_external_bor_and_malformed(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -854,7 +813,6 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 output_grim="assembled.grim",
                 coordinate_units="inches",
                 point_locations_csv="points.csv",
-                expected_host_material="PEC",
             )
         )
         model.update_dataset_requirements(
@@ -921,7 +879,6 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 base_grim="body.grim",
                 output_grim="assembled.grim",
                 point_locations_csv="points.csv",
-                expected_host_material="PEC",
             )
         )
         model.update_dataset_requirements(
@@ -991,7 +948,6 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                 output_grim="assembled.grim",
                 coordinate_units="inches",
                 point_locations_csv="points.csv",
-                expected_host_material="PEC",
             )
         )
         model.update_dataset_requirements(
@@ -1094,7 +1050,6 @@ class FeatureAssemblyModelTests(unittest.TestCase):
                     output_grim=str(output),
                     coordinate_units="inches",
                     point_locations_csv=str(points),
-                    expected_host_material="PEC",
                 )
             )
             model.update_dataset_requirements(
@@ -1207,35 +1162,14 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "less than 90"):
             model.validate()
 
-    def test_production_host_ids_resolve_per_response_with_global_fallback(self):
+    def test_strict_assembly_accepts_missing_host_declarations(self):
         model = _ready_point_model()
-        model.values.expected_host_material = ""
-        with self.assertRaisesRegex(ValueError, "point:fastener"):
-            model.validate()
-
-        model.set_point_host_material("fastener", "coated-aluminum-v2")
         model.validate()
-        self.assertEqual(
-            model.effective_host_materials(),
-            {"point:fastener": "coated-aluminum-v2"},
-        )
+        request = model.build_request(_FakeWorkflow())
+        self.assertNotIn("expected_host_material", request.kwargs)
+        self.assertNotIn("expected_host_materials", request.kwargs)
 
-    def test_point_and_line_can_share_dataset_id_with_distinct_host_stacks(self):
-        model = FeatureAssemblyFormModel(FeatureAssemblyValues(
-            expected_host_material="  PEC   outer skin  ",
-        ))
-        model.update_dataset_requirements({
-            "point_dataset_ids": ("shared",),
-            "line_dataset_ids": ("shared",),
-        })
-        model.set_point_host_material("shared", "pec OUTER skin")
-        model.set_line_host_material("shared", "rubber   seal stack v2")
 
-        self.assertEqual(model.effective_host_materials(), {
-            "point:shared": "PEC outer skin",
-            "line:shared": "rubber seal stack v2",
-        })
-        self.assertEqual(model.missing_host_material_mappings(), ())
 
     def test_output_alias_guard_includes_mesh_and_placement_csvs(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1292,10 +1226,8 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         self.assertFalse(request.kwargs["allow_legacy_base_metadata"])
         self.assertTrue(request.kwargs["require_feature_manifests"])
         self.assertFalse(request.kwargs["require_body_mesh_certification"])
-        self.assertEqual(request.kwargs["expected_host_material"], "PEC")
-        self.assertEqual(
-            request.kwargs["expected_host_materials"], {"point:fastener": "PEC"}
-        )
+        self.assertNotIn("expected_host_material", request.kwargs)
+        self.assertNotIn("expected_host_materials", request.kwargs)
 
     def test_discovery_updates_ids_and_preserves_surviving_paths(self):
         workflow = _FakeWorkflow()
@@ -2011,7 +1943,6 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                     point_locations_csv=str(points),
                     point_datasets={"fastener": str(response)},
                     excluded_point_placement_ids={"bolt_002"},
-                    expected_host_material="coated-aluminum-v2",
                 ),
                 root / "vehicle",
                 name="Test vehicle",
@@ -2027,9 +1958,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 )
                 self.assertFalse(panel._recipe_dirty)
                 self.assertEqual(panel.skin_tol.value(), 1.0)
-                self.assertEqual(
-                    panel.expected_host_material.text(), "coated-aluminum-v2"
-                )
+                self.assertFalse(hasattr(panel, "expected_host_material"))
                 self.assertIn("saved", panel.recipe_status_label.text())
                 self.assertEqual(
                     panel.point_mapping.mapping(), {"fastener": str(response.resolve())}
@@ -2293,20 +2222,17 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel.surface_units.setCurrentIndex(
                 panel.surface_units.findData("inches")
             )
-            panel.expected_host_material.setText("")
             panel._pull_values()
             panel.model.update_dataset_requirements(
                 {"point_dataset_ids": ("fastener",), "line_dataset_ids": ()}
             )
             panel.model.set_point_dataset("fastener", str(response))
             panel._apply_requirements_to_tables()
-            panel.point_mapping.set_host_material("fastener", "paint-stack-v3")
             panel._update_workflow_readiness()
 
-            self.assertEqual(
-                panel.model.values.point_host_materials,
-                {"fastener": "paint-stack-v3"},
-            )
+            self.assertEqual(panel.point_mapping.table.columnCount(), 4)
+            self.assertFalse(hasattr(panel, "expected_host_material"))
+            self.assertNotIn("host material", panel.next_step_label.text().lower())
 
             self.assertTrue(panel.preview_button.isEnabled())
             self.assertFalse(panel.build_button.isEnabled())
@@ -2912,7 +2838,6 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel = FeatureAssemblyPanel(service=_FakeWorkflow())
             panel.base_picker.set_path(str(base))
             panel.surface_picker.set_path(str(surface))
-            panel.expected_host_material.setText("PEC")
             panel.point_csv_picker.set_path(str(points))
             panel.output_picker.set_path(str(base))
             panel.coordinate_units.setCurrentIndex(

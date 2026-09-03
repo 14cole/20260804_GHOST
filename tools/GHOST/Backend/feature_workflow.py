@@ -181,15 +181,6 @@ class FeatureAssemblyRequest:
     # strict production deployments this makes their applicability evidence a
     # hard requirement instead of a recorded validation warning.
     require_feature_manifests: bool = False
-    # User-declared clean host identity. In strict mode this must exactly match
-    # every active feature-library manifest after whitespace/case
-    # normalization. Mesh formats do not reliably carry per-region materials,
-    # so the declaration is explicit rather than guessed from STL geometry.
-    expected_host_material: Optional[str] = None
-    # Heterogeneous vehicles may use a different clean local stack for each
-    # library. Keys may be "point:<dataset_id>" / "line:<dataset_id>" or a
-    # bare dataset_id; the plan-level value above is only a fallback.
-    expected_host_materials: Mapping[str, str] = field(default_factory=dict)
     # Production builds from a locally solved GHOST body can require the
     # embedded, dual-polarization fine-mesh certificate. External/HPC body
     # responses need an explicit caller-selected waiver because GRIM cannot
@@ -2622,7 +2613,7 @@ def validate_feature_library_manifest(
     """Validate and normalize one reusable point/line response manifest.
 
     The manifest makes the local-model assumptions machine readable instead
-    of leaving phase origin, subtraction sign, host material, and validity
+    of leaving phase origin, subtraction sign, and validity
     envelope in a filename or tribal knowledge.  It is intentionally strict;
     legacy datasets remain usable only through the separately recorded
     missing-manifest compatibility path.
@@ -2634,7 +2625,7 @@ def validate_feature_library_manifest(
         raise ValueError("Feature-library manifest must be a JSON object.")
     required = {
         "schema", "dataset_id", "feature_kind", "subtraction_order",
-        "phase_origin", "frame_convention", "time_convention", "host",
+        "phase_origin", "frame_convention", "time_convention",
         "applicability", "validation", "response_content_sha256",
     }
     missing = sorted(required - set(manifest))
@@ -2699,15 +2690,11 @@ def validate_feature_library_manifest(
             f"{expected_frame!r}."
         )
 
-    host = manifest["host"]
+    # Historical host declarations are optional descriptive metadata only.
+    host = manifest.get("host", {})
     if not isinstance(host, Mapping):
         raise ValueError("Feature-library manifest host must be an object.")
     material = str(host.get("material", "")).strip()
-    if not material:
-        raise ValueError(
-            "Feature-library manifest host.material must identify the clean "
-            "local material/coating stack."
-        )
 
     applicability = manifest["applicability"]
     if not isinstance(applicability, Mapping):
@@ -3703,8 +3690,6 @@ def _apply_feature_library_contracts(
     point_records: Sequence[dict[str, Any]],
     radar_grid: Mapping[str, Any],
     require_manifests: bool,
-    expected_host_material: Optional[str] = None,
-    expected_host_materials: Optional[Mapping[str, str]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, str], set[str]]:
     """Bind manifests, applicability gates, and component identities to a plan."""
@@ -3717,15 +3702,6 @@ def _apply_feature_library_contracts(
     absent_source_paths: set[str] = set()
     seen_components: dict[str, tuple[str, str]] = {}
     footprint_components: list[dict[str, Any]] = []
-    default_declared_host = " ".join(
-        str(expected_host_material or "").split()
-    )
-    host_overrides = {
-        str(key): " ".join(str(value).split())
-        for key, value in dict(expected_host_materials or {}).items()
-        if " ".join(str(value).split())
-    }
-
     groups = (
         ("line", line_placements, line_records),
         ("point", point_placements, point_records),
@@ -3770,17 +3746,6 @@ def _apply_feature_library_contracts(
                 continue
             dataset = str(dataset_value)
             contract_key = f"{feature_kind}:{dataset_id}"
-            declared_host = host_overrides.get(
-                contract_key,
-                host_overrides.get(dataset_id, default_declared_host),
-            )
-            normalized_declared_host = declared_host.casefold()
-            if require_manifests and not declared_host:
-                raise ValueError(
-                    "Strict feature-library validation requires a host "
-                    "material/coating ID for every active dataset. Enter one "
-                    f"for {contract_key!r} or provide the plan-level default."
-                )
             if dataset_id not in manifests:
                 manifest, sources = load_feature_library_manifest(
                     dataset, dataset_id=dataset_id, feature_kind=feature_kind
@@ -3836,23 +3801,6 @@ def _apply_feature_library_contracts(
                         if require_manifests:
                             raise ValueError(message)
                         warnings.append(message)
-                    manifest_host = " ".join(
-                        str(manifest["host"]["material"]).split()
-                    )
-                    if declared_host and (
-                        manifest_host.casefold() != normalized_declared_host
-                    ):
-                        raise ValueError(
-                            f"{feature_kind} dataset {dataset_id!r} was validated "
-                            f"for host material {manifest_host!r}, not the "
-                            f"declared Assembly host {declared_host!r}."
-                        )
-                    if not declared_host:
-                        warnings.append(
-                            f"{feature_kind} dataset {dataset_id!r} declares host "
-                            f"material {manifest_host!r}, but this Assembly has no "
-                            "host material declaration to compare."
-                        )
                     contracts[contract_key] = {
                         "status": manifest["validation"]["status"],
                         "dataset": dataset,
@@ -4573,8 +4521,6 @@ def prepare_feature_assembly(
             point_records=point_records,
             radar_grid=grid,
             require_manifests=bool(request.require_feature_manifests),
-            expected_host_material=request.expected_host_material,
-            expected_host_materials=request.expected_host_materials,
             cancel_check=cancel_check,
         )
     )
@@ -4799,16 +4745,6 @@ def prepare_feature_assembly(
             else "external_or_survey_waiver"
         ),
         "body_mesh_certification": body_mesh_certification,
-        "expected_host_material": (
-            None
-            if request.expected_host_material is None
-            else str(request.expected_host_material).strip()
-        ),
-        "expected_host_materials": {
-            str(key): str(value).strip()
-            for key, value in request.expected_host_materials.items()
-            if str(value).strip()
-        },
         "feature_library_contracts": feature_library_contracts,
         "validation_warnings": list(validation_warnings),
         "model_scope": {
@@ -4990,7 +4926,6 @@ def _execution_plan_snapshot(plan: FeatureAssemblyPlan) -> FeatureAssemblyPlan:
         plan.request,
         point_datasets=dict(plan.request.point_datasets),
         line_datasets=dict(plan.request.line_datasets),
-        expected_host_materials=dict(plan.request.expected_host_materials),
     )
     occluder = (
         None

@@ -64,8 +64,8 @@ See:
 The GRIM Assembly form and automation wrapper both call
 `Backend/feature_workflow.py`. `Backend/place_features.py` remains a thin
 settings-based wrapper for unattended work. It defaults to the Production
-profile: strict clean-body metadata, validated content-bound feature manifests,
-and declared host material/coating IDs. Legacy compatibility must be selected
+profile: strict clean-body metadata and validated content-bound feature manifests.
+Assembly does not require or compare host-material declarations. Legacy compatibility must be selected
 explicitly. A warning-bearing plan prints its sealed SHA-256 and requires that
 exact digest as the acknowledgment before execution, so a changed plan cannot
 reuse an old waiver. The GUI does not reimplement placement, phase, expansion,

@@ -736,7 +736,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             with vv_base.open("wb") as stream:
                 np.savez(stream, **vv_payload)
             with self.assertRaisesRegex(
-                ValueError, "require exactly VV, HH, and reciprocal"
+                ValueError, "require VV, HH, and VH/HV"
             ):
                 feature_sum.add_features_to_monostatic_grim(
                     str(vv_base), str(vv_combined), points=[point],

@@ -127,17 +127,15 @@ and `Backend/feature_workflow.py` exposes the Qt-free
 `FeatureAssemblyRequest` service. Both call the same validation and placement
 implementation used by the GUI; they are automation alternatives, not a
 second physics path. The wrapper defaults to `VALIDATION_PROFILE =
-"production"`, which requires strict clean-body metadata, validated response
-manifests, and one effective host material/coating ID for every active response.
-Use `EXPECTED_HOST_MATERIAL` for a homogeneous body or kind-qualified
-`EXPECTED_HOST_MATERIALS` entries such as `line:door_seam` and
-`point:fastener` for mixed stacks. `VALIDATION_PROFILE = "legacy"` is the
+"production"`, which requires strict clean-body metadata and validated response
+manifests. Assembly has no host-material declaration or matching requirement;
+historical material metadata is descriptive only. `VALIDATION_PROFILE = "legacy"` is the
 explicit compatibility choice for reviewed older inputs.
 
 Preparation prints every validation warning and does not publish when any are
 present. It prints the sealed plan SHA-256 with the warnings. Review that exact
 plan first; only then copy its digest into `ACKNOWLEDGED_PLAN_SHA256` if the
-waiver is justified. Any input, selection, tolerance, host map, or source change
+waiver is justified. Any input, selection, tolerance, or source change
 changes the digest and invalidates the acknowledgment. This keeps unattended
 execution from silently turning a stale compatibility waiver into a distributed
 result.
@@ -257,12 +255,9 @@ maximum-conical-incidence, and path-vertex-turn envelopes. The 10-degree
 grazing taper records the fixed complex-amplitude visibility ramp used by the
 current line-expansion implementation; it is not a fitted manifest parameter.
 
-Production compares each manifest `host.material` with the effective host ID
-declared for that response. That catches a library/configuration mismatch, but
-an STL/facet file does not carry reliable per-region material IDs: GRIM cannot
-derive or independently prove the declaration from geometry. Use kind-qualified
-host mappings when a point and line response share a `dataset_id` but belong on
-different stacks.
+Manifest `host.material` is optional descriptive metadata. Assembly does not
+require a host-material declaration, compare material names, or issue a
+missing-material warning. The material response is supplied by the datasets.
 
 The Production profile rejects missing, provisional, uncertified, legacy, or
 unbound evidence. The validator report records stable case IDs, all four

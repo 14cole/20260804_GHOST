@@ -15,6 +15,26 @@ import numpy as np
 
 C0 = 299_792_458.0
 
+# SENTRi's documented export convention: global origin, exp(+jwt), with the
+# outgoing exp(-jkr)/r factor removed. Incoming propagation reverses the look
+# vector without changing theta/phi polarization vectors. These are the same
+# V=theta, H=phi field conventions used by Assembly. RcsGrid still stores sigma
+# and phase; the backend recovers F by dividing sqrt(sigma) by sqrt(4*pi).
+SENTRI_FAR_FIELD_METADATA = {
+    "phase_reference": (
+        "origin=(0,0,0) vehicle frame, convention=exp(+jwt), "
+        "radar earth-frame V/H monostatic amplitude"
+    ),
+    "amplitude_convention": "F physical far-field amplitude; sigma_3d=4*pi*|F|^2",
+    "complex_field_domain": "coherent_radar_frame_far_field_amplitude",
+    "time_convention": "exp(+jwt)",
+    "sentri_far_field_reference": (
+        "SENTRi export: exp(+jwt); global coordinate origin; "
+        "outgoing exp(-jkr)/r removed; incident propagation opposite look; "
+        "unchanged theta/phi polarization vectors"
+    ),
+}
+
 # The legacy PTM bytes do not define the sign/origin of their aspect axis or
 # the H/V basis used along a great-circle cut.  GRIM therefore distinguishes
 # its explicit convention from an unmarked legacy PTM instead of silently
@@ -9532,6 +9552,8 @@ class RcsGrid:
         reconstructed as
         ``10**(dBsm/20) * exp(+1j*deg2rad(phase_deg))``.  These format-specific
         rules are deliberately separate from :meth:`read_CST`.
+        The far-field phase convention is recorded for coherent Assembly;
+        native theta still requires the explicit signed-elevation conversion.
         """
 
         rows = _read_cst_delimited_rows(path)
@@ -9935,6 +9957,7 @@ class RcsGrid:
             },
             extra={
                 "source_format": f"SENTRi {schema_name} RCS table",
+                **SENTRI_FAR_FIELD_METADATA,
                 "sentri_coordinate_mapping": "elevation=theta; azimuth=wrapped phi",
                 "sentri_elevation_convention": "sentri_theta_top_zero",
                 "sentri_zero_360_seam_policy": (

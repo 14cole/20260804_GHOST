@@ -229,7 +229,6 @@ class FeatureManifestTests(unittest.TestCase):
                     "axis_el_deg": 0.0,
                     "roll_deg": 0.0,
                 },
-                expected_host_material="PEC outer skin",
             )
             with (
                 mock.patch.object(
@@ -347,7 +346,6 @@ class FeatureManifestTests(unittest.TestCase):
                 feature_workflow._apply_feature_library_contracts(
                     **kwargs,
                     require_manifests=False,
-                    expected_host_material="PEC outer skin",
                 )
             )
             self.assertTrue(any("footprints overlap" in value for value in warnings))
@@ -355,8 +353,51 @@ class FeatureManifestTests(unittest.TestCase):
                 feature_workflow._apply_feature_library_contracts(
                     **kwargs,
                     require_manifests=True,
-                    expected_host_material="PEC outer skin",
                 )
+
+    def test_assembly_has_no_host_material_requirement_or_comparison(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset = Path(directory) / "fastener.grim"
+            response_digest = _write_response_placeholder(dataset)
+            definition = manifest(
+                "fastener", "point", response_content_sha256=response_digest
+            )
+            placement = {
+                "pattern": _point_pattern_stub(),
+                "location": np.zeros(3),
+                "aperture_normal": np.asarray([0.0, 0.0, 1.0]),
+                "roll_ref": np.asarray([1.0, 0.0, 0.0]),
+            }
+            record = {
+                "schema": feature_workflow.POINT_PLACEMENT_SCHEMA,
+                "kind": "compact_3d_delta",
+                "dataset": str(dataset),
+                "dataset_sha256": feature_workflow.sha256_file(str(dataset)),
+                "dataset_id": "fastener", "placement_id": "p1",
+            }
+            for host in (None, {}, {"material": "PEC outer skin"}):
+                definition.pop("host", None)
+                if host is not None:
+                    definition["host"] = host
+                dataset.with_suffix(".feature.json").write_text(
+                    json.dumps(definition), encoding="utf-8"
+                )
+                for strict in (False, True):
+                    with self.subTest(host=host, strict=strict):
+                        contracts, warnings, _hashes, _absent = (
+                            feature_workflow._apply_feature_library_contracts(
+                                line_placements=[], line_records=[],
+                                point_placements=[placement], point_records=[dict(record)],
+                                radar_grid={
+                                    "frequencies_ghz": [1.0], "azimuths_deg": [0.0],
+                                    "elevations_deg": [0.0], "axis_az_deg": 0.0,
+                                    "axis_el_deg": 0.0, "roll_deg": 0.0,
+                                },
+                                require_manifests=strict,
+                            )
+                        )
+                        self.assertIn("point:fastener", contracts)
+                        self.assertFalse(any("host material" in w for w in warnings))
 
     def test_line_manifest_gates_uncertified_conical_incidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -418,7 +459,6 @@ class FeatureManifestTests(unittest.TestCase):
                             "roll_deg": 0.0,
                         },
                         require_manifests=True,
-                        expected_host_material="PEC outer skin",
                     )
 
     def test_manifest_is_bound_to_exact_response_content(self):

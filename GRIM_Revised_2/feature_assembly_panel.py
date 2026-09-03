@@ -56,7 +56,7 @@ UNIT_ABBREVIATIONS = {
 FEATURE_SELECTION_DISPLAY_ID_LIMIT = 8
 
 FEATURE_RECIPE_SCHEMA = "grim.feature-assembly-recipe"
-FEATURE_RECIPE_VERSION = 4
+FEATURE_RECIPE_VERSION = 5
 FEATURE_RECIPE_SUFFIX = ".assembly.json"
 # Hash normal placement/library inputs while keeping recipe saves responsive for
 # very large vehicle meshes and clean-body response files. Large inputs still
@@ -515,12 +515,9 @@ class FeatureAssemblyValues:
     allow_legacy_base_metadata: bool = False
     require_feature_manifests: bool = True
     require_body_mesh_certification: bool = False
-    expected_host_material: str = ""
     base_dir: str | None = None
     point_datasets: dict[str, str] = field(default_factory=dict)
     line_datasets: dict[str, str] = field(default_factory=dict)
-    point_host_materials: dict[str, str] = field(default_factory=dict)
-    line_host_materials: dict[str, str] = field(default_factory=dict)
     # Spatial feature-definition state. These stable CSV IDs are independent
     # from both preview visibility and whole-response dataset arithmetic.
     excluded_point_placement_ids: set[str] = field(default_factory=set)
@@ -761,12 +758,6 @@ def _coerce_loaded_dataset_catalog(
 
 def _clean_path(value: Any) -> str:
     return str(value or "").strip()
-
-
-def _normalize_host_material(value: Any) -> str:
-    """Collapse insignificant host-ID whitespace while preserving display case."""
-
-    return " ".join(str(value or "").split())
 
 
 def _resolved_user_path(value: Any, *, base_dir: Any = None) -> Path:
@@ -1573,7 +1564,6 @@ def feature_assembly_recipe_payload(
         "require_body_mesh_certification": bool(
             values.require_body_mesh_certification
         ),
-        "expected_host_material": str(values.expected_host_material).strip(),
         # Every effective path above is rebased to this recipe directory.
         "base_dir": ".",
         "point_datasets": {
@@ -1583,18 +1573,6 @@ def feature_assembly_recipe_payload(
         "line_datasets": {
             str(dataset_id): relative(path)
             for dataset_id, path in sorted(values.line_datasets.items())
-        },
-        "point_host_materials": {
-            str(dataset_id): str(
-                values.point_host_materials.get(dataset_id, "")
-            ).strip()
-            for dataset_id in sorted(values.point_datasets)
-        },
-        "line_host_materials": {
-            str(dataset_id): str(
-                values.line_host_materials.get(dataset_id, "")
-            ).strip()
-            for dataset_id in sorted(values.line_datasets)
         },
         "excluded_point_placement_ids": sorted(
             str(value) for value in values.excluded_point_placement_ids
@@ -1740,10 +1718,10 @@ def read_feature_assembly_recipe(
             f"Not a {FEATURE_RECIPE_SCHEMA!r} Assembly recipe."
         )
     version = payload.get("version")
-    if version not in {1, 2, 3, FEATURE_RECIPE_VERSION}:
+    if type(version) is not int or version != FEATURE_RECIPE_VERSION:
         raise ValueError(
             f"Unsupported Assembly recipe version {version!r}; this GRIM build "
-            f"supports versions 1 through {FEATURE_RECIPE_VERSION}."
+            f"requires version {FEATURE_RECIPE_VERSION}."
         )
     name = payload.get("name")
     variant = payload.get("variant")
@@ -1771,18 +1749,13 @@ def read_feature_assembly_recipe(
         "normal_tol_deg",
         "allow_legacy_base_metadata",
         "require_feature_manifests",
+        "require_body_mesh_certification",
         "base_dir",
         "point_datasets",
         "line_datasets",
         "excluded_point_placement_ids",
         "excluded_line_ids",
     }
-    if version >= 2:
-        required.add("expected_host_material")
-    if version >= 3:
-        required.update({"point_host_materials", "line_host_materials"})
-    if version >= 4:
-        required.add("require_body_mesh_certification")
     missing = sorted(required - set(raw_values))
     if missing:
         raise ValueError(
@@ -1804,20 +1777,10 @@ def read_feature_assembly_recipe(
             "shadow",
             "allow_legacy_base_metadata",
             "require_feature_manifests",
-            *(
-                ("require_body_mesh_certification",)
-                if version >= 4
-                else ()
-            ),
+            "require_body_mesh_certification",
         )
     ):
         raise ValueError("Assembly recipe boolean settings must be true or false.")
-    expected_host_material = raw_values.get("expected_host_material", "")
-    if not isinstance(expected_host_material, str):
-        raise ValueError(
-            "Assembly recipe expected_host_material must be a text value."
-        )
-
     coordinate_units = str(raw_values["coordinate_units"])
     surface_units = str(raw_values["surface_units"])
     supported_units = {value for _label, value in UNIT_CHOICES}
@@ -1858,19 +1821,6 @@ def read_feature_assembly_recipe(
     line_paths = _recipe_string_mapping(
         raw_values["line_datasets"], "line_datasets"
     )
-    point_host_materials = _recipe_string_mapping(
-        raw_values.get("point_host_materials", {}), "point_host_materials"
-    )
-    line_host_materials = _recipe_string_mapping(
-        raw_values.get("line_host_materials", {}), "line_host_materials"
-    )
-    unknown_point_hosts = sorted(set(point_host_materials) - set(point_paths))
-    unknown_line_hosts = sorted(set(line_host_materials) - set(line_paths))
-    if unknown_point_hosts or unknown_line_hosts:
-        raise ValueError(
-            "Assembly recipe host-material rows reference unknown response IDs: "
-            f"point={unknown_point_hosts}, line={unknown_line_hosts}."
-        )
     recipe_dir = source.parent
     values = FeatureAssemblyValues(
         base_grim=_recipe_absolute_path(raw_values["base_grim"], recipe_dir=recipe_dir),
@@ -1892,10 +1842,7 @@ def read_feature_assembly_recipe(
         normal_tol_deg=normal_tol,
         allow_legacy_base_metadata=raw_values["allow_legacy_base_metadata"],
         require_feature_manifests=raw_values["require_feature_manifests"],
-        require_body_mesh_certification=bool(
-            raw_values.get("require_body_mesh_certification", False)
-        ),
-        expected_host_material=expected_host_material.strip(),
+        require_body_mesh_certification=raw_values["require_body_mesh_certification"],
         base_dir=None,
         point_datasets={
             dataset_id: _recipe_absolute_path(value, recipe_dir=recipe_dir)
@@ -1905,8 +1852,6 @@ def read_feature_assembly_recipe(
             dataset_id: _recipe_absolute_path(value, recipe_dir=recipe_dir)
             for dataset_id, value in line_paths.items()
         },
-        point_host_materials=point_host_materials,
-        line_host_materials=line_host_materials,
         excluded_point_placement_ids=_recipe_id_set(
             raw_values["excluded_point_placement_ids"],
             "excluded_point_placement_ids",
@@ -1921,22 +1866,6 @@ def read_feature_assembly_recipe(
         for role, dataset_id, path_value in _recipe_source_items(values)
     }
     warnings: list[str] = []
-    if version == 1:
-        warnings.append(
-            "Recipe v1 predates host material/coating identity. Enter that ID "
-            "before using the Production validation profile."
-        )
-    elif version == 2:
-        warnings.append(
-            "Recipe v2 has only one global host material/coating ID. Review "
-            "per-response host IDs before Production validation of mixed stacks."
-        )
-    if version < 4:
-        warnings.append(
-            "This older recipe does not claim a certified GHOST body mesh. "
-            "It was loaded with the explicit External/HPC body waiver; select "
-            "Production only after validating a locally certified body result."
-        )
     raw_manifest = payload.get("source_manifest", [])
     if not isinstance(raw_manifest, list):
         raise ValueError("Assembly recipe source_manifest must be a list.")
@@ -2513,18 +2442,6 @@ class FeatureAssemblyFormModel:
             dataset_id: _clean_path(self.values.line_datasets.get(dataset_id))
             for dataset_id in line_ids
         }
-        self.values.point_host_materials = {
-            dataset_id: str(
-                self.values.point_host_materials.get(dataset_id, "")
-            ).strip()
-            for dataset_id in point_ids
-        }
-        self.values.line_host_materials = {
-            dataset_id: str(
-                self.values.line_host_materials.get(dataset_id, "")
-            ).strip()
-            for dataset_id in line_ids
-        }
         self.invalidate_prepared_plan()
 
     def invalidate_dataset_requirements(self, kind: str | None = None) -> None:
@@ -2540,7 +2457,6 @@ class FeatureAssemblyFormModel:
             self._point_requirements_csv = ""
             self._point_requirements_fingerprint = None
             self.values.point_datasets = {}
-            self.values.point_host_materials = {}
         if normalized in (None, "line"):
             self._line_dataset_ids = ()
             self._line_path_count = 0
@@ -2549,7 +2465,6 @@ class FeatureAssemblyFormModel:
             self._line_requirements_csv = ""
             self._line_requirements_fingerprint = None
             self.values.line_datasets = {}
-            self.values.line_host_materials = {}
         self.invalidate_prepared_plan()
 
     def query_dataset_ids(self, service: Any) -> Any:
@@ -2596,12 +2511,6 @@ class FeatureAssemblyFormModel:
     def set_line_dataset(self, dataset_id: str, path: str) -> None:
         self._set_dataset("line", dataset_id, path)
 
-    def set_point_host_material(self, dataset_id: str, material: str) -> None:
-        self._set_host_material("point", dataset_id, material)
-
-    def set_line_host_material(self, dataset_id: str, material: str) -> None:
-        self._set_host_material("line", dataset_id, material)
-
     def _set_dataset(self, kind: str, dataset_id: str, path: str) -> None:
         key = str(dataset_id).strip()
         ids = self._point_dataset_ids if kind == "point" else self._line_dataset_ids
@@ -2615,21 +2524,6 @@ class FeatureAssemblyFormModel:
         mapping[key] = _clean_path(path)
         self.invalidate_prepared_plan()
 
-    def _set_host_material(
-        self, kind: str, dataset_id: str, material: str
-    ) -> None:
-        key = str(dataset_id).strip()
-        ids = self._point_dataset_ids if kind == "point" else self._line_dataset_ids
-        if key not in ids:
-            raise KeyError(f"Unknown {kind} dataset_id {key!r}.")
-        mapping = (
-            self.values.point_host_materials
-            if kind == "point"
-            else self.values.line_host_materials
-        )
-        mapping[key] = str(material).strip()
-        self.invalidate_prepared_plan()
-
     def missing_dataset_mappings(self) -> tuple[str, ...]:
         missing = [
             f"point:{dataset_id}"
@@ -2640,52 +2534,6 @@ class FeatureAssemblyFormModel:
             f"line:{dataset_id}"
             for dataset_id in self.active_line_dataset_ids()
             if not _clean_path(self.values.line_datasets.get(dataset_id))
-        )
-        return tuple(missing)
-
-    def effective_host_materials(self) -> dict[str, str]:
-        """Resolve per-response host IDs, using the global value as a default."""
-
-        default = _normalize_host_material(self.values.expected_host_material)
-        effective: dict[str, str] = {}
-        for kind, dataset_ids, overrides in (
-            (
-                "point",
-                self.active_point_dataset_ids(),
-                self.values.point_host_materials,
-            ),
-            (
-                "line",
-                self.active_line_dataset_ids(),
-                self.values.line_host_materials,
-            ),
-        ):
-            for dataset_id in dataset_ids:
-                override = _normalize_host_material(overrides.get(dataset_id, ""))
-                # Preserve one stable spelling when a per-response value is
-                # equivalent to the global default after the backend's
-                # whitespace/case normalization.
-                if (
-                    override
-                    and default
-                    and override.casefold() == default.casefold()
-                ):
-                    override = default
-                effective[f"{kind}:{dataset_id}"] = override or default
-        return effective
-
-    def missing_host_material_mappings(self) -> tuple[str, ...]:
-        effective = self.effective_host_materials()
-        missing: list[str] = []
-        missing.extend(
-            f"point:{dataset_id}"
-            for dataset_id in self.active_point_dataset_ids()
-            if not effective.get(f"point:{dataset_id}")
-        )
-        missing.extend(
-            f"line:{dataset_id}"
-            for dataset_id in self.active_line_dataset_ids()
-            if not effective.get(f"line:{dataset_id}")
         )
         return tuple(missing)
 
@@ -2773,17 +2621,6 @@ class FeatureAssemblyFormModel:
         if missing:
             raise ValueError(
                 "Choose an OPN-FRD GRIM response for: " + ", ".join(missing)
-            )
-        missing_hosts = self.missing_host_material_mappings()
-        if (
-            values.require_feature_manifests
-            and not values.allow_legacy_base_metadata
-            and missing_hosts
-        ):
-            raise ValueError(
-                "Production validation requires a host material/coating ID for: "
-                + ", ".join(missing_hosts)
-                + ". Enter a per-response ID or the global default."
             )
         if values.shadow and not _clean_path(values.surface_mesh):
             raise ValueError(
@@ -2885,10 +2722,6 @@ class FeatureAssemblyFormModel:
             require_body_mesh_certification=bool(
                 values.require_body_mesh_certification
             ),
-            expected_host_material=(
-                str(values.expected_host_material).strip() or None
-            ),
-            expected_host_materials=self.effective_host_materials(),
             base_dir=values.base_dir,
         )
 
@@ -2932,15 +2765,6 @@ class FeatureAssemblyFormModel:
             bool(values.allow_legacy_base_metadata),
             bool(values.require_feature_manifests),
             bool(values.require_body_mesh_certification),
-            str(values.expected_host_material).strip(),
-            tuple(
-                (dataset_id, str(values.point_host_materials.get(dataset_id, "")).strip())
-                for dataset_id in self.active_point_dataset_ids()
-            ),
-            tuple(
-                (dataset_id, str(values.line_host_materials.get(dataset_id, "")).strip())
-                for dataset_id in self.active_line_dataset_ids()
-            ),
             (
                 _path_key(Path(values.base_dir).expanduser().resolve())
                 if _clean_path(values.base_dir)
@@ -3765,12 +3589,11 @@ if GUI_AVAILABLE:
             self._required_ids: tuple[str, ...] = ()
             self._catalog: tuple[LoadedDatasetEntry, ...] = ()
             self._loaded_buttons: dict[str, _LoadedDatasetButton] = {}
-            self.table = QTableWidget(0, 5, self)
+            self.table = QTableWidget(0, 4, self)
             self.table.setHorizontalHeaderLabels(
                 [
                     "Dataset ID",
                     "Response (.grim)",
-                    "Host material",
                     "",
                     "",
                 ]
@@ -3779,7 +3602,6 @@ if GUI_AVAILABLE:
             self.table.horizontalHeaderItem(1).setToolTip(
                 "Coherent OPN − FRD feature response (.grim)"
             )
-            self.table.horizontalHeaderItem(2).setToolTip("Host material / coating ID")
             self.table.setToolTip(
                 "Every dataset_id used by the placement CSV must map to the "
                 "matching coherent OPN-FRD .grim response."
@@ -3790,9 +3612,8 @@ if GUI_AVAILABLE:
             header = self.table.horizontalHeader()
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-            header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
             self.empty_label = QLabel(empty_text, self)
             self.empty_label.setWordWrap(True)
             self.completeness_label = QLabel(self)
@@ -3814,13 +3635,6 @@ if GUI_AVAILABLE:
             result: dict[str, str] = {}
             for row, dataset_id in enumerate(self._ids):
                 item = self.table.item(row, 1)
-                result[dataset_id] = "" if item is None else item.text().strip()
-            return result
-
-        def host_materials(self) -> dict[str, str]:
-            result: dict[str, str] = {}
-            for row, dataset_id in enumerate(self._ids):
-                item = self.table.item(row, 2)
                 result[dataset_id] = "" if item is None else item.text().strip()
             return result
 
@@ -3857,19 +3671,10 @@ if GUI_AVAILABLE:
             self,
             dataset_ids: tuple[str, ...] | list[str],
             mapping: Mapping[str, str] | None = None,
-            host_materials: Mapping[str, str] | None = None,
         ) -> None:
             existing = self.mapping() if self._ids else {}
-            existing_hosts = self.host_materials() if self._ids else {}
             if mapping is not None:
                 existing.update({str(key): _clean_path(value) for key, value in mapping.items()})
-            if host_materials is not None:
-                existing_hosts.update(
-                    {
-                        str(key): str(value).strip()
-                        for key, value in host_materials.items()
-                    }
-                )
             self._ids = tuple(str(value) for value in dataset_ids)
             self._required_ids = self._ids
             self._loaded_buttons = {}
@@ -3884,12 +3689,6 @@ if GUI_AVAILABLE:
                 self.table.setItem(
                     row, 1, QTableWidgetItem(existing.get(dataset_id, ""))
                 )
-                host_item = QTableWidgetItem(existing_hosts.get(dataset_id, ""))
-                host_item.setToolTip(
-                    "Optional per-response override. Leave blank to use the "
-                    "global default host material/coating ID."
-                )
-                self.table.setItem(row, 2, host_item)
                 loaded_button = _LoadedDatasetButton(self.table)
                 loaded_button.set_catalog(self._catalog)
                 loaded_button.path_selected.connect(
@@ -3897,12 +3696,12 @@ if GUI_AVAILABLE:
                 )
                 loaded_button.notice.connect(self.catalog_notice.emit)
                 self._loaded_buttons[dataset_id] = loaded_button
-                self.table.setCellWidget(row, 3, loaded_button)
+                self.table.setCellWidget(row, 2, loaded_button)
                 button = QPushButton("Browse…", self.table)
                 button.clicked.connect(
                     lambda _checked=False, key=dataset_id: self._browse(key)
                 )
-                self.table.setCellWidget(row, 4, button)
+                self.table.setCellWidget(row, 3, button)
             self.table.blockSignals(False)
             has_rows = bool(self._ids)
             self.empty_label.setVisible(not has_rows)
@@ -3943,13 +3742,6 @@ if GUI_AVAILABLE:
             except ValueError as exc:
                 raise KeyError(f"Unknown dataset_id {dataset_id!r}.") from exc
             self.table.item(row, 1).setText(_clean_path(path))
-
-        def set_host_material(self, dataset_id: str, material: str) -> None:
-            try:
-                row = self._ids.index(str(dataset_id))
-            except ValueError as exc:
-                raise KeyError(f"Unknown dataset_id {dataset_id!r}.") from exc
-            self.table.item(row, 2).setText(str(material).strip())
 
         def _browse(self, dataset_id: str) -> None:
             current = self.mapping().get(dataset_id, "")
@@ -4830,15 +4622,6 @@ if GUI_AVAILABLE:
                 "Legacy compatibility reports missing "
                 "applicability evidence as review warnings."
             )
-            self.expected_host_material = QLineEdit(advanced)
-            self.expected_host_material.setPlaceholderText(
-                "Default for blank response rows, e.g. PEC or paint-stack-v3"
-            )
-            self.expected_host_material.setToolTip(
-                "Convenience default for response rows left blank. Enter a per-row "
-                "override beside each mapped response when the vehicle has mixed "
-                "host materials or coating stacks."
-            )
             self.reset_qa_defaults_button = QPushButton(
                 "Reset placement-check defaults", advanced
             )
@@ -4850,9 +4633,6 @@ if GUI_AVAILABLE:
             advanced_form.addRow("Maximum normal mismatch:", self.normal_tol)
             advanced_form.addRow("Shadow ray bias (m):", self.shadow_bias)
             advanced_form.addRow("Validation profile:", self.validation_profile)
-            advanced_form.addRow(
-                "Default host material / coating ID:", self.expected_host_material
-            )
             advanced_form.addRow("", self.reset_qa_defaults_button)
             self.advanced_section = _DisclosureSection(
                 "Advanced placement checks · defaults active",
@@ -5114,9 +4894,6 @@ if GUI_AVAILABLE:
             self.shadow_bias.editingFinished.connect(self._mark_preview_stale)
             self.validation_profile.currentIndexChanged.connect(
                 self._validation_profile_changed
-            )
-            self.expected_host_material.textEdited.connect(
-                self._mark_preview_stale
             )
             self.reset_qa_defaults_button.clicked.connect(
                 self._reset_qa_defaults
@@ -5443,7 +5220,6 @@ if GUI_AVAILABLE:
                 self.phase_tol.setValue(values.skin_phase_tol_deg)
                 self.normal_tol.setValue(values.normal_tol_deg)
                 self._set_validation_profile_from_values(values)
-                self.expected_host_material.setText(values.expected_host_material)
                 self.shadow_bias.setText(
                     "" if values.shadow_bias_m is None else f"{values.shadow_bias_m:.12g}"
                 )
@@ -5452,12 +5228,10 @@ if GUI_AVAILABLE:
                 self.point_mapping.set_dataset_ids(
                     tuple(values.point_datasets),
                     values.point_datasets,
-                    values.point_host_materials,
                 )
                 self.line_mapping.set_dataset_ids(
                     tuple(values.line_datasets),
                     values.line_datasets,
-                    values.line_host_materials,
                 )
                 self.spatial_feature_filter.clear()
                 self.recipe_name_edit.setText(loaded.name)
@@ -5855,8 +5629,6 @@ if GUI_AVAILABLE:
             values.line_locations_csv = self.line_csv_picker.path()
             values.point_datasets = self.point_mapping.mapping()
             values.line_datasets = self.line_mapping.mapping()
-            values.point_host_materials = self.point_mapping.host_materials()
-            values.line_host_materials = self.line_mapping.host_materials()
             values.coordinate_units = str(self.coordinate_units.currentData())
             values.surface_units = str(self.surface_units.currentData())
             values.flip_surface_normals = self.flip_normals.isChecked()
@@ -5869,9 +5641,6 @@ if GUI_AVAILABLE:
                 values.require_feature_manifests,
                 values.require_body_mesh_certification,
             ) = self._validation_profile_flags()
-            values.expected_host_material = (
-                self.expected_host_material.text().strip()
-            )
 
             point_selected = bool(values.point_locations_csv)
             line_selected = bool(values.line_locations_csv)
@@ -6050,39 +5819,10 @@ if GUI_AVAILABLE:
                 qa_mode = (
                     "legacy response compatibility (warnings shown after validation)"
                 )
-            host_id = values.expected_host_material.strip()
-            try:
-                effective_hosts = self.model.effective_host_materials()
-                missing_host_materials = self.model.missing_host_material_mappings()
-                host_mapping_error = ""
-            except ValueError as exc:
-                effective_hosts = {}
-                missing_host_materials = tuple(
-                    f"point:{value}" for value in active_point_ids
-                ) + tuple(f"line:{value}" for value in active_line_ids)
-                host_mapping_error = str(exc)
-            explicit_host_count = sum(
-                bool(str(value).strip())
-                for value in (
-                    *values.point_host_materials.values(),
-                    *values.line_host_materials.values(),
-                )
-            )
-            host_text = (
-                f"default {host_id}"
-                if host_id
-                else (
-                    f"{explicit_host_count} per-response override(s)"
-                    if explicit_host_count
-                    else "not set"
-                )
-            )
-            if not production_profile and missing_host_materials:
-                host_text += " (Legacy warning expected)"
             self.build_summary_label.setText(
                 (
                     "; ".join(selected_parts)
-                    + f"; QA: {qa_mode}; host: {host_text}"
+                    + f"; QA: {qa_mode}"
                 )
                 if selected_parts
                 else "Choose a point or line placement CSV."
@@ -6199,10 +5939,6 @@ if GUI_AVAILABLE:
                 and binding_status.sidecar_path.is_file()
                 else "Bind body to mesh…"
             )
-            host_material_ready = bool(
-                not host_mapping_error
-                and (not production_profile or not missing_host_materials)
-            )
             has_output = bool(values.output_grim)
             output_ready = has_output
             if has_output:
@@ -6235,7 +5971,6 @@ if GUI_AVAILABLE:
                     surface_units_ready,
                     binding_status.ready,
                     settings_ready,
-                    host_material_ready,
                 )
             )
             validation_current = bool(
@@ -6272,7 +6007,6 @@ if GUI_AVAILABLE:
                 checks.append((binding_status.ready, "reviewed body binding"))
             if certified_body_profile:
                 checks.append((validation_current, "body mesh certificate"))
-            checks.append((host_material_ready, "host material IDs"))
             if not settings_ready:
                 checks.append((False, "advanced settings"))
             checks.append((output_ready, "output"))
@@ -6316,7 +6050,6 @@ if GUI_AVAILABLE:
                             ("At least one feature enabled", has_enabled_features, True),
                             ("Every dataset_id mapped", mappings_complete, True),
                             ("Mapped response files available", response_files_ready, True),
-                            ("Host material / coating IDs", host_material_ready, True),
                         ),
                     ),
                     (
@@ -6366,16 +6099,6 @@ if GUI_AVAILABLE:
                 )
             elif binding_status.required and not binding_status.ready:
                 next_step = "Next: " + binding_status.message.lstrip("✗⚠○ ")
-            elif not host_material_ready:
-                next_step = "Next: " + (
-                    host_mapping_error
-                    if host_mapping_error
-                    else (
-                        "enter a per-response host material/coating ID for "
-                        + ", ".join(missing_host_materials)
-                        + ", or enter one global default."
-                    )
-                )
             elif not has_placements:
                 next_step = "Next: choose a point or line placement CSV."
             elif not scans_current:
@@ -6581,12 +6304,6 @@ if GUI_AVAILABLE:
         def _mapping_changed(self) -> None:
             self.model.values.point_datasets = self.point_mapping.mapping()
             self.model.values.line_datasets = self.line_mapping.mapping()
-            self.model.values.point_host_materials = (
-                self.point_mapping.host_materials()
-            )
-            self.model.values.line_host_materials = (
-                self.line_mapping.host_materials()
-            )
             self._refresh_spatial_feature_tree()
             self._mark_preview_stale()
             missing = [
@@ -6745,8 +6462,6 @@ if GUI_AVAILABLE:
             values.line_locations_csv = self.line_csv_picker.path()
             values.point_datasets = self.point_mapping.mapping()
             values.line_datasets = self.line_mapping.mapping()
-            values.point_host_materials = self.point_mapping.host_materials()
-            values.line_host_materials = self.line_mapping.host_materials()
             values.skin_tol_m = self.skin_tol.value() * 1.0e-3
             values.skin_phase_tol_deg = self.phase_tol.value()
             values.normal_tol_deg = self.normal_tol.value()
@@ -6755,9 +6470,6 @@ if GUI_AVAILABLE:
                 values.require_feature_manifests,
                 values.require_body_mesh_certification,
             ) = self._validation_profile_flags()
-            values.expected_host_material = (
-                self.expected_host_material.text().strip()
-            )
 
         def _show_error(self, text: str) -> None:
             message = str(text).strip() or "Feature assembly failed."
@@ -6799,12 +6511,10 @@ if GUI_AVAILABLE:
             self.point_mapping.set_dataset_ids(
                 self.model.point_dataset_ids,
                 self.model.values.point_datasets,
-                self.model.values.point_host_materials,
             )
             self.line_mapping.set_dataset_ids(
                 self.model.line_dataset_ids,
                 self.model.values.line_datasets,
-                self.model.values.line_host_materials,
             )
             self._refresh_spatial_feature_tree()
 
@@ -7439,8 +7149,6 @@ if GUI_AVAILABLE:
                 recipe_state_before = (
                     dict(self.model.values.point_datasets),
                     dict(self.model.values.line_datasets),
-                    dict(self.model.values.point_host_materials),
-                    dict(self.model.values.line_host_materials),
                     set(self.model.values.excluded_point_placement_ids),
                     set(self.model.values.excluded_line_ids),
                 )
@@ -7448,8 +7156,6 @@ if GUI_AVAILABLE:
                 recipe_state_after = (
                     dict(self.model.values.point_datasets),
                     dict(self.model.values.line_datasets),
-                    dict(self.model.values.point_host_materials),
-                    dict(self.model.values.line_host_materials),
                     set(self.model.values.excluded_point_placement_ids),
                     set(self.model.values.excluded_line_ids),
                 )

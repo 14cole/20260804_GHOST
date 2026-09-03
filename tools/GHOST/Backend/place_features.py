@@ -26,25 +26,12 @@ from pathlib import Path
 # =============================================================================
 
 # Production is deliberately the default. It requires a certified local GHOST
-# body, strict clean-body metadata, validated response manifests, and an
-# effective host material / coating ID for every active response. Use
+# body, strict clean-body metadata, and validated response manifests. Use
 # "external" for a reviewed external/HPC body that lacks the local mesh
 # certificate while retaining all other strict checks. Use "legacy" only for a
 # reviewed older library whose missing declarations you intentionally accept;
 # that choice and every compatibility assumption are recorded as warnings.
 VALIDATION_PROFILE = "production"       # production, external, or explicit legacy
-
-# The clean local material/coating stack expected by every response manifest.
-# A global value is convenient for a homogeneous host. Per-response overrides
-# support mixed vehicle stacks; use "point:<dataset_id>" / "line:<dataset_id>"
-# when the same dataset ID appears in both feature kinds, or a bare dataset ID
-# when it is unambiguous. Production requires one effective value per active
-# response, and it must match manifest host.material after case/space folding.
-EXPECTED_HOST_MATERIAL = None            # e.g. "PEC outer skin"
-EXPECTED_HOST_MATERIALS = {
-    # "line:door_seam": "primer + topcoat stack v3",
-    # "point:fastener": "aluminum skin stack v2",
-}
 
 # Validation never publishes output by itself. If a completed plan contains
 # warnings, execution prints its sealed SHA-256 and stops. After reviewing the
@@ -287,8 +274,6 @@ def main():
         allow_legacy_base_metadata=allow_legacy_metadata,
         require_feature_manifests=require_manifests,
         require_body_mesh_certification=require_body_certification,
-        expected_host_material=EXPECTED_HOST_MATERIAL,
-        expected_host_materials=EXPECTED_HOST_MATERIALS,
         base_dir=PROJECT_ROOT,
         history="place_features.py coherent platform line/compact placement",
     )

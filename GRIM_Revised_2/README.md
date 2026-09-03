@@ -363,17 +363,15 @@ Use **Find feature** to filter by instance ID, dataset ID, or mapped response;
 filtering never changes membership. **Copy full selection** records the exact
 enabled/disabled configuration even when the on-screen summary is shortened.
 Use the named **Reusable assembly recipe** bar to save the body, CSVs, response
-mappings, tolerances, validation profile, host material/coating IDs, and exact
+mappings, tolerances, validation profile, and exact
 membership as one portable
 `.assembly.json` trade-study variant. Paths are stored relative to the recipe
 when possible. Loading a recipe warns when an input is missing or has changed;
 it never silently treats changed bytes as the saved configuration. Loading a
 different recipe or closing GRIM with recipe edits presents **Save / Discard /
 Cancel**, so a trade-study configuration is not silently lost. Current recipes
-use schema version 4 and record the body-certification policy. Version 1-3
-recipes remain readable, but load with certification disabled, select the
-general body workflow, and show a warning rather than silently claiming
-Production certification.
+use schema version 5 and omit host-material declarations. Only the current
+recipe format is accepted; there are no older-recipe migrations or defaults.
 If every feature is unchecked, **Preview geometry** deliberately shows the
 clean body alone; validation and build still require at least one enabled
 feature.
@@ -450,8 +448,8 @@ cross-polarization where used). Line datasets require the TE and TM 2-D delta
 responses consumed by line expansion. New assemblies use **General body —
 compatible 3-D GRIM (default)**. Compatible coherent 3-D body responses can come
 from any solver; a GHOST BoR certificate is not required. Strict field metadata,
-feature-library manifests, and effective host material/coating IDs remain
-required. The optional **Require certified GHOST BoR body** profile under
+feature-library manifests remain required. Assembly has no host-material input
+or host-material matching step. The optional **Require certified GHOST BoR body** profile under
 **Advanced placement checks** additionally audits that solver's body-mesh
 certificate. Saved recipes retain their explicit profile.
 
@@ -461,12 +459,10 @@ phase conventions, polarization channels, and radar axes. A 2-D `sigma_2d`
 response cannot be used directly as a 3-D `sigma_3d` body; a suitable 2-D feature
 delta belongs in Line Features for expansion along its placement CSV.
 **Legacy compatibility** relaxes missing-metadata contracts and
-remains visibly unsuitable for Production publication. The global host-material
-field is a convenience default; use per-response row overrides for mixed vehicle
-substrates or coating stacks.
+remains visibly unsuitable for Production publication.
 The manifest binds each
 response ID to its installed-minus-clean sign, phase origin, local frame, host
-material declaration, frequency range, footprint, curvature/conical limits,
+material metadata when supplied, frequency range, footprint, curvature/conical limits,
 and validation case IDs. Legacy files remain available only through explicit
 **Legacy compatibility** and produce visible QA warnings. Placement skin
 distance is displayed in millimeters (stored as meters in recipes); the safe
@@ -720,6 +716,20 @@ A recognizable vendor-family header commits dispatch to the SENTRi
 reader, while all 11 required columns must be present for the file to load;
 damaged/partial SENTRi files therefore fail instead of falling through to a
 looser numeric-text reader.
+
+SENTRi exports use `exp(+jwt)`, reference the global coordinate origin, and
+remove the outgoing `exp(-jkr)/r` factor. Incoming propagation is opposite the
+outward look direction, with unchanged theta/phi polarization vectors. The
+importer records these field conventions for Assembly without conjugating
+phase or changing polarization signs. Stored RCS remains `sigma_3d`; Assembly
+recovers physical amplitude as `sqrt(sigma_3d / (4*pi)) * exp(j*phase)`.
+Existing saved imports carrying the recognized SENTRi source, phase, and
+polarization mappings can supply missing field declarations during Assembly
+without rewriting the input file. Explicit contradictory declarations still
+fail validation.
+Assembly retains all four SENTRi polarization channels, adding the reciprocal
+feature cross-polar contribution to both VH and HV without discarding either
+measured body channel.
 
 Import does not silently change SENTRi geometry. Select the loaded dataset and
 use **Geometry & Units → SENTRi El→GRIM** when a conventional signed elevation

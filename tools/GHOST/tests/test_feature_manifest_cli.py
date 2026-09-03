@@ -382,8 +382,6 @@ class HeadlessPlacementPolicyTests(unittest.TestCase):
             POINT_FEATURE_LOCATIONS_CSV=None,
             LINE_FEATURE_DATASETS={"door_seam": "door.grim"},
             VALIDATION_PROFILE=profile,
-            EXPECTED_HOST_MATERIAL="default stack",
-            EXPECTED_HOST_MATERIALS={"line:door_seam": "door stack"},
             ACKNOWLEDGED_PLAN_SHA256=acknowledged_sha,
             prepare_feature_assembly=prepare,
             execute_feature_assembly=execute,
@@ -393,18 +391,15 @@ class HeadlessPlacementPolicyTests(unittest.TestCase):
                 result = place_features.main()
         return result, prepare, execute
 
-    def test_default_profile_is_strict_production_and_passes_host_ids(self):
+    def test_default_profile_is_strict_production_without_host_ids(self):
         self.assertEqual(place_features.VALIDATION_PROFILE, "production")
         _result, prepare, execute = self._run_main()
         request = prepare.call_args.args[0]
         self.assertFalse(request.allow_legacy_base_metadata)
         self.assertTrue(request.require_feature_manifests)
         self.assertTrue(request.require_body_mesh_certification)
-        self.assertEqual(request.expected_host_material, "default stack")
-        self.assertEqual(
-            request.expected_host_materials,
-            {"line:door_seam": "door stack"},
-        )
+        self.assertFalse(hasattr(request, "expected_host_material"))
+        self.assertFalse(hasattr(request, "expected_host_materials"))
         execute.assert_called_once()
 
     def test_legacy_profile_is_explicit(self):

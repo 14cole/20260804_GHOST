@@ -4315,6 +4315,39 @@ def _validate_declared_coherent_base(
         "amplitude_convention": COMPONENT_AMPLITUDE_CONVENTION,
         "complex_field_domain": COMPONENT_COMPLEX_FIELD_DOMAIN,
     }
+    # Earlier SENTRi imports retained sigma, reported phase and explicit vendor
+    # mappings but omitted the generic field declarations. Resolve that known
+    # format using its documented global-origin exp(+jwt) far-field convention.
+    # A filename or a generic source label alone is not enough. Supplied field
+    # declarations still pass the contradiction checks below, and native theta
+    # must independently pass the radar-coordinate validator after conversion.
+    sentri_import = (
+        _optional_scalar_text(candidate, "source_format", label) in {
+            "SENTRi compact MHz RCS table", "SENTRi descriptive Hz RCS table",
+        }
+        and _optional_scalar_text(candidate, "sentri_phase_mapping", label) == (
+            "GRIM complex amplitude = 10^(dBsm/20) "
+            "* exp(+j*deg2rad(reported_phase_deg))"
+        )
+        and _optional_scalar_text(candidate, "sentri_polarization_mapping", label) == (
+            "VV=tt/theta-theta; HV=pt/phi-theta; VH=tp/theta-phi; HH=pp/phi-phi"
+        )
+    )
+    if sentri_import:
+        time_convention = _optional_scalar_text(candidate, "time_convention", label)
+        if time_convention not in (None, "exp(+jwt)"):
+            raise ValueError(
+                f"{label}: SENTRi export time_convention={time_convention!r} "
+                "contradicts its documented exp(+jwt) far-field convention."
+            )
+        for key in ("phase_reference", "amplitude_convention", "complex_field_domain"):
+            if _optional_scalar_text(candidate, key, label) is None:
+                candidate[key] = np.asarray(expected[key])
+        candidate["sentri_far_field_reference"] = np.asarray(
+            "SENTRi export: exp(+jwt); global coordinate origin; "
+            "outgoing exp(-jkr)/r removed; incident propagation opposite look; "
+            "unchanged theta/phi polarization vectors"
+        )
     normalized_aliases = {
         "rcs_domain": lambda value: value.lower().replace("-", "_"),
         "power_domain": lambda value: value.lower().replace("-", "_"),
@@ -4351,20 +4384,26 @@ def _validate_declared_coherent_base(
 
 
 def _canonical_3d_channel_indices(polarizations, label, *, require_all=True):
-    """Return (channel names, indices) in canonical radar order."""
+    """Return radar order, retaining both measured cross-pols when present.
+
+    A single HV channel represents reciprocal VH as before. Four-channel
+    solver exports carry independent HV/VH samples, neither of which may be
+    discarded or averaged when adding a reciprocal feature contribution.
+    """
+    labels = [str(raw).strip().upper() for raw in np.asarray(polarizations).ravel()]
+    has_both_cross_pols = {"VH", "HV"}.issubset(labels)
     indices = {}
-    for index, raw in enumerate(np.asarray(polarizations).ravel()):
-        value = str(raw).strip().upper()
+    for index, value in enumerate(labels):
         canonical = (
             "VV" if value in {"VV", "V", "VERTICAL"}
             else "HH" if value in {"HH", "H", "HORIZONTAL"}
-            else "VH" if value in {"VH", "HV"}
+            else "VH" if value == "HV" and not has_both_cross_pols
             else value
         )
-        if canonical not in {"VV", "HH", "VH"}:
+        if canonical not in {"VV", "HH", "VH", "HV"}:
             raise ValueError(
-                f"{label}: unsupported polarization label {raw!r}; use VV, "
-                "HH, or reciprocal VH/HV."
+                f"{label}: unsupported polarization label {value!r}; use VV, "
+                "HH, VH, or HV."
             )
         if canonical in indices:
             raise ValueError(
@@ -4372,12 +4411,12 @@ def _canonical_3d_channel_indices(polarizations, label, *, require_all=True):
             )
         indices[canonical] = index
     required = {"VV", "HH", "VH"}
-    if require_all and set(indices) != required:
+    if require_all and not required.issubset(indices):
         raise ValueError(
-            f"{label}: require exactly VV, HH, and reciprocal VH/HV; got "
+            f"{label}: require VV, HH, and VH/HV; got "
             f"{[str(value) for value in np.asarray(polarizations).ravel()]}."
         )
-    channels = [channel for channel in ("VV", "HH", "VH") if channel in indices]
+    channels = [channel for channel in ("VV", "HH", "VH", "HV") if channel in indices]
     if not channels:
         raise ValueError(f"{label}: no usable radar polarization channels.")
     return channels, [indices[channel] for channel in channels]
@@ -5358,6 +5397,9 @@ def add_features_to_monostatic_grim(
         },
         "base_grid_contract": base_grid_contract,
         "base_coherent_metadata_contract": {
+            "source_field_convention": _optional_scalar_text(
+                validated_base, "sentri_far_field_reference", label
+            ),
             "legacy_compatibility_enabled": bool(
                 allow_legacy_base_metadata
             ),
@@ -5494,6 +5536,9 @@ def add_features_to_monostatic_grim(
             component["polarizations"], "placed feature field"
         )
         feature_lookup = dict(zip(component_channels, component_order))
+        # Placed features are reciprocal; add their cross-pol contribution to
+        # each measured base cross-pol without collapsing the source channels.
+        feature_lookup.setdefault("HV", feature_lookup["VH"])
         component_order = [feature_lookup[channel] for channel in base_channels]
         base_amplitude = np.asarray(
             validated_base["_amp"], dtype=np.complex128
