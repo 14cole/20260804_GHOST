@@ -80,13 +80,15 @@ omitted.
   VV/HH, TE/TM, V/H, VERTICAL/HORIZONTAL, and reciprocal VH/HV/CROSS;
   frequency tokens such as `3GHz` or `0.0100GHz` are recognized wherever they
   appear.
-- Concatenation verifies all non-joined axes and physical convention metadata,
+- Concatenation verifies all non-joined axes and dimensional/storage units,
   detects conflicting overlap, and keeps solver raw complex arrays.
-- Solver certification metadata is advisory. It never admits or rejects a CEM
+- Solver certification and field-convention metadata are advisory. They never admit or reject a CEM
   operation, so certified, uncertified, mixed-origin, and imported datasets may
   be combined when their physical data are compatible. A joined or subtracted
   output does not inherit a source certification claim; inspect the unchanged
   source files when that evidence is relevant.
+  Coherent 2-D subtraction assumes the selected coupon frame, records missing
+  or conflicting annotations, and leaves the supplied complex samples unchanged.
 - Conversion inputs are `.grim`, `.out`, `.pio`, `.cmplx_di`, `.csv`, `.txt`,
   and `.ss`. Outputs are `.grim`, `.pio`, `.cmplx_di`, `.csv`, `.txt`, and
   `.out`. `.ss` remains read-only because the referenced GRIM library has no

@@ -311,9 +311,9 @@ in provenance. Input order is significant for the priority policies:
   available in single-source cells and becomes unknown in cells with multiple
   contributors.
 - `coherent-mean` averages usable complex fields. Samples with finite power but
-  missing phase are masked individually and counted. Explicitly conflicting
-  phase-reference, time-convention, or polarization-basis declarations stop the
-  merge; missing or one-sided declarations are recorded as unspecified.
+  missing phase are masked individually and counted. Missing or conflicting
+  phase-reference, time-convention, and polarization-basis annotations are
+  recorded as advisories without changing the supplied samples.
 
 The GUI adds the reversible unsaved result directly and reports overlap,
 missing, contributor, and resolved-conflict counts in status. The result's
@@ -334,8 +334,8 @@ collapse onto the same wrapped coordinate.
 ## Assembly
 
 Assembly presents **Body**, **Point Features**, **Line Features**, and **Review**.
-Choose the body dataset, then use either or both feature tabs for a placement
-CSV and its response datasets. The coordinate-unit choice is shared and can be
+Choose the body dataset, then use either or both feature tabs to create/edit
+placements or load a CSV and its response datasets. The coordinate-unit choice is shared and can be
 changed from either feature tab. Body geometry opens when a matching mesh is
 needed; mesh options, feature exclusions, and placement tolerances are kept in
 collapsed sections. Review contains the live run checklist, output, and placement QA;
@@ -381,14 +381,16 @@ when possible. Loading a recipe warns when an input is missing or has changed;
 it never silently treats changed bytes as the saved configuration. Loading a
 different recipe or closing GRIM with recipe edits presents **Save / Discard /
 Cancel**, so a trade-study configuration is not silently lost. Current recipes
-use schema version 5 and omit host-material declarations. Only the current
-recipe format is accepted; there are no older-recipe migrations or defaults.
+use schema version 5. Only the current
+recipe format is accepted. Recipes now retain the installed host material,
+stack ID, declared minimum principal radius, and exact study samples.
 If every feature is unchecked, **Preview geometry** deliberately shows the
-clean body alone; validation and build still require at least one enabled
-feature.
+clean body alone. Validation and build also accept this body-only baseline,
+including a body with no placement CSVs. A body-only build needs no mounting
+mesh or host declaration and publishes a zero feature-only sibling.
 The selected clean-body `.grim` is preflighted before it receives a ready check.
 An embedded BoR response may supply its own preview geometry; an external 3-D
-body requires its matching STL/facet mesh. A malformed ZIP or incomplete GRIM
+body with enabled features requires its matching STL/facet mesh. A malformed ZIP or incomplete GRIM
 key set is shown as unready rather than being counted as a body.
 For an external 3-D body, strict validation also requires a reviewed solve-to-mesh
 binding. **Bind / refresh...** records the team geometry revision and the
@@ -407,9 +409,10 @@ valid placement surface, but they deserve review before enabling shadowing.
 **Assemble & save** is locked until every required
 checklist row is ready and the exact current configuration
 has completed Validate placements. It never performs an unreviewed validation
-on the way to publication. If validation returns applicability or compatibility
-warnings, the operator must review them and apply the one-validation warning
-waiver before assembly is enabled. The action performs the full response
+on the way to publication. Metadata and model advisories are visible but need
+no waiver in the default profile. Large workload reviews and warnings in an
+explicitly selected strict profile still require acknowledgement of the current
+plan. The action performs the full response
 evaluation and writes the result. Its progress bar covers the
 direction/frequency work, and **Cancel
 assembly** cooperatively stops before publication. A cancelled or failed build
@@ -457,25 +460,26 @@ CSV/STL or modify placement validation, shadowing, or the assembled RCS.
 Point datasets require compatible 3-D delta channels (VV, HH, and reciprocal
 cross-polarization where used). Line datasets require the TE and TM 2-D delta
 responses consumed by line expansion. New assemblies use **General body —
-compatible 3-D GRIM (default)**. Compatible coherent 3-D body responses can come
-from any solver; a GHOST BoR certificate is not required. Strict field metadata,
-feature-library manifests remain required. Assembly has no host-material input
-or host-material matching step. The optional **Require certified GHOST BoR body** profile under
-**Advanced placement checks** additionally audits that solver's body-mesh
-certificate. Saved recipes retain their explicit profile.
+metadata advisory (default)**. Coherent 3-D body responses can come from any
+solver. Missing, stale, or conflicting convention annotations, solver versions,
+certificates, and manifests do not block the operation. The selected body or
+delta role supplies the working frame and assumptions; the program never
+conjugates, rephases, or rescales a field merely because an annotation differs.
+**Strict library metadata (optional)** checks host material/stack, curvature,
+surface bindings, and response certificates. **Require certified GHOST BoR
+body** also audits the solver's body-mesh certificate. Saved recipes retain
+their explicit profile.
 
 The `.grim` extension identifies a data container, not the physical role of
-its contents. Assembly checks the stored dimensional units, complex-field and
-phase conventions, polarization channels, and radar axes. A 2-D `sigma_2d`
+its contents. Assembly checks dimensional units, numerical power/phase
+consistency, polarization channels, and radar axes. A 2-D `sigma_2d`
 response cannot be used directly as a 3-D `sigma_3d` body; a suitable 2-D feature
 delta belongs in Line Features for expansion along its placement CSV.
-**Legacy compatibility** relaxes missing-metadata contracts and
-remains visibly unsuitable for Production publication.
-The manifest binds each
+Optional manifests describe each
 response ID to its installed-minus-clean sign, phase origin, local frame, host
-material metadata when supplied, frequency range, footprint, curvature/conical limits,
-and validation case IDs. Legacy files remain available only through explicit
-**Legacy compatibility** and produce visible QA warnings. Placement skin
+material and optional stack identity, frequency range, footprint, curvature/conical limits,
+and validation case IDs. These annotations are retained in provenance;
+they become requirements only in an explicitly selected strict profile. Placement skin
 distance is displayed in millimeters (stored as meters in recipes); the safe
 controls cap phase error at 90 degrees and provide a one-click reset to the
 1 mm / 15 degree / 15 degree defaults.
@@ -485,6 +489,52 @@ does not add diffraction, creeping waves, or body-feature multiple scattering.
 Assembly is a coherent first-order reduced model. Production confidence still
 requires representative clean/featured full-wave comparisons for each feature
 family and the intended host/material/curvature/aspect envelope.
+
+**Create / edit…** opens the point or line placement table. Add, duplicate,
+delete, and undo/redo rows; generate point rows/circles, distribute points by
+arclength along an open or closed path, or replace a line with
+ordered polyline vertices. Repeat the first vertex to close a boundary. Select
+rows for **Derive normals** (coordinates preserved) or **Snap + normals**
+(coordinates explicitly moved). Inspect the changes, save the CSV, then use
+**Preview geometry** and **Validate placements**. Double-click a visible point
+or line in the 3-D view to select it; selecting an editor row focuses its saved
+preview. Unsaved coordinates are refreshed in 3-D after saving and previewing.
+The editor accepts at most 10,000 rows / 16 MiB and keeps bounded undo history.
+
+New embedded-BoR selections enable shadowing and can generate a revolved
+shadow surface without an external mesh. Its radial sag is bounded by one
+quarter of the active skin tolerance; its azimuthal normal rotation is bounded
+by half the normal tolerance. The validation report records the actual mesh
+and topology. Explicit recipe shadow choices are retained.
+
+Under Review, **Exact stored study samples** accepts comma-separated frequency,
+azimuth, and elevation values; blank retains an entire axis. No interpolation
+is performed. Sampling warnings estimate phase changes caused by translated
+features; finer body/library samples are still required to resolve their
+intrinsic angular or frequency structure.
+
+After saving, **Response comparison** opens body, feature-only, and coherent
+total RCS cuts. Select an exact frequency/elevation/channel, or add saved
+family-only and configuration variants. Feature RCS is `4π|ΔF|²`; it is not
+the dB difference between total and body. The optional right-hand axis shows
+that total-minus-body dB comparison separately. Cuts are streamed on a worker with
+bounded archive reads. Use the plot toolbar to save a figure. Advanced tree
+builds likewise run on a cancellable worker with a capacity check. Their
+default is Strict axes; choosing Intersect records discarded samples.
+
+GHOST 2-D `amplitude_version` is provenance, not an eligibility requirement.
+Subtraction uses the supplied complex samples even with mixed or absent
+versions. It records assumptions and preserves agreed declarations without
+claiming that a mixed-version result was produced by the current solver.
+An existing Assembly output can also be used in a later study. Known duplicate
+feature instances remain rejected; without usable history, prior membership
+cannot be checked automatically.
+
+FREDDY nominal IBC CSVs contain `frequency_hz,resistance_ohm,reactance_ohm`;
+dielectric CSVs contain `frequency_hz,eps_real,eps_imag,mu_real,mu_imag`.
+GHOST reads both with and without the header and converts Hz to its internal
+GHz scale. Signed imaginary parts are preserved. Seven-column uncertainty or
+other analysis tables are separate artifacts and are not nominal material inputs.
 
 ## PPT reports
 
@@ -738,8 +788,8 @@ phase or changing polarization signs. Stored RCS remains `sigma_3d`; Assembly
 recovers physical amplitude as `sqrt(sigma_3d / (4*pi)) * exp(j*phase)`.
 Existing saved imports carrying the recognized SENTRi source, phase, and
 polarization mappings can supply missing field declarations during Assembly
-without rewriting the input file. Explicit contradictory declarations still
-fail validation.
+without rewriting the input file. Convention annotations are advisory in the
+default profile; numerical coordinate conversion remains necessary.
 Assembly retains all four SENTRi polarization channels, adding the reciprocal
 feature cross-polar contribution to both VH and HV without discarding either
 measured body channel.
@@ -888,10 +938,10 @@ coherently added directly to a 3-D `sigma_3d` body; it must first go through
 the line-expansion placement workflow. When inputs do not declare a phase
 center, time convention, or polarization basis, coherent work uses the
 available complex samples, masks unusable cells, and records missing facts
-without fabricating values. Only explicit declared convention mismatches stop.
-`--attest-coherent-metadata` remains only for backward compatibility when a
-script deliberately records a stronger user statement; it is not required and
-cannot override a conflict.
+without fabricating values. Conflicting convention annotations are also
+advisory; the arithmetic applies no inferred field conversion.
+`--attest-coherent-metadata` can record a stronger user statement but is not
+required for normal operations.
 
 Headless stitch accepts the same `priority-first`, `priority-last`,
 `power-mean`, and `coherent-mean` policies as the GUI. `--tol` controls numeric

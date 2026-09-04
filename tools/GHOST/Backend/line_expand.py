@@ -619,6 +619,32 @@ def _subdivide(segments: 'np.ndarray', max_len: 'float',
     )
 
 
+def constant_normal_piece_length(segments, segment_normals):
+    """One analytic piece per straight input segment, if its frame is constant.
+
+    This is valid only without spatial visibility masks or occlusion. A bent
+    polyline keeps each input segment; no geometry or phase is approximated.
+    """
+    if segment_normals is None:
+        return None
+    segments = np.asarray(segments, dtype=float)
+    normals = np.asarray(segment_normals, dtype=float)
+    if segments.ndim != 3 or segments.shape[1:] != (2, 3) or not len(segments):
+        return None
+    if normals.shape != segments.shape or not np.all(np.isfinite(normals)):
+        return None
+    norms = np.linalg.norm(normals, axis=2)
+    if np.any(norms <= 1e-12):
+        return None
+    normals = normals / norms[:, :, None]
+    if np.any(np.linalg.norm(normals[:, 1]-normals[:, 0], axis=1) > 1e-12):
+        return None
+    lengths = np.linalg.norm(segments[:, 1]-segments[:, 0], axis=1)
+    if not np.all(np.isfinite(lengths)) or np.any(lengths <= 0):
+        return None
+    return float(np.max(lengths))
+
+
 def prepare_perimeter_frame(
     segments: 'np.ndarray',
     max_piece_length_m: 'float',
@@ -691,6 +717,7 @@ def expand_perimeter(segments: 'np.ndarray',
                      progress_callback: 'Optional[Callable[[int, int], None]]' = None,
                      _shadow_visibility=None,
                      _look_batch_size: 'Optional[int]' = None,
+                     _frame_cache=None,
                      ) -> 'Dict[str, np.ndarray]':
     """Expand a seam coefficient along a 3D perimeter.
 
@@ -738,18 +765,37 @@ def expand_perimeter(segments: 'np.ndarray',
         raise ValueError("max_piece_wavelengths must be positive and finite.")
     if max_piece_length_m is None:
         maximum_piece_length = max_piece_wavelengths * lam
+        if occluder is None and shadow_points is None and _shadow_visibility is None:
+            analytic_length = constant_normal_piece_length(segments, segment_normals)
+            if analytic_length is not None:
+                maximum_piece_length = analytic_length
     else:
         maximum_piece_length = float(max_piece_length_m)
         if not math.isfinite(maximum_piece_length) or maximum_piece_length <= 0.0:
             raise ValueError("max_piece_length_m must be positive and finite.")
-    r0, path_t_hat, dL, r_mid, n_hat, frame_t_hat = (
-        prepare_perimeter_frame(
+    # The export owns this bounded cache for one immutable set of placements.
+    # Only explicit endpoint normals are cached: arbitrary normal callables
+    # may have state. Frequency-dependent subdivision remains part of the key.
+    cache_key = (id(segments), id(segment_normals), maximum_piece_length)
+    entry = (_frame_cache.get(cache_key) if _frame_cache is not None
+             and segment_normals is not None else None)
+    if entry is None:
+        frame = prepare_perimeter_frame(
             np.asarray(segments, dtype=float),
             maximum_piece_length,
             normal_fn=normal_fn,
             segment_normals=segment_normals,
         )
-    )
+        if _frame_cache is not None and segment_normals is not None:
+            size = sum(array.nbytes for array in frame)
+            retained = sum(sum(array.nbytes for array in value[2])
+                           for value in _frame_cache.values())
+            if size + retained <= 32*1024**2:
+                # Retain source identities to prevent object-id reuse.
+                _frame_cache[cache_key] = (segments, segment_normals, frame)
+    else:
+        frame = entry[2]
+    r0, path_t_hat, dL, r_mid, n_hat, frame_t_hat = frame
     visibility_origins = r_mid
     if shadow_points is not None:
         visibility_origins = np.asarray(shadow_points, dtype=float)

@@ -692,7 +692,7 @@ class RequestPlanTests(unittest.TestCase):
                     coordinate_units="meters",
                 )
 
-    def test_all_disabled_request_fails_before_response_loading(self):
+    def test_all_disabled_request_prepares_without_response_loading(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _write_empty_base(root / "body.grim")
@@ -713,7 +713,7 @@ class RequestPlanTests(unittest.TestCase):
                 mock.patch.object(
                     feature_workflow,
                     "load_body_requested_radar_grid",
-                    return_value={"frequencies_ghz": [1.0]},
+                    return_value={"frequencies_ghz": [1.0], "azimuths_deg": [0.0], "elevations_deg": [0.0], "axis_az_deg": 0.0, "axis_el_deg": 0.0},
                 ),
                 mock.patch.object(
                     feature_workflow,
@@ -724,8 +724,9 @@ class RequestPlanTests(unittest.TestCase):
                     feature_workflow, "_resolved_dataset_paths"
                 ) as response_loader,
             ):
-                with self.assertRaisesRegex(ValueError, "No enabled spatial features"):
-                    feature_workflow.prepare_feature_assembly(request)
+                plan = feature_workflow.prepare_feature_assembly(request)
+                self.assertEqual(plan.point_placements, [])
+                self.assertEqual(plan.line_placements, [])
             response_loader.assert_not_called()
 
     def test_disabled_dataset_mapping_is_not_loaded_or_hashed(self):

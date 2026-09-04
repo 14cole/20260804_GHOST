@@ -23,9 +23,6 @@ REQUIRED_KEYS = AXIS_KEYS + ("rcs_power", "rcs_phase")
 CRITICAL_METADATA = (
     "rcs_domain",
     "power_domain",
-    "phase_reference",
-    "amplitude_convention",
-    "complex_field_domain",
     "units",
 )
 DELTA_FIELD_DOMAIN = "featured_minus_clean_far_field_amplitude_delta"
@@ -722,6 +719,16 @@ def _merge_metadata(
                 pass
     merged["source_path"] = np.asarray("")
     merged["history"] = np.asarray(history)
+    advisories = []
+    for payload in payloads:
+        try:
+            notes = json.loads(_scalar_text(payload.get("metadata_advisories_json", "[]")))
+            if isinstance(notes, list):
+                advisories.extend(note for note in notes if note not in advisories)
+        except (ValueError, CemToolError):
+            pass
+    if advisories:
+        merged["metadata_advisories_json"] = np.asarray(json.dumps(advisories))
     return merged
 
 
@@ -913,12 +920,17 @@ def _canonical_2d_indices(
 
 
 def _validate_2d_source(payload: 'dict[str, np.ndarray]', label: 'str') -> 'None':
-    expected = {
-        "rcs_domain": "power_phase",
-        "power_domain": "linear_rcs",
+    from feature_sum import _assume_field_metadata, require_current_2d_amplitude
+    _assume_field_metadata(payload, label, {
         "phase_reference": PHYSICAL_2D_PHASE_REFERENCE,
         "amplitude_convention": PHYSICAL_2D_AMPLITUDE_CONVENTION,
         "complex_field_domain": PHYSICAL_2D_FIELD_DOMAIN,
+        "time_convention": "exp(+jwt)",
+    })
+    require_current_2d_amplitude(payload, label)
+    expected = {
+        "rcs_domain": "power_phase",
+        "power_domain": "linear_rcs",
     }
     for key, wanted in expected.items():
         if key not in payload:
@@ -955,6 +967,7 @@ def subtract_payloads(
     featured_label: 'str',
     clean_label: 'str',
 ) -> 'dict[str, Any]':
+    featured, clean = dict(featured), dict(clean)
     _validate_2d_source(featured, featured_label)
     _validate_2d_source(clean, clean_label)
     _critical_metadata_equal(

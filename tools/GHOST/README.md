@@ -15,6 +15,11 @@ its native near-field extension have been removed; older scripts requesting
 required for the direct numerical methods and condition-number checks. BoR's
 optional native streaming kernel remains supported.
 
+The September 2026 [solver audit updates](SOLVER_AUDIT_UPDATES.md) correct
+2-D complex phase, bound BoR near storage, and add quadrature convergence
+checks. Read the phase-compatibility notes before combining legacy complex
+exports with newly generated results.
+
 Build the native BoR sampler on the worker machine with:
 
 ```powershell
@@ -119,13 +124,26 @@ See:
 
 The GRIM Assembly form and automation wrapper both call
 `Backend/feature_workflow.py`. `Backend/place_features.py` remains a thin
-settings-based wrapper for unattended work. It defaults to the Production
-profile: strict clean-body metadata and validated content-bound feature manifests.
-Assembly does not require or compare host-material declarations. Legacy compatibility must be selected
-explicitly. A warning-bearing plan prints its sealed SHA-256 and requires that
-exact digest as the acknowledgment before execution, so a changed plan cannot
-reuse an old waiver. The GUI does not reimplement placement, phase, expansion,
-or shadowing physics.
+settings-based wrapper for unattended work. It defaults to advisory metadata:
+source certificates, version tags, convention labels, and feature/surface
+manifests do not gate ordinary use. Numerical units, fields, axes, and placement
+geometry are still checked. Strict library metadata and certified-body profiles
+are optional. Only an explicitly selected strict profile or a large workload
+review requires a warning acknowledgement. The GUI uses the same placement,
+phase, expansion, and shadowing implementation.
+
+The integrated tab supports editable placements, point rows/circles/polyline
+patterns, line paths, explicit surface projection and normal derivation,
+body-only baselines, exact stored-grid subsets, and body/feature/total response
+comparison. Newly selected BoR bodies can generate their own bounded-error
+shadow mesh. See the [Assembly workflow guide](FEATURE_VALIDATION_GUIDE.md).
+The 2-D `amplitude_version` is advisory during subtraction and line loading.
+Operations record convention assumptions without inferring a field conversion.
+
+FREDDY nominal IBC and dielectric CSVs store frequencies in Hz and are readable
+with or without headers. GHOST converts Hz to its internal GHz scale and
+preserves signed complex material values. Analysis/uncertainty CSVs are separate
+from nominal material tables.
 
 Create and check a reviewed feature-response sidecar with:
 

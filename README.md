@@ -207,6 +207,9 @@ py impedance_gui.py
   One point CSV may contain every point family and one line CSV may contain all
   ordered line chains; both files use the shared coordinate-unit selection.
   New assemblies accept compatible coherent 3-D body GRIMs from any solver.
+  Metadata is advisory by default: solver certificates, amplitude-version
+  tags, phase-convention labels, and feature manifests do not gate ordinary
+  subtraction or Assembly. Assumptions are recorded without changing samples.
   Requiring a certified GHOST BoR body is an optional advanced validation
   profile. Body geometry opens when a matching mesh is required; **View options**
   and **Review → Feature selection** hold the occasional display and exclusion controls.
@@ -225,8 +228,8 @@ py impedance_gui.py
   possible without deleting CSV rows. The hierarchy can be searched by
   instance, response ID, or response filename; its exact selection can be
   copied for a trade-study record. With every feature unchecked, **Preview
-  geometry** shows the clean body alone, while validation/build continue to
-  require an enabled feature. **Preview Layers → Show** remains a display-only
+  geometry** shows the body alone, and validation/build produce a body-only
+  baseline. **Preview Layers → Show** remains a display-only
   control and never changes the calculated response.
   A validated preview is reused by **Assemble & Save** while every path, option,
   and source-file fingerprint remains unchanged. Existing outputs require

@@ -320,10 +320,8 @@ def _load_grim(path: 'str') -> 'Dict[str, Any]':
         raise ValueError(
             f"{path}: complex amplitude must provide both rcs_amp_real and "
             "rcs_amp_imag.")
-    if bool(d.get("raw_complex_amplitude_preserved", False)) and not has_real:
-        raise ValueError(
-            f"{path}: raw_complex_amplitude_preserved is true but the raw "
-            "amplitude arrays are absent.")
+    if "raw_complex_amplitude_preserved" in d and not has_real:
+        _record_metadata_advisory(d, f"{path}: no raw amplitude arrays; complex fields reconstructed from the supplied power and phase.")
 
     scale = np.asarray(
         convention_scale(d, axes["frequencies"]), dtype=float)
@@ -407,6 +405,61 @@ def _metadata_text(grim: 'Dict[str, Any]', key: 'str', label: 'str',
     if required and not value:
         raise ValueError(f"{label}: metadata {key!r} is empty.")
     return value
+
+
+def _validate_optional_field_tags(metadata, label, *, point=False):
+    """Reject contradictory redundant declarations at every field boundary."""
+    time_sign = _metadata_text(metadata, "time_convention", label, required=False)
+    if time_sign and time_sign != "exp(+jwt)":
+        raise ValueError(f"{label}: time_convention={time_sign!r} contradicts required exp(+jwt).")
+    basis = _metadata_text(metadata, "polarization_basis", label, required=False)
+    allowed = ({"cavity theta/phi", POINT_PATTERN_FRAME_CONVENTION} if point
+               else {"earth V/H", "radar earth-frame V/H", "VV/HH/VH", "grim_conic_spherical_vh_v1"})
+    if basis and basis not in allowed:
+        raise ValueError(f"{label}: polarization_basis={basis!r} contradicts the required field frame.")
+
+
+def require_current_2d_amplitude(metadata, label):
+    """Record solver-version advisories without blocking numerical operations."""
+    versions = []
+    try:
+        if "amplitude_version" in metadata:
+            versions.append(np.asarray(metadata["amplitude_version"]).item())
+        if "solver_metadata_json" in metadata:
+            envelope = json.loads(_metadata_text(metadata, "solver_metadata_json", label))
+            versions.append(envelope.get("amplitude_version"))
+    except (ValueError, TypeError, AttributeError):
+        versions.append("unreadable solver annotation")
+    for version in versions:
+        if str(version) != "2":
+            _record_metadata_advisory(metadata, f"{label}: amplitude_version={version!r}; using supplied complex samples without a solver-version correction.")
+
+
+def _record_metadata_advisory(metadata, message):
+    try:
+        entries = json.loads(str(np.asarray(metadata.get("metadata_advisories_json", "[]")).item()))
+        if not isinstance(entries, list):
+            entries = []
+    except (ValueError, TypeError):
+        entries = []
+    if message not in entries:
+        entries.append(message)
+    metadata["metadata_advisories_json"] = np.asarray(json.dumps(entries))
+
+
+def _assume_field_metadata(metadata, label, expected, *, strict=False):
+    """Use the selected operation's frame; retain notes, never alter samples."""
+    for key, required in expected.items():
+        try:
+            got = _metadata_text(metadata, key, label, required=False)
+        except ValueError:
+            got = "<non-scalar annotation>"
+        if got != required:
+            message = f"{label}: {key}={got or '<unspecified>'!r}; operation assumes {required!r}. No field conversion was applied."
+            if strict:
+                raise ValueError(message)
+            _record_metadata_advisory(metadata, message)
+        metadata[key] = np.asarray(required)
 
 
 def validate_declared_coherent_delta_domain(
@@ -501,6 +554,50 @@ def _optional_scalar_text(metadata, key, label):
     return value if value else None
 
 
+def exact_assembly_subset(payload, radar_grid):
+    """Select stored samples only; preserve exact axes and coherent fields."""
+    keys = (("azimuths", "azimuths_deg"), ("elevations", "elevations_deg"), ("frequencies", "frequencies_ghz"))
+    indices = []
+    grid = dict(radar_grid)
+    shape = tuple(len(payload[key]) for key, _ in keys)
+    for key, requested_key in keys:
+        source = np.asarray(payload[key], float)
+        requested = np.asarray(grid[requested_key], float)
+        if requested.ndim != 1 or not len(requested) or not np.all(np.isfinite(requested)) or np.any(np.diff(requested) <= 0):
+            raise ValueError(f"Study {requested_key} must be a nonempty, strictly increasing list.")
+        positions = np.searchsorted(source, requested)
+        if np.any(positions >= len(source)) or not np.allclose(source[np.minimum(positions, len(source)-1)], requested, rtol=0, atol=1e-10):
+            raise ValueError(f"Study {requested_key} must use stored body-grid samples; interpolation is not supported.")
+        indices.append(positions)
+        grid[requested_key] = source[positions]
+    if all(np.array_equal(index, np.arange(size)) for index, size in zip(indices, shape)):
+        return payload, grid
+    result = dict(payload)
+    for key, value in payload.items():
+        if isinstance(value, np.ndarray) and value.ndim >= 4 and value.shape[:3] == shape:
+            result[key] = value[np.ix_(*indices, *[np.arange(n) for n in value.shape[3:]])]
+    for (key, requested_key) in keys:
+        result[key] = grid[requested_key]
+    # The embedded body model remains a source model. Its frequency columns
+    # and requested radar-grid declaration must still describe the selected
+    # samples; otherwise later metadata inspection reports a contradictory grid.
+    for key in ("body_model_amp_vv_real", "body_model_amp_vv_imag", "body_model_amp_hh_real", "body_model_amp_hh_imag"):
+        if key in result:
+            result[key] = np.asarray(result[key])[:, indices[2]]
+    if "requested_radar_grid_json" in result:
+        try:
+            requested = json.loads(str(np.asarray(result["requested_radar_grid_json"]).item()))
+            if not isinstance(requested, dict):
+                raise ValueError("expected an object")
+        except (TypeError, ValueError):
+            _record_metadata_advisory(result, "Invalid requested_radar_grid_json; the stored numerical axes define the study subset.")
+            requested = {}
+        for _, key in keys:
+            requested[key] = np.asarray(grid[key]).tolist()
+        result["requested_radar_grid_json"] = np.asarray(json.dumps(requested, sort_keys=True))
+    return result, grid
+
+
 def validate_assembly_base_grid_metadata(
     base_payload,
     radar_grid,
@@ -511,16 +608,15 @@ def validate_assembly_base_grid_metadata(
     """Validate a base field at the Assembly coordinate-system boundary.
 
     The numerical grid must be the exact canonical radar azimuth/elevation
-    grid used by :func:`export_radar_grim`.  Missing descriptive metadata can
-    be accepted only through the explicit legacy-compatibility argument and is
-    returned for provenance.  Present contradictory metadata is never
-    overwritten or treated as an attestation.
+    grid used by :func:`export_radar_grim`. Descriptive metadata is advisory
+    by default and assumptions are returned for provenance. Actual coordinate
+    units and unconverted angle systems still need explicit conversion.
 
     In particular, CREATE-RF SENTRi historically reports polar ``theta`` and
     GRIM stores it directly in the elevation array.  Numeric values from a
     partial theta sweep can fall inside [-90, 90] and otherwise look plausible,
-    so vendor/mapping metadata is inspected and rejected unless an upstream
-    conversion explicitly stamped :data:`ASSEMBLY_RADAR_ANGULAR_CONTRACT`.
+    so native polar-theta coordinates must be converted before placement.
+    Either the converted units or the angular contract can identify that step.
     """
 
     if not isinstance(base_payload, dict):
@@ -642,10 +738,10 @@ def validate_assembly_base_grid_metadata(
         base_payload, "assembly_angular_coordinate_contract", label
     )
     if contract is not None and contract != ASSEMBLY_RADAR_ANGULAR_CONTRACT:
-        raise ValueError(
-            f"{label}: assembly_angular_coordinate_contract={contract!r}; "
-            f"require {ASSEMBLY_RADAR_ANGULAR_CONTRACT!r}."
-        )
+        message = f"{label}: assembly_angular_coordinate_contract={contract!r}; operation uses the numerical conic radar axes."
+        if not allow_legacy_metadata:
+            raise ValueError(message)
+        _record_metadata_advisory(base_payload, message)
     explicit_canonical = contract == ASSEMBLY_RADAR_ANGULAR_CONTRACT
 
     source_format = (_optional_scalar_text(
@@ -658,7 +754,7 @@ def validate_assembly_base_grid_metadata(
         "sentri" in source_format
         or "elevation=theta" in sentri_mapping
         or "azimuth=wrappedphi" in sentri_mapping
-    ) and not explicit_canonical:
+    ) and not explicit_canonical and elevation_convention != "grim_elevation_waterline_zero_top_positive":
         raise ValueError(
             f"{label}: the base retains an unconverted SENTRi theta/phi "
             "coordinate mapping. Assembly requires canonical radar azimuth "
@@ -739,11 +835,12 @@ def _require_2d_source_semantics(
     _require_units(
         grim, label, linear_quantity="sigma_2d", log_unit="dBke")
     _require_singleton_zero_elevation(grim, label)
-    _require_exact_metadata(grim, label, {
+    _assume_field_metadata(grim, label, {
         "phase_reference": PHYSICAL_2D_PHASE_REFERENCE,
         "amplitude_convention": PHYSICAL_2D_AMPLITUDE_CONVENTION,
         "complex_field_domain": PHYSICAL_2D_FIELD_DOMAIN,
     })
+    require_current_2d_amplitude(grim, label)
 
 
 def _canonical_table_channels(
@@ -919,6 +1016,14 @@ def make_delta_grim(clean: 'PathOrList', featured: 'PathOrList', out_path: 'str'
         rcs_amp_imag=amp.imag.astype(np.float64),
         complex_field_domain=DELTA_FIELD_DOMAIN,
     )
+    for source in cg + fg:
+        try:
+            for message in json.loads(str(source.get("metadata_advisories_json", "[]"))):
+                _record_metadata_advisory(payload, message)
+        except (ValueError, TypeError):
+            pass
+    if all(str(source.get("amplitude_version", "")) == "2" for source in cg + fg):
+        payload["amplitude_version"] = 2
     from grim_io import _save_grim_npz
     return os.path.abspath(_save_grim_npz(payload, out))
 
@@ -981,6 +1086,8 @@ def load_seam_from_grim(path: 'str', frequency_ghz: 'float',
     """
     require_role_free_declared_delta(path)
     g = _load_grim(path) if _grim_payload is None else _grim_payload
+    require_current_2d_amplitude(g, path)
+    _assume_field_metadata(g, path, {"time_convention": "exp(+jwt)"})
     dom = str(g.get("rcs_domain", "")).strip()
     normalized_domain = dom.lower().replace("-", "_")
     if declared_coherent_delta:
@@ -1015,14 +1122,7 @@ def load_seam_from_grim(path: 'str', frequency_ghz: 'float',
         "phase_reference": expected_phase_reference,
         "amplitude_convention": PHYSICAL_2D_AMPLITUDE_CONVENTION,
     }
-    for key, expected_value in expected_metadata.items():
-        if declared_coherent_delta:
-            continue
-        got = _metadata_text(g, key, path)
-        if got != expected_value:
-            raise ValueError(
-                f"{path}: incompatible line-delta {key}: got {got!r}; "
-                f"require {expected_value!r}.")
+    _assume_field_metadata(g, path, expected_metadata)
     # Also rejects absent/unknown dimensional normalization.  Legacy
     # delta_amp_sq artifacts are intentionally not accepted by the production
     # placement path: they are not 2-D scattering widths and must be rebuilt.
@@ -1873,6 +1973,38 @@ def load_body_profile_grim(path: 'str') -> 'np.ndarray':
 
 
 def load_body_requested_radar_grid(
+    path: 'str', *, strict_metadata=False,
+) -> 'Optional[Dict[str, Any]]':
+    """Use stored radar axes for current BoR files; the request is provenance.
+
+    Compact aspect-only body tables still need an explicit radar-grid request.
+    For a complete monostatic field, an absent/stale request cannot invalidate
+    its numerical axes. Valid body attitude values are retained.
+    """
+    if strict_metadata:
+        return _load_declared_body_requested_radar_grid(path)
+    with np.load(path, allow_pickle=False) as payload:
+        has_radar_body = all(key in payload.files for key in (
+            "body_model_aspects_deg", "body_profile_rho_m", "body_profile_z_m",
+        ))
+        stored = {target: np.asarray(payload[source], dtype=float) for source, target in (
+            ("frequencies", "frequencies_ghz"), ("azimuths", "azimuths_deg"),
+            ("elevations", "elevations_deg"),
+        )} if has_radar_body else None
+    try:
+        declared = _load_declared_body_requested_radar_grid(path)
+    except (ValueError, TypeError, KeyError):
+        declared = None
+    if stored is None:
+        return declared
+    stored.update(schema="ghost.workflow.requested-radar-grid.v1",
+                  axis_az_deg=0.0, axis_el_deg=0.0, roll_deg=0.0)
+    if declared is not None:
+        stored.update({key: declared[key] for key in ("axis_az_deg", "axis_el_deg", "roll_deg")})
+    return stored
+
+
+def _load_declared_body_requested_radar_grid(
     path: 'str',
 ) -> 'Optional[Dict[str, Any]]':
     """Read the step-2 radar-grid request embedded for provenance.
@@ -1963,16 +2095,14 @@ def load_body_grim(
     """
     g = _load_grim(str(path)) if loaded_grim is None else loaded_grim
     label = str(path)
-    if "body_model_metadata_json" in g:
+    if "body_model_aspects_deg" in g:
         try:
             raw = np.asarray(g["body_model_metadata_json"]).reshape(()).item()
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
             metadata = json.loads(str(raw))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                f"{path}: embedded BoR body-model metadata is malformed."
-            ) from exc
+        except (KeyError, TypeError, ValueError):
+            metadata = {}
         if (
             not isinstance(metadata, dict)
             or metadata.get("schema") != _MONOSTATIC_BODY_MODEL_SCHEMA
@@ -1980,10 +2110,7 @@ def load_body_grim(
             or metadata.get("amplitude_convention")
             != PHYSICAL_3D_AMPLITUDE_CONVENTION
         ):
-            raise ValueError(
-                f"{path}: embedded BoR body model has incompatible field "
-                "conventions."
-            )
+            _record_metadata_advisory(g, f"{path}: embedded BoR model conventions are missing or differ; using supplied aspect fields in the selected body frame.")
         required = (
             "body_model_aspects_deg",
             "body_model_amp_vv_real",
@@ -2301,23 +2428,18 @@ def _validate_point_pattern_metadata(metadata: 'Dict[str, Any]',
                                      ) -> 'None':
     expected = point_pattern_convention_metadata()
     if declared_coherent_delta:
-        # Listing this file in POINT_FEATURE_DATASETS declares both the operation
-        # meaning (installed feature minus matching clean skin) and the cavity
-        # frame/origin convention documented by place_features.py. A GUI may
-        # drop these strings or carry stale source strings into its derived
-        # output, so the explicit declaration supersedes all of them. Units,
-        # normalization, finite fields, channels, and angular coverage are
-        # independently checked by _load_pattern.
+        # A role declaration supplies subtraction meaning, never a coordinate
+        # transformation or a correction to contradictory physics metadata.
         validate_declared_coherent_delta_domain(metadata, label)
-        return
-    for key, required in expected.items():
-        got = _metadata_text(metadata, key, label)
-        if got != required:
-            raise ValueError(
-                f"{label}: incompatible compact-pattern {key}: got {got!r}; "
-                f"require {required!r}.  The feature can be placed coherently "
-                "only when its phase origin, time sign, frame, and far-field "
-                "normalization are explicit.")
+        expected.pop("rcs_domain")
+    if "rcs_domain" in expected:
+        # Storage/response roles are distinct from optional convention tags.
+        if _metadata_text(metadata, "rcs_domain", label) != expected.pop("rcs_domain"):
+            raise ValueError(f"{label}: point response requires rcs_domain='delta' or selection as a declared coherent delta.")
+    expected.update(time_convention="exp(+jwt)")
+    if "polarization_basis" in metadata:
+        expected["polarization_basis"] = "cavity theta/phi"
+    _assume_field_metadata(metadata, label, expected)
 
 
 def _load_pattern(pattern, *, declared_coherent_delta=False,
@@ -2334,11 +2456,8 @@ def _load_pattern(pattern, *, declared_coherent_delta=False,
     if isinstance(pattern, str) and not pattern.lower().endswith(".grim"):
         # not one of our .grim exports -> try the GRIM_Revised_2 viewer's
         # importers (.out / .ss / PIO / theta-phi CSV or TXT) via grim_compat.
-        # Those formats cannot prove a phase origin/frame convention, so the
-        # returned untagged dict will fail the convention gate below.  Import
-        # it explicitly with grim_compat.load_pattern_any(...,
-        # convention_metadata=point_pattern_convention_metadata()) after
-        # verifying the external solver setup.
+        # The selected delta role supplies the working local frame. Optional
+        # source convention tags are advisory; their absence needs no stamp.
         from grim_compat import load_pattern_any
         pattern = load_pattern_any(pattern)
     if isinstance(pattern, str):
@@ -2392,7 +2511,10 @@ def _load_pattern(pattern, *, declared_coherent_delta=False,
                 f"{pattern}: rcs_power is inconsistent with the 3-D complex "
                 "field; require rcs_power=4*pi*|F|^2.")
     else:
-        _validate_point_pattern_metadata(pattern, "point pattern")
+        pattern = dict(pattern)  # assumptions belong to this operation, not the caller
+        _validate_point_pattern_metadata(
+            pattern, "point pattern", declared_coherent_delta=declared_coherent_delta
+        )
         az = np.asarray(pattern["azimuths"], float); el = np.asarray(pattern["elevations"], float)
         fr = np.asarray(pattern["frequencies"], float)
         pols = [str(p) for p in np.asarray(pattern["polarizations"]).ravel()]
@@ -2562,6 +2684,7 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
                               frequency_ghz, roll_ref=None,
                               tol_ghz: 'float' = 1e-6, occluder=None,
                               _interpolator_cache=None,
+                              _oriented_pattern_cache=None,
                               _visibility=None,
                               cancel_check: 'Optional[Callable[[], bool]]' = None,
                               progress_callback: 'Optional[Callable[[int, int], None]]' = None
@@ -2605,10 +2728,23 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
         cache_key
     )
     if interp is None:
+        # Stored pole values use fixed local x/y, whereas all other rows use
+        # theta/phi. Continue each pole into the meridian of its azimuth BEFORE
+        # interpolation; otherwise a cell blends incompatible Jones bases.
+        tables = {ch: np.array(amp[:, :, j, idx[ch]], copy=True)
+                  for ch in ("VV", "HH", "VH")}
+        for pole in np.flatnonzero(np.isclose(np.abs(el), 90., rtol=0., atol=1e-9)):
+            phi = np.deg2rad(az)
+            c, s = np.cos(phi), np.sin(phi)
+            sign = 1. if el[pole] > 0 else -1.
+            vv, hh, vh = (amp[0, pole, j, idx[ch]] for ch in ("VV", "HH", "VH"))
+            tables["VV"][:, pole] = c*c*vv + s*s*hh + 2*c*s*vh
+            tables["HH"][:, pole] = s*s*vv + c*c*hh - 2*c*s*vh
+            tables["VH"][:, pole] = sign*((hh-vv)*c*s + vh*(c*c-s*s))
         def _mk(ch):
             if ch not in idx:
                 return None
-            a2 = amp[:, :, j, idx[ch]]
+            a2 = tables[ch]
             return (RegularGridInterpolator(
                         (az, el), a2.real, bounds_error=True),
                     RegularGridInterpolator(
@@ -2657,6 +2793,40 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
                 "precomputed point visibility must contain one value per "
                 "requested direction."
             )
+    if (_oriented_pattern_cache is not None
+            and (occluder is None or visibility is not None)
+            and len(dirs) * 48 <= 32 * 1024**2):
+        oriented_key = (id(pattern), j, zc.tobytes(), xc.tobytes(), id(directions))
+        origin_field = _oriented_pattern_cache.get(oriented_key)
+        if origin_field is None:
+            origin_field = point_scatterer_amplitude(
+                pattern, np.zeros(3), zc, directions, frequency_ghz,
+                roll_ref=xc, tol_ghz=tol_ghz,
+                _interpolator_cache=_interpolator_cache,
+                cancel_check=cancel_check,
+            )
+            # Bound retention by bytes as well as entry count. A build may
+            # contain many distinct orientations on a curved surface.
+            entry_bytes = len(dirs) * 48
+            while _oriented_pattern_cache and (
+                len(_oriented_pattern_cache) >= 4
+                or (len(_oriented_pattern_cache)+1)*entry_bytes > 32*1024**2
+            ):
+                _oriented_pattern_cache.pop(next(iter(_oriented_pattern_cache)))
+            _oriented_pattern_cache[oriented_key] = origin_field
+        visible = visibility.to_dense() if isinstance(visibility, PackedVisibilityRow) else visibility
+        result = {ch: np.empty(len(dirs), complex) for ch in origin_field}
+        for start in range(0, len(dirs), _POINT_SCATTER_LOOK_BATCH):
+            _check_cancel(cancel_check)
+            sl = slice(start, min(start+_POINT_SCATTER_LOOK_BATCH, len(dirs)))
+            phase = np.exp(2j*k*(dirs[sl] @ rc))
+            if visible is not None:
+                phase *= visible[sl]
+            for ch in result:
+                result[ch][sl] = origin_field[ch][sl] * phase
+            if progress_callback is not None:
+                progress_callback(sl.stop, len(dirs))
+        return result
     e_vv, e_hh = _pol_unit_vectors(dirs)
     F = {c: np.zeros(len(dirs), complex) for c in ("F_vv", "F_hh", "F_vh")}
 
@@ -2685,6 +2855,14 @@ def point_scatterer_amplitude(pattern, location, aperture_normal, directions,
             values[lit] = (
                 interp[ch][0](pts[lit]) + 1j * interp[ch][1](pts[lit]))
         Scav[ch] = values
+    exact_pole = lit & (np.linalg.norm(dc[:, :2], axis=1) <= 1e-12)
+    if np.any(exact_pole):
+        # The query basis itself is fixed x/y at the exact singularity.
+        for i in np.flatnonzero(exact_pole):
+            pole = int(np.argmin(np.abs(el-el_q[i])))
+            if abs(abs(el[pole])-90.) <= 1e-9:
+                for ch in Scav:
+                    Scav[ch][i] = amp[0, pole, j, idx[ch]]
     evc, ehc = _pol_unit_vectors(dc)                           # cavity meridian basis (cavity coords)
     rc2 = rc[None, :]
     lit_indices = np.nonzero(lit)[0]
@@ -2904,6 +3082,7 @@ def sum_features(bor_result: 'Dict[str, Any]',
                  progress_callback: 'Optional[ProgressCallback]' = None,
                  _point_visibility_matrix=None,
                  _line_visibility_matrices=None,
+                 _line_frame_cache=None,
                  ) -> 'Dict[str, np.ndarray]':
     """Combine the BoR body with any number of line-expanded features.
 
@@ -3069,6 +3248,7 @@ def sum_features(bor_result: 'Dict[str, Any]',
                 _component_progress(f"Expanding line {label}", done, total)
             ),
             _shadow_visibility=line_visibility_matrices[placement_index - 1],
+            _frame_cache=_line_frame_cache,
         )
         _record_feature(line_feature)
         component_completed += 1
@@ -3088,6 +3268,7 @@ def sum_features(bor_result: 'Dict[str, Any]',
         _component_progress(f"Evaluated corner {corner_index}", 0, 1)
 
     point_interpolator_cache = {}
+    oriented_pattern_cache = {}
     point_visibility = None
     if points:
         if _point_visibility_matrix is not None:
@@ -3131,6 +3312,7 @@ def sum_features(bor_result: 'Dict[str, Any]',
             pt["pattern"], pt["location"], pt["aperture_normal"], dirs, frequency_ghz,
             roll_ref=pt.get("roll_ref"), occluder=occluder,
             _interpolator_cache=point_interpolator_cache,
+            _oriented_pattern_cache=oriented_pattern_cache,
             _visibility=(
                 None
                 if point_visibility is None
@@ -3786,7 +3968,8 @@ def export_radar_grim(out_path: 'str', *,
                       assembly_base_response_sha256: 'str' = "",
                       feature_provenance_json: 'str' = "",
                       cancel_check: 'Optional[Callable[[], bool]]' = None,
-                      progress_callback: 'Optional[ProgressCallback]' = None
+                      progress_callback: 'Optional[ProgressCallback]' = None,
+                      _return_payload: 'bool' = False,
                       ) -> 'str':
     """Monostatic radar-frame RCS -> ONE .grim with axes
     (azimuth, elevation, frequency, polarization=[VV,HH,VH]).
@@ -3826,17 +4009,10 @@ def export_radar_grim(out_path: 'str', *,
     # H directly from the requested azimuth rather than cross(z,d), which is
     # singular at vertical looks even though the radar coordinate still
     # supplies a definite azimuthal polarization reference.
-    d_e = np.zeros((len(az), len(el), 3))
-    v_r = np.zeros_like(d_e)
-    h_r = np.zeros_like(d_e)
-    for i, a in enumerate(az):
-        ar = math.radians(float(a))
-        h = np.array([-math.sin(ar), math.cos(ar), 0.0])
-        for j, e in enumerate(el):
-            d = _direction(a, e)
-            d_e[i, j] = d
-            h_r[i, j] = h
-            v_r[i, j] = np.cross(h, d)
+    ar, er = np.meshgrid(np.deg2rad(az), np.deg2rad(el), indexing="ij")
+    d_e = np.stack((np.cos(er)*np.cos(ar), np.cos(er)*np.sin(ar), np.sin(er)), axis=-1)
+    h_r = np.stack((-np.sin(ar), np.cos(ar), np.zeros_like(ar)), axis=-1)
+    v_r = np.cross(h_r, d_e)
 
     d_e_flat = d_e.reshape(-1, 3)
     d_v_flat = d_e_flat @ R              # R^T @ d_e per row  (earth -> vehicle)
@@ -3977,6 +4153,7 @@ def export_radar_grim(out_path: 'str', *,
     _report_progress(progress_callback, shadow_progress_offset,
                      field_progress_total,
                      "Preparing feature field")
+    line_frame_cache = {}
     for fi, f in enumerate(freqs):
         _check_cancel(cancel_check)
         frequency_placements = _prepared_line_placements_at_frequency(
@@ -4001,7 +4178,8 @@ def export_radar_grim(out_path: 'str', *,
                            cancel_check=cancel_check,
                            progress_callback=frequency_progress,
                            _point_visibility_matrix=point_visibility,
-                           _line_visibility_matrices=line_visibility)
+                           _line_visibility_matrices=line_visibility,
+                           _line_frame_cache=line_frame_cache)
         S = np.zeros((len(d_v_flat), 2, 2), dtype=complex)
         S[:, 0, 0] = res["amp_vv"]
         S[:, 1, 1] = res["amp_hh"]
@@ -4022,12 +4200,11 @@ def export_radar_grim(out_path: 'str', *,
         )
 
     _check_cancel(cancel_check)
-    amp_real = amp.real.astype(np.float64)
-    amp_imag = amp.imag.astype(np.float64)
-    amp_stored = amp_real.astype(float) + 1j * amp_imag.astype(float)
-    power = (4.0 * math.pi * (
-        amp_real.astype(float) ** 2 + amp_imag.astype(float) ** 2)
-    ).astype(np.float32)
+    amp_real, amp_imag = amp.real, amp.imag
+    power = np.empty(amp.shape, dtype=np.float32)
+    # Keep only one small temporary regardless of total frequency-grid size.
+    for fi in range(len(freqs)):
+        power[:, :, fi, :] = 4.0*math.pi*np.abs(amp[:, :, fi, :])**2
     out = out_path if out_path.lower().endswith(".grim") else out_path + ".grim"
     payload = {
         "azimuths": az, "elevations": el, "frequencies": freqs,
@@ -4036,7 +4213,7 @@ def export_radar_grim(out_path: 'str', *,
         "polarization_aliases_json": json.dumps(["VV", "HH", "VH"]),
         "combine_role": np.asarray("coherent"),
         "rcs_power": power,
-        "rcs_phase": np.angle(amp_stored).astype(np.float32),
+        "rcs_phase": np.angle(amp).astype(np.float32),
         "rcs_domain": "power_phase", "power_domain": "linear_rcs",
         "source_path": source_path,
         "history": (history + f" | feature_sum radar-frame coherent "
@@ -4076,6 +4253,9 @@ def export_radar_grim(out_path: 'str', *,
     # combine_role is part of grim_io's preserved optional schema.  Writing it
     # in the original payload avoids a second full archive load/recompression,
     # which is material on vehicle-scale grids.
+    if _return_payload:
+        payload["_amp"] = amp
+        return saved, payload
     return saved
 
 
@@ -4269,9 +4449,10 @@ def _validate_declared_coherent_base(
 
     GRIM may retain only sigma and phase after a derived operation. Selecting
     that file as BASE_MONOSTATIC_GRIM attests the missing common-origin,
-    radar-frame coherent semantics; metadata that remains must not contradict
-    the declaration. The returned payload is a canonical in-memory view used
-    only for validation and summation.
+    radar-frame coherent semantics. Descriptive annotations are advisory by
+    default; strict auditing is opt-in. The returned payload is a canonical
+    in-memory view used only for validation and summation, with assumptions
+    recorded and complex samples unchanged.
     """
     from components import (
         COMPONENT_AMPLITUDE_CONVENTION,
@@ -4281,6 +4462,10 @@ def _validate_declared_coherent_base(
     )
 
     candidate = dict(base_payload)
+    if not allow_legacy_metadata:
+        _validate_optional_field_tags(candidate, label)
+    else:
+        _assume_field_metadata(candidate, label, {"time_convention": "exp(+jwt)", "polarization_basis": "earth V/H"})
     if "combine_role" in candidate:
         role = _metadata_text(candidate, "combine_role", label).strip().lower()
         if role != "coherent":
@@ -4335,13 +4520,15 @@ def _validate_declared_coherent_base(
     )
     if sentri_import:
         time_convention = _optional_scalar_text(candidate, "time_convention", label)
-        if time_convention not in (None, "exp(+jwt)"):
+        if not allow_legacy_metadata and time_convention not in (None, "exp(+jwt)"):
             raise ValueError(
                 f"{label}: SENTRi export time_convention={time_convention!r} "
                 "contradicts its documented exp(+jwt) far-field convention."
             )
         for key in ("phase_reference", "amplitude_convention", "complex_field_domain"):
-            if _optional_scalar_text(candidate, key, label) is None:
+            if allow_legacy_metadata:
+                _assume_field_metadata(candidate, label, {key: expected[key]})
+            elif _optional_scalar_text(candidate, key, label) is None:
                 candidate[key] = np.asarray(expected[key])
         candidate["sentri_far_field_reference"] = np.asarray(
             "SENTRi export: exp(+jwt); global coordinate origin; "
@@ -4353,19 +4540,27 @@ def _validate_declared_coherent_base(
         "power_domain": lambda value: value.lower().replace("-", "_"),
     }
     for key, required in expected.items():
+        if allow_legacy_metadata and key not in {"rcs_domain", "power_domain"}:
+            if key not in candidate:
+                legacy_missing.append(key)
+            _assume_field_metadata(candidate, label, {key: required})
+            continue
         got = _optional_scalar_text(candidate, key, label)
         if got is None:
             legacy_missing.append(key)
         else:
             normalize = normalized_aliases.get(key, lambda value: value)
-            if normalize(got) != normalize(required):
+            if normalize(got) != normalize(required) and (not allow_legacy_metadata or key in {"rcs_domain", "power_domain"}):
                 raise ValueError(
                     f"{label}: declared coherent base metadata contradicts "
                     f"the Assembly contract: {key}={got!r}; require "
                     f"{required!r}. Re-export or explicitly canonicalize the "
                     "base; contradictory metadata cannot be overwritten."
                 )
-        candidate[key] = np.asarray(required)
+        if allow_legacy_metadata and key not in {"rcs_domain", "power_domain"}:
+            _assume_field_metadata(candidate, label, {key: required})
+        else:
+            candidate[key] = np.asarray(required)
 
     if legacy_missing and not bool(allow_legacy_metadata):
         raise ValueError(
@@ -4606,24 +4801,17 @@ def _decoded_feature_provenance(payload, label):
     if "feature_provenance_json" not in payload:
         return []
     raw = np.asarray(payload["feature_provenance_json"])
-    if raw.size != 1:
-        raise ValueError(
-            f"{label}: feature_provenance_json must be one scalar JSON value."
-        )
-    value = raw.reshape(()).item()
-    if isinstance(value, bytes):
-        value = value.decode("utf-8")
     try:
+        value = raw.reshape(()).item()
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
         decoded = json.loads(str(value))
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{label}: feature_provenance_json is malformed."
-        ) from exc
-    records = decoded if isinstance(decoded, list) else [decoded]
-    if any(not isinstance(record, dict) for record in records):
-        raise ValueError(
-            f"{label}: feature_provenance_json records must be objects."
-        )
+        records = decoded if isinstance(decoded, list) else [decoded]
+        if any(not isinstance(record, dict) for record in records):
+            raise ValueError("expected objects")
+    except (ValueError, TypeError):
+        _record_metadata_advisory(payload, f"{label}: unrecognized feature history retained as an annotation; prior component identities cannot be checked.")
+        records = [{"unparsed_source_feature_provenance": str(raw)}]
     return records
 
 
@@ -5314,10 +5502,10 @@ def add_features_to_monostatic_grim(
     existing_assembly_role = _optional_scalar_text(
         base_payload, "assembly_response_role", label
     )
-    if existing_provenance_records or existing_assembly_role in {
+    if not allow_legacy_base_metadata and (existing_provenance_records or existing_assembly_role in {
         "body_plus_features",
         "features_only_delta",
-    }:
+    }):
         raise ValueError(
             f"{label}: Assembly cannot add another batch to a feature-bearing "
             "base. That workflow can double-count the body and cannot recheck "
@@ -5358,6 +5546,8 @@ def add_features_to_monostatic_grim(
     missing_grid = sorted(required_grid - set(grid))
     if missing_grid:
         raise ValueError(f"radar_grid is missing {missing_grid}.")
+    base_payload, grid = exact_assembly_subset(base_payload, grid)
+    validated_base, _ = exact_assembly_subset(validated_base, grid)
     base_grid_contract = validate_assembly_base_grid_metadata(
         base_payload,
         grid,
@@ -5493,7 +5683,7 @@ def add_features_to_monostatic_grim(
             scaled = int(round(85.0 * int(done) / max(1, int(total))))
             _report_progress(progress_callback, scaled, 100, message)
 
-        export_radar_grim(
+        _component_path, component = export_radar_grim(
             component_tmp,
             bor_result=None,
             placements=placements,
@@ -5518,11 +5708,11 @@ def add_features_to_monostatic_grim(
             feature_provenance_json=serialized_delta_provenance,
             cancel_check=cancel_check,
             progress_callback=field_progress,
+            _return_payload=True,
         )
         _check_cancel(cancel_check)
         _report_progress(progress_callback, 87, 100,
                          "Combining with the clean-body field")
-        component = _load_grim(component_tmp)
         for key in ("azimuths", "elevations", "frequencies"):
             if not np.array_equal(base_payload[key], component[key]):
                 raise ValueError(
@@ -5547,10 +5737,9 @@ def add_features_to_monostatic_grim(
             component["_amp"], dtype=np.complex128
         )[..., component_order]
         total = base_amplitude + feature_amplitude
-        with np.load(base, allow_pickle=False) as stored:
-            payload = {
-                key: np.array(stored[key], copy=True) for key in stored.files
-            }
+        # The already loaded immutable source contains the original archive
+        # metadata. Avoid a second full archive read and copy before export.
+        payload = {key: value for key, value in base_payload.items() if not key.startswith("_")}
         if sha256_file(base) != base_snapshot_sha256:
             raise RuntimeError(
                 f"{base}: base response changed during assembly. Output was "

@@ -5,13 +5,11 @@ Edit only the USER SETTINGS block, then run:
 
     python place_features.py
 
-Production is the default: the clean body must carry the strict coherent/grid
-metadata contract and passed fine-mesh VV/HH body certificate, and every active
-feature response must have a validated, content-bound feature-library manifest.
-Use the explicit ``external`` profile for a reviewed external/HPC body whose
-solver certificate is not embedded; its strict metadata, surface binding, host,
-and feature-manifest checks remain active. An external monostatic GRIM also
-needs its matching indexed ASCII ``.facet``/STL platform surface. Point and
+Metadata is advisory by default. Imported complex fields need no solver
+certificate or feature-library manifest. The optional ``production`` and
+``external`` profiles enable strict metadata auditing. An external monostatic
+GRIM needs its matching indexed ASCII ``.facet``/STL platform surface when
+placing features. Point and
 line datasets use the single canonical OPN-FRD (featured-clean) differential
 response.
 
@@ -25,28 +23,29 @@ from pathlib import Path
 # USER SETTINGS
 # =============================================================================
 
-# Production is deliberately the default. It requires a certified local GHOST
-# body, strict clean-body metadata, and validated response manifests. Use
-# "external" for a reviewed external/HPC body that lacks the local mesh
-# certificate while retaining all other strict checks. Use "legacy" only for a
-# reviewed older library whose missing declarations you intentionally accept;
-# that choice and every compatibility assumption are recorded as warnings.
-VALIDATION_PROFILE = "production"       # production, external, or explicit legacy
+# Advisory records assumptions without blocking on missing or conflicting
+# annotations. Strict metadata checks are available through "external";
+# "production" additionally requires a certified local GHOST body.
+VALIDATION_PROFILE = "advisory"         # advisory (default), external, or production
 
-# Validation never publishes output by itself. If a completed plan contains
-# warnings, execution prints its sealed SHA-256 and stops. After reviewing the
-# exact warning-bearing plan, copy that digest here. Any input/configuration
-# change produces a different digest and invalidates the waiver automatically.
-# Leave None for normal Production use.
+# Large workload reviews (and warnings in an explicitly selected strict
+# profile) require the printed plan digest here. Metadata advisories in the
+# default profile need no acknowledgement. Input changes invalidate a digest.
 ACKNOWLEDGED_PLAN_SHA256 = None
 
 # The Production profile verifies that this file declares the coherent
 # monostatic platform field in the GHOST global-origin radar VV/HH/VH
-# convention. Legacy may supply missing declarations, but an explicitly
+# convention. The default profile assumes the selected body frame; an explicitly
 # power-only file is always refused.
 BASE_MONOSTATIC_GRIM = "rcs_runs_bor/run_x/results/body.grim"
 OUTPUT_MONOSTATIC_GRIM = "rcs_runs_bor/run_x/results/body_with_features.grim"
 COORDINATE_UNITS = "inches"
+HOST_MATERIAL = ""               # match the library's host.material declaration
+HOST_STACK_ID = ""               # required when the library declares stack_id
+HOST_MINIMUM_RADIUS_M = None      # lower bound for both principal radii over every footprint
+STUDY_FREQUENCIES_GHZ = None      # e.g. (1.0, 2.0); exact stored samples only
+STUDY_AZIMUTHS_DEG = None
+STUDY_ELEVATIONS_DEG = None
 
 # Required for a non-BoR base. Production also requires the canonical
 # <surface>.assembly.json binding made by create_feature_manifest.py after the
@@ -60,7 +59,7 @@ FLIP_SURFACE_NORMALS = False      # True only when mesh winding points inward
 
 # Geometric-optics blockage. False keeps the local outward-facing test but
 # does not hide an otherwise facing feature behind another part of the body.
-SHADOW = False
+SHADOW = True
 SHADOW_BIAS_M = None              # normally leave None for mesh-scaled default
 
 # One strict line-placement table is used for every line-expanded feature.
@@ -226,19 +225,14 @@ def _validation_policy():
         return profile, False, True, True
     if profile == "external":
         return profile, False, True, False
-    if profile == "legacy":
+    if profile in {"advisory", "legacy"}:
         return profile, True, False, False
     raise ValueError(
-        "VALIDATION_PROFILE must be exactly 'production', 'external', or "
-        "'legacy'."
+        "VALIDATION_PROFILE must be 'advisory', 'production', or 'external'."
     )
 
 
 def main():
-    if LINE_FEATURE_LOCATIONS_CSV is None and POINT_FEATURE_LOCATIONS_CSV is None:
-        raise SystemExit(
-            "Configure LINE_FEATURE_LOCATIONS_CSV or POINT_FEATURE_LOCATIONS_CSV."
-        )
     try:
         (
             profile,
@@ -253,12 +247,18 @@ def main():
         f"(strict base metadata={'yes' if not allow_legacy_metadata else 'no'}, "
         f"validated feature manifests={'yes' if require_manifests else 'no'}, "
         "certified body mesh="
-        f"{'yes' if require_body_certification else 'explicit waiver'})"
+        f"{'yes' if require_body_certification else 'not required'})"
     )
     request = FeatureAssemblyRequest(
         base_grim=BASE_MONOSTATIC_GRIM,
         output_grim=OUTPUT_MONOSTATIC_GRIM,
         coordinate_units=COORDINATE_UNITS,
+        host_material=HOST_MATERIAL,
+        host_stack_id=HOST_STACK_ID,
+        host_minimum_radius_m=HOST_MINIMUM_RADIUS_M,
+        study_frequencies_ghz=STUDY_FREQUENCIES_GHZ,
+        study_azimuths_deg=STUDY_AZIMUTHS_DEG,
+        study_elevations_deg=STUDY_ELEVATIONS_DEG,
         surface_mesh=SURFACE_MESH,
         surface_units=SURFACE_UNITS,
         flip_surface_normals=FLIP_SURFACE_NORMALS,
@@ -288,6 +288,12 @@ def main():
         )
         for index, warning in enumerate(plan.validation_warnings, start=1):
             print(f"  {index}. {warning}")
+    from assembly_workload import warnings_require_workload_acknowledgement
+    review_required = bool(plan.validation_warnings) and (
+        require_manifests or require_body_certification
+        or warnings_require_workload_acknowledgement(plan.validation_warnings)
+    )
+    if review_required:
         plan_sha256 = str(plan.prepared_plan_sha256).strip()
         if len(plan_sha256) != 64 or any(
             character not in "0123456789abcdef" for character in plan_sha256
@@ -314,7 +320,7 @@ def main():
         saved = execute_feature_assembly(
             plan,
             acknowledged_plan_sha256=(
-                ACKNOWLEDGED_PLAN_SHA256 if plan.validation_warnings else None
+                ACKNOWLEDGED_PLAN_SHA256 if review_required else None
             ),
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:

@@ -51,9 +51,12 @@ INCH_M = 0.0254
 POINT_AZIMUTH_NODES = np.asarray([0.0, 90.0, 180.0, 270.0, 360.0])
 POINT_AZIMUTH_PROFILE = np.asarray([0.0, 1.0, -0.7, 0.55, 0.0])
 POINT_ELEVATION_NODES = np.asarray([-90.0, 0.0, 90.0])
+# The pole row is stored in fixed x/y, while interior rows use theta/phi.
+# An isotropic pole limit makes this synthetic bilinear pattern continuous
+# under that basis change. Anisotropy below is retained away from the poles.
 POINT_BASE_JONES = np.asarray([
-    [0.0053 + 0.0009j, 0.0008 - 0.0003j],
-    [0.0008 - 0.0003j, 0.0031 - 0.0007j],
+    [0.0042 + 0.0001j, 0.0],
+    [0.0, 0.0042 + 0.0001j],
 ])
 POINT_MODULATION_JONES = np.asarray([
     [0.0032 + 0.0008j, 0.0014 - 0.0005j],
@@ -290,6 +293,7 @@ def _write_anisotropic_point_delta(path):
 
 def _write_isotropic_line_delta(path, installed_coefficient):
     """Write raw TM/TE values that become equal after legacy phase mapping."""
+    import feature_sum as contracts
 
     angles = np.asarray([0.0, 90.0, 180.0])
     raw_te = complex(installed_coefficient) * np.exp(
@@ -302,6 +306,10 @@ def _write_isotropic_line_delta(path, installed_coefficient):
     amplitude[..., 0] = raw_te
     amplitude[..., 1] = raw_tm
     payload = {
+        "rcs_domain": "delta",
+        "amplitude_convention": contracts.PHYSICAL_2D_AMPLITUDE_CONVENTION,
+        "phase_reference": contracts.PHYSICAL_2D_PHASE_REFERENCE+contracts.DELTA_PHASE_SUFFIX,
+        "complex_field_domain": contracts.DELTA_FIELD_DOMAIN,
         "azimuths": angles,
         "elevations": np.asarray([0.0]),
         "frequencies": np.asarray([FREQUENCY_GHZ]),

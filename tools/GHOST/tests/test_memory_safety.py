@@ -335,9 +335,13 @@ class BorMemoryGateTests(unittest.TestCase):
             )
 
         self.assertEqual(captured["workers"], 2)
+        solver = bor_solver.BorPecSolver(points, 1.0e9)
+        near_peak = bor_solver.estimate_bor_operator_storage_gb(
+            4, ((solver, True, True, False),), streaming=True)
+        self.assertGreater(captured["assembly_peak_gb"], near_peak)
         self.assertLessEqual(
             captured["assembly_peak_gb"]
-            - bor_streaming.BOR_STREAM_TILE_BUDGET_GB,
+            - bor_streaming.BOR_STREAM_TILE_BUDGET_GB - near_peak,
             budget,
         )
         self.assertEqual(enable_streaming.call_args.kwargs["workers"], 2)

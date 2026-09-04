@@ -35,16 +35,24 @@ as a 2-D delta expanded around the same ring.
 ## Assembly tab workflow
 
 The normal interactive path is GRIM's **Assembly** tab in the unified
-application. It contains the one
-canonical Assembly tree and the 3-D placement preview:
+application. It presents Body, Point Features, Line Features, and Review beside
+the 3-D placement and response-comparison views:
 
-1. Open **Place Features**. The neighboring **Datasets + Preview Layers**
-   tab is for arithmetic on complete GRIM responses, not spatial placement.
+1. Open **Assembly → Body**. **Preview layers** opens the advanced response
+   tree and display-layer controls.
 2. Select the clean base monostatic GRIM. For an external 3-D base, select its
    matching STL or indexed ASCII `.facet`
    surface and its units. A self-contained GHOST BoR result may preview the
-   revolved profile embedded in its GRIM without a separate surface.
-3. Select the point-placement and/or line-placement CSV. The form shows the
+   revolved profile embedded in its GRIM without a separate surface. Shadowing
+   defaults on for newly selected bodies. BoR shadow geometry can be generated
+   from the profile with recorded sag and normal-rotation bounds. Enter the
+   installed host material/stack to match the feature-library declarations.
+3. In **Point Features** and **Line Features**, select a placement CSV or use
+   **Create / edit…**. The table supports add/duplicate/delete, undo/redo, point
+   rows and circles, and ordered polylines (repeat the first vertex to close a
+   boundary). Choose units first. **Derive normals** preserves coordinates;
+   **Snap + normals** explicitly moves selected vertices onto the body. Save,
+   preview, and revalidate after either operation. The form shows the
    exact shared local/HPC header and example and can write a blank template.
    Put data immediately after the header; do not add a units or comments row.
    Coordinate units come from the form. The form reads
@@ -86,7 +94,15 @@ canonical Assembly tree and the 3-D placement preview:
    assembling. The progress bar reports frequency/direction work; cancellation
    is cooperative and occurs before atomic publication, so an existing output
    is retained. The saved result is automatically available to GRIM as a
-   dataset.
+   dataset. **Response comparison** opens body, feature-only, and coherent total
+   cuts. A feature-only RCS curve is `4π|ΔF|²`, not a dB subtraction. Add saved
+   family-only variants to compare contributions. Use the toolbar to save a plot.
+
+Review accepts exact stored frequency/azimuth/elevation subsets. Blank keeps
+the complete axis; unstored values are rejected. An all-disabled or no-CSV
+configuration can validate and build a body-only baseline with zero feature
+field. Translation-phase sampling warnings are useful lower-bound checks,
+not proof of convergence between samples.
 
 Before numerical execution, Assembly conservatively estimates peak RAM and
 same-volume scratch for the component and final atomic staging archives. A job
@@ -99,7 +115,7 @@ staging begins.
 
 Save the setup as a named `.assembly.json` recipe before running variants. The
 recipe records relative paths where possible, exact enabled/disabled IDs,
-mappings, tolerances, and source identities. A later load reports moved,
+mappings, host declarations, exact study samples, tolerances, and source identities. A later load reports moved,
 missing, or changed inputs instead of silently reusing the old validation.
 
 Per-node **Show** checkboxes and the global **Show All** checkbox under
@@ -127,18 +143,23 @@ and `Backend/feature_workflow.py` exposes the Qt-free
 `FeatureAssemblyRequest` service. Both call the same validation and placement
 implementation used by the GUI; they are automation alternatives, not a
 second physics path. The wrapper defaults to `VALIDATION_PROFILE =
-"production"`, which requires strict clean-body metadata and validated response
-manifests. Assembly has no host-material declaration or matching requirement;
-historical material metadata is descriptive only. `VALIDATION_PROFILE = "legacy"` is the
-explicit compatibility choice for reviewed older inputs.
+"advisory"`. Missing, stale, or conflicting metadata and manifests are recorded
+without blocking execution or changing complex samples. The optional
+`"external"` profile enables strict library and base metadata checks;
+`"production"` also requires a certified GHOST BoR body. For a strict audit,
+set `HOST_MATERIAL`, and `HOST_STACK_ID` if the library declares one.
+Set `HOST_MINIMUM_RADIUS_M` when the library specifies
+`applicability.minimum_principal_radius_m`: this is a reviewed lower bound on
+both principal radii over every footprint, not a triangle-based estimate.
+Missing principal-curvature evidence remains visible as a warning. The wrapper
+also exposes `STUDY_FREQUENCIES_GHZ`, `STUDY_AZIMUTHS_DEG`, and
+`STUDY_ELEVATIONS_DEG`. Body-only studies are supported without a placement CSV.
 
-Preparation prints every validation warning and does not publish when any are
-present. It prints the sealed plan SHA-256 with the warnings. Review that exact
-plan first; only then copy its digest into `ACKNOWLEDGED_PLAN_SHA256` if the
-waiver is justified. Any input, selection, tolerance, or source change
-changes the digest and invalidates the acknowledgment. This keeps unattended
-execution from silently turning a stale compatibility waiver into a distributed
-result.
+Preparation prints advisories without requiring a metadata waiver. Large
+workload reviews and warnings in an explicitly selected strict profile require
+the printed plan digest in `ACKNOWLEDGED_PLAN_SHA256`. Input changes invalidate
+that acknowledgement. Numerical data, geometry, and file-integrity checks apply
+in every profile.
 
 ## Creating and checking an evidence-bound feature manifest
 
@@ -176,8 +197,19 @@ JSON may instead be embedded under `feature_library_manifest_json`; embedded
 and sidecar declarations must agree when both exist. The supported creator
 does not rewrite a response archive that already embeds a declaration. It
 always writes the current v3 response schema and v2 line-calibration schema.
-Existing v1/v2 declarations remain readable only through explicit Legacy
-compatibility; review the evidence and recreate them before Production use.
+Existing v1/v2 declarations are advisory by default. Strict certification
+requires current evidence-bound declarations.
+Use `--host-stack-id` for a distinct material/coating stack and
+`--minimum-principal-radius-m` for an evidence-supported bound on both host
+principal radii. Material names are matched after whitespace/case normalization;
+stack IDs distinguish physically different constructions. These declarations
+describe reviewed applicability; they do not generate missing full-wave evidence.
+
+Current GHOST 2-D responses must carry `amplitude_version=2`. This survives
+coherent GUI subtraction and line-delta export. Regenerate incompatible earlier
+responses; a delta label does not repair an old phase convention. Point-library
+pole samples use the documented fixed Cartesian transverse basis; interpolation
+transports these pole values into each surrounding azimuth meridian.
 
 This is a complete line-response example (replace the engineering values and
 case IDs with evidence from that exact response library):
@@ -249,15 +281,16 @@ Point manifests omit the three line-only applicability values and the complete
 `line_phase_calibration` object. `footprint_radius_m` bounds the local
 installation region represented by the delta. Overlapping footprints identify
 feature clusters whose mutual coupling is omitted. In Production an overlap is
-rejected; Legacy shows it as a QA warning. Line placements are additionally
+rejected. In the default profile footprint annotations are retained for review
+without enforcing them. Strict line placements are additionally
 gated against the declared frequency, normal-turn-radius,
 maximum-conical-incidence, and path-vertex-turn envelopes. The 10-degree
 grazing taper records the fixed complex-amplitude visibility ramp used by the
 current line-expansion implementation; it is not a fitted manifest parameter.
 
-Manifest `host.material` is optional descriptive metadata. Assembly does not
-require a host-material declaration, compare material names, or issue a
-missing-material warning. The material response is supplied by the datasets.
+Host material/stack and curvature annotations are optional in the default
+profile. Strict profiles require a matching installed host and any declared
+principal-radius bound. The material response is supplied by the datasets.
 
 The Production profile rejects missing, provisional, uncertified, legacy, or
 unbound evidence. The validator report records stable case IDs, all four
@@ -270,8 +303,8 @@ A library-certification case may place the same response at several locations,
 but it must not combine different reusable response files. Combined line/point
 or mixed-library cases remain valuable system regressions; they cannot certify
 one member because opposite errors could cancel in the aggregate field.
-Use Legacy only to evaluate an established library whose missing contracts have
-been explicitly reviewed; the profile and warnings are recorded in provenance.
+The default advisory profile accepts external libraries without these contracts;
+the profile and assumptions are recorded in provenance.
 A manifest still includes a **team attestation**: the software can prove what
 files were compared and which gates passed, but it cannot prove that an
 external file came from Maxwell's equations or that its mesh converged. The
@@ -392,11 +425,12 @@ intentional. The cited registration evidence must therefore include a CAD/mesh
 integrity check for self-intersections and unintended duplicate shells; do not
 waive a topology warning merely because the preview looks solid.
 
-Production requires the base GRIM itself to declare that it is the coherent
+Strict profiles require the base GRIM itself to declare that it is the coherent
 physical platform far field at the global vehicle origin in radar-frame
-VV/HH/VH, along with the required angular/grid conventions. Legacy treats the
-explicit base selection as the operator declaration for missing descriptive
-tags and records each assumption as a warning. In both profiles, stored sigma
+VV/HH/VH, along with the required angular/grid conventions. The default profile
+treats base selection as the working declaration even when descriptive tags
+are absent or conflict, and records assumptions without converting fields.
+In every profile, stored sigma
 and phase undergo full normalization and consistency checks, and a base
 explicitly tagged `combine_role=power` remains invalid. The combined output is
 written back with the complete canonical coherent schema.
@@ -413,10 +447,9 @@ a directly featured full-wave platform solve.
 For a point feature, form the installed-minus-clean complex delta in the 3-D
 solver or an independently validated lossless export process. Preserve the raw
 complex Jones response; do not subtract dBsm or linear RCS. A legacy compact
-result made with GRIM's **Coherent subtraction** can still be loaded when its
-sigma, phase, complete VV/HH/VH matrix, azimuth seam, frequency support, and
-declared conventions pass every check, but that compatibility path is not the
-production delta-building recommendation.
+result made with GRIM's **Coherent subtraction** can be loaded when its
+sigma, phase, complete VV/HH/VH matrix, azimuth seam, and frequency support
+are usable. Convention annotations need no validation in the default profile.
 
 For a 2-D line feature, use only the repository's strict CEM entry point:
 

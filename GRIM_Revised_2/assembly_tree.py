@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import uuid
 
 import numpy as np
@@ -130,6 +131,7 @@ _KNOWN_RESPONSE_ROLES = {
 # inputs declare the same value; explicit disagreements are errors for the
 # coordinate/convention keys below rather than silently discarded evidence.
 _SEMANTIC_SCALAR_KEYS = (
+    "amplitude_version",
     "phase_reference",
     "time_convention",
     "polarization_basis",
@@ -440,6 +442,8 @@ def _canonical_metadata_value(key: str, value):
 def _declared_extra_scalar(grid, key: str):
     """Read one scalar from units/extra and refuse internal contradictions."""
 
+    if key in {"amplitude_version", "phase_reference", "time_convention", "polarization_basis", "amplitude_convention", "complex_field_domain"}:
+        return grid._declared_scalar_metadata(key) or None
     declarations = []
     for container in (getattr(grid, "units", None) or {}, getattr(grid, "extra", None) or {}):
         if key in container:
@@ -2513,6 +2517,7 @@ class AssemblyTreePanel(QWidget):
         self._dirty = False
         self._assembly_path: Path | None = None
         self._save_in_progress = False
+        self._build_thread = None
 
         self.btn_add_root.clicked.connect(
             lambda: self.tree._make_node("New Root", _TYPE_ROOT)
@@ -2595,6 +2600,10 @@ class AssemblyTreePanel(QWidget):
         return True
 
     def request_close(self, parent: QWidget | None = None) -> bool:
+        if self._build_thread is not None:
+            self._build_cancel.set()
+            self._notify("Cancelling Assembly build; close again after it stops.")
+            return False
         if self._save_in_progress:
             QMessageBox.warning(
                 parent or self,
@@ -2822,20 +2831,53 @@ class AssemblyTreePanel(QWidget):
             return
         axis_mode = dlg.axis_mode()
 
+        if self._build_thread is not None:
+            return
         try:
-            grid, history = build_assembly_grid(
-                item,
-                axis_mode=axis_mode,
-            )
+            snapshot = _BuildNode(item)
+            from grim_dataset import _coherent_working_set_limit_bytes
+            required = snapshot.working_bytes()+16*1024**2
+            limit = _coherent_working_set_limit_bytes(None)
+            if required > limit:
+                raise MemoryError(f"Assembly tree needs approximately {required/1024**2:.1f} MiB additional memory; safe allowance is {limit/1024**2:.1f} MiB. Reduce the response grid or subtree.")
         except Exception as exc:
             self._notify(f"Build failed: {exc}")
             return
-        if grid is None:
-            self._notify(
-                "Build produced no data (subtree has no enabled, loaded leaves)."
-            )
-            return
-        self.platform_built.emit(item.text(0), grid, history)
+        self._build_cancel = threading.Event()
+        self._build_title = item.text(0)
+        self._build_dialog = QProgressDialog("Combining response grids…", "Cancel", 0, 0, self)
+        self._build_dialog.setWindowTitle("Build Assembly")
+        self._build_dialog.setWindowModality(Qt.WindowModal)
+        self._build_dialog.setMinimumDuration(0)
+        self._build_dialog.canceled.connect(self._build_cancel.set)
+        self._build_thread = QThread(self)
+        self._build_worker = _AssemblyBuildWorker(snapshot, axis_mode, self._build_cancel)
+        self._build_worker.moveToThread(self._build_thread)
+        self._build_thread.started.connect(self._build_worker.run)
+        self._build_worker.finished.connect(self._build_completed)
+        self._build_worker.finished.connect(self._build_thread.quit)
+        self._build_thread.finished.connect(self._build_worker.deleteLater)
+        self._build_thread.finished.connect(self._build_stopped)
+        self.tree.setEnabled(False)
+        self._build_dialog.show()
+        self._build_thread.start()
+
+    def _build_completed(self, result):
+        if self._build_cancel.is_set():
+            self._notify("Assembly build cancelled; no result published.")
+        elif result.get("error"):
+            self._notify("Build failed: "+result["error"])
+        elif result["grid"] is not None:
+            self.platform_built.emit(self._build_title, result["grid"], result["history"])
+        else:
+            self._notify("Build produced no data; select enabled, loaded responses.")
+
+    def _build_stopped(self):
+        self._build_dialog.close()
+        self._build_dialog.deleteLater()
+        self.tree.setEnabled(True)
+        self._build_thread.deleteLater()
+        self._build_thread = None
 
     def _notify(self, text: str) -> None:
         # Surface a transient error through the main window's status bar if
@@ -2914,7 +2956,7 @@ class BuildDialog(QDialog):
         ))
         self._btn_group = QButtonGroup(self)
         self._radio_intersect = QRadioButton(
-            "Intersect — keep only axis values present in every part (no interpolation, lossless)."
+            "Intersect — retain shared samples; discard all nonshared axis values."
         )
         self._radio_interp = QRadioButton(
             "Interpolate — power-only builds; resample onto a common grid "
@@ -2923,7 +2965,7 @@ class BuildDialog(QDialog):
         self._radio_strict = QRadioButton(
             "Strict — require every part to share exactly the same axes (error if any differs)."
         )
-        self._radio_intersect.setChecked(True)
+        self._radio_strict.setChecked(True)
         self._btn_group.addButton(self._radio_intersect, 0)
         self._btn_group.addButton(self._radio_interp, 1)
         self._btn_group.addButton(self._radio_strict, 2)
@@ -3218,6 +3260,8 @@ def _validate_coherent_sources(
             )
     if len(grids) < 2:
         return {}
+    for grid in grids[1:]:
+        grids[0]._assert_coherent_metadata_compatible(grid)
 
     missing_by_field: dict[str, list[int]] = {}
     labels = {
@@ -3237,13 +3281,7 @@ def _validate_coherent_sources(
             _canonical_metadata_value(key, value) for _index, value in declared
         }
         if len(canonical) > 1:
-            descriptions = ", ".join(
-                f"input {index + 1}={value!r}" for index, value in declared
-            )
-            raise ValueError(
-                f"coherent Field + requires matching {labels[key]}; got "
-                f"{descriptions}"
-            )
+            missing_by_field[key+" (conflicting annotations; samples unchanged)"] = [index+1 for index, _ in declared]
         missing = [
             index + 1
             for index, value in enumerate(values)
@@ -3296,6 +3334,7 @@ def _combined_semantic_extra(
     source_grids = list(source_grids)
     extra = {}
     coherent_keys = {
+        "amplitude_version",
         "phase_reference",
         "time_convention",
         "amplitude_convention",
@@ -3310,7 +3349,7 @@ def _combined_semantic_extra(
         canonical = {
             _canonical_metadata_value(key, value) for value in declared
         }
-        if len(canonical) > 1 and key in _STRICT_SEMANTIC_KEYS:
+        if len(canonical) > 1 and key in _STRICT_SEMANTIC_KEYS and key not in coherent_keys | {"polarization_basis"}:
             raise ValueError(
                 f"refusing to combine parts with contradictory {key} metadata"
             )
@@ -3318,6 +3357,10 @@ def _combined_semantic_extra(
         # source made it. Unknown inputs do not inherit another input's claim.
         if len(declared) == len(relevant) and len(canonical) == 1:
             extra[key] = copy.deepcopy(declared[0])
+
+    advisories = [issue for grid in source_coh_grids[1:] for issue in source_coh_grids[0]._assert_coherent_metadata_compatible(grid)]
+    if advisories:
+        extra["metadata_advisories_json"] = json.dumps(advisories)
 
     # No unique phase/time/amplitude exists after any incoherent contribution.
     if has_incoh:
@@ -3547,6 +3590,7 @@ def _combine_children(
     coherent_metadata_attested=False,
     validated_body_occupancy=None,
     validated_component_signatures=None,
+    cancel_check=None,
 ):
     """Coherent-field + incoherent-power combination of pre-aligned children.
 
@@ -3587,6 +3631,8 @@ def _combine_children(
     C_coh = None
     if coh_grids:
         for g in coh_grids:
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("Assembly build cancelled.")
             missing = np.isfinite(g.rcs_power) & ~np.isfinite(g.rcs_phase)
             if np.any(missing):
                 raise ValueError(
@@ -3601,6 +3647,8 @@ def _combine_children(
 
         C_coh = np.array(_field(coh_grids[0]), copy=True)
         for g in coh_grids[1:]:
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("Assembly build cancelled.")
             next_field = _field(g)
             result_dtype = np.result_type(C_coh.dtype, next_field.dtype)
             if C_coh.dtype != result_dtype:
@@ -3611,6 +3659,8 @@ def _combine_children(
     if incoh_grids:
         P_incoh = np.array(incoh_grids[0].rcs_power, copy=True)
         for g in incoh_grids[1:]:
+            if cancel_check is not None and cancel_check():
+                raise InterruptedError("Assembly build cancelled.")
             result_dtype = np.result_type(P_incoh.dtype, g.rcs_power.dtype)
             if P_incoh.dtype != result_dtype:
                 P_incoh = P_incoh.astype(result_dtype)
@@ -3688,11 +3738,52 @@ def _combine_children(
     return result
 
 
+class _BuildNode:
+    """Plain data captured on the GUI thread; workers never read Qt items."""
+    def __init__(self, item):
+        self._name = item.text(0)
+        self._included = _item_response_included(item)
+        self._data = {role: item.data(0, role) for role in (_ROLE_TYPE, _ROLE_MODE, _ROLE_GRID, _ROLE_PURPOSE)}
+        self._children = tuple(_BuildNode(item.child(i)) for i in range(item.childCount()) if not _is_preview_item(item.child(i)) and _item_response_included(item.child(i))) if self._included else ()
+    def text(self, column):
+        return self._name
+    def data(self, column, role):
+        return self._data.get(role)
+    def childCount(self):
+        return len(self._children)
+    def child(self, index):
+        return self._children[index]
+    def parent(self):
+        return None
+    def checkState(self, column):
+        return Qt.Checked if self._included else Qt.Unchecked
+    def cells(self):
+        grid = self._data.get(_ROLE_GRID)
+        return int(grid.rcs_power.size) if grid is not None else max((c.cells() for c in self._children), default=0)
+    def working_bytes(self):
+        return self.cells()*256+sum(c.working_bytes() for c in self._children)
+
+
+class _AssemblyBuildWorker(QObject):
+    finished = Signal(object)
+    def __init__(self, snapshot, axis_mode, cancellation):
+        super().__init__()
+        self.snapshot, self.axis_mode, self.cancellation = snapshot, axis_mode, cancellation
+    @Slot()
+    def run(self):
+        try:
+            grid, history = build_assembly_grid(self.snapshot, axis_mode=self.axis_mode, cancel_check=self.cancellation.is_set)
+            self.finished.emit({"grid": grid, "history": history})
+        except Exception as exc:
+            self.finished.emit({"error": str(exc)})
+
+
 def build_assembly_grid(
     node: QTreeWidgetItem,
     *,
     axis_mode: str = "intersect",
     coherent_metadata_attested: bool = False,
+    cancel_check=None,
 ):
     """Recursively materialise an assembly subtree into a single RcsGrid.
 
@@ -3708,6 +3799,8 @@ def build_assembly_grid(
     Returns (grid, history_string). Both are None / "" if the subtree has
     no loaded data.
     """
+    if cancel_check is not None and cancel_check():
+        raise InterruptedError("Assembly build cancelled.")
     if not isinstance(coherent_metadata_attested, (bool, np.bool_)):
         raise TypeError("coherent_metadata_attested must be True or False")
     if _is_preview_item(node):
@@ -3734,6 +3827,7 @@ def build_assembly_grid(
             child,
             axis_mode=axis_mode,
             coherent_metadata_attested=coherent_metadata_attested,
+            cancel_check=cancel_check,
         )
         if child_grid is None:
             continue
@@ -3781,6 +3875,8 @@ def build_assembly_grid(
         coherent_count=len(coh),
     )
     n_coh = len(coh)
+    if cancel_check is not None and cancel_check():
+        raise InterruptedError("Assembly build cancelled.")
     aligned_coh = aligned[:n_coh]
     aligned_incoh = aligned[n_coh:]
     ref = aligned[0]
@@ -3792,6 +3888,7 @@ def build_assembly_grid(
         coherent_metadata_attested=coherent_metadata_attested,
         validated_body_occupancy=body_occupancy,
         validated_component_signatures=component_signatures,
+        cancel_check=cancel_check,
     )
 
     parts = []
@@ -3800,6 +3897,11 @@ def build_assembly_grid(
     if incoh:
         parts.append("incoh[" + " + ".join(h for h, _ in incoh) + "]")
     history = f"Σ {node.text(0)} ({axis_mode}): " + " ⊕ ".join(parts)
+    if axis_mode == "intersect":
+        losses = [int(source.rcs_power.size-aligned_grid.rcs_power.size) for source, aligned_grid in zip(grids_in_order, aligned)]
+        history += " | Exact intersection discarded samples per input: " + ", ".join(map(str, losses))
+    if cancel_check is not None and cancel_check():
+        raise InterruptedError("Assembly build cancelled.")
     if len(coh) > 1:
         if coherent_metadata_attested:
             history += (

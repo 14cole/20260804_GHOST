@@ -46,6 +46,7 @@ from feature_sum import (
     _validate_declared_coherent_base,
     add_features_to_monostatic_grim,
     feature_only_output_path,
+    exact_assembly_subset,
     load_seam_from_grim,
     load_body_profile_grim,
     load_body_requested_radar_grid,
@@ -58,6 +59,7 @@ from feature_sum import (
     validate_radar_grid,
 )
 from frame import (
+    CAD2AXIS,
     AXIS_AZ_DEG,
     AXIS_EL_DEG,
     ROLL_DEG,
@@ -69,6 +71,7 @@ from line_expand import (
     GRAZING_TAPER_DEG,
     PSI_HH_DEG,
     PSI_VV_DEG,
+    constant_normal_piece_length,
     perimeter_surface_deviation,
     prepare_perimeter_frame,
     surface_of_revolution_normal,
@@ -187,6 +190,14 @@ class FeatureAssemblyRequest:
     # reconstruct solver convergence evidence that is absent from the file.
     # Appended for positional compatibility with earlier request layouts.
     require_body_mesh_certification: bool = False
+    # Declarations about the installation region, not guessed from mesh shape.
+    # Use a material/stack identity shared with the characterized feature library.
+    host_material: str = ""
+    host_stack_id: str = ""
+    host_minimum_radius_m: Optional[float] = None
+    study_frequencies_ghz: Optional[tuple[float, ...]] = None
+    study_azimuths_deg: Optional[tuple[float, ...]] = None
+    study_elevations_deg: Optional[tuple[float, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -1876,6 +1887,10 @@ def prepare_line_placements(
                 f"fraction {normal_parameters[flat_index]:.5g}."
             )
 
+        if not prepare_shadow_origins:
+            analytic_length = constant_normal_piece_length(perimeter, segment_normals)
+            if analytic_length is not None:
+                maximum_solver_piece_m = analytic_length
         placements.append({
             "delta": str(dataset),
             "perimeter": perimeter,
@@ -2709,11 +2724,15 @@ def validate_feature_library_manifest(
             f"{expected_frame!r}."
         )
 
-    # Historical host declarations are optional descriptive metadata only.
     host = manifest.get("host", {})
     if not isinstance(host, Mapping):
         raise ValueError("Feature-library manifest host must be an object.")
     material = str(host.get("material", "")).strip()
+    if manifest_schema == FEATURE_LIBRARY_MANIFEST_SCHEMA and not material:
+        raise ValueError("Current feature-library manifest requires host.material.")
+    principal_radius = manifest.get("applicability", {}).get("minimum_principal_radius_m") if isinstance(manifest.get("applicability"), Mapping) else None
+    if principal_radius is not None and (not math.isfinite(float(principal_radius)) or float(principal_radius) < 0):
+        raise ValueError("minimum_principal_radius_m must be finite and nonnegative.")
 
     applicability = manifest["applicability"]
     if not isinstance(applicability, Mapping):
@@ -3161,6 +3180,30 @@ def load_feature_library_manifest(
     return normalized[0], sources
 
 
+def assembly_sampling_warnings(radar_grid, lines, points):
+    """Conservative phase-step diagnostics; not a body-model convergence claim."""
+    extent = max([float(np.linalg.norm(p["location"])) for p in points]
+                 + [float(np.max(np.linalg.norm(p["perimeter"], axis=-1))) for p in lines] + [0.])
+    if extent == 0:
+        return []
+    frequency = np.asarray(radar_grid["frequencies_ghz"], float)
+    wavelength = C0/(float(np.max(frequency))*1e9)
+    warnings = []
+    for key in ("azimuths_deg", "elevations_deg"):
+        values = np.asarray(radar_grid[key], float)
+        if len(values) < 2:
+            continue
+        step = np.deg2rad(np.max(np.diff(values)))
+        phase_degrees = 720*extent*min(float(step), 2.)/wavelength
+        if phase_degrees > 180:
+            warnings.append(f"Sampling: {key} spacing permits up to {phase_degrees:.0f}° translated-feature phase change between stored looks (conservative bound). Narrow lobes/nulls may be missed; use a finer body/library grid and check convergence. This diagnostic does not bound body scattering or intrinsic feature angular variation.")
+    if len(frequency) > 1:
+        phase_degrees = 720*extent*float(np.max(np.diff(frequency)))*1e9/C0
+        if phase_degrees > 180:
+            warnings.append(f"Sampling: frequency spacing permits up to {phase_degrees:.0f}° translated-feature phase change. Refine stored frequency samples before interpreting broadband structure; this diagnostic does not certify intrinsic spectral variation.")
+    return warnings
+
+
 def _vehicle_radar_directions(radar_grid: Mapping[str, Any]) -> np.ndarray:
     azimuths, elevations = validate_radar_grid(
         radar_grid["azimuths_deg"], radar_grid["elevations_deg"]
@@ -3170,11 +3213,8 @@ def _vehicle_radar_directions(radar_grid: Mapping[str, Any]) -> np.ndarray:
         float(radar_grid["axis_el_deg"]),
         float(radar_grid.get("roll_deg", 0.0)),
     )
-    earth = np.asarray([
-        _direction(azimuth, elevation)
-        for azimuth in azimuths
-        for elevation in elevations
-    ], dtype=float)
+    az, el = np.meshgrid(np.deg2rad(azimuths), np.deg2rad(elevations), indexing="ij")
+    earth = np.stack((np.cos(el)*np.cos(az), np.cos(el)*np.sin(az), np.sin(el)), axis=-1).reshape(-1, 3)
     return earth @ R
 
 
@@ -3183,6 +3223,7 @@ def _line_applicability_metrics(
     radar_directions: np.ndarray,
     *,
     requested_frequencies_ghz: Sequence[float],
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Measure the exact installed line frame over every requested solve.
 
@@ -3216,29 +3257,34 @@ def _line_applicability_metrics(
             maximum_piece_length,
             segment_normals=normals,
         )
-        conical = np.degrees(np.arcsin(np.clip(
-            np.abs(radar_directions @ frame_tangents.T), 0.0, 1.0
-        )))
-        normal_projection = radar_directions @ sampled_normals.T
-        # Match expand_perimeter exactly: every strictly front-facing sample
-        # is evaluated (the fixed grazing taper drives it smoothly to zero).
-        lit = normal_projection > 0.0
-        lit_look_count = int(np.count_nonzero(np.any(lit, axis=1)))
-        if np.any(lit):
-            lit_maximum_conical = float(np.max(conical[lit]))
-            binormals = np.cross(frame_tangents, sampled_normals)
-            binormal_projection = radar_directions @ binormals.T
-            installed_phi = np.degrees(np.arctan2(
-                normal_projection[lit], binormal_projection[lit]
-            ))
-            cut_min = float(np.min(installed_phi))
-            cut_max = float(np.max(installed_phi))
-            lit_count = int(installed_phi.size)
-        else:
-            cut_min = None
-            cut_max = None
-            lit_count = 0
-            lit_maximum_conical = 0.0
+        # Bound every direction/piece product to 8192 pairs. In particular,
+        # admission/validation must not allocate an entire look x piece grid.
+        binormals = np.cross(frame_tangents, sampled_normals)
+        lit_maximum_conical, low, high = 0.0, math.inf, -math.inf
+        lit_count = lit_look_count = 0
+        for look_start in range(0, len(radar_directions), 32):
+            looks = radar_directions[look_start:look_start+32]
+            lit_any = np.zeros(len(looks), dtype=bool)
+            for piece_start in range(0, len(sampled_normals), 256):
+                if cancel_check is not None and cancel_check():
+                    raise InterruptedError("Line applicability validation cancelled.")
+                sl = slice(piece_start, piece_start+256)
+                normal_projection = looks @ sampled_normals[sl].T
+                lit = normal_projection > 0.0
+                lit_any |= np.any(lit, axis=1)
+                if not np.any(lit):
+                    continue
+                conical_projection = np.abs(looks @ frame_tangents[sl].T)
+                lit_maximum_conical = max(lit_maximum_conical, float(np.degrees(
+                    np.arcsin(np.clip(np.max(conical_projection[lit]), 0.0, 1.0)))))
+                binormal_projection = looks @ binormals[sl].T
+                installed_phi = np.degrees(np.arctan2(normal_projection[lit], binormal_projection[lit]))
+                low = min(low, float(np.min(installed_phi)))
+                high = max(high, float(np.max(installed_phi)))
+                lit_count += int(installed_phi.size)
+            lit_look_count += int(np.count_nonzero(lit_any))
+        cut_min = low if lit_count else None
+        cut_max = high if lit_count else None
         return (
             lit_maximum_conical,
             cut_min,
@@ -3701,6 +3747,45 @@ def _footprint_candidate_pairs(
         active.append((index, lower, upper))
 
 
+def validate_installed_host(manifest, *, material, stack_id="", minimum_radius_m=None, required=True, label="feature"):
+    """Match installation declarations to library evidence without guessing.
+
+    A triangle's zero local curvature is not evidence that its parent surface
+    is flat. Principal-radius bounds must describe the whole feature footprint.
+    """
+    def canonical(value):
+        return " ".join(str(value).split()).casefold()
+    host = manifest.get("host", {})
+    warnings = []
+    for key, installed in (("material", material), ("stack_id", stack_id)):
+        expected = host.get(key, "")
+        if expected and installed and canonical(expected) != canonical(installed):
+            raise ValueError(f"{label}: installed host {key}={installed!r} differs from characterized {expected!r}.")
+        if expected and not installed:
+            message = f"{label}: declare installed host {key} to match characterized {expected!r}."
+            if required:
+                raise ValueError(message)
+            warnings.append(message)
+    bound = manifest.get("applicability", {}).get("minimum_principal_radius_m")
+    if minimum_radius_m is not None:
+        minimum_radius_m = float(minimum_radius_m)
+        if not math.isfinite(minimum_radius_m) or minimum_radius_m < 0:
+            raise ValueError("Installed host minimum radius must be finite and nonnegative.")
+    if bound is None:
+        warnings.append(f"{label}: library has no principal-curvature envelope over the feature footprint. Along-line normal checks do not certify transverse or point-footprint curvature.")
+    elif minimum_radius_m is None:
+        message = f"{label}: declare the minimum principal radius over every installed feature footprint; library requires at least {float(bound):g} m."
+        if required:
+            raise ValueError(message)
+        warnings.append(message)
+    elif minimum_radius_m < float(bound):
+        raise ValueError(f"{label}: installed minimum principal radius {minimum_radius_m:g} m is below library limit {float(bound):g} m.")
+    return {"material": material, "stack_id": stack_id,
+            "minimum_principal_radius_m": minimum_radius_m,
+            "principal_curvature_checked": bound is not None and minimum_radius_m is not None,
+            "declaration_source": "user; match to library evidence", "warnings": warnings}
+
+
 def _apply_feature_library_contracts(
     *,
     line_placements: Sequence[Mapping[str, Any]],
@@ -3710,6 +3795,9 @@ def _apply_feature_library_contracts(
     radar_grid: Mapping[str, Any],
     require_manifests: bool,
     cancel_check: Optional[Callable[[], bool]] = None,
+    host_material: str = "",
+    host_stack_id: str = "",
+    host_minimum_radius_m: Optional[float] = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, str], set[str]]:
     """Bind manifests, applicability gates, and component identities to a plan."""
 
@@ -3766,9 +3854,18 @@ def _apply_feature_library_contracts(
             dataset = str(dataset_value)
             contract_key = f"{feature_kind}:{dataset_id}"
             if dataset_id not in manifests:
-                manifest, sources = load_feature_library_manifest(
-                    dataset, dataset_id=dataset_id, feature_kind=feature_kind
-                )
+                try:
+                    manifest, sources = load_feature_library_manifest(
+                        dataset, dataset_id=dataset_id, feature_kind=feature_kind
+                    )
+                except (ValueError, TypeError, KeyError, OSError) as exc:
+                    if require_manifests:
+                        raise
+                    manifest, sources = None, []
+                    warnings.append(f"Metadata advisory for {feature_kind} {dataset_id!r}: {exc}; response samples remain usable.")
+                advisory_manifest = manifest if not require_manifests else None
+                if not require_manifests:
+                    manifest = None
                 for source in sources:
                     if source.get("absent") == "true" and "path" in source:
                         absent_source_paths.add(str(source["path"]))
@@ -3794,18 +3891,20 @@ def _apply_feature_library_contracts(
                             dataset_digest
                         )
                 if manifest is None:
+                    description = "has an advisory" if advisory_manifest is not None else "has no"
                     message = (
-                        f"{feature_kind} dataset {dataset_id!r} has no "
+                        f"{feature_kind} dataset {dataset_id!r} {description} "
                         "feature-library manifest; phase/frame are accepted "
-                        "through the legacy dataset-role declaration and its "
-                        "host/curvature/footprint validity is not certified."
+                        "through the selected dataset role; host/curvature/"
+                        "footprint annotations are advisory."
                     )
                     if require_manifests:
                         raise ValueError(message)
                     warnings.append(message)
                     contracts[contract_key] = {
-                        "status": "legacy_missing_manifest",
+                        "status": "metadata_advisory",
                         "dataset": dataset,
+                        "source_manifest": advisory_manifest,
                     }
                 else:
                     if manifest["schema"] != FEATURE_LIBRARY_MANIFEST_SCHEMA:
@@ -3888,6 +3987,15 @@ def _apply_feature_library_contracts(
                         "release-warning waiver before Build."
                     )
             if manifest is not None:
+                host_result = validate_installed_host(
+                    manifest, material=host_material, stack_id=host_stack_id,
+                    minimum_radius_m=host_minimum_radius_m,
+                    required=require_manifests, label=f"{feature_kind} dataset {dataset_id!r}",
+                )
+                record["host_applicability"] = host_result
+                for message in host_result["warnings"]:
+                    if message not in warnings:
+                        warnings.append(message)
                 applicability = manifest["applicability"]
                 frequency_range = applicability["frequency_ghz"]
                 if (
@@ -3918,6 +4026,7 @@ def _apply_feature_library_contracts(
                     placement,
                     directions,
                     requested_frequencies_ghz=frequencies,
+                    cancel_check=cancel_check,
                 )
                 installed_radius = float(metrics[
                     "estimated_min_along_line_normal_turn_radius_m"
@@ -4195,6 +4304,27 @@ def _prepared_assembly_workload(
     )
 
 
+def bor_shadow_triangles(profile, *, max_sag_m, normal_tolerance_deg):
+    """Revolve the authoritative profile with an explicit radial sag bound."""
+    profile = np.asarray(profile, float)
+    if profile.ndim != 2 or profile.shape[1] != 2 or len(profile) < 2 or not np.all(np.isfinite(profile)) or np.any(profile[:, 0] < 0):
+        raise ValueError("BoR shadow profile must contain finite nonnegative rho,z vertices.")
+    radius = float(np.max(profile[:, 0]))
+    if radius <= 0 or max_sag_m <= 0:
+        raise ValueError("BoR shadow tessellation needs a positive radius and sag tolerance.")
+    step = min(2*math.acos(max(-1., 1.-min(float(max_sag_m)/radius, 1.))), math.radians(float(normal_tolerance_deg)))
+    count = max(64, int(math.ceil(2*math.pi/max(step, 1e-12))))
+    if 2*(len(profile)-1)*count > 1_000_000:
+        raise MemoryError("Auto BoR shadow surface exceeds one million facets at the requested tolerance. Supply a reviewed surface mesh or use a smaller study with justified geometry tolerances.")
+    phi = np.arange(count)*(2*math.pi/count)
+    ring = np.stack((profile[:, 0, None]*np.cos(phi), profile[:, 0, None]*np.sin(phi), np.broadcast_to(profile[:, 1, None], (len(profile), count))), axis=-1)
+    a, b = ring[:-1], ring[1:]
+    an, bn = np.roll(a, -1, axis=1), np.roll(b, -1, axis=1)
+    triangles = np.stack((np.stack((a, b, bn), axis=-2), np.stack((a, bn, an), axis=-2)), axis=2).reshape(-1, 3, 3)
+    valid = np.linalg.norm(np.cross(triangles[:, 1]-triangles[:, 0], triangles[:, 2]-triangles[:, 0]), axis=1) > 0
+    return triangles[valid], {"azimuth_sector_count": count, "maximum_radial_sag_m": radius*(1-math.cos(math.pi/count)), "source": "authoritative embedded BoR profile"}
+
+
 def prepare_feature_assembly(
     request: FeatureAssemblyRequest,
     *,
@@ -4215,15 +4345,15 @@ def prepare_feature_assembly(
     )
     features_only_output = Path(feature_only_output_path(str(output)))
     _reject_output_aliases(request, base=base, output=output)
-    if request.line_locations_csv is None and request.point_locations_csv is None:
-        raise ValueError(
-            "Configure line_locations_csv or point_locations_csv."
-        )
+    active_features = bool(
+        (request.point_locations_csv is not None and request.enabled_point_placement_ids != ())
+        or (request.line_locations_csv is not None and request.enabled_line_ids != ())
+    )
     coordinate_scale = _required_unit_scale(
         request.coordinate_units,
         label="coordinate_units",
         used_for="a point or line placement CSV",
-    )
+    ) if request.point_locations_csv is not None or request.line_locations_csv is not None else 1.0
     surface_scale: Optional[float] = None
     if request.surface_mesh is not None:
         surface_scale = _required_unit_scale(
@@ -4304,6 +4434,16 @@ def prepare_feature_assembly(
     if cancel_check is not None and cancel_check():
         raise InterruptedError("Feature placement validation cancelled.")
 
+    # NPZ access is lazy: read only the small axes before admitting the full
+    # coherent response and its metadata. The complete feature/mesh estimate
+    # is repeated at execution after the prepared geometry is known.
+    with np.load(str(base), allow_pickle=False) as archive:
+        capacity_grid = {
+            "frequencies_ghz": archive["frequencies"],
+            "azimuths_deg": archive["azimuths"],
+            "elevations_deg": archive["elevations"],
+        }
+    preflight_feature_assembly_capacity(str(base), str(output), radar_grid=capacity_grid)
     base_payload = _load_grim(str(base))
     body_mesh_certification = None
     if request.require_body_mesh_certification:
@@ -4377,6 +4517,20 @@ def prepare_feature_assembly(
             allow_legacy_metadata=request.allow_legacy_base_metadata,
         )
 
+    for request_key, grid_key in (("study_frequencies_ghz", "frequencies_ghz"),
+                                  ("study_azimuths_deg", "azimuths_deg"),
+                                  ("study_elevations_deg", "elevations_deg")):
+        selected = getattr(request, request_key)
+        if selected is not None:
+            grid[grid_key] = selected
+    # Validation uses the exact requested solve scope. The original clean-body
+    # file/hash still anchors registration and source provenance.
+    _subset_payload, grid = exact_assembly_subset({key: base_payload[key] for key in ("frequencies", "azimuths", "elevations")}, grid)
+    del _subset_payload
+
+    skin_limit, wavelength = compute_skin_limit(grid["frequencies_ghz"], skin_tol_m=request.skin_tol_m, skin_phase_tol_deg=request.skin_phase_tol_deg)
+    normal_tolerance = validate_normal_tolerance(request.normal_tol_deg)
+    auto_shadow_report = None
     surface: Optional[TriangleSurface] = None
     surface_triangles_cad_m: Optional[np.ndarray] = None
     mesh_topology_report = None
@@ -4397,14 +4551,20 @@ def prepare_feature_assembly(
         # report as the feature instances. This is diagnostic rather than an
         # automatic repair: an intentional open placement patch remains usable.
         mesh_topology_report = surface.topology_report
-    elif embedded_grid is None:
+    elif embedded_grid is not None and active_features and request.shadow:
+        triangles, auto_shadow_report = bor_shadow_triangles(profile, max_sag_m=skin_limit/4, normal_tolerance_deg=max(normal_tolerance/2, 1e-6))
+        surface = TriangleSurface(triangles)
+        surface_triangles_cad_m = triangles @ CAD2AXIS
+        surface_triangles_cad_m.setflags(write=False)
+        mesh_topology_report = surface.topology_report
+    elif embedded_grid is None and active_features:
         raise ValueError(
             "A non-BoR base requires surface_mesh=.facet or .stl for skin "
             "validation and outward normals."
         )
-    if request.shadow and surface is None:
+    if request.shadow and active_features and surface is None:
         raise ValueError("shadow=True requires surface_mesh.")
-    if surface is not None and not request.shadow:
+    if surface is not None and active_features and not request.shadow:
         pre_validation_warnings.append(
             "Geometric body shadowing is OFF while a body mesh is selected. "
             "Hidden point and line features are not occlusion-tested and can "
@@ -4418,12 +4578,6 @@ def prepare_feature_assembly(
     if progress_callback is not None:
         progress_callback(35, 100, "Checking body surface and topology")
 
-    skin_limit, wavelength = compute_skin_limit(
-        grid["frequencies_ghz"],
-        skin_tol_m=request.skin_tol_m,
-        skin_phase_tol_deg=request.skin_phase_tol_deg,
-    )
-    normal_tolerance = validate_normal_tolerance(request.normal_tol_deg)
     if embedded_grid is not None:
         if surface is None:
             surface_geometry_contract = {
@@ -4439,6 +4593,9 @@ def prepare_feature_assembly(
                 cancel_check=cancel_check,
             )
             surface_geometry_contract["surface_mesh"] = str(surface_path)
+            if auto_shadow_report is not None:
+                surface_geometry_contract["surface_mesh"] = None
+                surface_geometry_contract["generated_shadow_surface"] = auto_shadow_report
     point_preview_lists: dict[str, list[np.ndarray]] = {}
     point_preview_normals: dict[str, list[np.ndarray]] = {}
     point_preview_roll_references: dict[str, list[np.ndarray]] = {}
@@ -4488,20 +4645,21 @@ def prepare_feature_assembly(
             str(record["placement_id"])
         )
 
-    if not lines and not points:
-        raise ValueError(
-            "No enabled spatial features remain. Enable at least one point "
-            "placement or line path before validating or building."
-        )
-    if embedded_grid is None:
+    if embedded_grid is None and (lines or points):
         surface_digest = prepared_source_sha256[str(surface_path)]
-        binding, binding_path, binding_digest = load_surface_binding(
-            base,
-            surface_path,
-            base_grim_sha256=base_sha256,
-            surface_sha256=surface_digest,
-            surface_units=request.surface_units,
-        )
+        try:
+            binding, binding_path, binding_digest = load_surface_binding(
+                base,
+                surface_path,
+                base_grim_sha256=base_sha256,
+                surface_sha256=surface_digest,
+                surface_units=request.surface_units,
+            )
+        except (ValueError, TypeError, KeyError, OSError) as exc:
+            if request.require_feature_manifests:
+                raise
+            binding, binding_path, binding_digest = None, surface_binding_path(surface_path), None
+            pre_validation_warnings.append(f"Surface metadata advisory: {exc}; registration is assumed from the selected body and mesh.")
         if binding is None:
             message = (
                 f"{base.name}: external body fields do not embed geometry, so "
@@ -4516,16 +4674,16 @@ def prepare_feature_assembly(
                 "surface_mesh": str(surface_path),
                 "expected_sidecar": str(binding_path),
             }
-            pre_absent_paths.add(str(binding_path))
             if request.require_feature_manifests:
                 raise ValueError(message)
-            pre_validation_warnings.append(message)
+            pre_validation_warnings.append("Surface metadata advisory: selected body and mesh are assumed to share units, frame, and origin; no registration certificate is required.")
         else:
-            prepared_source_sha256[str(binding_path)] = str(binding_digest)
-            prepared_input_sources["surface_binding"] = {
-                "path": str(binding_path),
-                "sha256": str(binding_digest),
-            }
+            if request.require_feature_manifests:
+                prepared_source_sha256[str(binding_path)] = str(binding_digest)
+                prepared_input_sources["surface_binding"] = {
+                    "path": str(binding_path),
+                    "sha256": str(binding_digest),
+                }
             surface_geometry_contract = {
                 **binding,
                 "status": "reviewed_exact_file_binding",
@@ -4547,17 +4705,21 @@ def prepare_feature_assembly(
             radar_grid=grid,
             require_manifests=bool(request.require_feature_manifests),
             cancel_check=cancel_check,
+            host_material=request.host_material,
+            host_stack_id=request.host_stack_id,
+            host_minimum_radius_m=request.host_minimum_radius_m,
         )
     )
     validation_warnings = pre_validation_warnings + list(contract_warnings)
+    validation_warnings.extend(assembly_sampling_warnings(grid, lines, points))
     manifest_absent_paths.update(pre_absent_paths)
     if progress_callback is not None:
         progress_callback(88, 100, "Checking feature-library applicability")
     if coherent_base_missing_metadata:
         validation_warnings.append(
-            "Clean-body coherent metadata is missing "
-            f"{list(coherent_base_missing_metadata)}; the recorded Legacy "
-            "compatibility declaration supplied those semantics."
+            "Metadata advisory: clean-body convention fields are unspecified: "
+            f"{list(coherent_base_missing_metadata)}; the selected body role "
+            "supplies the Assembly frame. No field conversion was applied."
         )
     grid_missing_metadata = list(
         base_grid_contract.get("legacy_missing_metadata", ())
@@ -4565,8 +4727,8 @@ def prepare_feature_assembly(
     if grid_missing_metadata:
         validation_warnings.append(
             "Clean-body angular/grid metadata is missing "
-            f"{grid_missing_metadata}; the recorded Legacy compatibility "
-            "declaration supplied those semantics."
+            f"{grid_missing_metadata}; the selected body role supplies those "
+            "semantics as a recorded assumption."
         )
     if mesh_topology_report is not None:
         strict_mesh_errors = []
@@ -4619,11 +4781,11 @@ def prepare_feature_assembly(
     normal_fn = (
         surface.normal
         if surface is not None
-        else surface_of_revolution_normal(profile)
+        else (surface_of_revolution_normal(profile) if profile is not None else None)
     )
     occluder = None
     maximum_shadow_registration_offset = 0.0
-    if request.shadow:
+    if request.shadow and active_features:
         occluder = Occluder(surface.triangles, bias=request.shadow_bias_m)
         maximum_shadow_registration_offset = max(
             [float(record.get("max_skin_offset_m", 0.0)) for record in line_records]
@@ -4720,6 +4882,12 @@ def prepare_feature_assembly(
     )
     provenance = {
         "request_schema": FEATURE_ASSEMBLY_REQUEST_SCHEMA,
+        "study_grid": {key: np.asarray(grid[key]).tolist() for key in ("frequencies_ghz", "azimuths_deg", "elevations_deg")},
+        "installed_host": {
+            "material": request.host_material, "stack_id": request.host_stack_id,
+            "minimum_principal_radius_m": request.host_minimum_radius_m,
+            "source": "user-declared installation region; not inferred from body RCS",
+        },
         "coordinate_units": request.coordinate_units,
         "surface_mesh": None if surface_path is None else str(surface_path),
         "surface_units": (
@@ -4763,10 +4931,13 @@ def prepare_feature_assembly(
         "legacy_base_metadata_allowed": bool(
             request.allow_legacy_base_metadata
         ),
+        "metadata_policy": "advisory" if request.allow_legacy_base_metadata and not request.require_feature_manifests else "strict_opt_in",
+        "base_metadata_advisories": json.loads(str(validated_base_payload.get("metadata_advisories_json", "[]"))),
+        "feature_field_assumptions": "Selected point/line datasets are installed-minus-clean local fields in the documented placement frames. No conversion is inferred from optional solver annotations.",
         "feature_library_manifest_policy": (
             "required_validated"
             if request.require_feature_manifests
-            else "legacy_warn"
+            else "advisory"
         ),
         "body_mesh_certification_policy": (
             "required_validated"

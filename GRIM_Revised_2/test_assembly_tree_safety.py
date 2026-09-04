@@ -903,7 +903,7 @@ class AssemblyTreeSafetyTests(unittest.TestCase):
             assumption["missing_metadata_input_indices_1_based"], {}
         )
 
-    def test_explicit_coherent_convention_conflict_still_blocks(self):
+    def test_explicit_coherent_convention_conflict_is_advisory(self):
         left_extra = _coherent_extra()
         right_extra = _coherent_extra(time_convention="exp(-jwt)")
         _tree, root, _leaves = self._root_with(
@@ -911,8 +911,10 @@ class AssemblyTreeSafetyTests(unittest.TestCase):
             ("right", _grid(2.0, extra=right_extra)),
         )
 
-        with self.assertRaisesRegex(ValueError, "matching time conventions"):
-            build_assembly_grid(root, axis_mode="strict")
+        result, _history = build_assembly_grid(root, axis_mode="strict")
+        self.assertAlmostEqual(float(result.rcs_power.item()), 9.0)
+        self.assertIn("time_convention", result.extra["metadata_advisories_json"])
+        self.assertNotIn("time_convention", result.extra)
 
     def test_interpolation_is_refused_when_any_field_input_is_present(self):
         _tree, root, _leaves = self._root_with(

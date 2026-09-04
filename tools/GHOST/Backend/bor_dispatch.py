@@ -289,7 +289,9 @@ def _element_count(n_prop: 'int', prim_len: 'float', lam_target: 'float') -> 'in
     if n_prop > 0:
         return max(1, n_prop)
     n_wave = abs(n_prop) if n_prop < 0 else DEFAULT_ELEMENTS_PER_WAVELENGTH
-    target = max(lam_target / max(1, n_wave), prim_len / 2000.0)
+    target = lam_target / max(1, n_wave)
+    if not math.isfinite(target) or target <= 0.0:
+        raise ValueError("The controlling mesh wavelength must be positive and finite.")
     return max(1, int(math.ceil(prim_len / target)))
 
 
@@ -780,6 +782,11 @@ def estimate_bor_resources(
             estimated_assembly = "tables"
             estimated_precision = "single" if use_single else "double"
 
+    if kind in ('conductor', 'dielectric') and estimated_assembly == 'streaming':
+        auxiliary_estimate = _estimate_junction_auxiliary_gb(surface_layout, mode_cap)
+        assembly_peak_gb += auxiliary_estimate['peak_gb']
+        persistent_gb += auxiliary_estimate['retained_gb']
+
     active_modes = min(effective_workers, mode_cap + 1)
     # Use the exact same dense-work reservation and effective outer-mode
     # concurrency as the runtime gate.  Keeping a second scheduler planner can
@@ -1196,26 +1203,16 @@ def _estimate_junction_auxiliary_gb(surface_layout, mode_cap: 'int') -> 'Dict[st
         )
         near_workspace = max(near_workspace, 128.0e6)
 
-    # A graded shared-endpoint pair retains 260 quadrature samples.  The
-    # 8*(nt+ns) stencil is deliberately wider than the normal near_factor=2
-    # band and is capped by the exact Cartesian pair count.
-    graded_points = 260
+    # Cross interactions retain two families of four 2x2 modal blocks;
+    # quadrature samples are contracted and released in bounded tiles.
     for test_index, (test_elements, _test_conductor) in enumerate(surface_layout):
         for source_index, (source_elements, _source_conductor) in enumerate(surface_layout):
             if test_index == source_index:
                 continue
-            nt = max(1, int(test_elements))
-            ns = max(1, int(source_elements))
+            nt, ns = max(1, int(test_elements)), max(1, int(source_elements))
             pair_count = min(nt * ns, 8 * (nt + ns))
-            pair_complex = (
-                graded_points
-                * ((modes + 2) + 4 * signed_modes)
-                * complex_bytes
-            )
-            near_bytes += pair_count * (
-                pair_complex + 16.0 * graded_points * 8.0
-            )
-            near_workspace = max(near_workspace, 4.0 * pair_complex)
+            near_bytes += pair_count * 2 * 4 * signed_modes * 4 * complex_bytes
+            near_workspace = max(near_workspace, 128.0e6)
 
     retained_bytes = 1.10 * (projection_bytes + near_bytes)
     return {
@@ -1809,6 +1806,7 @@ def solve_monostatic_rcs_bor(
             "stream_mode_block": out.get("stream_mode_block"),
             "stream_sweeps": out.get("stream_sweeps"),
             "stream_sampling_backend": out.get("stream_sampling_backend"),
+            "near_quadrature": out.get("near_quadrature"),
             "mesh_elements_total": int(total_mesh_elements),
             "mesh_surface_count": int(len(surface_layout)),
             "mesh_elements_by_surface": [

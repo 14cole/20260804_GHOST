@@ -567,6 +567,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "gui_coherent_subtraction.grim"
             payload = {
+                **feature_sum.point_pattern_convention_metadata(),
                 "azimuths": source["azimuths"],
                 "elevations": source["elevations"],
                 "frequencies": source["frequencies"],
@@ -632,17 +633,14 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             )
             np.testing.assert_array_equal(diagonal.amplitude[..., 2], 0.0)
 
-            # GUI-derived grids can carry stale source semantics. The explicit
-            # feature declaration supersedes those strings.
+            # An origin annotation is advisory; no numerical rephasing occurs.
             payload["phase_reference"] = np.asarray("wrong origin")
             with path.open("wb") as stream:
                 np.savez(stream, **payload)
-            stale_metadata = feature_sum.prepare_point_pattern(
-                str(path), declared_coherent_delta=True
-            )
-            self.assertEqual(len(stale_metadata.azimuths), 3601)
+            advisory = feature_sum.prepare_point_pattern(str(path), declared_coherent_delta=True)
+            np.testing.assert_array_equal(advisory.amplitude, prepared.amplitude)
 
-            payload.pop("phase_reference")
+            payload["phase_reference"] = source["phase_reference"]
             payload["azimuths"] = source["azimuths"][:-1]
             for key in ("rcs_power", "rcs_phase"):
                 payload[key] = payload[key][:-1]
@@ -653,7 +651,7 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                     str(path), declared_coherent_delta=True
                 )
 
-    def test_declared_gui_line_delta_needs_no_semantic_metadata(self):
+    def test_declared_gui_line_delta_preserves_physical_semantic_metadata(self):
         frequency = 2.0
         angles = np.asarray([60.0, 90.0, 120.0])
         amplitudes = np.empty((3, 1, 1, 2), dtype=np.complex128)
@@ -667,6 +665,10 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "gui_2d_subtraction.grim"
             payload = {
+                "phase_reference": feature_sum.PHYSICAL_2D_PHASE_REFERENCE,
+                "amplitude_convention": feature_sum.PHYSICAL_2D_AMPLITUDE_CONVENTION,
+                "complex_field_domain": feature_sum.PHYSICAL_2D_FIELD_DOMAIN,
+                "amplitude_version": 2,
                 "azimuths": angles,
                 "elevations": np.asarray([0.0]),
                 "frequencies": np.asarray([frequency]),
@@ -707,12 +709,12 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             payload["phase_reference"] = np.asarray("wrong origin")
             with path.open("wb") as stream:
                 np.savez(stream, **payload)
-            stale_metadata = feature_sum.load_seam_from_grim(
-                str(path), frequency, declared_coherent_delta=True
-            )
-            np.testing.assert_allclose(
-                stale_metadata.dA_te, positive.dA_te
-            )
+            advisory = feature_sum.load_seam_from_grim(str(path), frequency, declared_coherent_delta=True)
+            np.testing.assert_array_equal(advisory.dA_te, positive.dA_te)
+            np.testing.assert_array_equal(advisory.dA_tm, positive.dA_tm)
+            payload["phase_reference"] = feature_sum.PHYSICAL_2D_PHASE_REFERENCE
+            with path.open("wb") as stream:
+                np.savez(stream, **payload)
 
             placement = {
                 "delta": str(path), "perimeter": np.zeros((1, 2, 3)),
@@ -1176,20 +1178,13 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                 atol=2.0e-14,
             )
 
-            # A clean base can be reused for independent trade-study builds,
-            # but a body-plus-features result must not become the next base.
-            # That sequential workflow obscures cross-batch coupling and can
-            # make downstream tree combinations count the body twice.
-            with self.assertRaisesRegex(
-                ValueError, "cannot add another batch to a feature-bearing base"
-            ):
-                feature_sum.add_features_to_monostatic_grim(
-                    str(point_a_total), str(sequential), points=[point_b]
-                )
-            self.assertFalse(sequential.exists())
-            self.assertFalse(
-                Path(feature_sum.feature_only_output_path(str(sequential))).exists()
+            # Existing Assembly output remains usable. The new batch adds
+            # only B, and retains A's history for duplicate placement checks.
+            feature_sum.add_features_to_monostatic_grim(
+                str(point_a_total), str(sequential), points=[point_b]
             )
+            sequential_field = feature_sum._load_grim(str(sequential))["_amp"]
+            np.testing.assert_allclose(sequential_field, direct_field, rtol=2e-14, atol=2e-14)
 
     def test_dispatch_builds_each_frequency_on_its_own_mesh(self):
         snapshot = _pec_sphere_snapshot(explicit_elements=-20)

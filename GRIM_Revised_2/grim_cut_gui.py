@@ -1518,9 +1518,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.feature_assembly_panel.feature_instance_selected.connect(
             self.assembly_workspace.focus_feature_instance
         )
+        self.assembly_workspace.feature_instance_picked.connect(
+            self.feature_assembly_panel.select_feature_instance
+        )
         self.feature_assembly_panel.feature_built.connect(
             self._on_feature_file_built
         )
+        self.feature_assembly_panel.comparison_ready.connect(self.assembly_workspace.response_comparison.set_outputs)
         self.feature_assembly_panel.build_failed.connect(
             self.status.showMessage
         )
@@ -2908,6 +2912,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API name
         """Keep the unified app alive while background physics work runs."""
+        if not self.assembly_workspace.response_comparison.can_close():
+            self.status.showMessage("Cancelling response comparison; close again after it stops.")
+            event.ignore()
+            return
         if self._background_job_active() or bool(
             getattr(self, "_pending_import_batches", ())
         ):

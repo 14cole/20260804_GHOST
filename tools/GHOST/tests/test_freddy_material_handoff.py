@@ -74,6 +74,22 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
         return geometry
 
     @mock.patch("geometry_tab.QMessageBox.information")
+    def test_actual_headerless_freddy_exports_attach_to_geometry(self, _information):
+        freddy = Path(__file__).resolve().parents[2]/"FREDDY"
+        if str(freddy) not in sys.path:
+            sys.path.insert(0, str(freddy))
+        from ibc.io import write_output, write_material_table
+        from ibc.compute import MaterialTable
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._saved_geometry(root)
+            ibc, medium = root/"coating.csv", root/"dielectric.csv"
+            write_output(ibc, [(1., 20., -3.), (2., 30., 4.)], False)
+            write_material_table(medium, MaterialTable([1., 2.], [2-.1j, 3-.2j], [1+0j, 1+0j]), False)
+            self.assertTrue(self.tab.attach_material_artifact("ibc", str(ibc)))
+            self.assertTrue(self.tab.attach_material_artifact("material", str(medium)))
+
+    @mock.patch("geometry_tab.QMessageBox.information")
     def test_nominal_ibc_is_copied_and_added_to_ibc_table(
         self, _information: mock.Mock
     ) -> None:

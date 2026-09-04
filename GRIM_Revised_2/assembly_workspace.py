@@ -1870,6 +1870,7 @@ if GUI_AVAILABLE:
         feature_build_requested = Signal(object)
         feature_built = Signal(str, object, str)
         feature_build_failed = Signal(str)
+        feature_instance_picked = Signal(str, str)
 
         def __init__(
             self,
@@ -1893,6 +1894,8 @@ if GUI_AVAILABLE:
             self._tree_preview_removing_signal = None
             self._feature_preview_group_ids: set[str] = set()
             self._feature_instance_geometry: dict[tuple[str, str], np.ndarray] = {}
+            self._feature_instance_groups = {}
+            self.scene_canvas.mpl_connect("button_press_event", self._pick_feature)
             self._triangle_detail_name = "Balanced"
             self._body_render_mode = "Solid"
             self._body_opacity = 0.75
@@ -2114,7 +2117,13 @@ if GUI_AVAILABLE:
             viewer = QWidget(self)
             viewer_layout = QVBoxLayout(viewer)
             viewer_layout.setContentsMargins(0, 0, 0, 0)
-            viewer_layout.addWidget(self.scene_canvas, 1)
+            from assembly_response_comparison import ResponseComparison
+            self.viewer_tabs = QTabWidget(viewer)
+            self.viewer_tabs.addTab(self.scene_canvas, "3-D placement")
+            self.response_comparison = ResponseComparison(self)
+            self.viewer_tabs.addTab(self.response_comparison, "Response comparison")
+            self.response_comparison.ready.connect(lambda: self.viewer_tabs.setCurrentWidget(self.response_comparison))
+            viewer_layout.addWidget(self.viewer_tabs, 1)
             viewer_layout.addWidget(self.lbl_status)
             splitter.addWidget(viewer)
             splitter.setStretchFactor(0, 0)
@@ -2479,6 +2488,7 @@ if GUI_AVAILABLE:
                     self._pending_visibility.pop(group_id, None)
                 self._feature_preview_group_ids.clear()
                 self._feature_instance_geometry.clear()
+                self._feature_instance_groups.clear()
                 self.scene_canvas.set_preview_stage("none")
             finally:
                 self.scene_canvas.end_scene_updates()
@@ -2730,6 +2740,7 @@ if GUI_AVAILABLE:
                         for placement_id, location in zip(
                             point_placement_ids[dataset_id], locations
                         ):
+                            self._feature_instance_groups[("point", str(placement_id))] = group_id
                             self._feature_instance_geometry[
                                 ("point", str(placement_id))
                             ] = np.array(location, dtype=float, copy=True)
@@ -2785,6 +2796,7 @@ if GUI_AVAILABLE:
                         orientation_length_m=vector_length_m,
                     )
                     for line_id in ordered_line_ids:
+                        self._feature_instance_groups[("line", str(line_id))] = group_id
                         self._feature_instance_geometry[
                             ("line", str(line_id))
                         ] = np.array(
@@ -2942,6 +2954,45 @@ if GUI_AVAILABLE:
 
         def fit_visible(self) -> None:
             self.scene_canvas.fit_visible()
+
+        def closeEvent(self, event) -> None:
+            if not self.response_comparison.can_close():
+                event.ignore()
+                return
+            if getattr(self.assembly_tree_panel, "_build_thread", None) is not None:
+                self.assembly_tree_panel._build_cancel.set()
+                event.ignore()
+                return
+            super().closeEvent(event)
+
+        def _pick_feature(self, event) -> None:
+            """Double-click selects the closest projected visible feature."""
+            if not event.dblclick or event.button != 1 or event.inaxes is not self.scene_canvas.axes:
+                return
+            from mpl_toolkits.mplot3d import proj3d
+            axes = self.scene_canvas.axes
+            cursor = np.asarray([event.x, event.y], float)
+            best, best_distance = None, 12.0
+            matrix = axes.get_proj()
+            for identity, geometry in self._feature_instance_geometry.items():
+                group_id = self._feature_instance_groups.get(identity)
+                if group_id not in self.scene_model.group_ids or not self.scene_model.group(group_id).visible:
+                    continue
+                points = np.asarray(geometry, float).reshape(-1, 3)
+                x, y, _ = proj3d.proj_transform(points[:, 0], points[:, 1], points[:, 2], matrix)
+                pixels = axes.transData.transform(np.column_stack((x, y)))
+                if identity[0] == "line" and len(pixels) > 1:
+                    starts, edges = pixels[:-1], np.diff(pixels, axis=0)
+                    norm2 = np.sum(edges**2, axis=1)
+                    t = np.clip(np.sum((cursor-starts)*edges, axis=1)/np.maximum(norm2, 1e-20), 0, 1)
+                    distance = float(np.min(np.linalg.norm(starts+t[:, None]*edges-cursor, axis=1)))
+                else:
+                    distance = float(np.min(np.linalg.norm(pixels-cursor, axis=1)))
+                if distance < best_distance:
+                    best, best_distance = identity, distance
+            if best is not None:
+                self.focus_feature_instance(*best)
+                self.feature_instance_picked.emit(*best)
 
         def focus_feature_instance(self, kind: str, instance_id: str) -> bool:
             """Highlight and frame one validated QA instance in the 3-D view."""

@@ -802,14 +802,12 @@ class CoreOperationTests(unittest.TestCase):
         self.assertEqual(adopted._phase_reference(), "")
 
         conflicting_known = _grid(extra={"phase_reference": "origin B"})
-        with self.assertRaisesRegex(ValueError, "matching phase reference"):
-            right.coherent_add_many(
-                known,
-                conflicting_known,
-                metadata_attested=True,
-            )
+        combined = right.coherent_add_many(known, conflicting_known)
+        np.testing.assert_allclose(combined.rcs_power, 9.0)
+        self.assertNotIn("phase_reference", combined.extra)
+        self.assertIn("origin B", combined.extra["coherent_source_conventions_json"])
 
-    def test_explicit_coherent_metadata_mismatch_is_not_overridable(self):
+    def test_explicit_coherent_metadata_mismatch_is_advisory(self):
         base_units = {
             "azimuth": "deg",
             "elevation": "deg",
@@ -848,8 +846,11 @@ class CoreOperationTests(unittest.TestCase):
         )
         for other in mismatch_cases:
             with self.subTest(other=other.units.get("polarization_basis")):
-                with self.assertRaisesRegex(ValueError, "requires matching"):
-                    left.coherent_add(other, metadata_attested=True)
+                result = left.coherent_subtract(other)
+                np.testing.assert_array_equal(result.rcs_power, 0.0)
+                record = json.loads(result.extra["coherent_metadata_assumption_json"])
+                self.assertTrue(record["advisories"])
+                self.assertIn("no phase or amplitude conversion", record["metadata_policy"])
 
     def test_join_first_does_not_pair_kept_power_with_conflicting_phase(self):
         first = _grid(1.0, phase=np.nan)

@@ -391,16 +391,17 @@ class HeadlessPlacementPolicyTests(unittest.TestCase):
                 result = place_features.main()
         return result, prepare, execute
 
-    def test_default_profile_is_strict_production_without_host_ids(self):
-        self.assertEqual(place_features.VALIDATION_PROFILE, "production")
-        _result, prepare, execute = self._run_main()
+    def test_default_profile_is_advisory_without_host_ids(self):
+        self.assertEqual(place_features.VALIDATION_PROFILE, "advisory")
+        _result, prepare, execute = self._run_main(profile="advisory", warnings=("missing metadata",))
         request = prepare.call_args.args[0]
-        self.assertFalse(request.allow_legacy_base_metadata)
-        self.assertTrue(request.require_feature_manifests)
-        self.assertTrue(request.require_body_mesh_certification)
+        self.assertTrue(request.allow_legacy_base_metadata)
+        self.assertFalse(request.require_feature_manifests)
+        self.assertFalse(request.require_body_mesh_certification)
         self.assertFalse(hasattr(request, "expected_host_material"))
         self.assertFalse(hasattr(request, "expected_host_materials"))
         execute.assert_called_once()
+        self.assertIsNone(execute.call_args.kwargs["acknowledged_plan_sha256"])
 
     def test_legacy_profile_is_explicit(self):
         _result, prepare, _execute = self._run_main(profile="legacy")

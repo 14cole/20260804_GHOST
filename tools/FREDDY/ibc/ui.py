@@ -372,15 +372,15 @@ ABOUT_TEXT = (
     "Use plane-wave TE/TM labels. Legacy HH=TE and VV=TM aliases follow the\n"
     "usual vertical plane-of-incidence convention, but the companion 2D RCS\n"
     "elevation-cut solver uses different HH/VV aliases.\n\n"
-    "Loss metric definitions:\n"
-    "loss_db = 20*log10(|x|)\n"
-    "metal_loss_db uses x = Gamma_metal\n"
-    "air_loss_db uses x = Gamma_air\n"
-    "insertion_loss_db uses x = S21\n\n"
+    "Coefficient metric definitions:\n"
+    "coefficient_db = 20*log10(|x|)\n"
+    "PEC-backed reflection uses x = Gamma_metal\n"
+    "air-backed reflection uses x = Gamma_air\n"
+    "transmission uses x = S21\n\n"
     "Sign interpretation:\n"
-    "negative loss_db => |x| < 1 (attenuation)\n"
-    "zero loss_db => |x| = 1\n"
-    "positive loss_db => |x| > 1 (effective gain/non-passive)\n\n"
+    "negative coefficient dB => |x| < 1 (attenuation)\n"
+    "zero coefficient dB => |x| = 1\n"
+    "positive coefficient dB => |x| > 1 (effective gain/non-passive)\n\n"
     "Absorption metric definitions:\n"
     "metal_absorption_db = 10*log10(1 - |Gamma_metal|^2)\n"
     "air_absorption_db = 10*log10(1 - |Gamma_air|^2 - |S21|^2)\n\n"
@@ -389,6 +389,64 @@ ABOUT_TEXT = (
     "Air absorption: power absorbed by a free-standing\n"
     "slab in dB (accounts for both reflection and transmission)."
 )
+
+MATERIAL_GUIDE_HTML = """
+<h2>FREDDY material and result guide</h2>
+<p>FREDDY models an infinite planar stack. A material CSV supplies relative
+permittivity and permeability versus frequency using the
+<b>e<sup>+jωt</sup></b> convention. Passive loss therefore has a
+<b>negative imaginary part</b>.</p>
+
+<h3>Material variables</h3>
+<table cellspacing="6" cellpadding="4">
+<tr><th align="left">Variable</th><th align="left">Physical meaning and typical effect</th></tr>
+<tr><td><b>ε′ — eps real</b></td><td>Electric energy storage. Increasing ε′ usually
+shortens wavelength inside the material, increases electrical thickness, and
+moves interference or quarter-wave features to lower frequency. It also changes
+wave impedance and interface reflection.</td></tr>
+<tr><td><b>ε″ — eps imaginary</b></td><td>Electric/dielectric loss. In FREDDY a passive
+material uses ε″ ≤ 0. A more-negative value generally increases attenuation and
+heat produced by electric-field loss, but excessive mismatch can increase front-face reflection.</td></tr>
+<tr><td><b>μ′ — mu real</b></td><td>Magnetic energy storage. Increasing μ′ changes
+both wavelength and wave impedance and can enable a thinner absorber, especially
+when ε and μ are balanced for impedance matching.</td></tr>
+<tr><td><b>μ″ — mu imaginary</b></td><td>Magnetic loss. In FREDDY a passive material
+uses μ″ ≤ 0. A more-negative value increases magnetic-field dissipation; its benefit
+depends on field placement and impedance match.</td></tr>
+<tr><td><b>Thickness</b></td><td>Sets propagation phase and attenuation distance.
+Small thickness changes can move a narrow absorption minimum substantially.</td></tr>
+<tr><td><b>Sheet resistance</b></td><td>Resistance in Ω/square for a zero-thickness
+resistive sheet. It is a shunt surface impedance; values near the applicable wave
+impedance can improve matching when combined with the correct spacing/backing.</td></tr>
+</table>
+
+<h3>How the values work together</h3>
+<p>The approximate normal-incidence material wave impedance is
+η = η<sub>0</sub>√(μ<sub>r</sub>/ε<sub>r</sub>), while refractive index is
+n = √(ε<sub>r</sub>μ<sub>r</sub>). Matching η toward free space reduces the first
+surface reflection; n and thickness determine phase; ε″ and μ″ dissipate energy.
+More loss alone does not guarantee lower reflection.</p>
+
+<h3>Result terminology</h3>
+<ul>
+<li><b>Reflection |Γ| (dB)</b> = 20 log<sub>10</sub>|Γ|. More-negative is less reflected field.</li>
+<li><b>Transmission |S21| (dB)</b> = 20 log<sub>10</sub>|S21|. More-negative is less transmitted field.</li>
+<li><b>Absorbed power (dB)</b> = 10 log<sub>10</sub>(absorbed fraction). 0 dB is 100% absorption.</li>
+<li><b>Resistance/reactance</b> are the real/imaginary parts of front-face input impedance in ohms.</li>
+</ul>
+
+<h3>Optimization quick start</h3>
+<ol>
+<li>Add or edit every bulk layer.</li>
+<li>Enter its <b>minimum thickness, maximum thickness, and thickness step</b>.</li>
+<li>For a resistive sheet, enter resistance minimum, maximum, and step; leave
+minimum/maximum blank to keep it fixed.</li>
+<li>Choose the frequency and angle target, then run Inverse Design. Use a fixed
+seed when you need an exactly repeatable comparison.</li>
+</ol>
+<p><b>Scope:</b> results are planar reflection/transmission properties, not finite-object RCS.
+Directional materials support measured principal axes only.</p>
+"""
 
 # --- GRIM blue/slate palette --------------------------------------------
 # The dark theme shares GRIM's exact application chrome colors. The light
@@ -483,16 +541,26 @@ DARK_THEME = {
 }
 
 HEATMAP_METRIC_OPTIONS = [
-    ("Metal backed loss (dB)", "metal_loss_db"),
-    ("Metal phase (deg)", "metal_phase_deg"),
-    ("Metal absorption (dB)", "metal_absorption_db"),
-    ("Air backed loss (dB)", "air_loss_db"),
-    ("Air phase (deg)", "air_phase_deg"),
-    ("Air absorption (dB)", "air_absorption_db"),
-    ("Insertion loss (dB)", "insertion_loss_db"),
-    ("Insertion phase (deg)", "insertion_phase_deg"),
+    ("PEC-backed reflection |Γ| (dB)", "metal_loss_db"),
+    ("PEC reflection phase (deg)", "metal_phase_deg"),
+    ("PEC absorbed power (dB)", "metal_absorption_db"),
+    ("Air-backed reflection |Γ| (dB)", "air_loss_db"),
+    ("Air reflection phase (deg)", "air_phase_deg"),
+    ("Air absorbed power (dB)", "air_absorption_db"),
+    ("Transmission |S21| (dB)", "insertion_loss_db"),
+    ("Transmission phase (deg)", "insertion_phase_deg"),
 ]
 HEATMAP_METRIC_KEYS = [key for _label, key in HEATMAP_METRIC_OPTIONS]
+METRIC_EXPORT_NAMES = {
+    "metal_loss_db": "pec_reflection_db",
+    "metal_phase_deg": "pec_reflection_phase_deg",
+    "metal_absorption_db": "pec_absorbed_power_db",
+    "air_loss_db": "air_reflection_db",
+    "air_phase_deg": "air_reflection_phase_deg",
+    "air_absorption_db": "air_absorbed_power_db",
+    "insertion_loss_db": "transmission_db",
+    "insertion_phase_deg": "transmission_phase_deg",
+}
 PHASE_METRIC_KEYS = {
     "metal_phase_deg",
     "air_phase_deg",
@@ -532,8 +600,8 @@ UNCERTAINTY_VIEW_OPTIONS = [
     ("Span (max-min)", "span"),
 ]
 INVERSE_SCORE_MODE_OPTIONS = (
-    "Worst-case mean metal loss (robust)",
-    "Average mean metal loss (robust)",
+    "Worst-corner mean PEC reflection |Γ| (dB)",
+    "Average-corner mean PEC reflection |Γ| (dB)",
 )
 MIX_RULE_LABEL_OPTIONS = tuple(MIX_RULE_LABELS[key] for key in MIX_RULES)
 # Material Mix predicts a single homogeneous effective layer. Its performance
@@ -704,14 +772,20 @@ class LayerDialog(QDialog):
         self.file_90deg_var = StringVar(init.file_90deg)
         self.pol_var = StringVar(str(init.polarization_deg))
         self.preset_var = StringVar("")
+        default_min = 0.5 * init.thickness_in if initial is None else None
+        default_max = 1.5 * init.thickness_in if initial is None else None
+        default_step = init.thickness_in / 25.0 if initial is None else None
         self.inv_t_min_var = StringVar(
-            "" if init.inv_t_min_in is None else f"{init.inv_t_min_in:g}"
+            f"{(init.inv_t_min_in if init.inv_t_min_in is not None else default_min):g}"
+            if init.inv_t_min_in is not None or default_min is not None else ""
         )
         self.inv_t_max_var = StringVar(
-            "" if init.inv_t_max_in is None else f"{init.inv_t_max_in:g}"
+            f"{(init.inv_t_max_in if init.inv_t_max_in is not None else default_max):g}"
+            if init.inv_t_max_in is not None or default_max is not None else ""
         )
         self.inv_t_acc_var = StringVar(
-            "" if init.inv_t_accuracy_in is None else f"{init.inv_t_accuracy_in:g}"
+            f"{(init.inv_t_accuracy_in if init.inv_t_accuracy_in is not None else default_step):g}"
+            if init.inv_t_accuracy_in is not None or default_step is not None else ""
         )
 
         grid = QGridLayout()
@@ -767,27 +841,27 @@ class LayerDialog(QDialog):
         sep.setFrameShadow(QFrame.Sunken)
         grid.addWidget(sep, 6, 0, 1, 3)
         grid.addWidget(
-            QLabel("Inverse-design thickness range (required to include this layer in a search)"),
+            QLabel("Optimization range — choose the thicknesses FREDDY may manufacture/search"),
             7,
             0,
             1,
             3,
             Qt.AlignLeft,
         )
-        grid.addWidget(QLabel("t_min (in)"), 8, 0, Qt.AlignLeft)
+        grid.addWidget(QLabel("Minimum thickness (in)"), 8, 0, Qt.AlignLeft)
         tmin_edit = QLineEdit()
         bind_line_edit(self.inv_t_min_var, tmin_edit)
         grid.addWidget(tmin_edit, 8, 1)
-        grid.addWidget(QLabel("t_max (in)"), 9, 0, Qt.AlignLeft)
+        grid.addWidget(QLabel("Maximum thickness (in)"), 9, 0, Qt.AlignLeft)
         tmax_edit = QLineEdit()
         bind_line_edit(self.inv_t_max_var, tmax_edit)
         grid.addWidget(tmax_edit, 9, 1)
-        grid.addWidget(QLabel("t_accuracy (in)"), 10, 0, Qt.AlignLeft)
+        grid.addWidget(QLabel("Thickness step (in)"), 10, 0, Qt.AlignLeft)
         tacc_edit = QLineEdit()
         bind_line_edit(self.inv_t_acc_var, tacc_edit)
         tacc_edit.setToolTip(
-            "Snap searched thickness to this increment (e.g. 0.001 in). "
-            "Blank = continuous."
+            "Allowed manufacturing/search increment (for example 0.001 in). "
+            "A step makes reported candidates land on buildable thicknesses."
         )
         grid.addWidget(tacc_edit, 10, 1)
 
@@ -858,16 +932,16 @@ class LayerDialog(QDialog):
             inv_t_min_in = _parse_optional_thickness(self.inv_t_min_var.get(), "inv_t_min")
             inv_t_max_in = _parse_optional_thickness(self.inv_t_max_var.get(), "inv_t_max")
             inv_t_accuracy_in = _parse_optional_thickness(
-                self.inv_t_acc_var.get(), "inv_t_accuracy"
+                self.inv_t_acc_var.get(), "thickness step"
             )
             if (inv_t_min_in is None) != (inv_t_max_in is None):
-                raise ValueError("Set both inv_t_min and inv_t_max, or leave both blank.")
+                raise ValueError("Set both minimum and maximum thickness, or leave both blank.")
             if (
                 inv_t_min_in is not None
                 and inv_t_max_in is not None
                 and inv_t_max_in < inv_t_min_in
             ):
-                raise ValueError("inv_t_max must be >= inv_t_min.")
+                raise ValueError("Maximum thickness must be >= minimum thickness.")
 
             self.result = LayerConfig(
                 thickness_in=thickness_in,
@@ -908,14 +982,20 @@ class SheetDialog(QDialog):
         )
 
         self.rs_var = StringVar(f"{init.sheet_resistance:g}")
+        default_min = 0.5 * init.sheet_resistance if initial is None else None
+        default_max = 1.5 * init.sheet_resistance if initial is None else None
+        default_step = max(1.0, init.sheet_resistance / 50.0) if initial is None else None
         self.inv_rs_min_var = StringVar(
-            "" if init.inv_rs_min is None else f"{init.inv_rs_min:g}"
+            f"{(init.inv_rs_min if init.inv_rs_min is not None else default_min):g}"
+            if init.inv_rs_min is not None or default_min is not None else ""
         )
         self.inv_rs_max_var = StringVar(
-            "" if init.inv_rs_max is None else f"{init.inv_rs_max:g}"
+            f"{(init.inv_rs_max if init.inv_rs_max is not None else default_max):g}"
+            if init.inv_rs_max is not None or default_max is not None else ""
         )
         self.inv_rs_acc_var = StringVar(
-            "" if init.inv_rs_accuracy is None else f"{init.inv_rs_accuracy:g}"
+            f"{(init.inv_rs_accuracy if init.inv_rs_accuracy is not None else default_step):g}"
+            if init.inv_rs_accuracy is not None or default_step is not None else ""
         )
 
         grid = QGridLayout()
@@ -933,26 +1013,26 @@ class SheetDialog(QDialog):
         sep.setFrameShadow(QFrame.Sunken)
         grid.addWidget(sep, 1, 0, 1, 2)
         grid.addWidget(
-            QLabel("Inverse-design resistance range (optional; blank = keep fixed)"),
+            QLabel("Optimization range (leave minimum and maximum blank to keep fixed)"),
             2,
             0,
             1,
             2,
             Qt.AlignLeft,
         )
-        grid.addWidget(QLabel("R min (\u03a9/sq)"), 3, 0, Qt.AlignLeft)
+        grid.addWidget(QLabel("Minimum resistance (\u03a9/sq)"), 3, 0, Qt.AlignLeft)
         rmin_edit = QLineEdit()
         bind_line_edit(self.inv_rs_min_var, rmin_edit)
         grid.addWidget(rmin_edit, 3, 1)
-        grid.addWidget(QLabel("R max (\u03a9/sq)"), 4, 0, Qt.AlignLeft)
+        grid.addWidget(QLabel("Maximum resistance (\u03a9/sq)"), 4, 0, Qt.AlignLeft)
         rmax_edit = QLineEdit()
         bind_line_edit(self.inv_rs_max_var, rmax_edit)
         grid.addWidget(rmax_edit, 4, 1)
-        grid.addWidget(QLabel("R accuracy (\u03a9)"), 5, 0, Qt.AlignLeft)
+        grid.addWidget(QLabel("Resistance step (\u03a9)"), 5, 0, Qt.AlignLeft)
         racc_edit = QLineEdit()
         bind_line_edit(self.inv_rs_acc_var, racc_edit)
         racc_edit.setToolTip(
-            "Snap searched resistance to this increment (e.g. 1 ohm). Blank = continuous."
+            "Allowed manufacturing/search increment (for example 1 ohm)."
         )
         grid.addWidget(racc_edit, 5, 1)
         grid.setColumnStretch(1, 1)
@@ -973,7 +1053,7 @@ class SheetDialog(QDialog):
             inv_rs_min = _parse_optional_thickness(self.inv_rs_min_var.get(), "R min")
             inv_rs_max = _parse_optional_thickness(self.inv_rs_max_var.get(), "R max")
             inv_rs_accuracy = _parse_optional_thickness(
-                self.inv_rs_acc_var.get(), "R accuracy"
+                self.inv_rs_acc_var.get(), "resistance step"
             )
             if (inv_rs_min is None) != (inv_rs_max is None):
                 raise ValueError("Set both R min and R max, or leave both blank.")
@@ -1247,7 +1327,7 @@ class ImpedanceGui(QMainWindow):
         self.inv_unc_mu_pct_var = StringVar("5.0")
         self.inv_score_mode_var = StringVar(INVERSE_SCORE_MODE_OPTIONS[0])
         self.inv_refine_var = BooleanVar(True)
-        self.inv_seed_var = StringVar("")
+        self.inv_seed_var = StringVar("1")
         # Material Mix tab: predict effective properties from a volume recipe or
         # find bounded volume-fraction recipes for properties/planar performance.
         self.mix_components: list[dict] = []
@@ -1305,6 +1385,7 @@ class ImpedanceGui(QMainWindow):
         self.selected_x_idx: int | None = None
         self.selected_freq_idx: int | None = None
         self.inv_results_list: QListWidget | None = None
+        self.inv_parameter_summary_label: QLabel | None = None
         self.left_tabs = None
         self.mode_stack = None
         self.nav_group = None
@@ -1893,6 +1974,19 @@ class ImpedanceGui(QMainWindow):
         inv_layout = QVBoxLayout(inv_tab)
         _add_mode("Inverse Design", inv_tab)
 
+        inv_intro = QLabel(
+            "Set each search parameter by editing its layer: enter Minimum, "
+            "Maximum, and Step for thickness or sheet resistance. FREDDY then "
+            "samples only those buildable values. The summary below shows "
+            "exactly what will vary."
+        )
+        inv_intro.setWordWrap(True)
+        inv_layout.addWidget(inv_intro)
+        self.inv_parameter_summary_label = QLabel("No optimization parameters configured.")
+        self.inv_parameter_summary_label.setWordWrap(True)
+        self.inv_parameter_summary_label.setObjectName("PreviewLabel")
+        inv_layout.addWidget(self.inv_parameter_summary_label)
+
         self.inv_freq_target_frame = CollapsibleFrame("Frequency target", expanded=True)
         inv_layout.addWidget(self.inv_freq_target_frame)
         freq_body = QGridLayout(self.inv_freq_target_frame.body)
@@ -1931,18 +2025,25 @@ class ImpedanceGui(QMainWindow):
         angle_body.addWidget(make_combo(("TE", "TM"), self.inv_wave_pol_var, width=60), 0, 7, Qt.AlignLeft)
         angle_body.setColumnStretch(8, 1)
 
-        self.inv_search_frame = CollapsibleFrame("Monte Carlo search", expanded=False)
+        self.inv_search_frame = CollapsibleFrame("Monte Carlo search", expanded=True)
         inv_layout.addWidget(self.inv_search_frame)
         search_body = QGridLayout(self.inv_search_frame.body)
         search_body.addWidget(QLabel("Samples"), 0, 0, Qt.AlignLeft)
         search_body.addWidget(_entry(self.inv_max_evals_var, 8), 0, 1, Qt.AlignLeft)
-        search_body.addWidget(QLabel("Top N"), 0, 2, Qt.AlignLeft)
+        search_body.addWidget(QLabel("Keep best"), 0, 2, Qt.AlignLeft)
         search_body.addWidget(_entry(self.inv_top_n_var, 8), 0, 3, Qt.AlignLeft)
-        search_body.addWidget(QLabel("Seed"), 0, 4, Qt.AlignLeft)
+        search_body.addWidget(QLabel("Repeatable seed"), 0, 4, Qt.AlignLeft)
         search_body.addWidget(_entry(self.inv_seed_var, 10), 0, 5, Qt.AlignLeft)
         refine_check = QCheckBox("Refine top candidates (local search)")
         bind_check_box(self.inv_refine_var, refine_check)
         search_body.addWidget(refine_check, 1, 0, 1, 6, Qt.AlignLeft)
+        search_help = QLabel(
+            "Samples controls how many unique candidates are tried. The seed "
+            "makes reruns repeatable. Local refinement is optional; parameter "
+            "steps are still enforced on the final candidates."
+        )
+        search_help.setWordWrap(True)
+        search_body.addWidget(search_help, 2, 0, 1, 6)
         search_body.setColumnStretch(6, 1)
 
         self.inv_score_frame = CollapsibleFrame("Robust scoring", expanded=False)
@@ -2296,6 +2397,24 @@ class ImpedanceGui(QMainWindow):
             mix_source_provider=self._material_explorer_mix_sources,
         )
         _add_mode("Material Explorer", self.material_explorer)
+
+        # Keep the essential material definitions inside the workspace instead
+        # of hiding them only in a modal About dialog. This page is deliberately
+        # read-only and does not participate in project state.
+        about_tab = QScrollArea()
+        about_tab.setWidgetResizable(True)
+        about_content = QWidget()
+        about_layout = QVBoxLayout(about_content)
+        about_layout.setContentsMargins(18, 14, 18, 18)
+        about_text = QLabel(MATERIAL_GUIDE_HTML)
+        about_text.setTextFormat(Qt.RichText)
+        about_text.setWordWrap(True)
+        about_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        about_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        about_layout.addWidget(about_text)
+        about_layout.addStretch(1)
+        about_tab.setWidget(about_content)
+        _add_mode("About & Guide", about_tab)
 
         layers_group = QGroupBox("Layers (top to bottom)")
         self.layers_group = layers_group
@@ -2953,6 +3072,23 @@ class ImpedanceGui(QMainWindow):
                     value = normalize_wave_polarization(value).upper()
                 elif key == "backing":
                     value = normalize_backing(value)
+                elif key == "heatmap_metric":
+                    legacy_metrics = {
+                        "Metal backed loss (dB)": "PEC-backed reflection |Γ| (dB)",
+                        "Metal phase (deg)": "PEC reflection phase (deg)",
+                        "Metal absorption (dB)": "PEC absorbed power (dB)",
+                        "Air backed loss (dB)": "Air-backed reflection |Γ| (dB)",
+                        "Air phase (deg)": "Air reflection phase (deg)",
+                        "Air absorption (dB)": "Air absorbed power (dB)",
+                        "Insertion loss (dB)": "Transmission |S21| (dB)",
+                        "Insertion phase (deg)": "Transmission phase (deg)",
+                    }
+                    value = legacy_metrics.get(value, value)
+                elif key == "inv_score_mode":
+                    if value.startswith("Worst-case"):
+                        value = INVERSE_SCORE_MODE_OPTIONS[0]
+                    elif value.startswith("Average mean"):
+                        value = INVERSE_SCORE_MODE_OPTIONS[1]
                 elif key == "mix_objective":
                     lowered = value.strip().lower()
                     if "performance" in lowered:
@@ -3379,13 +3515,13 @@ class ImpedanceGui(QMainWindow):
         return (
             f"Mode: angle-frequency heatmap ({wave_pol.upper()}) | Uncertainty: {unc_state}\n"
             f"Grid: {len(freqs)} freq x {len(angles)} angle points\n"
-            f"Metal loss dB mean/min/max: {metal_mean:.3f} / {metal_min:.3f} / {metal_max:.3f}\n"
-            f"Metal absorption dB mean/min/max: {abs_mean:.3f} / {abs_min:.3f} / {abs_max:.3f}\n"
-            f"Air loss dB mean/min/max: {air_mean:.3f} / {air_min:.3f} / {air_max:.3f}\n"
-            f"Insertion loss dB mean/min/max: {ins_mean:.3f} / {ins_min:.3f} / {ins_max:.3f}\n"
-            f"Metal phase deg mean/min/max: {phase_mean:.3f} / {phase_min:.3f} / {phase_max:.3f}\n"
-            f"Best average metal loss angle: {best_angle:.2f} deg ({best_angle_score:.3f} dB)\n"
-            f"Max contiguous bandwidth with metal loss <= {band_threshold:.0f} dB: "
+            f"PEC reflection |Γ| dB mean/min/max: {metal_mean:.3f} / {metal_min:.3f} / {metal_max:.3f}\n"
+            f"PEC absorbed power dB mean/min/max: {abs_mean:.3f} / {abs_min:.3f} / {abs_max:.3f}\n"
+            f"Air reflection |Γ| dB mean/min/max: {air_mean:.3f} / {air_min:.3f} / {air_max:.3f}\n"
+            f"Transmission |S21| dB mean/min/max: {ins_mean:.3f} / {ins_min:.3f} / {ins_max:.3f}\n"
+            f"PEC reflection phase deg mean/min/max: {phase_mean:.3f} / {phase_min:.3f} / {phase_max:.3f}\n"
+            f"Best average PEC reflection angle: {best_angle:.2f} deg ({best_angle_score:.3f} dB)\n"
+            f"Max contiguous bandwidth with PEC reflection <= {band_threshold:.0f} dB: "
             f"{best_bw:.3f} GHz @ {best_bw_angle:.2f} deg"
         )
 
@@ -3432,12 +3568,12 @@ class ImpedanceGui(QMainWindow):
             f"Uncertainty: {unc_state}\n"
             f"Grid: {len(freqs)} freq x {len(thicknesses)} thickness points "
             f"({thicknesses[0]:g} to {thicknesses[-1]:g} in)\n"
-            f"Metal loss dB mean/min/max: {metal_mean:.3f} / {metal_min:.3f} / {metal_max:.3f}\n"
-            f"Metal absorption dB mean/min/max: {abs_mean:.3f} / {abs_min:.3f} / {abs_max:.3f}\n"
-            f"Air loss dB mean/min/max: {air_mean:.3f} / {air_min:.3f} / {air_max:.3f}\n"
-            f"Insertion loss dB mean/min/max: {ins_mean:.3f} / {ins_min:.3f} / {ins_max:.3f}\n"
-            f"Best average metal loss thickness: {best_t:g} in ({best_t_score:.3f} dB)\n"
-            f"Max contiguous bandwidth with metal loss <= {band_threshold:.0f} dB: "
+            f"PEC reflection |Γ| dB mean/min/max: {metal_mean:.3f} / {metal_min:.3f} / {metal_max:.3f}\n"
+            f"PEC absorbed power dB mean/min/max: {abs_mean:.3f} / {abs_min:.3f} / {abs_max:.3f}\n"
+            f"Air reflection |Γ| dB mean/min/max: {air_mean:.3f} / {air_min:.3f} / {air_max:.3f}\n"
+            f"Transmission |S21| dB mean/min/max: {ins_mean:.3f} / {ins_min:.3f} / {ins_max:.3f}\n"
+            f"Best average PEC reflection thickness: {best_t:g} in ({best_t_score:.3f} dB)\n"
+            f"Max contiguous bandwidth with PEC reflection <= {band_threshold:.0f} dB: "
             f"{best_bw:.3f} GHz @ {best_bw_t:g} in"
         )
 
@@ -3465,12 +3601,12 @@ class ImpedanceGui(QMainWindow):
         return (
             f"Mode: frequency sweep ({wave_pol.upper()}, backing={backing}) | Uncertainty: {unc_state}\n"
             f"Points: {len(sweep)}\n"
-            f"Metal loss dB mean/min/max: {metal_mean:.3f} / {metal_min:.3f} / {metal_max:.3f}\n"
-            f"Metal absorption dB mean/min/max: {abs_mean:.3f} / {abs_min:.3f} / {abs_max:.3f}\n"
-            f"Air loss dB mean/min/max: {air_mean:.3f} / {air_min:.3f} / {air_max:.3f}\n"
-            f"Insertion loss dB mean/min/max: {ins_mean:.3f} / {ins_min:.3f} / {ins_max:.3f}\n"
-            f"Metal phase deg mean/min/max: {phase_mean:.3f} / {phase_min:.3f} / {phase_max:.3f}\n"
-            f"Contiguous bandwidth with metal loss <= -10 dB at 0 deg: {bw10:.3f} GHz"
+            f"PEC reflection |Γ| dB mean/min/max: {metal_mean:.3f} / {metal_min:.3f} / {metal_max:.3f}\n"
+            f"PEC absorbed power dB mean/min/max: {abs_mean:.3f} / {abs_min:.3f} / {abs_max:.3f}\n"
+            f"Air reflection |Γ| dB mean/min/max: {air_mean:.3f} / {air_min:.3f} / {air_max:.3f}\n"
+            f"Transmission |S21| dB mean/min/max: {ins_mean:.3f} / {ins_min:.3f} / {ins_max:.3f}\n"
+            f"PEC reflection phase deg mean/min/max: {phase_mean:.3f} / {phase_min:.3f} / {phase_max:.3f}\n"
+            f"Contiguous bandwidth with PEC reflection <= -10 dB at 0 deg: {bw10:.3f} GHz"
         )
 
     def _selected_idx(self) -> int | None:
@@ -3612,7 +3748,7 @@ class ImpedanceGui(QMainWindow):
                     if layer.inv_rs_max is not None:
                         rparts.append(f"max={layer.inv_rs_max:g}")
                     if layer.inv_rs_accuracy is not None:
-                        rparts.append(f"acc={layer.inv_rs_accuracy:g}")
+                        rparts.append(f"step={layer.inv_rs_accuracy:g}")
                     desc += f" | inv[{', '.join(rparts)}]"
             elif layer.anisotropic:
                 file0 = Path(layer.file_0deg).name or layer.file_0deg
@@ -3635,9 +3771,36 @@ class ImpedanceGui(QMainWindow):
                 if layer.inv_t_max_in is not None:
                     parts.append(f"max={layer.inv_t_max_in:g}")
                 if layer.inv_t_accuracy_in is not None:
-                    parts.append(f"acc={layer.inv_t_accuracy_in:g}")
+                    parts.append(f"step={layer.inv_t_accuracy_in:g}")
                 desc += f" | inv[{', '.join(parts)}]"
             self.layer_list.addItem(desc)
+        if self.inv_parameter_summary_label is not None:
+            parameters: list[str] = []
+            for index, layer in enumerate(self.layers, start=1):
+                if layer.is_sheet:
+                    if layer.inv_rs_min is not None and layer.inv_rs_max is not None:
+                        step = (
+                            f", step {layer.inv_rs_accuracy:g} Ω"
+                            if layer.inv_rs_accuracy is not None else ", continuous"
+                        )
+                        parameters.append(
+                            f"Layer {index} resistance: {layer.inv_rs_min:g} to "
+                            f"{layer.inv_rs_max:g} Ω/sq{step}"
+                        )
+                elif layer.inv_t_min_in is not None and layer.inv_t_max_in is not None:
+                    step = (
+                        f", step {layer.inv_t_accuracy_in:g} in"
+                        if layer.inv_t_accuracy_in is not None else ", continuous"
+                    )
+                    parameters.append(
+                        f"Layer {index} thickness: {layer.inv_t_min_in:g} to "
+                        f"{layer.inv_t_max_in:g} in{step}"
+                    )
+            self.inv_parameter_summary_label.setText(
+                "Optimization parameters: " + " | ".join(parameters)
+                if parameters else
+                "No optimization parameters configured. Edit a layer and set its Minimum, Maximum, and Step."
+            )
         self.layer_preview.update()
         self._refresh_thickness_layers()
 
@@ -4364,9 +4527,9 @@ class ImpedanceGui(QMainWindow):
             markersize=3,
             label=f"Selected candidate (P{percentile:g})",
         )
-        self.ax_heatmap.set_title(f"Metal Loss vs Frequency at P{percentile:g} across analyzed points")
+        self.ax_heatmap.set_title(f"PEC Reflection vs Frequency at P{percentile:g} across analyzed points")
         self.ax_heatmap.set_xlabel("Frequency (GHz)")
-        self.ax_heatmap.set_ylabel("Metal loss (dB)")
+        self.ax_heatmap.set_ylabel("PEC reflection |Γ| (dB)")
         self._style_plot_axis(self.ax_heatmap)
         self.ax_heatmap.grid(True, color=colors["plot_grid"], alpha=0.3)
         self.ax_heatmap.legend(loc="best", fontsize=8)
@@ -4884,20 +5047,20 @@ class ImpedanceGui(QMainWindow):
                 if envelope_enabled:
                     f.write(
                         "frequency_hz,angle_deg,"
-                        "metal_loss_db,metal_loss_db_min,metal_loss_db_max,"
-                        "metal_phase_deg,metal_phase_deg_min,metal_phase_deg_max,"
-                        "metal_absorption_db,metal_absorption_db_min,metal_absorption_db_max,"
-                        "air_loss_db,air_loss_db_min,air_loss_db_max,"
-                        "air_phase_deg,air_phase_deg_min,air_phase_deg_max,"
-                        "air_absorption_db,air_absorption_db_min,air_absorption_db_max,"
-                        "insertion_loss_db,insertion_loss_db_min,insertion_loss_db_max,"
-                        "insertion_phase_deg,insertion_phase_deg_min,insertion_phase_deg_max\n"
+                        "pec_reflection_db,pec_reflection_db_min,pec_reflection_db_max,"
+                        "pec_reflection_phase_deg,pec_reflection_phase_deg_min,pec_reflection_phase_deg_max,"
+                        "pec_absorbed_power_db,pec_absorbed_power_db_min,pec_absorbed_power_db_max,"
+                        "air_reflection_db,air_reflection_db_min,air_reflection_db_max,"
+                        "air_reflection_phase_deg,air_reflection_phase_deg_min,air_reflection_phase_deg_max,"
+                        "air_absorbed_power_db,air_absorbed_power_db_min,air_absorbed_power_db_max,"
+                        "transmission_db,transmission_db_min,transmission_db_max,"
+                        "transmission_phase_deg,transmission_phase_deg_min,transmission_phase_deg_max\n"
                     )
                 else:
                     f.write(
-                        "frequency_hz,angle_deg,metal_loss_db,metal_phase_deg,metal_absorption_db,"
-                        "air_loss_db,air_phase_deg,air_absorption_db,"
-                        "insertion_loss_db,insertion_phase_deg\n"
+                        "frequency_hz,angle_deg,pec_reflection_db,pec_reflection_phase_deg,pec_absorbed_power_db,"
+                        "air_reflection_db,air_reflection_phase_deg,air_absorbed_power_db,"
+                        "transmission_db,transmission_phase_deg\n"
                     )
             for i, f_ghz in enumerate(freq):
                 for j, a in enumerate(ang):
@@ -4999,9 +5162,10 @@ class ImpedanceGui(QMainWindow):
             if include_header:
                 cols = ["frequency_hz", "thickness_in"]
                 for key in HEATMAP_METRIC_KEYS:
-                    cols.append(key)
+                    export_key = METRIC_EXPORT_NAMES[key]
+                    cols.append(export_key)
                     if envelope_enabled:
-                        cols.extend((f"{key}_min", f"{key}_max"))
+                        cols.extend((f"{export_key}_min", f"{export_key}_max"))
                 f.write(",".join(cols) + "\n")
             for i, f_ghz in enumerate(freqs):
                 for j, t_in in enumerate(thicknesses_in):
@@ -5106,7 +5270,7 @@ class ImpedanceGui(QMainWindow):
         worst_mean = max(corner_means)
         avg_mean = sum(corner_means) / len(corner_means)
         best_mean = min(corner_means)
-        score_db = worst_mean if "worst-case" in score_mode.lower() else avg_mean
+        score_db = worst_mean if "worst" in score_mode.lower() else avg_mean
         return score_db, nominal_mean, worst_mean, avg_mean, best_mean
 
     def _refresh_inverse_results_list(self) -> None:
@@ -5409,9 +5573,38 @@ class ImpedanceGui(QMainWindow):
                             )
 
             mc_rng = random.Random(search_seed)
-            n_samples = max_evals if search_dims else 1
+            proposals: list[tuple[list[float], list[float]]] = []
+            seen_proposals: set[tuple[float, ...]] = set()
 
-            for _ in range(n_samples):
+            def add_proposal(trial_t: list[float], trial_rs: list[float]) -> None:
+                key_values: list[float] = []
+                for idx, kind, _lo, _hi, _step in search_dims:
+                    key_values.append(trial_t[idx] if kind == "t" else trial_rs[idx])
+                key = tuple(round(value, 12) for value in key_values)
+                if key not in seen_proposals:
+                    seen_proposals.add(key)
+                    proposals.append((trial_t, trial_rs))
+
+            # Always begin with the current nominal design clipped to each
+            # user's range and snapped to the requested manufacturing step.
+            nominal_t = list(base_thick)
+            nominal_rs = list(base_rs)
+            for idx, kind, lo, hi, step in search_dims:
+                current = (
+                    layer_snapshot[idx].thickness_in
+                    if kind == "t" else layer_snapshot[idx].sheet_resistance
+                )
+                value = snap_to_increment(current, step, lo, hi)
+                if kind == "t":
+                    nominal_t[idx] = value
+                else:
+                    nominal_rs[idx] = value
+            add_proposal(nominal_t, nominal_rs)
+
+            attempts = 0
+            attempt_limit = max(100, max_evals * 50)
+            while search_dims and len(proposals) < max_evals and attempts < attempt_limit:
+                attempts += 1
                 trial_t = list(base_thick)
                 trial_rs = list(base_rs)
                 for idx, kind, lo, hi, acc in search_dims:
@@ -5420,6 +5613,9 @@ class ImpedanceGui(QMainWindow):
                         trial_t[idx] = val
                     else:
                         trial_rs[idx] = val
+                add_proposal(trial_t, trial_rs)
+
+            for trial_t, trial_rs in proposals:
                 eval_count += 1
                 score_db, nominal_mean, worst_mean, avg_mean, best_mean = score_config(
                     trial_t, trial_rs
@@ -5572,7 +5768,7 @@ class ImpedanceGui(QMainWindow):
                 f"Region: {target_freq_desc}, {a_start:g}-{a_stop:g} deg, pol={wave_pol.upper()}\n"
                 f"Uncertainty: {unc_state} ({len(scales)} corner(s))\n"
                 f"Search: {search_mode_text}{seed_text_msg}\n"
-                f"Evaluated: {eval_count} candidates (budget {max_evals})\n"
+                f"Evaluated: {eval_count} unique candidates (requested {max_evals})\n"
                 f"Refinement: {refine_text}\n"
                 f"Best score: {best.score_db:.3f} dB | nominal {best.nominal_mean_db:.3f} dB | "
                 f"worst-case {best.worst_mean_db:.3f} dB\n"

@@ -100,6 +100,7 @@ def _solver_metadata_json(result: 'Dict[str, Any]') -> 'str':
         'rcs_log_unit': result.get('rcs_log_unit', ''),
         'rcs_linear_quantity': result.get('rcs_linear_quantity', ''),
         'amplitude_convention': result.get('amplitude_convention', ''),
+        'amplitude_version': result.get('amplitude_version', 1),
         'metadata': result.get('metadata', {}) or {},
         'sample_diagnostics': diagnostics,
     }
@@ -503,9 +504,7 @@ def _validate_grim_payload(payload: 'Dict[str, Any]') -> 'None':
     if len(set(polarizations.tolist())) != polarizations.size:
         raise ValueError("GRIM polarization labels must be unique.")
 
-    for key in (
-            'rcs_domain', 'power_domain', 'source_path', 'history', 'units',
-            'phase_reference', 'amplitude_convention'):
+    for key in ('rcs_domain', 'power_domain', 'units'):
         if key not in payload:
             raise ValueError(f"GRIM payload is missing metadata {key!r}.")
         value = np.asarray(payload[key])
@@ -557,17 +556,7 @@ def _validate_grim_payload(payload: 'Dict[str, Any]') -> 'None':
             "GRIM complex amplitude must provide both rcs_amp_real and "
             "rcs_amp_imag."
         )
-    if bool(payload.get('raw_complex_amplitude_preserved', False)) and not has_real:
-        raise ValueError(
-            "raw_complex_amplitude_preserved is true but amplitude grids are absent."
-        )
     if has_real:
-        if 'complex_field_domain' not in payload \
-                or not str(np.asarray(
-                    payload['complex_field_domain']).reshape(-1)[0]).strip():
-            raise ValueError(
-                "GRIM raw complex amplitude requires a nonempty "
-                "complex_field_domain.")
         stored_real = finite_grid('rcs_amp_real')
         stored_imag = finite_grid('rcs_amp_imag')
         stored_amp = stored_real + 1j * stored_imag
@@ -625,16 +614,8 @@ def _validate_grim_payload(payload: 'Dict[str, Any]') -> 'None':
     if 'combination_estimate_power' in payload:
         finite_grid('combination_estimate_power', nonnegative=True)
 
-    if 'solver_metadata_json' in payload:
-        try:
-            decoded = json.loads(str(payload['solver_metadata_json']))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("solver_metadata_json is not valid JSON.") from exc
-        if not isinstance(decoded, dict) or decoded.get('schema') != SOLVER_METADATA_SCHEMA:
-            raise ValueError(
-                "solver_metadata_json does not use the supported "
-                f"{SOLVER_METADATA_SCHEMA!r} schema."
-            )
+    # Solver annotations are retained for inspection. Their schema/version
+    # does not determine whether the numerical field can be saved or used.
 
 
 def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
@@ -665,12 +646,12 @@ def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
                 rcs_phase=payload['rcs_phase'],
                 rcs_domain=payload['rcs_domain'],
                 power_domain=payload['power_domain'],
-                source_path=payload['source_path'],
-                history=payload['history'],
+                source_path=payload.get('source_path', ''),
+                history=payload.get('history', ''),
                 units=payload['units'],
-                phase_reference=payload['phase_reference'],
+                phase_reference=payload.get('phase_reference', ''),
                 amplitude_convention=payload.get('amplitude_convention', ''),
-                raw_complex_amplitude_preserved=payload.get('raw_complex_amplitude_preserved', False),
+                raw_complex_amplitude_preserved=('rcs_amp_real' in payload),
             )
             if 'rcs_amp_real' in payload and 'rcs_amp_imag' in payload:
                 # Coherent subtraction and feature placement can expose deltas far
@@ -692,6 +673,11 @@ def _save_grim_npz(payload: 'Dict[str, Any]', path: 'str') -> 'str':
                         'combination_estimate_mode',
                         'combination_estimate_semantics',
                         'solver_metadata_json',
+                        'amplitude_version',
+                        'metadata_advisories_json',
+                        'solver_metadata_advisory',
+                        'time_convention',
+                        'polarization_basis',
                         'combine_role',
                         'combine_role_note',
                         'component_provenance_json',

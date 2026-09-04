@@ -253,7 +253,7 @@ class FeatureManifestTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(
-                    any("Legacy manifest schema" in value for value in warnings)
+                    any("annotations are advisory" in value for value in warnings)
                 )
                 with self.assertRaisesRegex(ValueError, "Production requires"):
                     feature_workflow._apply_feature_library_contracts(
@@ -329,6 +329,7 @@ class FeatureManifestTests(unittest.TestCase):
                 for identity in ("p1", "p2")
             ]
             kwargs = dict(
+                host_material="PEC outer skin",
                 line_placements=[],
                 line_records=[],
                 point_placements=placements,
@@ -348,14 +349,15 @@ class FeatureManifestTests(unittest.TestCase):
                     require_manifests=False,
                 )
             )
-            self.assertTrue(any("footprints overlap" in value for value in warnings))
+            self.assertTrue(any("annotations are advisory" in value for value in warnings))
+            self.assertEqual(_contracts["point:fastener"]["source_manifest"]["applicability"]["footprint_radius_m"], .1)
             with self.assertRaisesRegex(ValueError, "footprints overlap"):
                 feature_workflow._apply_feature_library_contracts(
                     **kwargs,
                     require_manifests=True,
                 )
 
-    def test_assembly_has_no_host_material_requirement_or_comparison(self):
+    def test_current_manifests_require_host_and_production_matches_installation(self):
         with tempfile.TemporaryDirectory() as directory:
             dataset = Path(directory) / "fastener.grim"
             response_digest = _write_response_placeholder(dataset)
@@ -379,6 +381,10 @@ class FeatureManifestTests(unittest.TestCase):
                 definition.pop("host", None)
                 if host is not None:
                     definition["host"] = host
+                if not host:
+                    with self.assertRaisesRegex(ValueError, "host.material"):
+                        feature_workflow.validate_feature_library_manifest(definition, dataset_id="fastener", feature_kind="point")
+                    continue
                 dataset.with_suffix(".feature.json").write_text(
                     json.dumps(definition), encoding="utf-8"
                 )
@@ -394,10 +400,11 @@ class FeatureManifestTests(unittest.TestCase):
                                     "axis_el_deg": 0.0, "roll_deg": 0.0,
                                 },
                                 require_manifests=strict,
+                                host_material="PEC outer skin" if strict else "",
                             )
                         )
                         self.assertIn("point:fastener", contracts)
-                        self.assertFalse(any("host material" in w for w in warnings))
+                        self.assertEqual(any("annotations are advisory" in w for w in warnings), not strict)
 
     def test_line_manifest_gates_uncertified_conical_incidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -446,6 +453,7 @@ class FeatureManifestTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "conical incidence"):
                     feature_workflow._apply_feature_library_contracts(
+                        host_material="PEC outer skin",
                         line_placements=[placement],
                         line_records=[record],
                         point_placements=[],
@@ -759,7 +767,10 @@ class BaseContractTests(unittest.TestCase):
             _path, _grid, payload = self._base(Path(directory))
             payload["phase_reference"] = np.asarray("opposite time sign")
             with self.assertRaisesRegex(ValueError, "contradicts"):
-                feature_sum._validate_declared_coherent_base(payload, "base")
+                feature_sum._validate_declared_coherent_base(payload, "base", allow_legacy_metadata=False)
+            accepted = feature_sum._validate_declared_coherent_base(payload, "base")
+            np.testing.assert_array_equal(accepted["_amp"], payload["_amp"])
+            self.assertIn("opposite time sign", str(accepted["metadata_advisories_json"]))
 
             payload.pop("phase_reference")
             payload.pop("amplitude_convention")

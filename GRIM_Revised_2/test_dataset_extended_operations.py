@@ -546,18 +546,14 @@ class StitchManyTests(unittest.TestCase):
         self.assertTrue(attestation["user_attested"])
         self.assertEqual(attestation["operation"], "coherent-mean-stitch")
 
-    def test_attestation_never_overrides_explicit_metadata_conflict(self):
+    def test_stitch_records_conflicting_annotations_without_changing_samples(self):
         opposite_extra = dict(_COHERENT_EXTRA)
         opposite_extra["time_convention"] = "exp(+jwt)"
         opposite = _line_grid([1.0, 2.0], [9.0, 16.0], [0.0, 0.0], extra=opposite_extra)
 
-        with self.assertRaisesRegex(ValueError, "different explicit time conventions"):
-            RcsGrid.stitch_many(
-                self.first,
-                opposite,
-                policy="coherent-mean",
-                metadata_attested=True,
-            )
+        result = RcsGrid.stitch_many(self.first, opposite, policy="coherent-mean")
+        self.assertNotIn("time_convention", result.extra)
+        self.assertIn("conflicting annotations", str(result.extra))
 
     def test_merge_allows_one_sided_and_placeholder_metadata(self):
         declared = _line_grid([0.0], [1.0], [0.0], extra=_COHERENT_EXTRA)

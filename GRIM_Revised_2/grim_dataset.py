@@ -1328,6 +1328,19 @@ class RcsGrid:
         self.history = history
         self.units = dict(units or {})
         self.extra = dict(extra or {})
+        # Physical amplitude identity is independent of the source solver's
+        # grid-bound audit envelope, which derived operations rightly discard.
+        envelope = self.extra.get("solver_metadata_json")
+        if envelope is not None and self.linear_quantity() == "sigma_2d":
+            try:
+                parsed = json.loads(str(np.asarray(envelope).reshape(()).item()))
+                version = parsed.get("amplitude_version")
+                if version is not None and "amplitude_version" not in self.extra:
+                    self.extra["amplitude_version"] = version
+                elif version is not None and str(self.extra["amplitude_version"]) != str(version):
+                    self.extra["solver_metadata_advisory"] = "Conflicting amplitude-version annotations; supplied samples retained."
+            except (ValueError, TypeError, AttributeError):
+                self.extra["solver_metadata_advisory"] = "Unreadable solver annotation; supplied samples retained."
 
         # A declared phase-wrap marker describes the stored phase
         # representation, not merely a plotting preference.  Normalize here
@@ -2470,11 +2483,14 @@ class RcsGrid:
         """
 
         declared = []
+        advisory_key = key in {"amplitude_version", "phase_reference", "time_convention", "polarization_basis", "amplitude_convention", "complex_field_domain"}
         for container in (self.units or {}, self.extra or {}):
             if key not in container:
                 continue
             raw = np.asarray(container[key])
             if raw.size != 1:
+                if advisory_key:
+                    continue
                 raise ValueError(f"metadata {key!r} must be scalar")
             value = raw.reshape(-1)[0]
             if isinstance(value, np.generic):
@@ -2495,6 +2511,8 @@ class RcsGrid:
                 " ".join(value.split()).casefold() for value in declared
             }
         if len(normalized) > 1:
+            if advisory_key:
+                return ""
             raise ValueError(f"dataset contains contradictory {key} metadata")
         return declared[0] if declared else ""
 
@@ -3184,17 +3202,15 @@ class RcsGrid:
     def _assert_coherent_metadata_compatible(
         self, other, *, metadata_attested=False
     ):
-        """Validate convention metadata needed for field-level arithmetic.
-
-        Explicitly contradictory declarations are never overridable. Missing
-        and one-sided declarations are allowed: requesting the coherent
-        operation is treated as the user's intent to combine the available
-        complex samples, and the derived result records the assumption without
-        inventing convention values.
-        """
+        """Return advisory convention differences; field operations stay usable."""
 
         if not isinstance(metadata_attested, (bool, np.bool_)):
             raise TypeError("metadata_attested must be True or False")
+        issues = []
+        if self.linear_quantity() == "sigma_2d":
+            versions = [grid._declared_scalar_metadata("amplitude_version") for grid in (self, other)]
+            if any(versions) and versions != ["2", "2"]:
+                issues.append("2-D amplitude_version annotations differ or are unverified; using supplied complex samples.")
         fields = (
             (
                 "phase_reference",
@@ -3211,6 +3227,8 @@ class RcsGrid:
                 "polarization bases",
                 lambda value: " ".join(value.split()).casefold(),
             ),
+            ("amplitude_convention", "amplitude conventions", lambda value: " ".join(value.split()).casefold()),
+            ("complex_field_domain", "complex field domains", lambda value: " ".join(value.split()).casefold()),
         )
         for key, label, canonicalize in fields:
             left_values = self._coherent_source_convention_values(key)
@@ -3219,11 +3237,12 @@ class RcsGrid:
                 canonicalize(value) for value in (*left_values, *right_values)
             }
             if len(normalized) > 1:
-                raise ValueError(
-                    f"coherent operation requires matching {label}; got "
+                issues.append(
+                    f"coherent operation uses supplied samples despite different {label} ({key}): "
                     f"{left_values or ['<unspecified>']!r} and "
                     f"{right_values or ['<unspecified>']!r}"
                 )
+        return issues
 
     def _assert_acquisition_metadata_compatible(
         self,
@@ -3603,7 +3622,11 @@ class RcsGrid:
             "phase_reference",
             "time_convention",
             "polarization_basis",
+            "amplitude_version",
+            "amplitude_convention",
+            "complex_field_domain",
         )
+        advisories = [issue for grid in inputs[1:] for issue in self._assert_coherent_metadata_compatible(grid)]
         missing = {}
         for key in fields:
             missing_indices = [
@@ -3619,12 +3642,14 @@ class RcsGrid:
             if missing_indices:
                 missing[key] = missing_indices
 
-        if not missing and not metadata_attested:
+        if not missing and not metadata_attested and not advisories:
             return None, None
 
         operation_name = str(operation).strip().lower().replace("_", "-")
         user_attested = bool(metadata_attested)
         record = {
+            "metadata_policy": "advisory; no phase or amplitude conversion applied",
+            "advisories": advisories,
             "schema": (
                 "grim.coherent-metadata-attestation.v1"
                 if user_attested
@@ -3682,11 +3707,6 @@ class RcsGrid:
                     " ".join(value.split()).casefold()
                     for value in declared_values
                 }
-            if len(normalized) > 1:
-                raise ValueError(
-                    f"coherent operation requires matching {key.replace('_', ' ')} "
-                    "declarations across every input"
-                )
             if declared_values:
                 unique_values = []
                 seen = set()
@@ -3700,7 +3720,7 @@ class RcsGrid:
                         unique_values.append(value)
                         seen.add(canonical)
                 source_declarations[key] = unique_values
-            if len(direct_values) == len(inputs):
+            if len(direct_values) == len(inputs) and len(normalized) == 1:
                 # This is an exact declaration from an input, not a value
                 # manufactured by the assumption. Carrying it forward also
                 # prevents a later chained operation from hiding a conflict.
@@ -4304,8 +4324,8 @@ class RcsGrid:
 
         Args:
             other: Another RcsGrid with identical axes.
-            metadata_attested: Legacy optional user-attestation record. Missing
-                metadata is allowed without it; explicit conflicts still fail.
+            metadata_attested: Optional user-attestation record. Missing and
+                conflicting convention annotations are advisory without it.
 
         Returns:
             New RcsGrid with rcs = self.rcs + other.rcs.
@@ -4363,8 +4383,8 @@ class RcsGrid:
 
         Args:
             *grids: One or more RcsGrid instances.
-            metadata_attested: Legacy optional user-attestation record. Missing
-                metadata is allowed without it; explicit conflicts still fail.
+            metadata_attested: Optional user-attestation record. Missing and
+                conflicting convention annotations are advisory without it.
 
         Returns:
             New RcsGrid with rcs = self.rcs + sum(grid.rcs).
@@ -4432,8 +4452,8 @@ class RcsGrid:
 
         Args:
             other: Another RcsGrid with identical axes.
-            metadata_attested: Legacy optional user-attestation record. Missing
-                metadata is allowed without it; explicit conflicts still fail.
+            metadata_attested: Optional user-attestation record. Missing and
+                conflicting convention annotations are advisory without it.
             maximum_working_bytes: Optional cap for the newly retained result
                 arrays plus bounded arithmetic/QA scratch. By default GRIM uses
                 half of currently available physical memory (or the reviewed
@@ -5448,6 +5468,7 @@ class RcsGrid:
     # lists are intentionally narrow: solver certificates and arbitrary source
     # payloads must not be promoted to statements about a transformed grid.
     _FIELD_CONVENTION_EXTRA_KEYS = frozenset({
+        "amplitude_version",
         "phase_reference",
         "time_convention",
         "polarization_basis",
@@ -5708,6 +5729,9 @@ class RcsGrid:
                 "phase_reference",
                 "time_convention",
                 "polarization_basis",
+                "amplitude_version",
+                "amplitude_convention",
+                "complex_field_domain",
             ):
                 values = [
                     grid._declared_scalar_metadata(key) for grid in sources
@@ -6943,10 +6967,8 @@ class RcsGrid:
                     f"input {index}={value or '<unspecified>'!r}"
                     for index, value in enumerate(values, start=1)
                 )
-                raise ValueError(
-                    f"cannot stitch grids with different explicit {label}: {rendered}"
-                )
-            if nonblank and len(nonblank) == len(grids):
+                metadata_assumptions[f"{key} (conflicting annotations; samples unchanged)"] = rendered
+            if nonblank and len(nonblank) == len(grids) and len(normalized) == 1:
                 preserved_conventions[key] = nonblank[0]
             elif len(nonblank) != len(grids):
                 metadata_assumptions[key] = [
@@ -7643,9 +7665,12 @@ class RcsGrid:
                     f"input {index}={value or '<unspecified>'!r}"
                     for index, value in enumerate(declared, start=1)
                 )
-                raise ValueError(
-                    f"cannot join grids with different explicit {label}: {rendered}"
-                )
+                if key in {"phase_reference", "time_convention", "polarization_basis", "amplitude_convention", "complex_field_domain", "feature_provenance_json", "amplitude_version"}:
+                    metadata_assumptions[f"{key} (conflicting annotations; samples unchanged)"] = rendered
+                else:
+                    raise ValueError(
+                        f"cannot join grids with different explicit {label}: {rendered}"
+                    )
             if nonblank and len(nonblank) != len(grids):
                 metadata_assumptions[key] = {
                     "declared_input_indices": [
@@ -8656,7 +8681,7 @@ class RcsGrid:
                     f"{name} must be real numeric",
                     field=name,
                 )
-        if report["issues"]:
+        if any(item["code"] != "invalid_raw_complex_preserved_flag" for item in report["issues"]):
             return report
 
         power = np.asarray(rcs_power)
@@ -8989,8 +9014,11 @@ class RcsGrid:
             units=normalized_units,
             extra=extra,
         )
-        if raw_report["issues"]:
-            first_issue = raw_report["issues"][0]
+        numerical_issues = [issue for issue in raw_report["issues"] if issue["code"] not in {
+            "invalid_raw_complex_preserved_flag", "missing_raw_complex_pair",
+        }]
+        if numerical_issues:
+            first_issue = numerical_issues[0]
             raise ValueError(f"{path} contains {first_issue['message']}")
 
         return (

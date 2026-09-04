@@ -497,6 +497,10 @@ def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, A
         args.maximum_conical_incidence_deg,
         args.maximum_path_vertex_turn_deg,
     )
+    if args.host_stack_id:
+        manifest["host"]["stack_id"] = args.host_stack_id.strip()
+    if args.minimum_principal_radius_m is not None:
+        applicability["minimum_principal_radius_m"] = args.minimum_principal_radius_m
     if args.feature_kind == "line":
         if any(value is None for value in line_values):
             raise ValueError(
@@ -728,6 +732,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Clean local material/coating stack ID.",
     )
     create.add_argument("--frequency-min-ghz", required=True, type=float)
+    create.add_argument("--host-stack-id", default="", help="Exact coating/material stack identity used by the reference coupon.")
+    create.add_argument("--minimum-principal-radius-m", type=float, help="Validated lower bound for both principal curvature radii over the entire mounted footprint.")
     create.add_argument("--frequency-max-ghz", required=True, type=float)
     create.add_argument("--footprint-radius-m", required=True, type=float)
     create.add_argument(

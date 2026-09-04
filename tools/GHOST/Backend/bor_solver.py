@@ -38,6 +38,7 @@ import numpy as np
 from scipy import special as sp
 from scipy.linalg import get_lapack_funcs
 from scipy.spatial import cKDTree
+from scipy.sparse import csr_matrix
 
 from bor_kernels import (
     C0, ETA0, FFT_BUILD_BUDGET, N_XI_SAFETY_CAP, Generatrix, cached_leggauss,
@@ -72,6 +73,12 @@ BOR_TABLE_BUILD_PEAK_FACTOR = 3.5
 BOR_PEAK_SAFETY_FACTOR = 1.20
 BOR_PEAK_FIXED_MARGIN_GB = 0.5
 _COMPLEX128_BYTES = np.dtype(np.complex128).itemsize
+
+
+def _reduce_constrained_operator(matrix, transform):
+    """Apply sparse pole/junction relations without dense cubic products."""
+    q = csr_matrix(transform)
+    return q.conj().T @ (q.T @ matrix.T).T
 
 
 def estimate_bor_dense_peak_gb(
@@ -854,7 +861,7 @@ class BorPecSolver:
         # signed mode into compact band-entry arrays, eliminating thousands of
         # tiny 2x2 einsums during the mode sweep.  Keep the direct fallback for
         # callers that assemble an operator without first preparing it.
-        prepared = self._near_contractions.get(("efie", m_max))
+        prepared = self._prepared_near("efie", m_max)
         if prepared is not None:
             midx = m + m_max
             rc = (prepared["rows"], prepared["cols"])
@@ -991,7 +998,7 @@ class BorPecSolver:
                 blocks.append(2.0 * np.pi * (self.B_T * wrho[None, :]) @ Km @ (self.B_T * wrho[None, :]).T)
         ktt, ktf, kft, kff = blocks
 
-        prepared = self._near_contractions.get(("mfie", m_max))
+        prepared = self._prepared_near("mfie", m_max)
         if prepared is not None:
             midx = m + m_max
             rc = (prepared["rows"], prepared["cols"])
@@ -1134,7 +1141,7 @@ class BorPecSolver:
                 Km = mfie_for_mode(Kt[uv], m, m_max)
                 blocks.append(2.0 * np.pi * (self.B_T * wrho_p[None, :]) @ Km @ (self.B_T * wrho_q[None, :]).T)
 
-        prepared = self._near_contractions.get(("ibc", m_max))
+        prepared = self._prepared_near("ibc", m_max)
         if prepared is not None:
             midx = m + m_max
             rc = (prepared["rows"], prepared["cols"])
@@ -1206,257 +1213,44 @@ class BorPecSolver:
         P[Nn:, Nn:] = Bft
         return P
 
-    def _prepare_near_contractions(self, kind: 'str', pairs, m_max: 'int') -> 'None':
-        """Precontract refined near kernels for all signed modes.
+    def _prepared_near(self, kind, m_max):
+        """Direct operator callers get the same bounded, checked integration."""
+        key = (kind, int(m_max))
+        if key not in self._near_contractions:
+            pairs = [(e, f) for e, sources in enumerate(self._near_sources_by_element)
+                     for f in sources]
+            self._prepare_near_contractions(kind, pairs, m_max)
+        return self._near_contractions[key]
 
-        The raw near kernels already contain every Fourier order.  Contracting
-        one 2x2 block at a time inside every mode assembly repeated the same
-        NumPy dispatch tens of thousands of times.  This routine performs the
-        identical Galerkin sums with a mode axis, then stores only the four
-        compact nodal entries per directed element pair.
-        """
-
+    def _prepare_near_contractions(self, kind, pairs, m_max):
+        """Prepare compact mode blocks with bounded point-level scratch."""
         key = (kind, int(m_max))
         if key in self._near_contractions:
             return
-        pair_count = len(pairs)
-        mode_count = 2 * m_max + 1
-        entry_count = 4 * pair_count
-        rows = np.empty(entry_count, dtype=np.intp)
-        cols = np.empty(entry_count, dtype=np.intp)
-        source_elems = np.empty(entry_count, dtype=np.intp)
-        values = np.empty(
-            (4, mode_count, entry_count), dtype=np.complex128
-        )
-        modes = np.arange(-m_max, m_max + 1, dtype=int)
-
-        def contract(left, weighted_kernel, right):
-            return np.einsum(
-                "ip,pm,jp->ijm", left, weighted_kernel, right,
-                optimize=False,
-            )
-
+        count = 4 * len(pairs)
+        rows, cols, sources = (np.empty(count, dtype=np.intp) for _ in range(3))
+        values = np.empty((4, 2 * m_max + 1, count), complex)
         for pi, (e, f) in enumerate(pairs):
-            offset = 4 * pi
-            sl = slice(offset, offset + 4)
+            sl = slice(4 * pi, 4 * pi + 4)
             rows[sl] = (e, e, e + 1, e + 1)
             cols[sl] = (f, f + 1, f, f + 1)
-            source_elems[sl] = f
-
-            if kind == "efie":
-                (_s, _sp, w, rho_p, tr_p, tz_p, Tp, Dp,
-                 rho_q, tr_q, tz_q, Tq, Dq, Gm) = self._near_pair_data(
-                    e, f, m_max
-                )
-                am = np.abs(modes)
-                gm_m1 = Gm[:, np.abs(am - 1)]
-                gm_p1 = Gm[:, am + 1]
-                Gn = Gm[:, am]
-                Gcn = 0.5 * (gm_m1 + gm_p1)
-                Gsn = (gm_m1 - gm_p1) / 2j
-                Gsn[:, modes < 0] *= -1.0
-                rr = (rho_p * rho_q * w)[:, None]
-                ksc = w[:, None] * Gn
-                inv_k2 = 1.0 / self.k ** 2
-                btt = (
-                    contract(
-                        Tp,
-                        rr * (
-                            (tr_p * tr_q) * Gcn
-                            + (tz_p * tz_q) * Gn
-                        ),
-                        Tq,
-                    )
-                    - inv_k2 * contract(Dp, ksc, Dq)
-                )
-                btf = (
-                    contract(Tp, rr * tr_p * Gsn, Tq)
-                    - (1j * modes[None, None, :] * inv_k2)
-                    * contract(Dp, ksc, Tq)
-                )
-                bft = (
-                    contract(Tp, -rr * tr_q * Gsn, Tq)
-                    + (1j * modes[None, None, :] * inv_k2)
-                    * contract(Tp, ksc, Dq)
-                )
-                bff = (
-                    contract(Tp, rr * Gcn, Tq)
-                    - ((modes ** 2)[None, None, :] * inv_k2)
-                    * contract(Tp, ksc, Tq)
-                )
-                pair_blocks = (btt, btf, bft, bff)
+            sources[sl] = f
+            if abs(e - f) <= 1:
+                cell = ('diag' if e == f else
+                        ('corner10' if f == e + 1 else 'corner01'))
+                blocks = _contract_near_points(self.gen, e, self.gen, f,
+                    self.k, m_max, (kind,), _cell_points(cell, depth=self.near_depth))
             else:
-                if kind == "mfie":
-                    w, rho_p, Tp, rho_q, Tq, Kn = self._near_mfie_data(
-                        e, f, m_max
-                    )
-                elif kind == "ibc":
-                    w, rho_p, Tp, rho_q, Tq, Kn = self._near_ibc_data(
-                        e, f, m_max
-                    )
-                else:
-                    raise ValueError(f"Unknown BoR near-contraction kind {kind!r}.")
-                rr = (2.0 * np.pi * rho_p * rho_q * w)[:, None]
-                pair_blocks = tuple(
-                    contract(Tp, rr * kernel, Tq) for kernel in Kn
-                )
-
-            for uv, block in enumerate(pair_blocks):
-                values[uv, :, sl] = block.reshape(4, mode_count).T
-
-        self._near_contractions[key] = {
-            "rows": rows,
-            "cols": cols,
-            "source_elems": source_elems,
-            "values": values,
-        }
-        raw_key = m_max if kind == "efie" else (kind, m_max)
-        # The precontracted representation is much smaller than the raw
-        # point-pair kernels and is the only form used after preparation.
-        self._near_cache.pop(raw_key, None)
-
-    def _prepare_near_kernel_cache(self, kind: 'str', pairs, m_max: 'int',
-                                   workers: 'int' = 1) -> 'None':
-        """Build refined near kernels in bounded vector batches.
-
-        Each element pair retains its original tail quadrature order.  Pairs
-        with the same order are concatenated only along the independent pair
-        axis, so quadrature nodes, weights, modal projections, and physical
-        accuracy are unchanged.  The batch is memory-capped because the
-        temporary ``pair x quadrature x mode`` arrays can otherwise be large.
-        """
-
-        raw_key = m_max if kind == "efie" else (kind, m_max)
-        cache = self._near_cache.setdefault(raw_key, {})
-        pending = []
-        for e, f in pairs:
-            if (e, f) in cache:
-                continue
-            if e == f:
-                s, sp_, w = _cell_points("diag", depth=self.near_depth)
-            elif abs(e - f) == 1:
-                cell_kind = "corner10" if f == e + 1 else "corner01"
-                s, sp_, w = _cell_points(
-                    cell_kind, depth=self.near_depth
-                )
-            else:
-                s, sp_, w = _regular_cell_points()
-
-            if kind == "efie":
-                rp = _points_on_element(self.gen, e, s)
-                rq = _points_on_element(self.gen, f, sp_)
-                (rho_p, z_p, tr_p, tz_p, T0p, T1p, D0p, D1p, Lp) = rp
-                (rho_q, z_q, tr_q, tz_q, T0q, T1q, D0q, D1q, Lq) = rq
-                prefix = (
-                    s, sp_, w * Lp * Lq,
-                    rho_p, tr_p, tz_p, np.vstack([T0p, T1p]),
-                    np.vstack([D0p, D1p]),
-                    rho_q, tr_q, tz_q, np.vstack([T0q, T1q]),
-                    np.vstack([D0q, D1q]),
-                )
-                args = (rho_p, z_p, rho_q, z_q)
-                rr4 = 4.0 * rho_p * rho_q
-                active = rr4 > 1.0e-30
-                if np.any(active):
-                    amax = float(np.max(np.sqrt(rr4[active])))
-                    osc = abs(complex(self.k)) * amax / math.pi + (m_max + 2)
-                    tail_order = int(min(1024, max(64, math.ceil(4.0 * osc))))
-                else:
-                    tail_order = 0
-            elif kind in ("mfie", "ibc"):
-                rp = _points_on_element(self.gen, e, s)
-                rq = _points_on_element(self.gen, f, sp_)
-                (rho_p, z_p, tr_p, tz_p, T0p, T1p, _D0p, _D1p, Lp) = rp
-                (rho_q, z_q, tr_q, tz_q, T0q, T1q, _D0q, _D1q, Lq) = rq
-                tr_pa = np.full_like(rho_p, tr_p)
-                tz_pa = np.full_like(rho_p, tz_p)
-                tr_qa = np.full_like(rho_q, tr_q)
-                tz_qa = np.full_like(rho_q, tz_q)
-                prefix = (
-                    w * Lp * Lq, rho_p, np.vstack([T0p, T1p]),
-                    rho_q, np.vstack([T0q, T1q]),
-                )
-                args = (
-                    rho_p, z_p, tr_pa, tz_pa,
-                    rho_q, z_q, tr_qa, tz_qa,
-                )
-                amax = float(np.max(np.sqrt(np.maximum(
-                    4.0 * rho_p * rho_q, 1.0e-300
-                ))))
-                osc = abs(complex(self.k)) * amax / math.pi + (m_max + 2)
-                tail_order = int(min(1024, max(64, math.ceil(4.0 * osc))))
-            else:
-                raise ValueError(f"Unknown BoR near-kernel kind {kind!r}.")
-            pending.append(((e, f), prefix, args, tail_order))
-
-        groups: 'Dict[int, List[Tuple]]' = {}
-        for record in pending:
-            groups.setdefault(record[3], []).append(record)
-
-        mode_count = (m_max + 2) if kind == "efie" else (2 * m_max + 1)
-        worker_count = max(1, int(workers))
-        budget = 128.0e6 / worker_count
-        for tail_order, records in groups.items():
-            quadrature_count = 48 + max(64, tail_order)
-            # Conservative bound for simultaneous trig, bracket, and modal
-            # projection temporaries.  A single large record is still allowed.
-            bytes_per_pair_point = max(
-                1.0, 64.0 * quadrature_count * mode_count
-            )
-            point_limit = max(1, int(budget / bytes_per_pair_point))
-            chunks = []
-            chunk = []
-            point_count = 0
-            for record in records:
-                count = len(record[2][0])
-                if chunk and point_count + count > point_limit:
-                    chunks.append(chunk)
-                    chunk = []
-                    point_count = 0
-                chunk.append(record)
-                point_count += count
-            if chunk:
-                chunks.append(chunk)
-
-            def build_batch(batch):
-                arg_count = len(batch[0][2])
-                args = tuple(
-                    np.concatenate([record[2][i] for record in batch])
-                    for i in range(arg_count)
-                )
-                if kind == "efie":
-                    result = modal_kernels_near(
-                        *args, self.k, m_max, tail_order=tail_order
-                    )
-                    results = (result,)
-                elif kind == "mfie":
-                    results = mfie_kernels_near(
-                        *args, self.k, m_max, tail_order=tail_order
-                    )
-                else:
-                    results = ibc_kernels_near(
-                        *args, self.k, m_max, tail_order=tail_order
-                    )
-                built = []
-                start = 0
-                for pair, prefix, pair_args, _tail in batch:
-                    stop = start + len(pair_args[0])
-                    sliced = tuple(result[start:stop] for result in results)
-                    built.append((
-                        pair,
-                        prefix + (sliced[0] if kind == "efie" else sliced,),
-                    ))
-                    start = stop
-                return built
-
-            if worker_count > 1 and len(chunks) > 1:
-                with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                    built_chunks = executor.map(build_batch, chunks)
-                    for built in built_chunks:
-                        cache.update(built)
-            else:
-                for batch in chunks:
-                    cache.update(build_batch(batch))
+                blocks, order, error = _converged_disjoint_blocks(
+                    self.gen, e, self.gen, f, self.k, m_max, (kind,))
+                self.near_quadrature_order_max = max(
+                    getattr(self, 'near_quadrature_order_max', 0), order)
+                self.near_quadrature_error_max = max(
+                    getattr(self, 'near_quadrature_error_max', 0.), error)
+            values[:, :, sl] = blocks[kind].reshape(4, 2 * m_max + 1, 4)
+        self._near_contractions[key] = dict(rows=rows, cols=cols,
+            source_elems=sources, values=values)
+        self._near_cache.pop(m_max if kind == 'efie' else (kind, m_max), None)
 
     # -- cache warm-up (thread safety for parallel mode assembly) --
     def prepare_operators(self, m_max: 'int', efie: 'bool' = True,
@@ -1464,8 +1258,8 @@ class BorPecSolver:
                           workers: 'int' = 1) -> 'None':
         """Build every kernel table and near-pair cache this solver will need
         up front, so parallel per-mode assembly only READS shared state.
-        The near-pair builds are independent per element pair and run on
-        `workers` threads (each pair writes its own cache key)."""
+        Near integration is sequential and bounded; workers parallelize mode
+        assembly after these immutable compact blocks have been prepared."""
 
         ne = self.gen.n_elems
         pairs = [
@@ -1483,15 +1277,12 @@ class BorPecSolver:
         if efie:
             if not streaming:
                 self._kernel_tables(m_max)
-            self._prepare_near_kernel_cache("efie", pairs, m_max, workers)
         if mfie:
             if not streaming:
                 self._mfie_tables(m_max)
-            self._prepare_near_kernel_cache("mfie", pairs, m_max, workers)
         if ibc:
             if not (streaming and self._stream.B is not None):
                 self._ibc_tables(m_max)
-            self._prepare_near_kernel_cache("ibc", pairs, m_max, workers)
         if efie:
             self._prepare_near_contractions("efie", pairs, m_max)
         if mfie:
@@ -2552,9 +2343,9 @@ def estimate_bor_operator_storage_gb(
         retained += enabled_kinds * 3.0 * (4 * pair_count) * index_bytes
 
         if enabled_kinds:
-            # Raw same-surface near kernels are built in bounded batches and
-            # released after contraction.  The implementation caps their
-            # aggregate concurrent working set at 128 MB.
+            # One serial point tile is integrated and released immediately.
+            # Includes angular refinement scratch, contraction intermediates,
+            # and the maximum default meridian rule's coordinate arrays.
             build_workspace = max(build_workspace, 128.0e6)
 
         if not streaming and (efie or mfie or ibc):
@@ -2575,7 +2366,7 @@ def estimate_bor_operator_storage_gb(
                 n_xi = n_xi_for_pairs(
                     solver.k, rho_max, modes, far_gap, bracket=True
                 )
-                bracket_arrays = 14.0 if ibc else 12.0
+                bracket_arrays = 18.0 if ibc else 16.0
                 build_workspace = max(
                     build_workspace,
                     min(
@@ -2600,21 +2391,10 @@ def estimate_bor_operator_storage_gb(
             retained += pair_points * (modes + 2) * cross_table_bytes
             retained += 4.0 * pair_points * signed_modes * cross_table_bytes
 
-        for pair in cross.near_pairs:
-            kind = cross.pair_kind.get(pair)
-            if kind is None:
-                quadrature_points = int(cross.near_order) ** 2
-            else:
-                quadrature_points = (
-                    len(_graded_cells(kind)) * 4 * 5
-                )
-            pair_complex = (
-                quadrature_points
-                * ((modes + 2) + 4 * signed_modes)
-                * _COMPLEX128_BYTES
-            )
-            retained += pair_complex + 16.0 * quadrature_points * 8.0
-            build_workspace = max(build_workspace, 4.0 * pair_complex)
+        retained += len(cross.near_pairs) * 2 * 4 * signed_modes * 4 * _COMPLEX128_BYTES
+        if cross.near_pairs:
+            build_workspace = max(build_workspace, 128.0e6,
+                64.0e6 + 768 * int(cross.near_max_order)**2)
 
         if not streaming:
             rho_max = max(
@@ -2635,7 +2415,7 @@ def estimate_bor_operator_storage_gb(
                 ),
                 min(
                     float(FFT_BUILD_BUDGET),
-                    pair_points * n_xi_b * 14.0 * _COMPLEX128_BYTES,
+                    pair_points * n_xi_b * 18.0 * _COMPLEX128_BYTES,
                 ),
             )
 
@@ -3000,7 +2780,9 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     # Streamed blocks and detailed multi-surface estimates already include
     # bounded build workspace and must not receive this multiplier again.
     assembly_peak_gb = (
-        est_held + BOR_STREAM_TILE_BUDGET_GB
+        est_held + BOR_STREAM_TILE_BUDGET_GB + estimate_bor_operator_storage_gb(
+            m_max, ((solver, alpha > 0.0, alpha < 1.0,
+                     zs_pt is not None and alpha > 0.0),), streaming=True)
         if use_streaming
         else BOR_TABLE_BUILD_PEAK_FACTOR * est_held
     )
@@ -3041,7 +2823,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                 Z += mfie
         if abs(int(m)) == 1:
             Q = solver.basis_transform(m)
-            return Q.conj().T @ Z @ Q, Q
+            return _reduce_constrained_operator(Z, Q), Q
         # Outside |m|=1 there is no coupled pole relation, so retain the
         # O(N^2) Boolean slice instead of paying for dense O(N^3) products.
         mask = solver.basis_mask(m)
@@ -3226,6 +3008,8 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
         )
         operator_storage_gb = (
             2.0 * held_one + BOR_STREAM_TILE_BUDGET_GB
+            + estimate_bor_operator_storage_gb(m_max,
+                ((se, True, False, True), (si, True, False, True)), streaming=True)
         )
     else:
         if use_single:
@@ -3274,7 +3058,7 @@ def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
         if abs(int(m)) == 1:
             q_surface = se.basis_transform(m)
             Q = _block_diagonal_transforms(q_surface, q_surface)
-            return Q.conj().T @ A @ Q, Q
+            return _reduce_constrained_operator(A, Q), Q
         mask = np.tile(se.basis_mask(m), 2)
         return A[np.ix_(mask, mask)], mask
 
@@ -3374,26 +3158,174 @@ def _segment_distance(p0, p1, q0, q1) -> 'float':
                pt_seg(q0, p0, p1), pt_seg(q1, p0, p1))
 
 
+def _contract_near_points(gp, e, gq, f, k, m_max, kinds, points):
+    """Integrate immediately into 2x2 blocks; never retain raw pair kernels.
+
+    Point tiles and modal projection tiles bound scratch even for a single
+    large quadrature record. Output shape per kind is [4, 2m+1, 2, 2].
+    EFIE omits j*k*eta*2pi; bracket blocks include 2pi.
+    """
+    s, t, weight = points
+    active = weight > 0
+    s, t, weight = s[active], t[active], weight[active]
+    modes = np.arange(-m_max, m_max + 1)
+    nm = len(modes)
+    out = {kind: np.zeros((4, nm, 2, 2), complex) for kind in kinds}
+    chunk = max(1, min(256, int(8.0e6 / (16 * nm * 20))))
+    contract = lambda left, kernel, right: np.einsum(
+        'ip,pm,jp->mij', left, kernel, right, optimize=False)
+    for i in range(0, len(s), chunk):
+        sl = slice(i, i + chunk)
+        rp, zp, trp, tzp, p0, p1, dp0, dp1, lp = _points_on_element(gp, e, s[sl])
+        rq, zq, trq, tzq, q0, q1, dq0, dq1, lq = _points_on_element(gq, f, t[sl])
+        Tp, Tq = np.array([p0, p1]), np.array([q0, q1])
+        Dp, Dq = np.array([dp0, dp1]), np.array([dq0, dq1])
+        w = weight[sl] * lp * lq
+        rr = (rp * rq * w)[:, None]
+        if 'efie' in out:
+            G = modal_kernels_near(rp, zp, rq, zq, k, m_max)
+            am = np.abs(modes)
+            Gn = G[:, am]
+            Gc = 0.5 * (G[:, np.abs(am - 1)] + G[:, am + 1])
+            Gs = (G[:, np.abs(am - 1)] - G[:, am + 1]) / 2j
+            Gs[:, modes < 0] *= -1
+            scalar = w[:, None] * Gn / k**2
+            out['efie'][0] += contract(Tp, rr * (trp * trq * Gc + tzp * tzq * Gn), Tq) - contract(Dp, scalar, Dq)
+            out['efie'][1] += contract(Tp, rr * trp * Gs, Tq) - (1j * modes[:, None, None]) * contract(Dp, scalar, Tq)
+            out['efie'][2] += contract(Tp, -rr * trq * Gs, Tq) + (1j * modes[:, None, None]) * contract(Tp, scalar, Dq)
+            out['efie'][3] += contract(Tp, rr * Gc, Tq) - (modes[:, None, None]**2) * contract(Tp, scalar, Tq)
+            del G, Gn, Gc, Gs, scalar
+        for kind in kinds:
+            if kind == 'efie':
+                continue
+            kernel = mfie_kernels_near if kind == 'mfie' else ibc_kernels_near
+            values = kernel(rp, zp, trp, tzp, rq, zq, trq, tzq, k, m_max)
+            for uv, value in enumerate(values):
+                out[kind][uv] += contract(Tp, 2 * np.pi * rr * value, Tq)
+            del values
+    return out
+
+
+def _gap_graded_points(gp, e, gq, f, order):
+    """Sinh grading around the closest source point for each test point."""
+    x, wg = cached_leggauss(order)
+    u, w = (x + 1) / 2, wg / 2
+    p0, p1 = gp.nodes[e:e + 2]
+    q0, q1 = gq.nodes[f:f + 2]
+    dp, dq = p1 - p0, q1 - q0
+    # Split the outer integral at projections of source endpoints. This
+    # resolves changes in the closest-point map on unequal element meshes.
+    cuts = np.unique(np.r_[0., 1., np.clip(
+        [(q0 - p0) @ dp / (dp @ dp), (q1 - p0) @ dp / (dp @ dp)], 0, 1)])
+    # The inner integral also develops endpoint layers in the test variable.
+    # Grade both ends of each outer interval to resolve those layers without
+    # raising a uniform tensor order over the whole element pair.
+    gap = _segment_distance(p0, p1, q0, q1)
+    outer_delta = max(gap / np.linalg.norm(dp), 1e-15)
+    ss, ww = [], []
+    for a, b in zip(cuts[:-1], cuts[1:]):
+        vmax = np.arcsinh((b - a) / (2 * outer_delta))
+        v = vmax * u
+        distance = outer_delta * np.sinh(v)
+        weights = w * vmax * outer_delta * np.cosh(v)
+        ss.extend((a + distance, b - distance))
+        ww.extend((weights, weights))
+    s, ws = np.concatenate(ss), np.concatenate(ww)
+    p = p0 + s[:, None] * dp
+    center = np.clip((p - q0) @ dq / (dq @ dq), 0, 1)
+    distance = np.linalg.norm(p - (q0 + center[:, None] * dq), axis=1)
+    delta = np.maximum(distance / np.linalg.norm(dq), 1e-15)
+    ts, weights = [], []
+    for side, extent in ((-1, center), (1, 1 - center)):
+        vmax = np.arcsinh(extent / delta)
+        v = vmax[:, None] * u
+        ts.append(center[:, None] + side * delta[:, None] * np.sinh(v))
+        weights.append(ws[:, None] * w * vmax[:, None] * delta[:, None] * np.cosh(v))
+    t = np.concatenate(ts, axis=1)
+    return np.broadcast_to(s[:, None], t.shape).ravel(), t.ravel(), np.concatenate(weights, axis=1).ravel()
+
+
+def _converged_disjoint_blocks(gp, e, gq, f, k, m_max, kinds,
+                               order=12, rtol=2e-5, max_order=192):
+    """Converge actual EFIE/PV blocks independently of angular integration."""
+    requested_order = int(order)
+    if requested_order < 2 or not 2 * requested_order <= max_order <= 384 or not 0 < rtol < 1:
+        raise ValueError('BoR near quadrature needs order >= 2, 2*order <= max_order <= 384, and 0 < rtol < 1.')
+    if tuple(kinds) == ('mfie',):
+        nodes = np.vstack((gp.nodes[e:e+2], gq.nodes[f:f+2]))
+        # On one flat annulus R and J are coplanar, hence curl(G J) is
+        # normal and its tangential MFIE PV trace is exactly zero. Geometry
+        # subdivision can leave a few ulps in z; relative convergence of that
+        # roundoff (~1e-20 blocks) is meaningless. Use the exact geometric
+        # identity, without loosening tolerances for any non-planar pair.
+        z_tolerance = 8*np.finfo(float).eps*max(float(np.max(np.abs(nodes))), np.finfo(float).tiny)
+        if float(np.ptp(nodes[:, 1])) <= z_tolerance:
+            return {'mfie': np.zeros((4, 2*m_max+1, 2, 2), complex)}, int(order), 0.
+    gap = _segment_distance(gp.nodes[e], gp.nodes[e + 1], gq.nodes[f], gq.nodes[f + 1])
+    graded = gap < 0.25 * max(gp.lengths[e], gq.lengths[f])
+    def evaluate(n):
+        points = (_gap_graded_points(gp, e, gq, f, n) if graded
+                  else _regular_cell_points(n))
+        return _contract_near_points(gp, e, gq, f, k, m_max, kinds, points)
+    # Smooth disjoint pairs usually converge at the requested order. Compare
+    # a cheaper preliminary rule first; never publish below requested_order.
+    n = requested_order if graded else max(2, requested_order // 2)
+    coarse = evaluate(n)
+    while n < max_order:
+        n = max(requested_order, min(2 * n, max_order))
+        fine = evaluate(n)
+        errors = []
+        for kind in kinds:
+            # Check every vector block, with a floor for symmetry-zero blocks.
+            scale = np.max(np.abs(fine[kind]), axis=(1, 2, 3))
+            floor = max(float(np.max(scale)) * 1e-8, 1e-280)
+            error = np.max(np.abs(fine[kind] - coarse[kind]), axis=(1, 2, 3))
+            errors.append(float(np.max(error / np.maximum(scale, floor))))
+        error = max(errors)
+        if math.isfinite(error) and error <= rtol:
+            return fine, n, error
+        coarse = fine
+    raise ValueError(f'BoR near meridian quadrature did not converge for elements ({e}, {f}); gap={gap:.6g}, order={n}, relative block change={error:.3g}. Refine the mesh or increase near_max_order.')
+
+
+def _near_quadrature_summary(*operators):
+    return {
+        'scheme': 'bounded_compact_blocks_with_angular_and_disjoint_meridian_refinement',
+        'disjoint_meridian_order_max': max(
+            (getattr(op, 'near_quadrature_order_max', 0) for op in operators), default=0),
+        'disjoint_meridian_relative_change_max': max(
+            (getattr(op, 'near_quadrature_error_max', 0.) for op in operators), default=0.),
+        'self_and_junction_rule': 'graded_singular_cells',
+    }
+
+
 class BorCrossOperators:
     """T (EFIE) and P (rotated-PV) Galerkin blocks between two DIFFERENT
     generatrices in one homogeneous medium: test bases on solver sp, source
     bases on solver sq (both BorPecSolver instances with the same medium).
 
     Pairs closer than near_factor * max(element lengths) are re-integrated
-    on a dense tensor Gauss grid with the adaptive near kernels -- this is
-    what keeps thin coatings accurate.  The surfaces may TOUCH at shared
+    with gap-graded meridian quadrature and independent block refinement.
+    Only compact mode blocks are retained. The surfaces may TOUCH at shared
     endpoints (coating-termination junctions): element pairs sharing such a
     point are log-singular in the Galerkin sense and are routed to the same
     graded corner-cell quadrature the same-surface assembly uses for
     adjacent elements.  Overlapping/crossing interiors remain an error."""
 
     def __init__(self, sp: 'BorPecSolver', sq: 'BorPecSolver',
-                 near_factor: 'float' = 2.0, near_order: 'int' = 12):
+                 near_factor: 'float' = 2.0, near_order: 'int' = 12,
+                 near_rtol: 'float' = 2e-5, near_max_order: 'int' = 192):
         if not np.isclose(complex(sp.k), complex(sq.k)):
             raise ValueError("Cross operators need both solvers in the same medium.")
         self.sp, self.sq = sp, sq
         self.k, self.eta = sp.k, sp.eta
-        self.near_order = near_order
+        self.near_order = int(near_order)
+        self.near_rtol = float(near_rtol)
+        self.near_max_order = int(near_max_order)
+        if self.near_order < 2 or not 2 * self.near_order <= self.near_max_order <= 384 or not 0 < self.near_rtol < 1:
+            raise ValueError('BoR near quadrature needs order >= 2, 2*order <= max_order <= 384, and 0 < rtol < 1.')
+        self.near_quadrature_order_max = 0
+        self.near_quadrature_error_max = 0.0
         # element-pair classification by segment distance / shared endpoints
         gp, gq = sp.gen, sq.gen
         diag = max(float(np.max(gp.nodes)) - float(np.min(gp.nodes)),
@@ -3478,34 +3410,23 @@ class BorCrossOperators:
         self._B = tuple(value.astype(table_dtype, copy=False) for value in B)
         return self._G, self._B
 
-    def _near_data(self, e: 'int', f: 'int', m_max: 'int'):
-        key = (e, f)
+    def _near_data(self, e, f, m_max):
+        """Cache only converged 2x2 EFIE and rotated-PV mode blocks."""
         cache = self._cache.setdefault(m_max, {})
-        if key in cache:
-            return cache[key]
-        kind = self.pair_kind.get(key)
-        if kind is not None:
-            # shared junction endpoint: graded corner cells (log singularity)
-            s, sp_, W = _cell_points(kind)
-        else:
-            n = self.near_order
-            xg, wg = cached_leggauss(n)
-            u = 0.5 * (xg + 1.0); w1 = 0.5 * wg
-            S, SP = np.meshgrid(u, u, indexing="ij")
-            W = np.outer(w1, w1).ravel()
-            s, sp_ = S.ravel(), SP.ravel()
-        rho_p, z_p, tr_p, tz_p, T0p, T1p, D0p, D1p, Lp = _points_on_element(self.sp.gen, e, s)
-        rho_q, z_q, tr_q, tz_q, T0q, T1q, D0q, D1q, Lq = _points_on_element(self.sq.gen, f, sp_)
-        Gm = modal_kernels_near(rho_p, z_p, rho_q, z_q, self.k, m_max)
-        Bn = ibc_kernels_near(rho_p, z_p, np.full_like(rho_p, tr_p), np.full_like(rho_p, tz_p),
-                              rho_q, z_q, np.full_like(rho_q, tr_q), np.full_like(rho_q, tz_q),
-                              self.k, m_max)
-        data = (W * Lp * Lq,
-                rho_p, tr_p, tz_p, np.vstack([T0p, T1p]), np.vstack([D0p, D1p]),
-                rho_q, tr_q, tz_q, np.vstack([T0q, T1q]), np.vstack([D0q, D1q]),
-                Gm, Bn)
-        cache[key] = data
-        return data
+        key = (e, f)
+        if key not in cache:
+            kind = self.pair_kind.get(key)
+            if kind is not None:
+                blocks = _contract_near_points(self.sp.gen, e, self.sq.gen, f,
+                    self.k, m_max, ('efie', 'ibc'), _cell_points(kind))
+            else:
+                blocks, order, error = _converged_disjoint_blocks(
+                    self.sp.gen, e, self.sq.gen, f, self.k, m_max,
+                    ('efie', 'ibc'), self.near_order, self.near_rtol, self.near_max_order)
+                self.near_quadrature_order_max = max(self.near_quadrature_order_max, order)
+                self.near_quadrature_error_max = max(self.near_quadrature_error_max, error)
+            cache[key] = blocks
+        return cache[key]
 
     def assemble_T(self, m: 'int', m_max: 'int') -> 'np.ndarray':
         """Cross EFIE operator [2Np, 2Nq] (same normalization as
@@ -3524,25 +3445,11 @@ class BorCrossOperators:
                 gq.rho, gq.trho, gq.tz, self.sq.B_T, self.sq.B_D, gq.w,
                 Gm, Gc, Gs,
             )
-        for (e, f) in self.near_pairs:
-            (w, rho_p, tr_p, tz_p, Tp, Dp,
-             rho_q, tr_q, tz_q, Tq, Dq, Gtab, _) = self._near_data(e, f, m_max)
-            Gn, Gcn, Gsn = kernels_for_mode(Gtab, m)
-            rr = rho_p * rho_q * w
-            ktt = rr * ((tr_p * tr_q) * Gcn + (tz_p * tz_q) * Gn)
-            ksc = w * Gn
-            ktf = rr * (tr_p * Gsn)
-            kft = -rr * (tr_q * Gsn)
-            kff = rr * Gcn
-            btt = np.einsum("ip,p,jp->ij", Tp, ktt, Tq) - (1.0 / k ** 2) * np.einsum("ip,p,jp->ij", Dp, ksc, Dq)
-            btf = np.einsum("ip,p,jp->ij", Tp, ktf, Tq) - (1j * m / k ** 2) * np.einsum("ip,p,jp->ij", Dp, ksc, Tq)
-            bft = np.einsum("ip,p,jp->ij", Tp, kft, Tq) + (1j * m / k ** 2) * np.einsum("ip,p,jp->ij", Tp, ksc, Dq)
-            bff = np.einsum("ip,p,jp->ij", Tp, kff, Tq) - (m ** 2 / k ** 2) * np.einsum("ip,p,jp->ij", Tp, ksc, Tq)
-            rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
-            ztt[np.ix_(rows, cols)] += btt
-            ztf[np.ix_(rows, cols)] += btf
-            zft[np.ix_(rows, cols)] += bft
-            zff[np.ix_(rows, cols)] += bff
+        for e, f in self.near_pairs:
+            blocks = self._near_data(e, f, m_max)['efie'][:, m + m_max]
+            rc = np.ix_([e, e + 1], [f, f + 1])
+            for target, value in zip((ztt, ztf, zft, zff), blocks):
+                target[rc] += value
 
         C = 1j * k * self.eta * 2.0 * np.pi
         Np, Nq = self.sp.Nn, self.sq.Nn
@@ -3567,13 +3474,11 @@ class BorCrossOperators:
             for uv in range(4):
                 Km = mfie_for_mode(Bt[uv], m, m_max)
                 blocks.append(2.0 * np.pi * (self.sp.B_T * wrho_p[None, :]) @ Km @ (self.sq.B_T * wrho_q[None, :]).T)
-        for (e, f) in self.near_pairs:
-            (w, rho_p, _, _, Tp, _, rho_q, _, _, Tq, _, _, Bn) = self._near_data(e, f, m_max)
-            rr = rho_p * rho_q * w
-            rows = np.array([e, e + 1]); cols = np.array([f, f + 1])
-            for uv, tgt in enumerate(blocks):
-                Km = mfie_for_mode(Bn[uv], m, m_max)
-                tgt[np.ix_(rows, cols)] += 2.0 * np.pi * np.einsum("ip,p,jp->ij", Tp, rr * Km, Tq)
+        for e, f in self.near_pairs:
+            near = self._near_data(e, f, m_max)['ibc'][:, m + m_max]
+            rc = np.ix_([e, e + 1], [f, f + 1])
+            for target, value in zip(blocks, near):
+                target[rc] += value
         Btt, Btf, Bft, Bff = blocks
         Np, Nq = self.sp.Nn, self.sq.Nn
         P = np.empty((2 * Np, 2 * Nq), dtype=np.complex128)
@@ -3602,7 +3507,9 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
                          check_abort: 'Optional[Callable]' = None,
                          table_precision: 'str' = "auto",
                          assembly: 'str' = "auto",
-                         stream_budget_gb: 'float' = 8.0) -> 'Dict':
+                         stream_budget_gb: 'float' = 8.0,
+                         near_rtol: 'float' = 2e-5,
+                         near_max_order: 'int' = 192) -> 'Dict':
     """
     Monostatic RCS of a PEC core (generatrix points_core) fully covered by a
     homogeneous coating with outer surface points_outer (both closed, both
@@ -3627,8 +3534,10 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
                        medium=(eps_r, mu_r))
     sLc = BorPecSolver(points_core, freq_hz, gauss_order=gauss_order,
                        medium=(eps_r, mu_r))
-    Xoc = BorCrossOperators(sLo, sLc, near_factor=near_factor, near_order=near_order)
-    Xco = BorCrossOperators(sLc, sLo, near_factor=near_factor, near_order=near_order)
+    Xoc = BorCrossOperators(sLo, sLc, near_factor=near_factor, near_order=near_order,
+                            near_rtol=near_rtol, near_max_order=near_max_order)
+    Xco = BorCrossOperators(sLc, sLo, near_factor=near_factor, near_order=near_order,
+                            near_rtol=near_rtol, near_max_order=near_max_order)
     k = se.k
     thetas = _validated_bor_aspects(thetas_deg)
     rho_max = float(np.max(se.gen.nodes[:, 0]))
@@ -3781,7 +3690,7 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
             Q = _block_diagonal_transforms(
                 q_outer, q_outer, sLc.basis_transform(m)
             )
-            return Q.conj().T @ A @ Q, Q
+            return _reduce_constrained_operator(A, Q), Q
         mask_o = se.basis_mask(m)
         mask = np.concatenate([mask_o, mask_o, sLc.basis_mask(m)])
         return A[np.ix_(mask, mask)], mask
@@ -3857,6 +3766,7 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
         "modes_used": modes_used,
         "n_unknowns": int(ntot),
         "formulation": "pmchwt-coated",
+        "near_quadrature": _near_quadrature_summary(se, sLo, sLc, Xoc, Xco),
         "eps_r": complex(eps_r),
         "mu_r": complex(mu_r),
         "assembly": "streaming" if use_streaming else "tables",
@@ -4275,7 +4185,7 @@ def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                     if S_maps[bj] is not None:
                         A[sl_b, sl_bj] += -X_11[(bi, bj)].assemble_P(m, m_max) @ S_maps[bj]
         Q = build_Q(m)
-        return Q.conj().T @ A @ Q, None
+        return _reduce_constrained_operator(A, Q), None
 
     def rhs(m, th, pol):
         V = np.zeros(n_full, dtype=np.complex128)
@@ -4653,7 +4563,7 @@ class _MultiRegionBor:
                         if self.off_M[sj] is not None:
                             A[slM_i, slM_j] += eta2 * ss * T
         Q = self.build_Q(m)
-        return Q.conj().T @ A @ Q, None
+        return _reduce_constrained_operator(A, Q), None
 
     def rhs(self, m: 'int', th: 'float', pol: 'str') -> 'np.ndarray':
         V = np.zeros(self.n_full, dtype=np.complex128)

@@ -88,6 +88,7 @@ RCS_NORM_NUMERATOR = 0.25
 RCS_NORM_MODE_DEFAULT = "physical"
 RCS_NORM_MODE_PHYSICAL = "physical"
 RCS_AMPLITUDE_CONVENTION = "A_physical_asymptotic = +j * B_stored"
+RCS_AMPLITUDE_VERSION = 2  # Absolute dielectric / TE-sheet / multi-region phase.
 DENSE_LINEAR_BACKWARD_ERROR_MAX = 1.0e-12
 DENSE_GPU_BACKEND_ENV = "GHOST_DENSE_BACKEND"
 DENSE_GPU_MIN_N_ENV = "GHOST_DENSE_GPU_MIN_N"
@@ -1140,25 +1141,29 @@ def _read_csv_numeric_rows(
     path: 'str',
     expected_header: 'List[str]',
 ) -> 'List[List[float]]':
-    """Read a strict CSV material table whose first column is frequency in Hz."""
+    """Read a nominal material CSV in Hz, with or without FREDDY's header."""
 
     rows: 'List[List[float]]' = []
     with open(path, "r", encoding="utf-8-sig", newline="") as csv_file:
         reader = csv.reader(csv_file)
-        try:
-            raw_header = next(reader)
-        except StopIteration:
-            raise ValueError(f"CSV material file '{path}' is empty.")
-        header = [str(value).strip().lower() for value in raw_header]
-        if header != expected_header:
-            raise ValueError(
-                f"CSV material file '{path}' must have header "
-                f"{','.join(expected_header)}; found {','.join(header)}."
-            )
+        first_row = True
         for raw_row in reader:
             lineno = reader.line_num
             if not raw_row or all(not str(value).strip() for value in raw_row):
                 continue
+            if first_row:
+                first_row = False
+                header = [str(value).strip().lower() for value in raw_row]
+                if header == expected_header:
+                    continue
+                try:
+                    [float(value) for value in raw_row]
+                except ValueError as exc:
+                    raise ValueError(
+                        f"CSV material file '{path}' must have header "
+                        f"{','.join(expected_header)} or contain headerless numeric rows in Hz; "
+                        f"found {','.join(header)}."
+                    ) from exc
             if len(raw_row) != len(expected_header):
                 raise ValueError(
                     f"CSV material file '{path}' line {lineno} must contain "
@@ -1302,7 +1307,9 @@ def _panel_count_from_n(n_prop: 'int', primitive_len: 'float', min_wavelength: '
         return max(1, n_prop)
     if n_prop < 0:
         n_wave = max(1, abs(n_prop))
-        target = max(min_wavelength / n_wave, primitive_len / 2000.0)
+        target = min_wavelength / n_wave
+        if not math.isfinite(target) or target <= 0.0:
+            raise ValueError("The controlling mesh wavelength must be positive and finite.")
         return max(1, int(math.ceil(primitive_len / target)))
     # n_prop == 0: apply default panels-per-wavelength density.
     if min_wavelength > EPS:
@@ -6165,7 +6172,7 @@ def _solve_te_robin_mfie(
             alpha_elements if has_ibc else None
         ),
     )
-    if operator_cache is not None:
+    if operator_cache is not None and has_ibc:
         cache_key = (
             "air_kp",
             id(mesh),
@@ -6332,7 +6339,11 @@ def _solve_dielectric_indirect(
         u_int(r)  = SL_1(sigma) (interior, single-layer at k1)
 
     Trace continuity:  u_inc + (mu/2 + K0*mu) = S1*sigma
-    Flux continuity:   D0*mu + factor*(sigma/2 + K'1*sigma) = -du_inc/dn
+    Flux continuity:   W0*mu + factor*(sigma/2 + K'1*sigma) = du_inc/dn
+
+    The Maue matrix is W0 = -d_n DL_0. The interior derivative of SL_1
+    is (1/2 + K'1). Thus both rows below follow directly from continuity;
+    the physical exterior density is mu, without a far-field sign change.
 
     where factor = mu_ext/mu_int for E_z, eps_ext/eps_int for H_z.
 
@@ -6377,10 +6388,10 @@ def _solve_dielectric_indirect(
 
     # Build system: 2N x 2N.
     a_sys = np.zeros((2 * nnodes, 2 * nnodes), dtype=np.complex128)
-    # Row 1 (trace): 0.5*M*mu + K0*mu - S1*sigma = bu
+    # Row 1 (trace): 0.5*M*mu + K0*mu - S1*sigma = -bu
     a_sys[:nnodes, :nnodes] = 0.5 * M + K0
     a_sys[:nnodes, nnodes:] = -S1
-    # Row 2 (flux): D0*mu + factor*(0.5*M + K'1)*sigma = -bdn
+    # Row 2 (flux): W0*mu + factor*(0.5*M + K'1)*sigma = bdn
     a_sys[nnodes:, :nnodes] = D0
     a_sys[nnodes:, nnodes:] = factor * (0.5 * M + Kp1)
 
@@ -6390,8 +6401,8 @@ def _solve_dielectric_indirect(
         ids = np.asarray(elem.node_ids, dtype=int)
         load_u = _linear_element_incident_load_many(elem, k_air=k0, elevations_deg=elev)
         load_dn = _linear_element_incident_dn_load_many(elem, k_air=k0, elevations_deg=elev)
-        rhs_sys[ids, :] += load_u
-        rhs_sys[nnodes + ids, :] -= load_dn
+        rhs_sys[ids, :] -= load_u
+        rhs_sys[nnodes + ids, :] += load_dn
 
     _ensure_finite_linear_system(a_sys, rhs_sys, label="dielectric indirect system")
     sol = _solve_dense_system(
@@ -6563,12 +6574,12 @@ def _solve_te_sheet(
     Represent u_s by a double-layer potential with density mu = K:
         u_s(r) = Int (dG(r,r')/dn_src) . mu(r') dr'.
     Then u_s jumps across the sheet by exactly mu (as required), and the
-    normal derivative of u_s is continuous and equals (N mu)(r), where N
-    is the hypersingular operator obtainable from S via the Maue identity.
+    normal derivative of u_s is continuous and equals -(W mu)(r), where W
+    is the hypersingular matrix assembled through the Maue identity.
 
-    At the sheet:  q = q_inc + N mu,  E_tangent relates to q through the
+    At the sheet:  q = q_inc - W mu,  E_tangent relates to q through the
     local frame, and K = Y . E_tangent gives:
-        (N - jomegaeps . Z_s . I) mu = -q_inc    ->   (N - jk/eta . Z_s . M) mu = -RHS_qinc
+        (W - jomegaeps . Z_s . I) mu = q_inc
 
     (Using omegaeps = k/eta with eta = free-space impedance.  The sign of the Z_s
     term mirrors the validated TM sheet system S - (Z_s/jketa).M: this
@@ -6579,7 +6590,7 @@ def _solve_te_sheet(
     passive sheet scatter above the PEC level.)
 
     Limit cases:
-        Z_s -> 0  (PEC sheet):        N mu = -q_inc          (TE PEC Neumann)
+        Z_s -> 0  (PEC sheet):        W mu = q_inc           (TE PEC Neumann)
         Z_s -> inf (transparent):     mu -> 0                (no scattering)
 
     Returns (rcs_lin, amp, residual_norm_max).  Far field uses the standard
@@ -6606,12 +6617,12 @@ def _solve_te_sheet(
 
     a_sys = N_mat - weighted_mass
 
-    # RHS: -<phi, du_inc/dn>.
+    # W = -d_n D: the physical DLP density has RHS +<phi, du_inc/dn>.
     rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
     for elem in mesh.elements:
         ids = np.asarray(elem.node_ids, dtype=int)
         load_dn = _linear_element_incident_dn_load_many(elem, k_air=float(k0), elevations_deg=elev)
-        rhs_sys[ids, :] -= load_dn
+        rhs_sys[ids, :] += load_dn
 
     # Meixner edge condition: at open-strip endpoints mu -> 0 (H_z is
     # continuous across the strip edge, so the jump density vanishes).
@@ -6749,14 +6760,14 @@ def _solve_mixed_sheet_pec(
         )
         a_sys = N_mat - weighted_mass
 
-        # RHS: -<phi, du_inc/dn>
+        # RHS: +<phi, du_inc/dn>, since W = -d_n D.
         rhs_sys = np.zeros((nnodes, elev.size), dtype=np.complex128)
         for elem in mesh.elements:
             ids = np.asarray(elem.node_ids, dtype=int)
             load_dn = _linear_element_incident_dn_load_many(
                 elem, k_air=float(k0), elevations_deg=elev,
             )
-            rhs_sys[ids, :] -= load_dn
+            rhs_sys[ids, :] += load_dn
 
         # Meixner edge condition on open sheet endpoints: mu=0 (H_z continuous
         # at the strip edge).  Applied only to nodes that are geometric
@@ -7509,15 +7520,9 @@ def _solve_multi_region_indirect(
             continue
         density = sol[dm[0]:dm[0]+dm[1], :]
         for li, nid in enumerate(ifc['nodes']):
-            # The exterior Green representation used by the multi-region
-            # equations is u_scat = -S[sigma_ext].  Keep that representation
-            # sign on the returned density itself so monostatic, bistatic,
-            # boundary-density export, and every downstream far-field caller
-            # share the same physical complex-amplitude convention as the
-            # single-dielectric DLP formulation.  Omitting this minus sign
-            # preserved RCS power but introduced a formulation-dependent
-            # 180-degree phase jump in coherent GRIM data.
-            ext_density_global[nid, :] -= density[li, :]
+            # These equations use u_scat = S[sigma_ext]. Preserve the
+            # physical SLP density in all projections and density exports.
+            ext_density_global[nid, :] += density[li, :]
         for eidx in ifc['eids']:
             ext_elem_mask[eidx] = True
 
@@ -7765,6 +7770,14 @@ def solve_monostatic_rcs_2d_single_polarization(
         )
 
     for freq_ghz in frequencies:
+        # Specialist callers can also reuse this cache. Keep dense operators
+        # only for the current frequency; preserve scalar telemetry.
+        if shared_operator_cache is not None:
+            if shared_operator_cache.get('_frequency_ghz') != freq_ghz:
+                for cache_key in list(shared_operator_cache):
+                    if isinstance(cache_key, tuple):
+                        del shared_operator_cache[cache_key]
+                shared_operator_cache['_frequency_ghz'] = freq_ghz
         check_abort()
         freq_hz = freq_ghz * 1e9
         k0 = 2.0 * math.pi * freq_hz / C0
@@ -7820,6 +7833,7 @@ def solve_monostatic_rcs_2d_single_polarization(
                 )
                 linear_mesh_stats_local = dict(linear_mesh_stats_local)
                 if shared_frequency_meshes is not None:
+                    shared_frequency_meshes.clear()
                     shared_frequency_meshes[mesh_cache_key] = (
                         panels,
                         mesh,
@@ -8309,6 +8323,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         **_dense_backend_summary(),
     }
 
+    metadata["amplitude_version"] = RCS_AMPLITUDE_VERSION
     quality_gate = evaluate_quality_gate(metadata, thresholds=quality_thresholds)
     metadata["quality_gate"] = quality_gate
     if strict_quality_gate and not bool(quality_gate.get("passed", False)):
@@ -8319,6 +8334,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         "solver": "2d_bie_mom_rcs",
         "scattering_mode": "monostatic",
         "amplitude_convention": RCS_AMPLITUDE_CONVENTION,
+        "amplitude_version": RCS_AMPLITUDE_VERSION,
         "polarization": _canonical_user_polarization_label(polarization),
         "polarization_export": _canonical_user_polarization_label(polarization),
         "samples": samples,
@@ -8548,6 +8564,7 @@ def _merge_co_polarized_2d_results(
         "preflight": dict(first_metadata.get("preflight", {}) or {}),
         "quality_gate": quality_gate,
         "channel_metadata": channel_metadata,
+        "amplitude_version": RCS_AMPLITUDE_VERSION,
         "co_solve_shared_discretization": True,
         "shared_operator_cache_enabled": any(
             bool(channel_metadata[label].get(
@@ -8652,6 +8669,7 @@ def _merge_co_polarized_2d_results(
         "solver": next(iter(solver_names)),
         "scattering_mode": next(iter(scattering_modes)),
         "amplitude_convention": next(iter(amplitude_conventions)),
+        "amplitude_version": RCS_AMPLITUDE_VERSION,
         "rcs_log_unit": "dBke",
         "rcs_linear_quantity": "sigma_2d",
         "polarizations": list(expected_channels),
@@ -8660,6 +8678,69 @@ def _merge_co_polarized_2d_results(
         "co_solved_samples": co_solved_samples,
         "metadata": metadata,
     }
+
+
+def _frequency_local_co_solve(solve, kwargs):
+    """Finish both channels (and both certification meshes) per frequency."""
+    kwargs = dict(kwargs)
+    frequencies = list(kwargs.pop('frequencies_ghz'))
+    if len({float(value) for value in frequencies}) != len(frequencies):
+        raise ValueError('Duplicate frequencies are not supported in a co-polarized result grid.')
+    progress = kwargs.pop('progress_callback', None)
+    results = []
+    for index, frequency in enumerate(frequencies):
+        def report(done, total, message):
+            if progress is not None:
+                progress(index * 1000 + int(1000 * done / max(total, 1)),
+                         1000 * len(frequencies), message)
+        results.append(solve(frequencies_ghz=[frequency], progress_callback=report, **kwargs))
+
+    def combine(items, field=''):
+        first = items[0]
+        if all(isinstance(v, dict) for v in items):
+            return {key: combine([v[key] for v in items if key in v], key)
+                    for key in dict.fromkeys(k for v in items for k in v)}
+        if all(isinstance(v, bool) for v in items):
+            return all(items)
+        if all(isinstance(v, (int, float)) for v in items):
+            finite = [v for v in items if math.isfinite(v)]
+            if finite and ('_min' in field or field.startswith('min_')):
+                return min(finite)
+            if finite and field.endswith('_mean'):
+                return sum(finite) / len(finite)
+            return max(finite) if finite else float('nan')
+        if all(isinstance(v, list) for v in items):
+            merged = []
+            for value in items:
+                for entry in value:
+                    if entry not in merged:
+                        merged.append(entry)
+            return merged
+        return first
+
+    result = dict(results[0])
+    result['samples'] = [row for value in results for row in value['samples']]
+    result['co_solved_samples'] = {
+        pol: [row for value in results for row in value['co_solved_samples'][pol]]
+        for pol in ('VV', 'HH')}
+    key = lambda row: (float(row['frequency_ghz']), float(row['theta_inc_deg']),
+                       float(row['theta_scat_deg']), 0 if row['polarization'] == 'VV' else 1)
+    result['samples'].sort(key=key)
+    for rows in result['co_solved_samples'].values():
+        rows.sort(key=key)
+    metadata = combine([value['metadata'] for value in results])
+    # Preserve every frequency's evidence, including its channel mesh gates.
+    metadata['frequency_metadata'] = [
+        {'frequency_ghz': float(frequency), 'metadata': value['metadata']}
+        for frequency, value in zip(frequencies, results)]
+    metadata['operator_cache_scope'] = 'one_frequency'
+    metadata['panel_count_min'] = min(value['metadata']['panel_count_min'] for value in results)
+    for key in ('shared_operator_cache_hits', 'shared_operator_cache_stores',
+                'reused_matrix_solve_count', 'residual_nonfinite_count'):
+        metadata[key] = sum(value['metadata'].get(key, 0) for value in results)
+    metadata['warning_count'] = len(metadata.get('warnings', []))
+    result['metadata'] = metadata
+    return result
 
 
 def solve_monostatic_rcs_2d(
@@ -8687,6 +8768,8 @@ def solve_monostatic_rcs_2d(
     conditions differ.
     """
 
+    if len(frequencies_ghz) > 1:
+        return _frequency_local_co_solve(solve_monostatic_rcs_2d, locals())
     shared_cache: 'Dict[str, Any]' = {}
     channel_results = {}
     for index, (export_pol, internal_pol) in enumerate(
@@ -8870,8 +8953,12 @@ def solve_bistatic_rcs_2d_single_polarization(
             n_regions=max(1, resources["n_regions"]),
             system_dofs=resources["system_dofs"],
             operator_matrices=resources["operator_matrices"],
-            n_rhs=1,
+            n_rhs=len(inc_angles),
         )
+        # Returned dictionaries persist across frequencies; include them as
+        # well as the rectangular complex/power projection workspace.
+        est_gb += (len(inc_angles) * len(obs_angles) *
+                   (1024 * len(frequencies) + 64)) / (1024 ** 3)
         memory_limit_gb = _solve_memory_limit_gb()
         if est_gb > memory_limit_gb:
             raise MemoryError(
@@ -8885,8 +8972,7 @@ def solve_bistatic_rcs_2d_single_polarization(
                     ),
                     (
                         "Reduce panel count or frequency, set an appropriate "
-                        "mesh_reference_ghz, or reduce the observation-angle "
-                        "batch."
+                        "mesh_reference_ghz, or reduce the incidence/observation grid."
                     ),
                 )
             )
@@ -8985,7 +9071,7 @@ def solve_bistatic_rcs_2d_single_polarization(
                         elem, k_air=float(k0), elevations_deg=inc_all_arr
                     )
                 else:
-                    rhs_all[ids, :] -= _linear_element_incident_dn_load_many(
+                    rhs_all[ids, :] += _linear_element_incident_dn_load_many(
                         elem, k_air=float(k0), elevations_deg=inc_all_arr
                     )
             if sheet_endpoint_nodes is not None and sheet_endpoint_nodes.size > 0:
@@ -9123,10 +9209,10 @@ def solve_bistatic_rcs_2d_single_polarization(
             )
             for elem in mesh.elements:
                 ids = np.asarray(elem.node_ids, dtype=int)
-                rhs_all[ids, :] += _linear_element_incident_load_many(
+                rhs_all[ids, :] -= _linear_element_incident_load_many(
                     elem, k0, inc_all_arr
                 )
-                rhs_all[nnodes + ids, :] -= (
+                rhs_all[nnodes + ids, :] += (
                     _linear_element_incident_dn_load_many(
                         elem, k0, inc_all_arr
                     )
@@ -9243,6 +9329,7 @@ def solve_bistatic_rcs_2d_single_polarization(
         "preflight": dict(preflight_report),
         **_dense_backend_summary(),
     }
+    metadata["amplitude_version"] = RCS_AMPLITUDE_VERSION
     quality_gate = evaluate_quality_gate(metadata, thresholds=quality_thresholds)
     metadata["quality_gate"] = quality_gate
     if strict_quality_gate and not bool(quality_gate.get("passed", False)):
@@ -9253,6 +9340,7 @@ def solve_bistatic_rcs_2d_single_polarization(
         "solver": "2d_bie_mom_rcs",
         "scattering_mode": "bistatic",
         "amplitude_convention": RCS_AMPLITUDE_CONVENTION,
+        "amplitude_version": RCS_AMPLITUDE_VERSION,
         "polarization": _canonical_user_polarization_label(polarization),
         "polarization_export": _canonical_user_polarization_label(polarization),
         "samples": samples,
@@ -9561,6 +9649,8 @@ def solve_monostatic_rcs_2d_certified(
 ) -> 'Dict[str, Any]':
     """Canonical production monostatic entry; both channels must certify."""
 
+    if len(frequencies_ghz) > 1:
+        return _frequency_local_co_solve(solve_monostatic_rcs_2d_certified, locals())
     channel_results = {}
     shared_discretization_caches = ({}, {})
     for index, (export_pol, internal_pol) in enumerate(
@@ -9874,8 +9964,8 @@ def compute_boundary_densities(
         rhs = np.zeros(2*nnodes, dtype=np.complex128)
         for elem in mesh.elements:
             ids = np.asarray(elem.node_ids, dtype=int)
-            rhs[ids] += _linear_element_incident_load_many(elem, k0, elev_arr)[:,0]
-            rhs[nnodes+ids] -= _linear_element_incident_dn_load_many(elem, k0, elev_arr)[:,0]
+            rhs[ids] -= _linear_element_incident_load_many(elem, k0, elev_arr)[:,0]
+            rhs[nnodes+ids] += _linear_element_incident_dn_load_many(elem, k0, elev_arr)[:,0]
         check_abort()
         sol = np.linalg.solve(a, rhs)
         check_abort()
@@ -9946,4 +10036,5 @@ def compute_boundary_densities(
         "density_imag": np.imag(density).tolist(),
         "density_abs": np.abs(density).tolist(),
         "density_phase_deg": np.degrees(np.angle(density)).tolist(),
+        "amplitude_version": RCS_AMPLITUDE_VERSION,
     }

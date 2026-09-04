@@ -175,6 +175,7 @@ def _write_isotropic_line_delta(
     psi_vv_deg: float,
 ) -> None:
     """Write one strict two-channel line response shared by both instances."""
+    import feature_sum as contracts
 
     angles = np.asarray([0.0, 90.0, 180.0])
     wave_number = 2.0 * math.pi * frequency_ghz * 1.0e9 / c0
@@ -184,6 +185,10 @@ def _write_isotropic_line_delta(
     amplitude[..., 0] = raw_te
     amplitude[..., 1] = raw_tm
     payload = {
+        "rcs_domain": "delta",
+        "amplitude_convention": contracts.PHYSICAL_2D_AMPLITUDE_CONVENTION,
+        "phase_reference": contracts.PHYSICAL_2D_PHASE_REFERENCE+contracts.DELTA_PHASE_SUFFIX,
+        "complex_field_domain": contracts.DELTA_FIELD_DOMAIN,
         "azimuths": angles,
         "elevations": np.asarray([0.0]),
         "frequencies": np.asarray([frequency_ghz]),
@@ -873,12 +878,13 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-negative"):
             model.feature_selection_summary(max_disabled_ids_per_kind=-1)
 
-    def test_all_disabled_spatial_configuration_is_rejected(self):
+    def test_all_disabled_spatial_configuration_builds_a_baseline(self):
         model = FeatureAssemblyFormModel(
             FeatureAssemblyValues(
                 base_grim="body.grim",
                 output_grim="assembled.grim",
                 point_locations_csv="points.csv",
+                coordinate_units="meters",
             )
         )
         model.update_dataset_requirements(
@@ -890,8 +896,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         )
         model.set_feature_instance_enabled("point", "p1", False)
 
-        with self.assertRaisesRegex(ValueError, "No enabled spatial features"):
-            model.validate()
+        model.validate()
 
     def test_all_disabled_configuration_can_preview_the_clean_body(self):
         model = FeatureAssemblyFormModel(
@@ -1223,8 +1228,8 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         self.assertEqual(request.kwargs["skin_tol_m"], 8.0e-4)
         self.assertEqual(request.kwargs["skin_phase_tol_deg"], 12.0)
         self.assertEqual(request.kwargs["normal_tol_deg"], 9.0)
-        self.assertFalse(request.kwargs["allow_legacy_base_metadata"])
-        self.assertTrue(request.kwargs["require_feature_manifests"])
+        self.assertTrue(request.kwargs["allow_legacy_base_metadata"])
+        self.assertFalse(request.kwargs["require_feature_manifests"])
         self.assertFalse(request.kwargs["require_body_mesh_certification"])
         self.assertNotIn("expected_host_material", request.kwargs)
         self.assertNotIn("expected_host_materials", request.kwargs)
@@ -1850,9 +1855,13 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             surface = root / "vehicle.facet"
             _write_minimal_base_grim(base)
             surface.write_text("4 2\nexact mesh revision 7\n", encoding="utf-8")
+            coordinates = root / "points.csv"
+            coordinates.write_text(",".join(POINT_PLACEMENT_COLUMNS)+"\np1,fastener,0,0,0,0,0,1,1,0,0\n", encoding="utf-8")
             panel = FeatureAssemblyPanel(service=ghost.feature_workflow)
             try:
+                panel.validation_profile.setCurrentIndex(0)  # explicit strict audit
                 panel.set_base_grim(str(base))
+                panel.set_point_csv(str(coordinates), discover=False)
                 panel.set_surface_mesh(str(surface))
                 panel.surface_units.setCurrentIndex(
                     panel.surface_units.findData("meters")
@@ -2022,8 +2031,8 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             self.assertIn("2 enabled", panel.validation_qa_label.text())
             self.assertIn("1 production QA warning", panel.validation_qa_label.text())
             self.assertFalse(panel.validation_warning_label.isHidden())
-            self.assertIn("RELEASE WARNINGS", panel.validation_warning_label.text())
-            self.assertFalse(panel.validation_warning_ack.isHidden())
+            self.assertIn("advisories", panel.validation_warning_label.text())
+            self.assertTrue(panel.validation_warning_ack.isHidden())
             self.assertFalse(panel.validation_warning_ack.isChecked())
             self.assertIn(
                 "no certified library manifest",
@@ -2071,7 +2080,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             self.assertEqual(result.text(), "WARN: not illuminated")
             self.assertIn("Not illuminated: 0 of 361", result.toolTip())
             self.assertIn("WARN/not illuminated", panel.validation_qa_label.text())
-            self.assertFalse(panel.validation_warning_ack.isHidden())
+            self.assertTrue(panel.validation_warning_ack.isHidden())
             self.assertFalse(panel.validation_warning_ack.isChecked())
         finally:
             _close_panel_without_prompt(panel)
@@ -2088,9 +2097,9 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertIn("No Assembly operation", panel.status_label.text())
         self.assertFalse(panel.advanced_section.header.isChecked())
         self.assertTrue(panel.skin_tol.isEnabled())
-        self.assertEqual(panel.validation_profile.currentData()[0], "external")
+        self.assertEqual(panel.validation_profile.currentData()[0], "advisory")
         self.assertEqual(
-            panel._validation_profile_flags(), (False, True, False)
+            panel._validation_profile_flags(), (True, False, False)
         )
         self.assertFalse(panel.body_geometry_section.header.isChecked())
         self.assertFalse(panel.feature_selection_section.header.isChecked())
@@ -2125,7 +2134,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         self.assertEqual(panel.phase_tol.value(), 15.0)
         self.assertEqual(panel.normal_tol.value(), 15.0)
         self.assertEqual(
-            panel._validation_profile_flags(), (True, False, False)
+            panel._validation_profile_flags(), (False, True, False)
         )
         _close_panel_without_prompt(panel)
 
@@ -2197,7 +2206,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel.base_picker.set_path(str(external))
             panel._update_workflow_readiness()
             self.assertIn("✓ valid body GRIM", panel.readiness_label.text())
-            self.assertIn("surface mesh", panel.next_step_label.text())
+            self.assertIn("body-only baseline", panel.readiness_label.text())
             self.assertTrue(panel.body_geometry_section.header.isChecked())
 
             panel.base_picker.set_path(str(embedded))
@@ -2265,9 +2274,8 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             panel._show_validation_qa(warning_plan)
             panel._validated_plan_current = True
             panel._update_workflow_readiness()
-            self.assertFalse(panel.build_button.isEnabled())
-            panel.validation_warning_ack.setChecked(True)
             self.assertTrue(panel.build_button.isEnabled())
+            self.assertTrue(panel.validation_warning_ack.isHidden())
 
             panel.normal_tol.setValue(16.0)
             self.app.processEvents()
@@ -2542,7 +2550,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         )
         self.assertEqual(panel.model.enabled_point_placement_ids, ())
         self.assertFalse(panel.input_preview_button.isEnabled())
-        self.assertIn("enable at least one", panel.status_label.text().lower())
+        self.assertIn("body-only baseline", panel.status_label.text().lower())
         _close_panel_without_prompt(panel)
 
     def test_tree_leaf_selection_reaches_real_backend_field_and_provenance(self):
@@ -2568,6 +2576,9 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
             disabled_output = root / "disabled_seal_only.grim"
 
             _write_closed_box_facet(surface)
+            # Default placement must also tolerate a foreign/stale registration
+            # sidecar, while continuing to use this actual mesh for geometry.
+            Path(str(surface)+".assembly.json").write_text('{"schema":"foreign"}')
             _write_isotropic_line_delta(
                 response,
                 frequency_ghz=frequency_ghz,
@@ -2610,8 +2621,8 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 panel.surface_units.setCurrentIndex(
                     panel.surface_units.findData("meters")
                 )
-                # This fixture intentionally predates certified feature manifests.
-                panel.validation_profile.setCurrentIndex(2)
+                # Imported fields and local deltas need no certified manifest.
+                self.assertEqual(panel.validation_profile.currentData()[0], "advisory")
                 panel.skin_tol.setValue(1.0e-5)  # millimeters = 1e-8 meters
                 panel.phase_tol.setValue(0.1)
                 panel.normal_tol.setValue(2.0)

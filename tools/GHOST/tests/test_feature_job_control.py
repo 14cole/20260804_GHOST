@@ -165,7 +165,7 @@ class FeatureJobControlTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertEqual(features.read_bytes(), intruder)
 
-    def test_feature_bearing_total_cannot_be_used_as_another_build_base(self):
+    def test_strict_profile_can_reject_feature_bearing_total(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clean = root / "clean.grim"
@@ -187,6 +187,7 @@ class FeatureJobControlTests(unittest.TestCase):
                     str(second),
                     radar_grid=GRID,
                     declared_coherent_base=True,
+                    allow_legacy_base_metadata=False,
                 )
 
             self.assertFalse(second.exists())

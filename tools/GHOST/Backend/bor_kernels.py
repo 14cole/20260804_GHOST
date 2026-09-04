@@ -26,13 +26,18 @@ from functools import lru_cache
 from typing import List, Tuple
 
 import numpy as np
+from scipy.special import roots_legendre
+
+NEAR_KERNEL_WORK_BYTES = 64_000_000
+NEAR_ANGULAR_MAX_ORDER = 4096
+NEAR_ANGULAR_RTOL = 2.0e-8
 
 C0 = 299_792_458.0
 ETA0 = 376.730313668
 AXIS_TOL = 1e-12
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=64)
 def cached_leggauss(order: 'int') -> 'Tuple[np.ndarray, np.ndarray]':
     """Immutable Gauss-Legendre rule shared by every BoR kernel build.
 
@@ -42,7 +47,7 @@ def cached_leggauss(order: 'int') -> 'Tuple[np.ndarray, np.ndarray]':
     arrays are read-only to keep the process-wide cache safe.
     """
 
-    x, w = np.polynomial.legendre.leggauss(int(order))
+    x, w = roots_legendre(int(order))
     x.setflags(write=False)
     w.setflags(write=False)
     return x, w
@@ -247,7 +252,7 @@ def modal_kernels_fft(rho_p, z_p, rho_q, z_q, k, m_max: 'int', n_xi: 'int' = 0):
     return out.reshape(shape + (m_max + 2,))
 
 
-def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 48,
+def _modal_kernels_near_rule(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 48,
                        tail_order: 'int' = 0):
     """
     G_m for m = 0..m_max+1 at near-singular point pairs.
@@ -311,14 +316,16 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     dxi_dv = 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
     g = np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R)
     w_all = wv * dxi_dv
-    cosmx = np.cos(xi[:, :, None] * m[None, None, :])
     gw = g * w_all
-    acc = 2.0 * np.matmul(gw[:, None, :], cosmx).squeeze(1)
+    acc = np.empty((len(idx), len(m)), complex)
+    for m0 in range(0, len(m), 32):
+        cosmx = np.cos(xi[:, :, None] * m[None, None, m0:m0 + 32])
+        acc[:, m0:m0 + 32] = 2.0 * np.matmul(gw[:, None, :], cosmx).squeeze(1)
 
     # -- tail --
     osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
-    required_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
-    n_tail = max(required_tail, int(tail_order))
+    required_tail = int(max(64, math.ceil(4.0 * osc)))
+    n_tail = int(tail_order) if tail_order > 0 else required_tail
     xt, wt = cached_leggauss(n_tail)
     u01t = 0.5 * (xt + 1.0)
     w01t = 0.5 * wt
@@ -329,9 +336,10 @@ def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 4
     st = np.sin(0.5 * xi_t)
     Rt = np.sqrt(d[:, None] ** 2 + (a[:, None] * st) ** 2)
     gt = np.exp(-1j * complex(k) * Rt) / (4.0 * np.pi * Rt)
-    cosmt = np.cos(xi_t[:, :, None] * m[None, None, :])
     gtw = gt * w_t
-    acc += 2.0 * np.matmul(gtw[:, None, :], cosmt).squeeze(1)
+    for m0 in range(0, len(m), 32):
+        cosmt = np.cos(xi_t[:, :, None] * m[None, None, m0:m0 + 32])
+        acc[:, m0:m0 + 32] += 2.0 * np.matmul(gtw[:, None, :], cosmt).squeeze(1)
 
     out[idx, :] = acc
     return out
@@ -409,13 +417,15 @@ def mfie_kernels_fft(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     n_pairs = flats[0].size
     out = [np.empty((n_pairs, 2 * m_max + 1), dtype=np.complex128)
            for _ in range(4)]
-    # _mfie_brackets holds ~12 [chunk, n_xi] complex intermediates at peak.
-    chunk = max(1, int(FFT_BUILD_BUDGET / (16.0 * n_xi * 12.0)))
+    # Include geometric arrays, FFT work, and expression temporaries.
+    chunk = max(1, int(FFT_BUILD_BUDGET / (16.0 * n_xi * 16.0)))
     for i0 in range(0, n_pairs, chunk):
         i1 = min(i0 + chunk, n_pairs)
         Fs = _mfie_brackets(*(a[i0:i1] for a in flats), k, xi)
         for o, F in zip(out, Fs):
             o[i0:i1] = np.fft.fft(F, axis=-1)[:, bins] * phase
+        # Do not retain the previous batch while constructing the next one.
+        del Fs, F
     return tuple(o.reshape(shape + (2 * m_max + 1,)) for o in out)
 
 
@@ -430,9 +440,6 @@ def _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m) -> 'List[np.ndarray]':
     complex-exponential form and shares the trig tables across brackets.
     Returns one [n_pairs, len(m)] array per bracket."""
 
-    arg = xi_pos[:, :, None] * m[None, None, :]
-    cosm = np.cos(arg)
-    sinm = np.sin(arg)
     # Stack the four vector-component brackets and use batched matrix
     # products over their shared quadrature axis.  This performs the same
     # pairwise modal projections while avoiding eight small einsum dispatches
@@ -443,11 +450,14 @@ def _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m) -> 'List[np.ndarray]':
     D = np.stack(
         [(Fpos - Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)], axis=1
     )
-    projected = np.matmul(S, cosm) - 1j * np.matmul(D, sinm)
+    projected = np.empty((len(xi_pos), len(Fp), len(m)), complex)
+    for m0 in range(0, len(m), 32):
+        arg = xi_pos[:, :, None] * m[None, None, m0:m0 + 32]
+        projected[:, :, m0:m0 + 32] = np.matmul(S, np.cos(arg)) - 1j * np.matmul(D, np.sin(arg))
     return [projected[:, i, :] for i in range(projected.shape[1])]
 
 
-def mfie_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+def _mfie_kernels_near_rule(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
                       m_max: 'int', order: 'int' = 48,
                       tail_order: 'int' = 0):
     """Modal MFIE kernels for near point pairs (1-D pair lists) via the
@@ -482,10 +492,13 @@ def mfie_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     xi_c = 2.0 * np.arcsin(s)
     ds_dv = (d / a)[:, None] * np.cosh(v)
     w_c = wv * 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
+    axis = rr4 <= 1e-30
+    xi_c[axis] = np.pi * u01
+    w_c[axis] = np.pi * w01
     # tail
     osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
-    required_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
-    n_tail = max(required_tail, int(tail_order))
+    required_tail = int(max(64, math.ceil(4.0 * osc)))
+    n_tail = int(tail_order) if tail_order > 0 else required_tail
     xt, wt = cached_leggauss(n_tail)
     xi0 = 2.0 * np.arcsin(np.minimum(s0, 1.0))
     span = np.pi - xi0
@@ -598,8 +611,8 @@ def ibc_kernels_fft(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     n_pairs = Pp * Pq
     out = [np.empty((n_pairs, 2 * m_max + 1), dtype=np.complex128)
            for _ in range(4)]
-    # _ibc_brackets_grid holds ~14 [chunk, n_xi] intermediates at peak.
-    chunk = max(1, int(FFT_BUILD_BUDGET / (16.0 * n_xi * 14.0)))
+    # Include geometric arrays, FFT work, and expression temporaries.
+    chunk = max(1, int(FFT_BUILD_BUDGET / (16.0 * n_xi * 18.0)))
     flats = (pr, pz, ptr, ptz, qr, qz, qtr, qtz)
     for i0 in range(0, n_pairs, chunk):
         i1 = min(i0 + chunk, n_pairs)
@@ -607,10 +620,11 @@ def ibc_kernels_fft(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
                                 np.broadcast_to(xi, (i1 - i0, n_xi)))
         for o, F in zip(out, Fs):
             o[i0:i1] = np.fft.fft(F, axis=-1)[:, bins] * phase
+        del Fs, F
     return tuple(o.reshape(Pp, Pq, -1) for o in out)
 
 
-def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+def _ibc_kernels_near_rule(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
                      m_max: 'int', order: 'int' = 48,
                      tail_order: 'int' = 0):
     """Modal IBC kernels for near point-pair lists [n_pairs, 2*m_max+1],
@@ -642,9 +656,12 @@ def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     xi_c = 2.0 * np.arcsin(s)
     ds_dv = (d / a)[:, None] * np.cosh(v)
     w_c = wv * 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
+    axis = rr4 <= 1e-30
+    xi_c[axis] = np.pi * u01
+    w_c[axis] = np.pi * w01
     osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
-    required_tail = int(min(1024, max(64, math.ceil(4.0 * osc))))
-    n_tail = max(required_tail, int(tail_order))
+    required_tail = int(max(64, math.ceil(4.0 * osc)))
+    n_tail = int(tail_order) if tail_order > 0 else required_tail
     xt, wt = cached_leggauss(n_tail)
     xi0 = 2.0 * np.arcsin(np.minimum(s0, 1.0))
     span = np.pi - xi0
@@ -658,6 +675,95 @@ def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
     Fm = _ibc_brackets_grid(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, -xi_pos)
     outs = _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m)
     return tuple(outs)
+
+
+def _checked_near_kernels(rule, args, k, m_max, order, tail_order, bracket):
+    """Resolve core and tail oscillation, check refinement, and bound scratch.
+
+    The limit applies to temporary point/angular/mode arrays. The returned
+    point-by-mode arrays are owned by the caller and must be budgeted there.
+    """
+    args = tuple(np.ravel(a) for a in np.broadcast_arrays(
+        *[np.atleast_1d(np.asarray(a, dtype=float)) for a in args]))
+    q = 4 if bracket else 2
+    rp, zp, rq, zq = args[0], args[1], args[q], args[q + 1]
+    n = len(rp)
+    nm = 2 * m_max + 1 if bracket else m_max + 2
+    outputs = tuple(np.empty((n, nm), complex) for _ in range(4 if bracket else 1))
+    if n == 0:
+        return outputs if bracket else outputs[0]
+    a = np.sqrt(np.maximum(4 * rp * rq, 0.0))
+    d = np.hypot(rp - rq, zp - zq)
+    s0 = np.minimum(0.25, 20 * d / np.maximum(a, 1e-150))
+    xi0 = 2 * np.arcsin(s0)
+    core_phase = abs(complex(k)) * a * s0 + (m_max + 2) * xi0
+    if bracket:
+        core_phase = np.where(a <= 1e-15, (m_max + 2) * np.pi, core_phase)
+    core = max(int(order), 48, int(math.ceil(24 + 2 * np.max(core_phase))))
+    tail = max(int(tail_order), 64, int(math.ceil(
+        4 * (abs(complex(k)) * float(np.max(a)) / math.pi + m_max + 2))))
+    if max(core, tail) > NEAR_ANGULAR_MAX_ORDER:
+        raise ValueError("BoR near angular quadrature exceeds its accuracy limit; refine the mesh or reduce modal bandwidth.")
+
+    # Independent point chunks cannot affect the Galerkin sum. Leave enough
+    # room for both rules, trigonometric arrays, and all four vector brackets.
+    point_chunk = max(1, int(NEAR_KERNEL_WORK_BYTES /
+                            (128 * (core + tail) * max(min(nm, 32), 16))))
+    for start in range(0, n, point_chunk):
+        stop = min(n, start + point_chunk)
+        part = tuple(a[start:stop] for a in args)
+        # Check the requested rule against a cheaper preliminary rule. A
+        # published result always uses at least the requested core/tail order.
+        c, t = max(16, core // 2), max(16, tail // 2)
+        coarse = rule(*part, k, m_max, order=c, tail_order=t)
+        coarse = coarse if bracket else (coarse,)
+        while True:
+            cf = min(NEAR_ANGULAR_MAX_ORDER, max(core, c + 16, int(math.ceil(1.5 * c))))
+            tf = min(NEAR_ANGULAR_MAX_ORDER, max(tail, t + 16, int(math.ceil(1.5 * t))))
+            if cf == c and tf == t:
+                worst = int(np.argmax(error / np.maximum(scale, 1e-280)))
+                coordinates = tuple(float(a[worst]) for a in part)
+                raise ValueError(f"BoR near angular quadrature did not converge at the maximum order: {rule.__name__}, point={coordinates}, relative change={float(error[worst] / max(scale[worst], 1e-280)):.3g}.")
+            # Refinement can require a smaller point chunk than the initial
+            # rule. Evaluate it in subchunks so no large record escapes.
+            fine_chunk = max(1, int(NEAR_KERNEL_WORK_BYTES /
+                                   (128 * (cf + tf) * max(min(nm, 32), 16))))
+            fine = tuple(np.empty_like(x) for x in coarse)
+            for i in range(0, stop - start, fine_chunk):
+                val = rule(*(a[i:i + fine_chunk] for a in part), k, m_max,
+                           order=cf, tail_order=tf)
+                val = val if bracket else (val,)
+                for out, x in zip(fine, val):
+                    out[i:i + fine_chunk] = x
+            scale = np.maximum.reduce([np.max(np.abs(x), axis=1) for x in fine])
+            error = np.maximum.reduce([np.max(np.abs(x - y), axis=1)
+                                       for x, y in zip(fine, coarse)])
+            if np.all(np.isfinite(error)) and np.all(error <= NEAR_ANGULAR_RTOL * np.maximum(scale, 1e-280)):
+                for out, x in zip(outputs, fine):
+                    out[start:stop] = x
+                break
+            coarse, c, t = fine, cf, tf
+    return outputs if bracket else outputs[0]
+
+
+def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 48,
+                       tail_order: 'int' = 0):
+    return _checked_near_kernels(_modal_kernels_near_rule,
+        (rho_p, z_p, rho_q, z_q), k, m_max, order, tail_order, False)
+
+
+def mfie_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                      m_max: 'int', order: 'int' = 48, tail_order: 'int' = 0):
+    return _checked_near_kernels(_mfie_kernels_near_rule,
+        (rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q),
+        k, m_max, order, tail_order, True)
+
+
+def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                     m_max: 'int', order: 'int' = 48, tail_order: 'int' = 0):
+    return _checked_near_kernels(_ibc_kernels_near_rule,
+        (rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q),
+        k, m_max, order, tail_order, True)
 
 
 def gc_gs_from_g(G: 'np.ndarray', m: 'int') -> 'Tuple[np.ndarray, np.ndarray]':

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 import hashlib
 import inspect
+import io
 import json
 import math
 import os
@@ -65,8 +66,8 @@ FEATURE_RECIPE_HASH_LIMIT_BYTES = 16 * 1024 * 1024
 
 VALIDATION_PROFILES = (
     ("Require certified GHOST BoR body", "production", False, True, True),
-    ("General body — compatible 3-D GRIM (default)", "external", False, True, False),
-    ("Legacy compatibility", "legacy", True, False, False),
+    ("General body — metadata advisory (default)", "advisory", True, False, False),
+    ("Strict library metadata (optional)", "external", False, True, False),
 )
 DEFAULT_SKIN_TOL_MM = 1.0
 DEFAULT_SKIN_PHASE_TOL_DEG = 15.0
@@ -493,6 +494,18 @@ def coerce_feature_workflow(service: Any) -> FeatureWorkflowAdapter:
     return FeatureWorkflowAdapter.from_module(service)
 
 
+def parse_study_samples(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        values = tuple(float(part) for part in (value.replace(",", " ").split() if isinstance(value, str) else value))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Study samples must be comma-separated finite numbers.") from exc
+    if not values or not all(math.isfinite(v) for v in values) or any(a >= b for a, b in zip(values, values[1:])):
+        raise ValueError("Study samples must be finite, unique and increasing.")
+    return values
+
+
 @dataclass
 class FeatureAssemblyValues:
     """User-editable values, independent of any GUI toolkit."""
@@ -512,9 +525,15 @@ class FeatureAssemblyValues:
     skin_tol_m: float = 1.0e-3
     skin_phase_tol_deg: float = 15.0
     normal_tol_deg: float = 15.0
-    allow_legacy_base_metadata: bool = False
-    require_feature_manifests: bool = True
+    allow_legacy_base_metadata: bool = True
+    require_feature_manifests: bool = False
     require_body_mesh_certification: bool = False
+    host_material: str = ""
+    host_stack_id: str = ""
+    host_minimum_radius_m: float | None = None
+    study_frequencies_ghz: tuple[float, ...] | None = None
+    study_azimuths_deg: tuple[float, ...] | None = None
+    study_elevations_deg: tuple[float, ...] | None = None
     base_dir: str | None = None
     point_datasets: dict[str, str] = field(default_factory=dict)
     line_datasets: dict[str, str] = field(default_factory=dict)
@@ -533,6 +552,64 @@ class LoadedFeatureAssemblyRecipe:
     variant: str
     values: FeatureAssemblyValues
     source_warnings: tuple[str, ...] = ()
+
+
+@lru_cache(maxsize=64)
+def _response_summary_cached(path, size, modified):
+    import numpy as np
+    fields = {}
+    with zipfile.ZipFile(path) as archive:
+        for key in ("azimuths", "elevations", "frequencies", "polarizations", "units", "phase_reference", "amplitude_convention", "amplitude_version", "complex_field_domain", "time_convention", "feature_library_manifest_json"):
+            try:
+                member = archive.getinfo(key+".npy")
+            except KeyError:
+                continue
+            if member.file_size <= 512*1024:
+                fields[key] = np.load(io.BytesIO(archive.read(member)), allow_pickle=False)
+    parts = []
+    for key, label in (("frequencies", "GHz"), ("azimuths", "azimuth°"), ("elevations", "elevation°")):
+        values = np.asarray(fields.get(key, []), float).ravel()
+        if len(values):
+            parts.append(f"{label}: {values[0]:g}…{values[-1]:g} ({len(values):,})")
+    channels = np.asarray(fields.get("polarizations", [])).ravel()
+    parts.append("Channels: "+", ".join(map(str, channels)))
+    parts.append("Phase origin / frame: "+str(fields.get("phase_reference", "missing; validation required")))
+    parts.append("Amplitude: "+str(fields.get("amplitude_convention", "missing; validation required")))
+    if "amplitude_version" in fields:
+        parts.append("Physical amplitude version: "+str(fields["amplitude_version"]))
+    if "units" in fields:
+        units = json.loads(str(fields["units"]))
+        parts.append("Quantity: "+str(units.get("rcs_linear_quantity", "unspecified"))+" / "+str(units.get("rcs_log_unit", "unspecified")))
+    return "\n".join(parts)
+
+
+def response_summary(path, *, base_dir=None):
+    if not str(path).strip():
+        return "Choose a response to inspect its stored grid, channels and field frame."
+    try:
+        source = _resolved_user_path(path, base_dir=base_dir)
+        stat = source.stat()
+        summary = _response_summary_cached(str(source), stat.st_size, stat.st_mtime_ns)
+        manifests = [candidate for candidate in (Path(str(source)+".feature.json"), source.with_suffix(".feature.json")) if candidate.is_file()]
+        if len(manifests) > 1:
+            return summary+"\nConflicting manifest sidecars: keep exactly one."
+        manifest = None
+        if manifests and manifests[0].stat().st_size <= 512*1024:
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8-sig"))
+        elif not manifests:
+            with zipfile.ZipFile(source) as archive:
+                key = "feature_library_manifest_json.npy"
+                if key in archive.namelist() and archive.getinfo(key).file_size <= 512*1024:
+                    import numpy as np
+                    manifest = json.loads(str(np.load(io.BytesIO(archive.read(key)), allow_pickle=False)))
+        if manifest is not None:
+            host = manifest.get("host", {})
+            envelope = manifest.get("applicability", {})
+            summary += f"\nLibrary host: {host.get('material', 'missing')}; stack: {host.get('stack_id', 'unspecified')}"
+            summary += f"\nFootprint radius: {envelope.get('footprint_radius_m', 'missing')} m; validation: {manifest.get('validation', {}).get('status', 'missing')} (source declaration; checked on Validate)"
+        return summary
+    except Exception as exc:
+        return "Response summary unavailable: "+str(exc)
 
 
 @dataclass(frozen=True)
@@ -1543,6 +1620,10 @@ def feature_assembly_recipe_payload(
         )
 
     serialized_values: dict[str, Any] = {
+        **{key: getattr(values, key) for key in ("study_frequencies_ghz", "study_azimuths_deg", "study_elevations_deg")},
+        "host_material": values.host_material,
+        "host_stack_id": values.host_stack_id,
+        "host_minimum_radius_m": values.host_minimum_radius_m,
         "base_grim": relative(values.base_grim),
         "output_grim": relative(values.output_grim),
         "coordinate_units": str(values.coordinate_units),
@@ -1733,6 +1814,9 @@ def read_feature_assembly_recipe(
     raw_values = payload.get("values")
     if not isinstance(raw_values, Mapping):
         raise ValueError("Assembly recipe values must be a JSON object.")
+    for key in ("host_material", "host_stack_id"):
+        if not isinstance(raw_values.get(key, ""), str):
+            raise ValueError(f"Recipe {key} must be a string.")
 
     required = {
         "base_grim",
@@ -1842,6 +1926,10 @@ def read_feature_assembly_recipe(
         skin_phase_tol_deg=phase_tol,
         normal_tol_deg=normal_tol,
         allow_legacy_base_metadata=raw_values["allow_legacy_base_metadata"],
+        **{key: parse_study_samples(raw_values.get(key)) for key in ("study_frequencies_ghz", "study_azimuths_deg", "study_elevations_deg")},
+        host_material=raw_values.get("host_material", ""),
+        host_stack_id=raw_values.get("host_stack_id", ""),
+        host_minimum_radius_m=(None if raw_values.get("host_minimum_radius_m") is None else _require_finite_nonnegative(raw_values["host_minimum_radius_m"], "Host minimum radius")),
         require_feature_manifests=raw_values["require_feature_manifests"],
         require_body_mesh_certification=raw_values["require_body_mesh_certification"],
         base_dir=None,
@@ -2588,8 +2676,6 @@ class FeatureAssemblyFormModel:
 
         point_csv = _clean_path(values.point_locations_csv)
         line_csv = _clean_path(values.line_locations_csv)
-        if not point_csv and not line_csv:
-            raise ValueError("Select a point or line placement CSV.")
         if point_csv and not self.requirements_are_current("point"):
             raise ValueError(
                 "The point CSV changed after its last successful scan. "
@@ -2610,20 +2696,12 @@ class FeatureAssemblyFormModel:
                 "Line dataset IDs have not been discovered. Re-scan the line "
                 "CSV before continuing."
             )
-        if (
-            (self._point_instances or self._line_instances)
-            and not (self.enabled_point_placement_ids or self.enabled_line_ids)
-        ):
-            raise ValueError(
-                "No enabled spatial features remain. Enable at least one point "
-                "placement or line path before validating or building."
-            )
         missing = self.missing_dataset_mappings()
         if missing:
             raise ValueError(
                 "Choose an OPN-FRD GRIM response for: " + ", ".join(missing)
             )
-        if values.shadow and not _clean_path(values.surface_mesh):
+        if values.shadow and not _clean_path(values.surface_mesh) and not preflight_base_grim(values.base_grim, base_dir=values.base_dir).embedded_bor:
             raise ValueError(
                 "Geometric shadowing requires an STL or facet surface mesh."
             )
@@ -2687,6 +2765,10 @@ class FeatureAssemblyFormModel:
         self.validate()
         values = self.values
         return adapter.request_factory(
+            **{key: getattr(values, key) for key in ("study_frequencies_ghz", "study_azimuths_deg", "study_elevations_deg")},
+            host_material=values.host_material,
+            host_stack_id=values.host_stack_id,
+            host_minimum_radius_m=values.host_minimum_radius_m,
             base_grim=_clean_path(values.base_grim),
             output_grim=_clean_path(values.output_grim),
             coordinate_units=values.coordinate_units,
@@ -2741,6 +2823,8 @@ class FeatureAssemblyFormModel:
 
         return (
             path_signature(values.base_grim),
+            values.host_material, values.host_stack_id, values.host_minimum_radius_m,
+            values.study_frequencies_ghz, values.study_azimuths_deg, values.study_elevations_deg,
             path_signature(values.output_grim, output=True),
             values.coordinate_units,
             path_signature(values.surface_mesh),
@@ -3326,7 +3410,7 @@ if GUI_AVAILABLE:
             self._sync(bool(expanded))
 
         def _sync(self, expanded: bool) -> None:
-            self.header.setText(("▾  " if expanded else "▸  ") + self._title)
+            self.header.setText(("−  " if expanded else "+  ") + self._title)
             self.body.setVisible(bool(expanded))
 
         def addWidget(self, widget: QWidget, stretch: int = 0) -> None:
@@ -3625,8 +3709,18 @@ if GUI_AVAILABLE:
             layout.addWidget(self.empty_label)
             layout.addWidget(self.table)
             layout.addWidget(self.completeness_label)
+            self.response_summary_label = QLabel(self)
+            self.response_summary_label.setWordWrap(True)
+            self.response_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            layout.addWidget(self.response_summary_label)
+            self.table.itemSelectionChanged.connect(self._show_selected_response_summary)
             self.table.cellChanged.connect(self._table_changed)
             self.set_dataset_ids(())
+
+        def _show_selected_response_summary(self):
+            row = self.table.currentRow()
+            item = self.table.item(row, 1) if row >= 0 else None
+            self.response_summary_label.setText(response_summary(item.text()) if item is not None and item.text().strip() else "Select a response row to inspect its grid and field convention.")
 
         @property
         def dataset_ids(self) -> tuple[str, ...]:
@@ -4041,6 +4135,7 @@ if GUI_AVAILABLE:
         build_failed = Signal(str)
         status_changed = Signal(str)
         feature_instance_selected = Signal(str, str)
+        comparison_ready = Signal(str, str, str)
 
         def __init__(
             self,
@@ -4070,6 +4165,7 @@ if GUI_AVAILABLE:
             self._surface_dimensions_key: tuple[Any, ...] | None = None
             self._surface_dimensions_text = ""
             self._current_work_estimate = AssemblyWorkEstimate(available=False)
+            self._placement_editors = {}
             self._build_ui()
 
         def _build_ui(self) -> None:
@@ -4167,7 +4263,7 @@ if GUI_AVAILABLE:
             placement_units_layout.addWidget(placement_units_label)
             placement_units_layout.addWidget(self.coordinate_units, 1)
             placement_units_layout.addWidget(
-                QLabel("Applies to Point and Line Features", placement_units_bar)
+                QLabel("Both feature tabs", placement_units_bar)
             )
             outer.addWidget(placement_units_bar)
 
@@ -4241,7 +4337,7 @@ if GUI_AVAILABLE:
                 self.surface_units.addItem(label, value)
             self.flip_normals = QCheckBox("Flip mesh normals", body_group)
             self.shadow = QCheckBox(
-                "Apply geometric body shadowing (requires mesh)", body_group
+                "Apply geometric body shadowing", body_group
             )
             mesh_options = QWidget(body_group)
             mesh_layout = QVBoxLayout(mesh_options)
@@ -4260,6 +4356,22 @@ if GUI_AVAILABLE:
                 "Units of the selected STL/facet surface, independent of the CSV units."
             )
             body_form.addRow("Body dataset:", self.base_picker)
+            self.body_response_summary = QLabel(body_group)
+            self.body_response_summary.setWordWrap(True)
+            self.body_response_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            body_form.addRow(self.body_response_summary)
+            self.host_material = QLineEdit(body_group)
+            self.host_material.setPlaceholderText("Match library host.material, e.g. PEC outer skin")
+            self.host_stack = QLineEdit(body_group)
+            self.host_stack.setPlaceholderText("Characterized coating / layer-stack ID, if applicable")
+            self.host_radius = QLineEdit(body_group)
+            self.host_radius.setPlaceholderText("Minimum principal radius in meters; blank = unknown")
+            self.host_radius.setToolTip("Conservative minimum radius over every feature footprint, in both surface directions. A flat mesh facet does not prove a flat host. Enter a finite lower bound for a planar surface.")
+            body_form.addRow("Host material:", self.host_material)
+            body_form.addRow("Host stack ID:", self.host_stack)
+            body_form.addRow("Host curvature bound:", self.host_radius)
+            for control in (self.host_material, self.host_stack, self.host_radius):
+                control.editingFinished.connect(self._host_changed)
             body_geometry = QWidget(body_content)
             geometry_form = QFormLayout(body_geometry)
             geometry_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
@@ -4370,6 +4482,9 @@ if GUI_AVAILABLE:
             self.point_help_label.setVisible(False)
             point_layout.addWidget(self.point_help_label)
             point_format_row = QHBoxLayout()
+            self.point_edit_button = QPushButton("Create / edit…", point_page)
+            self.point_edit_button.clicked.connect(lambda: self._edit_placements("point"))
+            point_format_row.addWidget(self.point_edit_button)
             self.point_format_button = QPushButton(
                 "CSV guide", point_page
             )
@@ -4412,8 +4527,7 @@ if GUI_AVAILABLE:
             point_response_help.setWordWrap(True)
             point_response_help.setObjectName("featureContract")
             point_layout.addWidget(point_response_help)
-            point_response_help.setVisible(False)
-            self.point_format_button.toggled.connect(point_response_help.setVisible)
+            point_response_help.setVisible(True)
             self.point_mapping = _DatasetMappingEditor(
                 "Choose a point CSV; one response row will appear per dataset_id.",
                 point_page,
@@ -4445,6 +4559,9 @@ if GUI_AVAILABLE:
             self.line_help_label.setVisible(False)
             line_layout.addWidget(self.line_help_label)
             line_format_row = QHBoxLayout()
+            self.line_edit_button = QPushButton("Create / edit…", line_page)
+            self.line_edit_button.clicked.connect(lambda: self._edit_placements("line"))
+            line_format_row.addWidget(self.line_edit_button)
             self.line_format_button = QPushButton(
                 "CSV guide", line_page
             )
@@ -4486,8 +4603,7 @@ if GUI_AVAILABLE:
             line_response_help.setWordWrap(True)
             line_response_help.setObjectName("featureContract")
             line_layout.addWidget(line_response_help)
-            line_response_help.setVisible(False)
-            self.line_format_button.toggled.connect(line_response_help.setVisible)
+            line_response_help.setVisible(True)
             self.line_mapping = _DatasetMappingEditor(
                 "Choose a line CSV; one response row will appear per dataset_id.",
                 line_page,
@@ -4618,10 +4734,10 @@ if GUI_AVAILABLE:
             self.validation_profile.setCurrentIndex(1)
             self.validation_profile.setToolTip(
                 "General body accepts compatible 3-D responses from any solver, "
-                "with strict field metadata and feature manifests. The optional "
-                "GHOST BoR profile additionally requires its mesh certificate. "
-                "Legacy compatibility reports missing "
-                "applicability evidence as review warnings."
+                "with advisory metadata and no required source certificates or "
+                "feature manifests. Numerical units, samples and placement "
+                "geometry remain checked. Strict library and certified GHOST "
+                "BoR checks are optional."
             )
             self.reset_qa_defaults_button = QPushButton(
                 "Reset placement-check defaults", advanced
@@ -4667,6 +4783,21 @@ if GUI_AVAILABLE:
             review_form = QFormLayout(review_group)
             review_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             review_form.addRow("Output response:", self.output_picker)
+            self.study_fields = {}
+            study_group = QWidget(review_content)
+            study_form = QFormLayout(study_group)
+            study_note = QLabel("Optional exact subset: enter comma-separated stored body samples in increasing order. Blank keeps the full axis; no frequency or angle interpolation is introduced.")
+            study_note.setWordWrap(True)
+            study_form.addRow(study_note)
+            for key, label in (("study_frequencies_ghz", "Frequency (GHz):"), ("study_azimuths_deg", "Azimuth (deg):"), ("study_elevations_deg", "Elevation (deg):")):
+                control = QLineEdit(study_group)
+                control.setPlaceholderText("All stored samples")
+                control.editingFinished.connect(self._study_changed)
+                self.study_fields[key] = control
+                study_form.addRow(label, control)
+            self.study_section = _DisclosureSection("Study scope (all samples by default)", review_content, expanded=False)
+            self.study_section.addWidget(study_group)
+            review_content_layout.addWidget(self.study_section)
             self.readiness_checklist = QTreeWidget(review_group)
             self.readiness_checklist.setObjectName("featureReadinessChecklist")
             self.readiness_checklist.setHeaderLabels(["Requirement", "Status"])
@@ -4722,7 +4853,7 @@ if GUI_AVAILABLE:
                 "Model boundary: Assembly coherently superposes reviewed local "
                 "feature deltas. It does not solve body–feature mutual coupling, "
                 "feature–feature multiple scattering, diffraction, or creeping "
-                "waves. Production validation certifies the inputs and declared "
+                "waves. Production validation checks the inputs and declared "
                 "applicability envelope—not full-vehicle Maxwell accuracy.",
                 review_group,
             )
@@ -5182,7 +5313,10 @@ if GUI_AVAILABLE:
 
         def request_close(self, parent: QWidget | None = None) -> bool:
             """Return True only when active work and unsaved recipes are resolved."""
-
+            for editor in tuple(self._placement_editors.values()):
+                editor.reject()
+                if editor.isVisible() or editor._thread is not None:
+                    return False
             if self.is_busy():
                 if self._active_kind in {"preview", "build"}:
                     self.request_cancel()
@@ -5226,6 +5360,12 @@ if GUI_AVAILABLE:
                 self.surface_units.setCurrentIndex(surface_index)
                 self.flip_normals.setChecked(values.flip_surface_normals)
                 self.shadow.setChecked(values.shadow)
+                self.host_material.setText(values.host_material)
+                self.host_stack.setText(values.host_stack_id)
+                self.host_radius.setText("" if values.host_minimum_radius_m is None else str(values.host_minimum_radius_m))
+                for key, control in self.study_fields.items():
+                    selected = getattr(values, key)
+                    control.setText("" if selected is None else ", ".join(map(str, selected)))
                 self.skin_tol.setValue(values.skin_tol_m * 1.0e3)
                 self.phase_tol.setValue(values.skin_phase_tol_deg)
                 self.normal_tol.setValue(values.normal_tol_deg)
@@ -5573,12 +5713,13 @@ if GUI_AVAILABLE:
                     self.model.values.surface_mesh,
                     base_dir=self.model.values.base_dir,
                 )
+                values = self.model.values
+                azimuth_count = len(values.study_azimuths_deg) if values.study_azimuths_deg else int(base_preflight.azimuth_count)
+                elevation_count = len(values.study_elevations_deg) if values.study_elevations_deg else int(base_preflight.elevation_count)
+                frequency_count = len(values.study_frequencies_ghz) if values.study_frequencies_ghz else int(base_preflight.frequency_count)
                 estimate = estimate_assembly_workload(
-                    look_count=(
-                        int(base_preflight.azimuth_count)
-                        * int(base_preflight.elevation_count)
-                    ),
-                    frequency_count=int(base_preflight.frequency_count),
+                    look_count=azimuth_count * elevation_count,
+                    frequency_count=frequency_count,
                     point_count=point_count,
                     line_path_count=line_count,
                     line_segment_count=segment_count,
@@ -5827,7 +5968,7 @@ if GUI_AVAILABLE:
                 )
             else:
                 qa_mode = (
-                    "legacy response compatibility (warnings shown after validation)"
+                    "metadata advisory (no source certificate required)"
                 )
             self.build_summary_label.setText(
                 (
@@ -5856,7 +5997,7 @@ if GUI_AVAILABLE:
                     else (
                         ""
                         if production_profile
-                        else " · legacy compatibility"
+                        else " · metadata advisory"
                     )
                 )
             )
@@ -5866,6 +6007,10 @@ if GUI_AVAILABLE:
                 values.base_grim, base_dir=values.base_dir
             )
             body_ready = base_preflight.valid
+            geometry_required = base_preflight.requires_surface_mesh and bool(
+                (point_selected and self.model.enabled_point_placement_ids != ())
+                or (line_selected and self.model.enabled_line_ids != ())
+            )
             geometry_needed = bool(
                 (body_ready and base_preflight.requires_surface_mesh)
                 or values.surface_mesh or values.shadow
@@ -5875,10 +6020,11 @@ if GUI_AVAILABLE:
             self._geometry_needed = geometry_needed
             self.body_geometry_section.header.setText(
                 "Body geometry (required for this response)"
-                if body_ready and base_preflight.requires_surface_mesh
+                if body_ready and geometry_required
                 else "Body geometry and shadowing (optional)"
             )
             self.body_preview_help.setText(base_preflight.summary)
+            self.body_response_summary.setText(response_summary(values.base_grim, base_dir=values.base_dir))
             has_placements = point_selected or line_selected
             has_enabled_features = bool(
                 self.model.enabled_point_placement_ids
@@ -5909,7 +6055,8 @@ if GUI_AVAILABLE:
             surface_file_ready = existing_surface_file(values.surface_mesh)
             surface_required = bool(
                 body_ready
-                and (base_preflight.requires_surface_mesh or self.shadow.isChecked())
+                and has_enabled_features
+                and (base_preflight.requires_surface_mesh or (self.shadow.isChecked() and not base_preflight.embedded_bor))
             )
             surface_ready = (
                 surface_file_ready
@@ -5989,15 +6136,13 @@ if GUI_AVAILABLE:
                 (
                     service_ready,
                     body_ready,
-                    has_placements,
-                    has_enabled_features,
                     scans_current,
                     response_files_ready,
                     output_ready,
                     surface_ready,
                     placement_units_ready,
                     surface_units_ready,
-                    binding_status.ready,
+                    binding_status.ready or not has_enabled_features,
                     settings_ready,
                 )
             )
@@ -6017,11 +6162,10 @@ if GUI_AVAILABLE:
             checks = [
                 (service_ready, "GHOST backend"),
                 (body_ready, "valid body GRIM"),
-                (has_placements, "placements"),
-                (has_enabled_features, "features enabled"),
-                (scans_current and has_placements, "CSV read"),
+                (True, "features enabled" if has_enabled_features else "body-only baseline"),
+                (scans_current, "CSV read"),
                 (
-                    scans_current and response_files_ready and has_placements,
+                    scans_current and response_files_ready,
                     "response files",
                 ),
             ]
@@ -6065,17 +6209,17 @@ if GUI_AVAILABLE:
                             (
                                 "Reviewed solve ↔ mesh binding",
                                 binding_status.ready,
-                                bool(binding_status.required),
+                                bool(binding_status.required and has_enabled_features),
                             ),
                         ),
                     ),
                     (
                         "Point and Line Features",
                         (
-                            ("Placement CSV selected", has_placements, True),
-                            ("Placement coordinate units", placement_units_ready, True),
-                            ("Placement CSV read", scans_current, True),
-                            ("At least one feature enabled", has_enabled_features, True),
+                            ("Placement CSV selected", has_placements, has_placements),
+                            ("Placement coordinate units", placement_units_ready, has_placements),
+                            ("Placement CSV read", scans_current, has_placements),
+                            ("Body-only baseline when no features enabled", True, not has_enabled_features),
                             ("Every dataset_id mapped", mappings_complete, True),
                             ("Mapped response files available", response_files_ready, True),
                         ),
@@ -6125,16 +6269,10 @@ if GUI_AVAILABLE:
                     "Next: choose the coordinate units used by the selected "
                     "placement CSV(s)."
                 )
-            elif binding_status.required and not binding_status.ready:
+            elif has_enabled_features and binding_status.required and not binding_status.ready:
                 next_step = "Next: " + binding_status.message.lstrip("✗⚠○ ")
-            elif not has_placements:
-                next_step = "Next: choose a point or line placement CSV."
             elif not scans_current:
                 next_step = "Next: refresh the selected CSV and correct any format error."
-            elif not has_enabled_features:
-                next_step = (
-                    "Next: enable at least one item in Spatial Feature Configuration."
-                )
             elif not mappings_complete:
                 next_step = "Next: map every dataset_id to its OPN − FRD response."
             elif not response_files_ready:
@@ -6229,7 +6367,7 @@ if GUI_AVAILABLE:
         def can_close(self) -> bool:
             """Closing is safe after any active worker reaches a safe boundary."""
 
-            return not self.is_busy()
+            return not self.is_busy() and all(editor._thread is None for editor in self._placement_editors.values())
 
         @Slot()
         def request_cancel(self) -> None:
@@ -6259,8 +6397,11 @@ if GUI_AVAILABLE:
             super().closeEvent(event)
 
         def _base_path_changed(self) -> None:
-            self._mark_preview_stale()
             base = self.base_picker.path()
+            previous = self.model.values.base_grim
+            if base and base != previous and not self._loading_recipe and preflight_base_grim(base, base_dir=self.model.values.base_dir).embedded_bor:
+                self.shadow.setChecked(True)
+            self._mark_preview_stale()
             if base and not self.output_picker.path():
                 source = Path(base)
                 suggestion = source.with_name(source.stem + "_features.grim")
@@ -6496,7 +6637,91 @@ if GUI_AVAILABLE:
                 "then choose that CSV above to validate it."
             )
 
+        def _edit_placements(self, kind: str) -> None:
+            """Open a modeless editor so existing 3-D selection stays usable."""
+            try:
+                existing = self._placement_editors.get(kind)
+                if existing is not None:
+                    existing.show()
+                    existing.raise_()
+                    return
+                self._pull_values()
+                values = self.model.values
+                if values.coordinate_units not in UNIT_SCALE_M:
+                    raise ValueError("Choose placement coordinate units before authoring geometry.")
+                adapter = coerce_feature_workflow(self._service)
+                from assembly_placement_editor import PlacementEditor
+                preview_arguments = {
+                    "base_grim": values.base_grim or None,
+                    "surface_mesh": values.surface_mesh or None,
+                    "surface_units": values.surface_units or None,
+                    "base_dir": values.base_dir,
+                }
+                scale = UNIT_SCALE_M[values.coordinate_units]
+                flip = values.flip_surface_normals
+                def surface_loader():
+                    if adapter.preview_inputs is None:
+                        raise ValueError("Surface helper requires the current GHOST preview service.")
+                    preview = adapter.preview_inputs(**preview_arguments)
+                    from surface_mesh import TriangleSurface
+                    triangles = preview.surface_triangles_cad_m
+                    surface = None if triangles is None else TriangleSurface(triangles, flip_normals=flip)
+                    return surface, preview.body_profile_rho_z_m, scale
+                def validate_csv(path):
+                    adapter.discover(**{f"{kind}_locations_csv": path})
+                editor = PlacementEditor(kind,
+                    columns=POINT_PLACEMENT_COLUMNS if kind == "point" else LINE_PLACEMENT_COLUMNS,
+                    units=values.coordinate_units,
+                    path=values.point_locations_csv if kind == "point" else values.line_locations_csv,
+                    base_dir=values.base_dir, surface_loader=surface_loader,
+                    validator=validate_csv, parent=self)
+                editor.instance_selected.connect(self.feature_instance_selected.emit)
+                editor.saved.connect(self.set_point_csv if kind == "point" else self.set_line_csv)
+                editor.finished.connect(lambda _result: self._placement_editors.pop(kind, None))
+                editor.finished.connect(editor.deleteLater)
+                self._placement_editors[kind] = editor
+                editor.show()
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        def select_feature_instance(self, kind: str, identifier: str) -> None:
+            """Select the matching authoring row after a 3-D pick."""
+            editor = self._placement_editors.get(kind)
+            if editor is not None:
+                for index, row in enumerate(editor.rows()):
+                    if row[0] == identifier:
+                        editor.table.selectRow(index)
+                        editor.table.scrollToItem(editor.table.item(index, 0))
+                        break
+            self.status_changed.emit(f"Selected {kind} {identifier}. Use Create / edit to change its placement.")
+
+        def _host_changed(self) -> None:
+            try:
+                self._pull_host_values()
+            except ValueError as exc:
+                self._show_error(str(exc))
+                return
+            self._mark_preview_stale()
+
+        def _pull_host_values(self) -> None:
+            values = self.model.values
+            values.host_material = self.host_material.text().strip()
+            values.host_stack_id = self.host_stack.text().strip()
+            raw = self.host_radius.text().strip()
+            values.host_minimum_radius_m = None if not raw else _require_finite_nonnegative(raw, "Host minimum principal radius (m)")
+
+        def _study_changed(self) -> None:
+            try:
+                for key, control in self.study_fields.items():
+                    setattr(self.model.values, key, parse_study_samples(control.text()))
+                self._mark_preview_stale()
+            except ValueError as exc:
+                self._show_error(str(exc))
+
         def _pull_values(self) -> None:
+            for key, control in self.study_fields.items():
+                setattr(self.model.values, key, parse_study_samples(control.text()))
+            self._pull_host_values()
             values = self.model.values
             values.base_grim = self.base_picker.path()
             values.output_grim = self.output_picker.path()
@@ -6601,17 +6826,17 @@ if GUI_AVAILABLE:
                 for value in (getattr(plan, "validation_warnings", ()) or ())
                 if str(value).strip()
             )
-            self._validation_warning_count = len(validation_warnings)
+            review_required = bool(self.model.values.require_feature_manifests or self.model.values.require_body_mesh_certification or any(message.startswith(WORKLOAD_REVIEW_WARNING_PREFIX) for message in validation_warnings))
+            self._validation_warning_count = len(validation_warnings) if review_required else 0
             self.validation_warning_ack.blockSignals(True)
             self.validation_warning_ack.setChecked(False)
             self.validation_warning_ack.blockSignals(False)
-            self.validation_warning_ack.setVisible(bool(validation_warnings))
+            self.validation_warning_ack.setVisible(bool(self._validation_warning_count))
             if validation_warnings:
                 self.validation_warning_label.setText(
-                    "⚠ VALIDATION PASSED WITH RELEASE WARNINGS:\n• "
+                    ("⚠ VALIDATION PASSED WITH RELEASE WARNINGS:\n• " if review_required else "Placement checks passed. Metadata/model advisories:\n• ")
                     + "\n• ".join(validation_warnings)
-                    + "\nResolve them where possible. Otherwise review each warning "
-                    "and use the one-time waiver below before assembly."
+                    + ("\nReview the warnings and use the one-time waiver below before assembly." if review_required else "\nAdvisories are recorded with the output and do not block Build.")
                 )
                 self.validation_warning_label.setVisible(True)
             else:
@@ -6835,8 +7060,7 @@ if GUI_AVAILABLE:
                 or self.model.enabled_line_ids
             ):
                 self.status_changed.emit(
-                    "No spatial features are enabled. Enable at least one point "
-                    "placement or line path before validation or assembly."
+                    "Body-only baseline selected. Validate and build to save the clean-body comparison."
                 )
 
         @Slot()
@@ -7328,6 +7552,7 @@ if GUI_AVAILABLE:
                     # routing both published artifacts through GRIM's normal
                     # dataset loader for immediate before/after plotting.
                     self.feature_built.emit(features_only_path)
+                self.comparison_ready.emit(str(getattr(dispatch.plan, "base_path", self.model.values.base_grim)), features_only_path if features_only_saved else "", str(dispatch.output_path))
                 features_status = (
                     f" Saved reusable feature-only delta: {features_only_path}."
                     if features_only_saved
