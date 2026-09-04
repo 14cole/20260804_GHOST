@@ -26,6 +26,7 @@ from grim_cut_dataset_mixin import (
     DATASET_ID_ROLE,
     DATASET_PATH_ROLE,
     DatasetAuditDialog,
+    DecimateDialog,
     RegridDialog,
     StitchDialog,
     WrapDialog,
@@ -289,10 +290,12 @@ class DatasetOperationDialogTest(unittest.TestCase):
         regrid = RegridDialog(reference)
         stitch = StitchDialog(["first", "second"])
         wrap = WrapDialog()
+        decimate = DecimateDialog()
         self.addCleanup(crop.deleteLater)
         self.addCleanup(regrid.deleteLater)
         self.addCleanup(stitch.deleteLater)
         self.addCleanup(wrap.deleteLater)
+        self.addCleanup(decimate.deleteLater)
 
         self.assertEqual(crop._range_controls["azimuth"][0].text(), "Azimuth (deg)")
         self.assertEqual(crop._range_controls["frequency"][0].text(), "Frequency (GHz)")
@@ -305,6 +308,8 @@ class DatasetOperationDialogTest(unittest.TestCase):
         self.assertIn("same units", stitch._tolerance_help.text())
         self.assertEqual(wrap._rb_0_360.text(), "[0°, 360°)")
         self.assertEqual(wrap._rb_pm180.text(), "[-180°, 180°)")
+        self.assertEqual(decimate.get_params()["factor"], 2)
+        self.assertEqual(decimate.get_params()["mode"], "power")
 
         great_circle_units = dict(reference.units)
         great_circle_units.update(
@@ -409,6 +414,195 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         self.assertIn("conflicting finite overlap", self.window.btn_join.toolTip())
         self.assertIn("without interpolation", self.window.btn_stitch.toolTip())
         self.assertIn("resolve conflicting overlaps", self.window.btn_stitch.toolTip())
+        self.assertIn("anti-alias", self.window.btn_decimate.toolTip().lower())
+
+    def test_dataset_actions_follow_selection_count_and_dirty_state(self) -> None:
+        self.assertFalse(self.window.btn_dataset_save.isEnabled())
+        self.assertFalse(self.window.btn_dataset_save_all.isEnabled())
+        self.assertFalse(self.window.btn_dataset_save_dirty.isEnabled())
+        self.assertFalse(self.window.btn_dataset_undo_delete.isEnabled())
+        self.assertFalse(self.window.btn_audit.isEnabled())
+        self.assertFalse(self.window.btn_compatibility.isEnabled())
+
+        self.window._add_dataset_row(
+            _axis_grid([0.0], 1.0), "First", "Derived", ""
+        )
+        self.assertTrue(self.window.btn_dataset_save_all.isEnabled())
+        self.assertTrue(self.window.btn_dataset_save_dirty.isEnabled())
+        self._select_rows_in_order(0)
+        self.assertTrue(self.window.btn_dataset_save.isEnabled())
+        self.assertTrue(self.window.btn_audit.isEnabled())
+        self.assertTrue(self.window.btn_provenance.isEnabled())
+        self.assertFalse(self.window.btn_compatibility.isEnabled())
+        self.assertFalse(self.window.btn_coherent_div.isEnabled())
+
+        self.window._add_dataset_row(
+            _axis_grid([0.0], 2.0), "Second", "Derived", ""
+        )
+        self._select_rows_in_order(0, 1)
+        self.assertTrue(self.window.btn_compatibility.isEnabled())
+        self.assertTrue(self.window.btn_coherent_div.isEnabled())
+
+        self.window._add_dataset_row(
+            _axis_grid([0.0], 3.0), "Third", "Derived", ""
+        )
+        self._select_rows_in_order(0, 1, 2)
+        self.assertTrue(self.window.btn_coherent_add.isEnabled())
+        self.assertFalse(self.window.btn_coherent_div.isEnabled())
+
+    def test_save_dirty_targets_only_unsaved_or_modified_rows(self) -> None:
+        self.window._add_dataset_row(
+            _axis_grid([0.0], 1.0), "Saved", "Loaded", "saved.grim"
+        )
+        self.window._add_dataset_row(
+            _axis_grid([0.0], 2.0), "Derived", "Computed", ""
+        )
+        with (
+            mock.patch(
+                "grim_cut_dataset_mixin.QFileDialog.getExistingDirectory",
+                return_value=os.path.abspath("dirty-output"),
+            ),
+            mock.patch.object(
+                self.window, "_save_rows_to_directory", return_value=True
+            ) as save_rows,
+        ):
+            self.window._save_dirty_datasets()
+
+        self.assertEqual(
+            save_rows.call_args.args[:2],
+            ([1], os.path.abspath("dirty-output")),
+        )
+        self.assertEqual(
+            save_rows.call_args.kwargs["dialog_title"], "Save Dirty Datasets"
+        )
+
+    def test_provenance_view_formats_json_and_bounds_large_arrays(self) -> None:
+        dataset = _axis_grid([0.0], 1.0)
+        dataset.extra["workflow_json"] = '{"schema":"example.v1","ok":true}'
+        dataset.extra["large_payload"] = np.zeros((20, 20), dtype=np.float32)
+        dataset.history = "loaded\nderived"
+        self.window._add_dataset_row(dataset, "Evidence", "", "source.grim")
+        self._select_rows_in_order(0)
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.DatasetProvenanceDialog"
+        ) as dialog_type:
+            self.window._provenance_selected_datasets()
+
+        report = dialog_type.call_args.args[0]
+        self.assertIn("Operand 1: Evidence", report)
+        self.assertIn('"schema": "example.v1"', report)
+        self.assertIn("array shape=(20, 20)", report)
+        self.assertNotIn("0.0, 0.0, 0.0", report)
+
+    def test_decimate_button_prefilters_selected_dataset_and_records_recipe(self) -> None:
+        source_path = os.path.abspath("decimation-source.grim")
+        source = _axis_grid([0.0, 1.0, 2.0, 3.0, 4.0], 1.0)
+        source.rcs_power[:, 0, 0, 0] = [1.0, 3.0, 5.0, 7.0, 9.0]
+        self.window._add_dataset_row(source, "Samples", "Loaded", source_path)
+        self._select_rows_in_order(0)
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.DecimateDialog"
+        ) as dialog_type:
+            dialog = dialog_type.return_value
+            dialog.exec.return_value = QDialog.Accepted
+            dialog.get_params.return_value = {
+                "axis": "azimuth",
+                "factor": 2,
+                "mode": "power",
+            }
+            self.window._decimate_selected()
+            self._wait_for_background()
+
+        result = self.window.table.item(1, 0).data(Qt.UserRole)
+        np.testing.assert_allclose(result.azimuths, [0.5, 2.5, 4.0])
+        np.testing.assert_allclose(result.rcs_power.ravel(), [2.0, 6.0, 9.0])
+        self.assertIn("decimate_axis(", self.window.python_recorder.script)
+        self.assertIn("axis='azimuth'", self.window.python_recorder.script)
+
+    def test_coherent_missing_metadata_requires_explicit_confirmation(self) -> None:
+        dataset = _axis_grid([0.0], 1.0)
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        with mock.patch(
+            "grim_cut_dataset_mixin.QMessageBox.question",
+            return_value=buttons.No,
+        ) as question:
+            rejected = self.window._confirm_coherent_metadata(
+                [("Unspecified", dataset)], "Coherent Test"
+            )
+        self.assertIsNone(rejected)
+        self.assertIn("phase reference", question.call_args.args[2])
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.QMessageBox.question",
+            return_value=buttons.Yes,
+        ):
+            accepted = self.window._confirm_coherent_metadata(
+                [("Unspecified", dataset)], "Coherent Test"
+            )
+        self.assertTrue(accepted)
+
+        dataset.extra.update(
+            phase_reference="origin",
+            time_convention="exp(-jwt)",
+            polarization_basis="V/H",
+        )
+        with mock.patch(
+            "grim_cut_dataset_mixin.QMessageBox.question"
+        ) as question:
+            declared = self.window._confirm_coherent_metadata(
+                [("Declared", dataset)], "Coherent Test"
+            )
+        self.assertFalse(declared)
+        question.assert_not_called()
+
+    def test_mirror_default_is_displayed_in_physical_degrees_for_radian_axis(self) -> None:
+        dataset = _mixed_unit_grid(radians=True, frequency_hz=False)
+        self.window._add_dataset_row(dataset, "Radians", "Loaded", "radians.grim")
+        self._select_rows_in_order(0)
+
+        with mock.patch(
+            "grim_cut_dataset_mixin.QInputDialog.getDouble",
+            return_value=(0.0, False),
+        ) as prompt:
+            self.window._mirror_selected()
+
+        self.assertAlmostEqual(prompt.call_args.args[3], 90.0)
+
+    def test_cancel_stops_map_job_before_partial_results_are_published(self) -> None:
+        source = _axis_grid([0.0, 1.0], 1.0)
+        self.window._add_dataset_row(source, "Cancelable", "Loaded", "source.grim")
+        self._select_rows_in_order(0)
+        started = threading.Event()
+        release = threading.Event()
+
+        def delayed_operation(_index, _name, dataset):
+            started.set()
+            if not release.wait(5.0):
+                raise TimeoutError("test did not release duplicate worker")
+            return dataset
+
+        completion = mock.Mock()
+        self.window._start_dataset_map_job(
+            "Cancelable map",
+            [("Cancelable", source)],
+            delayed_operation,
+            completion,
+            start_message="Cancelable map started",
+        )
+        self.assertTrue(started.wait(2.0))
+        self.app.processEvents()
+        self.assertFalse(self.window.btn_dataset_cancel.isHidden())
+        self.assertFalse(self.window.btn_duplicate.isEnabled())
+        self.window._cancel_background_job()
+        release.set()
+        self._wait_for_background()
+
+        self.assertEqual(self.window.table.rowCount(), 1)
+        completion.assert_not_called()
+        self.assertTrue(self.window.btn_dataset_cancel.isHidden())
+        self.assertIn("cancelled", self.window.status.currentMessage().lower())
 
     def test_open_and_overlap_have_distinct_discoverable_shortcuts(self) -> None:
         shortcuts = {

@@ -54,6 +54,7 @@ except (ImportError, RuntimeError) as exc:  # pragma: no cover - environment-spe
 GUI_AVAILABLE = _GUI_IMPORT_ERROR is None
 
 FEATURE_PREVIEW_ROOT_KEY = "feature-assembly"
+FEATURE_SELECTION_GROUP_KEY = f"{FEATURE_PREVIEW_ROOT_KEY}/selection"
 
 DISPLAY_UNIT_SPECS = {
     "Meters": ("m", 1.0),
@@ -69,6 +70,15 @@ TRIANGLE_DETAIL_CAPS = {
 MAX_DISPLAY_TRIANGLES = max(TRIANGLE_DETAIL_CAPS.values())
 
 BODY_RENDER_MODES = ("Solid", "Solid + edges", "Wireframe")
+
+# Camera names include the visible CAD plane so the view remains physically
+# unambiguous even when a vehicle's informal "front" naming differs by team.
+CAMERA_PRESETS = {
+    "Isometric": (24.0, -58.0),
+    "Nose (X–Z)": (0.0, 90.0),
+    "Right side (Y–Z)": (0.0, 0.0),
+    "Top (X–Y)": (90.0, -90.0),
+}
 
 NORMAL_VECTOR_COLOR = "#f472b6"
 ROLL_VECTOR_COLOR = "#c084fc"
@@ -1095,6 +1105,7 @@ if GUI_AVAILABLE:
                 left=0.04, right=0.94, bottom=0.07, top=0.91
             )
             self.axes = self.figure.add_subplot(111, projection="3d")
+            self.axes.set_proj_type("ortho")
             super().__init__(self.figure)
             self.setParent(parent)
             self.setMinimumSize(360, 280)
@@ -1103,6 +1114,7 @@ if GUI_AVAILABLE:
             self._display_units = "Meters"
             self._orientation_scale = 1.0
             self._orientation_vectors_visible = True
+            self._orthographic_projection = True
             self._interaction_lod_enabled = True
             self._interaction_detail_caps: dict[str, int | None] = {}
             self._scene_update_depth = 0
@@ -1233,6 +1245,33 @@ if GUI_AVAILABLE:
             else:
                 # refresh_scene_feedback() also requests the artist redraw.
                 self.refresh_scene_feedback()
+
+        @property
+        def orthographic_projection(self) -> bool:
+            return self._orthographic_projection
+
+        def set_projection_mode(self, orthographic: bool) -> None:
+            """Select a display-only orthographic or perspective camera."""
+
+            use_ortho = bool(orthographic)
+            if use_ortho == self._orthographic_projection:
+                return
+            self.axes.set_proj_type("ortho" if use_ortho else "persp")
+            self._orthographic_projection = use_ortho
+            self._request_draw()
+
+        def set_camera_preset(self, name: str) -> None:
+            """Apply one CAD-axis camera preset without changing scene limits."""
+
+            key = str(name).strip()
+            try:
+                elevation, azimuth = CAMERA_PRESETS[key]
+            except KeyError as exc:
+                raise ValueError(
+                    "camera preset must be one of: " + ", ".join(CAMERA_PRESETS)
+                ) from exc
+            self.axes.view_init(elev=elevation, azim=azimuth)
+            self._request_draw()
 
         def _style_axes(self, *, reset_view: bool = True) -> None:
             background = self._theme["background"]
@@ -1776,12 +1815,27 @@ if GUI_AVAILABLE:
         def fit_visible(self, *, padding_fraction: float = 0.06) -> None:
             """Fit visible bounds with equal data scale on x/y/z."""
 
-            padding = float(padding_fraction)
-            if not np.isfinite(padding) or padding < 0.0:
-                raise ValueError("padding_fraction must be finite and nonnegative")
             bounds = self.model.bounds(visible_only=True)
             if bounds is None:
                 bounds = np.asarray([[-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]])
+            self.fit_bounds(bounds, padding_fraction=padding_fraction)
+
+        def fit_bounds(
+            self,
+            bounds_m: Any,
+            *,
+            padding_fraction: float = 0.06,
+        ) -> None:
+            """Fit explicit CAD-meter bounds without altering scene geometry."""
+
+            padding = float(padding_fraction)
+            if not np.isfinite(padding) or padding < 0.0:
+                raise ValueError("padding_fraction must be finite and nonnegative")
+            bounds = np.asarray(bounds_m, dtype=float)
+            if bounds.shape != (2, 3) or not np.all(np.isfinite(bounds)):
+                raise ValueError("bounds_m must be a finite 2-by-3 array")
+            if np.any(bounds[1] < bounds[0]):
+                raise ValueError("bounds_m upper values must not be below lower values")
             center = 0.5 * (bounds[0] + bounds[1])
             span = bounds[1] - bounds[0]
             reference = max(float(np.max(span)), float(np.max(np.abs(center))), 1.0)
@@ -1838,6 +1892,7 @@ if GUI_AVAILABLE:
             self._tree_clearing_signal = None
             self._tree_preview_removing_signal = None
             self._feature_preview_group_ids: set[str] = set()
+            self._feature_instance_geometry: dict[tuple[str, str], np.ndarray] = {}
             self._triangle_detail_name = "Balanced"
             self._body_render_mode = "Solid"
             self._body_opacity = 0.75
@@ -1847,14 +1902,12 @@ if GUI_AVAILABLE:
             outer.setSpacing(6)
 
             toolbar = QHBoxLayout()
-            title = QLabel("Assembly")
-            title.setStyleSheet("font-weight: 600;")
-            self.btn_fit_visible = QPushButton("Fit visible geometry")
+            self.btn_fit_visible = QPushButton("Fit")
             self.btn_fit_visible.setToolTip(
                 "Refit the 3-D camera to the body, points, and lines whose Show "
                 "boxes are checked. This changes the view only."
             )
-            self.btn_preview_layers = QPushButton("Preview layers")
+            self.btn_preview_layers = QPushButton("Layers")
             self.btn_preview_layers.setToolTip(
                 "Open advanced whole-dataset combination and preview visibility "
                 "without interrupting the feature workflow."
@@ -1867,10 +1920,14 @@ if GUI_AVAILABLE:
                 "the assembled RCS."
             )
             self.lbl_status.setWordWrap(True)
-            toolbar.addWidget(title)
             toolbar.addStretch(1)
-            toolbar.addWidget(self.lbl_legend)
-            self.btn_display_options = QPushButton("View options")
+            self.btn_legend = QPushButton("Legend")
+            self.btn_legend.setCheckable(True)
+            self.btn_legend.setToolTip(
+                "Show or hide the semantic color key for display-only geometry."
+            )
+            toolbar.addWidget(self.btn_legend)
+            self.btn_display_options = QPushButton("View")
             self.btn_display_options.setCheckable(True)
             self.btn_display_options.setToolTip(
                 "Adjust display units, body appearance, detail, and orientation arrows."
@@ -1879,6 +1936,16 @@ if GUI_AVAILABLE:
             toolbar.addWidget(self.btn_preview_layers)
             toolbar.addWidget(self.btn_fit_visible)
             outer.addLayout(toolbar)
+
+            self.legend_bar = QWidget(self)
+            legend_layout = QHBoxLayout(self.legend_bar)
+            legend_layout.setContentsMargins(8, 4, 8, 4)
+            legend_layout.addStretch(1)
+            legend_layout.addWidget(self.lbl_legend)
+            legend_layout.addStretch(1)
+            self.legend_bar.setVisible(False)
+            self.btn_legend.toggled.connect(self.legend_bar.setVisible)
+            outer.addWidget(self.legend_bar)
 
             self.display_options = QWidget(self)
             display_layout = QVBoxLayout(self.display_options)
@@ -1894,6 +1961,21 @@ if GUI_AVAILABLE:
 
             display_row = QHBoxLayout()
             display_row.setSpacing(6)
+            display_row.addWidget(QLabel("Camera"))
+            self.cmb_camera_preset = QComboBox(self)
+            self.cmb_camera_preset.addItems(tuple(CAMERA_PRESETS))
+            self.cmb_camera_preset.setToolTip(
+                "Choose a reproducible CAD-axis view. Parentheses name the plane "
+                "visible in the viewport."
+            )
+            display_row.addWidget(self.cmb_camera_preset)
+            self.chk_orthographic = QCheckBox("Orthographic QA", self)
+            self.chk_orthographic.setChecked(True)
+            self.chk_orthographic.setToolTip(
+                "Remove perspective foreshortening for placement inspection. "
+                "This changes the camera only."
+            )
+            display_row.addWidget(self.chk_orthographic)
             display_row.addWidget(QLabel("Display units"))
             self.cmb_display_units = QComboBox(self)
             for unit_name, (suffix, _scale) in DISPLAY_UNIT_SPECS.items():
@@ -2037,7 +2119,7 @@ if GUI_AVAILABLE:
             splitter.addWidget(viewer)
             splitter.setStretchFactor(0, 0)
             splitter.setStretchFactor(1, 1)
-            left_host.setMinimumWidth(440)
+            left_host.setMinimumWidth(400)
             splitter.setSizes([500, 1000])
             outer.addWidget(splitter, 1)
             self.splitter = splitter
@@ -2049,6 +2131,12 @@ if GUI_AVAILABLE:
             self._opacity_timer.timeout.connect(self._apply_body_rendering)
             self.btn_fit_visible.clicked.connect(self.scene_canvas.fit_visible)
             self.btn_preview_layers.clicked.connect(self._show_preview_layers)
+            self.cmb_camera_preset.currentTextChanged.connect(
+                self.scene_canvas.set_camera_preset
+            )
+            self.chk_orthographic.toggled.connect(
+                self.scene_canvas.set_projection_mode
+            )
             self.cmb_display_units.currentIndexChanged.connect(
                 self._apply_display_units
             )
@@ -2390,6 +2478,7 @@ if GUI_AVAILABLE:
                         self.scene_model.remove_group(group_id)
                     self._pending_visibility.pop(group_id, None)
                 self._feature_preview_group_ids.clear()
+                self._feature_instance_geometry.clear()
                 self.scene_canvas.set_preview_stage("none")
             finally:
                 self.scene_canvas.end_scene_updates()
@@ -2431,6 +2520,9 @@ if GUI_AVAILABLE:
                     "be dicts"
                 )
             point_normals, point_rolls, line_normals = orientation
+            point_placement_ids = getattr(plan, "point_placement_ids", {})
+            if not isinstance(point_placement_ids, dict):
+                raise TypeError("prepared point_placement_ids must be a dict")
             # Empty orientation maps mean a legacy four-field preview object;
             # it remains displayable with markers/paths only. Once any new
             # orientation data is supplied, require an exact keyed contract so
@@ -2463,7 +2555,28 @@ if GUI_AVAILABLE:
                             f"line-normal IDs for dataset {dataset_id!r} must "
                             "exactly match its line-path IDs"
                         )
-            return (*base_geometry, *orientation)
+            if point_placement_ids:
+                if set(point_placement_ids) != set(point_groups):
+                    raise ValueError(
+                        "point placement-ID dataset keys must exactly match point "
+                        "location dataset IDs"
+                    )
+                all_point_ids: list[str] = []
+                for dataset_id, locations in point_groups.items():
+                    identifiers = tuple(
+                        str(value) for value in point_placement_ids[dataset_id]
+                    )
+                    if len(identifiers) != len(np.asarray(locations)):
+                        raise ValueError(
+                            f"point placement-ID count for dataset {dataset_id!r} "
+                            "does not match its location count"
+                        )
+                    if any(not value for value in identifiers):
+                        raise ValueError("point placement IDs must be nonempty strings")
+                    all_point_ids.extend(identifiers)
+                if len(all_point_ids) != len(set(all_point_ids)):
+                    raise ValueError("point placement IDs must be globally unique")
+            return (*base_geometry, *orientation, point_placement_ids)
 
         def _show_preview_error(self, exc: Exception) -> None:
             """Publish one consistent, non-destructive preview failure state."""
@@ -2498,6 +2611,7 @@ if GUI_AVAILABLE:
                     point_normals,
                     point_rolls,
                     line_normals,
+                    point_placement_ids,
                 ) = (
                     self._feature_plan_geometry(plan)
                 )
@@ -2609,6 +2723,16 @@ if GUI_AVAILABLE:
                         ),
                         orientation_length_m=vector_length_m,
                     )
+                    if point_placement_ids:
+                        locations = np.asarray(
+                            point_groups[dataset_id], dtype=float
+                        ).reshape(-1, 3)
+                        for placement_id, location in zip(
+                            point_placement_ids[dataset_id], locations
+                        ):
+                            self._feature_instance_geometry[
+                                ("point", str(placement_id))
+                            ] = np.array(location, dtype=float, copy=True)
                     scene_ids.append(group_id)
                     point_word = "point" if count == 1 else "points"
                     item = tree.add_preview_item(
@@ -2660,6 +2784,12 @@ if GUI_AVAILABLE:
                         endpoint_normals=endpoint_normals,
                         orientation_length_m=vector_length_m,
                     )
+                    for line_id in ordered_line_ids:
+                        self._feature_instance_geometry[
+                            ("line", str(line_id))
+                        ] = np.array(
+                            paths_by_id[line_id], dtype=float, copy=True
+                        )
                     scene_ids.append(group_id)
                     line_word = "line" if count == 1 else "lines"
                     item = tree.add_preview_item(
@@ -2813,6 +2943,59 @@ if GUI_AVAILABLE:
         def fit_visible(self) -> None:
             self.scene_canvas.fit_visible()
 
+        def focus_feature_instance(self, kind: str, instance_id: str) -> bool:
+            """Highlight and frame one validated QA instance in the 3-D view."""
+
+            category = str(kind).strip().lower()
+            identifier = str(instance_id).strip()
+            geometry = self._feature_instance_geometry.get((category, identifier))
+            if geometry is None or category not in {"point", "line"}:
+                return False
+            self.scene_canvas.begin_scene_updates()
+            try:
+                if FEATURE_SELECTION_GROUP_KEY in self.scene_model.group_ids:
+                    self.scene_model.remove_group(FEATURE_SELECTION_GROUP_KEY)
+                if category == "point":
+                    selected = self.scene_canvas.add_points(
+                        FEATURE_SELECTION_GROUP_KEY,
+                        np.asarray(geometry, dtype=float).reshape(1, 3),
+                        label=f"Selected point {identifier}",
+                        color="#fde047",
+                        size=150.0,
+                        depthshade=False,
+                    )
+                else:
+                    selected = self.scene_canvas.add_lines(
+                        FEATURE_SELECTION_GROUP_KEY,
+                        np.asarray(geometry, dtype=float),
+                        label=f"Selected line {identifier}",
+                        color="#fde047",
+                        linewidth=5.0,
+                    )
+                self._feature_preview_group_ids.add(FEATURE_SELECTION_GROUP_KEY)
+            finally:
+                self.scene_canvas.end_scene_updates()
+            focus_bounds = np.array(selected.bounds_m, dtype=float, copy=True)
+            scene_bounds = self.scene_model.bounds(visible_only=True)
+            if scene_bounds is not None:
+                scene_extent = max(
+                    float(np.max(scene_bounds[1] - scene_bounds[0])),
+                    DEFAULT_ORIENTATION_VECTOR_LENGTH_M,
+                )
+                minimum_focus_span = 0.08 * scene_extent
+                center = 0.5 * (focus_bounds[0] + focus_bounds[1])
+                focus_span = np.maximum(
+                    focus_bounds[1] - focus_bounds[0], minimum_focus_span
+                )
+                focus_bounds[0] = center - 0.5 * focus_span
+                focus_bounds[1] = center + 0.5 * focus_span
+            self.scene_canvas.fit_bounds(focus_bounds, padding_fraction=0.35)
+            self.lbl_status.setText(
+                f"Focused validated {category} feature {identifier!r}. "
+                "The yellow overlay and camera framing are display only."
+            )
+            return True
+
         def _show_preview_layers(self, _checked: bool = False) -> None:
             """Show the secondary dataset/layer editor without changing steps."""
 
@@ -2920,6 +3103,7 @@ else:
 
 __all__ = [
     "BODY_RENDER_MODES",
+    "CAMERA_PRESETS",
     "DISPLAY_UNIT_SPECS",
     "TRIANGLE_DETAIL_CAPS",
     "AssemblySceneCanvas",
@@ -2927,6 +3111,7 @@ __all__ = [
     "AssemblySceneModel",
     "AssemblyWorkspace",
     "FEATURE_PREVIEW_ROOT_KEY",
+    "FEATURE_SELECTION_GROUP_KEY",
     "FeatureBuildResult",
     "FeatureBuildService",
     "GUI_AVAILABLE",

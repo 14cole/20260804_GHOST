@@ -16,11 +16,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from assembly_workspace import (  # noqa: E402
     BODY_RENDER_MODES,
+    CAMERA_PRESETS,
     DISPLAY_UNIT_SPECS,
     AssemblySceneCanvas,
     AssemblySceneModel,
     AssemblyWorkspace,
     FEATURE_PREVIEW_ROOT_KEY,
+    FEATURE_SELECTION_GROUP_KEY,
     FeatureBuildResult,
     GUI_AVAILABLE,
     _feature_preview_nonvector_bounds,
@@ -463,6 +465,28 @@ class AssemblyGuiTests(unittest.TestCase):
         canvas.model.add_points("points:detached", [[0.0, 0.0, 0.0]])
         self.assertNotIn("points:detached", canvas._artists)
 
+    def test_camera_presets_and_projection_are_display_only(self):
+        canvas = AssemblySceneCanvas()
+        canvas.add_points("points:a", [[1.0, 2.0, 3.0]])
+        original_geometry = np.array(
+            canvas.model.group("points:a").geometry, copy=True
+        )
+
+        self.assertTrue(canvas.orthographic_projection)
+        canvas.set_camera_preset("Nose (X–Z)")
+        self.assertEqual(
+            (canvas.axes.elev, canvas.axes.azim),
+            CAMERA_PRESETS["Nose (X–Z)"],
+        )
+        canvas.set_projection_mode(False)
+        self.assertFalse(canvas.orthographic_projection)
+        np.testing.assert_array_equal(
+            canvas.model.group("points:a").geometry, original_geometry
+        )
+
+        with self.assertRaisesRegex(ValueError, "camera preset"):
+            canvas.set_camera_preset("Ambiguous front")
+
     def test_application_theme_changes_colors_without_moving_preview(self):
         from matplotlib.colors import to_hex
 
@@ -712,6 +736,10 @@ class AssemblyGuiTests(unittest.TestCase):
                     [[0.1, 0.1, 0.0], [0.9, 0.1, 0.0]]
                 ),
             },
+            point_placement_ids={
+                "antenna": ("antenna-1",),
+                "fastener / M4": ("fastener-1", "fastener-2"),
+            },
             point_normals_cad={
                 "antenna": np.asarray([[0.0, 0.0, 2.0]]),
                 "fastener / M4": np.asarray(
@@ -860,6 +888,35 @@ class AssemblyGuiTests(unittest.TestCase):
             stored = workspace.scene_canvas._artists[group_id]
             artists = stored if isinstance(stored, tuple) else (stored,)
             self.assertTrue(all(not artist.get_visible() for artist in artists))
+
+    def test_qa_instance_focus_uses_exact_point_and_line_ids(self):
+        from assembly_tree import AssemblyTreePanel
+
+        workspace = AssemblyWorkspace(assembly_tree_panel=AssemblyTreePanel())
+        workspace.load_feature_preview(self._feature_plan())
+
+        self.assertTrue(workspace.focus_feature_instance("point", "fastener-2"))
+        selected = workspace.scene_model.group(FEATURE_SELECTION_GROUP_KEY)
+        self.assertEqual(selected.kind, "points")
+        np.testing.assert_allclose(selected.geometry, [[0.9, 0.1, 0.0]])
+        self.assertIn("display only", workspace.lbl_status.text())
+        self.assertGreater(
+            workspace.scene_canvas.axes.get_xlim()[1]
+            - workspace.scene_canvas.axes.get_xlim()[0],
+            0.05,
+        )
+
+        self.assertTrue(workspace.focus_feature_instance("line", "path-a"))
+        selected = workspace.scene_model.group(FEATURE_SELECTION_GROUP_KEY)
+        self.assertEqual(selected.kind, "lines")
+        np.testing.assert_allclose(
+            selected.geometry[0],
+            [[0.0, 0.2, 0.0], [0.5, 0.2, 0.0], [1.0, 0.2, 0.0]],
+        )
+        self.assertFalse(workspace.focus_feature_instance("point", "missing"))
+
+        workspace.clear_feature_preview()
+        self.assertNotIn(FEATURE_SELECTION_GROUP_KEY, workspace.group_ids)
 
     def test_bor_body_points_and_lines_are_previewed_together(self):
         from assembly_tree import AssemblyTreePanel

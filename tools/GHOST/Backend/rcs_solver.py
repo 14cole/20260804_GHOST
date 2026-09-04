@@ -23,6 +23,7 @@ import ctypes
 import ctypes.util
 import math
 import os
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass
@@ -87,6 +88,160 @@ RCS_NORM_NUMERATOR = 0.25
 RCS_NORM_MODE_DEFAULT = "physical"
 RCS_NORM_MODE_PHYSICAL = "physical"
 RCS_AMPLITUDE_CONVENTION = "A_physical_asymptotic = +j * B_stored"
+DENSE_LINEAR_BACKWARD_ERROR_MAX = 1.0e-12
+DENSE_GPU_BACKEND_ENV = "GHOST_DENSE_BACKEND"
+DENSE_GPU_MIN_N_ENV = "GHOST_DENSE_GPU_MIN_N"
+DENSE_GPU_MIN_N_DEFAULT = 768
+DENSE_GPU_PROBE_TIMEOUT_S = 20.0
+
+_DENSE_BACKEND_LOCAL = threading.local()
+_CUPY_PROBE_LOCK = threading.Lock()
+_CUPY_PROBE_RESULT: 'Optional[Tuple[bool, str]]' = None
+
+
+def _reset_dense_backend_telemetry() -> 'None':
+    _DENSE_BACKEND_LOCAL.events = []
+
+
+def _record_dense_backend_event(**event: 'Any') -> 'None':
+    events = getattr(_DENSE_BACKEND_LOCAL, "events", None)
+    if events is None:
+        events = []
+        _DENSE_BACKEND_LOCAL.events = events
+    events.append(dict(event))
+
+
+def _dense_backend_summary() -> 'Dict[str, Any]':
+    events = list(getattr(_DENSE_BACKEND_LOCAL, "events", []) or [])
+    used = sorted({str(row.get("used", "cpu")) for row in events})
+    reasons = []
+    for row in events:
+        reason = str(row.get("fallback_reason", "") or "")
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    devices = []
+    for row in events:
+        device = str(row.get("gpu_device", "") or "")
+        if device and device not in devices:
+            devices.append(device)
+    return {
+        "linear_backend": (
+            used[0] if len(used) == 1 else ("mixed" if used else "cpu")
+        ),
+        "dense_gpu_solve_count": sum(
+            1 for row in events if row.get("used") == "gpu_cupy"
+        ),
+        "dense_cpu_solve_count": sum(
+            1 for row in events if row.get("used") == "cpu"
+        ),
+        "dense_gpu_fallback_reasons": reasons,
+        "dense_gpu_devices": devices,
+        "dense_largest_system": max(
+            [int(row.get("n", 0)) for row in events] or [0]
+        ),
+    }
+
+
+def _requested_dense_backend() -> 'Tuple[str, int]':
+    backend = os.environ.get(DENSE_GPU_BACKEND_ENV, "cpu").strip().lower()
+    if backend not in {"cpu", "auto", "gpu"}:
+        raise ValueError(
+            f"{DENSE_GPU_BACKEND_ENV} must be cpu, auto, or gpu."
+        )
+    try:
+        minimum_n = int(os.environ.get(
+            DENSE_GPU_MIN_N_ENV, str(DENSE_GPU_MIN_N_DEFAULT)
+        ))
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{DENSE_GPU_MIN_N_ENV} must be a positive integer."
+        ) from None
+    if minimum_n < 1:
+        raise ValueError(
+            f"{DENSE_GPU_MIN_N_ENV} must be a positive integer."
+        )
+    return backend, minimum_n
+
+
+def _probe_cupy_backend() -> 'Tuple[bool, str]':
+    """Run one isolated cuSOLVER operation so a bad driver cannot hang GHOST."""
+
+    global _CUPY_PROBE_RESULT
+    with _CUPY_PROBE_LOCK:
+        if _CUPY_PROBE_RESULT is not None:
+            return _CUPY_PROBE_RESULT
+        probe = (
+            "import cupy as c; "
+            "a=c.asarray([[3+0j,1],[1,2]],dtype=c.complex128); "
+            "b=c.asarray([1+0j,0]); "
+            "x=c.asnumpy(c.linalg.solve(a,b)); "
+            "assert abs(x[0]-0.4)<1e-12 and abs(x[1]+0.2)<1e-12"
+        )
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", probe],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                text=True,
+                timeout=DENSE_GPU_PROBE_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            _CUPY_PROBE_RESULT = (
+                False,
+                "CuPy cuSOLVER health probe timed out",
+            )
+            return _CUPY_PROBE_RESULT
+        if completed.returncode != 0:
+            detail = str(completed.stderr or "").strip().splitlines()
+            suffix = detail[-1] if detail else "unknown CuPy error"
+            _CUPY_PROBE_RESULT = (
+                False,
+                "CuPy cuSOLVER health probe failed: " + suffix,
+            )
+            return _CUPY_PROBE_RESULT
+        _CUPY_PROBE_RESULT = (True, "")
+        return _CUPY_PROBE_RESULT
+
+
+def _solve_dense_gpu(a_eval: 'np.ndarray', rhs_eval: 'np.ndarray'):
+    healthy, reason = _probe_cupy_backend()
+    if not healthy:
+        raise RuntimeError(reason)
+    try:
+        import cupy as cp
+        import cupyx
+    except Exception as exc:
+        raise RuntimeError(f"CuPy import failed: {exc}") from exc
+    free_bytes, _total_bytes = cp.cuda.runtime.memGetInfo()
+    # Matrix, RHS, solution, cuSOLVER work area, and allocator fragmentation.
+    required_bytes = int(
+        4.0 * a_eval.nbytes + 3.0 * rhs_eval.nbytes + 64.0 * 1024.0 ** 2
+    )
+    if required_bytes > 0.8 * float(free_bytes):
+        raise MemoryError(
+            "GPU dense solve needs an estimated "
+            f"{required_bytes / 1024.0 ** 3:.3f} GiB, exceeding 80% of "
+            f"the {float(free_bytes) / 1024.0 ** 3:.3f} GiB currently free."
+        )
+    try:
+        with cupyx.errstate(linalg="raise"):
+            gpu_a = cp.asarray(a_eval)
+            gpu_b = cp.asarray(rhs_eval)
+            gpu_x = cp.linalg.solve(gpu_a, gpu_b)
+            solution = cp.asnumpy(gpu_x)
+        cp.cuda.Stream.null.synchronize()
+        properties = cp.cuda.runtime.getDeviceProperties(
+            cp.cuda.runtime.getDevice()
+        )
+        raw_name = properties.get("name", "CUDA GPU")
+        device_name = (
+            raw_name.decode(errors="replace")
+            if isinstance(raw_name, bytes) else str(raw_name)
+        )
+    except Exception as exc:
+        raise RuntimeError(f"CuPy dense solve failed: {exc}") from exc
+    return np.asarray(solution, dtype=np.complex128), device_name
 
 @dataclass
 class Panel:
@@ -5250,7 +5405,47 @@ def _solve_dense_system(
 
     a_eval = np.asarray(a_mat, dtype=np.complex128)
     rhs_eval = np.asarray(rhs, dtype=np.complex128)
-    if _SCIPY_LINALG is None:
+    requested_backend, gpu_min_n = _requested_dense_backend()
+    system_n = int(a_eval.shape[0]) if a_eval.ndim == 2 else 0
+    backend_used = "cpu"
+    fallback_reason = ""
+    gpu_device = ""
+    lu = piv = None
+    solution = None
+    gpu_candidate = requested_backend in {"auto", "gpu"}
+    if gpu_candidate and condition_diagnostics is not None:
+        fallback_reason = "CPU LU required for certified condition estimation"
+        gpu_candidate = False
+    if (
+        gpu_candidate
+        and requested_backend == "auto"
+        and system_n < gpu_min_n
+    ):
+        fallback_reason = (
+            f"system order {system_n} is below the auto-GPU threshold "
+            f"{gpu_min_n}"
+        )
+        gpu_candidate = False
+    if gpu_candidate:
+        try:
+            solution, gpu_device = _solve_dense_gpu(a_eval, rhs_eval)
+            backend_used = "gpu_cupy"
+        except Exception as exc:
+            fallback_reason = str(exc)
+            if requested_backend == "gpu":
+                _record_dense_backend_event(
+                    requested=requested_backend,
+                    used="gpu_failed",
+                    n=system_n,
+                    label=str(label),
+                    fallback_reason=fallback_reason,
+                )
+                raise RuntimeError(
+                    f"{label} requested the GPU backend but it was not "
+                    f"usable: {fallback_reason}"
+                ) from exc
+
+    if solution is None and _SCIPY_LINALG is None:
         solution = np.linalg.solve(a_eval, rhs_eval)
         if condition_diagnostics is not None:
             # Production environments require SciPy, but keep a fail-closed
@@ -5268,7 +5463,7 @@ def _solve_dense_system(
             condition_diagnostics["condition_method"] = (
                 "equilibrated_1norm_numpy_fallback"
             )
-    else:
+    elif solution is None:
         lu, piv = _SCIPY_LINALG.lu_factor(a_eval)
         solution = _SCIPY_LINALG.lu_solve((lu, piv), rhs_eval)
         if condition_diagnostics is not None:
@@ -5278,8 +5473,79 @@ def _solve_dense_system(
             condition_diagnostics["condition_method"] = (
                 "equilibrated_1norm_lu_onenormest"
             )
+
+    def backward_metrics(candidate):
+        x_columns = np.asarray(candidate, dtype=np.complex128)
+        b_columns = rhs_eval
+        if x_columns.ndim == 1:
+            x_columns = x_columns[:, None]
+            b_columns = b_columns[:, None]
+        residual = a_eval @ x_columns - b_columns
+        residual_inf = np.max(np.abs(residual), axis=0)
+        matrix_inf = float(np.linalg.norm(a_eval, ord=np.inf))
+        solution_inf = np.max(np.abs(x_columns), axis=0)
+        rhs_inf = np.max(np.abs(b_columns), axis=0)
+        denominator = matrix_inf * solution_inf + rhs_inf
+        errors = np.divide(
+            residual_inf,
+            denominator,
+            out=np.zeros_like(residual_inf, dtype=float),
+            where=denominator > 0.0,
+        )
+        errors[(denominator <= 0.0) & (residual_inf > 0.0)] = math.inf
+        return residual, float(np.max(errors))
+
+    residual_matrix, backward_error = backward_metrics(solution)
+    refinement_steps = 0
+    for _attempt in range(2):
+        if backward_error <= DENSE_LINEAR_BACKWARD_ERROR_MAX:
+            break
+        correction_rhs = -residual_matrix
+        if np.asarray(solution).ndim == 1:
+            correction_rhs = correction_rhs[:, 0]
+        correction = (
+            np.linalg.solve(a_eval, correction_rhs)
+            if lu is None
+            else _SCIPY_LINALG.lu_solve((lu, piv), correction_rhs)
+        )
+        candidate = solution + correction
+        candidate_residual, candidate_error = backward_metrics(candidate)
+        if candidate_error >= backward_error:
+            break
+        solution = candidate
+        residual_matrix = candidate_residual
+        backward_error = candidate_error
+        refinement_steps += 1
+
+    if not math.isfinite(backward_error):
+        raise RuntimeError(
+            f"{label} produced a non-finite normwise backward error."
+        )
+    if backward_error > DENSE_LINEAR_BACKWARD_ERROR_MAX:
+        raise RuntimeError(
+            f"{label} normwise backward error {backward_error:.6g} exceeds "
+            f"the release limit {DENSE_LINEAR_BACKWARD_ERROR_MAX:.6g}."
+        )
     if condition_diagnostics is not None:
         condition_diagnostics["condition_label"] = str(label)
+        condition_diagnostics["linear_backward_error"] = float(
+            backward_error
+        )
+        condition_diagnostics["linear_backward_error_limit"] = float(
+            DENSE_LINEAR_BACKWARD_ERROR_MAX
+        )
+        condition_diagnostics["linear_refinement_steps"] = int(
+            refinement_steps
+        )
+    _record_dense_backend_event(
+        requested=requested_backend,
+        used=backend_used,
+        n=system_n,
+        label=str(label),
+        fallback_reason=fallback_reason,
+        gpu_device=gpu_device,
+        refinement_steps=int(refinement_steps),
+    )
     return np.asarray(solution, dtype=np.complex128)
 
 
@@ -5851,6 +6117,7 @@ def _solve_te_robin_mfie(
     src_order: 'int' = 8,
     solver_method: 'str' = "auto",
     condition_diagnostics: 'Optional[Dict[str, Any]]' = None,
+    operator_cache: 'Optional[Dict[Any, Any]]' = None,
 ) -> 'Tuple[np.ndarray, np.ndarray, float]':
     """
     Solve TE Robin (PEC or IBC) problems via a generalized MFIE.
@@ -5898,6 +6165,19 @@ def _solve_te_robin_mfie(
             alpha_elements if has_ibc else None
         ),
     )
+    if operator_cache is not None:
+        cache_key = (
+            "air_kp",
+            id(mesh),
+            complex(k0),
+            int(obs_order),
+            int(src_order),
+        )
+        if cache_key not in operator_cache:
+            operator_cache[cache_key] = kp_mat
+            operator_cache["_stores"] = int(
+                operator_cache.get("_stores", 0)
+            ) + 1
     mass_mat = _assemble_linear_mass_matrix(mesh)
     a_mfie = -0.5 * mass_mat + kp_mat
     if has_ibc:
@@ -6521,6 +6801,7 @@ def _assemble_robin_bie_system(
     k0: 'float',
     obs_order: 'int' = 8,
     src_order: 'int' = 8,
+    operator_cache: 'Optional[Dict[Any, Any]]' = None,
 ) -> 'Tuple[np.ndarray, np.ndarray, np.ndarray]':
     """
     Assemble the all-Robin SLP BIE system shared by the monostatic and
@@ -6569,15 +6850,46 @@ def _assemble_robin_bie_system(
     # full passes over every element pair were redundant.  Pure TM-PEC uses
     # only S because every row is replaced by the EFIE limit.
     need_kp = not all_tm_pec
-    S_alpha, Kp_mat = _assemble_linear_operator_matrices(
-        mesh, k0, obs_normal_deriv=True,
-        obs_order=obs_order, src_order=src_order,
-        compute_single_layer=(has_ibc or all_tm_pec),
-        compute_double_layer=need_kp,
-        single_layer_observation_coefficients=(
-            alpha_elements if has_ibc and not all_tm_pec else None
-        ),
+    cache_key = (
+        "air_kp",
+        id(mesh),
+        complex(k0),
+        int(obs_order),
+        int(src_order),
     )
+    cached_kp = (
+        operator_cache.get(cache_key)
+        if operator_cache is not None and need_kp else None
+    )
+    if cached_kp is not None:
+        # TE has already assembled the same air-side K' on the shared mesh.
+        # Assemble only the polarization-specific weighted S term for TM.
+        S_alpha, _unused = _assemble_linear_operator_matrices(
+            mesh, k0, obs_normal_deriv=True,
+            obs_order=obs_order, src_order=src_order,
+            compute_single_layer=(has_ibc or all_tm_pec),
+            compute_double_layer=False,
+            single_layer_observation_coefficients=(
+                alpha_elements if has_ibc and not all_tm_pec else None
+            ),
+        )
+        Kp_mat = cached_kp
+        operator_cache["_hits"] = int(operator_cache.get("_hits", 0)) + 1
+    else:
+        S_alpha, Kp_mat = _assemble_linear_operator_matrices(
+            mesh, k0, obs_normal_deriv=True,
+            obs_order=obs_order, src_order=src_order,
+            compute_single_layer=(has_ibc or all_tm_pec),
+            compute_double_layer=need_kp,
+            single_layer_observation_coefficients=(
+                alpha_elements if has_ibc and not all_tm_pec else None
+            ),
+        )
+        if operator_cache is not None and need_kp:
+            operator_cache[cache_key] = Kp_mat
+            operator_cache["_stores"] = int(
+                operator_cache.get("_stores", 0)
+            ) + 1
     M_mat = _assemble_linear_mass_matrix(mesh)
 
     # Default Robin row: (-1/2 M + K' + S_alpha) sigma,
@@ -6658,6 +6970,7 @@ def _solve_robin_bie(
     obs_order: 'int' = 8,
     src_order: 'int' = 8,
     condition_diagnostics: 'Optional[Dict[str, Any]]' = None,
+    operator_cache: 'Optional[Dict[Any, Any]]' = None,
 ) -> 'Tuple[np.ndarray, np.ndarray, float]':
     """
     Solve all-Robin (PEC, IBC, or mixed PEC+IBC) scattering with SLP representation.
@@ -6694,7 +7007,8 @@ def _solve_robin_bie(
 
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
     a_sys, alpha_elements, pec_node = _assemble_robin_bie_system(
-        mesh, infos, pol, k0, obs_order=obs_order, src_order=src_order)
+        mesh, infos, pol, k0, obs_order=obs_order, src_order=src_order,
+        operator_cache=operator_cache)
     rhs_sys = _robin_bie_rhs_many(
         mesh, alpha_elements, pec_node, pol, k0, elev
     )
@@ -7289,6 +7603,7 @@ def solve_monostatic_rcs_2d_single_polarization(
     rcs_norm_mode = _normalize_rcs_normalization_mode(rcs_normalization_mode)
     solver_method = _normalize_public_2d_solver_method(solver_method)
     _raise_if_untrusted_math_backends()
+    _reset_dense_backend_telemetry()
 
     pol = _normalize_polarization(polarization)
     unit_scale = _unit_scale_to_meters(geometry_units)
@@ -7297,6 +7612,10 @@ def solve_monostatic_rcs_2d_single_polarization(
         _shared_discretization_cache
         if isinstance(_shared_discretization_cache, dict)
         else None
+    )
+    shared_operator_cache = (
+        shared_cache.setdefault("operators", {})
+        if shared_cache is not None else None
     )
     prepared = shared_cache.get("prepared") if shared_cache is not None else None
     if prepared is None:
@@ -7713,6 +8032,7 @@ def solve_monostatic_rcs_2d_single_polarization(
                 elevations_deg=elevations_arr,
                 solver_method=solver_method,
                 condition_diagnostics=condition_diagnostics,
+                operator_cache=shared_operator_cache,
             )
             rcs_db_vec = _rcs_db_from_sigma(rcs_lin_vec)
             residual_vec = np.full(len(elevations), mfie_residual, dtype=float)
@@ -7857,6 +8177,7 @@ def solve_monostatic_rcs_2d_single_polarization(
                 k0=k0,
                 elevations_deg=elevations_arr,
                 condition_diagnostics=condition_diagnostics,
+                operator_cache=shared_operator_cache,
             )
             rcs_db_vec = _rcs_db_from_sigma(rcs_lin_vec)
             residual_vec = np.full(len(elevations), robin_residual, dtype=float)
@@ -7953,6 +8274,17 @@ def solve_monostatic_rcs_2d_single_polarization(
         "math_backend_real_bessel": _BESSEL.backend_name,
         "math_backend_complex_hankel": _complex_hankel_backend_name(),
         "reused_matrix_solve_count": int(reused_matrix_solve_count),
+        "shared_operator_cache_enabled": bool(
+            shared_operator_cache is not None
+        ),
+        "shared_operator_cache_hits": int(
+            shared_operator_cache.get("_hits", 0)
+            if shared_operator_cache is not None else 0
+        ),
+        "shared_operator_cache_stores": int(
+            shared_operator_cache.get("_stores", 0)
+            if shared_operator_cache is not None else 0
+        ),
         "parallel_elevation_solve_count": 0,
         "max_parallel_workers_used": int(max_parallel_workers_used),
         "mesh_reference_frequency_used": bool(mesh_ref_ghz is not None),
@@ -7974,6 +8306,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         "split_boundary_primitive_count": int(junction_stats.get("split_boundary_primitive_count", 0)),
         "multi_signature_node_count": int(junction_stats.get("multi_signature_node_count", 0)),
         "preflight": dict(preflight_report),
+        **_dense_backend_summary(),
     }
 
     quality_gate = evaluate_quality_gate(metadata, thresholds=quality_thresholds)
@@ -8117,11 +8450,25 @@ def _merge_co_polarized_2d_results(
     ))
 
     warnings = []
+    gpu_fallback_reasons = []
+    gpu_devices = []
     for export_pol in expected_channels:
         for warning in list(channel_metadata[export_pol].get("warnings", []) or []):
             text = str(warning)
             if text not in warnings:
                 warnings.append(text)
+        for reason in list(channel_metadata[export_pol].get(
+            "dense_gpu_fallback_reasons", []
+        ) or []):
+            text = str(reason)
+            if text and text not in gpu_fallback_reasons:
+                gpu_fallback_reasons.append(text)
+        for device in list(channel_metadata[export_pol].get(
+            "dense_gpu_devices", []
+        ) or []):
+            text = str(device)
+            if text and text not in gpu_devices:
+                gpu_devices.append(text)
 
     quality_by_channel = {
         export_pol: dict(
@@ -8157,6 +8504,10 @@ def _merge_co_polarized_2d_results(
     )
 
     first_metadata = channel_metadata[expected_channels[0]]
+    linear_backends = {
+        str(channel_metadata[label].get("linear_backend", "cpu"))
+        for label in expected_channels
+    }
     metadata: 'Dict[str, Any]' = {
         "source_path": first_metadata.get("source_path", ""),
         "segment_count": first_metadata.get("segment_count", 0),
@@ -8198,6 +8549,35 @@ def _merge_co_polarized_2d_results(
         "quality_gate": quality_gate,
         "channel_metadata": channel_metadata,
         "co_solve_shared_discretization": True,
+        "shared_operator_cache_enabled": any(
+            bool(channel_metadata[label].get(
+                "shared_operator_cache_enabled", False
+            ))
+            for label in expected_channels
+        ),
+        "shared_operator_cache_hits": int(_finite_metadata_max(
+            channel_metadata, "shared_operator_cache_hits"
+        )),
+        "shared_operator_cache_stores": int(_finite_metadata_max(
+            channel_metadata, "shared_operator_cache_stores"
+        )),
+        "linear_backend": (
+            next(iter(linear_backends))
+            if len(linear_backends) == 1 else "mixed"
+        ),
+        "dense_gpu_solve_count": int(sum(
+            int(channel_metadata[label].get("dense_gpu_solve_count", 0))
+            for label in expected_channels
+        )),
+        "dense_cpu_solve_count": int(sum(
+            int(channel_metadata[label].get("dense_cpu_solve_count", 0))
+            for label in expected_channels
+        )),
+        "dense_gpu_fallback_reasons": gpu_fallback_reasons,
+        "dense_gpu_devices": gpu_devices,
+        "dense_largest_system": int(_finite_metadata_max(
+            channel_metadata, "dense_largest_system"
+        )),
         "mesh_convergence_certified": mesh_certified,
         "certified_entry_point": all(
             bool(channel_metadata[label].get("certified_entry_point", False))
@@ -8388,6 +8768,7 @@ def solve_bistatic_rcs_2d_single_polarization(
 
     solver_method = _normalize_public_2d_solver_method(solver_method)
     _raise_if_untrusted_math_backends()
+    _reset_dense_backend_telemetry()
     pol = _normalize_polarization(polarization)
     unit_scale = _unit_scale_to_meters(geometry_units)
     base_dir = _material_base_dir_for_snapshot(
@@ -8860,6 +9241,7 @@ def solve_bistatic_rcs_2d_single_polarization(
         "warnings": list(materials.warnings),
         "warning_count": int(len(materials.warnings)),
         "preflight": dict(preflight_report),
+        **_dense_backend_summary(),
     }
     quality_gate = evaluate_quality_gate(metadata, thresholds=quality_thresholds)
     metadata["quality_gate"] = quality_gate
@@ -9038,6 +9420,8 @@ def _run_certified_2d_pair(
     mesh_gate["schema"] = "ghost.solver.mesh-convergence.v1"
     mesh_gate["fine_factor"] = policy["fine_factor"]
     mesh_gate["published_mesh"] = "fine"
+    mesh_gate["geometry_model"] = "piecewise_linear_input"
+    mesh_gate["geometry_approximation_certified"] = False
     mesh_gate["base_quality_gate"] = dict(
         base_result.get("metadata", {}).get("quality_gate", {}) or {}
     )

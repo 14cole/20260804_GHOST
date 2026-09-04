@@ -22,10 +22,23 @@ sys.path.insert(0, str(BACKEND))
 
 import feature_sum  # noqa: E402
 import bor_streaming  # noqa: E402
+import build_bor_stream_kernel  # noqa: E402
 import rcs_solver  # noqa: E402
 
 
 class NativeLoaderTrustTests(unittest.TestCase):
+    def test_windows_build_exposes_compiler_runtime_to_helper_processes(self) -> None:
+        compiler = REPO / "fake-msys2" / "ucrt64" / "bin" / "gcc.exe"
+        original_path = str(REPO / "unrelated-tools")
+        with mock.patch.dict(os.environ, {"PATH": original_path}):
+            environment = build_bor_stream_kernel._compiler_environment(
+                str(compiler), "windows"
+            )
+
+        path_entries = environment["PATH"].split(os.pathsep)
+        self.assertEqual(path_entries[0], str(compiler.resolve().parent))
+        self.assertEqual(path_entries[1:], [original_path])
+
     def test_bor_native_extensions_are_host_specific(self) -> None:
         self.assertEqual(bor_streaming._native_extensions("Windows"), (".dll",))
         self.assertEqual(bor_streaming._native_extensions("Linux"), (".so",))

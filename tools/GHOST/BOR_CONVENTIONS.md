@@ -41,16 +41,38 @@ BoR `VV` is theta/meridian-plane polarization and `HH` is phi polarization.
 The compatibility aliases are `TE -> VV` and `TM -> HH`. Each modal matrix is
 factored once and both channels are solved together.
 
+Modal-tail convergence is checked independently at every requested look and
+for both polarizations. A strong channel or aspect therefore cannot conceal a
+non-converged weak one. The axisymmetric signed-mode identity is used to solve
+only the non-negative member of each `+m/-m` pair for the analytically gated
+PEC, impedance, homogeneous dielectric, and simple coated-PEC formulations.
+Junction and general multi-region formulations retain independent signed
+solves until equivalent coverage exists for their constraint maps.
+
 At an exactly axial look the meridian basis is undefined, but rotational
 symmetry requires the VV and HH complex amplitudes to agree. The radar-frame
 azimuth/elevation conversion checks that condition.
+
+At a generatrix endpoint on the rotation axis, the `|m| = 1` current uses the
+exact regularity relation between meridional and azimuthal components (with
+the endpoint tangent orientation included). Higher-order non-regular pole
+components are removed. This constraint is applied as a basis transform, so
+both testing and source spaces satisfy it.
 
 ## Mesh and result status
 
 Mesh certification is enabled by default. A certified solve compares the
 complex VV and HH fields on the requested mesh and an internally refined mesh,
 then publishes the refined result only if both pass the fixed convergence
-policy.
+policy. The refinement changes the realized element inventory even when the
+input generatrix was already explicitly segmented; the recorded base/fine
+element counts are checked before the comparison is accepted.
+
+The current geometry model remains a piecewise-linear generatrix. Mesh
+certification establishes convergence of that discretized geometry sequence;
+it is not an independent certification of a curved CAD surface approximation.
+Outputs state this distinction in `geometry_model` and
+`geometry_approximation_certified` metadata.
 
 Certification can be disabled whenever the user chooses. Such output is marked
 with `survey_mode=true`, `mesh_convergence_certified=false`, and
@@ -59,6 +81,17 @@ but must not be described as having passed a base/fine mesh comparison.
 
 Every solve still enforces finite fields, non-negative RCS, modal convergence,
 linear residual, conditioning, and amplitude/power consistency gates.
+The configured `near_depth` controls the graded near/self quadrature rule and
+is included in its cache identity.
+
+All production formulations can replace retained all-mode far tables with
+bounded per-mode nodal blocks, including partial, layered, and banded junction
+systems. For penetrable and coated bodies, the configured streaming budget
+covers the combined self and rectangular cross-surface PMCHWT streams. Cached
+mode-category junction projections and direct near/junction operators are
+estimated separately and added to the peak before the runtime memory gate.
+This changes storage and assembly cost only: table-versus-streaming
+complex-field equivalence is regression-gated for the junction formulations.
 
 ## Validated scope and feature boundary
 

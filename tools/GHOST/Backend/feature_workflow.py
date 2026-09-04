@@ -228,6 +228,9 @@ class FeaturePreviewGeometry:
     line_endpoint_normals_cad: dict[str, dict[str, np.ndarray]] = field(
         default_factory=dict
     )
+    # Line paths retain line_id as dictionary keys. Point arrays are grouped by
+    # response dataset, so carry their IDs explicitly for exact GUI QA focus.
+    point_placement_ids: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -272,6 +275,10 @@ class FeatureInputPreview:
     @property
     def line_endpoint_normals_cad(self) -> dict[str, dict[str, np.ndarray]]:
         return self.preview_geometry.line_endpoint_normals_cad
+
+    @property
+    def point_placement_ids(self) -> dict[str, tuple[str, ...]]:
+        return self.preview_geometry.point_placement_ids
 
 
 @dataclass(frozen=True)
@@ -350,6 +357,10 @@ class FeatureAssemblyPlan:
     @property
     def line_endpoint_normals_cad(self) -> dict[str, dict[str, np.ndarray]]:
         return self.preview_geometry.line_endpoint_normals_cad
+
+    @property
+    def point_placement_ids(self) -> dict[str, tuple[str, ...]]:
+        return self.preview_geometry.point_placement_ids
 
     @property
     def preview_stage(self) -> str:
@@ -1115,10 +1126,14 @@ def prepare_feature_input_preview(
     # retaining the complete parsed descriptor catalog for re-enabling items.
     # Authoritative validation/build still rejects an empty feature set.
     point_groups: dict[str, list[np.ndarray]] = {}
+    point_id_groups: dict[str, list[str]] = {}
     point_normal_groups: dict[str, list[np.ndarray]] = {}
     point_roll_groups: dict[str, list[np.ndarray]] = {}
     for row in point_rows:
         dataset_id = str(row["dataset_id"])
+        point_id_groups.setdefault(dataset_id, []).append(
+            str(row["placement_id"])
+        )
         point_groups.setdefault(dataset_id, []).append(
             np.asarray([row["x"], row["y"], row["z"]], dtype=float)
             * coordinate_scale
@@ -1169,6 +1184,10 @@ def prepare_feature_input_preview(
             for dataset_id, vectors in point_roll_groups.items()
         },
         line_endpoint_normals_cad=line_normals,
+        point_placement_ids={
+            dataset_id: tuple(placement_ids)
+            for dataset_id, placement_ids in point_id_groups.items()
+        },
     )
     return FeatureInputPreview(
         preview_geometry=geometry,
@@ -4463,6 +4482,12 @@ def prepare_feature_assembly(
     if progress_callback is not None:
         progress_callback(72, 100, "Checking point placements")
 
+    point_preview_ids: dict[str, list[str]] = {}
+    for record in point_records:
+        point_preview_ids.setdefault(str(record["dataset_id"]), []).append(
+            str(record["placement_id"])
+        )
+
     if not lines and not points:
         raise ValueError(
             "No enabled spatial features remain. Enable at least one point "
@@ -4687,6 +4712,10 @@ def prepare_feature_assembly(
                 for line_id, vectors in groups.items()
             }
             for dataset_id, groups in line_preview_endpoint_normals.items()
+        },
+        point_placement_ids={
+            dataset_id: tuple(placement_ids)
+            for dataset_id, placement_ids in point_preview_ids.items()
         },
     )
     provenance = {

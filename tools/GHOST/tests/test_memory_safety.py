@@ -117,6 +117,28 @@ class AvailableMemoryDetectionTests(unittest.TestCase):
 
 
 class BorMemoryGateTests(unittest.TestCase):
+    def test_junction_projection_estimate_counts_signed_axis_categories(self):
+        dofs = 17
+        unit_gb = (
+            1.10 * dofs * dofs * np.dtype(np.complex128).itemsize / 1.0e9
+        )
+        estimates = [
+            bor_solver.estimate_bor_operator_storage_gb(
+                mode_cap,
+                (),
+                (),
+                constraint_dofs=dofs,
+                streaming=True,
+            )
+            for mode_cap in (0, 1, 2)
+        ]
+        np.testing.assert_allclose(
+            estimates,
+            np.asarray([1.0, 3.0, 4.0]) * unit_gb,
+            rtol=1.0e-14,
+            atol=0.0,
+        )
+
     def test_streaming_tile_shape_honors_conservative_live_set_budget(self):
         budget_gb = 0.25
         workers = 3
@@ -228,6 +250,48 @@ class BorMemoryGateTests(unittest.TestCase):
                 single_blocks=False,
                 stream_budget_gb=0.5 * minimum,
                 workers=64,
+            )
+
+    def test_combined_streaming_plan_counts_every_rectangular_mapping(self):
+        requirements = (
+            (80, 80, True, False),
+            (80, 80, True, False),
+            (50, 50, False, False),
+            (80, 50, True, False),
+            (50, 80, True, False),
+        )
+        block, retained, workers = (
+            bor_streaming.plan_combined_streaming_mode_block(
+                60, requirements, 0.25, 32
+            )
+        )
+        expected = sum(
+            bor_streaming.estimate_rectangular_streaming_block_gb(
+                nt, ns, 60, block, rotated, single
+            )
+            for nt, ns, rotated, single in requirements
+        )
+        self.assertAlmostEqual(retained, expected)
+        self.assertLessEqual(retained, 0.25)
+        self.assertEqual(
+            block,
+            bor_streaming._aligned_stream_mode_block(60, block, workers),
+        )
+
+    def test_combined_streaming_plan_rejects_below_total_minimum(self):
+        requirements = (
+            (100, 80, True, False),
+            (80, 100, True, False),
+        )
+        minimum = sum(
+            bor_streaming.estimate_rectangular_streaming_block_gb(
+                nt, ns, 20, 1, rotated, single
+            )
+            for nt, ns, rotated, single in requirements
+        )
+        with self.assertRaisesRegex(ValueError, "one-mode retained minimum"):
+            bor_streaming.plan_combined_streaming_mode_block(
+                20, requirements, 0.5 * minimum, 8
             )
 
     def test_streaming_runtime_uses_budget_capped_outer_workers(self):

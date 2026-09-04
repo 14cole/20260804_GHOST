@@ -21,13 +21,26 @@
 #include <math.h>
 #include <stddef.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846264338327950288
+#endif
+
 #define R_MIN 1e-30
+#if defined(_MSC_VER)
+#define GHOST_RESTRICT __restrict
+#else
+#define GHOST_RESTRICT restrict
+#endif
 
 void sample_g(int nr, int np_, int nxi,
-              const double *rho_p, const double *z_p,
-              const double *rho_q, const double *z_q,
-              double k, const double *sin2_tab, double *out)
+              const double *GHOST_RESTRICT rho_p,
+              const double *GHOST_RESTRICT z_p,
+              const double *GHOST_RESTRICT rho_q,
+              const double *GHOST_RESTRICT z_q,
+              double k, const double *GHOST_RESTRICT sin2_tab,
+              double *GHOST_RESTRICT out)
 {
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < nr; i++) {
         for (int j = 0; j < np_; j++) {
             double dr = rho_p[i] - rho_q[j];
@@ -70,6 +83,7 @@ void sample_mfie(int nr, int np_, int nxi,
                  double k, const double *cx_tab, const double *sx_tab,
                  double *o_tt, double *o_tf, double *o_ft, double *o_ff)
 {
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < nr; i++) {
         for (int j = 0; j < np_; j++) {
             double Rz = z_p[i] - z_q[j];
@@ -113,6 +127,7 @@ void sample_ibc(int nr, int np_, int nxi,
                 double k, const double *cx_tab, const double *sx_tab,
                 double *o_tt, double *o_tf, double *o_ft, double *o_ff)
 {
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < nr; i++) {
         for (int j = 0; j < np_; j++) {
             double Rz = z_p[i] - z_q[j];

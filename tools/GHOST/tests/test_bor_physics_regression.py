@@ -39,12 +39,18 @@ from bor_kernels import (  # noqa: E402
 from bor_solver import (  # noqa: E402
     BOR_LINEAR_BACKWARD_ERROR_MAX,
     BOR_LINEAR_RESIDUAL_MAX,
+    BorCrossOperators,
     BorPecSolver,
+    _MultiRegionBor,
+    _cell_points,
     _segment_distance,
     _mode_sweep,
+    _solve_multiregion,
     solve_bor,
     solve_bor_coated_pec,
+    solve_bor_coating_patch,
     solve_bor_dielectric,
+    solve_bor_partial_coating,
 )
 from mie_sphere import (  # noqa: E402
     sigma_coated_pec_sphere,
@@ -64,6 +70,28 @@ def _sphere(radius_m, elements):
     return np.column_stack((
         float(radius_m) * np.sin(theta),
         float(radius_m) * np.cos(theta),
+    ))
+
+
+def _hemisphere(radius_m, elements, upper=True):
+    start, stop = (0.0, 0.5 * math.pi) if upper else (
+        0.5 * math.pi, math.pi
+    )
+    theta = np.linspace(start, stop, int(elements) + 1)
+    return np.column_stack((
+        float(radius_m) * np.sin(theta),
+        float(radius_m) * np.cos(theta),
+    ))
+
+
+def _bulged_upper_interface(radius_m, elements, bulge=0.12):
+    theta = np.linspace(0.0, 0.5 * math.pi, int(elements) + 1)
+    local_radius = float(radius_m) * (
+        1.0 + float(bulge) * np.sin(2.0 * theta)
+    )
+    return np.column_stack((
+        local_radius * np.sin(theta),
+        local_radius * np.cos(theta),
     ))
 
 
@@ -95,6 +123,47 @@ def _pec_sphere_snapshot(radius_m=0.04, explicit_elements=20):
     }
 
 
+def _partial_coating_snapshot(radius_m=0.04, explicit_elements=6):
+    def segment(name, seg_type, points, positive_material=0):
+        return {
+            "name": name,
+            "seg_type": seg_type,
+            "properties": [
+                str(seg_type), str(explicit_elements), "0",
+                str(positive_material), "0",
+            ],
+            "point_pairs": [
+                {
+                    "x1": float(points[index, 0]),
+                    "y1": float(points[index, 1]),
+                    "x2": float(points[index + 1, 0]),
+                    "y2": float(points[index + 1, 1]),
+                }
+                for index in range(len(points) - 1)
+            ],
+        }
+
+    return {
+        "title": "Partial coated sphere",
+        "segments": [
+            segment(
+                "coating interface", 3,
+                _bulged_upper_interface(radius_m, 6), 1,
+            ),
+            segment(
+                "covered core", 4,
+                _hemisphere(radius_m, 6, upper=True), 1,
+            ),
+            segment(
+                "bare core", 2,
+                _hemisphere(radius_m, 6, upper=False), 0,
+            ),
+        ],
+        "ibcs": [],
+        "dielectrics": [["1", "2.5", "-0.08", "1.0", "-0.01"]],
+    }
+
+
 def _constant_compact_pattern(frequency_ghz=1.0):
     metadata = feature_sum.point_pattern_convention_metadata()
     amplitude = np.empty((2, 3, 1, 3), dtype=np.complex128)
@@ -117,6 +186,7 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
         hh = np.asarray(result["sigma_hh"], dtype=float)
         amp_vv = np.asarray(result["amp_vv"], dtype=complex)
         amp_hh = np.asarray(result["amp_hh"], dtype=complex)
+        self.assertTrue(result["signed_mode_symmetry_used"])
         self.assertTrue(np.all(np.isfinite(vv)))
         self.assertTrue(np.all(np.isfinite(hh)))
         self.assertEqual(result["theta_deg"], SPHERE_ASPECTS_DEG)
@@ -209,6 +279,56 @@ class AnalyticSphereRegressionTests(unittest.TestCase):
 
 
 class BoRWorkflowRegressionTests(unittest.TestCase):
+
+    def test_certification_refines_realized_presegmented_mesh(self):
+        snapshot = _pec_sphere_snapshot(
+            radius_m=0.04, explicit_elements=0
+        )
+        wavelength = C0 / 1.0e6
+        base_chains = bor_dispatch._chains_from_snapshot(snapshot, 1.0)
+
+        fine = copy.deepcopy(snapshot)
+        fine["segments"][0]["properties"][1] = "-30"
+        fine["_bor_certification_refinement_factor"] = 1.5
+        fine["_bor_certification_base_segment_n"] = ["0"]
+        fine_chains = bor_dispatch._chains_from_snapshot(fine, 1.0)
+
+        base_count = bor_dispatch._run_element_count(
+            base_chains, wavelength
+        )
+        fine_count = bor_dispatch._run_element_count(
+            fine_chains, wavelength
+        )
+        self.assertEqual(base_count, 12)
+        self.assertEqual(fine_count, 24)
+        self.assertGreater(fine_count, base_count)
+
+    def test_near_depth_changes_graded_quadrature(self):
+        shallow = _cell_points("diag", depth=1)
+        deep = _cell_points("diag", depth=5)
+        self.assertGreater(len(deep[0]), len(shallow[0]))
+        self.assertIsNot(shallow[0], deep[0])
+        with self.assertRaisesRegex(ValueError, "near_depth"):
+            BorPecSolver(_sphere(0.04, 4), FREQUENCY_HZ, near_depth=-1)
+
+    def test_axis_transform_enforces_exact_m1_pole_regularity(self):
+        solver = BorPecSolver(_sphere(0.04, 8), FREQUENCY_HZ)
+        for mode in (-1, 1):
+            transform = solver.basis_transform(mode)
+            for end, element in (
+                (0, 0),
+                (solver.Nn - 1, solver.gen.n_elems - 1),
+            ):
+                columns = np.flatnonzero(np.abs(transform[end]) > 0.0)
+                self.assertEqual(columns.size, 1)
+                column = int(columns[0])
+                radial_sign = (
+                    1.0 if solver.gen.trho[element] >= 0.0 else -1.0
+                )
+                self.assertEqual(
+                    transform[solver.Nn + end, column],
+                    1j * mode * radial_sign,
+                )
 
     def test_production_entry_points_have_no_polarization_selector(self):
         for entry_point in (
@@ -327,7 +447,9 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
                     frequencies=np.asarray([], dtype=float),
                     solver_metadata_json=np.asarray("{}"),
                 )
-            with self.assertRaisesRegex(ValueError, "valid BoR body"):
+            with self.assertRaisesRegex(
+                ValueError, "certified GHOST BoR body"
+            ):
                 feature_sum.require_body_mesh_certification(str(nonbody))
 
     def test_bor_unit_audits_are_advisory_but_integrity_checked(self):
@@ -1155,6 +1277,253 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         stream = solve_bor(
             assembly="streaming", stream_budget_gb=0.25, **common
         )
+        self.assertIn(
+            stream["stream_sampling_backend"], {"native_c", "numpy"}
+        )
+        for key in ("sigma_vv", "sigma_hh", "amp_vv", "amp_hh"):
+            np.testing.assert_allclose(
+                np.asarray(stream[key]), np.asarray(table[key]),
+                rtol=2.0e-10, atol=2.0e-12,
+            )
+
+    def test_dielectric_streaming_and_table_paths_are_equivalent(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        common = dict(
+            points=_sphere(radius, 10),
+            freq_hz=FREQUENCY_HZ,
+            thetas_deg=[0.0, 37.0, 90.0],
+            eps_r=3.0 - 0.1j,
+            mu_r=1.0 - 0.02j,
+            n_modes=8,
+            workers=1,
+            table_precision="double",
+        )
+        table = solve_bor_dielectric(assembly="tables", **common)
+        stream = solve_bor_dielectric(
+            assembly="streaming", stream_budget_gb=0.25, **common
+        )
+        self.assertEqual(stream["assembly"], "streaming")
+        self.assertEqual(
+            set(stream["stream_sampling_backends"]),
+            {"exterior", "interior"},
+        )
+        for key in ("sigma_vv", "sigma_hh", "amp_vv", "amp_hh"):
+            np.testing.assert_allclose(
+                np.asarray(stream[key]), np.asarray(table[key]),
+                rtol=2.0e-10, atol=2.0e-12,
+            )
+
+    def test_rectangular_cross_streaming_matches_all_table_modes(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        medium = (3.0 - 0.1j, 1.0 - 0.02j)
+        table_cross = BorCrossOperators(
+            BorPecSolver(
+                _sphere(1.3 * radius, 9), FREQUENCY_HZ, medium=medium
+            ),
+            BorPecSolver(
+                _sphere(0.8 * radius, 7), FREQUENCY_HZ, medium=medium
+            ),
+        )
+        stream_cross = BorCrossOperators(
+            BorPecSolver(
+                _sphere(1.3 * radius, 9), FREQUENCY_HZ, medium=medium
+            ),
+            BorPecSolver(
+                _sphere(0.8 * radius, 7), FREQUENCY_HZ, medium=medium
+            ),
+        )
+        table_cross.prepare(3)
+        stream_cross.enable_streaming(
+            3, tile_budget_gb=0.02, workers=1
+        )
+        stream_cross.prepare(3)
+        self.assertIsNone(stream_cross.sp._B_T)
+        self.assertIsNone(stream_cross.sq._B_T)
+        for mode in range(-3, 4):
+            np.testing.assert_allclose(
+                stream_cross.assemble_T(mode, 3),
+                table_cross.assemble_T(mode, 3),
+                rtol=2.0e-12, atol=2.0e-13,
+            )
+            np.testing.assert_allclose(
+                stream_cross.assemble_P(mode, 3),
+                table_cross.assemble_P(mode, 3),
+                rtol=2.0e-12, atol=2.0e-13,
+            )
+
+    def test_coated_streaming_and_table_paths_are_equivalent(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        common = dict(
+            points_outer=_sphere(1.2 * radius, 12),
+            points_core=_sphere(0.8 * radius, 10),
+            freq_hz=FREQUENCY_HZ,
+            thetas_deg=[0.0, 37.0, 90.0],
+            eps_r=3.0 - 0.1j,
+            mu_r=1.0 - 0.02j,
+            n_modes=8,
+            workers=1,
+            table_precision="double",
+        )
+        table = solve_bor_coated_pec(assembly="tables", **common)
+        stream = solve_bor_coated_pec(
+            assembly="streaming", stream_budget_gb=0.25, **common
+        )
+        self.assertEqual(stream["assembly"], "streaming")
+        self.assertEqual(
+            set(stream["stream_sampling_backends"]),
+            {
+                "exterior_outer", "coating_outer", "coating_core",
+                "cross_outer_core", "cross_core_outer",
+            },
+        )
+        for key in ("sigma_vv", "sigma_hh", "amp_vv", "amp_hh"):
+            np.testing.assert_allclose(
+                np.asarray(stream[key]), np.asarray(table[key]),
+                rtol=2.0e-10, atol=2.0e-12,
+            )
+
+    def test_partial_junction_streaming_matches_tables(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        common = dict(
+            points_interface=_bulged_upper_interface(radius, 5),
+            points_covered=_hemisphere(radius, 5, upper=True),
+            bare_pieces=[_hemisphere(radius, 5, upper=False)],
+            freq_hz=FREQUENCY_HZ,
+            thetas_deg=[0.0, 37.0, 90.0],
+            eps_r=2.5 - 0.08j,
+            mu_r=1.0 - 0.01j,
+            n_modes=8,
+            workers=1,
+            table_precision="double",
+        )
+        table = solve_bor_partial_coating(assembly="tables", **common)
+        stream = solve_bor_partial_coating(
+            assembly="streaming", stream_budget_gb=0.25, **common
+        )
+        self.assertEqual(stream["assembly"], "streaming")
+        self.assertGreater(stream["stream_auxiliary_peak_gb"], 0.0)
+        self.assertEqual(stream["n_junctions"], 1)
+        for key in ("sigma_vv", "sigma_hh", "amp_vv", "amp_hh"):
+            np.testing.assert_allclose(
+                np.asarray(stream[key]), np.asarray(table[key]),
+                rtol=2.0e-10, atol=2.0e-12,
+            )
+
+    def test_layered_patch_junction_streaming_matches_tables(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        common = dict(
+            points_patch=_bulged_upper_interface(radius, 4),
+            points_mid_covered=_hemisphere(radius, 4, upper=True),
+            points_mid_bare=[_hemisphere(radius, 4, upper=False)],
+            points_core=_sphere(0.72 * radius, 8),
+            freq_hz=FREQUENCY_HZ,
+            thetas_deg=[0.0, 37.0, 90.0],
+            eps_inner=2.2 - 0.06j,
+            mu_inner=1.0 - 0.01j,
+            eps_patch=3.0 - 0.10j,
+            mu_patch=1.0 - 0.02j,
+            n_modes=8,
+            workers=1,
+            table_precision="double",
+        )
+        table = solve_bor_coating_patch(assembly="tables", **common)
+        stream = solve_bor_coating_patch(
+            assembly="streaming", stream_budget_gb=0.25, **common
+        )
+        self.assertEqual(stream["assembly"], "streaming")
+        self.assertGreater(stream["stream_auxiliary_peak_gb"], 0.0)
+        self.assertGreaterEqual(stream["n_junctions"], 1)
+        for key in ("sigma_vv", "sigma_hh", "amp_vv", "amp_hh"):
+            np.testing.assert_allclose(
+                np.asarray(stream[key]), np.asarray(table[key]),
+                rtol=2.0e-10, atol=2.0e-12,
+            )
+
+    def test_banded_junction_streaming_matches_tables(self):
+        radius = C0 / (2.0 * math.pi * FREQUENCY_HZ)
+        outer_radius = 1.12 * radius
+
+        def system():
+            surfaces = [
+                (_hemisphere(outer_radius, 4, upper=True), False),
+                (_hemisphere(outer_radius, 4, upper=False), False),
+                (np.asarray([[outer_radius, 0.0], [radius, 0.0]]), False),
+                (_hemisphere(radius, 4, upper=True), True),
+                (_hemisphere(radius, 4, upper=False), True),
+            ]
+            regions = [
+                {
+                    "medium": None,
+                    "bounds": [(0, +1), (1, +1)],
+                    "exterior": True,
+                },
+                {
+                    "medium": (2.4 - 0.06j, 1.0 - 0.01j),
+                    "bounds": [(0, -1), (2, +1), (3, +1)],
+                },
+                {
+                    "medium": (3.1 - 0.10j, 1.0 - 0.02j),
+                    "bounds": [(1, -1), (2, -1), (4, +1)],
+                },
+            ]
+            return _MultiRegionBor(
+                surfaces, regions, FREQUENCY_HZ, near_factor=2.0, near_order=12
+            )
+
+        common = dict(
+            freq_hz=FREQUENCY_HZ,
+            thetas_deg=[0.0, 37.0, 90.0],
+            n_modes=8,
+            mode_tol=1.0e-6,
+            workers=1,
+            progress=None,
+            check_abort=None,
+            formulation="pmchwt-banded",
+            extra={},
+            table_precision="double",
+        )
+        table = _solve_multiregion(system(), assembly="tables", **common)
+        stream_system = system()
+        stream = _solve_multiregion(
+            stream_system,
+            assembly="streaming",
+            stream_budget_gb=0.25,
+            **common,
+        )
+        self.assertEqual(stream["assembly"], "streaming")
+        self.assertGreater(stream["stream_auxiliary_peak_gb"], 0.0)
+        self.assertEqual(stream["n_junctions"], 2)
+        self.assertTrue(all(
+            solver._B_T is None and solver._B_D is None
+            for solver in stream_system.solv.values()
+        ))
+        self.assertTrue(all(
+            cross._G is None and cross._B is None
+            for cross in stream_system.X.values()
+        ))
+
+        def retained_bytes(value):
+            if isinstance(value, np.ndarray):
+                return value.nbytes
+            if isinstance(value, dict):
+                return sum(retained_bytes(item) for item in value.values())
+            if isinstance(value, (tuple, list)):
+                return sum(retained_bytes(item) for item in value)
+            return 0
+
+        actual_auxiliary_bytes = retained_bytes(stream_system._Q_cache)
+        actual_auxiliary_bytes += sum(
+            retained_bytes(solver._near_contractions)
+            for solver in stream_system.solv.values()
+        )
+        actual_auxiliary_bytes += sum(
+            retained_bytes(cross._cache)
+            for cross in stream_system.X.values()
+        )
+        self.assertGreaterEqual(
+            stream["stream_auxiliary_peak_gb"],
+            actual_auxiliary_bytes / 1.0e9,
+        )
         for key in ("sigma_vv", "sigma_hh", "amp_vv", "amp_hh"):
             np.testing.assert_allclose(
                 np.asarray(stream[key]), np.asarray(table[key]),
@@ -1336,6 +1705,38 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             ),
         )
 
+    def test_junction_preview_counts_projection_and_near_operator_storage(self):
+        layout = [(12, False), (10, False), (8, True)]
+        estimate = bor_dispatch._estimate_junction_auxiliary_gb(layout, 2)
+        unknowns = 4 * 13 + 4 * 11 + 2 * 9
+        expected_projection = (
+            1.10 * 4 * unknowns ** 2 * np.dtype(np.complex128).itemsize
+            / 1.0e9
+        )
+        self.assertAlmostEqual(
+            estimate["projection_gb"], expected_projection, places=15
+        )
+        self.assertGreater(estimate["near_gb"], 0.0)
+        self.assertGreaterEqual(estimate["peak_gb"], estimate["retained_gb"])
+
+    def test_partial_preview_accepts_streaming_and_reports_junction_storage(self):
+        estimate = bor_dispatch.estimate_bor_resources(
+            _partial_coating_snapshot(),
+            1.0,
+            [0.0, 90.0],
+            geometry_units="meters",
+            n_modes=8,
+            workers=2,
+            table_precision="double",
+            assembly="streaming",
+            stream_budget_gb=0.25,
+            mesh_certification=False,
+        )
+        self.assertEqual(estimate["geometry_kind"], "partial")
+        self.assertEqual(estimate["assembly_estimate"], "streaming")
+        self.assertGreater(estimate["junction_projection_gb"], 0.0)
+        self.assertGreater(estimate["near_junction_operator_gb"], 0.0)
+
     def test_dielectric_resource_preview_counts_retained_operators(self):
         snapshot = _pec_sphere_snapshot(explicit_elements=12)
         snapshot["segments"][0]["seg_type"] = 3
@@ -1360,6 +1761,86 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
             estimate["held_assembly_gb"],
             estimate["persistent_assembly_gb"],
         )
+
+    def test_dielectric_streaming_preview_honors_combined_budget(self):
+        snapshot = _pec_sphere_snapshot(explicit_elements=24)
+        snapshot["segments"][0]["seg_type"] = 3
+        snapshot["segments"][0]["properties"] = ["3", "24", "0", "1", "0"]
+        snapshot["dielectrics"] = [["1", "3.0", "-0.05", "1", "0"]]
+        estimate = bor_dispatch.estimate_bor_resources(
+            snapshot,
+            1.0,
+            [0.0, 90.0],
+            geometry_units="meters",
+            n_modes=100,
+            workers=64,
+            table_precision="double",
+            assembly="streaming",
+            stream_budget_gb=0.25,
+            mesh_certification=False,
+        )
+        block = estimate["stream_mode_block_estimate"]
+        self.assertEqual(estimate["assembly_estimate"], "streaming")
+        self.assertLessEqual(estimate["held_assembly_gb"], 0.25)
+        self.assertAlmostEqual(
+            estimate["held_assembly_gb"],
+            2.0 * bor_streaming.estimate_streaming_block_gb(
+                estimate["mesh_elements"], 100, block,
+                "efie", True, False,
+            ),
+        )
+
+    def test_coated_streaming_preview_counts_self_and_cross_blocks(self):
+        outer = _pec_sphere_snapshot(
+            radius_m=0.04, explicit_elements=24
+        )["segments"][0]
+        outer["seg_type"] = 3
+        outer["properties"] = ["3", "24", "0", "1", "0"]
+        core = _pec_sphere_snapshot(
+            radius_m=0.03, explicit_elements=18
+        )["segments"][0]
+        core["name"] = "core"
+        core["seg_type"] = 4
+        core["properties"] = ["4", "18", "0", "1", "0"]
+        snapshot = {
+            "segments": [outer, core],
+            "ibcs": [],
+            "dielectrics": [["1", "3.0", "-0.05", "1", "0"]],
+        }
+        estimate = bor_dispatch.estimate_bor_resources(
+            snapshot,
+            1.0,
+            [0.0, 90.0],
+            geometry_units="meters",
+            n_modes=100,
+            workers=64,
+            table_precision="double",
+            assembly="streaming",
+            stream_budget_gb=0.25,
+            mesh_certification=False,
+        )
+        block = estimate["stream_mode_block_estimate"]
+        # The snapshot helper contains twelve primitive arcs; its explicit
+        # density applies to each primitive.
+        outer_elements = 12 * 24
+        core_elements = 12 * 18
+        requirements = (
+            (outer_elements, outer_elements, True, False),
+            (outer_elements, outer_elements, True, False),
+            (core_elements, core_elements, False, False),
+            (outer_elements, core_elements, True, False),
+            (core_elements, outer_elements, True, False),
+        )
+        expected = sum(
+            bor_streaming.estimate_rectangular_streaming_block_gb(
+                nt, ns, 100, block, rotated, single
+            )
+            for nt, ns, rotated, single in requirements
+        )
+        self.assertEqual(estimate["geometry_kind"], "coated")
+        self.assertEqual(estimate["assembly_estimate"], "streaming")
+        self.assertAlmostEqual(estimate["held_assembly_gb"], expected)
+        self.assertLessEqual(estimate["held_assembly_gb"], 0.25)
 
     def test_total_element_gate_applies_across_bor_surfaces(self):
         outer = _pec_sphere_snapshot(
@@ -1409,6 +1890,66 @@ class BoRWorkflowRegressionTests(unittest.TestCase):
         self.assertEqual(stats["mode_tail_start"], 3)
         self.assertTrue(stats["mode_converged"])
         np.testing.assert_allclose(field, [[2.0 + 0.0j]])
+
+    def test_modal_tail_convergence_is_samplewise(self):
+        def contribution(mode, _solution, _theta, polarization):
+            if mode == 0 and polarization == "VV":
+                return 1.0
+            if 1 <= abs(mode) <= 3 and polarization == "HH":
+                return 2.0e-7
+            return 0.0
+
+        field, modes_used, stats = _mode_sweep(
+            1,
+            [90.0],
+            ("VV", "HH"),
+            6,
+            1.0e-6,
+            lambda _mode: (np.ones((1, 1), dtype=np.complex128), None),
+            lambda _mode, _theta, _polarization: np.ones(
+                1, dtype=np.complex128
+            ),
+            contribution,
+            min_mode_before_tail=0,
+        )
+        self.assertEqual(modes_used, 5)
+        self.assertTrue(stats["mode_converged"])
+        np.testing.assert_allclose(field, [[1.0], [1.2e-6]])
+
+    def test_signed_mode_symmetry_skips_redundant_negative_solves(self):
+        calls = []
+
+        def contribution(mode, _solution, _theta, _polarization):
+            calls.append(mode)
+            return 1.0 if abs(mode) <= 2 else 0.0
+
+        common = dict(
+            n_dofs=1,
+            thetas=[90.0],
+            pols=("VV",),
+            m_max=5,
+            mode_tol=1.0e-6,
+            assemble=lambda _mode: (
+                np.ones((1, 1), dtype=np.complex128), None
+            ),
+            rhs=lambda _mode, _theta, _polarization: np.ones(
+                1, dtype=np.complex128
+            ),
+            farfield=contribution,
+            min_mode_before_tail=0,
+        )
+        full, full_modes, _ = _mode_sweep(**common)
+        full_calls = list(calls)
+        calls.clear()
+        reduced, reduced_modes, stats = _mode_sweep(
+            signed_mode_symmetry=True, **common
+        )
+
+        np.testing.assert_allclose(reduced, full)
+        self.assertEqual(reduced_modes, full_modes)
+        self.assertTrue(stats["signed_mode_symmetry_used"])
+        self.assertTrue(any(mode < 0 for mode in full_calls))
+        self.assertFalse(any(mode < 0 for mode in calls))
 
     def test_signed_modal_pairs_obey_axisymmetric_cfie_symmetry(self):
         """Verify +m/-m operators independently, before their fields sum.

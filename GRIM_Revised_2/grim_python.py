@@ -175,6 +175,7 @@ try:
         coherent_divide,
         convert_extrusion,
         duplicate_dataset,
+        decimate_axis,
         join_datasets,
         medianize_azimuth,
         offset_db,
@@ -1175,6 +1176,236 @@ def convert_extrusion(dataset: RcsGrid, *, to: str, length_m: float) -> RcsGrid:
     )
 
 
+def decimate_axis(
+    dataset: RcsGrid,
+    *,
+    axis: str,
+    factor: int,
+    mode: str = "power",
+    metadata_attested: bool = False,
+) -> RcsGrid:
+    """Boxcar-prefilter and decimate one numeric axis by an integer factor.
+
+    ``mode='power'`` averages finite linear power and marks phase unknown.
+    ``mode='coherent'`` averages the finite complex field and retains the
+    resulting phase. The final partial bin is retained with its actual count.
+    """
+
+    axis_key = str(axis).strip().lower()
+    axis_map = {"azimuth": 0, "elevation": 1, "frequency": 2}
+    if axis_key not in axis_map:
+        raise ValueError("axis must be azimuth, elevation, or frequency")
+    if isinstance(factor, (bool, np.bool_)) or not isinstance(
+        factor, (int, np.integer)
+    ):
+        raise TypeError("factor must be an integer of at least 2")
+    factor = int(factor)
+    if factor < 2:
+        raise ValueError("factor must be an integer of at least 2")
+    mode_key = str(mode).strip().lower().replace("_", "-")
+    if mode_key not in {"power", "coherent"}:
+        raise ValueError("mode must be 'power' or 'coherent'")
+    if not isinstance(metadata_attested, (bool, np.bool_)):
+        raise TypeError("metadata_attested must be True or False")
+
+    axis_index = axis_map[axis_key]
+    source_axis = np.asarray(dataset.get_axis(axis_key), dtype=float)
+    if source_axis.size < 2 or np.any(~np.isfinite(source_axis)):
+        raise ValueError("decimation requires at least two finite axis coordinates")
+    source_steps = np.diff(source_axis)
+    if np.any(source_steps <= 0.0):
+        raise ValueError("decimation requires a strictly increasing source axis")
+    nominal_step = float(np.median(source_steps))
+    spacing_atol = max(
+        abs(nominal_step) * 1.0e-9,
+        np.finfo(np.float64).eps
+        * max(1.0, float(np.max(np.abs(source_axis))))
+        * 32.0,
+    )
+    if not np.allclose(
+        source_steps,
+        nominal_step,
+        rtol=1.0e-6,
+        atol=spacing_atol,
+    ):
+        raise ValueError(
+            "decimation requires uniformly spaced source coordinates; regrid "
+            "to a uniform fine grid before applying a boxcar prefilter"
+        )
+
+    source_count = int(source_axis.size)
+    full_bin_count, remainder = divmod(source_count, factor)
+    output_axis_parts = []
+    if full_bin_count:
+        output_axis_parts.append(
+            np.mean(
+                source_axis[: full_bin_count * factor].reshape(
+                    full_bin_count, factor
+                ),
+                axis=1,
+            )
+        )
+    if remainder:
+        output_axis_parts.append(
+            np.asarray(
+                [float(np.mean(source_axis[full_bin_count * factor :]))],
+                dtype=float,
+            )
+        )
+    output_axis = np.concatenate(output_axis_parts)
+    output_shape = list(dataset.rcs_power.shape)
+    output_shape[axis_index] = int(output_axis.size)
+    output_shape = tuple(output_shape)
+    output_power = np.full(output_shape, np.nan, dtype=np.float64)
+    output_phase = np.full(output_shape, np.nan, dtype=np.float64)
+    output_power_by_bin = np.moveaxis(output_power, axis_index, 0)
+    output_phase_by_bin = np.moveaxis(output_phase, axis_index, 0)
+    other_cell_count = max(
+        1,
+        int(np.prod(dataset.rcs_power.shape, dtype=np.int64)) // source_count,
+    )
+    transient_bytes_per_cell = 64 if mode_key == "coherent" else 24
+    bins_per_block = max(
+        1,
+        (32 * 1024**2)
+        // max(1, factor * other_cell_count * transient_bytes_per_cell),
+    )
+
+    def aggregate_bins(start: int, bin_count: int, samples_per_bin: int):
+        stop = start + bin_count * samples_per_bin
+        source_selection = [slice(None)] * 4
+        source_selection[axis_index] = slice(start, stop)
+        source_selection = tuple(source_selection)
+        if mode_key == "coherent":
+            field = np.asarray(dataset.rcs_slice(source_selection), dtype=np.complex128)
+            field = np.moveaxis(field, axis_index, 0)
+            field = field.reshape(
+                (bin_count, samples_per_bin) + field.shape[1:]
+            )
+            valid = np.isfinite(field.real) & np.isfinite(field.imag)
+            field_sum = np.sum(np.where(valid, field, 0.0 + 0.0j), axis=1)
+            magnitude_sum = np.sum(
+                np.where(valid, np.abs(field), 0.0), axis=1
+            )
+            count = np.sum(valid, axis=1)
+            mean_field = np.full(field_sum.shape, np.nan + 1j * np.nan)
+            np.divide(field_sum, count, out=mean_field, where=count > 0)
+            mean_magnitude = np.zeros(magnitude_sum.shape, dtype=np.float64)
+            np.divide(
+                magnitude_sum,
+                count,
+                out=mean_magnitude,
+                where=count > 0,
+            )
+            cancellation_floor = (
+                32.0 * np.finfo(np.float64).eps * mean_magnitude
+            )
+            near_zero = (count > 0) & (
+                np.abs(mean_field) <= cancellation_floor
+            )
+            mean_field[near_zero] = 0.0 + 0.0j
+            power = mean_field.real * mean_field.real + mean_field.imag * mean_field.imag
+            phase = np.angle(mean_field)
+            phase[(count == 0) | (power == 0.0)] = np.nan
+        else:
+            power_block = np.asarray(dataset.rcs_power[source_selection], dtype=np.float64)
+            power_block = np.moveaxis(power_block, axis_index, 0)
+            power_block = power_block.reshape(
+                (bin_count, samples_per_bin) + power_block.shape[1:]
+            )
+            valid = np.isfinite(power_block)
+            power_sum = np.sum(
+                np.where(valid, power_block, 0.0), axis=1
+            )
+            count = np.sum(valid, axis=1)
+            power = np.full(power_sum.shape, np.nan, dtype=np.float64)
+            np.divide(power_sum, count, out=power, where=count > 0)
+            phase = np.full(power.shape, np.nan, dtype=np.float64)
+        return power, phase
+
+    for output_start in range(0, full_bin_count, bins_per_block):
+        output_stop = min(full_bin_count, output_start + bins_per_block)
+        power, phase = aggregate_bins(
+            output_start * factor,
+            output_stop - output_start,
+            factor,
+        )
+        output_power_by_bin[output_start:output_stop] = power
+        output_phase_by_bin[output_start:output_stop] = phase
+    if remainder:
+        power, phase = aggregate_bins(
+            full_bin_count * factor,
+            1,
+            remainder,
+        )
+        output_power_by_bin[full_bin_count:] = power
+        output_phase_by_bin[full_bin_count:] = phase
+
+    axes = [
+        np.array(dataset.azimuths, copy=True),
+        np.array(dataset.elevations, copy=True),
+        np.array(dataset.frequencies, copy=True),
+        np.array(dataset.polarizations, copy=True),
+    ]
+    axes[axis_index] = output_axis
+    attestation_history = None
+    attestation_extra = None
+    if mode_key == "coherent":
+        attestation_history, attestation_extra = (
+            dataset._coherent_attestation_provenance(
+                (),
+                operation=f"decimate-{axis_key}",
+                metadata_attested=metadata_attested,
+            )
+        )
+    extra = dataset._derived_response_extra(
+        operation=f"decimate-{axis_key}-{mode_key}",
+        coherent=(mode_key == "coherent"),
+        attestation_extra=attestation_extra,
+    )
+    dataset._invalidate_assembly_sampling_hash(
+        extra, f"decimate-{axis_key}-{mode_key}"
+    )
+    extra["decimation_json"] = json.dumps(
+        {
+            "schema": "grim.decimation.v1",
+            "axis": axis_key,
+            "factor": factor,
+            "filter": "finite boxcar mean",
+            "mode": mode_key,
+            "partial_final_bin_retained": bool(source_axis.size % factor),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    history_entry = (
+        f"Decimate {axis_key} by {factor} with finite boxcar {mode_key} mean"
+    )
+    if source_axis.size % factor:
+        history_entry += "; retained final partial bin"
+    prior_history = (
+        attestation_history
+        if attestation_history is not None
+        else dataset.history
+    )
+    history = (
+        f"{prior_history}\n{history_entry}" if prior_history else history_entry
+    )
+    return RcsGrid(
+        axes[0],
+        axes[1],
+        axes[2],
+        axes[3],
+        rcs_power=output_power,
+        rcs_phase=output_phase,
+        rcs_domain="power_phase",
+        source_path=dataset.source_path,
+        history=history,
+        units=dict(dataset.units or {}),
+        extra=extra,
+    )
+
+
 def medianize_azimuth(
     dataset: RcsGrid,
     *,
@@ -2013,6 +2244,7 @@ __all__ = [
     "coherent_divide",
     "convert_extrusion",
     "crop_dataset",
+    "decimate_axis",
     "duplicate_dataset",
     "join_datasets",
     "medianize_azimuth",

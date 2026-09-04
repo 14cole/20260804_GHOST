@@ -15,6 +15,62 @@ its native near-field extension have been removed; older scripts requesting
 required for the direct numerical methods and condition-number checks. BoR's
 optional native streaming kernel remains supported.
 
+Build the native BoR sampler on the worker machine with:
+
+```powershell
+py Backend\build_bor_stream_kernel.py
+```
+
+On Windows, install MSYS2 in its default `C:\msys64` location, open the
+**MSYS2 UCRT64** terminal, and install the compiler with:
+
+```bash
+pacman -Syu
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc
+```
+
+If the first update asks you to close the terminal, reopen **MSYS2 UCRT64**
+and run both commands again. The build script discovers the default UCRT64
+compiler automatically; no global PATH change is required. Verify from this
+folder with `py Backend\build_bor_stream_kernel.py` and restart Python workers.
+
+The build enables OpenMP outer-loop parallelism when the compiler supports it
+and automatically retries a portable serial build otherwise. Use
+`--no-openmp` to request the serial build explicitly. Result metadata reports
+`stream_sampling_backend=native_c` or `numpy`, so production runs do not hide
+which path was active.
+
+Bounded far-block streaming is available for PEC/IBC, homogeneous dielectric
+PMCHWT, simple coated-PEC bodies, and partial, layered, or banded junction
+systems. The budget is enforced across every simultaneously retained self and
+rectangular cross-surface block. Peak planning separately includes cached
+junction projections and direct near/junction operators, which remain resident
+when the far field is streamed. Result metadata records the sampling backend
+for each medium side/mapping (a lossy material side uses the complex-wavenumber
+NumPy sampler).
+
+## Optional 2-D GPU dense solves
+
+The 2-D survey path can offload complex dense LU solves to an NVIDIA GPU via
+CuPy. This workstation was validated with the isolated CUDA 12 component
+wheels:
+
+```powershell
+..\..\.venv\Scripts\python.exe -m pip install "cupy-cuda12x[ctk]"
+$env:GHOST_DENSE_BACKEND = "auto"
+$env:GHOST_DENSE_GPU_MIN_N = "768"
+```
+
+Use `GHOST_DENSE_BACKEND=cpu` for the default CPU-only behavior, `auto` for a
+GPU attempt at or above the configured matrix order with audited CPU fallback,
+or `gpu` to fail rather than silently fall back when a GPU-eligible solve
+cannot run. GHOST performs a timed child-process cuSOLVER health check before
+the first GPU solve, checks available device memory, and applies the existing
+CPU backward-error gate to the returned solution. Runs requesting the release
+condition-number estimate remain on CPU because that gate currently reuses a
+SciPy LU factorization. Metadata records the backend, solve counts, device,
+and any fallback reason.
+
 ## Standalone GHOST
 
 Run commands from this folder:

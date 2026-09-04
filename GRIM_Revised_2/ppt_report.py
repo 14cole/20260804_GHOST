@@ -49,7 +49,7 @@ PP_ALIGN_RIGHT = 3
 DEFAULT_AZIMUTH_TEMPLATE_LAYOUT = "GRIM Azimuth 3x2"
 DEFAULT_FREQUENCY_TEMPLATE_LAYOUT = "GRIM Frequency Sweep"
 
-PlotKind = Literal["azimuth_rect", "azimuth_polar", "frequency"]
+PlotKind = Literal["azimuth_rect", "azimuth_polar", "elevation", "frequency"]
 LayoutKind = Literal["azimuth_3x2", "frequency_single"]
 RenderedImageKey = tuple[int, int]
 TemplateLayoutNames = Mapping[LayoutKind, str]
@@ -306,7 +306,7 @@ class PlotSpec:
     def __post_init__(self) -> None:
         if not self.plot_id.strip():
             raise ValueError("Every plot needs a stable, non-empty plot_id.")
-        if self.kind not in ("azimuth_rect", "azimuth_polar", "frequency"):
+        if self.kind not in ("azimuth_rect", "azimuth_polar", "elevation", "frequency"):
             raise ValueError(f"Unsupported report plot kind: {self.kind!r}")
         if not self.series:
             raise ValueError(f"Plot {self.plot_id!r} has no data series.")
@@ -484,8 +484,14 @@ def plan_azimuth_slides(
     plot_values = tuple(plots)
     if not plot_values:
         raise ValueError("Select at least one azimuth plot.")
-    if any(plot.kind not in ("azimuth_rect", "azimuth_polar") for plot in plot_values):
-        raise ValueError("Azimuth slides can contain only rectangular or polar azimuth plots.")
+    if any(
+        plot.kind not in ("azimuth_rect", "azimuth_polar", "elevation")
+        for plot in plot_values
+    ):
+        raise ValueError(
+            "Angular slides can contain only rectangular azimuth, polar azimuth, "
+            "or elevation plots."
+        )
     labels = _normalized_polarization_labels(
         polarization_labels,
         len(plot_values),

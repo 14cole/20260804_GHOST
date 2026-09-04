@@ -44,7 +44,13 @@ def make_plot(plot_id: str, kind: str = "azimuth_rect") -> PlotSpec:
         plot_id=plot_id,
         kind=kind,  # type: ignore[arg-type]
         title=f"Plot {plot_id}",
-        x_label="Azimuth (deg)" if kind.startswith("azimuth") else "Frequency (GHz)",
+        x_label=(
+            "Azimuth (deg)"
+            if kind.startswith("azimuth")
+            else "Elevation (deg)"
+            if kind == "elevation"
+            else "Frequency (GHz)"
+        ),
         y_label="RCS (dBsm)",
         series=(
             PlotSeries.from_values(
@@ -414,10 +420,15 @@ class LayoutPlanningTests(unittest.TestCase):
             )
 
     def test_wrong_plot_family_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "Azimuth slides"):
+        with self.assertRaisesRegex(ValueError, "Angular slides"):
             plan_azimuth_slides([make_plot("frequency", "frequency")])
         with self.assertRaisesRegex(ValueError, "Frequency-sweep"):
             plan_frequency_slides([make_plot("azimuth")])
+
+    def test_elevation_plots_use_the_angular_six_up_layout(self):
+        plan = plan_azimuth_slides([make_plot("elevation", "elevation")])
+        self.assertEqual(plan.slides[0].layout, "azimuth_3x2")
+        self.assertEqual(plan.slides[0].plots[0].plot.kind, "elevation")
 
     def test_combined_report_rejects_duplicate_ids(self):
         azimuth = plan_azimuth_slides([make_plot("same")])

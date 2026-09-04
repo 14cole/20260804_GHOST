@@ -560,7 +560,9 @@ class CoreOperationTests(unittest.TestCase):
             elevations=(-1.0, 1.0),
         )
         with self.assertRaisesRegex(ValueError, "conflicting finite seam"):
-            grid.combine_elevation_pair_to_azimuth_360()
+            grid.combine_elevation_pair_to_azimuth_360(
+                assumptions_attested=True
+            )
 
     def test_el_to_az360_merges_equivalent_overlap(self):
         power = np.asarray(
@@ -575,7 +577,9 @@ class CoreOperationTests(unittest.TestCase):
             azimuths=(0.0, 180.0),
             elevations=(-1.0, 1.0),
         )
-        combined = grid.combine_elevation_pair_to_azimuth_360()
+        combined = grid.combine_elevation_pair_to_azimuth_360(
+            assumptions_attested=True
+        )
         np.testing.assert_array_equal(combined.azimuths, [0.0, 180.0, 360.0])
         np.testing.assert_array_equal(combined.rcs_power.ravel(), [1.0, 2.0, 4.0])
 
@@ -587,9 +591,65 @@ class CoreOperationTests(unittest.TestCase):
             units={"azimuth": "rad", "elevation": "rad", "frequency": "GHz"},
         )
         np.testing.assert_allclose(
-            radian_grid.combine_elevation_pair_to_azimuth_360().azimuths,
+            radian_grid.combine_elevation_pair_to_azimuth_360(
+                assumptions_attested=True
+            ).azimuths,
             [0.0, np.pi, 2.0 * np.pi],
         )
+
+    def test_el_to_az360_requires_attestation_and_opposite_elevations(self):
+        power = np.arange(1.0, 5.0).reshape(2, 2, 1, 1)
+        symmetric = _grid(
+            power,
+            phase=np.zeros_like(power),
+            azimuths=(0.0, 90.0),
+            elevations=(-10.0, 10.0),
+        )
+        with self.assertRaisesRegex(ValueError, "acquisition-specific relabel"):
+            symmetric.combine_elevation_pair_to_azimuth_360()
+
+        asymmetric = _grid(
+            power,
+            phase=np.zeros_like(power),
+            azimuths=(0.0, 90.0),
+            elevations=(0.0, 10.0),
+        )
+        with self.assertRaisesRegex(ValueError, "equal-and-opposite"):
+            asymmetric.combine_elevation_pair_to_azimuth_360(
+                assumptions_attested=True
+            )
+
+        result = symmetric.combine_elevation_pair_to_azimuth_360(
+            assumptions_attested=True
+        )
+        provenance = json.loads(result.extra["elevation_pair_to_azimuth_json"])
+        self.assertTrue(provenance["user_assumptions_attested"])
+        self.assertEqual(provenance["elevation_pair_deg"], [-10.0, 10.0])
+
+    def test_axis_unit_conversion_preserves_physical_grid_and_samples(self):
+        power = np.arange(1.0, 5.0).reshape(2, 1, 2, 1)
+        phase = np.linspace(0.1, 0.4, 4).reshape(power.shape)
+        grid = _grid(
+            power,
+            phase=phase,
+            azimuths=(0.0, 180.0),
+            elevations=(30.0,),
+            frequencies=(1.0, 2.0),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+            },
+        )
+        converted = grid.convert_axis_units(
+            azimuth="rad", elevation="rad", frequency="MHz"
+        )
+        np.testing.assert_allclose(converted.azimuths, [0.0, np.pi])
+        np.testing.assert_allclose(converted.elevations, [np.pi / 6.0])
+        np.testing.assert_allclose(converted.frequencies, [1000.0, 2000.0])
+        np.testing.assert_array_equal(converted.rcs_power, power)
+        np.testing.assert_array_equal(converted.rcs_phase, phase)
+        self.assertEqual(converted.units["frequency"], "MHz")
 
     def test_db_difference_preserves_undefined_zero_ratios(self):
         left = _grid(

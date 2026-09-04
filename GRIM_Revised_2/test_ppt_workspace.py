@@ -37,10 +37,11 @@ def _grid(
     frequencies=tuple(range(1, 8)),
     scale: float = 1.0,
     azimuths=(0.0, 90.0, 180.0, 270.0),
+    elevations=(0.0,),
     angle_unit: str = "deg",
 ):
     azimuths = np.asarray(azimuths, dtype=float)
-    elevations = np.asarray((0.0,))
+    elevations = np.asarray(elevations, dtype=float)
     frequencies = np.asarray(frequencies, dtype=float)
     polarizations = np.asarray(("HH", "VV"))
     shape = (
@@ -695,7 +696,7 @@ class PptWorkspaceTests(unittest.TestCase):
         widget.set_plot_kind("frequency")
         self.assertEqual(widget.x_scale_mode_combo.currentData(), "automatic")
         self.assertEqual(widget.x_min_spin.value(), 1.0)
-        self.assertEqual(widget.x_max_spin.value(), 10.0)
+        self.assertEqual(widget.x_max_spin.value(), 7.0)
         self.assertIn("GHz", widget.x_scale_label.text())
         widget.x_scale_mode_combo.setCurrentIndex(
             widget.x_scale_mode_combo.findData("fixed")
@@ -835,6 +836,97 @@ class PptWorkspaceTests(unittest.TestCase):
         self.assertEqual(len(widget.preview_plan.slides), 1)
         self.assertEqual(widget.preview_plan.slides[0].layout, "frequency_single")
         self.assertEqual(len(widget.preview_plan.slides[0].plots), 1)
+
+    def test_elevation_sweep_uses_fixed_azimuth_and_angular_layout(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(
+            (
+                DatasetCatalogEntry(
+                    "elevation",
+                    "Elevation response",
+                    _grid(elevations=(-20.0, 0.0, 35.0)),
+                ),
+            )
+        )
+        widget.set_plot_kind("elevation")
+        self.assertFalse(widget.frequency_box.isHidden())
+        self.assertTrue(widget.elevation_combo.isHidden())
+        self.assertFalse(widget.azimuth_combo.isHidden())
+        self.assertEqual(widget.x_min_spin.value(), -20.0)
+        self.assertEqual(widget.x_max_spin.value(), 35.0)
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        plot = widget.preview_plan.slides[0].plots[0].plot
+        self.assertEqual(plot.kind, "elevation")
+        self.assertEqual(plot.series[0].x, (-20.0, 0.0, 35.0))
+
+    def test_global_and_per_dataset_line_styles_reach_plot_and_master_legend(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.global_line_width_spin.setValue(2.5)
+        widget.global_line_style_combo.setCurrentIndex(
+            widget.global_line_style_combo.findData("--")
+        )
+        widget.series_dataset_combo.setCurrentIndex(
+            widget.series_dataset_combo.findData("b")
+        )
+        widget.series_line_width_spin.setValue(3.25)
+        widget.series_line_style_combo.setCurrentIndex(
+            widget.series_line_style_combo.findData(":")
+        )
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        plot = widget.preview_plan.slides[0].plots[0].plot
+        self.assertEqual(plot.series[0].line_width, 2.5)
+        self.assertEqual(plot.series[0].line_style, "--")
+        self.assertEqual(plot.series[1].line_width, 3.25)
+        self.assertEqual(plot.series[1].line_style, ":")
+        legend = widget.preview_plan.slides[0].master_legend
+        self.assertEqual(legend[0].line_width, 2.5)
+        self.assertEqual(legend[1].line_width, 3.25)
+
+    def test_data_bounds_and_partial_clipping_warning_are_visible(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        self.assertEqual(widget.x_min_spin.value(), 0.0)
+        self.assertEqual(widget.x_max_spin.value(), 270.0)
+        widget.x_scale_mode_combo.setCurrentIndex(
+            widget.x_scale_mode_combo.findData("fixed")
+        )
+        widget.x_min_spin.setValue(0.0)
+        widget.x_max_spin.setValue(90.0)
+        widget.x_step_spin.setValue(30.0)
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        self.assertFalse(widget.axis_warning_label.isHidden())
+        self.assertIn("clip", widget.axis_warning_label.text().casefold())
+
+        widget.x_data_bounds_button.click()
+        self.assertEqual(widget.x_scale_mode_combo.currentData(), "fixed")
+        self.assertEqual(widget.x_min_spin.value(), 0.0)
+        self.assertEqual(widget.x_max_spin.value(), 270.0)
+
+    def test_vertical_data_bounds_create_a_fixed_shared_scale(self):
+        widget = self.workspace()
+        widget.set_dataset_catalog(self.entries())
+        widget.y_data_bounds_button.click()
+        self.assertEqual(widget.scale_mode_combo.currentData(), "fixed")
+        self.assertLess(widget.y_min_spin.value(), widget.y_max_spin.value())
+        self.assertGreater(widget.y_step_spin.value(), 0.0)
+        with mock.patch.object(widget.preview_canvas, "render_slide"):
+            self.assertTrue(widget.build_preview())
+        assert widget.preview_plan is not None
+        limits = {
+            placement.plot.y_limits
+            for slide in widget.preview_plan.slides
+            for placement in slide.plots
+        }
+        self.assertEqual(
+            limits,
+            {(widget.y_min_spin.value(), widget.y_max_spin.value())},
+        )
 
     def test_workspace_has_no_footer_control_and_plans_no_custom_footer(self):
         widget = self.workspace()

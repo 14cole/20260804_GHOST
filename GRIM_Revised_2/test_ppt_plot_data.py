@@ -11,6 +11,7 @@ from ppt_plot_data import (
     DUAL_COPOLARIZATION,
     NamedGrid,
     build_azimuth_specs,
+    build_elevation_specs,
     build_frequency_spec,
     build_frequency_specs,
     get_plot_availability,
@@ -118,6 +119,34 @@ class PptPlotDataTests(unittest.TestCase):
             spec.series[1].y,
             [0.0, 10.0 * np.log10(4.0), 10.0 * np.log10(16.0)],
         )
+
+    def test_elevation_sweep_sorts_native_axis_without_interpolation(self):
+        grid = _grid(
+            azimuths=(15.0,),
+            elevations=(30.0, -30.0, 0.0),
+            frequencies=(2.0,),
+            power=np.asarray([100.0, 1.0, 10.0]).reshape(1, 3, 1, 1),
+        )
+        spec = build_elevation_specs(
+            [("Elevation", grid)],
+            frequencies=(2.0,),
+            azimuth=15.0,
+            polarization="VV",
+        )[0]
+        self.assertEqual(spec.kind, "elevation")
+        self.assertEqual(spec.x_label, "Elevation (deg)")
+        self.assertIn("Azimuth 15 deg", spec.title)
+        self.assertEqual(spec.series[0].x, (-30.0, 0.0, 30.0))
+        np.testing.assert_allclose(spec.series[0].y, (0.0, 10.0, 20.0))
+
+    def test_elevation_sweep_requires_a_real_swept_axis(self):
+        with self.assertRaisesRegex(ValueError, "at least two stored elevation"):
+            build_elevation_specs(
+                [("Single cut", _grid(elevations=(0.0,)))],
+                frequencies=(1.0,),
+                azimuth=0.0,
+                polarization="VV",
+            )
 
     def test_frequency_dbke_passes_sorted_frequency_vector_to_conversion(self):
         frequencies = np.asarray([2.0, 1.0])

@@ -151,6 +151,13 @@ def build_qss(palette: Mapping[str, object]) -> str:
     arrow_down = _branch_arrow_uri(
         "1,2 7,2 4,6", str(palette["text"])
     )
+    is_dark = bool(palette.get("is_dark", True))
+    success_bg = "#052e16" if is_dark else "#ecfdf5"
+    success_border = "#22c55e" if is_dark else "#15803d"
+    warning_bg = "#422006" if is_dark else "#fffbeb"
+    warning_border = "#f59e0b" if is_dark else "#b45309"
+    danger_bg = "#450a0a" if is_dark else "#fef2f2"
+    danger_border = "#ef4444" if is_dark else "#b91c1c"
     return f"""
     QMainWindow {{ background: {palette['win_bg']}; }}
     QMenuBar {{ background: {palette['panel_bg']}; color: {palette['text']}; }}
@@ -209,10 +216,13 @@ def build_qss(palette: Mapping[str, object]) -> str:
     QListWidget::item:selected {{
         background: {palette['checked_bg']}; color: white; border-bottom: 1px solid {palette['grid']};
     }}
-    QToolButton, QPushButton, QDoubleSpinBox, QSpinBox, QCheckBox,
-    QRadioButton, QLineEdit, QComboBox {{
+    QToolButton, QPushButton, QDoubleSpinBox, QSpinBox, QLineEdit, QComboBox {{
         background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']};
         border-radius: 6px; padding: 6px;
+    }}
+    QCheckBox, QRadioButton {{
+        background: transparent; color: {palette['text']}; border: none;
+        padding: 4px 2px;
     }}
     QCheckBox::indicator {{
         width: 14px; height: 14px;
@@ -225,6 +235,10 @@ def build_qss(palette: Mapping[str, object]) -> str:
         border-color: {palette['checked_border']};
     }}
     QToolButton:hover, QPushButton:hover {{ border-color: {palette['hover']}; }}
+    QToolButton:focus, QPushButton:focus, QLineEdit:focus, QComboBox:focus,
+    QDoubleSpinBox:focus, QSpinBox:focus {{
+        border: 2px solid {palette['checked_border']};
+    }}
     QToolButton:disabled, QPushButton:disabled, QLineEdit:disabled,
     QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled {{
         color: {palette['muted']}; border-color: {palette['grid']};
@@ -251,7 +265,8 @@ def build_qss(palette: Mapping[str, object]) -> str:
         border-radius: 4px; padding: 2px 6px; font-family: "Consolas","Courier New",monospace; font-size: 11px;
     }}
     QScrollArea#controlDock {{ background: {palette['win_bg']}; border: none; }}
-    QScrollArea#featureBodyScroll, QScrollArea#featureMapScroll,
+    QScrollArea#featureBodyScroll, QScrollArea#featurePointScroll,
+    QScrollArea#featureLineScroll,
     QScrollArea#featureReviewScroll {{ background: {palette['panel_bg']}; border: none; }}
     QScrollArea#plotSettingsScroll {{ background: {palette['panel_bg']}; border: none; }}
     QScrollArea#runsControlsScroll, QScrollArea#pptControlsScroll {{
@@ -262,6 +277,10 @@ def build_qss(palette: Mapping[str, object]) -> str:
     QWidget#runsControlsContent,
     QWidget#pptControlsContent {{ background: {palette['panel_bg']}; }}
     QWidget#featureAssemblyContent {{ background: {palette['panel_bg']}; }}
+    QWidget#featurePlacementUnitsBar {{
+        background: {palette['head_bg']}; border: 1px solid {palette['border']};
+        border-radius: 7px;
+    }}
     QLabel#featurePanelIntro {{ font-size: 13px; font-weight: 600; padding: 2px 1px; }}
     QLabel#featureWorkflowSteps {{
         background: {palette['head_bg']}; color: {palette['text']};
@@ -283,6 +302,42 @@ def build_qss(palette: Mapping[str, object]) -> str:
     QLabel#featureSummary, QLabel#featureBuildSummary {{
         background: {palette['head_bg']}; border: 1px solid {palette['border']};
         border-radius: 5px; padding: 5px 7px;
+    }}
+    QLabel#featureEffectivePhysics {{
+        background: {success_bg}; border: 1px solid {success_border};
+        border-radius: 5px; padding: 6px 8px;
+    }}
+    QLabel#featureModelBoundary {{
+        background: {warning_bg}; border-left: 3px solid {warning_border};
+        border-radius: 5px; padding: 7px 9px;
+    }}
+    QLabel#featureValidationWarning {{
+        background: {warning_bg}; border: 1px solid {warning_border};
+        border-radius: 5px; padding: 6px 8px;
+    }}
+    QLabel#featureSurfaceBindingStatus {{
+        background: {palette['head_bg']}; border-left: 3px solid {palette['border']};
+        border-radius: 4px; padding: 6px 8px;
+    }}
+    QLabel#featureSurfaceBindingStatus[bindingState="valid"],
+    QLabel#featureSurfaceBindingStatus[bindingState="not_required"] {{
+        background: {success_bg}; border-left-color: {success_border};
+    }}
+    QLabel#featureSurfaceBindingStatus[bindingState="missing"],
+    QLabel#featureSurfaceBindingStatus[bindingState="invalid"],
+    QLabel#featureSurfaceBindingStatus[bindingState="unavailable"] {{
+        background: {danger_bg}; border-left-color: {danger_border};
+    }}
+    QLabel#featureSurfaceBindingStatus[bindingState="stale"],
+    QLabel#featureSurfaceBindingStatus[bindingState="unchecked"] {{
+        background: {warning_bg}; border-left-color: {warning_border};
+    }}
+    QPushButton#featureWorkflowAction[primaryAction="true"] {{
+        background: {palette['checked_bg']}; color: white;
+        border: 1px solid {palette['checked_border']}; font-weight: 600;
+    }}
+    QPushButton#featureWorkflowAction[primaryAction="true"]:hover {{
+        border: 2px solid {palette['checked_border']};
     }}
     QLabel#featureContract {{
         background: {palette['head_bg']}; border-left: 3px solid {palette['checked_border']};
@@ -898,6 +953,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         dataset_actions = QHBoxLayout()
         self.btn_dataset_load = QToolButton(text="Load…")
         self.btn_dataset_save = QToolButton(text="Save")
+        self.btn_dataset_save_dirty = QToolButton(text="Save Dirty")
         self.btn_dataset_save_all = QToolButton(text="Save All")
         self.btn_dataset_export = QToolButton(text="Export…")
         self.btn_dataset_export.setPopupMode(QToolButton.InstantPopup)
@@ -914,11 +970,25 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "CSV. Native .grim storage uses Save."
         )
         self.btn_dataset_delete = QToolButton(text="Delete")
+        self.btn_dataset_undo_delete = QToolButton(text="Undo Delete")
+        self.btn_dataset_undo_delete.setToolTip(
+            "Restore the most recently deleted batch of dataset rows, including "
+            "their stable identities, dirty state, and provenance."
+        )
+        self.btn_dataset_cancel = QToolButton(text="Cancel Job")
+        self.btn_dataset_cancel.setVisible(False)
+        self.btn_dataset_cancel.setToolTip(
+            "Request cooperative cancellation of the active dataset job. "
+            "The current numerical block or file finishes safely before stopping."
+        )
         dataset_actions.addWidget(self.btn_dataset_load)
         dataset_actions.addWidget(self.btn_dataset_save)
+        dataset_actions.addWidget(self.btn_dataset_save_dirty)
         dataset_actions.addWidget(self.btn_dataset_save_all)
         dataset_actions.addWidget(self.btn_dataset_export)
         dataset_actions.addWidget(self.btn_dataset_delete)
+        dataset_actions.addWidget(self.btn_dataset_undo_delete)
+        dataset_actions.addWidget(self.btn_dataset_cancel)
         dataset_actions.addStretch(1)
         sec_datasets.addLayout(dataset_actions)
 
@@ -1046,6 +1116,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Percentile", "btn_percentile"),
             ("Align", "btn_align"),
             ("Regrid", "btn_interpolate"),
+            ("Decimate…", "btn_decimate"),
             ("Mirror", "btn_mirror"),
             ("Wrap", "btn_wrap"),
             ("Shift", "btn_shift"),
@@ -1058,6 +1129,23 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ("Range Cal", "btn_range_cal"),
             ("Support Ref -", "btn_support_reference"),
         ), cols=1)
+        _ops_pad("Quality", (
+            ("Audit…", "btn_audit"),
+            ("Compatibility…", "btn_compatibility"),
+            ("Provenance…", "btn_provenance"),
+        ), cols=1)
+        self.btn_audit.setToolTip(
+            "Run the bounded, read-only dataset health audit and show axis, "
+            "sample, phase, metadata, seam, and readiness findings."
+        )
+        self.btn_compatibility.setToolTip(
+            "Compare selected datasets against the first operand for exact-grid, "
+            "physical-unit, coordinate-frame, and coherent-combination readiness."
+        )
+        self.btn_provenance.setToolTip(
+            "Inspect copyable source, history, unit, coordinate, and derived-operation "
+            "metadata without expanding large embedded arrays."
+        )
         self.btn_overlap.setToolTip(
             "Crop every selected dataset to the common axis values and finite "
             "cells shared by all selected datasets. Selection order does not "
@@ -1077,6 +1165,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         _ops_pad("Geometry & Units", (
             ("Set Coordinates", "btn_set_coordinates"),
+            ("Axis Units…", "btn_axis_units"),
             ("El→Az360", "btn_el_to_az360"),
             ("Swap El/Az", "btn_swap_el_az"),
             ("SENTRi El→GRIM", "btn_sentri_elevation"),
@@ -1089,6 +1178,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             "Declare selected datasets as Azimuth/Elevation or Aspect/Pitch, "
             "regardless of file format. Creates selected copies with unchanged "
             "numeric axes, power, and phase; no coordinate conversion."
+        )
+        self.btn_axis_units.setToolTip(
+            "Convert stored angle and frequency coordinates between equivalent "
+            "units without interpolating or changing any response sample."
         )
         self.btn_sentri_elevation.setToolTip(
             "Convert selected native SENTRi polar Theta to GRIM signed "
@@ -1132,8 +1225,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             ),
             "btn_dbdiff": (
                 "Using exactly two datasets, compute first-minus-second logarithmic "
-                "level differences. Zero power is represented by the mathematically "
-                "correct infinities, not a floor."
+                "level differences as a linear power ratio. A zero or missing "
+                "denominator is marked missing; a zero numerator remains exact zero "
+                "and may be display-floored by logarithmic plots."
             ),
             "btn_join": (
                 "Union existing axis bins without interpolation using a fixed 1e-6 "
@@ -1169,6 +1263,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
                 "Interpolate complex samples onto an explicit azimuth, elevation, or "
                 "frequency grid from the active row's physical coordinates without "
                 "extrapolation. Compatible native units are preserved."
+            ),
+            "btn_decimate": (
+                "Anti-alias a uniformly sampled axis before integer-factor "
+                "downsampling with a finite boxcar mean in linear power or "
+                "coherent complex field."
             ),
             "btn_mirror": "Mirror azimuth about a user-entered angle in degrees.",
             "btn_wrap": (
@@ -1416,6 +1515,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.feature_assembly_panel.preview_stale.connect(
             self.assembly_workspace.mark_preview_stale
         )
+        self.feature_assembly_panel.feature_instance_selected.connect(
+            self.assembly_workspace.focus_feature_instance
+        )
         self.feature_assembly_panel.feature_built.connect(
             self._on_feature_file_built
         )
@@ -1543,6 +1645,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_overlap.clicked.connect(self._overlap_selected_datasets)
         self.btn_align.clicked.connect(self._align_selected)
         self.btn_interpolate.clicked.connect(self._interpolate_selected)
+        self.btn_decimate.clicked.connect(self._decimate_selected)
         self.btn_mirror.clicked.connect(self._mirror_selected)
         self.btn_wrap.clicked.connect(self._wrap_selected)
         self.btn_shift.clicked.connect(self._shift_selected)
@@ -1552,11 +1655,17 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_support_reference.clicked.connect(
             self._support_reference_difference_selected
         )
+        self.btn_audit.clicked.connect(self._audit_selected_datasets)
+        self.btn_compatibility.clicked.connect(
+            self._compatibility_selected_datasets
+        )
+        self.btn_provenance.clicked.connect(self._provenance_selected_datasets)
         self.btn_medianize.clicked.connect(self._medianize_selected)
         self.btn_duplicate.clicked.connect(self._duplicate_selected)
         self.btn_el_to_az360.clicked.connect(self._elevation_to_azimuth_360_selected)
         self.btn_swap_el_az.clicked.connect(self._swap_elevation_azimuth_selected)
         self.btn_set_coordinates.clicked.connect(self._set_coordinates_selected)
+        self.btn_axis_units.clicked.connect(self._convert_axis_units_selected)
         self.btn_sentri_elevation.clicked.connect(
             self._convert_sentri_elevation_selected
         )
@@ -1566,8 +1675,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_wedge_to_conic.clicked.connect(self._convert_wedge_to_conic_selected)
         self.btn_dataset_load.clicked.connect(self._load_dataset_files)
         self.btn_dataset_save.clicked.connect(self._save_selected_datasets)
+        self.btn_dataset_save_dirty.clicked.connect(self._save_dirty_datasets)
         self.btn_dataset_save_all.clicked.connect(self._save_all_datasets)
         self.btn_dataset_delete.clicked.connect(self._delete_selected_datasets)
+        self.btn_dataset_undo_delete.clicked.connect(
+            self._undo_last_deleted_datasets
+        )
+        self.btn_dataset_cancel.clicked.connect(self._cancel_background_job)
         self.table.delete_requested.connect(self._delete_selected_datasets)
 
         # Window-scoped keyboard shortcuts for the most common dataset ops.
@@ -2604,6 +2718,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         return tuple(ids)
 
     def _notify_dataset_catalog_changed(self) -> None:
+        update_actions = getattr(self, "_update_dataset_action_states", None)
+        if callable(update_actions):
+            update_actions()
         catalog = self._dataset_catalog()
         workspace = getattr(self, "ppt_workspace", None)
         if workspace is not None:

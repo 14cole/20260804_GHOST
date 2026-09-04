@@ -215,6 +215,70 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
                 atol=2.0e-14,
             )
 
+    @unittest.skipUnless(
+        rcs._SCIPY_SPECIAL is not None,
+        "SciPy is required for the real 2-D kernel regression",
+    )
+    def test_impedance_co_solve_reuses_air_kp_without_changing_fields(self):
+        count = 12
+        radius = 0.05
+        theta = np.linspace(0.0, -2.0 * np.pi, count + 1)
+        snapshot = {
+            "title": "closed IBC co-polarized cache regression",
+            "segments": [{
+                "name": "ibc_circle",
+                "seg_type": 2,
+                "properties": ["2", "1", "1", "0", "0"],
+                "point_pairs": [
+                    {
+                        "x1": float(radius * np.cos(theta[index])),
+                        "y1": float(radius * np.sin(theta[index])),
+                        "x2": float(radius * np.cos(theta[index + 1])),
+                        "y2": float(radius * np.sin(theta[index + 1])),
+                    }
+                    for index in range(count)
+                ],
+            }],
+            "ibcs": [["1", "constant", "75", "-20", "0", "0"]],
+            "dielectrics": [],
+        }
+        common = {
+            "geometry_snapshot": snapshot,
+            "frequencies_ghz": [0.3],
+            "elevations_deg": [0.0, 45.0],
+            "geometry_units": "meters",
+            "strict_quality_gate": False,
+            "compute_condition_number": False,
+            "max_panels": 200,
+        }
+
+        combined = rcs.solve_monostatic_rcs_2d(**common)
+        self.assertTrue(
+            combined["metadata"]["shared_operator_cache_enabled"]
+        )
+        self.assertEqual(
+            combined["metadata"]["shared_operator_cache_hits"], 1
+        )
+        self.assertEqual(
+            combined["metadata"]["shared_operator_cache_stores"], 1
+        )
+
+        for export, internal in (("VV", "TE"), ("HH", "TM")):
+            independent = rcs.solve_monostatic_rcs_2d_single_polarization(
+                polarization=internal, **common
+            )
+            actual = np.asarray([
+                complex(row["rcs_amp_real"], row["rcs_amp_imag"])
+                for row in combined["co_solved_samples"][export]
+            ])
+            expected = np.asarray([
+                complex(row["rcs_amp_real"], row["rcs_amp_imag"])
+                for row in independent["samples"]
+            ])
+            np.testing.assert_allclose(
+                actual, expected, rtol=2.0e-13, atol=2.0e-14
+            )
+
     def test_bistatic_co_solve_exposes_both_channels(self):
         def fake_single(**kwargs):
             return _single_result(

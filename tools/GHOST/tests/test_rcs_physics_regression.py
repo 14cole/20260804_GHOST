@@ -328,6 +328,66 @@ class NumericalCertificationTests(unittest.TestCase):
             diagnostics["condition_method"],
             "equilibrated_1norm_lu_onenormest",
         )
+        self.assertLessEqual(
+            diagnostics["linear_backward_error"],
+            rcs.DENSE_LINEAR_BACKWARD_ERROR_MAX,
+        )
+        self.assertGreaterEqual(diagnostics["linear_refinement_steps"], 0)
+
+    def test_opt_in_gpu_dense_solve_keeps_cpu_backward_error_gate(self):
+        matrix = np.asarray(
+            [[4.0 + 0.2j, 1.0], [1.0, 3.0 - 0.1j]],
+            dtype=np.complex128,
+        )
+        rhs = np.asarray([1.0 + 0.5j, -0.2j], dtype=np.complex128)
+
+        def fake_gpu(a_eval, rhs_eval):
+            return np.linalg.solve(a_eval, rhs_eval), "test CUDA device"
+
+        rcs._reset_dense_backend_telemetry()
+        with mock.patch.dict(
+            rcs.os.environ,
+            {rcs.DENSE_GPU_BACKEND_ENV: "gpu"},
+        ), mock.patch.object(
+            rcs, "_solve_dense_gpu", side_effect=fake_gpu
+        ) as gpu_solve:
+            solution = rcs._solve_dense_system(
+                matrix, rhs, None, "GPU regression"
+            )
+        gpu_solve.assert_called_once()
+        np.testing.assert_allclose(
+            matrix @ solution, rhs, rtol=2.0e-14, atol=2.0e-14
+        )
+        summary = rcs._dense_backend_summary()
+        self.assertEqual(summary["linear_backend"], "gpu_cupy")
+        self.assertEqual(summary["dense_gpu_solve_count"], 1)
+        self.assertEqual(summary["dense_gpu_devices"], ["test CUDA device"])
+
+    def test_condition_estimation_forces_audited_cpu_fallback(self):
+        matrix = np.asarray(
+            [[3.0, 0.5], [0.5, 2.0]], dtype=np.complex128
+        )
+        rhs = np.asarray([1.0, -1.0], dtype=np.complex128)
+        diagnostics = {}
+        rcs._reset_dense_backend_telemetry()
+        with mock.patch.dict(
+            rcs.os.environ,
+            {rcs.DENSE_GPU_BACKEND_ENV: "gpu"},
+        ), mock.patch.object(
+            rcs, "_solve_dense_gpu",
+            side_effect=AssertionError("GPU must not be called"),
+        ):
+            solution = rcs._solve_dense_system(
+                matrix, rhs, diagnostics, "condition regression"
+            )
+        np.testing.assert_allclose(matrix @ solution, rhs)
+        summary = rcs._dense_backend_summary()
+        self.assertEqual(summary["linear_backend"], "cpu")
+        self.assertEqual(summary["dense_cpu_solve_count"], 1)
+        self.assertIn(
+            "condition estimation",
+            summary["dense_gpu_fallback_reasons"][0],
+        )
 
     def test_condition_gate_is_explicit_and_threshold_override_is_auditable(self):
         metadata = {

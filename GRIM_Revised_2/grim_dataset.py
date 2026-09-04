@@ -5490,6 +5490,9 @@ class RcsGrid:
         "coherent_metadata_assumption_json",
         "merge_metadata_assumption_json",
         "coherent_source_conventions_json",
+        "elevation_pair_to_azimuth_json",
+        "decimation_json",
+        "statistics_reduction_json",
     })
     _RAW_AMPLITUDE_EXTRA_KEYS = ("rcs_amp_real", "rcs_amp_imag")
 
@@ -6116,6 +6119,71 @@ class RcsGrid:
             ),
         )
 
+    def convert_axis_units(
+        self,
+        *,
+        azimuth="deg",
+        elevation="deg",
+        frequency="GHz",
+    ):
+        """Convert numeric-axis storage units without changing physical samples."""
+
+        target_az = self._canonical_unit(azimuth, _ANGLE_UNITS, "deg")
+        target_el = self._canonical_unit(elevation, _ANGLE_UNITS, "deg")
+        target_frequency = self._canonical_unit(
+            frequency, _FREQUENCY_UNITS, "GHz"
+        )
+        source_az = self._supported_unit("azimuth", _ANGLE_UNITS, "deg")
+        source_el = self._supported_unit("elevation", _ANGLE_UNITS, "deg")
+        source_frequency = self._supported_unit(
+            "frequency", _FREQUENCY_UNITS, "GHz"
+        )
+
+        def convert_angle(values, source, target):
+            values = np.asarray(values, dtype=float)
+            degrees = np.rad2deg(values) if source == "rad" else values
+            return np.deg2rad(degrees) if target == "rad" else degrees.copy()
+
+        frequency_to_hz = {
+            "Hz": 1.0,
+            "kHz": 1.0e3,
+            "MHz": 1.0e6,
+            "GHz": 1.0e9,
+        }
+        frequency_hz = (
+            np.asarray(self.frequencies, dtype=float)
+            * frequency_to_hz[source_frequency]
+        )
+        converted_frequency = frequency_hz / frequency_to_hz[target_frequency]
+        converted_units = copy.deepcopy(self.units or {})
+        converted_units.update(
+            azimuth=target_az,
+            elevation=target_el,
+            frequency=target_frequency,
+        )
+        history_entry = (
+            "Convert axis storage units without interpolation: "
+            f"azimuth {source_az}->{target_az}, elevation {source_el}->{target_el}, "
+            f"frequency {source_frequency}->{target_frequency}"
+        )
+        history = (
+            f"{self.history}\n{history_entry}" if self.history else history_entry
+        )
+        return self._new_grid(
+            convert_angle(self.azimuths, source_az, target_az),
+            convert_angle(self.elevations, source_el, target_el),
+            converted_frequency,
+            np.array(self.polarizations, copy=True),
+            rcs_power=np.array(self.rcs_power, copy=True),
+            rcs_phase=np.array(self.rcs_phase, copy=True),
+            rcs_domain="power_phase",
+            units=converted_units,
+            history=history,
+            extra=self._exact_transform_extra(
+                coordinate_change="convert-axis-storage-units"
+            ),
+        )
+
     def shift_azimuth(self, delta_deg: float):
         """Shift azimuth axis by a constant offset and return a new grid."""
         delta = self._angle_value_from_degrees(delta_deg, "azimuth")
@@ -6547,6 +6615,7 @@ class RcsGrid:
         *,
         azimuth_shift_deg: float = 180.0,
         tol: float = 1e-6,
+        assumptions_attested: bool = False,
     ):
         """Stitch two elevation cuts into one 0-360 azimuth cut.
 
@@ -6554,8 +6623,14 @@ class RcsGrid:
         cut is shifted by the degree-valued `azimuth_shift_deg` and merged onto
         the same output elevation plane. On radian-native data the shift and
         tolerance are converted internally. Equivalent/complementary overlap
-        bins merge; conflicting finite seam samples are rejected.
+        bins merge; conflicting finite seam samples are rejected. Because this
+        is an acquisition-specific relabel rather than a general spherical
+        coordinate transform, untagged inputs require explicit attestation and
+        the two elevations must be equal and opposite about zero.
         """
+
+        if not isinstance(assumptions_attested, (bool, np.bool_)):
+            raise TypeError("assumptions_attested must be True or False")
 
         el_axis = np.asarray(self.elevations, dtype=float)
         if el_axis.size < 2:
@@ -6595,6 +6670,33 @@ class RcsGrid:
         )
         if np.isclose(lo_value, hi_value, atol=elevation_tol, rtol=0.0):
             raise ValueError("elevation pair values must be distinct")
+        lo_deg = float(np.rad2deg(lo_value)) if elevation_unit == "rad" else lo_value
+        hi_deg = float(np.rad2deg(hi_value)) if elevation_unit == "rad" else hi_value
+        if not np.isclose(
+            lo_deg,
+            -hi_deg,
+            atol=max(tolerance_deg, 1.0e-9),
+            rtol=0.0,
+        ):
+            raise ValueError(
+                "El->Az360 requires equal-and-opposite elevation cuts about "
+                f"zero; got {lo_deg:.12g} and {hi_deg:.12g} deg"
+            )
+        if not np.isclose(
+            float(azimuth_shift_deg), 180.0, atol=max(tolerance_deg, 1.0e-9), rtol=0.0
+        ):
+            raise ValueError(
+                "El->Az360 requires a 180 degree second-half azimuth shift"
+            )
+        declared_contract = self._declared_scalar_metadata(
+            "elevation_pair_azimuth_contract"
+        )
+        if not declared_contract and not bool(assumptions_attested):
+            raise ValueError(
+                "El->Az360 is an acquisition-specific relabel. Confirm the "
+                "opposite-elevation/180-degree acquisition assumption before "
+                "creating the result."
+            )
 
         lo_matches = self._axis_value_match(
             self.elevations, lo_value, tol=elevation_tol
@@ -6714,6 +6816,20 @@ class RcsGrid:
             combined_extra["rcs_amp_real"] = out_raw_real
             combined_extra["rcs_amp_imag"] = out_raw_imag
             combined_extra["raw_complex_amplitude_preserved"] = True
+        combined_extra["elevation_pair_to_azimuth_json"] = json.dumps(
+            {
+                "schema": "grim.elevation-pair-to-azimuth.v1",
+                "operation": "acquisition_specific_relabel",
+                "elevation_pair_deg": [lo_deg, hi_deg],
+                "azimuth_shift_deg": float(azimuth_shift_deg),
+                "declared_contract": declared_contract or None,
+                "user_assumptions_attested": bool(assumptions_attested),
+                "interpolation": False,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
 
         return self._new_grid(
             az_merged,
@@ -8103,6 +8219,56 @@ class RcsGrid:
         statistics_extra = self._derived_response_extra(
             operation=f"statistics-{stat_key}-{domain}",
             coherent=statistics_coherent,
+        )
+        axis_names = ("azimuth", "elevation", "frequency", "polarization")
+        axis_summaries = {}
+        source_axes = (
+            self.azimuths,
+            self.elevations,
+            self.frequencies,
+            self.polarizations,
+        )
+        for axis_idx in reduce_axes:
+            axis_name = axis_names[axis_idx]
+            original = np.asarray(source_axes[axis_idx])
+            summary = {"source_count": int(original.size)}
+            if axis_idx == 3:
+                summary["representative"] = (
+                    None if broadcast_reduced else "ALL"
+                )
+            else:
+                numeric = np.asarray(original, dtype=float)
+                finite = numeric[np.isfinite(numeric)]
+                summary.update(
+                    source_min=(float(np.min(finite)) if finite.size else None),
+                    source_max=(float(np.max(finite)) if finite.size else None),
+                    representative=(
+                        None
+                        if broadcast_reduced
+                        else float(axis_values[axis_idx][0])
+                    ),
+                )
+            axis_summaries[axis_name] = summary
+        statistics_extra["statistics_reduction_json"] = json.dumps(
+            {
+                "schema": "grim.statistics-reduction.v1",
+                "statistic": stat_key,
+                "percentile": (
+                    float(percentile) if stat_key == "percentile" else None
+                ),
+                "domain": domain,
+                "reduced_axes": [axis_names[index] for index in reduce_axes],
+                "broadcast_reduced": bool(broadcast_reduced),
+                "coordinate_semantics": (
+                    "original coordinates with repeated aggregate value"
+                    if broadcast_reduced
+                    else "representative aggregate label; not an observed sample"
+                ),
+                "axes": axis_summaries,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
         source_role = self._declared_scalar_metadata(
             "assembly_response_role"

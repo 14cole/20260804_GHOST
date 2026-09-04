@@ -133,13 +133,19 @@ class _SegChain:
     """One segment's polyline in scaled (rho, z) coordinates."""
 
     def __init__(self, name: 'str', seg_type: 'int', n_prop: 'int', ibc_flag: 'int',
-                 pos_mat: 'int', neg_mat: 'int', pts: 'np.ndarray'):
+                 pos_mat: 'int', neg_mat: 'int', pts: 'np.ndarray',
+                 certification_base_n: 'Optional[int]' = None,
+                 certification_refinement_factor: 'float' = 1.0):
         self.name = name
         self.seg_type = seg_type
         self.n_prop = n_prop
         self.ibc_flag = ibc_flag
         self.pos_mat = pos_mat
         self.neg_mat = neg_mat
+        self.certification_base_n = certification_base_n
+        self.certification_refinement_factor = float(
+            certification_refinement_factor
+        )
         self.pts = pts                       # (N, 2) columns rho, z
         d = np.diff(pts, axis=0)
         self.prim_lengths = np.hypot(d[:, 0], d[:, 1])
@@ -148,7 +154,25 @@ class _SegChain:
 
 def _chains_from_snapshot(snapshot: 'Dict[str, Any]', scale: 'float') -> 'List[_SegChain]':
     chains: 'List[_SegChain]' = []
-    for seg_idx, seg in enumerate(snapshot.get("segments", []) or []):
+    segments = list(snapshot.get("segments", []) or [])
+    refinement_factor = float(
+        snapshot.get("_bor_certification_refinement_factor", 1.0) or 1.0
+    )
+    base_segment_n = list(
+        snapshot.get("_bor_certification_base_segment_n", []) or []
+    )
+    if not math.isfinite(refinement_factor) or refinement_factor < 1.0:
+        raise ValueError(
+            "Internal BoR certification refinement factor must be finite "
+            "and >= 1."
+        )
+    if refinement_factor > 1.0 and len(base_segment_n) != len(segments):
+        raise ValueError(
+            "Internal BoR certification refinement metadata does not match "
+            "the geometry segment count."
+        )
+
+    for seg_idx, seg in enumerate(segments):
         props = list(seg.get("properties", []) or [])
         seg_type = _parse_flag(
             props[0] if len(props) > 0 and str(props[0]).strip() else seg.get("seg_type", 2), 2)
@@ -172,9 +196,21 @@ def _chains_from_snapshot(snapshot: 'Dict[str, Any]', scale: 'float') -> 'List[_
             pts.append((x2, y2))
         if len(pts) < 2:
             continue
-        chains.append(_SegChain(str(seg.get("name", f"segment_{seg_idx + 1}")),
-                                seg_type, n_prop, ibc_flag, pos_mat, neg_mat,
-                                np.asarray(pts, dtype=float)))
+        certification_base_n = (
+            _parse_int(base_segment_n[seg_idx], 0)
+            if refinement_factor > 1.0 else None
+        )
+        chains.append(_SegChain(
+            str(seg.get("name", f"segment_{seg_idx + 1}")),
+            seg_type,
+            n_prop,
+            ibc_flag,
+            pos_mat,
+            neg_mat,
+            np.asarray(pts, dtype=float),
+            certification_base_n=certification_base_n,
+            certification_refinement_factor=refinement_factor,
+        ))
     if not chains:
         raise ValueError("Geometry contains no usable segments.")
     return chains
@@ -257,6 +293,20 @@ def _element_count(n_prop: 'int', prim_len: 'float', lam_target: 'float') -> 'in
     return max(1, int(math.ceil(prim_len / target)))
 
 
+def _chain_element_count(
+    chain: '_SegChain', prim_len: 'float', lam_target: 'float'
+) -> 'int':
+    """Return a primitive count, refining the realized base discretization."""
+
+    factor = float(chain.certification_refinement_factor)
+    if factor > 1.0:
+        base_count = _element_count(
+            int(chain.certification_base_n or 0), prim_len, lam_target
+        )
+        return max(base_count + 1, int(math.ceil(base_count * factor)))
+    return _element_count(chain.n_prop, prim_len, lam_target)
+
+
 def _mesh_generatrix(ordered: 'List[_SegChain]', lam_target: 'float',
                      max_elements: 'int', axis_tol: 'float'):
     """Subdivide the ordered chains into elements.  Returns (points [Nn,2],
@@ -271,7 +321,7 @@ def _mesh_generatrix(ordered: 'List[_SegChain]', lam_target: 'float',
         for pi in range(len(c.pts) - 1):
             p0, p1 = c.pts[pi], c.pts[pi + 1]
             plen = c.prim_lengths[pi]
-            cnt = _element_count(c.n_prop, plen, lam_target)
+            cnt = _chain_element_count(c, plen, lam_target)
             for i in range(cnt):
                 q0 = p0 + (p1 - p0) * (i / cnt)
                 if not points:
@@ -349,23 +399,12 @@ def _validate_bor_far_controls(kind: 'str', assembly: 'str',
                                stream_budget_gb: 'float') -> 'None':
     """Apply the same far-table control policy to preview and solve paths."""
 
-    if kind == "conductor":
-        return
-    unsupported = []
-    if assembly != "auto":
-        unsupported.append(f"assembly={assembly!r}")
-    if table_precision != "auto":
-        unsupported.append(f"table_precision={table_precision!r}")
-    if stream_budget_gb != BOR_STREAM_BUDGET_GB_DEFAULT:
-        unsupported.append(f"stream_budget_gb={stream_budget_gb:g}")
-    if unsupported:
-        raise ValueError(
-            f"BoR {kind} formulation does not implement the conductor "
-            "far-table/streaming controls "
-            f"({', '.join(unsupported)}). Leave assembly and "
-            "table_precision at 'auto' and stream_budget_gb at its "
-            f"{BOR_STREAM_BUDGET_GB_DEFAULT:g} GB default."
-        )
+    del assembly, table_precision, stream_budget_gb
+    if kind not in {
+        "conductor", "dielectric", "coated", "partial", "layered",
+        "layered_n", "banded",
+    }:
+        raise ValueError(f"Unsupported BoR assembly-control kind {kind!r}.")
 
 
 def estimate_bor_resources(
@@ -415,6 +454,14 @@ def estimate_bor_resources(
         scale_snapshot_panel_density(geometry_snapshot, float(fine_factor))
         if mesh_certification else geometry_snapshot
     )
+    if mesh_certification:
+        preview_snapshot["_bor_certification_refinement_factor"] = float(
+            fine_factor
+        )
+        preview_snapshot["_bor_certification_base_segment_n"] = [
+            (list(segment.get("properties", []) or []) + ["", ""])[1]
+            for segment in list(geometry_snapshot.get("segments", []) or [])
+        ]
     scale = _unit_scale_to_meters(geometry_units)
     base_dir = _material_base_dir_for_snapshot(
         preview_snapshot, material_base_dir
@@ -466,6 +513,12 @@ def estimate_bor_resources(
     effective_workers = worker_count
     estimated_assembly = "dense-direct"
     estimated_precision = "double"
+    auxiliary_estimate = {
+        "projection_gb": 0.0,
+        "near_gb": 0.0,
+        "retained_gb": 0.0,
+        "peak_gb": 0.0,
+    }
     if kind == "conductor":
         from bor_solver import estimate_bor_table_gb
         from bor_streaming import (
@@ -517,18 +570,215 @@ def estimate_bor_resources(
             held_assembly_gb + BOR_STREAM_TILE_BUDGET_GB
             if use_streaming else held_assembly_gb
         )
-    else:
-        # Penetrable and multi-surface formulations currently retain dense
-        # all-mode self/cross-operator tables.  Count every surface's two
-        # medium-side self operators and every directed cross-surface pair.
-        # Some layouts share fewer regions, so this is deliberately a safe
-        # scheduler reservation rather than an optimistic RSS prediction.
-        persistent_gb = _estimate_multisurface_operator_gb(
+    elif kind == "dielectric":
+        from bor_solver import estimate_bor_table_gb
+        from bor_streaming import (
+            BOR_STREAM_TILE_BUDGET_GB,
+            estimate_streaming_gb,
+            plan_streaming_mode_block,
+        )
+
+        dielectric_elements = int(surface_layout[0][0])
+        table_double = 2.0 * estimate_bor_table_gb(
+            dielectric_elements, mode_cap, "efie", True, 4, False
+        )
+        use_streaming = (
+            assembly_key == "streaming"
+            or (assembly_key == "auto" and table_double > 2.0)
+        )
+        if use_streaming:
+            full_double = 2.0 * estimate_streaming_gb(
+                dielectric_elements, mode_cap, "efie", True, False
+            )
+            use_single = (
+                precision == "single"
+                or (precision == "auto" and full_double > 4.0)
+            )
+            persistent_gb = full_double / (2.0 if use_single else 1.0)
+            (
+                stream_mode_block,
+                held_one,
+                effective_workers,
+            ) = plan_streaming_mode_block(
+                dielectric_elements,
+                mode_cap,
+                "efie",
+                True,
+                use_single,
+                0.5 * stream_budget,
+                worker_count,
+            )
+            held_assembly_gb = 2.0 * held_one
+            assembly_peak_gb = (
+                held_assembly_gb + BOR_STREAM_TILE_BUDGET_GB
+            )
+            estimated_assembly = "streaming"
+            estimated_precision = "single" if use_single else "double"
+        else:
+            # Preserve the conservative multi-surface reservation for the
+            # two all-mode medium-side tables.
+            use_single = precision == "single"
+            persistent_gb = _estimate_multisurface_operator_gb(
+                surface_layout, mode_cap, single_tables=use_single
+            )
+            held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
+            assembly_peak_gb = held_assembly_gb
+            estimated_assembly = "tables"
+            estimated_precision = "single" if use_single else "double"
+    elif kind == "coated":
+        from bor_streaming import (
+            BOR_STREAM_TILE_BUDGET_GB,
+            estimate_rectangular_streaming_gb,
+            plan_combined_streaming_mode_block,
+        )
+
+        outer_elements = int(surface_layout[0][0])
+        core_elements = int(surface_layout[1][0])
+        table_double = _estimate_multisurface_operator_gb(
             surface_layout, mode_cap
         )
-        held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
-        assembly_peak_gb = held_assembly_gb
-        estimated_assembly = "dense-all-mode-tables"
+        use_streaming = (
+            assembly_key == "streaming"
+            or (assembly_key == "auto" and table_double > 2.0)
+        )
+        if use_streaming:
+            stream_specs_double = (
+                (outer_elements, outer_elements, True, False),
+                (outer_elements, outer_elements, True, False),
+                (core_elements, core_elements, False, False),
+                (outer_elements, core_elements, True, False),
+                (core_elements, outer_elements, True, False),
+            )
+            full_double = sum(
+                estimate_rectangular_streaming_gb(
+                    nt, ns, mode_cap, rotated, single
+                )
+                for nt, ns, rotated, single in stream_specs_double
+            )
+            use_single = (
+                precision == "single"
+                or (precision == "auto" and full_double > 4.0)
+            )
+            persistent_gb = full_double / (2.0 if use_single else 1.0)
+            stream_specs = tuple(
+                (nt, ns, rotated, use_single)
+                for nt, ns, rotated, _single in stream_specs_double
+            )
+            (
+                stream_mode_block,
+                held_assembly_gb,
+                effective_workers,
+            ) = plan_combined_streaming_mode_block(
+                mode_cap, stream_specs, stream_budget, worker_count
+            )
+            assembly_peak_gb = (
+                held_assembly_gb + BOR_STREAM_TILE_BUDGET_GB
+            )
+            estimated_assembly = "streaming"
+            estimated_precision = "single" if use_single else "double"
+        else:
+            use_single = precision == "single"
+            persistent_gb = _estimate_multisurface_operator_gb(
+                surface_layout, mode_cap, single_tables=use_single
+            )
+            held_assembly_gb = BOR_TABLE_BUILD_PEAK_FACTOR * persistent_gb
+            assembly_peak_gb = held_assembly_gb
+            estimated_assembly = "tables"
+            estimated_precision = "single" if use_single else "double"
+    else:
+        from bor_streaming import (
+            BOR_STREAM_TILE_BUDGET_GB,
+            estimate_rectangular_streaming_gb,
+            plan_combined_streaming_mode_block,
+        )
+
+        # Generalized partial/layered/banded planning.  Far-block storage is
+        # dimensioned independently from cached Q projections and direct
+        # near/junction operators so neither disappears when tables stream.
+        table_double = _estimate_multisurface_operator_gb(
+            surface_layout, mode_cap
+        )
+        auxiliary_estimate = _estimate_junction_auxiliary_gb(
+            surface_layout, mode_cap
+        )
+        use_streaming = (
+            assembly_key == "streaming"
+            or (
+                assembly_key == "auto"
+                and table_double + auxiliary_estimate["peak_gb"] > 2.0
+            )
+        )
+        if use_streaming:
+            stream_specs_double = []
+            for elements, is_conductor in surface_layout:
+                # Interfaces have one self stream per medium side.  A
+                # conductor has one; count rotated PV there too so partial
+                # bare-IBC pieces remain covered by the preview.
+                for _side in range(1 if is_conductor else 2):
+                    stream_specs_double.append(
+                        (int(elements), int(elements), True, False)
+                    )
+            for test_index, (test_elements, _test_cond) in enumerate(surface_layout):
+                for source_index, (source_elements, _source_cond) in enumerate(surface_layout):
+                    if test_index != source_index:
+                        stream_specs_double.append((
+                            int(test_elements), int(source_elements), True, False
+                        ))
+            full_far_double = sum(
+                estimate_rectangular_streaming_gb(
+                    nt, ns, mode_cap, rotated, False
+                )
+                for nt, ns, rotated, _single in stream_specs_double
+            )
+            use_single = (
+                precision == "single"
+                or (precision == "auto" and full_far_double > 4.0)
+            )
+            stream_specs = tuple(
+                (nt, ns, rotated, use_single)
+                for nt, ns, rotated, _single in stream_specs_double
+            )
+            (
+                stream_mode_block,
+                held_far_gb,
+                effective_workers,
+            ) = plan_combined_streaming_mode_block(
+                mode_cap, stream_specs, stream_budget, worker_count
+            )
+            full_far_gb = full_far_double / (2.0 if use_single else 1.0)
+            persistent_gb = (
+                full_far_gb + auxiliary_estimate["retained_gb"]
+            )
+            held_assembly_gb = (
+                held_far_gb + auxiliary_estimate["retained_gb"]
+            )
+            assembly_peak_gb = (
+                held_far_gb + auxiliary_estimate["peak_gb"]
+                + BOR_STREAM_TILE_BUDGET_GB
+            )
+            estimated_assembly = "streaming"
+            estimated_precision = "single" if use_single else "double"
+        else:
+            use_single = (
+                precision == "single"
+                or (
+                    precision == "auto"
+                    and table_double + auxiliary_estimate["peak_gb"] > 4.0
+                )
+            )
+            far_tables_gb = _estimate_multisurface_operator_gb(
+                surface_layout, mode_cap, single_tables=use_single
+            )
+            persistent_gb = (
+                far_tables_gb + auxiliary_estimate["retained_gb"]
+            )
+            held_assembly_gb = (
+                BOR_TABLE_BUILD_PEAK_FACTOR * far_tables_gb
+                + auxiliary_estimate["peak_gb"]
+            )
+            assembly_peak_gb = held_assembly_gb
+            estimated_assembly = "tables"
+            estimated_precision = "single" if use_single else "double"
 
     active_modes = min(effective_workers, mode_cap + 1)
     # Use the exact same dense-work reservation and effective outer-mode
@@ -558,6 +808,12 @@ def estimate_bor_resources(
         "table_precision_estimate": estimated_precision,
         "persistent_assembly_gb": float(persistent_gb),
         "held_assembly_gb": float(held_assembly_gb),
+        "junction_projection_gb": float(
+            auxiliary_estimate["projection_gb"]
+        ),
+        "near_junction_operator_gb": float(
+            auxiliary_estimate["near_gb"]
+        ),
         "stream_mode_block_estimate": (
             int(stream_mode_block) if stream_mode_block is not None else None
         ),
@@ -825,7 +1081,7 @@ def _prepare_bor_groups(chains: 'List[_SegChain]', kind: 'str'):
 
 def _run_element_count(run: 'List[_SegChain]', wavelength: 'float') -> 'int':
     return sum(
-        _element_count(chain.n_prop, float(length), wavelength)
+        _chain_element_count(chain, float(length), wavelength)
         for chain in run for length in chain.prim_lengths
     )
 
@@ -866,7 +1122,8 @@ def _bor_surface_layout(groups, kind: 'str', wavelength: 'float'):
 
 
 def _estimate_multisurface_operator_gb(surface_layout, mode_cap: 'int',
-                                       gauss_order: 'int' = 4) -> 'float':
+                                       gauss_order: 'int' = 4,
+                                       single_tables: 'bool' = False) -> 'float':
     """Conservative retained dense-table storage for nonconductor BoR.
 
     Each PMCHWT medium-side/self or cross operator retains one scalar modal
@@ -881,7 +1138,7 @@ def _estimate_multisurface_operator_gb(surface_layout, mode_cap: 'int',
         float(gauss_order) * float(elements)
         for elements, _conductor in surface_layout
     ]
-    complex_bytes = 16.0
+    complex_bytes = 8.0 if single_tables else 16.0
 
     def operator_gb(index_a, index_b):
         pair_points = points[index_a] * points[index_b]
@@ -899,6 +1156,74 @@ def _estimate_multisurface_operator_gb(surface_layout, mode_cap: 'int',
             if index_a != index_b:
                 total += operator_gb(index_a, index_b)
     return total
+
+
+def _estimate_junction_auxiliary_gb(surface_layout, mode_cap: 'int') -> 'Dict[str, float]':
+    """Conservative preview for retained junction and direct-near storage.
+
+    Runtime planning uses the constructed solvers' exact near-pair lists and
+    projection dimensions.  The scheduler preview intentionally assumes every
+    surface has both EFIE and rotated-PV local contractions, every directed
+    surface pair has a generous local near stencil, and every possible pair of
+    surfaces meets at a graded junction.  This keeps partial, layered, and
+    banded jobs from being admitted on far-block storage alone.
+    """
+
+    modes = max(0, int(mode_cap))
+    signed_modes = 2 * modes + 1
+    complex_bytes = float(np.dtype(np.complex128).itemsize)
+    index_bytes = float(np.dtype(np.intp).itemsize)
+    unknowns = sum(
+        (2 if is_conductor else 4) * (int(elements) + 1)
+        for elements, is_conductor in surface_layout
+    )
+    category_count = 1 if modes == 0 else (3 if modes == 1 else 4)
+    projection_bytes = (
+        category_count * unknowns * unknowns * complex_bytes
+    )
+
+    near_bytes = 0.0
+    near_workspace = 0.0
+    for elements, is_conductor in surface_layout:
+        ne = max(1, int(elements))
+        medium_sides = 1 if is_conductor else 2
+        pair_count = min(ne * ne, 8 * ne)
+        enabled_kinds = 2  # EFIE plus PMCHWT/possible bare-IBC rotated PV
+        near_bytes += medium_sides * (
+            enabled_kinds * 4.0 * signed_modes * (4 * pair_count)
+            * complex_bytes
+            + enabled_kinds * 3.0 * (4 * pair_count) * index_bytes
+        )
+        near_workspace = max(near_workspace, 128.0e6)
+
+    # A graded shared-endpoint pair retains 260 quadrature samples.  The
+    # 8*(nt+ns) stencil is deliberately wider than the normal near_factor=2
+    # band and is capped by the exact Cartesian pair count.
+    graded_points = 260
+    for test_index, (test_elements, _test_conductor) in enumerate(surface_layout):
+        for source_index, (source_elements, _source_conductor) in enumerate(surface_layout):
+            if test_index == source_index:
+                continue
+            nt = max(1, int(test_elements))
+            ns = max(1, int(source_elements))
+            pair_count = min(nt * ns, 8 * (nt + ns))
+            pair_complex = (
+                graded_points
+                * ((modes + 2) + 4 * signed_modes)
+                * complex_bytes
+            )
+            near_bytes += pair_count * (
+                pair_complex + 16.0 * graded_points * 8.0
+            )
+            near_workspace = max(near_workspace, 4.0 * pair_complex)
+
+    retained_bytes = 1.10 * (projection_bytes + near_bytes)
+    return {
+        "projection_gb": 1.10 * projection_bytes / 1.0e9,
+        "near_gb": 1.10 * near_bytes / 1.0e9,
+        "retained_gb": retained_bytes / 1.0e9,
+        "peak_gb": (retained_bytes + near_workspace) / 1.0e9,
+    }
 
 
 def _enforce_total_element_limit(surface_layout, max_elements: 'int') -> 'int':
@@ -1129,7 +1454,32 @@ def solve_monostatic_rcs_bor(
             out = solve_bor_dielectric(pts, freq_hz, aspects, eps, mu,
                                        n_modes=n_modes, mode_tol=mode_tol,
                                        workers=workers, progress=report,
-                                       check_abort=check_abort)
+                                       check_abort=check_abort,
+                                       table_precision=table_precision_key,
+                                       assembly=assembly_key,
+                                       stream_budget_gb=stream_budget)
+            actual_assembly = str(out.get("assembly", "")).strip().lower()
+            actual_precision = str(
+                out.get("table_precision", "")
+            ).strip().lower()
+            if (
+                assembly_key != "auto"
+                and actual_assembly != assembly_key
+            ):
+                raise RuntimeError(
+                    "BoR dielectric solver did not attest the requested "
+                    f"assembly={assembly_key!r}; reported "
+                    f"{actual_assembly or 'missing'!r}."
+                )
+            if (
+                table_precision_key != "auto"
+                and actual_precision != table_precision_key
+            ):
+                raise RuntimeError(
+                    "BoR dielectric solver did not attest the requested "
+                    f"table_precision={table_precision_key!r}; reported "
+                    f"{actual_precision or 'missing'!r}."
+                )
             formulation_label = "BoR-MoM PMCHWT (homogeneous dielectric)"
         elif kind == "coated":
             eps, mu = materials.get_medium(groups[0][0].pos_mat, freq_ghz)
@@ -1138,7 +1488,32 @@ def solve_monostatic_rcs_bor(
             out = solve_bor_coated_pec(pts_o, pts_c, freq_hz, aspects, eps, mu,
                                        n_modes=n_modes, mode_tol=mode_tol,
                                        workers=workers, progress=report,
-                                       check_abort=check_abort)
+                                       check_abort=check_abort,
+                                       table_precision=table_precision_key,
+                                       assembly=assembly_key,
+                                       stream_budget_gb=stream_budget)
+            actual_assembly = str(out.get("assembly", "")).strip().lower()
+            actual_precision = str(
+                out.get("table_precision", "")
+            ).strip().lower()
+            if (
+                assembly_key != "auto"
+                and actual_assembly != assembly_key
+            ):
+                raise RuntimeError(
+                    "BoR coated solver did not attest the requested "
+                    f"assembly={assembly_key!r}; reported "
+                    f"{actual_assembly or 'missing'!r}."
+                )
+            if (
+                table_precision_key != "auto"
+                and actual_precision != table_precision_key
+            ):
+                raise RuntimeError(
+                    "BoR coated solver did not attest the requested "
+                    f"table_precision={table_precision_key!r}; reported "
+                    f"{actual_precision or 'missing'!r}."
+                )
             formulation_label = "BoR-MoM PMCHWT coated PEC (multi-region)"
         elif kind == "partial":
             eps, mu = materials.get_medium(groups[0][0].pos_mat, freq_ghz)
@@ -1165,7 +1540,10 @@ def solve_monostatic_rcs_bor(
                                             n_modes=n_modes,
                                             mode_tol=mode_tol, workers=workers,
                                             progress=report,
-                                            check_abort=check_abort)
+                                            check_abort=check_abort,
+                                            table_precision=table_precision_key,
+                                            assembly=assembly_key,
+                                            stream_budget_gb=stream_budget)
             for w in out.get("warnings", []):
                 materials.warn_once(w)
             formulation_label = ("BoR-MoM PMCHWT partial coating "
@@ -1186,7 +1564,10 @@ def solve_monostatic_rcs_bor(
                                               eps_o, mu_o, n_modes=n_modes,
                                               mode_tol=mode_tol, workers=workers,
                                               progress=report,
-                                              check_abort=check_abort)
+                                              check_abort=check_abort,
+                                              table_precision=table_precision_key,
+                                              assembly=assembly_key,
+                                              stream_budget_gb=stream_budget)
                 formulation_label = ("BoR-MoM PMCHWT coating patch "
                                      f"({out['n_junctions']} junction(s))")
             else:
@@ -1194,7 +1575,10 @@ def solve_monostatic_rcs_bor(
                                             aspects, eps_i, mu_i, eps_o, mu_o,
                                             n_modes=n_modes, mode_tol=mode_tol,
                                             workers=workers, progress=report,
-                                            check_abort=check_abort)
+                                            check_abort=check_abort,
+                                            table_precision=table_precision_key,
+                                            assembly=assembly_key,
+                                            stream_budget_gb=stream_budget)
                 formulation_label = "BoR-MoM PMCHWT two-layer coated PEC"
         elif kind == "layered_n":
             iface_groups, core_chains, flag_order = groups
@@ -1210,7 +1594,10 @@ def solve_monostatic_rcs_bor(
                                          eps_list, mu_list, n_modes=n_modes,
                                          mode_tol=mode_tol, workers=workers,
                                          progress=report,
-                                         check_abort=check_abort)
+                                         check_abort=check_abort,
+                                         table_precision=table_precision_key,
+                                         assembly=assembly_key,
+                                         stream_budget_gb=stream_budget)
             formulation_label = (f"BoR-MoM PMCHWT {len(iface_pts)}-layer "
                                  "coated PEC")
         elif kind == "banded":
@@ -1300,10 +1687,32 @@ def solve_monostatic_rcs_bor(
                                    freq_hz=freq_hz)
             out = _solve_multiregion(sys_, freq_hz, aspects, n_modes, mode_tol,
                                      workers, report, check_abort,
-                                     "pmchwt-banded", {})
+                                     "pmchwt-banded", {},
+                                     table_precision_key, assembly_key,
+                                     stream_budget)
             formulation_label = (f"BoR-MoM PMCHWT banded coatings "
                                  f"({len(regions) - 1} band(s), "
                                  f"{out['n_junctions']} junction(s))")
+
+        actual_assembly = str(out.get("assembly", "")).strip().lower()
+        actual_precision = str(
+            out.get("table_precision", "")
+        ).strip().lower()
+        if assembly_key != "auto" and actual_assembly != assembly_key:
+            raise RuntimeError(
+                f"BoR {kind} solver did not attest the requested "
+                f"assembly={assembly_key!r}; reported "
+                f"{actual_assembly or 'missing'!r}."
+            )
+        if (
+            table_precision_key != "auto"
+            and actual_precision != table_precision_key
+        ):
+            raise RuntimeError(
+                f"BoR {kind} solver did not attest the requested "
+                f"table_precision={table_precision_key!r}; reported "
+                f"{actual_precision or 'missing'!r}."
+            )
 
         for w in out.get("warnings", []) or []:
             materials.warn_once(str(w))
@@ -1366,6 +1775,17 @@ def solve_monostatic_rcs_bor(
             "mode_last_relative_increment": float(
                 out.get("mode_last_relative_increment", math.inf)
             ),
+            "mode_last_absolute_increment": float(
+                out.get("mode_last_absolute_increment", math.inf)
+            ),
+            "mode_tail_absolute_floor": float(
+                out.get("mode_tail_absolute_floor", 0.0)
+            ),
+            "mode_worst_polarization": out.get("mode_worst_polarization"),
+            "mode_worst_theta_deg": out.get("mode_worst_theta_deg"),
+            "signed_mode_symmetry_used": bool(
+                out.get("signed_mode_symmetry_used", False)
+            ),
             "n_unknowns": int(out["n_unknowns"]),
             "linear_residual": residual,
             "linear_backward_error": backward_error,
@@ -1388,8 +1808,12 @@ def solve_monostatic_rcs_bor(
             ),
             "stream_mode_block": out.get("stream_mode_block"),
             "stream_sweeps": out.get("stream_sweeps"),
+            "stream_sampling_backend": out.get("stream_sampling_backend"),
             "mesh_elements_total": int(total_mesh_elements),
             "mesh_surface_count": int(len(surface_layout)),
+            "mesh_elements_by_surface": [
+                int(elements) for elements, _conductor in surface_layout
+            ],
             "mesh_wavelength_m": float(current_mesh[0]),
             "mesh_max_refractive_index": float(current_mesh[1]),
             "mesh_material_flags": list(current_mesh[2]),
@@ -1737,11 +2161,80 @@ def solve_monostatic_rcs_bor_certified(
     fine_snapshot = scale_snapshot_panel_density(
         geometry_snapshot, policy["fine_factor"]
     )
+    fine_snapshot["_bor_certification_refinement_factor"] = float(
+        policy["fine_factor"]
+    )
+    fine_snapshot["_bor_certification_base_segment_n"] = [
+        (list(segment.get("properties", []) or []) + ["", ""])[1]
+        for segment in list(geometry_snapshot.get("segments", []) or [])
+    ]
     fine_result = solve_monostatic_rcs_bor(
         geometry_snapshot=fine_snapshot,
         progress_callback=phase_progress(1),
         **common
     )
+
+    base_frequency_meshes = {
+        round(float(row.get("frequency_ghz", 0.0)), 12): row
+        for row in list(
+            (base_result.get("metadata", {}) or {}).get("per_frequency", [])
+            or []
+        )
+    }
+    fine_frequency_meshes = {
+        round(float(row.get("frequency_ghz", 0.0)), 12): row
+        for row in list(
+            (fine_result.get("metadata", {}) or {}).get("per_frequency", [])
+            or []
+        )
+    }
+    if set(base_frequency_meshes) != set(fine_frequency_meshes):
+        raise RuntimeError(
+            "Certified BoR mesh refinement failed: base and fine solves did "
+            "not report the same frequency mesh inventory."
+        )
+    mesh_refinement_records = []
+    for frequency in sorted(base_frequency_meshes):
+        base_row = base_frequency_meshes[frequency]
+        fine_row = fine_frequency_meshes[frequency]
+        base_surfaces = [
+            int(value)
+            for value in list(base_row.get("mesh_elements_by_surface", []) or [])
+        ]
+        fine_surfaces = [
+            int(value)
+            for value in list(fine_row.get("mesh_elements_by_surface", []) or [])
+        ]
+        if not base_surfaces or len(base_surfaces) != len(fine_surfaces):
+            raise RuntimeError(
+                "Certified BoR mesh refinement failed: base/fine surface "
+                f"inventories differ at {frequency:g} GHz."
+            )
+        stagnant = [
+            index
+            for index, (base_count, fine_count) in enumerate(
+                zip(base_surfaces, fine_surfaces)
+            )
+            if fine_count <= base_count
+        ]
+        if stagnant:
+            raise RuntimeError(
+                "Certified BoR mesh refinement failed: the fine solve did "
+                "not increase the realized element count of surface(s) "
+                + ", ".join(str(index) for index in stagnant)
+                + f" at {frequency:g} GHz (base={base_surfaces}, "
+                f"fine={fine_surfaces})."
+            )
+        base_total = int(sum(base_surfaces))
+        fine_total = int(sum(fine_surfaces))
+        mesh_refinement_records.append({
+            "frequency_ghz": float(frequency),
+            "base_elements_by_surface": base_surfaces,
+            "fine_elements_by_surface": fine_surfaces,
+            "base_elements_total": base_total,
+            "fine_elements_total": fine_total,
+            "refinement_ratio_total": float(fine_total) / float(base_total),
+        })
 
     per_polarization = {}
     violations = []
@@ -1769,9 +2262,12 @@ def solve_monostatic_rcs_bor_certified(
         "passed": not violations,
         "fine_factor": policy["fine_factor"],
         "published_mesh": "fine",
+        "geometry_model": "piecewise_linear_generatrix",
+        "geometry_approximation_certified": False,
         "co_solved_polarizations": ["VV", "HH"],
         "policy": policy,
         "polarizations": per_polarization,
+        "realized_mesh_refinement": mesh_refinement_records,
         "violations": violations,
         "reason": (
             "; ".join(violations)

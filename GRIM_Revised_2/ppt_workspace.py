@@ -20,6 +20,7 @@ from ppt_plot_data import (
     DUAL_COPOLARIZATION,
     NamedGrid,
     build_azimuth_specs,
+    build_elevation_specs,
     build_frequency_specs,
     get_plot_availability,
 )
@@ -140,6 +141,42 @@ def _with_shared_y_limits(
     values = tuple(plots)
     shared = limits if limits is not None else _finite_common_y_limits(values)
     return tuple(replace(plot, y_limits=shared) for plot in values)
+
+
+def _nice_tick_step(low: float, high: float, *, angular: bool = False) -> float:
+    """Choose a stable major-tick interval targeting roughly eight divisions."""
+
+    span = float(high) - float(low)
+    if not math.isfinite(span) or span <= 0.0:
+        return 1.0
+    target = span / 8.0
+    if angular:
+        for candidate in (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0):
+            if candidate >= target - 1.0e-12:
+                return candidate
+    exponent = math.floor(math.log10(target))
+    scale = 10.0**exponent
+    fraction = target / scale
+    if fraction <= 1.0:
+        nice_fraction = 1.0
+    elif fraction <= 2.0:
+        nice_fraction = 2.0
+    elif fraction <= 5.0:
+        nice_fraction = 5.0
+    else:
+        nice_fraction = 10.0
+    return float(nice_fraction * scale)
+
+
+def _finite_bounds(values: Iterable[Any]) -> tuple[float, float] | None:
+    finite = tuple(float(value) for value in values if math.isfinite(float(value)))
+    if not finite:
+        return None
+    low, high = min(finite), max(finite)
+    if math.isclose(low, high, rel_tol=0.0, abs_tol=1.0e-12):
+        padding = max(1.0, abs(low) * 0.05)
+        return low - padding, high + padding
+    return low, high
 
 
 _GUI_IMPORT_ERROR: Exception | None = None
@@ -508,11 +545,16 @@ if GUI_AVAILABLE:
             self._thread: QThread | None = None
             self._worker: _ExportWorker | None = None
             self._last_error = ""
+            self._last_plan_warnings: tuple[str, ...] = ()
             self._active_x_axis_family = "azimuth"
             self._x_axis_settings: dict[str, tuple[str, float, float, float]] = {
                 "azimuth": ("automatic", -180.0, 180.0, 45.0),
+                "elevation": ("automatic", -90.0, 90.0, 15.0),
                 "frequency": ("automatic", 1.0, 10.0, 1.0),
             }
+            self._x_axis_customized: set[str] = set()
+            self._series_line_widths: dict[str, float] = {}
+            self._series_line_styles: dict[str, str] = {}
             self._preview_temp = tempfile.TemporaryDirectory(prefix="grim-ppt-preview-")
             # Embedded hosts normally call dispose(), but a Python/Qt wrapper
             # can outlive its native widget during teardown or abnormal
@@ -591,6 +633,17 @@ if GUI_AVAILABLE:
                 self.dataset_list.addItem(item)
             self.dataset_list.blockSignals(False)
             self._syncing = False
+            self._series_line_widths = {
+                dataset_id: value
+                for dataset_id, value in self._series_line_widths.items()
+                if dataset_id in incoming
+            }
+            self._series_line_styles = {
+                dataset_id: value
+                for dataset_id, value in self._series_line_styles.items()
+                if dataset_id in incoming
+            }
+            self._refresh_series_style_datasets()
             self._dataset_selection_changed()
 
         def dataset_ids_in_order(self) -> tuple[str, ...]:
@@ -749,6 +802,7 @@ if GUI_AVAILABLE:
             self.plot_type_combo = QComboBox(plot_group)
             self.plot_type_combo.addItem("Azimuth — rectangular", "azimuth_rect")
             self.plot_type_combo.addItem("Azimuth — polar", "azimuth_polar")
+            self.plot_type_combo.addItem("Elevation / pitch sweep", "elevation")
             self.plot_type_combo.addItem("Frequency sweep", "frequency")
             plot_form.addRow("Plot type", self.plot_type_combo)
             self.elevation_label = QLabel("Elevation cut", plot_group)
@@ -874,7 +928,7 @@ if GUI_AVAILABLE:
             frequency_heading.addStretch(1)
             self.all_frequencies_button = QPushButton("First 60", self.frequency_box)
             self.all_frequencies_button.setToolTip(
-                "Select up to the first 60 common frequencies (10 slides). "
+                "Select up to the first 60 common frequencies (10 angular slides). "
                 "Create additional reports for larger frequency sets."
             )
             self.no_frequencies_button = QPushButton("None", self.frequency_box)
@@ -900,8 +954,10 @@ if GUI_AVAILABLE:
             self.x_scale_label = QLabel("Horizontal axis (deg)", plot_group)
             scale_form.addRow(self.x_scale_label, self.x_scale_mode_combo)
             self.fixed_x_scale_widget = QWidget(plot_group)
-            fixed_x_layout = QHBoxLayout(self.fixed_x_scale_widget)
+            fixed_x_layout = QGridLayout(self.fixed_x_scale_widget)
             fixed_x_layout.setContentsMargins(0, 0, 0, 0)
+            fixed_x_layout.setHorizontalSpacing(6)
+            fixed_x_layout.setVerticalSpacing(3)
             self.x_min_spin = self._axis_spin_box(
                 self.fixed_x_scale_widget, value=-180.0
             )
@@ -911,13 +967,23 @@ if GUI_AVAILABLE:
             self.x_step_spin = self._axis_spin_box(
                 self.fixed_x_scale_widget, value=45.0, positive=True
             )
-            for label, spin in (
+            for column, (label, spin) in enumerate((
                 ("Min", self.x_min_spin),
                 ("Max", self.x_max_spin),
                 ("Step", self.x_step_spin),
-            ):
-                fixed_x_layout.addWidget(QLabel(label, self.fixed_x_scale_widget))
-                fixed_x_layout.addWidget(spin)
+            )):
+                label_widget = QLabel(label, self.fixed_x_scale_widget)
+                label_widget.setBuddy(spin)
+                fixed_x_layout.addWidget(label_widget, 0, column)
+                fixed_x_layout.addWidget(spin, 1, column)
+            self.x_data_bounds_button = QPushButton(
+                "Use data bounds", self.fixed_x_scale_widget
+            )
+            self.x_data_bounds_button.setToolTip(
+                "Set the minimum, maximum, and a readable major-tick step from "
+                "the selected datasets. No data are resampled."
+            )
+            fixed_x_layout.addWidget(self.x_data_bounds_button, 2, 0, 1, 3)
             scale_form.addRow("Fixed horizontal", self.fixed_x_scale_widget)
 
             self.scale_mode_combo = QComboBox(plot_group)
@@ -929,8 +995,10 @@ if GUI_AVAILABLE:
             )
             scale_form.addRow("Vertical RCS axis", self.scale_mode_combo)
             self.fixed_scale_widget = QWidget(plot_group)
-            fixed_scale_layout = QHBoxLayout(self.fixed_scale_widget)
+            fixed_scale_layout = QGridLayout(self.fixed_scale_widget)
             fixed_scale_layout.setContentsMargins(0, 0, 0, 0)
+            fixed_scale_layout.setHorizontalSpacing(6)
+            fixed_scale_layout.setVerticalSpacing(3)
             self.y_min_spin = self._axis_spin_box(
                 self.fixed_scale_widget, value=-60.0
             )
@@ -940,13 +1008,23 @@ if GUI_AVAILABLE:
             self.y_step_spin = self._axis_spin_box(
                 self.fixed_scale_widget, value=10.0, positive=True
             )
-            for label, spin in (
+            for column, (label, spin) in enumerate((
                 ("Min", self.y_min_spin),
                 ("Max", self.y_max_spin),
                 ("Step", self.y_step_spin),
-            ):
-                fixed_scale_layout.addWidget(QLabel(label, self.fixed_scale_widget))
-                fixed_scale_layout.addWidget(spin)
+            )):
+                label_widget = QLabel(label, self.fixed_scale_widget)
+                label_widget.setBuddy(spin)
+                fixed_scale_layout.addWidget(label_widget, 0, column)
+                fixed_scale_layout.addWidget(spin, 1, column)
+            self.y_data_bounds_button = QPushButton(
+                "Use data bounds", self.fixed_scale_widget
+            )
+            self.y_data_bounds_button.setToolTip(
+                "Build the selected cuts in memory and choose a shared readable "
+                "vertical range from every finite plotted value."
+            )
+            fixed_scale_layout.addWidget(self.y_data_bounds_button, 2, 0, 1, 3)
             scale_form.addRow("Fixed vertical", self.fixed_scale_widget)
             self.legend_mode_combo = QComboBox(plot_group)
             self.legend_mode_combo.addItem("Master across slide", "master")
@@ -957,17 +1035,97 @@ if GUI_AVAILABLE:
                 "the dataset order above."
             )
             scale_form.addRow("Dataset legend", self.legend_mode_combo)
+            self.global_line_width_spin = QDoubleSpinBox(plot_group)
+            self.global_line_width_spin.setRange(0.5, 5.0)
+            self.global_line_width_spin.setDecimals(2)
+            self.global_line_width_spin.setSingleStep(0.25)
+            self.global_line_width_spin.setValue(1.5)
+            self.global_line_width_spin.setSuffix(" pt")
+            self.global_line_width_spin.setKeyboardTracking(False)
+            self.global_line_width_spin.setToolTip(
+                "Default plotted line thickness for every dataset. Individual "
+                "datasets can override it below."
+            )
+            scale_form.addRow("Line thickness", self.global_line_width_spin)
+            self.global_line_style_combo = QComboBox(plot_group)
+            self.global_line_style_combo.addItem("Solid", "-")
+            self.global_line_style_combo.addItem("Dashed", "--")
+            self.global_line_style_combo.addItem("Dotted", ":")
+            self.global_line_style_combo.addItem("Dash-dot", "-.")
+            scale_form.addRow("Line style", self.global_line_style_combo)
             plot_layout.addLayout(scale_form)
+
+            self.series_override_button = QPushButton(
+                "Series overrides…", plot_group
+            )
+            self.series_override_button.setCheckable(True)
+            self.series_override_button.setChecked(False)
+            self.series_override_button.setToolTip(
+                "Optionally override thickness or pattern for one loaded dataset."
+            )
+            plot_layout.addWidget(self.series_override_button)
+            self.series_override_widget = QWidget(plot_group)
+            series_override_form = QFormLayout(self.series_override_widget)
+            series_override_form.setContentsMargins(0, 0, 0, 0)
+            self.series_dataset_combo = QComboBox(self.series_override_widget)
+            series_override_form.addRow("Dataset", self.series_dataset_combo)
+            self.series_line_width_spin = QDoubleSpinBox(self.series_override_widget)
+            self.series_line_width_spin.setRange(0.0, 5.0)
+            self.series_line_width_spin.setDecimals(2)
+            self.series_line_width_spin.setSingleStep(0.25)
+            self.series_line_width_spin.setSpecialValueText("Use global")
+            self.series_line_width_spin.setSuffix(" pt")
+            self.series_line_width_spin.setKeyboardTracking(False)
+            series_override_form.addRow("Thickness", self.series_line_width_spin)
+            self.series_line_style_combo = QComboBox(self.series_override_widget)
+            self.series_line_style_combo.addItem("Use global", "")
+            self.series_line_style_combo.addItem("Solid", "-")
+            self.series_line_style_combo.addItem("Dashed", "--")
+            self.series_line_style_combo.addItem("Dotted", ":")
+            self.series_line_style_combo.addItem("Dash-dot", "-.")
+            series_override_form.addRow("Pattern", self.series_line_style_combo)
+            self.reset_series_style_button = QPushButton(
+                "Reset selected dataset", self.series_override_widget
+            )
+            series_override_form.addRow("", self.reset_series_style_button)
+            self.series_override_widget.setVisible(False)
+            plot_layout.addWidget(self.series_override_widget)
+
+            self.axis_warning_label = QLabel("", plot_group)
+            self.axis_warning_label.setObjectName("pptAxisWarning")
+            self.axis_warning_label.setWordWrap(True)
+            self.axis_warning_label.setVisible(False)
+            plot_layout.addWidget(self.axis_warning_label)
             controls.addWidget(plot_group)
 
             deck_group = QGroupBox("3  Slide text and files", self.controls_content)
-            deck_form = QFormLayout(deck_group)
+            deck_layout = QVBoxLayout(deck_group)
+            deck_form = QFormLayout()
             deck_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             self.deck_title_edit = QLineEdit("RCS Report", deck_group)
             self.deck_title_edit.setPlaceholderText("RCS Report")
             deck_form.addRow("Slide title", self.deck_title_edit)
+            self.output_edit, output_widget = self._path_row(
+                deck_group, "Choose report output", self._browse_output
+            )
+            self.output_edit.setText("RCS_Report.pptx")
+            deck_form.addRow("Output .pptx", output_widget)
+            deck_layout.addLayout(deck_form)
+
+            self.template_options_button = QPushButton(
+                "Template and layouts…", deck_group
+            )
+            self.template_options_button.setCheckable(True)
+            self.template_options_button.setChecked(False)
+            deck_layout.addWidget(self.template_options_button)
+            self.template_options_widget = QWidget(deck_group)
+            template_form = QFormLayout(self.template_options_widget)
+            template_form.setContentsMargins(0, 0, 0, 0)
+            template_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             self.template_edit, template_widget = self._path_row(
-                deck_group, "Choose PowerPoint template", self._browse_template
+                self.template_options_widget,
+                "Choose PowerPoint template",
+                self._browse_template,
             )
             self.template_edit.setPlaceholderText("Optional .pptx or .potx template")
             self.template_edit.setToolTip(
@@ -976,23 +1134,23 @@ if GUI_AVAILABLE:
             )
             if DEFAULT_POWERPOINT_TEMPLATE.is_file():
                 self.template_edit.setText(str(DEFAULT_POWERPOINT_TEMPLATE))
-            deck_form.addRow("PowerPoint template", template_widget)
+            template_form.addRow("PowerPoint template", template_widget)
             self.azimuth_layout_edit = QLineEdit(
                 DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
-                deck_group,
+                self.template_options_widget,
             )
             self.azimuth_layout_edit.setPlaceholderText(
                 "Leave blank for PowerPoint's generic blank layout"
             )
             self.azimuth_layout_edit.setToolTip(
-                "Named custom layout for rectangular and polar azimuth reports. "
+                "Named custom layout for azimuth, polar, and elevation reports. "
                 "Use 'Master :: Layout' when the same layout name appears under "
                 "more than one slide master."
             )
-            deck_form.addRow("Azimuth custom layout", self.azimuth_layout_edit)
+            template_form.addRow("Angular custom layout", self.azimuth_layout_edit)
             self.frequency_layout_edit = QLineEdit(
                 DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,
-                deck_group,
+                self.template_options_widget,
             )
             self.frequency_layout_edit.setPlaceholderText(
                 "Leave blank for PowerPoint's generic blank layout"
@@ -1001,22 +1159,11 @@ if GUI_AVAILABLE:
                 "Named custom layout for one-plot frequency-sweep slides. Use "
                 "'Master :: Layout' to qualify duplicate layout names."
             )
-            deck_form.addRow("Frequency custom layout", self.frequency_layout_edit)
-            self.output_edit, output_widget = self._path_row(
-                deck_group, "Choose report output", self._browse_output
-            )
-            self.output_edit.setText("RCS_Report.pptx")
-            deck_form.addRow("Output .pptx", output_widget)
+            template_form.addRow("Frequency custom layout", self.frequency_layout_edit)
+            self.template_options_widget.setVisible(False)
+            deck_layout.addWidget(self.template_options_widget)
             controls.addWidget(deck_group)
 
-            action_row = QHBoxLayout()
-            self.build_preview_button = QPushButton("Build Preview", self.controls_content)
-            self.build_preview_button.setDefault(True)
-            self.export_button = QPushButton("Export PPTX", self.controls_content)
-            self.export_button.setEnabled(False)
-            action_row.addWidget(self.build_preview_button)
-            action_row.addWidget(self.export_button)
-            controls.addLayout(action_row)
             controls.addStretch(1)
             self.controls_scroll.setWidget(self.controls_content)
             splitter.addWidget(self.controls_scroll)
@@ -1054,6 +1201,17 @@ if GUI_AVAILABLE:
             splitter.setStretchFactor(0, 0)
             splitter.setStretchFactor(1, 1)
             splitter.setSizes((430, 900))
+
+            action_bar = QHBoxLayout()
+            action_bar.setContentsMargins(0, 2, 0, 0)
+            action_bar.addStretch(1)
+            self.build_preview_button = QPushButton("Build preview", self)
+            self.build_preview_button.setDefault(True)
+            self.export_button = QPushButton("Export PowerPoint", self)
+            self.export_button.setEnabled(False)
+            action_bar.addWidget(self.build_preview_button)
+            action_bar.addWidget(self.export_button)
+            outer.addLayout(action_bar)
             self._update_navigation()
 
         def _path_row(
@@ -1087,7 +1245,7 @@ if GUI_AVAILABLE:
             spin.setSingleStep(1.0)
             spin.setKeyboardTracking(False)
             spin.setMinimumWidth(82)
-            spin.setMaximumWidth(106)
+            spin.setMaximumWidth(124)
             return spin
 
         def _connect_signals(self) -> None:
@@ -1128,11 +1286,37 @@ if GUI_AVAILABLE:
                 self.azimuth_percentile_spin,
             ):
                 spin.valueChanged.connect(self._mark_preview_stale)
+            for spin in (self.x_min_spin, self.x_max_spin, self.x_step_spin):
+                spin.valueChanged.connect(self._x_axis_value_changed)
+            self.x_data_bounds_button.clicked.connect(self._use_data_x_bounds)
+            self.y_data_bounds_button.clicked.connect(self._use_data_y_bounds)
+            self.global_line_width_spin.valueChanged.connect(self._mark_preview_stale)
+            self.global_line_style_combo.currentIndexChanged.connect(
+                self._mark_preview_stale
+            )
+            self.series_override_button.toggled.connect(
+                self.series_override_widget.setVisible
+            )
+            self.series_dataset_combo.currentIndexChanged.connect(
+                self._load_series_style_controls
+            )
+            self.series_line_width_spin.valueChanged.connect(
+                self._store_series_style_override
+            )
+            self.series_line_style_combo.currentIndexChanged.connect(
+                self._store_series_style_override
+            )
+            self.reset_series_style_button.clicked.connect(
+                self._reset_series_style_override
+            )
             self.deck_title_edit.textChanged.connect(self._mark_preview_stale)
             self.template_edit.textChanged.connect(self._mark_preview_stale)
             self.template_edit.textChanged.connect(self._update_template_controls)
             self.azimuth_layout_edit.textChanged.connect(self._mark_preview_stale)
             self.frequency_layout_edit.textChanged.connect(self._mark_preview_stale)
+            self.template_options_button.toggled.connect(
+                self.template_options_widget.setVisible
+            )
             self.build_preview_button.clicked.connect(self.build_preview)
             self.export_button.clicked.connect(self.export_report)
             self.previous_slide_button.clicked.connect(self.previous_slide)
@@ -1191,6 +1375,102 @@ if GUI_AVAILABLE:
                 "frequency_single": self.frequency_layout_edit.text().strip(),
             }
             return {kind: selector for kind, selector in values.items() if selector}
+
+        def _refresh_series_style_datasets(self) -> None:
+            current = self.series_dataset_combo.currentData()
+            self.series_dataset_combo.blockSignals(True)
+            self.series_dataset_combo.clear()
+            for dataset_id in self.dataset_ids_in_order():
+                entry = self._catalog.get(dataset_id)
+                if entry is not None:
+                    self.series_dataset_combo.addItem(entry.name, dataset_id)
+            index = self.series_dataset_combo.findData(current)
+            if index < 0 and self.series_dataset_combo.count():
+                index = 0
+            self.series_dataset_combo.setCurrentIndex(index)
+            self.series_dataset_combo.blockSignals(False)
+            self._load_series_style_controls()
+
+        @Slot()
+        def _load_series_style_controls(self, *_args: Any) -> None:
+            dataset_id = str(self.series_dataset_combo.currentData() or "")
+            self.series_line_width_spin.blockSignals(True)
+            self.series_line_style_combo.blockSignals(True)
+            try:
+                self.series_line_width_spin.setValue(
+                    float(self._series_line_widths.get(dataset_id, 0.0))
+                )
+                style = self._series_line_styles.get(dataset_id, "")
+                index = self.series_line_style_combo.findData(style)
+                self.series_line_style_combo.setCurrentIndex(max(index, 0))
+            finally:
+                self.series_line_width_spin.blockSignals(False)
+                self.series_line_style_combo.blockSignals(False)
+            enabled = bool(dataset_id)
+            self.series_line_width_spin.setEnabled(enabled)
+            self.series_line_style_combo.setEnabled(enabled)
+            self.reset_series_style_button.setEnabled(enabled)
+
+        @Slot()
+        def _store_series_style_override(self, *_args: Any) -> None:
+            if self._syncing:
+                return
+            dataset_id = str(self.series_dataset_combo.currentData() or "")
+            if not dataset_id:
+                return
+            width = float(self.series_line_width_spin.value())
+            if width > 0.0:
+                self._series_line_widths[dataset_id] = width
+            else:
+                self._series_line_widths.pop(dataset_id, None)
+            style = str(self.series_line_style_combo.currentData() or "")
+            if style:
+                self._series_line_styles[dataset_id] = style
+            else:
+                self._series_line_styles.pop(dataset_id, None)
+            self._mark_preview_stale()
+
+        @Slot()
+        def _reset_series_style_override(self) -> None:
+            dataset_id = str(self.series_dataset_combo.currentData() or "")
+            if not dataset_id:
+                return
+            self._series_line_widths.pop(dataset_id, None)
+            self._series_line_styles.pop(dataset_id, None)
+            self._load_series_style_controls()
+            self._mark_preview_stale()
+
+        def _apply_series_styles(
+            self,
+            plots: Sequence[PlotSpec],
+            entries: Sequence[DatasetCatalogEntry],
+        ) -> tuple[PlotSpec, ...]:
+            global_width = float(self.global_line_width_spin.value())
+            global_style = str(self.global_line_style_combo.currentData() or "-")
+            values: list[PlotSpec] = []
+            for plot in plots:
+                styled_series = []
+                for index, series in enumerate(plot.series):
+                    dataset_id = (
+                        entries[index].dataset_id if index < len(entries) else ""
+                    )
+                    styled_series.append(
+                        replace(
+                            series,
+                            line_width=float(
+                                self._series_line_widths.get(
+                                    dataset_id,
+                                    global_width,
+                                )
+                            ),
+                            line_style=self._series_line_styles.get(
+                                dataset_id,
+                                global_style,
+                            ),
+                        )
+                    )
+                values.append(replace(plot, series=tuple(styled_series)))
+            return tuple(values)
 
         # ------------------------------------------------------------------
         # Selector synchronization and validation
@@ -1319,6 +1599,10 @@ if GUI_AVAILABLE:
             self._set_frequency_choices(
                 tuple(availability.frequencies), frequency_unit
             )
+            self._refresh_axis_data_defaults(availability)
+            rcs_suffix = f" {availability.rcs_unit}"
+            for spin in (self.y_min_spin, self.y_max_spin, self.y_step_spin):
+                spin.setSuffix(rcs_suffix)
 
         def _set_axis_combo(
             self,
@@ -1462,6 +1746,191 @@ if GUI_AVAILABLE:
             if values:
                 self._frequency_choices_initialized = True
 
+        @staticmethod
+        def _display_axis_values(
+            values: Sequence[Any], unit: str, family: str
+        ) -> tuple[float, ...]:
+            unit_text = str(unit or "").strip().casefold()
+            numeric = tuple(float(value) for value in values)
+            if family in {"azimuth", "elevation"}:
+                if unit_text in {"rad", "radian", "radians"}:
+                    return tuple(math.degrees(value) for value in numeric)
+                return numeric
+            if family == "frequency":
+                factors = {
+                    "hz": 1.0e-9,
+                    "khz": 1.0e-6,
+                    "mhz": 1.0e-3,
+                    "ghz": 1.0,
+                    "thz": 1.0e3,
+                }
+                factor = factors.get(unit_text)
+                if factor is None:
+                    raise ValueError(
+                        f"Unsupported frequency display conversion from {unit!r}."
+                    )
+                return tuple(value * factor for value in numeric)
+            raise ValueError(f"Unsupported horizontal-axis family: {family!r}")
+
+        def _axis_data_values(self, family: str) -> tuple[float, ...]:
+            availability = self._availability
+            if availability is None:
+                return ()
+            if family == "azimuth":
+                return self._display_axis_values(
+                    tuple(availability.azimuths),
+                    str(availability.azimuth_unit),
+                    family,
+                )
+            if family == "elevation":
+                return self._display_axis_values(
+                    tuple(availability.elevations),
+                    str(availability.elevation_unit),
+                    family,
+                )
+            return self._display_axis_values(
+                tuple(availability.frequencies),
+                str(availability.frequency_unit),
+                family,
+            )
+
+        def _refresh_axis_data_defaults(self, availability: Any) -> None:
+            del availability  # The normalized values are read through self._availability.
+            for family in ("azimuth", "elevation", "frequency"):
+                if family in self._x_axis_customized:
+                    continue
+                bounds = _finite_bounds(self._axis_data_values(family))
+                if bounds is None:
+                    continue
+                low, high = bounds
+                mode = self._x_axis_settings[family][0]
+                self._x_axis_settings[family] = (
+                    mode,
+                    low,
+                    high,
+                    _nice_tick_step(
+                        low,
+                        high,
+                        angular=family in {"azimuth", "elevation"},
+                    ),
+                )
+            if self._active_x_axis_family in self._x_axis_customized:
+                return
+            mode, low, high, step = self._x_axis_settings[
+                self._active_x_axis_family
+            ]
+            widgets = (
+                self.x_scale_mode_combo,
+                self.x_min_spin,
+                self.x_max_spin,
+                self.x_step_spin,
+            )
+            for widget in widgets:
+                widget.blockSignals(True)
+            try:
+                mode_index = self.x_scale_mode_combo.findData(mode)
+                self.x_scale_mode_combo.setCurrentIndex(max(mode_index, 0))
+                self.x_min_spin.setValue(low)
+                self.x_max_spin.setValue(high)
+                self.x_step_spin.setValue(step)
+            finally:
+                for widget in widgets:
+                    widget.blockSignals(False)
+
+        @Slot()
+        def _x_axis_value_changed(self, *_args: Any) -> None:
+            if self._syncing:
+                return
+            self._x_axis_customized.add(self._active_x_axis_family)
+            self._x_axis_settings[self._active_x_axis_family] = (
+                str(self.x_scale_mode_combo.currentData() or "automatic"),
+                float(self.x_min_spin.value()),
+                float(self.x_max_spin.value()),
+                float(self.x_step_spin.value()),
+            )
+
+        @Slot()
+        def _use_data_x_bounds(self) -> None:
+            try:
+                bounds = _finite_bounds(
+                    self._axis_data_values(self._active_x_axis_family)
+                )
+                if bounds is None:
+                    raise ValueError(
+                        "The selected datasets have no finite horizontal-axis values."
+                    )
+                low, high = bounds
+                step = _nice_tick_step(
+                    low,
+                    high,
+                    angular=self._active_x_axis_family
+                    in {"azimuth", "elevation"},
+                )
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+            widgets = (
+                self.x_scale_mode_combo,
+                self.x_min_spin,
+                self.x_max_spin,
+                self.x_step_spin,
+            )
+            for widget in widgets:
+                widget.blockSignals(True)
+            try:
+                self.x_scale_mode_combo.setCurrentIndex(
+                    self.x_scale_mode_combo.findData("fixed")
+                )
+                self.x_min_spin.setValue(low)
+                self.x_max_spin.setValue(high)
+                self.x_step_spin.setValue(step)
+            finally:
+                for widget in widgets:
+                    widget.blockSignals(False)
+            self._x_axis_customized.discard(self._active_x_axis_family)
+            self._x_axis_settings[self._active_x_axis_family] = (
+                "fixed",
+                low,
+                high,
+                step,
+            )
+            self._control_changed()
+
+        @Slot()
+        def _use_data_y_bounds(self) -> None:
+            original_index = self.scale_mode_combo.currentIndex()
+            self.scale_mode_combo.blockSignals(True)
+            try:
+                automatic_index = self.scale_mode_combo.findData("shared_auto")
+                self.scale_mode_combo.setCurrentIndex(automatic_index)
+                plan = self._build_plan()
+                plots = tuple(
+                    placement.plot
+                    for slide in plan.slides
+                    for placement in slide.plots
+                )
+                low, high = _finite_common_y_limits(plots)
+                step = _nice_tick_step(low, high)
+            except Exception as exc:
+                self.scale_mode_combo.setCurrentIndex(original_index)
+                self.scale_mode_combo.blockSignals(False)
+                self._show_error(str(exc))
+                return
+            self.scale_mode_combo.setCurrentIndex(
+                self.scale_mode_combo.findData("fixed")
+            )
+            self.scale_mode_combo.blockSignals(False)
+            for spin in (self.y_min_spin, self.y_max_spin, self.y_step_spin):
+                spin.blockSignals(True)
+            try:
+                self.y_min_spin.setValue(low)
+                self.y_max_spin.setValue(high)
+                self.y_step_spin.setValue(step)
+            finally:
+                for spin in (self.y_min_spin, self.y_max_spin, self.y_step_spin):
+                    spin.blockSignals(False)
+            self._control_changed()
+
         @Slot()
         def _select_first_frequencies(self) -> None:
             count = min(self.frequency_list.count(), _MAX_AZIMUTH_REPORT_FREQUENCIES)
@@ -1472,15 +1941,21 @@ if GUI_AVAILABLE:
             if self.frequency_list.count() > count:
                 self._set_status(
                     f"Selected the first {count} frequencies. The PPT builder limits "
-                    "one report to 60 frequencies (10 azimuth slides) to keep preview "
+                    "one report to 60 frequencies (10 angular slides) to keep preview "
                     "and export responsive."
                 )
 
         @Slot()
         def _update_plot_type_controls(self, *_args: Any) -> None:
             kind = str(self.plot_type_combo.currentData() or "azimuth_rect")
-            azimuth_kind = kind in {"azimuth_rect", "azimuth_polar"}
-            x_family = "azimuth" if azimuth_kind else "frequency"
+            angular_kind = kind in {"azimuth_rect", "azimuth_polar", "elevation"}
+            x_family = (
+                "azimuth"
+                if kind in {"azimuth_rect", "azimuth_polar"}
+                else "elevation"
+                if kind == "elevation"
+                else "frequency"
+            )
             if x_family != self._active_x_axis_family:
                 self._x_axis_settings[self._active_x_axis_family] = (
                     str(self.x_scale_mode_combo.currentData() or "automatic"),
@@ -1507,12 +1982,15 @@ if GUI_AVAILABLE:
                     for widget in widgets:
                         widget.blockSignals(False)
                 self._active_x_axis_family = x_family
-            self.frequency_box.setVisible(azimuth_kind)
-            self.frequency_azimuth_mode_label.setVisible(not azimuth_kind)
-            self.frequency_azimuth_mode_combo.setVisible(not azimuth_kind)
+            self.frequency_box.setVisible(angular_kind)
+            self.frequency_azimuth_mode_label.setVisible(kind == "frequency")
+            self.frequency_azimuth_mode_combo.setVisible(kind == "frequency")
             self.x_scale_label.setText(
-                "Horizontal axis (deg)" if azimuth_kind else "Horizontal axis (GHz)"
+                "Horizontal axis (deg)" if angular_kind else "Horizontal axis (GHz)"
             )
+            x_suffix = " deg" if angular_kind else " GHz"
+            for spin in (self.x_min_spin, self.x_max_spin, self.x_step_spin):
+                spin.setSuffix(x_suffix)
             self._control_changed()
 
         @Slot()
@@ -1524,10 +2002,19 @@ if GUI_AVAILABLE:
                 str(self.frequency_azimuth_mode_combo.currentData() or "exact")
                 == "band"
             )
-            self.azimuth_label.setVisible(frequency_kind and not band_mode)
-            self.azimuth_combo.setVisible(frequency_kind and not band_mode)
+            elevation_kind = (
+                str(self.plot_type_combo.currentData() or "") == "elevation"
+            )
+            self.azimuth_label.setVisible(
+                elevation_kind or (frequency_kind and not band_mode)
+            )
+            self.azimuth_combo.setVisible(
+                elevation_kind or (frequency_kind and not band_mode)
+            )
             self.azimuth_band_label.setVisible(frequency_kind and band_mode)
             self.azimuth_band_widget.setVisible(frequency_kind and band_mode)
+            self.elevation_label.setVisible(not elevation_kind)
+            self.elevation_combo.setVisible(not elevation_kind)
             self.fixed_x_scale_widget.setVisible(
                 self.x_scale_mode_combo.currentData() == "fixed"
             )
@@ -1538,6 +2025,8 @@ if GUI_AVAILABLE:
 
         @Slot()
         def _mark_preview_stale(self, *_args: Any) -> None:
+            self.axis_warning_label.clear()
+            self.axis_warning_label.setVisible(False)
             if self._syncing or not self._preview_is_current:
                 return
             self._preview_is_current = False
@@ -1598,6 +2087,8 @@ if GUI_AVAILABLE:
                 axis_name=(
                     "azimuth axis (deg)"
                     if kind in {"azimuth_rect", "azimuth_polar"}
+                    else "elevation axis (deg)"
+                    if kind == "elevation"
                     else "frequency axis (GHz)"
                 ),
                 maximum_span=360.0 if kind == "azimuth_polar" else None,
@@ -1611,8 +2102,110 @@ if GUI_AVAILABLE:
             )
             return x_limits, x_step, y_limits, y_step
 
+        @staticmethod
+        def _axis_clipping_warnings(
+            plots: Sequence[PlotSpec],
+            *,
+            x_limits: tuple[float, float] | None,
+            x_step: float | None,
+            y_limits: tuple[float, float] | None,
+            y_step: float | None,
+        ) -> tuple[str, ...]:
+            warnings: list[str] = []
+
+            def clipped_summary(
+                values: Iterable[float],
+                limits: tuple[float, float] | None,
+                label: str,
+            ) -> None:
+                if limits is None:
+                    return
+                finite = tuple(float(value) for value in values if math.isfinite(value))
+                if not finite:
+                    return
+                low, high = limits
+                outside = sum(value < low or value > high for value in finite)
+                if outside == 0:
+                    return
+                percent = 100.0 * outside / len(finite)
+                if outside == len(finite):
+                    warnings.append(
+                        f"Fixed {label} limits contain no stored sample centers; "
+                        "the rendered traces may be blank or show only crossing segments."
+                    )
+                else:
+                    warnings.append(
+                        f"Fixed {label} limits clip {outside} of {len(finite)} "
+                        f"plotted samples ({percent:.1f}%)."
+                    )
+
+            clipped_summary(
+                (
+                    value
+                    for plot in plots
+                    for series in plot.series
+                    for value in series.x
+                ),
+                x_limits,
+                "horizontal-axis",
+            )
+            clipped_summary(
+                (
+                    value
+                    for plot in plots
+                    for series in plot.series
+                    for value in series.y
+                ),
+                y_limits,
+                "vertical-axis",
+            )
+            for label, limits, step in (
+                ("horizontal", x_limits, x_step),
+                ("vertical", y_limits, y_step),
+            ):
+                if limits is None or step is None:
+                    continue
+                count = int(math.floor((limits[1] - limits[0]) / step + 1.0e-9)) + 1
+                if count > 40:
+                    warnings.append(
+                        f"The fixed {label} axis creates {count} major ticks; "
+                        "increase the step for a readable slide."
+                    )
+            return tuple(warnings)
+
+        def _finalize_plots(
+            self,
+            plots: Sequence[PlotSpec],
+            entries: Sequence[DatasetCatalogEntry],
+            *,
+            x_limits: tuple[float, float] | None,
+            x_tick_step: float | None,
+            fixed_y_limits: tuple[float, float] | None,
+            y_tick_step: float | None,
+        ) -> tuple[PlotSpec, ...]:
+            values = _with_shared_y_limits(plots, fixed_y_limits)
+            values = self._apply_series_styles(values, entries)
+            values = tuple(
+                replace(
+                    plot,
+                    x_limits=x_limits,
+                    x_tick_step=x_tick_step,
+                    y_tick_step=y_tick_step,
+                )
+                for plot in values
+            )
+            self._last_plan_warnings = self._axis_clipping_warnings(
+                values,
+                x_limits=x_limits,
+                x_step=x_tick_step,
+                y_limits=fixed_y_limits,
+                y_step=y_tick_step,
+            )
+            return values
+
         def _build_plan(self) -> PresentationPlan:
-            datasets = self._named_grids()
+            entries = self._selected_entries()
+            datasets = tuple(NamedGrid(entry.name, entry.grid) for entry in entries)
             if not datasets:
                 raise ValueError(
                     "Select at least one loaded dataset in the PPT dataset list."
@@ -1626,7 +2219,7 @@ if GUI_AVAILABLE:
             kind = str(self.plot_type_combo.currentData())
             elevation = self.elevation_combo.currentData()
             polarization = self.polarization_combo.currentData()
-            if elevation is None:
+            if kind != "elevation" and elevation is None:
                 raise ValueError("The selected datasets have no common elevation cut.")
             if polarization is None:
                 raise ValueError("The selected datasets have no common polarization.")
@@ -1642,15 +2235,15 @@ if GUI_AVAILABLE:
             show_plot_legends = legend_mode == "per_plot"
             show_master_legend = legend_mode == "master"
             deck_title = self.deck_title_edit.text().strip()
-            if kind in {"azimuth_rect", "azimuth_polar"}:
+            if kind in {"azimuth_rect", "azimuth_polar", "elevation"}:
                 frequencies = self.selected_frequencies()
                 if not frequencies:
                     raise ValueError(
-                        "Select one or more frequencies for the azimuth report."
+                        "Select one or more frequencies for the angular report."
                     )
                 if len(frequencies) > _MAX_AZIMUTH_REPORT_FREQUENCIES:
                     raise ValueError(
-                        "A single PPT report is limited to 60 azimuth frequencies "
+                        "A single PPT report is limited to 60 angular-cut frequencies "
                         "(10 slides) to keep preview and export responsive. Select a "
                         "smaller frequency group and create additional reports as needed."
                     )
@@ -1662,31 +2255,49 @@ if GUI_AVAILABLE:
                         "Use rectangular azimuth or choose datasets with compatible "
                         "angular coverage."
                     )
-                plots = build_azimuth_specs(
-                    datasets,
-                    frequencies=frequencies,
-                    elevation=elevation,
-                    polarization=polarization,
-                    kind=kind,
-                    quantity="magnitude",
-                    angle_display_unit="deg",
-                    frequency_display_unit="GHz",
-                    y_limits=fixed_limits,
-                    show_legend=show_plot_legends,
-                )
-                plots = _with_shared_y_limits(plots, fixed_limits)
-                plots = tuple(
-                    replace(
-                        plot,
-                        x_limits=x_limits,
-                        x_tick_step=x_tick_step,
-                        y_tick_step=y_tick_step,
+                if kind == "elevation":
+                    azimuth = self.azimuth_combo.currentData()
+                    if azimuth is None:
+                        raise ValueError(
+                            "The selected datasets have no common azimuth cut."
+                        )
+                    plots = build_elevation_specs(
+                        datasets,
+                        frequencies=frequencies,
+                        azimuth=azimuth,
+                        polarization=polarization,
+                        quantity="magnitude",
+                        angle_display_unit="deg",
+                        frequency_display_unit="GHz",
+                        y_limits=fixed_limits,
+                        show_legend=show_plot_legends,
                     )
-                    for plot in plots
+                    default_title = "RCS Elevation Sweeps"
+                else:
+                    plots = build_azimuth_specs(
+                        datasets,
+                        frequencies=frequencies,
+                        elevation=elevation,
+                        polarization=polarization,
+                        kind=kind,
+                        quantity="magnitude",
+                        angle_display_unit="deg",
+                        frequency_display_unit="GHz",
+                        y_limits=fixed_limits,
+                        show_legend=show_plot_legends,
+                    )
+                    default_title = "RCS Azimuth Sweeps"
+                plots = self._finalize_plots(
+                    plots,
+                    entries,
+                    x_limits=x_limits,
+                    x_tick_step=x_tick_step,
+                    fixed_y_limits=fixed_limits,
+                    y_tick_step=y_tick_step,
                 )
                 return plan_azimuth_slides(
                     plots,
-                    slide_titles=deck_title or "RCS Azimuth Sweeps",
+                    slide_titles=deck_title or default_title,
                     master_legend=show_master_legend,
                     polarization_labels=tuple(
                         value
@@ -1738,15 +2349,13 @@ if GUI_AVAILABLE:
                     y_limits=fixed_limits,
                     show_legend=show_plot_legends,
                 )
-                plots = _with_shared_y_limits(plots, fixed_limits)
-                plots = tuple(
-                    replace(
-                        plot,
-                        x_limits=x_limits,
-                        x_tick_step=x_tick_step,
-                        y_tick_step=y_tick_step,
-                    )
-                    for plot in plots
+                plots = self._finalize_plots(
+                    plots,
+                    entries,
+                    x_limits=x_limits,
+                    x_tick_step=x_tick_step,
+                    fixed_y_limits=fixed_limits,
+                    y_tick_step=y_tick_step,
                 )
                 return plan_frequency_slides(
                     plots,
@@ -1771,6 +2380,7 @@ if GUI_AVAILABLE:
             if self.job_is_running():
                 self._show_error("Wait for the current PowerPoint export to finish.")
                 return False
+            self._last_plan_warnings = ()
             try:
                 plan = self._build_plan()
                 self._preview_plan = plan
@@ -1788,6 +2398,8 @@ if GUI_AVAILABLE:
                     "Preview could not be built", str(exc)
                 )
                 self.page_label.setText("Preview error")
+                self.axis_warning_label.clear()
+                self.axis_warning_label.setVisible(False)
                 self._update_navigation()
                 return False
             self.export_button.setEnabled(True)
@@ -1797,6 +2409,16 @@ if GUI_AVAILABLE:
                 f"{plan.plot_count} plot(s). Review each page, choose an output, "
                 "then export PPTX."
             )
+            if self._last_plan_warnings:
+                warning_text = "\n".join(
+                    f"• {warning}" for warning in self._last_plan_warnings
+                )
+                self.axis_warning_label.setText(warning_text)
+                self.axis_warning_label.setVisible(True)
+                message += " Axis warning: " + " ".join(self._last_plan_warnings)
+            else:
+                self.axis_warning_label.clear()
+                self.axis_warning_label.setVisible(False)
             self._set_status(message)
             return True
 
@@ -1937,6 +2559,8 @@ if GUI_AVAILABLE:
 
         def _set_busy(self, busy: bool) -> None:
             self.controls_content.setEnabled(not busy)
+            self.build_preview_button.setEnabled(not busy)
+            self.export_button.setEnabled(not busy and self._preview_is_current)
             self.previous_slide_button.setEnabled(
                 not busy
                 and self._preview_is_current
@@ -1948,8 +2572,6 @@ if GUI_AVAILABLE:
                 and self._preview_is_current
                 and self._current_slide_index + 1 < count
             )
-            if not busy:
-                self.export_button.setEnabled(self._preview_is_current)
 
         def _set_status(self, message: str) -> None:
             text = str(message).strip()

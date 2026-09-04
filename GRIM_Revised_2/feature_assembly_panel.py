@@ -1325,7 +1325,7 @@ def assess_surface_binding_readiness(
     if not preflight.valid:
         return SurfaceBindingReadiness(
             "waiting",
-            "Select a valid clean-body GRIM before checking registration.",
+            "Select a valid clean-body GRIM before checking binding integrity.",
             ready=not required,
             required=False,
             external_body=False,
@@ -1353,8 +1353,8 @@ def assess_surface_binding_readiness(
     ):
         return SurfaceBindingReadiness(
             "waiting",
-            "Choose the matching STL/facet mesh before checking solve-to-CAD "
-            "registration.",
+            "Choose the matching STL/facet mesh before checking body-binding "
+            "integrity.",
             ready=not required,
             required=required,
             external_body=True,
@@ -1364,7 +1364,7 @@ def assess_surface_binding_readiness(
     if selected_units not in UNIT_SCALE_M:
         message = (
             "Choose the physical units of the selected surface mesh before "
-            "checking solve-to-CAD registration."
+            "checking body-binding integrity."
             if not selected_units
             else f"Unsupported surface mesh units: {selected_units!r}."
         )
@@ -1426,7 +1426,8 @@ def assess_surface_binding_readiness(
         case_id = str(checked_binding.get("attestation_case_id", "")).strip()
         return SurfaceBindingReadiness(
             "valid",
-            f"✓ Current reviewed binding — geometry {geometry}; registration {case_id}.",
+            f"✓ Integrity-checked reviewed binding — geometry {geometry}; "
+            f"attested registration case {case_id}.",
             ready=True,
             required=required,
             external_body=True,
@@ -1436,13 +1437,13 @@ def assess_surface_binding_readiness(
     if checked_key is not None or error_key is not None:
         message = (
             "⚠ Binding check is stale — the body, mesh, units, or sidecar changed. "
-            "Click Check binding again."
+            "Click Check binding integrity again."
         )
         code = "stale"
     else:
         message = (
             "○ Binding found but not checked for the current body, mesh, and units. "
-            "Click Check binding before Production validation."
+            "Click Check binding integrity before Production validation."
         )
         code = "unchecked"
     return SurfaceBindingReadiness(
@@ -3784,6 +3785,7 @@ if GUI_AVAILABLE:
             self.setMinimumHeight(190)
             self._syncing = False
             self._filter_text = ""
+            self._instance_items: dict[tuple[str, str], QTreeWidgetItem] = {}
             self.itemChanged.connect(self._on_item_changed)
 
         @staticmethod
@@ -3895,8 +3897,10 @@ if GUI_AVAILABLE:
         def set_configuration(self, model: FeatureAssemblyFormModel) -> None:
             """Rebuild from parsed descriptors while honoring model exclusions."""
             self._syncing = True
+            self.setUpdatesEnabled(False)
             try:
                 self.clear()
+                self._instance_items.clear()
                 body_name = Path(_clean_path(model.values.base_grim)).name
                 body = QTreeWidgetItem(
                     ["Body", body_name or "clean-body response not selected", "Required"]
@@ -3935,6 +3939,7 @@ if GUI_AVAILABLE:
                 self.set_filter_text(self._filter_text)
             finally:
                 self._syncing = False
+                self.setUpdatesEnabled(True)
 
         def _add_kind(
             self,
@@ -3977,6 +3982,7 @@ if GUI_AVAILABLE:
                     leaf = QTreeWidgetItem([instance_id + suffix, "", ""])
                     leaf.setData(0, self._ROLE_KIND, kind)
                     leaf.setData(0, self._ROLE_INSTANCE_ID, instance_id)
+                    self._instance_items[(kind, instance_id)] = leaf
                     self._checkable_flags(leaf)
                     self._set_checked(leaf, instance_id not in excluded)
                     group.addChild(leaf)
@@ -4012,29 +4018,18 @@ if GUI_AVAILABLE:
             target = str(instance_id).strip()
             if normalized not in {"point", "line"} or not target:
                 return False
-            pending = [
-                self.topLevelItem(index)
-                for index in range(self.topLevelItemCount())
-            ]
-            while pending:
-                item = pending.pop()
-                pending.extend(
-                    item.child(index) for index in range(item.childCount())
-                )
-                if (
-                    item.data(0, self._ROLE_KIND) == normalized
-                    and str(item.data(0, self._ROLE_INSTANCE_ID) or "") == target
-                ):
-                    self.setCurrentItem(item)
-                    current = item.parent()
-                    while current is not None:
-                        current.setExpanded(True)
-                        current = current.parent()
-                    self.scrollToItem(
-                        item, QAbstractItemView.ScrollHint.PositionAtCenter
-                    )
-                    return True
-            return False
+            item = self._instance_items.get((normalized, target))
+            if item is None:
+                return False
+            self.setCurrentItem(item)
+            current = item.parent()
+            while current is not None:
+                current.setExpanded(True)
+                current = current.parent()
+            self.scrollToItem(
+                item, QAbstractItemView.ScrollHint.PositionAtCenter
+            )
+            return True
 
 
     class FeatureAssemblyPanel(QWidget):
@@ -4045,6 +4040,7 @@ if GUI_AVAILABLE:
         feature_built = Signal(str)
         build_failed = Signal(str)
         status_changed = Signal(str)
+        feature_instance_selected = Signal(str, str)
 
         def __init__(
             self,
@@ -4153,6 +4149,28 @@ if GUI_AVAILABLE:
             self.recipe_section.addWidget(recipe_group)
             outer.addWidget(self.recipe_section)
 
+            placement_units_bar = QWidget(self)
+            placement_units_bar.setObjectName("featurePlacementUnitsBar")
+            placement_units_layout = QHBoxLayout(placement_units_bar)
+            placement_units_layout.setContentsMargins(8, 5, 8, 5)
+            placement_units_layout.setSpacing(7)
+            placement_units_label = QLabel("Placement coordinate units:", placement_units_bar)
+            self.coordinate_units = QComboBox(placement_units_bar)
+            self.coordinate_units.addItem("Choose coordinate units...", "")
+            for label, value in UNIT_CHOICES:
+                self.coordinate_units.addItem(label, value)
+            self.coordinate_units.setToolTip(
+                "One shared unit system for every x/y/z coordinate in both the "
+                "point and line placement CSVs."
+            )
+            placement_units_label.setBuddy(self.coordinate_units)
+            placement_units_layout.addWidget(placement_units_label)
+            placement_units_layout.addWidget(self.coordinate_units, 1)
+            placement_units_layout.addWidget(
+                QLabel("Applies to Point and Line Features", placement_units_bar)
+            )
+            outer.addWidget(placement_units_bar)
+
             self.workflow_tabs = QTabWidget(self)
             self.workflow_tabs.setObjectName("featureWorkflowTabs")
             self.body_step_page = QWidget(self.workflow_tabs)
@@ -4217,12 +4235,9 @@ if GUI_AVAILABLE:
                 file_filter="GRIM response (*.grim);;All files (*)",
                 save=True,
             )
-            self.coordinate_units = QComboBox(body_group)
             self.surface_units = QComboBox(body_group)
-            self.coordinate_units.addItem("Choose coordinate units...", "")
             self.surface_units.addItem("Choose mesh units...", "")
             for label, value in UNIT_CHOICES:
-                self.coordinate_units.addItem(label, value)
                 self.surface_units.addItem(label, value)
             self.flip_normals = QCheckBox("Flip mesh normals", body_group)
             self.shadow = QCheckBox(
@@ -4240,9 +4255,6 @@ if GUI_AVAILABLE:
             self.surface_picker.setToolTip(
                 "Choose the matching STL/facet surface for a 3-D body. Leave "
                 "blank when the base GRIM contains an embedded BoR profile."
-            )
-            self.coordinate_units.setToolTip(
-                "Units used by every x/y/z coordinate in both placement CSVs."
             )
             self.surface_units.setToolTip(
                 "Units of the selected STL/facet surface, independent of the CSV units."
@@ -4268,6 +4280,7 @@ if GUI_AVAILABLE:
                 "available yet."
             )
             body_form.addRow("Interpreted mesh size:", self.surface_dimensions_label)
+            body_form.addRow("Mesh orientation and visibility:", mesh_options)
             binding_box = QWidget(body_group)
             binding_layout = QVBoxLayout(binding_box)
             binding_layout.setContentsMargins(0, 0, 0, 0)
@@ -4279,11 +4292,12 @@ if GUI_AVAILABLE:
             binding_actions = QHBoxLayout()
             binding_actions.setContentsMargins(0, 0, 0, 0)
             self.check_surface_binding_button = QPushButton(
-                "Check binding", binding_box
+                "Check binding integrity", binding_box
             )
             self.check_surface_binding_button.setToolTip(
-                "Explicitly hash and verify the exact clean-body response, mesh, "
-                "units, frame declaration, and reviewed IDs."
+                "Hash-check the exact clean-body response, mesh, units, frame "
+                "declaration, and reviewer attestations recorded by the binding. "
+                "This does not independently prove solve-to-CAD registration."
             )
             self.bind_surface_button = QPushButton(
                 "Bind / refresh…", binding_box
@@ -4307,36 +4321,23 @@ if GUI_AVAILABLE:
             body_form.addRow("", self.body_preview_help)
             body_content_layout.addStretch(1)
 
-            units_row = QHBoxLayout()
-            units_label = QLabel("CSV coordinate units:", point_page)
-            units_label.setBuddy(self.coordinate_units)
-            units_row.addWidget(units_label)
-            units_row.addWidget(self.coordinate_units, 1)
-            point_layout.addLayout(units_row)
             self.shared_units_label = QLabel(
-                "Units apply to both placement CSVs.", point_page,
+                "Placement units are shared across both CSVs and selected above the tabs.",
+                point_page,
             )
             self.shared_units_label.setObjectName("featureHint")
             self.shared_units_label.setWordWrap(True)
             point_layout.addWidget(self.shared_units_label)
-            self.line_coordinate_units = QComboBox(line_page)
-            for index in range(self.coordinate_units.count()):
-                self.line_coordinate_units.addItem(
-                    self.coordinate_units.itemText(index),
-                    self.coordinate_units.itemData(index),
-                )
-            self.line_coordinate_units.setToolTip(self.coordinate_units.toolTip())
-            self.coordinate_units.currentIndexChanged.connect(
-                self.line_coordinate_units.setCurrentIndex
+            # Backward-compatible attribute for recipes/tests and third-party
+            # controllers. There is intentionally only one physical control.
+            self.line_coordinate_units = self.coordinate_units
+            line_units_note = QLabel(
+                "Placement units are shared across both CSVs and selected above the tabs.",
+                line_page,
             )
-            self.line_coordinate_units.currentIndexChanged.connect(
-                self.coordinate_units.setCurrentIndex
-            )
-            line_units_row = QHBoxLayout()
-            line_units_row.addWidget(QLabel("CSV coordinate units:", line_page))
-            line_units_row.addWidget(self.line_coordinate_units, 1)
-            line_layout.addLayout(line_units_row)
-            line_layout.addWidget(QLabel("Units apply to both placement CSVs.", line_page))
+            line_units_note.setObjectName("featureHint")
+            line_units_note.setWordWrap(True)
+            line_layout.addWidget(line_units_note)
 
             feature_group = QWidget(review_content)
             feature_layout = QVBoxLayout(feature_group)
@@ -4640,7 +4641,6 @@ if GUI_AVAILABLE:
                 expanded=False,
             )
             self.advanced_section.addWidget(advanced)
-            self.advanced_section.addWidget(mesh_options)
             self.advanced_section.header.setToolTip(
                 "The displayed defaults remain active while this section is collapsed."
             )
@@ -4700,6 +4700,13 @@ if GUI_AVAILABLE:
             self.build_summary_label.setObjectName("featureBuildSummary")
             self.build_summary_label.setWordWrap(True)
             review_form.addRow(self.build_summary_label)
+            self.effective_physics_label = QLabel(review_group)
+            self.effective_physics_label.setObjectName("featureEffectivePhysics")
+            self.effective_physics_label.setWordWrap(True)
+            self.effective_physics_label.setToolTip(
+                "The settings that will actually be sent to validation and assembly."
+            )
+            review_form.addRow(self.effective_physics_label)
             self.work_estimate_label = QLabel(review_group)
             self.work_estimate_label.setObjectName("featureWorkEstimate")
             self.work_estimate_label.setWordWrap(True)
@@ -4720,12 +4727,12 @@ if GUI_AVAILABLE:
                 review_group,
             )
             self.model_scope_label.setWordWrap(True)
-            self.model_scope_label.setObjectName("featureHint")
+            self.model_scope_label.setObjectName("featureModelBoundary")
+            review_form.addRow(self.model_scope_label)
             self.model_scope_section = _DisclosureSection(
-                "Workload and physics scope", review_content, expanded=False
+                "Workload estimate", review_content, expanded=False
             )
             self.model_scope_section.addWidget(self.work_estimate_label)
-            self.model_scope_section.addWidget(self.model_scope_label)
             self.validation_qa_label = QLabel(
                 "Run Validate placements to see a row for every enabled point "
                 "and line path.",
@@ -4831,16 +4838,19 @@ if GUI_AVAILABLE:
 
             action_row = QHBoxLayout()
             self.input_preview_button = QPushButton("Preview geometry", self)
+            self.input_preview_button.setObjectName("featureWorkflowAction")
             self.input_preview_button.setToolTip(
                 "Show available body geometry and enabled CSV locations without "
                 "requiring response mappings or an output path. This is visual QA only."
             )
             self.preview_button = QPushButton("Validate placements", self)
+            self.preview_button.setObjectName("featureWorkflowAction")
             self.preview_button.setToolTip(
                 "Validate body skin, normals, and response mapping completeness, then "
                 "show the prepared body and features in the 3-D Assembly view."
             )
             self.build_button = QPushButton("Assemble && save", self)
+            self.build_button.setObjectName("featureWorkflowAction")
             self.build_button.setToolTip(
                 "Publish the exact current validation: coherently add every enabled "
                 "mapped feature and atomically save the selected output .grim file."
@@ -5428,7 +5438,7 @@ if GUI_AVAILABLE:
 
         @Slot()
         def check_selected_surface_binding(self) -> None:
-            """Explicitly verify the exact current external body registration."""
+            """Integrity-check the current reviewed external-body binding."""
 
             if self.job_is_running():
                 self.status_changed.emit("An Assembly operation is already running.")
@@ -5782,7 +5792,7 @@ if GUI_AVAILABLE:
             self.workflow_tabs.setTabToolTip(1, point_text)
             self.workflow_tabs.setTabToolTip(2, line_text)
             self.shared_units_label.setText(
-                "Units apply to both placement CSVs."
+                "Placement units are shared across both CSVs and selected above the tabs."
             )
 
             selected_parts = []
@@ -5826,6 +5836,17 @@ if GUI_AVAILABLE:
                 )
                 if selected_parts
                 else "Choose a point or line placement CSV."
+            )
+            shadow_state = "on" if values.shadow else "off"
+            normals_state = (
+                "flipped" if values.flip_surface_normals else "as stored"
+            )
+            self.effective_physics_label.setText(
+                "Effective settings — "
+                f"body shadowing: {shadow_state}; mesh normals: {normals_state}; "
+                f"skin distance ≤ {values.skin_tol_m * 1.0e3:.6g} mm; "
+                f"two-way phase error ≤ {values.skin_phase_tol_deg:.4g}°; "
+                f"normal mismatch ≤ {values.normal_tol_deg:.4g}°."
             )
             self.advanced_section.header.setText(
                 "Advanced placement checks"
@@ -5915,6 +5936,13 @@ if GUI_AVAILABLE:
             self.surface_binding_status.setProperty(
                 "bindingState", binding_status.code
             )
+            if self.surface_binding_status.property("styledBindingState") != binding_status.code:
+                self.surface_binding_status.setProperty(
+                    "styledBindingState", binding_status.code
+                )
+                style = self.surface_binding_status.style()
+                style.unpolish(self.surface_binding_status)
+                style.polish(self.surface_binding_status)
             binding_action_ready = bool(
                 not self.job_is_running()
                 and binding_status.external_body
@@ -6160,6 +6188,30 @@ if GUI_AVAILABLE:
             self.build_button.setEnabled(
                 not busy and full_ready and validation_current and warnings_reviewed
             )
+            primary_action = (
+                self.build_button
+                if self.build_button.isEnabled()
+                else (
+                    self.preview_button
+                    if self.preview_button.isEnabled()
+                    else (
+                        self.input_preview_button
+                        if self.input_preview_button.isEnabled()
+                        else None
+                    )
+                )
+            )
+            for action_button in (
+                self.input_preview_button,
+                self.preview_button,
+                self.build_button,
+            ):
+                should_be_primary = action_button is primary_action
+                if bool(action_button.property("primaryAction")) != should_be_primary:
+                    action_button.setProperty("primaryAction", should_be_primary)
+                    style = action_button.style()
+                    style.unpolish(action_button)
+                    style.polish(action_button)
             self.point_clear_button.setEnabled(not busy and point_selected)
             self.line_clear_button.setEnabled(not busy and line_selected)
 
@@ -6713,18 +6765,23 @@ if GUI_AVAILABLE:
         def _qa_row_clicked(self, row: int, _column: int) -> None:
             item = self.validation_qa_table.item(int(row), 0)
             payload = None if item is None else item.data(Qt.ItemDataRole.UserRole)
-            if (
-                isinstance(payload, (tuple, list))
-                and len(payload) == 2
-                and self.spatial_feature_tree.select_instance(
-                    str(payload[0]), str(payload[1])
+            if isinstance(payload, (tuple, list)) and len(payload) == 2:
+                kind = str(payload[0])
+                identifier = str(payload[1])
+                # A QA result is an explicit navigation request. Clear a
+                # display-only filter so the selected authoritative row cannot
+                # remain hidden behind stale search text.
+                self.spatial_feature_filter.clear()
+                found_in_tree = self.spatial_feature_tree.select_instance(
+                    kind, identifier
                 )
-            ):
+                self.feature_instance_selected.emit(kind, identifier)
                 self.workflow_tabs.setCurrentWidget(self.review_step_page)
-                self.feature_selection_section.header.setChecked(True)
+                if found_in_tree:
+                    self.feature_selection_section.header.setChecked(True)
                 self.status_changed.emit(
-                    f"Selected validated {payload[0]} feature {payload[1]!r} "
-                    "in Spatial Feature Configuration."
+                    f"Selected validated {kind} feature {identifier!r} for "
+                    "configuration and 3-D QA focus."
                 )
 
         def _update_spatial_selection_summary(self) -> None:
@@ -7031,8 +7088,8 @@ if GUI_AVAILABLE:
             self._set_busy(True)
             status = {
                 "discover": "Reading placement CSV schemas…",
-                "binding_check": "Checking exact body-to-mesh binding…",
-                "binding_write": "Writing and verifying reviewed body binding…",
+                "binding_check": "Checking exact body-to-mesh binding integrity…",
+                "binding_write": "Writing and integrity-checking reviewed body binding…",
                 "input_preview": (
                     "Loading body geometry and placement locations for visual preview…"
                 ),
@@ -7125,13 +7182,14 @@ if GUI_AVAILABLE:
                     self.preview_stale.emit(
                         "The body binding changed; the prior Assembly review is stale."
                     )
-                    verb = "Created and verified"
+                    verb = "Created and integrity-checked"
                 else:
-                    verb = "Verified"
+                    verb = "Integrity-checked"
                 self.status_changed.emit(
-                    f"✓ {verb} body binding: geometry "
-                    f"{binding.get('geometry_id')!r}; registration "
-                    f"{binding.get('attestation_case_id')!r}."
+                    f"✓ {verb} reviewed body-binding record: geometry "
+                    f"{binding.get('geometry_id')!r}; attested registration case "
+                    f"{binding.get('attestation_case_id')!r}. The hash check does "
+                    "not independently prove solve-to-CAD registration."
                 )
                 self._update_workflow_readiness()
             elif kind == "discover":

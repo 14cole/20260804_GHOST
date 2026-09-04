@@ -637,6 +637,9 @@ class RequestPlanTests(unittest.TestCase):
             )
 
             self.assertEqual(set(preview.point_locations_cad_m), {"antenna"})
+            self.assertEqual(
+                preview.point_placement_ids, {"antenna": ("p2",)}
+            )
             self.assertEqual(set(preview.line_paths_cad_m), {"seal"})
             self.assertEqual(
                 preview.dataset_requirements.point_instances,
@@ -920,6 +923,9 @@ class RequestPlanTests(unittest.TestCase):
             np.testing.assert_allclose(
                 preview.point_locations_cad_m["fastener"],
                 [[1.0e-3, 2.0e-3, 3.0e-3]],
+            )
+            self.assertEqual(
+                preview.point_placement_ids, {"fastener": ("p1",)}
             )
             np.testing.assert_allclose(
                 preview.line_paths_cad_m["panel_gap"]["gap_1"],
@@ -1509,6 +1515,9 @@ class RequestPlanTests(unittest.TestCase):
             np.testing.assert_allclose(
                 preview.point_locations_cad_m["antenna"],
                 [[0.25 * 0.0254, 0.25 * 0.0254, 0.0]],
+            )
+            self.assertEqual(
+                preview.point_placement_ids, {"antenna": ("p1",)}
             )
             np.testing.assert_allclose(
                 preview.line_paths_cad_m["gap"]["gap_1"],

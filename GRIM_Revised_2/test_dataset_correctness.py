@@ -540,7 +540,9 @@ class DatasetCorrectnessTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, "input azimuth axis contains coordinates closer"
         ):
-            grid.combine_elevation_pair_to_azimuth_360()
+            grid.combine_elevation_pair_to_azimuth_360(
+                assumptions_attested=True
+            )
 
     def test_join_tiles_polarization_and_reserves_ownership_bypass(self):
         polarizations = [f"P{i}" for i in range(5)]

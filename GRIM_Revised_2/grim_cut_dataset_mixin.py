@@ -66,6 +66,7 @@ from grim_python import (
     coherent_divide,
     convert_extrusion,
     crop_dataset,
+    decimate_axis,
     medianize_azimuth,
     offset_db,
     regrid_axis,
@@ -867,7 +868,8 @@ class StitchDialog(QDialog):
 
         preview = QLabel(
             "GRIM computes the merged result and overlap report in the background, "
-            "then shows the resolved/equal/conflicting counts before adding it."
+            "adds one new unsaved dataset, and reports resolved/equal/conflicting "
+            "counts. The complete report is retained in dataset provenance."
         )
         preview.setWordWrap(True)
         layout.addWidget(preview)
@@ -1000,6 +1002,56 @@ class DatasetAuditDialog(QDialog):
                 append_mapping(lines, metrics, 2)
             blocks.append("\n".join(lines))
         return "\n\n".join(blocks)
+
+
+class DatasetCompatibilityDialog(QDialog):
+    """Copyable preflight report for selected multi-dataset operations."""
+
+    def __init__(self, report_text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Dataset Compatibility")
+        self.resize(760, 560)
+        layout = QVBoxLayout(self)
+        summary = QLabel(
+            "Read-only preflight against operand 1. PASS means the tested "
+            "contract is satisfied; WARN requires a recorded assumption."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        text.setPlainText(str(report_text))
+        layout.addWidget(text, 1)
+        self.report_text = text
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class DatasetProvenanceDialog(QDialog):
+    """Copyable, bounded view of lineage and metadata for selected rows."""
+
+    def __init__(self, report_text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Dataset Provenance")
+        self.resize(800, 600)
+        layout = QVBoxLayout(self)
+        summary = QLabel(
+            "Large metadata arrays are described by shape, type, and size rather "
+            "than expanded. JSON provenance records are formatted for review."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        text.setPlainText(str(report_text))
+        layout.addWidget(text, 1)
+        self.report_text = text
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class ShiftDialog(QDialog):
@@ -1457,6 +1509,58 @@ class WrapDialog(QDialog):
         }
 
 
+class DecimateDialog(QDialog):
+    """Configure boxcar-prefiltered integer-factor downsampling."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Decimate with Prefilter")
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Average adjacent bins on a uniformly sampled source axis before "
+            "retaining one output bin. This avoids the unfiltered point-sampling "
+            "behavior of a coarse Regrid."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        grid = QGridLayout()
+        self._axis = QComboBox()
+        self._axis.addItem("Azimuth / Aspect", "azimuth")
+        self._axis.addItem("Elevation / Pitch", "elevation")
+        self._axis.addItem("Frequency", "frequency")
+        self._factor = QSpinBox()
+        self._factor.setRange(2, 1_000_000)
+        self._factor.setValue(2)
+        self._mode = QComboBox()
+        self._mode.addItem("Linear-power mean (phase becomes unknown)", "power")
+        self._mode.addItem("Coherent complex-field mean", "coherent")
+        grid.addWidget(QLabel("Axis:"), 0, 0)
+        grid.addWidget(self._axis, 0, 1)
+        grid.addWidget(QLabel("Integer factor:"), 1, 0)
+        grid.addWidget(self._factor, 1, 1)
+        grid.addWidget(QLabel("Filter domain:"), 2, 0)
+        grid.addWidget(self._mode, 2, 1)
+        layout.addLayout(grid)
+        warning = QLabel(
+            "The final partial bin is retained using its actual sample count. "
+            "A coherent mean requires finite phase and represents filtered field, "
+            "not averaged RCS power."
+        )
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_params(self) -> dict[str, object]:
+        return {
+            "axis": str(self._axis.currentData()),
+            "factor": int(self._factor.value()),
+            "mode": str(self._mode.currentData()),
+        }
+
+
 class MedianizeDialog(QDialog):
     """Pick the sliding-window parameters for a median smoothing pass along
     the azimuth axis.
@@ -1566,6 +1670,59 @@ class ExtrusionLengthDialog(QDialog):
 
     def display_text(self) -> str:
         return f"{float(self._spin.value()):g} {self._combo.currentText()}"
+
+
+class AxisUnitsDialog(QDialog):
+    """Choose equivalent storage units for all three numeric axes."""
+
+    def __init__(self, reference: RcsGrid, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Convert Axis Units")
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "This is an exact unit conversion. Physical coordinates and all "
+            "RCS samples remain unchanged; no interpolation is performed."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        grid = QGridLayout()
+        self._azimuth = QComboBox()
+        self._elevation = QComboBox()
+        self._frequency = QComboBox()
+        for combo in (self._azimuth, self._elevation):
+            combo.addItems(["deg", "rad"])
+        self._frequency.addItems(["Hz", "kHz", "MHz", "GHz"])
+        current_az = _canonical_angle_unit(
+            (reference.units or {}).get("azimuth", "deg")
+        )
+        current_el = _canonical_angle_unit(
+            (reference.units or {}).get("elevation", "deg")
+        )
+        current_frequency = _canonical_frequency_unit(
+            (reference.units or {}).get("frequency", "GHz")
+        )
+        self._azimuth.setCurrentText(current_az)
+        self._elevation.setCurrentText(current_el)
+        self._frequency.setCurrentText(current_frequency)
+        for row, (label, combo) in enumerate((
+            ("Azimuth / Aspect:", self._azimuth),
+            ("Elevation / Pitch:", self._elevation),
+            ("Frequency:", self._frequency),
+        )):
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(combo, row, 1)
+        layout.addLayout(grid)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_params(self) -> dict[str, str]:
+        return {
+            "azimuth": self._azimuth.currentText(),
+            "elevation": self._elevation.currentText(),
+            "frequency": self._frequency.currentText(),
+        }
 
 
 class CoordinateSystemDialog(QDialog):
@@ -2388,6 +2545,10 @@ class _CsvExportWorker(QObject):
         self.finished.emit({"ok": True, "paths": paths, "total": total})
 
 
+class _BackgroundJobCancelled(RuntimeError):
+    """Internal cooperative-cancellation sentinel."""
+
+
 class _BackgroundCallableWorker(QObject):
     """Run one pure-Python/NumPy callable away from Qt's GUI thread."""
 
@@ -2398,13 +2559,26 @@ class _BackgroundCallableWorker(QObject):
         super().__init__(parent)
         self._function = function
         self._reports_progress = bool(reports_progress)
+        self.supports_cancellation = self._reports_progress
 
     def run(self) -> None:
         try:
+            if QThread.currentThread().isInterruptionRequested():
+                raise _BackgroundJobCancelled()
             if self._reports_progress:
-                result = self._function(self.progress.emit)
+                def report_progress(done_count, total_count, detail=""):
+                    if QThread.currentThread().isInterruptionRequested():
+                        raise _BackgroundJobCancelled()
+                    self.progress.emit(done_count, total_count, detail)
+
+                result = self._function(report_progress)
             else:
                 result = self._function()
+            if QThread.currentThread().isInterruptionRequested():
+                raise _BackgroundJobCancelled()
+        except _BackgroundJobCancelled:
+            self.finished.emit({"ok": False, "cancelled": True})
+            return
         except Exception as exc:
             self.finished.emit(
                 {"ok": False, "error": str(exc), "error_type": type(exc).__name__}
@@ -2414,6 +2588,7 @@ class _BackgroundCallableWorker(QObject):
 
 
 class _JoinDatasetsWorker(QObject):
+    supports_cancellation = False
     progress = Signal(int, int, str)
     finished = Signal(object)
 
@@ -2425,10 +2600,18 @@ class _JoinDatasetsWorker(QObject):
     def run(self) -> None:
         total = max(1, len(self._grids))
         try:
+            if QThread.currentThread().isInterruptionRequested():
+                raise _BackgroundJobCancelled()
+
             def _emit_progress(done_count: int, total_count: int) -> None:
+                if QThread.currentThread().isInterruptionRequested():
+                    raise _BackgroundJobCancelled()
                 self.progress.emit(done_count, total_count, "Joining datasets")
 
             merged = _join_many_with_progress(self._grids, tol=self._tol, progress_cb=_emit_progress)
+        except _BackgroundJobCancelled:
+            self.finished.emit({"ok": False, "cancelled": True, "total": total})
+            return
         except Exception as exc:
             self.finished.emit({"ok": False, "error": str(exc), "total": total})
             return
@@ -2437,6 +2620,8 @@ class _JoinDatasetsWorker(QObject):
 
 class _RangeCalibrationWorker(QObject):
     """Apply one calibration definition to DUT grids off the GUI thread."""
+
+    supports_cancellation = True
 
     progress = Signal(int, int, str)
     finished = Signal(object)
@@ -2475,6 +2660,9 @@ class _RangeCalibrationWorker(QObject):
             exact_display = exact_display[:45] + "..."
 
         for index, (target_name, target) in enumerate(self._targets, start=1):
+            if QThread.currentThread().isInterruptionRequested():
+                failed.append("cancelled by user")
+                break
             try:
                 calibrated = target.range_calibrate(
                     self._measured,
@@ -2524,6 +2712,40 @@ class _RangeCalibrationWorker(QObject):
 
 
 class DatasetOpsMixin:
+    def _preflight_derived_outputs(
+        self,
+        operation_name: str,
+        plans,
+        *,
+        extra_bytes: int = 0,
+    ) -> bool:
+        """Reject a derived-result batch whose conservative peak is unsafe.
+
+        ``plans`` contains ``(dataset, output_shape)`` pairs. The common
+        estimator includes retained power/phase plus constructor and ufunc
+        scratch; callers add operation-specific tensors through ``extra_bytes``.
+        """
+
+        try:
+            estimated_peak = int(extra_bytes) + sum(
+                _derived_grid_peak_bytes(dataset, shape)
+                for dataset, shape in plans
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            self.status.showMessage(
+                f"{operation_name} blocked: invalid output-size estimate ({exc})"
+            )
+            return False
+        limit = _derived_grid_memory_limit()
+        if estimated_peak <= limit:
+            return True
+        self.status.showMessage(
+            f"{operation_name} blocked before allocation: estimated working set "
+            f"{_format_bytes(estimated_peak)} exceeds the current safety limit "
+            f"{_format_bytes(limit)}. Process fewer or smaller datasets."
+        )
+        return False
+
     def _ensure_background_worker_state(self) -> None:
         if hasattr(self, "_background_worker_thread"):
             return
@@ -2601,8 +2823,33 @@ class DatasetOpsMixin:
         self._background_worker = worker
         self._background_worker_name = job_name
         self._set_background_progress(detail=job_name)
+        cancel_button = getattr(self, "btn_dataset_cancel", None)
+        if cancel_button is not None:
+            cancel_button.setEnabled(True)
+            cancel_button.setVisible(
+                bool(getattr(worker, "supports_cancellation", False))
+            )
+        self._update_dataset_action_states(force_busy=True)
         thread.start()
         return True
+
+    def _cancel_background_job(self) -> None:
+        """Request a cooperative stop at the next safe worker boundary."""
+
+        self._ensure_background_worker_state()
+        thread = self._background_worker_thread
+        if not isinstance(thread, QThread) or not thread.isRunning():
+            self.status.showMessage("No dataset job is currently running.")
+            return
+        thread.requestInterruption()
+        cancel_button = getattr(self, "btn_dataset_cancel", None)
+        if cancel_button is not None:
+            cancel_button.setEnabled(False)
+        self.status.showMessage(
+            f"Cancellation requested for "
+            f"{self._background_worker_name or 'the dataset job'}; "
+            "finishing the current safe block…"
+        )
 
     def _start_background_callable(
         self,
@@ -2654,6 +2901,14 @@ class DatasetOpsMixin:
         """Run an independent full-grid transform for each selected row."""
 
         launch_items = tuple(datasets)
+        if not self._preflight_derived_outputs(
+            job_name,
+            [
+                (dataset, tuple(int(value) for value in dataset.rcs_power.shape))
+                for _name, dataset in launch_items
+            ],
+        ):
+            return False
 
         def compute(progress):
             results = []
@@ -2686,6 +2941,12 @@ class DatasetOpsMixin:
     def _on_background_callable_finished(self, payload: dict[str, object]) -> None:
         completion = self._pending_callable_completion
         self._pending_callable_completion = None
+        if bool(payload.get("cancelled", False)):
+            self.status.showMessage(
+                f"{self._background_worker_name or 'Dataset operation'} "
+                "cancelled; no unfinished result was published."
+            )
+            return
         if not bool(payload.get("ok", False)):
             self.status.showMessage(
                 f"{self._background_worker_name or 'Dataset operation'} failed: "
@@ -2702,6 +2963,11 @@ class DatasetOpsMixin:
         self._background_worker_name = ""
         self._active_import_keys.clear()
         self._clear_background_progress()
+        cancel_button = getattr(self, "btn_dataset_cancel", None)
+        if cancel_button is not None:
+            cancel_button.setVisible(False)
+            cancel_button.setEnabled(True)
+        self._update_dataset_action_states()
 
         if self._start_next_pending_import_batch():
             return
@@ -3214,6 +3480,7 @@ class DatasetOpsMixin:
 
         selected = self.table.selectionModel().selectedRows()
         self._update_dataset_selection_order([idx.row() for idx in selected])
+        self._update_dataset_action_states()
         summary_label = getattr(self, "lbl_dataset_selection_summary", None)
         if not selected:
             commit_active_dataset(None)
@@ -3277,6 +3544,64 @@ class DatasetOpsMixin:
             else:
                 summary_label.setText(f"Active parameters: {shown_active_name}")
                 summary_label.setToolTip(f"Active parameters: {active_name}")
+
+    def _update_dataset_action_states(self, *, force_busy: bool = False) -> None:
+        """Disable actions whose operand-count or job-state contract is unmet."""
+
+        table = getattr(self, "table", None)
+        if table is None:
+            return
+        selection_model = table.selectionModel()
+        selected_count = (
+            len(selection_model.selectedRows())
+            if selection_model is not None
+            else 0
+        )
+        row_count = int(table.rowCount())
+        busy = bool(force_busy or self._background_job_active())
+
+        def enable(names, condition) -> None:
+            state = bool(condition) and not busy
+            for name in names:
+                button = getattr(self, name, None)
+                if button is not None:
+                    button.setEnabled(state)
+
+        enable(
+            (
+                "btn_slice", "btn_stats", "btn_percentile", "btn_interpolate",
+                "btn_decimate", "btn_mirror", "btn_wrap", "btn_shift",
+                "btn_round", "btn_offset", "btn_medianize", "btn_duplicate",
+                "btn_audit", "btn_provenance", "btn_set_coordinates",
+                "btn_axis_units", "btn_el_to_az360", "btn_swap_el_az",
+                "btn_sentri_elevation", "btn_to_dbke", "btn_to_dbsm",
+                "btn_conic_gc", "btn_wedge_to_conic",
+            ),
+            selected_count >= 1,
+        )
+        enable(
+            (
+                "btn_coherent_add", "btn_coherent_sub", "btn_incoherent_add",
+                "btn_incoherent_sub", "btn_join", "btn_stitch", "btn_overlap",
+                "btn_align", "btn_compatibility", "btn_support_reference",
+            ),
+            selected_count >= 2,
+        )
+        enable(("btn_coherent_div", "btn_dbdiff"), selected_count == 2)
+        enable(
+            ("btn_range_cal",),
+            selected_count >= 1 and row_count - selected_count >= 2,
+        )
+        enable(
+            ("btn_dataset_save", "btn_dataset_export", "btn_dataset_delete"),
+            selected_count >= 1,
+        )
+        enable(("btn_dataset_save_all",), row_count >= 1)
+        enable(("btn_dataset_save_dirty",), bool(self._dirty_dataset_rows()))
+        enable(
+            ("btn_dataset_undo_delete",),
+            bool(getattr(self, "_last_deleted_dataset_rows", ())),
+        )
 
     def _update_dataset_selection_order(self, selected_rows: list[int]) -> None:
         selected_set = set(selected_rows)
@@ -3604,13 +3929,10 @@ class DatasetOpsMixin:
         self,
         datasets: list[tuple[str, RcsGrid]],
         operation_name: str,
+        *,
+        independent: bool = False,
     ) -> bool | None:
-        """Report missing coherent metadata without blocking the operation.
-
-        The selected operation itself expresses coherent intent. The numeric
-        core records missing declarations as assumptions and still rejects
-        explicit physical conflicts.
-        """
+        """Require explicit confirmation when coherent declarations are missing."""
 
         labels = _COHERENT_METADATA_LABELS
         missing = _missing_coherent_metadata_keys(
@@ -3621,11 +3943,50 @@ class DatasetOpsMixin:
             return False
 
         missing_text = ", ".join(labels[key] for key in labels if key in missing)
-        self.status.showMessage(
-            f"{operation_name}: {missing_text} unspecified; proceeding with "
-            "available complex samples and recording the assumption."
+        affected = []
+        for name, dataset in datasets:
+            absent = []
+            getter = getattr(dataset, "_declared_scalar_metadata", None)
+            for key, label in labels.items():
+                value = getter(key) if callable(getter) else ""
+                if not str(value or "").strip():
+                    absent.append(label)
+            if absent:
+                affected.append(f"• {name}: {', '.join(absent)}")
+        details = "\n".join(affected[:12])
+        if len(affected) > 12:
+            details += f"\n• …and {len(affected) - 12} more"
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        physical_statement = (
+            "For each dataset, coherent filtering is physically meaningful only "
+            "when the phase reference/center, phasor time convention, and "
+            "polarization basis apply consistently across its filtered samples. "
+            if independent
+            else "A coherent result is physically meaningful only when phase "
+            "center, phasor time convention, and polarization basis are "
+            "compatible across the inputs. "
         )
-        return False
+        answer = QMessageBox.question(
+            self,
+            f"Confirm {operation_name} Assumptions",
+            f"The selected datasets do not fully declare {missing_text}.\n\n"
+            f"{details}\n\n"
+            + physical_statement
+            + "Proceed under that explicit assumption and record it in provenance?",
+            buttons.Yes | buttons.No,
+            buttons.No,
+        )
+        if answer != buttons.Yes:
+            self.status.showMessage(
+                f"{operation_name} cancelled: coherent metadata assumptions "
+                "were not confirmed."
+            )
+            return None
+        self.status.showMessage(
+            f"{operation_name}: missing coherent declarations explicitly "
+            "accepted; the assumption will be recorded."
+        )
+        return True
 
     def _combine_datasets_add(
         self,
@@ -3642,6 +4003,21 @@ class DatasetOpsMixin:
         if len(datasets) < 2:
             self.status.showMessage("Select at least 2 datasets to combine.")
             return
+        base = datasets[0][1]
+        # Coherent addition may hold two complex operands plus the retained
+        # power/phase result. The common six-real-array estimate is adequate
+        # for ordinary power arithmetic; reserve one more output estimate for
+        # complex-field reconstruction.
+        combine_extra = (
+            _derived_grid_peak_bytes(base, base.rcs_power.shape)
+            if coherent else 0
+        )
+        if not self._preflight_derived_outputs(
+            op_label,
+            [(base, base.rcs_power.shape)],
+            extra_bytes=combine_extra,
+        ):
+            return
         metadata_attested = False
         if coherent:
             attestation = self._confirm_coherent_metadata(datasets, op_label)
@@ -3649,7 +4025,6 @@ class DatasetOpsMixin:
                 return
             metadata_attested = attestation
         names = [name for name, _ in datasets]
-        base = datasets[0][1]
         input_refs = self._python_input_references(datasets)
         new_name = f" {op_symbol} ".join(names)
         history = f"{op_label}: {new_name}"
@@ -3707,6 +4082,17 @@ class DatasetOpsMixin:
             self.status.showMessage(
                 f"{op_label}: select exactly {int(required_count)} datasets."
             )
+            return
+        base = datasets[0][1]
+        combine_extra = (
+            _derived_grid_peak_bytes(base, base.rcs_power.shape)
+            if coherent else 0
+        )
+        if not self._preflight_derived_outputs(
+            op_label,
+            [(base, base.rcs_power.shape)],
+            extra_bytes=combine_extra,
+        ):
             return
         metadata_attested = False
         if coherent:
@@ -3929,6 +4315,190 @@ class DatasetOpsMixin:
         if self._start_background_callable("Dataset audit", compute, publish):
             self.status.showMessage(f"Auditing {len(datasets)} dataset(s)...")
 
+    def _compatibility_selected_datasets(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select two or more datasets to compare compatibility.",
+        )
+        if datasets is None:
+            return
+        if len(datasets) < 2:
+            self.status.showMessage(
+                "Compatibility needs at least two selected datasets."
+            )
+            return
+        reference_name, reference = datasets[0]
+
+        def compute():
+            blocks = [
+                "Operand 1 (reference): " + reference_name,
+                "Selection order: " + " -> ".join(name for name, _grid in datasets),
+            ]
+            pass_count = 0
+            warning_count = 0
+            fail_count = 0
+            for operand_index, (name, dataset) in enumerate(datasets[1:], start=2):
+                lines = [f"Operand {operand_index}: {name}"]
+                axis_ok = False
+                physical_ok = False
+                exact_ok = False
+                coherent_ok = False
+                try:
+                    reference._assert_axis_metadata_compatible(dataset)
+                except Exception as exc:
+                    lines.append(f"  FAIL axis frame/units: {exc}")
+                    fail_count += 1
+                else:
+                    axis_ok = True
+                    lines.append("  PASS axis frame/units")
+                    pass_count += 1
+                try:
+                    reference._assert_physical_metadata_compatible(dataset)
+                except Exception as exc:
+                    lines.append(f"  FAIL physical quantity: {exc}")
+                    fail_count += 1
+                else:
+                    physical_ok = True
+                    lines.append("  PASS physical quantity/log unit")
+                    pass_count += 1
+                try:
+                    reference._assert_compatible(dataset)
+                except Exception as exc:
+                    lines.append(f"  FAIL exact element-wise grid: {exc}")
+                    fail_count += 1
+                else:
+                    exact_ok = True
+                    lines.append("  PASS exact element-wise grid")
+                    pass_count += 1
+                try:
+                    reference._assert_compatible(
+                        dataset,
+                        coherent=True,
+                        coherent_metadata_attested=False,
+                        _scan_phase_samples=False,
+                    )
+                except Exception as exc:
+                    lines.append(f"  FAIL coherent declarations: {exc}")
+                    fail_count += 1
+                else:
+                    coherent_ok = True
+                    missing = _missing_coherent_metadata_keys(
+                        (reference, dataset)
+                    )
+                    if missing:
+                        rendered = ", ".join(
+                            _COHERENT_METADATA_LABELS[key]
+                            for key in _COHERENT_METADATA_LABELS
+                            if key in missing
+                        )
+                        lines.append(
+                            "  WARN coherent declarations missing: " + rendered
+                        )
+                        warning_count += 1
+                    else:
+                        lines.append("  PASS coherent declarations")
+                        pass_count += 1
+                available = []
+                if axis_ok:
+                    available.extend(("Align", "Overlap"))
+                if physical_ok:
+                    available.extend(("Join", "Merge Overlaps"))
+                if exact_ok:
+                    available.extend(("Incoherent +/-", "Delta dB"))
+                if coherent_ok and exact_ok:
+                    available.extend(("Coherent +/-", "Coherent divide"))
+                lines.append(
+                    "  Compatible operation families: "
+                    + (", ".join(available) if available else "none without repair")
+                )
+                blocks.append("\n".join(lines))
+            summary = (
+                f"Checks: {pass_count} pass, {warning_count} warning, "
+                f"{fail_count} fail"
+            )
+            return summary + "\n\n" + "\n\n".join(blocks)
+
+        def publish(report_text) -> None:
+            dialog = DatasetCompatibilityDialog(report_text, parent=self)
+            dialog.exec()
+            dialog.deleteLater()
+            first_line = str(report_text).splitlines()[0]
+            self.status.showMessage("Dataset compatibility complete: " + first_line)
+
+        if self._start_background_callable(
+            "Dataset compatibility", compute, publish
+        ):
+            self.status.showMessage(
+                f"Comparing {len(datasets)} datasets against operand 1..."
+            )
+
+    @staticmethod
+    def _provenance_value_text(key: str, value) -> str:
+        """Format metadata without materializing or printing large arrays."""
+
+        try:
+            array = np.asarray(value)
+        except (TypeError, ValueError):
+            return repr(value)
+        if array.size > 16:
+            return (
+                f"<array shape={tuple(int(v) for v in array.shape)!r}, "
+                f"dtype={array.dtype}, bytes={int(array.nbytes):,}>"
+            )
+        if array.size == 1:
+            try:
+                scalar = array.reshape(()).item()
+            except ValueError:
+                scalar = value
+            if str(key).endswith("_json") and isinstance(scalar, str):
+                try:
+                    return json.dumps(
+                        json.loads(scalar), indent=2, sort_keys=True
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            return repr(scalar)
+        return repr(array.tolist())
+
+    def _provenance_selected_datasets(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select one or more datasets to inspect provenance.",
+        )
+        if datasets is None:
+            return
+        blocks = []
+        for operand_index, (name, dataset) in enumerate(datasets, start=1):
+            reference = self._python_reference_for_dataset(dataset)
+            source = reference.path if reference is not None else dataset.source_path
+            lines = [
+                f"Operand {operand_index}: {name}",
+                f"Source: {source or 'unsaved / in-memory'}",
+                f"Shape: {tuple(int(value) for value in dataset.rcs_power.shape)!r}",
+                f"Coordinate system: {dataset.angular_coordinate_system()}",
+                "Units:",
+                json.dumps(dict(dataset.units or {}), indent=2, sort_keys=True),
+                "History:",
+                str(dataset.history or "(none)"),
+                "Extra metadata:",
+            ]
+            if dataset.extra:
+                for key in sorted(dataset.extra, key=str):
+                    rendered = self._provenance_value_text(
+                        str(key), dataset.extra[key]
+                    )
+                    indented = rendered.replace("\n", "\n    ")
+                    lines.append(f"  {key}: {indented}")
+            else:
+                lines.append("  (none)")
+            blocks.append("\n".join(lines))
+        dialog = DatasetProvenanceDialog("\n\n".join(blocks), parent=self)
+        dialog.exec()
+        dialog.deleteLater()
+        self.status.showMessage(
+            f"Displayed provenance for {len(datasets)} dataset(s)."
+        )
+
     def _join_selected_datasets(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
@@ -3972,7 +4542,12 @@ class DatasetOpsMixin:
         tolerance = float(params["tol"])
         metadata_attested = False
         if policy == "coherent-mean":
-            self._confirm_coherent_metadata(datasets, "Coherent overlap merge")
+            attestation = self._confirm_coherent_metadata(
+                datasets, "Coherent overlap merge"
+            )
+            if attestation is None:
+                return
+            metadata_attested = attestation
 
         names = [name for name, _dataset in datasets]
         grids = [dataset for _name, dataset in datasets]
@@ -4571,6 +5146,11 @@ class DatasetOpsMixin:
 
 
     def _delete_selected_datasets(self) -> None:
+        if self._background_job_active():
+            self.status.showMessage(
+                "Wait for the active dataset job to finish before deleting rows."
+            )
+            return
         selected = self.table.selectionModel().selectedRows()
         if not selected:
             self.status.showMessage("Select one or more datasets to delete.")
@@ -4590,21 +5170,65 @@ class DatasetOpsMixin:
                 self,
                 "Delete Unsaved Datasets?",
                 f"{len(dirty_rows)} selected dataset(s) have never been saved:\n\n"
-                f"{details}\n\nDelete them permanently?",
+                f"{details}\n\nDelete them? The next Undo Delete action can "
+                "restore this batch.",
                 buttons.Yes | buttons.No,
                 buttons.No,
             )
             if answer != buttons.Yes:
                 self.status.showMessage("Delete cancelled; unsaved datasets were kept.")
                 return
+        deleted_rows = []
+        for row in sorted(rows):
+            items = []
+            for column in range(self.table.columnCount()):
+                item = self.table.item(row, column)
+                items.append(item.clone() if item is not None else None)
+            deleted_rows.append((row, items))
         for row in rows:
             self.table.removeRow(row)
+        self._last_deleted_dataset_rows = deleted_rows
         self.active_dataset = None
         self._clear_param_lists()
         notify = getattr(self, "_notify_dataset_catalog_changed", None)
         if callable(notify):
             notify()
-        self.status.showMessage(f"Deleted {len(rows)} dataset(s).")
+        self.status.showMessage(
+            f"Deleted {len(rows)} dataset(s). Undo Delete can restore this batch."
+        )
+
+    def _undo_last_deleted_datasets(self) -> None:
+        if self._background_job_active():
+            self.status.showMessage(
+                "Wait for the active dataset job to finish before restoring rows."
+            )
+            return
+        deleted_rows = list(getattr(self, "_last_deleted_dataset_rows", ()))
+        if not deleted_rows:
+            self.status.showMessage("There is no deleted dataset batch to restore.")
+            return
+        signals_were_blocked = self.table.blockSignals(True)
+        restored_rows = []
+        try:
+            for original_row, items in sorted(deleted_rows, key=lambda entry: entry[0]):
+                row = min(max(int(original_row), 0), self.table.rowCount())
+                self.table.insertRow(row)
+                for column, item in enumerate(items):
+                    if item is not None:
+                        self.table.setItem(row, column, item)
+                restored_rows.append(row)
+        finally:
+            self.table.blockSignals(signals_were_blocked)
+        self._last_deleted_dataset_rows = []
+        notify = getattr(self, "_notify_dataset_catalog_changed", None)
+        if callable(notify):
+            notify()
+        self.table.clearSelection()
+        if restored_rows:
+            self.table.selectRow(restored_rows[0])
+        self.status.showMessage(
+            f"Restored {len(restored_rows)} dataset(s) from the last deletion."
+        )
 
     def _save_selected_datasets(self) -> None:
         selected = self.table.selectionModel().selectedRows()
@@ -4655,6 +5279,22 @@ class DatasetOpsMixin:
             list(range(self.table.rowCount())),
             directory,
             dialog_title="Save All Datasets",
+        )
+
+    def _save_dirty_datasets(self) -> None:
+        """Save only rows whose current in-memory state is not on disk."""
+
+        rows = self._dirty_dataset_rows()
+        if not rows:
+            self.status.showMessage("No dirty dataset rows to save.")
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self, "Save Dirty Datasets"
+        )
+        if not directory:
+            return
+        self._save_rows_to_directory(
+            rows, directory, dialog_title="Save Dirty Datasets"
         )
 
     def _save_rows_to_directory(
@@ -5096,6 +5736,22 @@ class DatasetOpsMixin:
             return
 
         mode = dlg.get_mode()
+        align_plans = []
+        for _name, dataset in others:
+            if mode == "interp":
+                output_shape = tuple(int(value) for value in ref_grid.rcs_power.shape)
+            elif mode == "intersect":
+                output_shape = tuple(
+                    min(int(left), int(right))
+                    for left, right in zip(
+                        dataset.rcs_power.shape, ref_grid.rcs_power.shape
+                    )
+                )
+            else:
+                output_shape = tuple(int(value) for value in dataset.rcs_power.shape)
+            align_plans.append((dataset, output_shape))
+        if not self._preflight_derived_outputs("Align", align_plans):
+            return
         source_references = [
             self._python_reference_for_dataset(dataset)
             for _name, dataset in others
@@ -5286,10 +5942,28 @@ class DatasetOpsMixin:
                 return
 
         if downsampled:
-            self.status.showMessage(
-                "Regrid will sample a coarser grid without anti-alias filtering for: "
-                + _compact_item_summary(downsampled)
+            buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+            answer = QMessageBox.question(
+                self,
+                "Confirm Point-Sampled Downsampling",
+                "The requested grid is coarser than the source sampling for:\n\n"
+                + "\n".join(f"• {name}" for name in downsampled[:12])
+                + (
+                    f"\n• …and {len(downsampled) - 12} more"
+                    if len(downsampled) > 12 else ""
+                )
+                + "\n\nRegrid performs complex point interpolation and does not "
+                "apply an anti-alias filter. Continue with point-sampled "
+                "downsampling?",
+                buttons.Yes | buttons.No,
+                buttons.No,
             )
+            if answer != buttons.Yes:
+                self.status.showMessage(
+                    "Regrid cancelled: coarser point sampling was not confirmed."
+                )
+                return
+        downsampled_set = set(downsampled)
 
         source_references = [
             self._python_reference_for_dataset(dataset)
@@ -5340,6 +6014,8 @@ class DatasetOpsMixin:
                     f"Regrid {axis} [{start:g}..{resolved_stop:g} {display_unit}, "
                     f"step {step:g} {display_unit}, no extrapolation]: {name}"
                 )
+                if name in downsampled_set:
+                    history += "; coarser point sampling; no anti-alias filter"
                 output_name = f"{name} [Regrid {axis}]"
                 output_id = self._add_dataset_row(
                     interpolated, output_name, history, file_name=""
@@ -5365,6 +6041,12 @@ class DatasetOpsMixin:
                 )
                 return
             message = f"Regrid created {produced} dataset(s) on {axis}."
+            if downsampled:
+                message += (
+                    " Point-sampled without anti-alias filtering: "
+                    + _compact_item_summary(downsampled)
+                    + "."
+                )
             if skipped:
                 message += f" Skipped: {_compact_item_summary(skipped)}"
             self.status.showMessage(message)
@@ -5375,6 +6057,92 @@ class DatasetOpsMixin:
             self.status.showMessage(
                 f"Regridding {len(datasets)} dataset(s) onto {n:,} {axis} samples..."
             )
+
+    def _decimate_selected(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select one or more datasets to decimate.",
+        )
+        if datasets is None:
+            return
+
+        dlg = DecimateDialog(parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            dlg.deleteLater()
+            return
+        params = dlg.get_params()
+        dlg.deleteLater()
+        axis = str(params["axis"])
+        factor = int(params["factor"])
+        mode = str(params["mode"])
+        metadata_attested = False
+        if mode == "coherent":
+            attestation = self._confirm_coherent_metadata(
+                datasets,
+                "Coherent Decimation",
+                independent=True,
+            )
+            if attestation is None:
+                return
+            metadata_attested = attestation
+
+        source_references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
+
+        def operation(_index, _name, dataset):
+            return decimate_axis(
+                dataset,
+                axis=axis,
+                factor=factor,
+                mode=mode,
+                metadata_attested=metadata_attested,
+            )
+
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, decimated in results:
+                output_name = f"{name} [Decimate {axis} x{factor}]"
+                history = (
+                    f"Decimate {axis} by {factor}, {mode} boxcar prefilter: {name}"
+                )
+                output_id = self._add_dataset_row(
+                    decimated, output_name, history, file_name=""
+                )
+                source_ref = source_references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_function(
+                        self._python_output_reference(output_id, output_name),
+                        "decimate_axis",
+                        [source_ref],
+                        kwargs={
+                            "axis": axis,
+                            "factor": factor,
+                            "mode": mode,
+                            **(
+                                {"metadata_attested": True}
+                                if metadata_attested
+                                else {}
+                            ),
+                        },
+                        comment=f"Prefilter and decimate {name}",
+                    )
+            message = f"Decimate created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "Dataset decimation",
+            datasets,
+            operation,
+            publish,
+            start_message=(
+                f"Prefiltering and decimating {len(datasets)} dataset(s) "
+                f"along {axis} by {factor}..."
+            ),
+        )
 
 
     def _mirror_selected(self) -> None:
@@ -5388,7 +6156,11 @@ class DatasetOpsMixin:
         default_about = 0.0
         ref = self.active_dataset if self.active_dataset is not None else datasets[0][1]
         if isinstance(ref, RcsGrid) and len(ref.azimuths) > 0:
-            az_vals = np.asarray(ref.azimuths, dtype=float)
+            try:
+                az_vals = _angle_axis_degrees(ref, "azimuth")
+            except (TypeError, ValueError) as exc:
+                self.status.showMessage(f"Mirror blocked: {exc}")
+                return
             finite = az_vals[np.isfinite(az_vals)]
             if finite.size > 0:
                 default_about = float(np.mean(finite))
@@ -5810,33 +6582,83 @@ class DatasetOpsMixin:
         if datasets is None:
             return
 
+        reference = (
+            self.active_dataset
+            if isinstance(getattr(self, "active_dataset", None), RcsGrid)
+            else datasets[0][1]
+        )
         selected_el_values = self._selected_values(self.list_elev)
-        selected_pair: tuple[float, float] | None = None
+        selected_pair_deg: tuple[float, float] | None = None
         if len(selected_el_values) == 2:
             try:
-                pair = tuple(sorted(float(v) for v in selected_el_values))
-                selected_pair = (pair[0], pair[1])
+                pair_native = np.asarray(
+                    sorted(float(v) for v in selected_el_values), dtype=float
+                )
+                if _canonical_angle_unit(
+                    (reference.units or {}).get("elevation", "deg")
+                ) == "rad":
+                    pair_native = np.rad2deg(pair_native)
+                selected_pair_deg = (
+                    float(pair_native[0]),
+                    float(pair_native[1]),
+                )
             except (TypeError, ValueError):
-                selected_pair = None
+                selected_pair_deg = None
         pair_text = (
-            "min/max elevation"
-            if selected_pair is None
-            else f"{selected_pair[0]:.6g}/{selected_pair[1]:.6g} deg"
+            "the equal-and-opposite minimum/maximum elevation in each dataset"
+            if selected_pair_deg is None
+            else f"{selected_pair_deg[0]:.6g}/{selected_pair_deg[1]:.6g} deg"
         )
+        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
+        answer = QMessageBox.question(
+            self,
+            "Confirm Elevation-Pair Relabel",
+            "El→Az360 is not a general spherical-coordinate conversion. It "
+            "combines equal-and-opposite elevation cuts by shifting the second "
+            "half 180° in azimuth, without interpolation or polarization-basis "
+            f"rotation. This run will use {pair_text}.\n\n"
+            "Confirm that the acquisition geometry and polarization convention "
+            "make that relabel physically valid?",
+            buttons.Yes | buttons.No,
+            buttons.No,
+        )
+        if answer != buttons.Yes:
+            self.status.showMessage(
+                "El→Az360 cancelled: the acquisition-specific relabel was not confirmed."
+            )
+            return
+
+        native_pairs: list[tuple[float, float] | None] = []
+        try:
+            for _name, dataset in datasets:
+                _assert_same_angular_frame(reference, dataset)
+                if selected_pair_deg is None:
+                    native_pairs.append(None)
+                    continue
+                native = _degrees_to_angle_axis(
+                    dataset, "elevation", selected_pair_deg
+                )
+                native_pairs.append((float(native[0]), float(native[1])))
+        except (TypeError, ValueError) as exc:
+            self.status.showMessage(f"El→Az360 blocked: {exc}")
+            return
         source_references = [
             self._python_reference_for_dataset(dataset)
             for _name, dataset in datasets
         ]
 
-        def operation(_index, _name, dataset):
+        def operation(index, _name, dataset):
+            selected_pair = native_pairs[index]
             if selected_pair is None:
                 return dataset.combine_elevation_pair_to_azimuth_360(
-                    azimuth_shift_deg=180.0
+                    azimuth_shift_deg=180.0,
+                    assumptions_attested=True,
                 )
             return dataset.combine_elevation_pair_to_azimuth_360(
                 selected_pair[0],
                 selected_pair[1],
                 azimuth_shift_deg=180.0,
+                assumptions_attested=True,
             )
 
         def publish(results, skipped) -> None:
@@ -5853,8 +6675,11 @@ class DatasetOpsMixin:
                         self._python_output_reference(output_id, output_name),
                         source_ref,
                         "combine_elevation_pair_to_azimuth_360",
-                        args=selected_pair or (),
-                        kwargs={"azimuth_shift_deg": 180.0},
+                        args=native_pairs[source_index] or (),
+                        kwargs={
+                            "azimuth_shift_deg": 180.0,
+                            "assumptions_attested": True,
+                        },
                         comment=(
                             f"Convert {name} elevation pair to 360-degree azimuth"
                         ),
@@ -6199,6 +7024,71 @@ class DatasetOpsMixin:
             start_message=f"Setting coordinates for {len(datasets)} dataset(s)...",
         )
 
+    def _convert_axis_units_selected(self) -> None:
+        datasets = self._selected_datasets_ordered(
+            use_selection_order=True,
+            empty_message="Select one or more datasets to convert axis units.",
+        )
+        if datasets is None:
+            return
+        reference = next(
+            (grid for _name, grid in datasets if grid is self.active_dataset),
+            datasets[0][1],
+        )
+        try:
+            dialog = AxisUnitsDialog(reference, parent=self)
+        except (TypeError, ValueError) as exc:
+            self.status.showMessage(f"Axis Units blocked: {exc}")
+            return
+        if dialog.exec() != QDialog.Accepted:
+            dialog.deleteLater()
+            return
+        params = dialog.get_params()
+        dialog.deleteLater()
+        references = [
+            self._python_reference_for_dataset(dataset)
+            for _name, dataset in datasets
+        ]
+
+        def operation(_index, _name, dataset):
+            return dataset.convert_axis_units(**params)
+
+        def publish(results, skipped) -> None:
+            recorder = getattr(self, "python_recorder", None)
+            for source_index, name, result in results:
+                unit_label = (
+                    f"{params['azimuth']}/{params['elevation']}/"
+                    f"{params['frequency']}"
+                )
+                output_name = f"{name} [Units {unit_label}]"
+                output_id = self._add_dataset_row(
+                    result,
+                    output_name,
+                    f"Axis Units ({unit_label}): {name}",
+                    file_name="",
+                )
+                source_ref = references[source_index]
+                if recorder is not None and source_ref is not None:
+                    recorder.record_method(
+                        self._python_output_reference(output_id, output_name),
+                        source_ref,
+                        "convert_axis_units",
+                        kwargs=params,
+                        comment=f"Convert storage-axis units for {name}",
+                    )
+            message = f"Axis Units created {len(results)} dataset(s)."
+            if skipped:
+                message += f" Skipped: {_compact_item_summary(skipped)}"
+            self.status.showMessage(message)
+
+        self._start_dataset_map_job(
+            "Axis-unit conversion",
+            datasets,
+            operation,
+            publish,
+            start_message=f"Converting axis units for {len(datasets)} dataset(s)...",
+        )
+
     def _convert_conic_gc_selected(self) -> None:
         datasets = self._selected_datasets_ordered(
             use_selection_order=True,
@@ -6306,6 +7196,28 @@ class DatasetOpsMixin:
         params = dlg.get_params()
         mode = params["mode"]
         assume_cross_zero = params["assume_missing_cross_pol_zero"]
+        wedge_workspace = 0
+        wedge_plans = []
+        for _name, dataset in datasets:
+            shape = tuple(int(value) for value in dataset.rcs_power.shape)
+            wedge_plans.append((dataset, shape))
+            query_frequency_cells = int(
+                shape[0] * shape[1] * shape[2]
+            )
+            source_cells = int(math.prod(shape))
+            # Full-complex source plus interpolated/source Jones matrices,
+            # basis-change matrices, query coordinates, and einsum output.
+            wedge_workspace = max(
+                wedge_workspace,
+                source_cells * np.dtype(np.complex128).itemsize
+                + query_frequency_cells * 192,
+            )
+        if not self._preflight_derived_outputs(
+            "Wedge→Conic",
+            wedge_plans,
+            extra_bytes=wedge_workspace,
+        ):
+            return
         source_references = [
             self._python_reference_for_dataset(dataset)
             for _name, dataset in datasets
@@ -6411,6 +7323,7 @@ class DatasetOpsMixin:
 
         preflight_errors: list[str] = []
         peak_estimate = 0
+        window_workspace = 0
         for name, dataset in datasets:
             try:
                 az_deg = _angle_axis_degrees(dataset, "azimuth")
@@ -6437,6 +7350,17 @@ class DatasetOpsMixin:
                     len(dataset.polarizations),
                 )
                 peak_estimate += _derived_grid_peak_bytes(dataset, shape)
+                source_cells = int(math.prod(dataset.rcs_power.shape))
+                source_itemsize = max(
+                    np.dtype(dataset.rcs_power.dtype).itemsize,
+                    np.dtype(dataset.rcs_phase.dtype).itemsize,
+                )
+                # A widest-window advanced-index copy and nanmedian partition
+                # scratch can coexist with all previously retained outputs.
+                window_workspace = max(
+                    window_workspace,
+                    source_cells * source_itemsize * 3,
+                )
             except (TypeError, ValueError) as exc:
                 preflight_errors.append(f"{name} ({exc})")
         if preflight_errors:
@@ -6445,6 +7369,7 @@ class DatasetOpsMixin:
             )
             return
         memory_limit = _derived_grid_memory_limit()
+        peak_estimate += window_workspace
         if peak_estimate > memory_limit:
             self.status.showMessage(
                 "Medianize blocked before allocation: estimated working set "
@@ -6527,6 +7452,22 @@ class DatasetOpsMixin:
             empty_message="Select one or more datasets to duplicate.",
         )
         if datasets is None:
+            return
+        metadata_array_bytes = 0
+        for _name, dataset in datasets:
+            for value in (dataset.extra or {}).values():
+                if isinstance(value, np.ndarray):
+                    metadata_array_bytes += int(value.nbytes)
+        if not self._preflight_derived_outputs(
+            "Duplicate",
+            [
+                (dataset, tuple(int(value) for value in dataset.rcs_power.shape))
+                for _name, dataset in datasets
+            ],
+            # deepcopy owns another metadata-array set while the source stays
+            # resident. The row publication itself only shallow-copies extras.
+            extra_bytes=2 * metadata_array_bytes,
+        ):
             return
         source_references = [
             self._python_reference_for_dataset(dataset)
@@ -6694,6 +7635,29 @@ class DatasetOpsMixin:
         if datasets is None:
             return
 
+        prefers_double = any(
+            np.dtype(dataset.rcs_power.dtype).itemsize > 4
+            or dataset._complete_authoritative_raw_arrays() is not None
+            for _name, dataset in datasets
+        )
+        precision_choices = [
+            "Double precision (64-bit real/imag)",
+            "Single precision (32-bit real/imag; smaller legacy files)",
+        ]
+        precision_label, accepted = QInputDialog.getItem(
+            self,
+            "Pioneer Export Precision",
+            "On-disk complex-sample precision:",
+            precision_choices,
+            0 if prefers_double else 1,
+            False,
+        )
+        if not accepted:
+            return
+        precision = (
+            "double" if str(precision_label).startswith("Double") else "single"
+        )
+
         if len(datasets) == 1:
             name, dataset = datasets[0]
             slices = list(self._iter_pio_slices(dataset, name))
@@ -6710,7 +7674,10 @@ class DatasetOpsMixin:
                 def compute_single(progress):
                     progress(0, 1, f"Writing {os.path.basename(path)}")
                     saved = dataset.save_pio(
-                        path, el_idx=el_idx, pol_idx=pol_idx
+                        path,
+                        el_idx=el_idx,
+                        pol_idx=pol_idx,
+                        precision=precision,
                     )
                     progress(1, 1, f"Published {os.path.basename(saved)}")
                     return saved
@@ -6751,7 +7718,10 @@ class DatasetOpsMixin:
 
         def compute_batch(progress):
             return self._write_pio_batch(
-                directory, plans, progress_cb=progress
+                directory,
+                plans,
+                precision=precision,
+                progress_cb=progress,
             )
 
         def publish_batch(produced) -> None:
@@ -7101,6 +8071,13 @@ class DatasetOpsMixin:
             return
         name_a, ds_a = datasets[0]
         name_b, ds_b = datasets[1]
+
+        if not self._preflight_derived_outputs(
+            "Coherent ÷",
+            [(ds_a, ds_a.rcs_power.shape)],
+            extra_bytes=_derived_grid_peak_bytes(ds_a, ds_a.rcs_power.shape),
+        ):
+            return
 
         attestation = self._confirm_coherent_metadata(datasets, "Coherent ÷")
         if attestation is None:

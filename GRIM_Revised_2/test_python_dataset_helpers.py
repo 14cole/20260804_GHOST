@@ -9,6 +9,7 @@ from grim_headless import combine_datasets
 from grim_python import (
     coherent_divide,
     convert_extrusion,
+    decimate_axis,
     medianize_azimuth,
     offset_db,
     shift_dataset,
@@ -44,6 +45,125 @@ def _grid(
 
 
 class PythonDatasetHelperTest(unittest.TestCase):
+    def test_decimate_power_prefilters_and_retains_final_partial_bin(self):
+        source = _grid(
+            azimuths=(0.0, 1.0, 2.0, 3.0, 4.0),
+            values=(1.0, 3.0, 5.0, 7.0, 9.0),
+        )
+
+        result = decimate_axis(
+            source,
+            axis="azimuth",
+            factor=2,
+            mode="power",
+        )
+
+        np.testing.assert_allclose(result.azimuths, [0.5, 2.5, 4.0])
+        np.testing.assert_allclose(result.rcs_power.ravel(), [2.0, 6.0, 9.0])
+        self.assertTrue(np.isnan(result.rcs_phase).all())
+        record = json.loads(result.extra["decimation_json"])
+        self.assertEqual(record["filter"], "finite boxcar mean")
+        self.assertTrue(record["partial_final_bin_retained"])
+        self.assertIn("retained final partial bin", result.history)
+
+    def test_decimate_coherent_averages_field_and_records_attestation(self):
+        field = np.asarray([1.0 + 0.0j, -1.0 + 0.0j, 2.0j, 2.0j]).reshape(
+            4, 1, 1, 1
+        )
+        source = RcsGrid(
+            [0.0, 1.0, 2.0, 3.0],
+            [0.0],
+            [10.0],
+            ["HH"],
+            rcs=field,
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_linear_quantity": "sigma_3d",
+                "rcs_log_unit": "dBsm",
+            },
+        )
+
+        result = decimate_axis(
+            source,
+            axis="azimuth",
+            factor=2,
+            mode="coherent",
+            metadata_attested=True,
+        )
+
+        np.testing.assert_allclose(result.rcs_power.ravel(), [0.0, 4.0])
+        self.assertTrue(np.isnan(result.rcs_phase[0, 0, 0, 0]))
+        self.assertAlmostEqual(result.rcs_phase[1, 0, 0, 0], np.pi / 2.0)
+        attestation = json.loads(
+            result.extra["coherent_metadata_attestation_json"]
+        )
+        self.assertEqual(attestation["operation"], "decimate-azimuth")
+        self.assertTrue(attestation["user_attested"])
+
+    def test_decimate_vectorized_blocks_follow_elevation_and_frequency_axes(self):
+        shape = (3, 5, 5, 1)
+        power = np.arange(1.0, np.prod(shape) + 1.0).reshape(shape)
+        source = RcsGrid(
+            [0.0, 1.0, 2.0],
+            [-2.0, -1.0, 0.0, 1.0, 2.0],
+            [8.0, 9.0, 10.0, 11.0, 12.0],
+            ["HH"],
+            rcs_power=power,
+            rcs_phase=np.zeros(shape),
+            units={
+                "azimuth": "deg",
+                "elevation": "deg",
+                "frequency": "GHz",
+                "rcs_linear_quantity": "sigma_3d",
+                "rcs_log_unit": "dBsm",
+            },
+        )
+
+        for axis_name, axis_index in (("elevation", 1), ("frequency", 2)):
+            with self.subTest(axis=axis_name):
+                result = decimate_axis(
+                    source, axis=axis_name, factor=2, mode="power"
+                )
+                expected_parts = []
+                for start in (0, 2, 4):
+                    indices = range(start, min(start + 2, shape[axis_index]))
+                    expected_parts.append(
+                        np.mean(np.take(power, list(indices), axis=axis_index), axis=axis_index)
+                    )
+                expected = np.stack(expected_parts, axis=axis_index)
+                np.testing.assert_allclose(result.rcs_power, expected)
+
+    def test_decimate_rejects_irregular_sampling_before_filtering(self):
+        source = _grid(
+            azimuths=(0.0, 1.0, 3.0, 4.0),
+            values=(1.0, 2.0, 3.0, 4.0),
+        )
+        with self.assertRaisesRegex(ValueError, "uniformly spaced"):
+            decimate_axis(source, axis="azimuth", factor=2)
+
+    def test_compact_statistics_marks_coordinate_as_aggregate_label(self):
+        source = _grid(
+            azimuths=(0.0, 10.0, 40.0),
+            values=(1.0, 2.0, 9.0),
+        )
+
+        result = source.statistics_dataset(
+            statistic="mean",
+            axes=("azimuth",),
+            domain="magnitude",
+            broadcast_reduced=False,
+        )
+
+        self.assertAlmostEqual(float(result.azimuths[0]), 50.0 / 3.0)
+        record = json.loads(result.extra["statistics_reduction_json"])
+        self.assertEqual(record["reduced_axes"], ["azimuth"])
+        self.assertEqual(record["axes"]["azimuth"]["source_count"], 3)
+        self.assertEqual(record["axes"]["azimuth"]["source_min"], 0.0)
+        self.assertEqual(record["axes"]["azimuth"]["source_max"], 40.0)
+        self.assertIn("not an observed sample", record["coordinate_semantics"])
+
     def test_medianize_is_degree_radian_equivalent_and_retains_native_unit(self):
         degree = _grid()
         radian = _grid(

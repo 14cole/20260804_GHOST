@@ -1882,7 +1882,10 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
 
                 sidecar = Path(str(surface) + ".assembly.json")
                 self.assertTrue(sidecar.is_file())
-                self.assertIn("Current reviewed binding", panel.surface_binding_status.text())
+                self.assertIn(
+                    "Integrity-checked reviewed binding",
+                    panel.surface_binding_status.text(),
+                )
                 self.assertIn("vehicle-r7", panel.surface_binding_status.text())
 
                 # A stat change immediately makes the cached green check stale;
@@ -1922,7 +1925,10 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 ):
                     panel.check_selected_surface_binding()
                 self.assertEqual(sidecar.read_bytes(), before)
-                self.assertIn("Current reviewed binding", panel.surface_binding_status.text())
+                self.assertIn(
+                    "Integrity-checked reviewed binding",
+                    panel.surface_binding_status.text(),
+                )
             finally:
                 _close_panel_without_prompt(panel)
 
@@ -2023,10 +2029,17 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 "no certified library manifest",
                 panel.validation_warning_label.text(),
             )
+            focused = []
+            panel.feature_instance_selected.connect(
+                lambda kind, identifier: focused.append((kind, identifier))
+            )
+            panel.spatial_feature_filter.setText("hidden-by-filter")
             panel._qa_row_clicked(0, 0)
             current = panel.spatial_feature_tree.currentItem()
             self.assertIsNotNone(current)
             self.assertIn("door_gap", current.text(0))
+            self.assertEqual(panel.spatial_feature_filter.text(), "")
+            self.assertEqual(focused, [("line", "door_gap")])
         finally:
             _close_panel_without_prompt(panel)
 

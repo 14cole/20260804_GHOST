@@ -412,20 +412,22 @@ class UnifiedGuiShellTest(unittest.TestCase):
         datasets_larger = splitter.sizes()
         self.assertGreater(datasets_larger[0], datasets_larger[1])
 
-    def test_dataset_operations_hide_inspect_and_audit_controls(self) -> None:
-        audit_buttons = [
+    def test_dataset_operations_expose_bounded_quality_controls(self) -> None:
+        quality_buttons = [
             button
             for button in self.window.findChildren(QToolButton)
-            if button.text() == "Audit / QA"
+            if button.text() in {"Audit…", "Compatibility…", "Provenance…"}
         ]
-        inspect_categories = [
+        quality_categories = [
             label
             for label in self.window.findChildren(QLabel)
-            if label.objectName() == "opsCategory" and label.text() == "Inspect"
+            if label.objectName() == "opsCategory" and label.text() == "Quality"
         ]
-        self.assertEqual(audit_buttons, [])
-        self.assertEqual(inspect_categories, [])
-        self.assertFalse(hasattr(self.window, "btn_audit"))
+        self.assertEqual(len(quality_buttons), 3)
+        self.assertEqual(len(quality_categories), 1)
+        self.assertTrue(hasattr(self.window, "btn_audit"))
+        self.assertTrue(hasattr(self.window, "btn_compatibility"))
+        self.assertTrue(hasattr(self.window, "btn_provenance"))
 
     def test_compare_sector_bar_is_compact_hidden_and_defaults_show_all_off(self) -> None:
         context = self.window._plot_contexts["plotting"]
@@ -1565,6 +1567,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         start_count = self.window.table.rowCount()
         self.window._add_dataset_row(_grid(), "Unsaved branch", "Derived")
         row = self.window.table.rowCount() - 1
+        dataset_id = self.window.table.item(row, 0).data(DATASET_ID_ROLE)
         self.window.table.clearSelection()
         self.window.table.selectRow(row)
         buttons = getattr(
@@ -1588,6 +1591,15 @@ class UnifiedGuiShellTest(unittest.TestCase):
         ):
             self.window._delete_selected_datasets()
         self.assertEqual(self.window.table.rowCount(), start_count)
+        self.assertTrue(self.window.btn_dataset_undo_delete.isEnabled())
+
+        self.window._undo_last_deleted_datasets()
+        self.assertEqual(self.window.table.rowCount(), start_count + 1)
+        restored = self.window.table.item(row, 0)
+        self.assertEqual(restored.text(), "Unsaved branch")
+        self.assertEqual(restored.data(DATASET_ID_ROLE), dataset_id)
+        self.assertTrue(restored.data(DATASET_DIRTY_ROLE))
+        self.assertFalse(self.window.btn_dataset_undo_delete.isEnabled())
 
     def test_batch_save_confirms_all_existing_replacements_once(self) -> None:
         self.window._add_dataset_row(_grid(1.0), "First", "first")
@@ -1741,6 +1753,42 @@ class UnifiedGuiShellTest(unittest.TestCase):
             dataset, destination, el_idx=0, pol_idx=0
         )
 
+    def test_pioneer_export_defaults_float64_sources_to_double_precision(self) -> None:
+        dataset = _grid(1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = os.path.join(tmp, "target.pio")
+            with (
+                mock.patch.object(
+                    self.window,
+                    "_selected_datasets_ordered",
+                    return_value=[("target", dataset)],
+                ),
+                mock.patch.object(
+                    grim_cut_dataset_mixin.QInputDialog,
+                    "getItem",
+                    return_value=("Double precision (64-bit real/imag)", True),
+                ) as precision_prompt,
+                mock.patch.object(
+                    grim_cut_gui.QFileDialog,
+                    "getSaveFileName",
+                    return_value=(destination, "Pioneer Files (*.pio)"),
+                ),
+                mock.patch.object(
+                    RcsGrid, "save_pio", autospec=True, return_value=destination
+                ) as save_pio,
+            ):
+                self.window._export_pio_selected()
+                self._wait_for_background()
+
+        self.assertEqual(precision_prompt.call_args.args[4], 0)
+        save_pio.assert_called_once_with(
+            dataset,
+            destination,
+            el_idx=0,
+            pol_idx=0,
+            precision="double",
+        )
+
     def test_pioneer_export_reports_great_circle_incompatibility(self) -> None:
         dataset = _grid(1.0)
         dataset.units["angular_coordinate_system"] = "great_circle"
@@ -1756,6 +1804,11 @@ class UnifiedGuiShellTest(unittest.TestCase):
                     grim_cut_gui.QFileDialog,
                     "getSaveFileName",
                     return_value=(destination, "Pioneer Files (*.pio)"),
+                ),
+                mock.patch.object(
+                    grim_cut_dataset_mixin.QInputDialog,
+                    "getItem",
+                    return_value=("Double precision (64-bit real/imag)", True),
                 ),
             ):
                 self.window._export_pio_selected()

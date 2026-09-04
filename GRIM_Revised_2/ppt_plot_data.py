@@ -540,6 +540,13 @@ def build_azimuth_specs(
     requested_frequencies = tuple(float(value) for value in frequencies)
     if not requested_frequencies:
         raise ValueError("Select at least one common frequency for azimuth slides.")
+    _exact_numeric_indices(
+        availability.frequencies,
+        requested_frequencies,
+        tol=tol,
+        axis_name="common frequency",
+        dataset_name="selected overlays",
+    )
 
     _exact_index(
         availability.elevations,
@@ -582,6 +589,7 @@ def build_azimuth_specs(
             np.ndarray,
             tuple[float, ...],
             np.ndarray,
+            np.ndarray,
         ]
     ] = []
     for dataset in selected:
@@ -610,6 +618,13 @@ def build_azimuth_specs(
             for value in _convert_angles(native_x, native_angle_unit, target_angle_unit)
         )
         source = grid.rcs_phase if plot_quantity == "phase" else grid.rcs_power
+        frequency_indices = _exact_numeric_indices(
+            grid.frequencies,
+            requested_frequencies,
+            tol=tol,
+            axis_name="frequency",
+            dataset_name=dataset.name,
+        )
         prepared_datasets.append(
             (
                 dataset,
@@ -618,20 +633,13 @@ def build_azimuth_specs(
                 order,
                 x_values,
                 source,
+                frequency_indices,
             )
         )
 
     specs: list[PlotSpec] = []
     for requested_polarization in requested_polarizations:
         for panel_index, frequency in enumerate(requested_frequencies):
-            # Resolve against the common selector set before touching any data.
-            _exact_index(
-                availability.frequencies,
-                frequency,
-                tol=tol,
-                axis_name="common frequency",
-                dataset_name="selected overlays",
-            )
             display_frequency = float(
                 _convert_frequencies(
                     [frequency], native_frequency_unit, frequency_unit
@@ -645,15 +653,10 @@ def build_azimuth_specs(
                 order,
                 x_values,
                 source,
+                frequency_indices,
             ) in prepared_datasets:
                 grid = dataset.grid
-                frequency_index = _exact_index(
-                    grid.frequencies,
-                    frequency,
-                    tol=tol,
-                    axis_name="frequency",
-                    dataset_name=dataset.name,
-                )
+                frequency_index = int(frequency_indices[panel_index])
                 raw_y = np.asarray(
                     source[
                         :,
@@ -695,6 +698,216 @@ def build_azimuth_specs(
                         f"{swept_axis_label} "
                         f"({'deg' if plot_kind == 'azimuth_polar' else angle_unit})"
                     ),
+                    y_label=y_label,
+                    series=tuple(series),
+                    y_limits=limits,
+                    show_legend=bool(show_legend),
+                )
+            )
+    return tuple(specs)
+
+
+def build_elevation_specs(
+    datasets: Sequence[NamedGrid | tuple[str, RcsGrid]],
+    *,
+    frequencies: Iterable[float],
+    azimuth: float,
+    polarization: PolarizationSelection,
+    quantity: Quantity = "magnitude",
+    angle_display_unit: str = "deg",
+    frequency_display_unit: str = "GHz",
+    y_limits: tuple[float, float] | None = None,
+    show_legend: bool = True,
+    tol: float = 1.0e-6,
+) -> tuple[PlotSpec, ...]:
+    """Build exact elevation/pitch sweeps at one stored azimuth/aspect cut.
+
+    The fixed selectors must be common to every overlay and are resolved
+    without interpolation.  Each dataset keeps its own swept elevation axis,
+    allowing compatible grids with different elevation sampling densities to
+    be compared without silently resampling either response.
+    """
+
+    selected = _coerce_named_grids(datasets)
+    undersampled = [
+        dataset.name
+        for dataset in selected
+        if np.asarray(dataset.grid.elevations).size < 2
+    ]
+    if undersampled:
+        raise ValueError(
+            "Elevation sweeps require at least two stored elevation samples in "
+            "every selected dataset. Insufficient data: " + ", ".join(undersampled)
+        )
+    availability = get_plot_availability(
+        selected,
+        tol=tol,
+        evaluate_phase=str(quantity).strip().lower() == "phase",
+    )
+    plot_quantity = _validate_quantity(quantity, availability)
+    angle_unit = _display_angle_unit(angle_display_unit)
+    frequency_unit = _display_frequency_unit(frequency_display_unit)
+    limits = _normalize_y_limits(y_limits)
+    requested_frequencies = tuple(float(value) for value in frequencies)
+    if not requested_frequencies:
+        raise ValueError("Select at least one common frequency for elevation slides.")
+    _exact_numeric_indices(
+        availability.frequencies,
+        requested_frequencies,
+        tol=tol,
+        axis_name="common frequency",
+        dataset_name="selected overlays",
+    )
+
+    _exact_index(
+        availability.azimuths,
+        azimuth,
+        tol=tol,
+        axis_name="common azimuth",
+        dataset_name="selected overlays",
+    )
+    requested_polarizations = _requested_polarizations(
+        polarization,
+        availability.polarizations,
+    )
+
+    reference = selected[0].grid
+    native_azimuth_unit = _angle_unit(reference, "azimuth")
+    native_elevation_unit = _angle_unit(reference, "elevation")
+    native_frequency_unit = _frequency_unit(reference)
+    azimuth_display = float(
+        _convert_angles([azimuth], native_azimuth_unit, angle_unit)[0]
+    )
+    if availability.angular_coordinate_system == "great_circle":
+        swept_axis_label = "Pitch"
+        fixed_angle_label = "Aspect"
+    else:
+        swept_axis_label = "Elevation"
+        fixed_angle_label = "Azimuth"
+    y_label = (
+        "Phase (deg)"
+        if plot_quantity == "phase"
+        else f"RCS ({availability.rcs_unit})"
+    )
+
+    prepared_datasets: list[
+        tuple[
+            NamedGrid,
+            int,
+            dict[str, int],
+            np.ndarray,
+            tuple[float, ...],
+            np.ndarray,
+            np.ndarray,
+        ]
+    ] = []
+    for dataset in selected:
+        grid = dataset.grid
+        azimuth_index = _exact_index(
+            grid.azimuths,
+            azimuth,
+            tol=tol,
+            axis_name="azimuth",
+            dataset_name=dataset.name,
+        )
+        polarization_indices = {
+            requested: _exact_index(
+                grid.polarizations,
+                requested,
+                tol=0.0,
+                axis_name="polarization",
+                dataset_name=dataset.name,
+            )
+            for requested in requested_polarizations
+        }
+        order = np.argsort(np.asarray(grid.elevations, dtype=float), kind="stable")
+        native_x = np.asarray(grid.elevations, dtype=float)[order]
+        x_values = tuple(
+            float(value)
+            for value in _convert_angles(
+                native_x,
+                native_elevation_unit,
+                angle_unit,
+            )
+        )
+        source = grid.rcs_phase if plot_quantity == "phase" else grid.rcs_power
+        frequency_indices = _exact_numeric_indices(
+            grid.frequencies,
+            requested_frequencies,
+            tol=tol,
+            axis_name="frequency",
+            dataset_name=dataset.name,
+        )
+        prepared_datasets.append(
+            (
+                dataset,
+                azimuth_index,
+                polarization_indices,
+                order,
+                x_values,
+                source,
+                frequency_indices,
+            )
+        )
+
+    specs: list[PlotSpec] = []
+    for requested_polarization in requested_polarizations:
+        for panel_index, frequency in enumerate(requested_frequencies):
+            display_frequency = float(
+                _convert_frequencies(
+                    [frequency], native_frequency_unit, frequency_unit
+                )[0]
+            )
+            series: list[PlotSeries] = []
+            for (
+                dataset,
+                azimuth_index,
+                polarization_indices,
+                order,
+                x_values,
+                source,
+                frequency_indices,
+            ) in prepared_datasets:
+                grid = dataset.grid
+                frequency_index = int(frequency_indices[panel_index])
+                raw_y = np.asarray(
+                    source[
+                        azimuth_index,
+                        :,
+                        frequency_index,
+                        polarization_indices[requested_polarization],
+                    ],
+                    dtype=float,
+                )[order]
+                y = _series_y(
+                    dataset,
+                    raw_y,
+                    quantity=plot_quantity,
+                    frequency_values=float(grid.frequencies[frequency_index]),
+                )
+                series.append(
+                    PlotSeries(
+                        x=x_values,
+                        y=tuple(float(value) for value in y),
+                        label=dataset.name,
+                    )
+                )
+
+            title = (
+                f"{_format_value(display_frequency)} {frequency_unit} | "
+                f"{fixed_angle_label} {_format_value(azimuth_display)} "
+                f"{angle_unit} | {requested_polarization}"
+            )
+            specs.append(
+                PlotSpec(
+                    plot_id=_safe_id(
+                        f"el_{plot_quantity}_{requested_polarization}_"
+                        f"{panel_index:03d}_{_format_value(display_frequency)}_"
+                        f"{frequency_unit}"
+                    ),
+                    kind="elevation",
+                    title=title,
+                    x_label=f"{swept_axis_label} ({angle_unit})",
                     y_label=y_label,
                     series=tuple(series),
                     y_limits=limits,
@@ -1078,6 +1291,7 @@ __all__ = [
     "PlotAvailability",
     "PolarizationSelection",
     "build_azimuth_specs",
+    "build_elevation_specs",
     "build_frequency_spec",
     "build_frequency_specs",
     "get_plot_availability",
