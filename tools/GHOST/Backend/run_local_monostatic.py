@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Tuple
 
 import hpc_scheduler
 import workflow_provenance as _workflow_provenance
-from solver_quality import validate_mesh_convergence_policy
+from solver_quality import accuracy_target_policy
 from workflow_provenance import (
     backend_source_fingerprint,
     backend_source_inventory,
@@ -83,6 +83,8 @@ BLAS_THREADS_PER_WORKER = 1
 # comparison is performed.  The choice is recorded for provenance and does not
 # prevent downstream viewing, combination, or subtraction.
 MESH_CERTIFICATION      = True
+ACCURACY_TARGET         = "standard"     # "standard" | "tight"; mesh comparison limits
+LU_PRECISION            = "double"       # "double" | "mixed"; CPU LU with refinement
 
 # --- Memory admission ------------------------------------------------------
 # A local machine has far less RAM than a compute node and is usually running
@@ -314,15 +316,18 @@ def _solve_and_export(
         material_base_dir=material_base,
         max_panels=context["max_panels"],
     )
-    if context["mesh_certification"]:
-        from rcs_solver import solve_monostatic_rcs_2d_certified
-        result = solve_monostatic_rcs_2d_certified(
-            mesh_convergence_policy=context["mesh_convergence_policy"],
-            **solve_kwargs
-        )
-    else:
-        from rcs_solver import solve_monostatic_rcs_2d_survey
-        result = solve_monostatic_rcs_2d_survey(**solve_kwargs)
+    # Select precision inside each worker; context variables are process-local.
+    from refined_lu import linear_precision
+    with linear_precision(context.get("lu_precision", "double")):
+        if context["mesh_certification"]:
+            from rcs_solver import solve_monostatic_rcs_2d_certified
+            result = solve_monostatic_rcs_2d_certified(
+                mesh_convergence_policy=context["mesh_convergence_policy"],
+                **solve_kwargs
+            )
+        else:
+            from rcs_solver import solve_monostatic_rcs_2d_survey
+            result = solve_monostatic_rcs_2d_survey(**solve_kwargs)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
 
@@ -412,6 +417,10 @@ def _unit_assembly_threads(
 
 
 def _validate_config() -> 'Tuple[List[float], List[float]]':
+    if ACCURACY_TARGET not in ("standard", "tight"):
+        sys.exit("ERROR: ACCURACY_TARGET must be 'standard' or 'tight'.")
+    if LU_PRECISION not in ("double", "mixed"):
+        sys.exit("ERROR: LU_PRECISION must be 'double' or 'mixed'.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     if not AZIMUTHS_DEG:    sys.exit("ERROR: AZIMUTHS_DEG is empty.")
     frequencies = [float(value) for value in FREQUENCIES_GHZ]
@@ -486,7 +495,7 @@ def main() -> 'None':
                 "frequency_ghz": float(f),
             })
 
-    mesh_policy = validate_mesh_convergence_policy()
+    mesh_policy = accuracy_target_policy(ACCURACY_TARGET)
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
     run_dir     = Path(OUTPUT_DIR).resolve() / run_id
     results_dir = run_dir / "results"
@@ -501,6 +510,8 @@ def main() -> 'None':
         "max_panels": int(MAX_PANELS),
         "blas_threads_per_worker": int(BLAS_THREADS_PER_WORKER),
         "mesh_convergence_policy": mesh_policy,
+        "accuracy_target": ACCURACY_TARGET,
+        "lu_precision": LU_PRECISION,
         "mesh_certification": bool(MESH_CERTIFICATION),
     }
     manifest: 'Dict[str, Any]' = {
@@ -537,6 +548,7 @@ def main() -> 'None':
         "geometry_units": GEOMETRY_UNITS,
         "max_panels": int(MAX_PANELS),
         "mesh_convergence_policy": mesh_policy,
+        "lu_precision": LU_PRECISION,
         "mesh_certification": bool(MESH_CERTIFICATION),
         "azimuths_deg": azimuths,
         "angular_grid_sha256": stable_json_fingerprint(

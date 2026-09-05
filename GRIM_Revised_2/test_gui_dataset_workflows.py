@@ -419,7 +419,6 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
     def test_dataset_actions_follow_selection_count_and_dirty_state(self) -> None:
         self.assertFalse(self.window.btn_dataset_save.isEnabled())
         self.assertFalse(self.window.btn_dataset_save_all.isEnabled())
-        self.assertFalse(self.window.btn_dataset_save_dirty.isEnabled())
         self.assertFalse(self.window.btn_dataset_undo_delete.isEnabled())
         self.assertFalse(self.window.btn_audit.isEnabled())
         self.assertFalse(self.window.btn_compatibility.isEnabled())
@@ -428,7 +427,6 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
             _axis_grid([0.0], 1.0), "First", "Derived", ""
         )
         self.assertTrue(self.window.btn_dataset_save_all.isEnabled())
-        self.assertTrue(self.window.btn_dataset_save_dirty.isEnabled())
         self._select_rows_in_order(0)
         self.assertTrue(self.window.btn_dataset_save.isEnabled())
         self.assertTrue(self.window.btn_audit.isEnabled())
@@ -450,7 +448,7 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         self.assertTrue(self.window.btn_coherent_add.isEnabled())
         self.assertFalse(self.window.btn_coherent_div.isEnabled())
 
-    def test_save_dirty_targets_only_unsaved_or_modified_rows(self) -> None:
+    def test_save_all_includes_loaded_and_unsaved_rows(self) -> None:
         self.window._add_dataset_row(
             _axis_grid([0.0], 1.0), "Saved", "Loaded", "saved.grim"
         )
@@ -460,20 +458,20 @@ class GuiDatasetWorkflowTest(unittest.TestCase):
         with (
             mock.patch(
                 "grim_cut_dataset_mixin.QFileDialog.getExistingDirectory",
-                return_value=os.path.abspath("dirty-output"),
+                return_value=os.path.abspath("all-output"),
             ),
             mock.patch.object(
                 self.window, "_save_rows_to_directory", return_value=True
             ) as save_rows,
         ):
-            self.window._save_dirty_datasets()
+            self.window._save_all_datasets()
 
         self.assertEqual(
             save_rows.call_args.args[:2],
-            ([1], os.path.abspath("dirty-output")),
+            ([0, 1], os.path.abspath("all-output")),
         )
         self.assertEqual(
-            save_rows.call_args.kwargs["dialog_title"], "Save Dirty Datasets"
+            save_rows.call_args.kwargs["dialog_title"], "Save All Datasets"
         )
 
     def test_provenance_view_formats_json_and_bounds_large_arrays(self) -> None:

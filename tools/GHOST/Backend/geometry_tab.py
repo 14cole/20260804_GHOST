@@ -2,16 +2,17 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+from material_models import segment_type_options, show_material_guide, choose_thin_layer
 
 try:
-    from PySide6.QtCore import Qt, Signal
+    from PySide6.QtCore import Qt, Signal, QItemSelectionModel
     from PySide6.QtWidgets import (
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,
         QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
     )
 except ImportError:
-    from PySide2.QtCore import Qt, Signal  # type: ignore
+    from PySide2.QtCore import Qt, Signal, QItemSelectionModel  # type: ignore
     from PySide2.QtWidgets import (  # type: ignore
         QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
         QHeaderView, QLabel, QMessageBox, QPushButton, QSizePolicy, QSplitter,
@@ -41,13 +42,7 @@ from geometry_io import (
 )
 
 
-SEGMENT_TYPE_OPTIONS: 'List[Tuple[str, str]]' = [
-    ("1", "1 (sheet)"),
-    ("2", "2 (PEC)"),
-    ("3", "3 (diel/air)"),
-    ("4", "4 (PEC/diel)"),
-    ("5", "5 (diel/diel)"),
-]
+SEGMENT_TYPE_OPTIONS: 'List[Tuple[str, str]]' = segment_type_options()
 
 
 def _parse_mesh_n_token(token: 'Any') -> 'int':
@@ -143,6 +138,10 @@ class GeometryTab(QWidget):
         btn_row.addStretch(1)
         right_layout.addLayout(btn_row)
 
+        self.btn_material_models = QPushButton("Material models and boundary sides...")
+        self.btn_material_models.clicked.connect(lambda: show_material_guide(self))
+        right_layout.addWidget(self.btn_material_models)
+
         self.table = QTableWidget()
         self.table.setRowCount(0)
         self.table.setColumnCount(6)
@@ -151,8 +150,18 @@ class GeometryTab(QWidget):
              "pos_mat", "neg_mat"]
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         right_layout.addWidget(self.table)
+
+        mesh_actions = QHBoxLayout()
+        self.btn_find_refinement = QPushButton("Find corners / junctions")
+        self.btn_refine_selected = QPushButton("Refine selected 2x")
+        self.btn_refine_selected.setToolTip("Increase N only on selected segments. Auto N becomes 40 panels per material wavelength. Fine geometry can already be denser; mesh certification still compares realized meshes.")
+        mesh_actions.addWidget(self.btn_find_refinement)
+        mesh_actions.addWidget(self.btn_refine_selected)
+        right_layout.addLayout(mesh_actions)
+        self.btn_find_refinement.clicked.connect(self._select_refinement_candidates)
+        self.btn_refine_selected.clicked.connect(self._refine_selected_segments)
 
         bottom_row = QHBoxLayout()
 
@@ -166,12 +175,17 @@ class GeometryTab(QWidget):
         ibc_btn_row = QHBoxLayout()
         self.btn_ibc_add = QPushButton("+")
         self.btn_ibc_add_csv = QPushButton("+ CSV")
+        self.btn_thin_layer_add = QPushButton("+ Thin layer")
         self.btn_ibc_remove = QPushButton("-")
         ibc_btn_row.addWidget(self.btn_ibc_add)
         ibc_btn_row.addWidget(self.btn_ibc_add_csv)
+        ibc_btn_row.addWidget(self.btn_thin_layer_add)
         ibc_btn_row.addWidget(self.btn_ibc_remove)
         ibc_btn_row.addStretch(1)
         ibc_box.addLayout(ibc_btn_row)
+        self.btn_apply_conductor_ibc = QPushButton("Apply IBC to selected TYPE 2 segments")
+        self.btn_apply_conductor_ibc.setToolTip("Select an impedance material row and the conductor segments above. For a FREDDY PEC-backed stack, draw the outer coating envelope. This assigns its scalar IBC without adding bulk layers or offsetting geometry.")
+        ibc_box.addWidget(self.btn_apply_conductor_ibc)
 
         diel_box = QVBoxLayout()
         self.lbl_diel = QLabel("Dielectrics")
@@ -205,6 +219,8 @@ class GeometryTab(QWidget):
         self.btn_validate.clicked.connect(self.validate_geometry)
         self.btn_ibc_add.clicked.connect(self._ibc_add_row)
         self.btn_ibc_add_csv.clicked.connect(self._ibc_add_csv_row)
+        self.btn_thin_layer_add.clicked.connect(self._thin_layer_add_row)
+        self.btn_apply_conductor_ibc.clicked.connect(self._apply_selected_conductor_ibc)
         self.btn_ibc_remove.clicked.connect(self._ibc_remove_row)
         self.btn_diel_add.clicked.connect(self._diel_add_row)
         self.btn_diel_add_csv.clicked.connect(self._diel_add_csv_row)
@@ -243,8 +259,8 @@ class GeometryTab(QWidget):
         self.canvas.mpl_connect("scroll_event", self._on_plot_scroll)
 
         self._set_equal_column_widths(self.table, enabled=True)
-        self._set_equal_column_widths(self.table_ibc, enabled=True)
-        self._set_equal_column_widths(self.table_diel, enabled=True)
+        self._set_equal_column_widths(self.table_ibc, enabled=False)
+        self._set_equal_column_widths(self.table_diel, enabled=False)
 
     def is_dirty(self) -> 'bool':
         return bool(self._dirty)
@@ -423,7 +439,7 @@ class GeometryTab(QWidget):
         if title_prefix == "IBCS/Resistances":
             # 6-column inline form: flag, kind, R_start, X_start, R_end, X_end.
             # Explicit CSV rows use only Flag and the second column.
-            headers = ["Flag", "Kind / CSV file", "R_start", "X_start", "R_end", "X_end"]
+            headers = ["Flag", "Model / CSV", "R / d (m)", "X / material", "R_end", "X_end"]
             col_count = len(headers)
         elif title_prefix == "Dielectrics":
             col_count = 5
@@ -444,6 +460,10 @@ class GeometryTab(QWidget):
             table.setRowCount(len(rows))
             table.setColumnCount(col_count)
             table.setHorizontalHeaderLabels(headers)
+            widths = [44, 135, 88, 88, 70, 70] if title_prefix == "IBCS/Resistances" else [44, 130, 75, 75, 75]
+            for col in range(col_count):
+                table.setColumnWidth(col, widths[col] if col < len(widths) else 85)
+                table.horizontalHeaderItem(col).setToolTip(headers[col])
 
             for r, tokens in enumerate(rows):
                 for c, token in enumerate(tokens):
@@ -458,11 +478,15 @@ class GeometryTab(QWidget):
                 for r, tokens in enumerate(rows):
                     if len(tokens) < 2 or is_tabulated_row(tokens):
                         continue
+                    if str(tokens[1]).lower() == "thin_dielectric":
+                        table.item(r, 2).setToolTip("Physical layer thickness in metres")
+                        table.item(r, 3).setToolTip("Flag in the Dielectrics table (epsilon and mu)")
+                        continue
                     self._install_ibc_kind_combo(table, r, tokens[1])
         finally:
             table.blockSignals(False)
 
-        label.setText(f"{title_prefix} (n={len(rows)})")
+        label.setText(f"{'Surface materials (IBC / sheets)' if title_prefix == 'IBCS/Resistances' else title_prefix} (n={len(rows)})")
 
     def _install_ibc_kind_combo(self, table: 'QTableWidget', row: 'int', current_kind: 'str') -> 'None':
         cb = QComboBox()
@@ -524,6 +548,9 @@ class GeometryTab(QWidget):
         """Build a QComboBox for the segment table. Connects the change handler only after the initial index is set."""
         cb = QComboBox()
         found_index = -1
+        cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        cb.setMinimumContentsLength(8)
+        cb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         current_clean = (current or "").strip()
         for i, (value, lbl) in enumerate(options):
             cb.addItem(lbl, userData=value)
@@ -613,6 +640,25 @@ class GeometryTab(QWidget):
         current.append([str(next_flag), "constant", "50", "0", "0", "0"])
         self.ibcs_entries = current
         self._populate_small_table(self.table_ibc, current, label=self.lbl_ibc, title_prefix="IBCS/Resistances")
+        self._refresh_segment_dropdowns()
+        self._set_dirty(True)
+
+    def _thin_layer_add_row(self):
+        options = [(flag, label) for flag, label in self._diel_dropdown_options() if flag != "0"]
+        if not options:
+            QMessageBox.information(self, "Thin layer material", "Add a dielectric material (epsilon and mu) first.")
+            return
+        row = choose_thin_layer(self, options)
+        if row is None:
+            return
+        current = self._read_small_table(self.table_ibc)
+        used = {self._parse_int_token(item[0], 0) for item in current if item}
+        flag = 1
+        while flag in used:
+            flag += 1
+        current.append([str(flag)] + row)
+        self.ibcs_entries = current
+        self._populate_small_table(self.table_ibc, current, self.lbl_ibc, "IBCS/Resistances")
         self._refresh_segment_dropdowns()
         self._set_dirty(True)
 
@@ -901,9 +947,42 @@ class GeometryTab(QWidget):
             "FREDDY Artifact Attached",
             f"Attached '{destination.name}' beside '{geometry_path.name}' as "
             f"{friendly_kind} flag {flag}.\n\n"
-            "Use Save in the Geometry tab to persist this new reference in "
+            + ("For a collapsed PEC-backed stack, select the TYPE 2 outer-envelope "
+               "segments and use Apply IBC to selected TYPE 2 segments. "
+               "Do not also model the collapsed bulk layers.\n\n" if kind == "ibc" else "")
+            + "Use Save in the Geometry tab to persist this new reference in "
             "the .geo file.",
         )
+        return True
+
+    def _apply_selected_conductor_ibc(self):
+        rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        material_rows = sorted({index.row() for index in self.table_ibc.selectedIndexes()})
+        try:
+            if not rows or len(material_rows) != 1:
+                raise ValueError("Select conductor segments above and exactly one surface-material row below.")
+            definition = self._read_small_table(self.table_ibc)[material_rows[0]]
+            flag = int(definition[0])
+            from rcs_solver import MaterialLibrary
+            base_dir = str(Path(self.loaded_path).parent) if self.loaded_path else os.getcwd()
+            library = MaterialLibrary.from_entries([definition], [], base_dir)
+            model = library.impedance_models[flag]
+            frequency = float(model.freqs_ghz[0]) if hasattr(model, "freqs_ghz") else 1.
+            library.get_impedance(flag, frequency)
+            for row in rows:
+                props = self._ensure_prop_len(self.segments[row].properties, 5)
+                if int(props[0]) != 2 or any(int(props[i] or 0) != 0 for i in (3,4)):
+                    raise ValueError("This action requires TYPE 2 conductor segments with air (0) region flags. Bulk interfaces and free sheets need their own material workflow.")
+        except (ValueError, IndexError, KeyError, OSError) as exc:
+            QMessageBox.warning(self, "Apply conductor IBC", str(exc))
+            return False
+        for row in rows:
+            self.segments[row].properties[2] = str(flag)
+        self._refresh_segment_dropdowns()
+        self._render_impedance_overlay()
+        self.canvas.draw_idle()
+        self._set_dirty(True)
+        self.lbl_status.setText(f"Applied IBC flag {flag} to {len(rows)} TYPE 2 segments. For a FREDDY coating, these coordinates must represent the outer coating envelope. Save the geometry to retain the assignment.")
         return True
 
     def _ibc_add_csv_row(self) -> 'None':
@@ -1033,6 +1112,26 @@ class GeometryTab(QWidget):
 
         if row == self._selected_row:
             self._update_status_label(row)
+
+    def _select_refinement_candidates(self):
+        from mesh_guidance import geometry_refinement_candidates
+        candidates = geometry_refinement_candidates(self.get_geometry_snapshot()["segments"])
+        self.table.clearSelection()
+        for row in candidates:
+            self.table.selectionModel().select(self.table.model().index(row, 0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
+        self.lbl_status.setText(f"Selected {len(candidates)} segments at open ends, bends, or material junctions. These are geometry indicators; use mesh certification to check complex-field accuracy.")
+
+    def _refine_selected_segments(self):
+        from mesh_guidance import refined_density
+        selected = sorted({index.row() for index in self.table.selectedIndexes()})
+        try:
+            values = [(row, refined_density(self._ensure_prop_len(self.segments[row].properties, 5)[1])) for row in selected]
+        except ValueError as exc:
+            QMessageBox.warning(self, "Mesh density", str(exc))
+            return
+        for row, value in values:
+            self.table.item(row, 2).setText(value)
+        self.lbl_status.setText(f"Refined {len(values)} selected segments. Run the certified solve to measure the field change." if values else "Select segments in the table or use Find corners / junctions first.")
 
     def _on_table_selection_changed(self):
         if self._syncing_selection:
@@ -1451,6 +1550,9 @@ class GeometryTab(QWidget):
             flag = self._parse_int_token(row[0], 0)
             if flag <= 0:
                 continue
+            if len(row) >= 2 and row[1].lower() == "thin_dielectric":
+                out[flag] = {"kind": "thin_dielectric", "z_start": None, "z_end": None, "raw": row}
+                continue
             if is_tabulated_row(row):
                 out[flag] = {
                     "kind": "tabulated",
@@ -1513,6 +1615,9 @@ class GeometryTab(QWidget):
         if info is None:
             return f"{base}  |  IBC {ibc} (NOT DEFINED)"
         kind = info["kind"]
+        if kind == "thin_dielectric":
+            row = info["raw"]
+            return f"{base}  |  thin layer {row[2]} m, dielectric {row[3]}" if len(row) == 4 else f"{base} | malformed thin layer"
         if kind == "tabulated":
             return (
                 f"{base}  |  IBC {ibc} -> tabulated "

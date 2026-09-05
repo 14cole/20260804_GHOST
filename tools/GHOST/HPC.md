@@ -21,6 +21,84 @@ cancelled, or is preempted cannot strand work.
 Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
 knobs below mean the same thing in each.
 
+### Headless materials, accuracy, and Assembly
+
+The numerical workflows run without a display, Qt, or an open GRIM/FREDDY
+window. Save the geometry and its material definitions before creating a run.
+The bundle copies referenced material/IBC tables; each run then freezes its
+own inputs and records solver settings and source hashes in `manifest.json`.
+
+| Capability | Headless use |
+|---|---|
+| FREDDY PEC-backed stack coating | Attach the exported scalar IBC CSV to TYPE 2 in the saved `.geo`; both 2D and BoR drivers read it. The boundary is the outer air/coating envelope. |
+| Thin dielectric sheet | Save the typed `thin_dielectric` material and thickness in `.geo`; supported by the 2D driver within the same model restrictions as the GUI. This model is separate from the PEC-backed stack IBC. |
+| Tight mesh comparison | Set `ACCURACY_TARGET = "tight"` and `MESH_CERTIFICATION = True` in either solver's driver or request settings. The actual tolerances are frozen in the run manifest and used by workers. |
+| Mixed-precision LU | Set `LU_PRECISION = "mixed"` in the **2D** driver/request. Each worker selects CPU mixed LU with double-precision residual refinement and fallback. Default is `"double"`. BoR's `TABLE_PRECISION` controls assembly tables, a separate option. |
+| Mesh refinement | Save segment refinement in `.geo`. Headless solves retain it; Tight changes acceptance limits and does not automatically repair an insufficient mesh. |
+| Runtime evidence | Timing and available sampled process RSS are embedded in the exported `.grim` solver metadata. |
+| Assembly | Configure and run `Backend/place_features.py`, or call `feature_workflow.prepare_feature_assembly` / `execute_feature_assembly`. The contribution calculations are available through `assembly_inspector.ContributionInspector.evaluate`. |
+| Feature-family validation | Run `Backend/feature_family_validation.py --study study.json --report new_report.json`. Missing reference data remain unvalidated. |
+
+`ACCURACY_TARGET` accepts `"standard"` or `"tight"` in both local and HPC
+drivers. With `MESH_CERTIFICATION = False`, the run uses the base mesh and
+does not apply mesh-comparison thresholds. Numerical certification does not
+certify the scalar coating approximation, its oblique-incidence accuracy, or
+Assembly's physical assumptions. See the
+[PEC-backed coating guide](geometry_tests/pec_backed_ibc/README.md).
+
+FREDDY's material calculation and coating assessment are also scriptable:
+use `ibc.compute.compute_stack_impedance_many`, `ibc.io.write_output`, and
+`ibc.ghost_coating.assess_scalar_coating`, with `tools/FREDDY` on `PYTHONPATH`.
+The GUI entry point `impedance_gui.py` imports Qt; the `ibc.compute`, `ibc.io`,
+and `ibc.ghost_coating` modules do not. Precomputing the stack CSV once avoids
+repeating the stack calculation for every scattering run.
+
+The dedicated SLURM sweep drivers cover 2D and BoR monostatic solves. Assembly
+and assessment scripts can run inside a normal batch job; they do not acquire
+the solver drivers' distributed scheduling merely by being headless. Window
+size, sidebar layout, and palette options affect the desktop presentation.
+
+#### Create an HPC request without opening the GUI
+
+From the repository root, create a `settings.json`, for example:
+
+```json
+{
+  "FREQUENCIES_GHZ": [1.0, 9.5, 18.0],
+  "AZIMUTHS_DEG": [0.0, 45.0, 90.0],
+  "GEOMETRY_UNITS": "inches",
+  "MESH_CERTIFICATION": true,
+  "ACCURACY_TARGET": "tight",
+  "LU_PRECISION": "mixed",
+  "N_NODES": 1,
+  "N_JOBS": 1,
+  "SLURM_PARTITION": "compute"
+}
+```
+
+Choose the frequency/angular grid, geometry units, partition, account, memory,
+and time for your actual study and cluster. The three frequencies above are
+only an example grid. Material tables must cover all requested frequencies.
+
+```bash
+python tools/GHOST/Backend/hpc_bundle.py create --solver 2d --output coated_request --settings settings.json --geometry FRD=/path/to/coated_body.geo
+python tools/GHOST/Backend/hpc_bundle.py verify coated_request
+```
+
+For BoR, use `--solver bor`, `--geometry BOR=/path/to/coated_bor.geo`, remove
+`LU_PRECISION`, and specify the required `ELEVATIONS_DEG` and body attitude.
+Transfer the complete request folder, then use the Linux stage command below.
+GUI Solver-tab choices are separate from the Runs request settings: explicit
+request settings determine the cluster run.
+
+The request contains inputs/settings, not the solver implementation. Install
+the matching updated GHOST backend and numerical dependencies on the cluster.
+Build the BoR native kernel for Linux on the target environment when using
+native acceleration; the Windows DLL cannot be reused as a Linux library.
+The local tests exercise bundle preparation and worker entry points with Qt
+imports blocked. They do not establish that a particular cluster's SLURM,
+modules, compiler, or filesystem is configured correctly.
+
 Edit the CONFIG block at the top of a driver and run it with no arguments to
 submit. `hpc_common.configure_driver` still works the same way: it rewrites
 those top-level constants in a copy of the driver, and submitting that copy is

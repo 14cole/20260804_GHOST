@@ -1,0 +1,341 @@
+{
+  "schema": "ghost.validation.feature-family-study.v1",
+  "status": "definition_only_no_reference_results",
+  "reference_solver": "",
+  "host_material": "PEC",
+  "frequency_ghz": 10.0,
+  "fixed_geometry": {
+    "groove_width_wavelengths": 0.03,
+    "groove_depth_wavelengths": 0.03,
+    "run_length_wavelengths": 6.0,
+    "host": "Converged finite PEC plate or a separately documented curved PEC host; use identical host geometry for clean and featured runs."
+  },
+  "conventions": "exp(+j omega t), coming-from radar directions, global phase origin; physical F, sigma=4*pi*|F|^2; VV/HH/VH on identical grids",
+  "cases": [
+    {
+      "id": "corner-01",
+      "family": "corner",
+      "parameter": "included_angle_deg",
+      "value": 30.0,
+      "geometry": "Two intersecting PEC groove runs, with a resolved sharp corner; compare to independent straight-run expansion.",
+      "paths": {
+        "clean_truth": "corner-01/clean_truth.grim",
+        "clean_prediction": "corner-01/clean_prediction.grim",
+        "featured_truth": "corner-01/featured_truth.grim",
+        "featured_prediction": "corner-01/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "corner-01/clean_coarse.grim",
+          "corner-01/clean_medium.grim",
+          "corner-01/clean_truth.grim"
+        ],
+        "featured": [
+          "corner-01/featured_coarse.grim",
+          "corner-01/featured_medium.grim",
+          "corner-01/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "corner-02",
+      "family": "corner",
+      "parameter": "included_angle_deg",
+      "value": 60.0,
+      "geometry": "Two intersecting PEC groove runs, with a resolved sharp corner; compare to independent straight-run expansion.",
+      "paths": {
+        "clean_truth": "corner-02/clean_truth.grim",
+        "clean_prediction": "corner-02/clean_prediction.grim",
+        "featured_truth": "corner-02/featured_truth.grim",
+        "featured_prediction": "corner-02/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "corner-02/clean_coarse.grim",
+          "corner-02/clean_medium.grim",
+          "corner-02/clean_truth.grim"
+        ],
+        "featured": [
+          "corner-02/featured_coarse.grim",
+          "corner-02/featured_medium.grim",
+          "corner-02/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "corner-03",
+      "family": "corner",
+      "parameter": "included_angle_deg",
+      "value": 90.0,
+      "geometry": "Two intersecting PEC groove runs, with a resolved sharp corner; compare to independent straight-run expansion.",
+      "paths": {
+        "clean_truth": "corner-03/clean_truth.grim",
+        "clean_prediction": "corner-03/clean_prediction.grim",
+        "featured_truth": "corner-03/featured_truth.grim",
+        "featured_prediction": "corner-03/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "corner-03/clean_coarse.grim",
+          "corner-03/clean_medium.grim",
+          "corner-03/clean_truth.grim"
+        ],
+        "featured": [
+          "corner-03/featured_coarse.grim",
+          "corner-03/featured_medium.grim",
+          "corner-03/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "termination-01",
+      "family": "termination",
+      "parameter": "run_length_wavelengths",
+      "value": 1.0,
+      "geometry": "A finite straight PEC groove with both physical end walls; compare to a truncated line expansion.",
+      "paths": {
+        "clean_truth": "termination-01/clean_truth.grim",
+        "clean_prediction": "termination-01/clean_prediction.grim",
+        "featured_truth": "termination-01/featured_truth.grim",
+        "featured_prediction": "termination-01/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "termination-01/clean_coarse.grim",
+          "termination-01/clean_medium.grim",
+          "termination-01/clean_truth.grim"
+        ],
+        "featured": [
+          "termination-01/featured_coarse.grim",
+          "termination-01/featured_medium.grim",
+          "termination-01/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "termination-02",
+      "family": "termination",
+      "parameter": "run_length_wavelengths",
+      "value": 3.0,
+      "geometry": "A finite straight PEC groove with both physical end walls; compare to a truncated line expansion.",
+      "paths": {
+        "clean_truth": "termination-02/clean_truth.grim",
+        "clean_prediction": "termination-02/clean_prediction.grim",
+        "featured_truth": "termination-02/featured_truth.grim",
+        "featured_prediction": "termination-02/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "termination-02/clean_coarse.grim",
+          "termination-02/clean_medium.grim",
+          "termination-02/clean_truth.grim"
+        ],
+        "featured": [
+          "termination-02/featured_coarse.grim",
+          "termination-02/featured_medium.grim",
+          "termination-02/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "termination-03",
+      "family": "termination",
+      "parameter": "run_length_wavelengths",
+      "value": 6.0,
+      "geometry": "A finite straight PEC groove with both physical end walls; compare to a truncated line expansion.",
+      "paths": {
+        "clean_truth": "termination-03/clean_truth.grim",
+        "clean_prediction": "termination-03/clean_prediction.grim",
+        "featured_truth": "termination-03/featured_truth.grim",
+        "featured_prediction": "termination-03/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "termination-03/clean_coarse.grim",
+          "termination-03/clean_medium.grim",
+          "termination-03/clean_truth.grim"
+        ],
+        "featured": [
+          "termination-03/featured_coarse.grim",
+          "termination-03/featured_medium.grim",
+          "termination-03/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "curved_seam-01",
+      "family": "curved_seam",
+      "parameter": "radius_wavelengths",
+      "value": 1.0,
+      "geometry": "A circular groove on a smooth PEC host; compare to curved line expansion using the same local normals.",
+      "paths": {
+        "clean_truth": "curved_seam-01/clean_truth.grim",
+        "clean_prediction": "curved_seam-01/clean_prediction.grim",
+        "featured_truth": "curved_seam-01/featured_truth.grim",
+        "featured_prediction": "curved_seam-01/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "curved_seam-01/clean_coarse.grim",
+          "curved_seam-01/clean_medium.grim",
+          "curved_seam-01/clean_truth.grim"
+        ],
+        "featured": [
+          "curved_seam-01/featured_coarse.grim",
+          "curved_seam-01/featured_medium.grim",
+          "curved_seam-01/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "curved_seam-02",
+      "family": "curved_seam",
+      "parameter": "radius_wavelengths",
+      "value": 3.0,
+      "geometry": "A circular groove on a smooth PEC host; compare to curved line expansion using the same local normals.",
+      "paths": {
+        "clean_truth": "curved_seam-02/clean_truth.grim",
+        "clean_prediction": "curved_seam-02/clean_prediction.grim",
+        "featured_truth": "curved_seam-02/featured_truth.grim",
+        "featured_prediction": "curved_seam-02/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "curved_seam-02/clean_coarse.grim",
+          "curved_seam-02/clean_medium.grim",
+          "curved_seam-02/clean_truth.grim"
+        ],
+        "featured": [
+          "curved_seam-02/featured_coarse.grim",
+          "curved_seam-02/featured_medium.grim",
+          "curved_seam-02/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "curved_seam-03",
+      "family": "curved_seam",
+      "parameter": "radius_wavelengths",
+      "value": 10.0,
+      "geometry": "A circular groove on a smooth PEC host; compare to curved line expansion using the same local normals.",
+      "paths": {
+        "clean_truth": "curved_seam-03/clean_truth.grim",
+        "clean_prediction": "curved_seam-03/clean_prediction.grim",
+        "featured_truth": "curved_seam-03/featured_truth.grim",
+        "featured_prediction": "curved_seam-03/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "curved_seam-03/clean_coarse.grim",
+          "curved_seam-03/clean_medium.grim",
+          "curved_seam-03/clean_truth.grim"
+        ],
+        "featured": [
+          "curved_seam-03/featured_coarse.grim",
+          "curved_seam-03/featured_medium.grim",
+          "curved_seam-03/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "nearby_pair-01",
+      "family": "nearby_pair",
+      "parameter": "separation_wavelengths",
+      "value": 0.1,
+      "geometry": "Two parallel finite PEC grooves solved together; compare to the coherent sum of independently characterized runs.",
+      "paths": {
+        "clean_truth": "nearby_pair-01/clean_truth.grim",
+        "clean_prediction": "nearby_pair-01/clean_prediction.grim",
+        "featured_truth": "nearby_pair-01/featured_truth.grim",
+        "featured_prediction": "nearby_pair-01/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "nearby_pair-01/clean_coarse.grim",
+          "nearby_pair-01/clean_medium.grim",
+          "nearby_pair-01/clean_truth.grim"
+        ],
+        "featured": [
+          "nearby_pair-01/featured_coarse.grim",
+          "nearby_pair-01/featured_medium.grim",
+          "nearby_pair-01/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "nearby_pair-02",
+      "family": "nearby_pair",
+      "parameter": "separation_wavelengths",
+      "value": 0.25,
+      "geometry": "Two parallel finite PEC grooves solved together; compare to the coherent sum of independently characterized runs.",
+      "paths": {
+        "clean_truth": "nearby_pair-02/clean_truth.grim",
+        "clean_prediction": "nearby_pair-02/clean_prediction.grim",
+        "featured_truth": "nearby_pair-02/featured_truth.grim",
+        "featured_prediction": "nearby_pair-02/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "nearby_pair-02/clean_coarse.grim",
+          "nearby_pair-02/clean_medium.grim",
+          "nearby_pair-02/clean_truth.grim"
+        ],
+        "featured": [
+          "nearby_pair-02/featured_coarse.grim",
+          "nearby_pair-02/featured_medium.grim",
+          "nearby_pair-02/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "nearby_pair-03",
+      "family": "nearby_pair",
+      "parameter": "separation_wavelengths",
+      "value": 0.5,
+      "geometry": "Two parallel finite PEC grooves solved together; compare to the coherent sum of independently characterized runs.",
+      "paths": {
+        "clean_truth": "nearby_pair-03/clean_truth.grim",
+        "clean_prediction": "nearby_pair-03/clean_prediction.grim",
+        "featured_truth": "nearby_pair-03/featured_truth.grim",
+        "featured_prediction": "nearby_pair-03/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "nearby_pair-03/clean_coarse.grim",
+          "nearby_pair-03/clean_medium.grim",
+          "nearby_pair-03/clean_truth.grim"
+        ],
+        "featured": [
+          "nearby_pair-03/featured_coarse.grim",
+          "nearby_pair-03/featured_medium.grim",
+          "nearby_pair-03/featured_truth.grim"
+        ]
+      }
+    },
+    {
+      "id": "nearby_pair-04",
+      "family": "nearby_pair",
+      "parameter": "separation_wavelengths",
+      "value": 1.0,
+      "geometry": "Two parallel finite PEC grooves solved together; compare to the coherent sum of independently characterized runs.",
+      "paths": {
+        "clean_truth": "nearby_pair-04/clean_truth.grim",
+        "clean_prediction": "nearby_pair-04/clean_prediction.grim",
+        "featured_truth": "nearby_pair-04/featured_truth.grim",
+        "featured_prediction": "nearby_pair-04/featured_prediction.grim"
+      },
+      "reference_refinements": {
+        "clean": [
+          "nearby_pair-04/clean_coarse.grim",
+          "nearby_pair-04/clean_medium.grim",
+          "nearby_pair-04/clean_truth.grim"
+        ],
+        "featured": [
+          "nearby_pair-04/featured_coarse.grim",
+          "nearby_pair-04/featured_medium.grim",
+          "nearby_pair-04/featured_truth.grim"
+        ]
+      }
+    }
+  ]
+}

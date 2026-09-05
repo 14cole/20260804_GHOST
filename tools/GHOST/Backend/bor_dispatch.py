@@ -14,7 +14,7 @@ Supported material configurations (segment TYPE semantics shared with the
 2D solver / MaterialLibrary):
 
   * all TYPE 2 (PEC, optionally with IBC flags incl. tapers and material
-    tables)                      -> CFIE (pure PEC) / IBC-EFIE (any Z_s != 0)
+    tables)                      -> CFIE (PEC/uniform reactive IBC), otherwise IBC-EFIE
   * all TYPE 3, one pos_mat     -> homogeneous penetrable body (PMCHWT)
   * TYPE 3 outer + TYPE 4 core,
     matching pos_mat            -> coated PEC (multi-region PMCHWT)
@@ -24,8 +24,10 @@ Supported material configurations (segment TYPE semantics shared with the
   * supported TYPE 2/3/4/5 band layouts
                                 -> side-by-side coating bands
 
-Anything else--including TYPE 1 sheets and arbitrary mixed PEC/dielectric
-graphs--raises with a named error. TYPE 5 is accepted only in the explicitly
+TYPE 1 electric-impedance sheets, alone or joined to pure TYPE 2 PEC in one
+meridian, use a two-sided EFIE sheet law. Their meridian may be open. Uniform
+reactive conductor IBCs use IBC-CFIE. Thin dielectric sheets remain 2D-only.
+Arbitrary mixed PEC/dielectric graphs raise with a named error. TYPE 5 is accepted only in the explicitly
 classified layouts above, not as a general interface graph.
 
 The production entry points share the 2-D solver's geometry/frequency/aspect
@@ -40,6 +42,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+from solver_metrics import active_metrics, profiled_solve, timed_stage
 
 from bor_kernels import C0
 from bor_solver import (BOR_CONDITION_EST_MAX,
@@ -343,8 +346,22 @@ def _mesh_generatrix(ordered: 'List[_SegChain]', lam_target: 'float',
     return pts, np.asarray(elem_seg, dtype=int), np.asarray(elem_arc, dtype=float)
 
 
+def _conductor_formulation(zs_elements):
+    from bor_solver import _effectively_reactive_surface_impedance
+    values = np.asarray(zs_elements, complex)
+    if not np.any(abs(values) > 0):
+        return "cfie"
+    if np.all(values == values[0]) and _effectively_reactive_surface_impedance(values):
+        return "cfie"
+    return "efie"
+
+
 def _classify(chains: 'List[_SegChain]') -> 'str':
     types = {c.seg_type for c in chains}
+    if types in ({1}, {1, 2}):
+        if any(c.seg_type == 2 and c.ibc_flag > 0 for c in chains):
+            raise ValueError("BoR sheets can join pure PEC, but not an opaque IBC or dielectric interface.")
+        return "sheet"
     if types == {2}:
         return "conductor"
     if types == {3}:
@@ -403,7 +420,7 @@ def _validate_bor_far_controls(kind: 'str', assembly: 'str',
 
     del assembly, table_precision, stream_budget_gb
     if kind not in {
-        "conductor", "dielectric", "coated", "partial", "layered",
+        "conductor", "sheet", "dielectric", "coated", "partial", "layered",
         "layered_n", "banded",
     }:
         raise ValueError(f"Unsupported BoR assembly-control kind {kind!r}.")
@@ -521,7 +538,7 @@ def estimate_bor_resources(
         "retained_gb": 0.0,
         "peak_gb": 0.0,
     }
-    if kind == "conductor":
+    if kind in {"conductor", "sheet"}:
         from bor_solver import estimate_bor_table_gb
         from bor_streaming import (
             BOR_STREAM_TILE_BUDGET_GB,
@@ -529,8 +546,9 @@ def estimate_bor_resources(
             plan_streaming_mode_block,
         )
 
-        has_ibc = any(chain.ibc_flag > 0 for chain in chains)
-        formulation = "efie" if has_ibc else "cfie"
+        has_ibc = kind == "conductor" and any(chain.ibc_flag > 0 for chain in chains)
+        sampled_zs = np.array([materials.get_impedance(c.ibc_flag, frequency, arc_s=s) for c in chains for s in (0., .5, 1.)])
+        formulation = "efie" if kind == "sheet" else _conductor_formulation(sampled_zs)
         table_double = estimate_bor_table_gb(
             element_count, mode_cap, formulation, has_ibc, 4, False
         )
@@ -782,11 +800,13 @@ def estimate_bor_resources(
             estimated_assembly = "tables"
             estimated_precision = "single" if use_single else "double"
 
-    if kind in ('conductor', 'dielectric') and estimated_assembly == 'streaming':
+    if kind in ('conductor', 'sheet', 'dielectric') and estimated_assembly == 'streaming':
         auxiliary_estimate = _estimate_junction_auxiliary_gb(surface_layout, mode_cap)
         assembly_peak_gb += auxiliary_estimate['peak_gb']
         persistent_gb += auxiliary_estimate['retained_gb']
 
+    if kind == "sheet":
+        assembly_peak_gb += 16.0*(element_count+1)**2/1e9
     active_modes = min(effective_workers, mode_cap + 1)
     # Use the exact same dense-work reservation and effective outer-mode
     # concurrency as the runtime gate.  Keeping a second scheduler planner can
@@ -1078,9 +1098,10 @@ def _prepare_bor_groups(chains: 'List[_SegChain]', kind: 'str'):
         groups = [covered_runs, outer_runs, wall_runs, bare_runs]
     else:
         ordered = _stitch_generatrix(
-            chains, "TYPE 2" if kind == "conductor" else "TYPE 3", tol
+            chains, "sheet / PEC" if kind == "sheet" else "TYPE 2" if kind == "conductor" else "TYPE 3", tol
         )
-        _preflight_generatrix(ordered, "body", axis_tol)
+        if kind != "sheet":
+            _preflight_generatrix(ordered, "body", axis_tol)
         groups = [ordered]
 
     return groups, tol, axis_tol
@@ -1099,7 +1120,7 @@ def _bor_surface_layout(groups, kind: 'str', wavelength: 'float'):
     def record(run, conductor):
         return (_run_element_count(run, wavelength), bool(conductor))
 
-    if kind == "conductor":
+    if kind in {"conductor", "sheet"}:
         return [record(groups[0], True)]
     if kind == "dielectric":
         return [record(groups[0], False)]
@@ -1236,6 +1257,7 @@ def _enforce_total_element_limit(surface_layout, max_elements: 'int') -> 'int':
     return total
 
 
+@profiled_solve
 def solve_monostatic_rcs_bor(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -1398,7 +1420,7 @@ def solve_monostatic_rcs_bor(
                 except Exception:
                     pass
 
-        if kind == "conductor":
+        if kind in {"conductor", "sheet"}:
             ordered = groups[0]
             pts, elem_seg, elem_arc = _mesh_generatrix(ordered, lam0,
                                                        max_elements, axis_tol)
@@ -1409,10 +1431,11 @@ def solve_monostatic_rcs_bor(
                     zs_elem[ei] = materials.get_impedance(
                         c.ibc_flag, freq_ghz, arc_s=float(elem_arc[ei]))
             has_ibc = bool(np.any(np.abs(zs_elem) > 0.0))
-            form = "efie" if has_ibc else "cfie"
+            form = "efie" if kind == "sheet" else _conductor_formulation(zs_elem)
             out = solve_bor(pts, freq_hz, aspects, formulation=form,
                             cfie_alpha=cfie_alpha,
-                            zs=zs_elem if has_ibc else None,
+                            zs=zs_elem if has_ibc and kind != "sheet" else None,
+                            sheet_zs=zs_elem if kind == "sheet" else None,
                             n_modes=n_modes, mode_tol=mode_tol,
                             workers=workers, progress=report,
                             check_abort=check_abort,
@@ -1441,8 +1464,8 @@ def solve_monostatic_rcs_bor(
                     f"table_precision={table_precision_key!r}; reported "
                     f"{actual_precision or 'missing'!r}."
                 )
-            formulation_label = ("BoR-MoM IBC-EFIE (Leontovich)" if has_ibc
-                                 else f"BoR-MoM PEC {form.upper()}")
+            formulation_label = ("BoR transmitting electric sheet / PEC EFIE" if kind == "sheet" else
+                                 f"BoR-MoM IBC-{form.upper()} (Leontovich)" if has_ibc else f"BoR-MoM PEC {form.upper()}")
         elif kind == "dielectric":
             eps, mu = materials.get_medium(groups[0][0].pos_mat, freq_ghz)
             pts, _, _ = _mesh_generatrix(
@@ -2057,7 +2080,7 @@ def solve_monostatic_rcs_bor(
             "quality_gate": quality_gate,
             "cfie_alpha": float(cfie_alpha),
             "workers": int(workers),
-            "far_table_controls_applicable": bool(kind == "conductor"),
+            "far_table_controls_applicable": bool(kind in ("conductor", "sheet")),
             "assembly_requested": assembly_key,
             "table_precision_requested": table_precision_key,
             "stream_budget_gb": stream_budget,
@@ -2088,6 +2111,7 @@ def _bor_channel_result(
     return {"samples": samples}
 
 
+@profiled_solve
 def solve_monostatic_rcs_bor_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -2299,6 +2323,7 @@ def solve_monostatic_rcs_bor_certified(
     return fine_result
 
 
+@profiled_solve
 def solve_monostatic_rcs_bor_survey(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',

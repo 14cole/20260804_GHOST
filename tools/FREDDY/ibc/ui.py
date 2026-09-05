@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Mapping
 import math
 import os
@@ -1424,6 +1425,7 @@ class ImpedanceGui(QMainWindow):
         self.layer_up_btn = None
         self.layer_down_btn = None
         self.compute_btn = None
+        self.coating_check_btn = None
         self.angle_compute_btn = None
         self.thk_compute_btn = None
         self.inv_run_btn = None
@@ -1719,7 +1721,8 @@ class ImpedanceGui(QMainWindow):
         self.backing_combo = make_combo(("pec", "air"), self.backing_var, width=110)
         self.backing_combo.setToolTip(
             "PEC: front-face impedance of a coating on a conductor; suitable "
-            "for collapsing the coating onto a Type 2 RCS body.\n"
+            "for a scalar Type 2 IBC on the OUTER coating envelope in 2D/BoR. "
+            "Check the angle approximation before replacing bulk layers.\n"
             "air: planar air-terminated input impedance for analysis; it is "
             "not a general one-sided IBC for a closed transmitting body."
         )
@@ -1753,6 +1756,10 @@ class ImpedanceGui(QMainWindow):
         self.compute_btn = QPushButton("Compute")
         self.compute_btn.clicked.connect(self._compute_impedance)
         imp_btn_row.addWidget(self.compute_btn)
+        self.coating_check_btn = QPushButton("Check GHOST coating approximation...")
+        self.coating_check_btn.setToolTip("Compare the PEC-backed stack with its normal-incidence scalar IBC for TE/TM at 0-85 degrees. Uses the frequency sweep above; does not write a CSV or certify finite-body RCS.")
+        self.coating_check_btn.clicked.connect(self._check_ghost_coating)
+        imp_btn_row.addWidget(self.coating_check_btn)
         imp_btn_row.addStretch(1)
         imp_layout.addLayout(imp_btn_row)
         imp_layout.addStretch(1)
@@ -4023,6 +4030,7 @@ class ImpedanceGui(QMainWindow):
         self._task_running = running
         for btn in (
             self.compute_btn,
+            self.coating_check_btn,
             self.ibc_batch_export_btn,
             self.angle_compute_btn,
             self.thk_compute_btn,
@@ -7289,6 +7297,33 @@ class ImpedanceGui(QMainWindow):
         self._run_background_task(
             "IBC Batch", worker, on_success, "IBC Batch Error"
         )
+
+    def _check_ghost_coating(self) -> None:
+        try:
+            if normalize_backing(self.backing_var.get()) != "pec":
+                raise ValueError("Select PEC backing for a coating on a GHOST conductor.")
+            if not self.layers:
+                raise ValueError("Add the coating layers first.")
+            snapshot = self._snapshot_layers()
+            frequencies = make_frequency_sweep(float(self.f_start_var.get()),
+                                              float(self.f_stop_var.get()),
+                                              float(self.f_step_var.get()))
+        except Exception as exc:
+            messagebox.showerror("GHOST coating check", str(exc))
+            return
+        from .ghost_coating import assess_scalar_coating, coating_report_text
+
+        def worker():
+            return assess_scalar_coating(frequencies, self._load_layers(0, snapshot))
+
+        def on_success(report):
+            dialog = QMessageBox(self)
+            dialog.setWindowTitle("GHOST scalar coating approximation")
+            dialog.setText(coating_report_text(report))
+            dialog.setDetailedText(json.dumps(report, indent=2, allow_nan=False))
+            dialog.exec()
+
+        self._run_background_task("GHOST coating check", worker, on_success, "GHOST coating check")
 
     def _compute_impedance(self) -> None:
         try:

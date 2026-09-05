@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import hpc_scheduler
+from solver_quality import accuracy_target_policy, validate_mesh_convergence_policy
 import workflow_provenance as _workflow_provenance
 from workflow_provenance import (
     backend_source_fingerprint,
@@ -85,6 +86,7 @@ MODE_TOL         = 1e-6
 MAX_ELEMENTS     = 50_000
 ASSEMBLY         = "auto"         # "auto" | "tables" | "streaming"
 TABLE_PRECISION  = "auto"         # "auto" | "single" | "double"
+ACCURACY_TARGET  = "standard"     # "standard" | "tight"; mesh comparison limits
 STREAM_BUDGET_GB = 8.0            # maximum held streaming-block budget; the
                                   # scheduler predicts total peak separately
 MESH_CERTIFICATION = True         # recommended: compare base/fine meshes;
@@ -345,6 +347,9 @@ def _solve_and_export(
     )
     solve = (solve_monostatic_rcs_bor_certified if context["mesh_certification"]
              else solve_monostatic_rcs_bor_survey)
+    quality_kwargs = ({"mesh_convergence_policy": validate_mesh_convergence_policy(
+        context.get("mesh_convergence_policy")
+    )} if context["mesh_certification"] else {})
     result = solve(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(pair["frequency_ghz"])],
@@ -360,6 +365,7 @@ def _solve_and_export(
         assembly=context["assembly"],
         stream_budget_gb=context["stream_budget_gb"],
         expand_to_360=context["expand_to_360"],
+        **quality_kwargs,
     )
     for warning in result.get("metadata", {}).get("warnings", []) or []:
         print(f"      [warn] {pair['geometry_stem']}: {warning}", flush=True)
@@ -437,11 +443,14 @@ def _plan(
             assembly=ASSEMBLY,
             stream_budget_gb=STREAM_BUDGET_GB,
             mesh_certification=bool(MESH_CERTIFICATION),
+            fine_factor=float(accuracy_target_policy(ACCURACY_TARGET)["fine_factor"]),
         )
     return costs
 
 
 def _validate_config() -> 'List[float]':
+    if ACCURACY_TARGET not in ("standard", "tight"):
+        sys.exit("ERROR: ACCURACY_TARGET must be 'standard' or 'tight'.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     try:
         from feature_sum import radar_grid_aspects, validate_radar_grid
@@ -494,6 +503,7 @@ def _validate_config() -> 'List[float]':
 
 def main() -> 'None':
     aspects = _validate_config()
+    mesh_policy = accuracy_target_policy(ACCURACY_TARGET)
     pols = ["VV", "HH"]
     hpc_scheduler.pin_blas_threads(int(BLAS_THREADS_PER_WORKER))
     hpc_scheduler.install_fingerprint_cache()
@@ -547,6 +557,8 @@ def main() -> 'None':
         "stream_budget_gb": float(STREAM_BUDGET_GB),
         "expand_to_360": False,
         "mesh_certification": bool(MESH_CERTIFICATION),
+        "accuracy_target": ACCURACY_TARGET,
+        "mesh_convergence_policy": mesh_policy,
         "workers_per_unit": int(WORKERS_PER_UNIT),
         "blas_threads_per_worker": int(BLAS_THREADS_PER_WORKER),
     }
@@ -598,6 +610,7 @@ def main() -> 'None':
         "stream_budget_gb": float(STREAM_BUDGET_GB),
         "expand_to_360": False,
         "mesh_certification": bool(MESH_CERTIFICATION),
+        "mesh_convergence_policy": mesh_policy,
         "workers_per_unit": int(WORKERS_PER_UNIT),
         "aspects_deg": aspects,
         "angular_grid_sha256": stable_json_fingerprint(

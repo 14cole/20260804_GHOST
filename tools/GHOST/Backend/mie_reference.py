@@ -328,7 +328,7 @@ def sigma_coated_pec_cylinder(a_inner_m, a_outer_m, eps_r, mu_r,
     return float(sigma)
 
 
-def sigma_two_layer_dielectric_cylinder(
+def two_layer_dielectric_cylinder_amplitude(
     a_core_m,
     a_outer_m,
     eps_shell,
@@ -338,7 +338,7 @@ def sigma_two_layer_dielectric_cylinder(
     freq_hz,
     polarization,
 ):
-    """Monostatic width of a concentric two-dielectric cylinder in air.
+    """Stored complex B amplitude of a concentric two-material cylinder.
 
     Region 0 is air, region 1 is the annular shell, and region 2 is the
     homogeneous core.  Each cylindrical harmonic is obtained from an
@@ -410,7 +410,18 @@ def sigma_two_layer_dielectric_cylinder(
         a_n[idx] = np.linalg.solve(matrix, rhs)[0]
 
     amp = np.sum(a_n * (-1.0) ** n_arr)
-    return float((4.0 / k0) * abs(amp) ** 2)
+    return complex(-4.0j * amp)
+
+
+def sigma_two_layer_dielectric_cylinder(a_core_m, a_outer_m, eps_shell,
+                                      mu_shell, eps_core, mu_core, freq_hz,
+                                      polarization):
+    """Monostatic width, preserving the existing public reference API."""
+    amplitude = two_layer_dielectric_cylinder_amplitude(
+        a_core_m, a_outer_m, eps_shell, mu_shell, eps_core, mu_core,
+        freq_hz, polarization)
+    k0 = 2.0 * np.pi * freq_hz / C0
+    return float(abs(amplitude)**2 / (4.0*k0))
 
 
 def sigma_coated_impedance_cylinder(

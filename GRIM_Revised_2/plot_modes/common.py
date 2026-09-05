@@ -134,6 +134,14 @@ def axis_label(reference, axis: str) -> str:
 def _declared_coherent_metadata(dataset, key: str) -> str:
     """Return one producer declaration without inventing a default."""
 
+    inspector = getattr(dataset, "inspect_scalar_metadata", None)
+    if callable(inspector):
+        try:
+            evidence = inspector(key)
+        except (TypeError, ValueError):
+            return f"<unusable {key} declaration>"
+        if evidence.status in {"conflicting", "malformed"}:
+            return f"<unusable {key} declaration>"
     declared_getter = getattr(dataset, "_declared_scalar_metadata", None)
     if callable(declared_getter):
         try:

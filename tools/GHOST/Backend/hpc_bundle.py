@@ -76,6 +76,7 @@ _COMMON_SETTINGS = {
     "SLURM_MAIL_TYPE",
     "SLURM_MAIL_USER",
     "MESH_CERTIFICATION",
+    "ACCURACY_TARGET",
     "BLAS_THREADS_PER_WORKER",
     "MEMORY_HEADROOM",
     "TASKS_PER_CHILD",
@@ -88,6 +89,7 @@ _SETTINGS_BY_SOLVER = {
         "MEMORY_SAFETY",
         "MAX_SOLVE_GB",
         "MAX_PANELS",
+        "LU_PRECISION",
         "ASSEMBLY_THREADS",
     },
     "bor": _COMMON_SETTINGS | {
@@ -654,6 +656,12 @@ def _validate_settings(solver: str, raw_settings: Any) -> Dict[str, Any]:
         value = settings["ASSEMBLY_THREADS"]
         if value != "auto":
             _require_positive_int(value, name="ASSEMBLY_THREADS")
+    for name, choices in (
+        ("ACCURACY_TARGET", ("standard", "tight")),
+        ("LU_PRECISION", ("double", "mixed")),
+    ):
+        if name in settings and settings[name] not in choices:
+            raise BundleError(f"{name} must be {' or '.join(choices)}.")
     if "ASSEMBLY" in settings and settings["ASSEMBLY"] not in {
         "auto",
         "tables",

@@ -251,6 +251,24 @@ def sigma_impedance_sphere(radius_m: 'float', freq_hz: 'float', zs_ohm: 'complex
     return _backscatter_sigma(k, a, b)
 
 
+def sigma_electric_sheet_sphere(radius_m, freq_hz, zs_ohm):
+    """Air/air electric sheet: continuous E, n x (H_out-H_in)=E/Zs.
+
+    Independent regular/outgoing radial boundary match, with no excluded
+    conductor interior. Zs=0 gives PEC; increasing |Zs| gives transparency.
+    """
+    k = 2*np.pi*freq_hz/C0
+    nmax = _nmax_for(k*radius_m)
+    psi, dp = _riccati_psi(nmax, k*radius_m)
+    xi, dx = _riccati_xi(nmax, k*radius_m)
+    g = 1j*complex(zs_ohm)/ETA0
+    a, b = np.zeros(nmax+1, complex), np.zeros(nmax+1, complex)
+    for n in range(1, nmax+1):
+        a[n] = np.linalg.solve([[dx[n], -dp[n]], [dx[n]-g*xi[n], g*psi[n]]], [-dp[n], -dp[n]+g*psi[n]])[0]
+        b[n] = np.linalg.solve([[xi[n], -psi[n]], [xi[n]+g*dx[n], -g*dp[n]]], [-psi[n], -psi[n]-g*dp[n]])[0]
+    return _backscatter_sigma(k, a, b)
+
+
 def sigma_dielectric_sphere(radius_m: 'float', eps_r: 'complex', mu_r: 'complex', freq_hz: 'float') -> 'float':
     k = 2.0 * math.pi * freq_hz / C0
     x = k * radius_m

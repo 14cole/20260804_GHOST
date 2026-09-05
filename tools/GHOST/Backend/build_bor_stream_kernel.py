@@ -93,7 +93,12 @@ def main() -> int:
     output = output_dir / f"bor_stream_kernel.{tag}{output_extension}"
     temporary = output.with_name(f".{output.name}.tmp.{os.getpid()}")
     command = [compiler, "-O3", "-std=c99", "-shared"]
-    if system_name != "windows":
+    if system_name == "windows":
+        # A release must load in a fresh Python process without the compiler's
+        # bin directory. Link GCC/OpenMP/pthread runtime archives into the DLL;
+        # Windows system libraries remain normal system dependencies.
+        command.extend(["-static", "-static-libgcc"])
+    else:
         command.append("-fPIC")
     command.extend(["-o", str(temporary), str(source), "-lm"])
     commands = [command]
@@ -128,16 +133,15 @@ def main() -> int:
                 "Native BoR sampler compilation failed:\n"
                 + "\n\n".join(diagnostics)
             )
-        dll_handle = None
-        if system_name == "windows" and hasattr(os, "add_dll_directory"):
-            dll_handle = os.add_dll_directory(str(Path(compiler).parent))
-        try:
-            library = ctypes.CDLL(str(temporary))
-        finally:
-            if dll_handle is not None:
-                dll_handle.close()
-        for symbol in ("sample_g", "sample_mfie", "sample_ibc"):
-            getattr(library, symbol)
+        # Validate exactly the runtime environment a fresh worker will have.
+        # Loading here with add_dll_directory(compiler/bin) concealed missing
+        # redistributables, and retained a Windows mapping of the staged DLL.
+        subprocess.run([
+            sys.executable, "-I", "-c",
+            "import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); "
+            "[getattr(lib,s) for s in ('sample_g','sample_mfie','sample_ibc')]",
+            str(temporary),
+        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         os.replace(temporary, output)
     finally:
         try:

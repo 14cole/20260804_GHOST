@@ -66,6 +66,30 @@ APPLICATION_PALETTES: dict[str, dict[str, object]] = {
             "#1e40af", "#3b82f6", "#334155", "#0284c7",
         ),
     },
+    "Neutral Dark": {
+        "is_dark": True,
+        "win_bg": "#111827",
+        "panel_bg": "#1f2937",
+        "text": "#f3f4f6",
+        "head_bg": "#273244",
+        "border": "#374151",
+        "hover": "#475569",
+        "checked_bg": "#2563eb",
+        "checked_border": "#60a5fa",
+        "grid": "#374151",
+        "muted": "#9ca3af",
+        "fg": "#f3f4f6",
+        "success": "#34d399",
+        "warning": "#fbbf24",
+        "danger": "#f87171",
+        "plot_line_freq": "#38bdf8",
+        "plot_line_angle": "#c4b5fd",
+        "plot_worst": "#fbbf24",
+        "layer_colors": (
+            "#2563eb", "#0e7490", "#7c3aed", "#b45309",
+            "#047857", "#be185d", "#4338ca", "#475569",
+        ),
+    },
     "Raytheon": {
         "is_dark": False,
         "win_bg": "#d9d9d6",
@@ -91,6 +115,13 @@ APPLICATION_PALETTES: dict[str, dict[str, object]] = {
     },
 }
 DEFAULT_APPLICATION_PALETTE = "Dark"
+APPLICATION_PALETTE_DESCRIPTIONS = {
+    "Colorful": "Purple, cyan, and magenta dark application chrome",
+    "Light": "Bright neutral application chrome with blue accents",
+    "Dark": "GRIM blue/slate dark application chrome",
+    "Neutral Dark": "Neutral slate surfaces, subtle borders, and blue actions",
+    "Raytheon": "Official white, black, cool gray, and Red 186 chrome",
+}
 APPLICATION_PALETTE_SETTINGS_KEY = "appearance/application_palette"
 LEGACY_APPLICATION_PALETTE_NAMES = {
     "Raytheon-inspired": "Raytheon",

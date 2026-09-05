@@ -349,8 +349,8 @@ def test_local_bor_downstream_collection(workspace):
           "base-mesh body passes downstream structural checks without a "
           "certification gate")
     grid = load_body_requested_radar_grid(str(body_paths[0]))
-    check(grid["azimuths_deg"] == [0.0, 90.0, 180.0]
-          and grid["elevations_deg"] == [0.0],
+    check(list(grid["azimuths_deg"]) == [0.0, 90.0, 180.0]
+          and list(grid["elevations_deg"]) == [0.0],
           "the same file carries the requested monostatic radar grid")
     diagnostics = load_body_solver_diagnostics(str(body_paths[0]))
     record = diagnostics["per_frequency"].get("1.0", {})

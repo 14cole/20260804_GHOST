@@ -17,7 +17,9 @@ import sys
 from types import ModuleType
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+)
 
 from grim_diagnostics import FREDDY_SENTINELS
 
@@ -285,7 +287,15 @@ class FreddyIntegrationWidget(QWidget):
             clear_connector = getattr(clear_signal, "connect", None)
             if callable(clear_connector):
                 clear_connector(self._clear_attachable_artifact)
-            layout.addWidget(self.workspace)
+            # The standalone workspace includes tall advanced forms. Let the
+            # embedded view scroll instead of forcing every GRIM tab to their
+            # minimum height, including on screens with a reserved taskbar.
+            self.workspace_scroll = QScrollArea(self)
+            self.workspace_scroll.setObjectName("freddyWorkspaceScroll")
+            self.workspace_scroll.setWidgetResizable(True)
+            self.workspace_scroll.setFrameShape(QFrame.NoFrame)
+            self.workspace_scroll.setWidget(self.workspace)
+            layout.addWidget(self.workspace_scroll, 1)
 
     def _remember_nominal_artifact(self, kind: str, path: str) -> None:
         """Remember only FREDDY's two solver-facing artifact types."""

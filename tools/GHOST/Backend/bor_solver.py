@@ -35,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+from solver_metrics import active_metrics, profiled_solve, timed_stage
 from scipy import special as sp
 from scipy.linalg import get_lapack_funcs
 from scipy.spatial import cKDTree
@@ -1612,6 +1613,16 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
     large solve before its physically expected modal content is reached.
     """
 
+    metrics = active_metrics()
+    if metrics is not None:
+        # Capturing this collector also instruments worker threads; a new
+        # thread does not inherit the caller's ContextVar automatically.
+        assemble = metrics.wrap("modal_assembly", assemble)
+        prepare = metrics.wrap("operators", prepare)
+        rhs = metrics.wrap("excitation", rhs)
+        rhs_batch = metrics.wrap("excitation", rhs_batch)
+        farfield = metrics.wrap("far_field", farfield)
+        farfield_batch = metrics.wrap("far_field", farfield_batch)
     thetas = np.atleast_1d(np.asarray(thetas, dtype=float))
     pols = list(pols)
     mode_tol = float(mode_tol)
@@ -1756,6 +1767,10 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                 getrf, getrs, gecon = get_lapack_funcs(
                     ("getrf", "getrs", "gecon"), (A,)
                 )
+                if metrics is not None:
+                    getrf = metrics.wrap("factorization", getrf)
+                    getrs = metrics.wrap("rhs_solve", getrs)
+                    gecon = metrics.wrap("condition_estimate", gecon)
                 lu, piv, factor_info = getrf(
                     np.asarray(A, dtype=np.complex128).copy()
                 )
@@ -1803,7 +1818,11 @@ def _mode_sweep(n_dofs: 'int', thetas, pols, m_max: 'int', mode_tol: 'float',
                     )
                 cond = max(cond, mode_condition)
             else:
-                X = np.linalg.solve(A, B)
+                solve_linear = (
+                    metrics.wrap("factor_and_rhs_solve", np.linalg.solve)
+                    if metrics is not None else np.linalg.solve
+                )
+                X = solve_linear(A, B)
             if not np.all(np.isfinite(X)):
                 raise RuntimeError(
                     f"BoR mode m={m} produced a non-finite linear-system "
@@ -2663,13 +2682,14 @@ def _apply_regular_axis_rows(Q: 'np.ndarray', columns: 'np.ndarray',
         )
 
 
+@profiled_solve
 def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
               cfie_alpha: 'float' = 0.5, zs=None, n_modes: 'Optional[int]' = None,
               gauss_order: 'int' = 4, mode_tol: 'float' = 1e-6, workers: 'int' = 1,
               progress: 'Optional[Callable]' = None,
               check_abort: 'Optional[Callable]' = None,
               table_precision: 'str' = "auto", assembly: 'str' = "auto",
-              stream_budget_gb: 'float' = 8.0) -> 'Dict':
+              stream_budget_gb: 'float' = 8.0, sheet_zs=None) -> 'Dict':
     """
     Monostatic RCS of a closed BoR at aspect angles thetas_deg (from +z).
 
@@ -2678,7 +2698,11 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
     zs: surface impedance -- None (PEC), a complex scalar, or a per-ELEMENT
     complex array (tapered IBC).  IBC uses the EFIE form E_tan = Z_s J;
     lossy Z_s also damps interior resonances.  Nonzero Z_s is implemented
-    only by the EFIE formulation; CFIE/MFIE requests raise.
+    by EFIE, or by CFIE for a uniform impedance on a closed surface.
+    sheet_zs: a transmitting electric sheet impedance, scalar or per element.
+    It uses EFIE + Zs mass with no equivalent magnetic current. Zs=0 elements
+    can join a sheet to a PEC surface in the same meridian; opaque IBC cannot
+    be combined with sheet_zs. Disconnected meridians require a separate solver.
     Returns dict with sigma_vv, sigma_hh (m^2) per angle.
     """
 
@@ -2718,11 +2742,24 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
         zs_pt = zs_elem[solver.g.elem]
         if np.all(np.abs(zs_pt) == 0.0):
             zs_pt = None
-        elif form != "efie":
+        elif form != "efie" and not (form == "cfie" and np.all(zs_elem == zs_elem[0])):
             raise ValueError(
                 f"{form.upper()} with nonzero surface impedance is not "
-                "implemented; use formulation='efie'."
+                "implemented for this layout; CFIE requires uniform Zs on a closed surface."
             )
+
+    sheet_mass = None
+    sheet_weights = None
+    if sheet_zs is not None:
+        if zs is not None or form != "efie":
+            raise ValueError("Free sheets require EFIE and cannot be combined with an opaque IBC.")
+        sheet_values = np.asarray(sheet_zs, complex)
+        if sheet_values.ndim == 0:
+            sheet_values = np.full(solver.gen.n_elems, sheet_values, complex)
+        if sheet_values.shape != (solver.gen.n_elems,):
+            raise ValueError("sheet_zs must have one value per meridian element.")
+        sheet_values = _validate_bor_surface_impedance(sheet_values, "BoR transmitting sheet")
+        sheet_weights = sheet_values[solver.g.elem]
 
     alpha = float(cfie_alpha) if form == "cfie" else (1.0 if form == "efie" else 0.0)
     n_dofs = 2 * solver.Nn
@@ -2792,6 +2829,10 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                   if use_single and tp == "auto" else None)
 
     def prepare(mm):
+        nonlocal sheet_mass
+        if sheet_weights is not None:
+            # _mode_sweep checks the complete reservation before prepare.
+            sheet_mass = solver.mass_blocks(weight=sheet_weights)
         if use_streaming and solver._stream is None:
             solver.enable_streaming(
                 mm, efie=alpha > 0.0, mfie=alpha < 1.0,
@@ -2805,8 +2846,21 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
 
     def assemble(m):
         Z = None
+        dual_ibc = None
         if alpha > 0.0:
             Z = solver.assemble_mode(m, m_max)
+            if zs_pt is not None and alpha < 1.0:
+                # Magnetic trace equation after M=-Zs(n x J), by Maxwell
+                # duality: MFIE - (Zs/eta^2) R L R. Here L=-E_s(J),
+                # R maps (t,phi) to (-phi,t). Uniform Zs commutes with the
+                # source operator; a nodal projection of tapered Zs would not.
+                N = solver.Nn
+                dual_ibc = np.block([[Z[N:, N:], -Z[N:, :N]],
+                                     [-Z[:N, N:], Z[:N, :N]]])
+                dual_ibc *= complex(zs_elem[0]) / ETA0**2
+            if sheet_mass is not None:
+                Z[:solver.Nn, :solver.Nn] += sheet_mass
+                Z[solver.Nn:, solver.Nn:] += sheet_mass
             if alpha != 1.0:
                 Z *= alpha
             if zs_pt is not None:
@@ -2816,6 +2870,8 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
                 Z += extra
         if alpha < 1.0:
             mfie = solver.assemble_mfie_mode(m, m_max)
+            if dual_ibc is not None:
+                mfie += dual_ibc
             mfie *= (1.0 - alpha) * ETA0
             if Z is None:
                 Z = mfie
@@ -2881,6 +2937,8 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
             "physical resistance, use an open surface, or use a validated "
             "full-wave formulation.")
 
+    if sheet_weights is not None:
+        assembly_peak_gb += 16.0*solver.Nn**2/1e9
     F, modes_used, stats = _mode_sweep(n_dofs, thetas, ("VV", "HH"), m_max,
                                        mode_tol, assemble, rhs, farfield,
                                        prepare=prepare, workers=solve_workers,
@@ -2903,6 +2961,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
         "modes_used": modes_used,
         "n_unknowns": int(n_dofs),
         "formulation": form,
+        "boundary_model": "transmitting_electric_sheet" if sheet_zs is not None else "opaque_ibc" if zs_pt is not None else "pec",
         "assembly": "streaming" if use_streaming else "tables",
         "table_precision": "single" if use_single else "double",
         "stream_mode_block": (solver._stream.mode_block
@@ -2921,6 +2980,7 @@ def solve_bor(points, freq_hz: 'float', thetas_deg, formulation: 'str' = "efie",
 # Phase 3: PMCHWT (homogeneous dielectric body)
 # -----------------------------------------------------------------------------
 
+@profiled_solve
 def solve_bor_dielectric(points, freq_hz: 'float', thetas_deg, eps_r: 'complex',
                          mu_r: 'complex' = 1.0, n_modes: 'Optional[int]' = None,
                          gauss_order: 'int' = 4, mode_tol: 'float' = 1e-6,
@@ -3498,6 +3558,7 @@ class BorCrossOperators:
             self._near_data(e, f, m_max)
 
 
+@profiled_solve
 def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg,
                          eps_r: 'complex', mu_r: 'complex' = 1.0,
                          n_modes: 'Optional[int]' = None, gauss_order: 'int' = 4,
@@ -3789,6 +3850,7 @@ def solve_bor_coated_pec(points_outer, points_core, freq_hz: 'float', thetas_deg
 # Partial coatings: coating terminating ON the PEC surface (junctions).
 # -----------------------------------------------------------------------------
 
+@profiled_solve
 def solve_bor_partial_coating(points_interface, points_covered, bare_pieces,
                               freq_hz: 'float', thetas_deg, eps_r: 'complex',
                               mu_r: 'complex' = 1.0, bare_zs=None,
@@ -4681,6 +4743,7 @@ def _solve_multiregion(sys_: '_MultiRegionBor', freq_hz, thetas_deg, n_modes,
     return out
 
 
+@profiled_solve
 def solve_bor_coated2_pec(points_outer, points_mid, points_core,
                           freq_hz: 'float', thetas_deg,
                           eps_inner: 'complex', mu_inner: 'complex',
@@ -4716,6 +4779,7 @@ def solve_bor_coated2_pec(points_outer, points_mid, points_core,
                               table_precision, assembly, stream_budget_gb)
 
 
+@profiled_solve
 def solve_bor_coated_n_pec(interface_points, points_core, freq_hz: 'float',
                            thetas_deg, eps_list, mu_list,
                            n_modes: 'Optional[int]' = None, gauss_order: 'int' = 4,
@@ -4759,6 +4823,7 @@ def solve_bor_coated_n_pec(interface_points, points_core, freq_hz: 'float',
                               table_precision, assembly, stream_budget_gb)
 
 
+@profiled_solve
 def solve_bor_coating_patch(points_patch, points_mid_covered, points_mid_bare,
                             points_core, freq_hz: 'float', thetas_deg,
                             eps_inner: 'complex', mu_inner: 'complex',

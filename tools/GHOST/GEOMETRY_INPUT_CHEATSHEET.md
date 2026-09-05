@@ -78,7 +78,7 @@ properties: TYPE N IBC_FLAG POS_MAT NEG_MAT
 
 | TYPE | Physical boundary | IBC_FLAG | POS_MAT | NEG_MAT |
 |---:|---|---:|---:|---:|
-| 1 | Free resistive/reactive sheet in air | Required material flag | 0 | 0 |
+| 1 | Free impedance sheet or thin dielectric layer in air | Required surface-material flag | 0 | 0 |
 | 2 | Air-to-conductor boundary | 0 = PEC; positive = IBC flag | 0 | 0 |
 | 3 | Air-to-dielectric interface | Must be 0 | Dielectric flag | 0 |
 | 4 | Dielectric-to-conductor boundary | 0 = PEC; positive = IBC flag | Dielectric flag | 0 |
@@ -94,6 +94,25 @@ properties: TYPE N IBC_FLAG POS_MAT NEG_MAT
 
 `N = 0` is the usual choice. Production results should still pass the
 base/fine complex-field mesh-convergence check.
+
+## Thin dielectric layer material (2D only)
+
+A TYPE 1 midsurface can refer to a typed row in `IBCS_Resistances`:
+
+```text
+IBCS_Resistances:
+10 thin_dielectric 0.0005 2
+Dielectrics:
+2 3.0 -0.02 1.0 0.0
+```
+
+The four surface fields are flag, `thin_dielectric`, thickness **in meters**,
+and dielectric flag. Use `properties: 1 N 10 0 0` on the midsurface. This
+transmitting approximation includes normal polarization; it is not an opaque
+IBC. Current scope is a uniform isotropic layer in air, with only thin-layer
+segments of identical material/thickness in the scene. BoR thin dielectric and
+mixed thin-layer/body scenes are unsupported. Electrical thickness and local
+curvature are checked; see `../../SOLVER_UPDATES.md` for limits.
 
 ## Geometry normal and winding
 
@@ -255,6 +274,11 @@ The solver samples the taper at element centers and retains the resulting
 piecewise-constant coefficient inside the Galerkin weak integral.
 
 ## PEC-backed dielectric coating with an IBC
+
+For a stack **already collapsed by FREDDY**, use a single TYPE 2 outer-envelope
+boundary and its nominal PEC-backed IBC CSV instead of the explicit layer
+example below. Both 2D and BoR support that scalar-IBC route. See
+[the collapsed-coating workflow](geometry_tests/pec_backed_ibc/README.md).
 
 The outer TYPE 3 boundary points into air. The inner TYPE 4 boundary points
 from the conductor into dielectric flag 1. Both square contours are clockwise.

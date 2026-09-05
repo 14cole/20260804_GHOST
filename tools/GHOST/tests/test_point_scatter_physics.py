@@ -556,6 +556,12 @@ class NonBorFastenerAssemblyRegression(unittest.TestCase):
             )
             saved = feature_workflow.execute_feature_assembly(plan)
             self.assertEqual(Path(saved), output.resolve())
+            from assembly_inspector import ContributionInspector
+            inspector = ContributionInspector()
+            sample = inspector.evaluate(plan, float(frequencies[0]), float(azimuths[0]), float(elevations[0]))
+            np.testing.assert_allclose(sample["body"] + sample["fields"].sum(axis=0), expected_total[0,0,0], rtol=3e-11, atol=3e-13)
+            self.assertIs(sample, inspector.evaluate(plan, float(frequencies[0]), float(azimuths[0]), float(elevations[0])))
+            self.assertLessEqual(inspector.bytes, inspector.max_bytes)
 
             with np.load(base, allow_pickle=False) as clean_payload:
                 stored_clean = (

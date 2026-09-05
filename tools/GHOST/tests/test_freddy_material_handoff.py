@@ -73,6 +73,32 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
         self.tab.loaded_path = str(geometry)
         return geometry
 
+    @mock.patch("geometry_tab.QMessageBox.warning")
+    def test_apply_ibc_targets_selected_conductors_and_rejects_mixed_selection(self, warning):
+        from geometry_io import Segment
+        from PySide6.QtCore import QItemSelectionModel
+        from PySide6.QtWidgets import QTableWidgetItem
+        self.tab.segments = [Segment(str(i), '2', ['2','4','0','0','0'], [0.,1.], [i,i]) for i in range(3)]
+        self.tab.table.setRowCount(3)
+        for row in range(3):
+            self.tab.table.setItem(row,0,QTableWidgetItem(str(row)))
+            self.tab.table.setItem(row,2,QTableWidgetItem('4'))
+        self.tab._populate_small_table(self.tab.table_ibc,[['7','constant','20','30','0','0']],self.tab.lbl_ibc,'IBCS/Resistances')
+        self.tab._refresh_segment_dropdowns()
+        self.tab.table.selectRow(0)
+        self.tab.table.selectionModel().select(self.tab.table.model().index(2,0),QItemSelectionModel.Select|QItemSelectionModel.Rows)
+        self.tab.table_ibc.selectRow(0)
+        self.assertTrue(self.tab._apply_selected_conductor_ibc())
+        self.assertEqual([s.properties[2] for s in self.tab.segments],['7','0','7'])
+        self.assertTrue(self.tab.is_dirty())
+        self.tab.segments[2].properties[0]='3'
+        self.tab.segments[0].properties[2]='0'
+        self.tab.table.selectRow(0)
+        self.tab.table.selectionModel().select(self.tab.table.model().index(2,0),QItemSelectionModel.Select|QItemSelectionModel.Rows)
+        self.assertFalse(self.tab._apply_selected_conductor_ibc())
+        self.assertEqual(self.tab.segments[0].properties[2],'0')
+        warning.assert_called_once()
+
     @mock.patch("geometry_tab.QMessageBox.information")
     def test_actual_headerless_freddy_exports_attach_to_geometry(self, _information):
         freddy = Path(__file__).resolve().parents[2]/"FREDDY"

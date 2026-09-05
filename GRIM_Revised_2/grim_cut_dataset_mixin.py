@@ -3597,7 +3597,6 @@ class DatasetOpsMixin:
             selected_count >= 1,
         )
         enable(("btn_dataset_save_all",), row_count >= 1)
-        enable(("btn_dataset_save_dirty",), bool(self._dirty_dataset_rows()))
         enable(
             ("btn_dataset_undo_delete",),
             bool(getattr(self, "_last_deleted_dataset_rows", ())),
@@ -5279,22 +5278,6 @@ class DatasetOpsMixin:
             list(range(self.table.rowCount())),
             directory,
             dialog_title="Save All Datasets",
-        )
-
-    def _save_dirty_datasets(self) -> None:
-        """Save only rows whose current in-memory state is not on disk."""
-
-        rows = self._dirty_dataset_rows()
-        if not rows:
-            self.status.showMessage("No dirty dataset rows to save.")
-            return
-        directory = QFileDialog.getExistingDirectory(
-            self, "Save Dirty Datasets"
-        )
-        if not directory:
-            return
-        self._save_rows_to_directory(
-            rows, directory, dialog_title="Save Dirty Datasets"
         )
 
     def _save_rows_to_directory(

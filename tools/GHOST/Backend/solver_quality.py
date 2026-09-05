@@ -19,6 +19,68 @@ PRODUCTION_MESH_CONVERGENCE_DEFAULTS = {
 }
 
 
+def accuracy_target_policy(target="standard"):
+    """Concrete mesh tolerances; no claim about model-approximation error."""
+    if target == "standard":
+        return validate_mesh_convergence_policy()
+    if target == "tight":
+        return validate_mesh_convergence_policy({
+            "rms_limit_db": 0.25, "max_abs_limit_db": 0.75,
+            "complex_rms_limit": 0.005, "complex_max_limit": 0.01,
+            "phase_rms_limit_deg": 2.0, "phase_max_limit_deg": 5.0,
+        })
+    raise ValueError("Accuracy target must be standard or tight.")
+
+
+def solver_report_text(metadata):
+    """Readable evidence summary without conflating four error mechanisms."""
+    lines = ["Numerical evidence (separate from material/Assembly approximation error)"]
+    lines.append(str(metadata.get("formulation", "")))
+    mesh = metadata.get("mesh_convergence", {})
+    lines.append("Mesh refinement comparison: " + ("passed" if metadata.get("mesh_convergence_certified") else "not certified"))
+    def measurements(value, key):
+        if not isinstance(value, dict):
+            return []
+        found = [float(value[key])] if key in value and isinstance(value[key], (float, int)) and math.isfinite(value[key]) else []
+        for name, child in value.items():
+            if name not in {"limits", "thresholds", "policy"} and isinstance(child, dict):
+                found.extend(measurements(child, key))
+        return found
+    for title, key, scale, unit in (("Largest normalized complex-field mesh change", "complex_max_normalized", 100., "%"),
+                                   ("Worst RMS mesh phase change", "phase_rms_deg", 1., " deg")):
+        values = measurements(mesh, key)
+        if values:
+            lines.append(f"{title}: {max(values)*scale:.4g}{unit}")
+    for title, key in (("Maximum linear residual", "residual_norm_max"),
+                       ("Maximum backward error", "backward_error_max"),
+                       ("Condition estimate", "condition_est_max")):
+        value = metadata.get(key)
+        if isinstance(value, (float, int)) and math.isfinite(value):
+            lines.append(f"{title}: {value:.4g}")
+    frequencies = metadata.get("per_frequency", [])
+    modal = [row["mode_converged"] for row in frequencies if "mode_converged" in row]
+    if modal:
+        lines.append(f"Modal convergence: {sum(bool(value) for value in modal)}/{len(modal)} frequencies passed")
+    if any(row.get("near_quadrature") for row in frequencies):
+        lines.append("Near-quadrature evidence is included in the per-frequency details.")
+    layers = metadata.get("thin_layer", [])
+    if (any(layers.values()) if isinstance(layers, dict) else bool(layers)):
+        lines.append("Thin layer: first-order thickness approximation. Mesh certification does not certify its difference from bulk material.")
+    lines.append("Linear backend: "+str(metadata.get("linear_backend", "see per-frequency details")))
+    if metadata.get("survey_mode"):
+        lines.append("Survey: the mesh-refinement comparison was not run.")
+    profile = metadata.get("runtime_profile", {})
+    if profile:
+        lines.append(f"Elapsed: {profile['wall_seconds']:.3f} s")
+        for name, value in sorted(profile.get("stage_seconds", {}).items()):
+            lines.append(f"  {name.replace('_', ' ')}: {value:.3f} s")
+        peak = profile.get("sampled_peak_process_rss_bytes")
+        lines.append("Sampled peak process RAM: " + (
+            f"{peak / 1024**3:.3f} GiB" if peak is not None else "unavailable"))
+        lines.append("Stages may overlap. RAM includes other work in this process.")
+    return "\n".join(lines)
+
+
 def _sample_key(row: 'Dict[str, Any]') -> 'Tuple[float, float, float]':
     return (
         round(float(row.get("frequency_ghz", 0.0)), 9),

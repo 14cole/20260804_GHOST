@@ -293,6 +293,10 @@ def _validate_ibc_row(tokens: 'List[str]', lineno_for_err: 'str') -> 'None':
             f"IBC row must start with a positive integer flag: "
             f"{lineno_for_err}"
         )
+    if len(tokens) > 1 and tokens[1].lower() == "thin_dielectric":
+        from thin_sheet import ThinLayerDefinition
+        ThinLayerDefinition.from_row(tokens)
+        return
     if len(tokens) == 2:
         _validate_material_filename(
             tokens[1], f"IBC flag {flag} CSV reference"

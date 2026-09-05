@@ -31,6 +31,30 @@ class MaterialMixUiTests(unittest.TestCase):
         parent = signature.parameters["parent"]
         self.assertIsNone(parent.default)
 
+    def test_coating_check_runs_read_only_and_shows_approximation_report(self):
+        from ibc.compute import LoadedLayer
+        workspace = ImpedanceGui()
+        try:
+            workspace.layers = [LayerConfig(.03,False,'example.csv','',0.)]
+            loaded = LoadedLayer(.000762,False,0.,MaterialTable([1.,18.],[4-.1j]*2,[1.]*2),None)
+            published=[]
+            workspace.nominal_artifact_exported.connect(lambda *args: published.append(args))
+            def run_now(_name, worker, success, _error):
+                success(worker())
+            with mock.patch.object(workspace,'_load_layers',return_value=[loaded]), \
+                 mock.patch.object(workspace,'_run_background_task',side_effect=run_now), \
+                 mock.patch.object(QMessageBox,'exec',return_value=0) as show:
+                workspace._check_ghost_coating()
+                show.assert_called_once()
+            self.assertEqual(published,[])
+            workspace._set_task_state(True,'testing')
+            self.assertFalse(workspace.coating_check_btn.isEnabled())
+            workspace._set_task_state(False,'Ready')
+            self.assertTrue(workspace.coating_check_btn.isEnabled())
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
     def test_themes_use_grim_blue_slate_contract(self) -> None:
         expected_dark = {
             "window_bg": "#0f172a",

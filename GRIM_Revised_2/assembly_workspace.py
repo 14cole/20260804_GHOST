@@ -2122,6 +2122,9 @@ if GUI_AVAILABLE:
             self.viewer_tabs.addTab(self.scene_canvas, "3-D placement")
             self.response_comparison = ResponseComparison(self)
             self.viewer_tabs.addTab(self.response_comparison, "Response comparison")
+            from assembly_interference import InterferenceInspector
+            self.interference_inspector = InterferenceInspector(self)
+            self.viewer_tabs.addTab(self.interference_inspector, "Interference inspector")
             self.response_comparison.ready.connect(lambda: self.viewer_tabs.setCurrentWidget(self.response_comparison))
             viewer_layout.addWidget(self.viewer_tabs, 1)
             viewer_layout.addWidget(self.lbl_status)
@@ -2184,6 +2187,7 @@ if GUI_AVAILABLE:
             """Apply host presentation colors to the 3-D preview canvas."""
 
             self.scene_canvas.apply_theme(palette)
+            self.interference_inspector.apply_application_palette(palette)
             self.lbl_legend.setText(
                 self._legend_html(str(palette.get("muted", "#94a3b8")))
             )
@@ -2956,7 +2960,7 @@ if GUI_AVAILABLE:
             self.scene_canvas.fit_visible()
 
         def closeEvent(self, event) -> None:
-            if not self.response_comparison.can_close():
+            if not self.response_comparison.can_close() or not self.interference_inspector.can_close():
                 event.ignore()
                 return
             if getattr(self.assembly_tree_panel, "_build_thread", None) is not None:
@@ -2999,6 +3003,7 @@ if GUI_AVAILABLE:
 
             category = str(kind).strip().lower()
             identifier = str(instance_id).strip()
+            self.interference_inspector.select_instance(category, identifier)
             geometry = self._feature_instance_geometry.get((category, identifier))
             if geometry is None or category not in {"point", "line"}:
                 return False
@@ -3065,6 +3070,7 @@ if GUI_AVAILABLE:
         def set_feature_controls(self, widget: QWidget | None) -> None:
             """Install or clear the controller-owned feature workflow."""
 
+            self.interference_inspector.plan_provider = lambda: getattr(getattr(widget, "model", None), "prepared_plan", None)
             while self.feature_controls_layout.count():
                 entry = self.feature_controls_layout.takeAt(0)
                 old_widget = entry.widget()

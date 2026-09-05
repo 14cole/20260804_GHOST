@@ -7,6 +7,20 @@ solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.
 
+The dataset sidebar offers **Save** for selected rows and **Save All** for the
+whole catalog. Its actions occupy two rows, with a draggable divider between
+the dataset table and parameter lists. The main window chooses its initial
+size from the available desktop area. Long GHOST solver forms and the embedded
+FREDDY workspace scroll within their tabs; GHOST's Run, Cancel, and progress
+controls stay visible below its scrolling form.
+
+Choose **View > Application Palette > Neutral Dark** for the optional charcoal,
+blue, cyan, and lavender colors. Palette selection is saved and shared with
+the embedded workspaces. The existing Dark palette remains the default.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for module responsibilities and extension
+boundaries.
+
 ## Folder layout
 
 ```text

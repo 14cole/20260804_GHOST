@@ -29,7 +29,7 @@ try:
         QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
         QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidget,
         QTableWidgetItem, QVBoxLayout, QWidget, QComboBox, QCheckBox,
-        QProgressBar, QSizePolicy, QToolButton,
+        QProgressBar, QSizePolicy, QToolButton, QScrollArea, QFrame,
     )
 except ImportError:
     from PySide2.QtCore import (  # type: ignore
@@ -39,7 +39,7 @@ except ImportError:
         QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
         QLineEdit, QMessageBox, QPushButton, QSplitter, QTableWidget,
         QTableWidgetItem, QVBoxLayout, QWidget, QComboBox, QCheckBox,
-        QProgressBar, QSizePolicy, QToolButton,
+        QProgressBar, QSizePolicy, QToolButton, QScrollArea, QFrame,
     )
 
 try:
@@ -72,7 +72,9 @@ from bor_dispatch import (
     solve_monostatic_rcs_bor_certified,
     solve_monostatic_rcs_bor_survey,
 )
-from solver_quality import validate_mesh_convergence_policy
+from solver_quality import (
+    accuracy_target_policy, solver_report_text, validate_mesh_convergence_policy,
+)
 
 
 def _result_kind(result: 'Dict[str, Any]') -> 'str':
@@ -474,6 +476,8 @@ class _SolveWorker(QObject):
         scattering_mode: 'str' = "monostatic",
         observation_angles: 'Optional[List[float]]' = None,
         solver_kind: 'str' = "2d",
+        accuracy_target: 'str' = "standard",
+        lu_precision: 'str' = "double",
     ):
         super().__init__()
         self.solver_kind = str(solver_kind)
@@ -485,6 +489,8 @@ class _SolveWorker(QObject):
         self.units = units
         self.quality_thresholds = dict(quality_thresholds)
         self.mesh_certification = bool(mesh_certification)
+        self.mesh_policy = accuracy_target_policy(accuracy_target)
+        self.lu_precision = lu_precision
         self.cfie_alpha = float(cfie_alpha)
         self.abort_event = abort_event
         self.scattering_mode = str(scattering_mode)
@@ -517,7 +523,7 @@ class _SolveWorker(QObject):
         if self.mesh_certification:
             return solve_monostatic_rcs_bor_certified(
                 progress_callback=self._on_progress,
-                mesh_convergence_policy=validate_mesh_convergence_policy(),
+                mesh_convergence_policy=self.mesh_policy,
                 **kwargs
             )
         return solve_monostatic_rcs_bor_survey(
@@ -526,9 +532,14 @@ class _SolveWorker(QObject):
         )
 
     def _run_2d(self, snapshot, progress_callback):
+        from refined_lu import linear_precision
+        with linear_precision(self.lu_precision):
+            return self._run_2d_with_precision(snapshot, progress_callback)
+
+    def _run_2d_with_precision(self, snapshot, progress_callback):
         """Run the selected 2-D mode with optional mesh certification."""
 
-        mesh_policy = validate_mesh_convergence_policy()
+        mesh_policy = self.mesh_policy
         if self.scattering_mode == "bistatic":
             if not self.observation_angles:
                 raise ValueError(
@@ -880,7 +891,19 @@ class SolverTab(QWidget):
 
     def _build_left_panel(self) -> 'QWidget':
         panel = QWidget()
-        layout = QVBoxLayout(panel)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.controls_scroll = QScrollArea(panel)
+        self.controls_scroll.setObjectName("ghostSolverControlsScroll")
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.controls_scroll.setMinimumHeight(160)
+        controls = QWidget()
+        controls.setObjectName("ghostSolverControlsContent")
+        layout = QVBoxLayout(controls)
+        self.controls_scroll.setWidget(controls)
+        outer.addWidget(self.controls_scroll, 1)
 
         geometry_group = QGroupBox("Geometry Source")
         geometry_grid = QGridLayout(geometry_group)
@@ -1018,6 +1041,23 @@ class SolverTab(QWidget):
         options_form.addRow("Units In Geometry", self.cmb_units)
         options_form.addRow("Output Channels", QLabel("VV and HH (co-solved)"))
         options_form.addRow("Discretization", self.lbl_solve_method)
+        self.cmb_accuracy_target = QComboBox()
+        self.cmb_accuracy_target.addItem("Standard", "standard")
+        self.cmb_accuracy_target.addItem("Tight (1% maximum complex change)", "tight")
+        self.cmb_accuracy_target.setToolTip(
+            "Sets the base/fine mesh comparison tolerances for both channels. "
+            "Enable Mesh Certification to run the comparison. These are "
+            "numerical tolerances, not a guarantee about a reduced material model."
+        )
+        options_form.addRow("Accuracy target", self.cmb_accuracy_target)
+        self.cmb_lu_precision = QComboBox()
+        self.cmb_lu_precision.addItem("Double precision (reference)", "double")
+        self.cmb_lu_precision.addItem("Mixed precision + refinement (experimental)", "mixed")
+        self.cmb_lu_precision.setToolTip("2D CPU only. Factors in single precision and checks double-precision residuals. Falls back to double LU if refinement stalls. Operator assembly still uses quadratic memory.")
+        options_form.addRow("2D LU precision", self.cmb_lu_precision)
+        self.btn_solver_report = QPushButton("Accuracy and performance report...")
+        self.btn_solver_report.clicked.connect(self._show_solver_report)
+        options_form.addRow(self.btn_solver_report)
         options_form.addRow(self.btn_advanced_settings)
         options_form.addRow(self.advanced_settings_widget)
         options_form.addRow("Frequency Mode", self.cmb_freq_mode)
@@ -1044,6 +1084,7 @@ class SolverTab(QWidget):
         output_grid.addWidget(self.btn_browse_output, 0, 2)
         output_grid.addWidget(self.chk_export_after_solve, 1, 0, 1, 3)
         layout.addWidget(output_group)
+        layout.addStretch(1)
 
         btn_row = QHBoxLayout()
         self.btn_run = QPushButton("Run Solver")
@@ -1060,17 +1101,16 @@ class SolverTab(QWidget):
         btn_row.addWidget(self.btn_cancel)
         btn_row.addWidget(self.btn_export)
         btn_row.addWidget(self.btn_currents)
-        layout.addLayout(btn_row)
+        outer.addLayout(btn_row)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
-        layout.addWidget(self.progress)
+        outer.addWidget(self.progress)
 
         self.lbl_status = QLabel("Ready.")
         self.lbl_status.setWordWrap(True)
-        layout.addWidget(self.lbl_status)
-        layout.addStretch(1)
+        outer.addWidget(self.lbl_status)
 
         self.btn_browse_geo.clicked.connect(self._browse_geo)
         self.btn_use_tab.clicked.connect(self._use_geometry_tab)
@@ -1192,6 +1232,17 @@ class SolverTab(QWidget):
     def _toggle_advanced_settings(self, checked: 'bool'):
         self.advanced_settings_widget.setVisible(bool(checked))
         self.btn_advanced_settings.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
+    def _show_solver_report(self):
+        if self.last_result is None:
+            QMessageBox.information(self, "Solve report", "Run a solve to see its accuracy and performance evidence.")
+            return
+        metadata = self.last_result.get("metadata", {})
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Accuracy and performance")
+        dialog.setText(solver_report_text(metadata))
+        dialog.setDetailedText(json.dumps(metadata, indent=2, default=str))
+        dialog.exec()
 
     def _update_mode_enables(self):
         busy = self._job_is_active()
@@ -1363,6 +1414,8 @@ class SolverTab(QWidget):
         self._update_mode_enables()
         self.chk_export_after_solve.setEnabled(not busy)
         self.chk_mesh_certification.setEnabled(not busy)
+        self.cmb_accuracy_target.setEnabled(not busy)
+        self.cmb_lu_precision.setEnabled(not busy)
         self.btn_advanced_settings.setEnabled(not busy)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)
@@ -1916,6 +1969,8 @@ class SolverTab(QWidget):
             scattering_mode=scatter_mode,
             observation_angles=obs_angles_list,
             solver_kind=solver_kind,
+            accuracy_target=str(self.cmb_accuracy_target.currentData()),
+            lu_precision=str(self.cmb_lu_precision.currentData()),
         )
         worker.moveToThread(thread)
 

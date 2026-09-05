@@ -3945,6 +3945,24 @@ def _attitude(axis_az_deg: 'float', axis_el_deg: 'float', roll_deg: 'float'):
     return np.column_stack([x_ax, y_ax, ax]), ax
 
 
+def radar_frame_basis(azimuths_deg, elevations_deg, axis_az_deg=0., axis_el_deg=0., roll_deg=0.):
+    """Vehicle look directions and Jones basis for exact radar coordinates."""
+    az, el = validate_radar_grid(azimuths_deg, elevations_deg)
+    R, _ = _attitude(axis_az_deg, axis_el_deg, roll_deg)
+    ar, er = np.meshgrid(np.deg2rad(az), np.deg2rad(el), indexing="ij")
+    d_e = np.stack((np.cos(er)*np.cos(ar), np.cos(er)*np.sin(ar), np.sin(er)), axis=-1)
+    h_r = np.stack((-np.sin(ar), np.cos(ar), np.zeros_like(ar)), axis=-1)
+    v_r = np.cross(h_r, d_e)
+    d_v = d_e.reshape(-1, 3) @ R
+    v_t, h_t = _pol_unit_vectors(d_v)
+    v_t, h_t = v_t @ R.T, h_t @ R.T
+    vrf, hrf = v_r.reshape(-1, 3), h_r.reshape(-1, 3)
+    basis = np.empty((len(d_v), 2, 2), float)
+    basis[:, 0, 0], basis[:, 0, 1] = np.sum(v_t*vrf, axis=1), np.sum(v_t*hrf, axis=1)
+    basis[:, 1, 0], basis[:, 1, 1] = np.sum(h_t*vrf, axis=1), np.sum(h_t*hrf, axis=1)
+    return d_v, basis
+
+
 def export_radar_grim(out_path: 'str', *,
                       bor_result: 'Optional[Dict[str, Any]]',
                       placements: 'Sequence[Dict[str, Any]]',
@@ -4003,34 +4021,7 @@ def export_radar_grim(out_path: 'str', *,
     )
     az = np.asarray(requested_az, dtype=float)
     el = np.asarray(requested_el, dtype=float)
-    R, _ax = _attitude(axis_az_deg, axis_el_deg, roll_deg)
-
-    # Earth-frame look directions and the radar's spherical V/H basis.  Build
-    # H directly from the requested azimuth rather than cross(z,d), which is
-    # singular at vertical looks even though the radar coordinate still
-    # supplies a definite azimuthal polarization reference.
-    ar, er = np.meshgrid(np.deg2rad(az), np.deg2rad(el), indexing="ij")
-    d_e = np.stack((np.cos(er)*np.cos(ar), np.cos(er)*np.sin(ar), np.sin(er)), axis=-1)
-    h_r = np.stack((-np.sin(ar), np.cos(ar), np.zeros_like(ar)), axis=-1)
-    v_r = np.cross(h_r, d_e)
-
-    d_e_flat = d_e.reshape(-1, 3)
-    d_v_flat = d_e_flat @ R              # R^T @ d_e per row  (earth -> vehicle)
-    # Use exactly the vehicle-frame basis in which sum_features returns its
-    # Jones matrix, then rotate that basis into earth coordinates.  This also
-    # preserves vehicle roll for a look exactly along the BoR axis, where a
-    # meridian chosen only from cross(axis, look) is mathematically singular
-    # but off-axis features remain polarization-anisotropic.
-    v_t_v, h_t_v = _pol_unit_vectors(d_v_flat)
-    v_t_e = v_t_v @ R.T
-    h_t_e = h_t_v @ R.T
-    vrf = v_r.reshape(-1, 3)
-    hrf = h_r.reshape(-1, 3)
-    Mf = np.empty((len(d_v_flat), 2, 2), dtype=float)
-    Mf[:, 0, 0] = np.sum(v_t_e * vrf, axis=1)
-    Mf[:, 0, 1] = np.sum(v_t_e * hrf, axis=1)
-    Mf[:, 1, 0] = np.sum(h_t_e * vrf, axis=1)
-    Mf[:, 1, 1] = np.sum(h_t_e * hrf, axis=1)
+    d_v_flat, Mf = radar_frame_basis(az, el, axis_az_deg, axis_el_deg, roll_deg)
 
     n_pol = 3
     shape = (len(az), len(el), len(freqs), n_pol)

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-from collections.abc import Mapping
 import os
 from pathlib import Path
 import sys
@@ -12,30 +10,24 @@ import numpy as np
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from PySide6.QtCore import Qt, QByteArray, QMimeData, QSettings, QTimer, Signal
+from PySide6.QtCore import Qt, QMimeData, QSettings, QTimer
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
-    QColor,
-    QDrag,
     QKeySequence,
     QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QApplication,
     QCheckBox,
-    QColorDialog,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
-    QLineEdit,
     QListWidget,
     QMainWindow,
     QMenu,
@@ -48,19 +40,22 @@ from PySide6.QtWidgets import (
     QSplitter,
     QSplashScreen,
     QTabWidget,
-    QTableWidget,
     QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from assembly_tree import MIME_BRANCH, MIME_DATASET
 from assembly_workspace import AssemblyWorkspace
 from feature_assembly_panel import FeatureAssemblyPanel
 from freddy_integration import FreddyIntegrationWidget
 from ghost_integration import GhostIntegrationWidget, load_ghost_module
 from grim_dataset import RcsGrid
+from dataset_sidebar import DatasetSidebar, DatasetTable
+from grim_widgets import (
+    ClickableLabel, CollapsibleSection, PlotSettingsPopup, initial_window_size,
+)
+from grim_theme import build_qss
 from grim_headless import is_supported_path
 from grim_python import PythonScriptRecorder
 from grim_cut_dataset_mixin import (
@@ -76,6 +71,7 @@ from runs_workspace import RunsWorkspace
 
 from grim_palette import (
     APPLICATION_PALETTES,
+    APPLICATION_PALETTE_DESCRIPTIONS,
     APPLICATION_PALETTE_SETTINGS_KEY,
     BLUE_PALETTE,
     DEFAULT_APPLICATION_PALETTE,
@@ -134,249 +130,6 @@ PLOT_OPS_SPECS = {
 }
 
 
-def _branch_arrow_uri(points: str, fill: str) -> str:
-    """Return a base64 SVG data-URI for a small polygon arrow (used in QSS branch rules)."""
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8">'
-        f'<polygon points="{points}" fill="{fill}"/>'
-        f'</svg>'
-    )
-    return "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
-
-
-def build_qss(palette: Mapping[str, object]) -> str:
-    arrow_right = _branch_arrow_uri(
-        "2,1 6,4 2,7", str(palette["text"])
-    )
-    arrow_down = _branch_arrow_uri(
-        "1,2 7,2 4,6", str(palette["text"])
-    )
-    is_dark = bool(palette.get("is_dark", True))
-    success_bg = "#052e16" if is_dark else "#ecfdf5"
-    success_border = "#22c55e" if is_dark else "#15803d"
-    warning_bg = "#422006" if is_dark else "#fffbeb"
-    warning_border = "#f59e0b" if is_dark else "#b45309"
-    danger_bg = "#450a0a" if is_dark else "#fef2f2"
-    danger_border = "#ef4444" if is_dark else "#b91c1c"
-    return f"""
-    QMainWindow {{ background: {palette['win_bg']}; }}
-    QMenuBar {{ background: {palette['panel_bg']}; color: {palette['text']}; }}
-    QMenuBar::item {{ background: transparent; padding: 5px 10px; }}
-    QMenuBar::item:selected {{ background: {palette['hover']}; }}
-    QMenu {{
-        background: {palette['panel_bg']}; color: {palette['text']};
-        border: 1px solid {palette['border']};
-    }}
-    QMenu::item {{ padding: 6px 28px 6px 24px; }}
-    QMenu::item:selected {{ background: {palette['checked_bg']}; color: white; }}
-    QMenu::indicator:checked {{ background: {palette['checked_border']}; }}
-    QStatusBar {{ background: {palette['panel_bg']}; color: {palette['muted']}; }}
-    QWidget {{ color: {palette['text']}; }}
-    QDialog {{ background: {palette['win_bg']}; color: {palette['text']}; }}
-    QFrame {{ background: {palette['panel_bg']}; border: 1px solid {palette['border']}; border-radius: 8px; }}
-    QFrame#paramSeparator {{
-        background: {palette['border']}; min-width: 2px; max-width: 2px; border: none; border-radius: 0px;
-    }}
-    QGroupBox {{ color: {palette['text']}; border: 1px solid {palette['border']}; border-radius: 8px; margin-top: 10px; }}
-    QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; }}
-    QLabel {{ color: {palette['text']}; }}
-    QTableWidget {{
-        background: {palette['panel_bg']}; color: {palette['text']};
-        alternate-background-color: {palette['head_bg']};
-        border: 1px solid {palette['border']}; gridline-color: {palette['grid']};
-    }}
-    QPlainTextEdit, QTextEdit {{
-        background: {palette['panel_bg']}; color: {palette['text']};
-        border: 1px solid {palette['border']}; border-radius: 6px;
-        selection-background-color: {palette['checked_bg']};
-        selection-color: white;
-    }}
-    QHeaderView::section {{ background: {palette['head_bg']}; color: {palette['text']}; border: none; padding: 6px; }}
-    QTabWidget::pane {{ border: 1px solid {palette['border']}; background: {palette['panel_bg']}; }}
-    QTabBar::tab {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; border-bottom: 0; padding: 6px 12px; margin-right: 2px; border-top-left-radius: 6px; border-top-right-radius: 6px; }}
-    QTabBar::tab:selected {{ background: {palette['head_bg']}; color: {palette['text']}; border-color: {palette['checked_border']}; }}
-    QTabBar::tab:hover {{ background: {palette['hover']}; }}
-    QListWidget {{
-        background: {palette['panel_bg']}; color: {palette['text']};
-        alternate-background-color: {palette['head_bg']};
-        border: 1px solid {palette['border']};
-    }}
-    QTreeWidget {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; }}
-    QTreeWidget::item {{ border-bottom: 1px solid {palette['grid']}; padding: 3px 4px; }}
-    QTreeWidget::item:selected {{ background: {palette['checked_bg']}; color: white; }}
-    QTreeWidget::branch {{ background: {palette['panel_bg']}; }}
-    QTreeWidget::branch:has-children:!open {{ image: url("{arrow_right}"); }}
-    QTreeWidget::branch:has-children:open  {{ image: url("{arrow_down}"); }}
-    QTreeWidget#assemblyTree::branch:has-children {{ image: none; }}
-    QListWidget::item {{ border-bottom: 1px solid {palette['grid']}; padding: 4px 6px; }}
-    QListWidget QLineEdit {{
-        background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']};
-        padding: 2px 4px; min-height: 20px; font-size: 12px;
-    }}
-    QListWidget::item:selected {{
-        background: {palette['checked_bg']}; color: white; border-bottom: 1px solid {palette['grid']};
-    }}
-    QToolButton, QPushButton, QDoubleSpinBox, QSpinBox, QLineEdit, QComboBox {{
-        background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']};
-        border-radius: 6px; padding: 6px;
-    }}
-    QCheckBox, QRadioButton {{
-        background: transparent; color: {palette['text']}; border: none;
-        padding: 4px 2px;
-    }}
-    QCheckBox::indicator {{
-        width: 14px; height: 14px;
-        border: 1px solid {palette['border']};
-        border-radius: 3px;
-        background: {palette['panel_bg']};
-    }}
-    QCheckBox::indicator:checked {{
-        background: {palette['checked_bg']};
-        border-color: {palette['checked_border']};
-    }}
-    QToolButton:hover, QPushButton:hover {{ border-color: {palette['hover']}; }}
-    QToolButton:focus, QPushButton:focus, QLineEdit:focus, QComboBox:focus,
-    QDoubleSpinBox:focus, QSpinBox:focus {{
-        border: 2px solid {palette['checked_border']};
-    }}
-    QToolButton:disabled, QPushButton:disabled, QLineEdit:disabled,
-    QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled {{
-        color: {palette['muted']}; border-color: {palette['grid']};
-        background: {palette['head_bg']};
-    }}
-    QToolButton:checked {{ background: {palette['checked_bg']}; color: white; border-color: {palette['checked_border']}; }}
-    QComboBox QAbstractItemView {{ background: {palette['panel_bg']}; color: {palette['text']}; border: 1px solid {palette['border']}; }}
-    QTableWidget::item:selected {{ background: {palette['checked_bg']}; color: white; }}
-    QProgressBar {{
-        background: {palette['head_bg']}; color: {palette['text']};
-        border: 1px solid {palette['border']}; border-radius: 5px;
-        text-align: center;
-    }}
-    QProgressBar::chunk {{ background: {palette['checked_bg']}; }}
-    QSlider::groove:horizontal {{
-        height: 6px; background: {palette['grid']}; border-radius: 3px;
-    }}
-    QSlider::handle:horizontal {{
-        width: 14px; margin: -5px 0; background: {palette['checked_border']};
-        border: 1px solid {palette['border']}; border-radius: 7px;
-    }}
-    QLabel#hoverReadout {{
-        background: {palette['head_bg']}; color: {palette['text']}; border: 1px solid {palette['border']};
-        border-radius: 4px; padding: 2px 6px; font-family: "Consolas","Courier New",monospace; font-size: 11px;
-    }}
-    QScrollArea#controlDock {{ background: {palette['win_bg']}; border: none; }}
-    QScrollArea#featureBodyScroll, QScrollArea#featurePointScroll,
-    QScrollArea#featureLineScroll,
-    QScrollArea#featureReviewScroll {{ background: {palette['panel_bg']}; border: none; }}
-    QScrollArea#plotSettingsScroll {{ background: {palette['panel_bg']}; border: none; }}
-    QScrollArea#runsControlsScroll, QScrollArea#pptControlsScroll {{
-        background: {palette['panel_bg']}; border: none;
-    }}
-    QScrollArea#runsControlsScroll > QWidget,
-    QScrollArea#pptControlsScroll > QWidget,
-    QWidget#runsControlsContent,
-    QWidget#pptControlsContent {{ background: {palette['panel_bg']}; }}
-    QWidget#featureAssemblyContent {{ background: {palette['panel_bg']}; }}
-    QWidget#featurePlacementUnitsBar {{
-        background: {palette['head_bg']}; border: 1px solid {palette['border']};
-        border-radius: 7px;
-    }}
-    QLabel#featurePanelIntro {{ font-size: 13px; font-weight: 600; padding: 2px 1px; }}
-    QLabel#featureWorkflowSteps {{
-        background: {palette['head_bg']}; color: {palette['text']};
-        border: 1px solid {palette['border']}; border-radius: 6px;
-        padding: 7px 9px; font-weight: 600;
-    }}
-    QLabel#featureNextStep {{ color: {palette['text']}; padding: 1px 4px 3px 4px; }}
-    QGroupBox#featureStepCard {{
-        border-color: {palette['border']}; background: {palette['panel_bg']};
-        font-weight: 600;
-    }}
-    QGroupBox#featureStepCard QLabel, QGroupBox#featureStepCard QLineEdit,
-    QGroupBox#featureStepCard QComboBox, QGroupBox#featureStepCard QCheckBox,
-    QGroupBox#featureStepCard QPushButton, QGroupBox#featureStepCard QTableWidget,
-    QGroupBox#featureStepCard QTreeWidget {{
-        font-weight: 400;
-    }}
-    QLabel#featureHint, QLabel#featureCsvSummary {{ color: {palette['muted']}; padding: 1px 2px; }}
-    QLabel#featureSummary, QLabel#featureBuildSummary {{
-        background: {palette['head_bg']}; border: 1px solid {palette['border']};
-        border-radius: 5px; padding: 5px 7px;
-    }}
-    QLabel#featureEffectivePhysics {{
-        background: {success_bg}; border: 1px solid {success_border};
-        border-radius: 5px; padding: 6px 8px;
-    }}
-    QLabel#featureModelBoundary {{
-        background: {warning_bg}; border-left: 3px solid {warning_border};
-        border-radius: 5px; padding: 7px 9px;
-    }}
-    QLabel#featureValidationWarning {{
-        background: {warning_bg}; border: 1px solid {warning_border};
-        border-radius: 5px; padding: 6px 8px;
-    }}
-    QLabel#featureSurfaceBindingStatus {{
-        background: {palette['head_bg']}; border-left: 3px solid {palette['border']};
-        border-radius: 4px; padding: 6px 8px;
-    }}
-    QLabel#featureSurfaceBindingStatus[bindingState="valid"],
-    QLabel#featureSurfaceBindingStatus[bindingState="not_required"] {{
-        background: {success_bg}; border-left-color: {success_border};
-    }}
-    QLabel#featureSurfaceBindingStatus[bindingState="missing"],
-    QLabel#featureSurfaceBindingStatus[bindingState="invalid"],
-    QLabel#featureSurfaceBindingStatus[bindingState="unavailable"] {{
-        background: {danger_bg}; border-left-color: {danger_border};
-    }}
-    QLabel#featureSurfaceBindingStatus[bindingState="stale"],
-    QLabel#featureSurfaceBindingStatus[bindingState="unchecked"] {{
-        background: {warning_bg}; border-left-color: {warning_border};
-    }}
-    QPushButton#featureWorkflowAction[primaryAction="true"] {{
-        background: {palette['checked_bg']}; color: white;
-        border: 1px solid {palette['checked_border']}; font-weight: 600;
-    }}
-    QPushButton#featureWorkflowAction[primaryAction="true"]:hover {{
-        border: 2px solid {palette['checked_border']};
-    }}
-    QLabel#featureContract {{
-        background: {palette['head_bg']}; border-left: 3px solid {palette['checked_border']};
-        border-radius: 4px; padding: 6px 8px;
-    }}
-    QLabel#featureReadiness {{
-        font-family: "Consolas","Courier New",monospace; padding: 4px 1px;
-    }}
-    QTreeWidget#featureReadinessChecklist {{
-        background: {palette['panel_bg']}; border: 1px solid {palette['border']};
-        border-radius: 5px;
-    }}
-    QLabel#featureAssemblyStatus {{
-        background: {palette['head_bg']}; border: 1px solid {palette['border']};
-        border-radius: 6px; padding: 6px 8px;
-    }}
-    QWidget#plotSettingsContent {{ background: {palette['panel_bg']}; }}
-    QLabel#settingsNoMatches {{ color: {palette['muted']}; padding: 4px 2px; }}
-    QWidget#dockBody {{ background: {palette['win_bg']}; }}
-    QToolButton#sectionHeader {{
-        background: {palette['head_bg']}; color: {palette['text']};
-        border: 1px solid {palette['border']}; border-radius: 6px;
-        padding: 7px 10px; text-align: left; font-weight: 600;
-    }}
-    QToolButton#sectionHeader:hover {{ border-color: {palette['hover']}; }}
-    QToolButton#sectionHeader:checked {{ background: {palette['head_bg']}; color: {palette['text']}; border-color: {palette['border']}; }}
-    QWidget#sectionBody {{
-        background: {palette['panel_bg']}; border: 1px solid {palette['border']};
-        border-top: none; border-top-left-radius: 0px; border-top-right-radius: 0px;
-        border-bottom-left-radius: 6px; border-bottom-right-radius: 6px;
-    }}
-    QLabel#opsCategory {{ color: {palette['text']}; font-weight: 600; padding: 6px 2px 1px 2px; }}
-    QLabel#paramHeader {{ color: {palette['text']}; font-weight: 600; padding: 2px; }}
-    QLabel#plotTitle {{ color: {palette['text']}; font-weight: 700; font-size: 14px; padding: 2px 4px; }}
-    QFrame#plotToolbar {{ background: {palette['head_bg']}; border: 1px solid {palette['border']}; border-radius: 8px; }}
-    QFrame#datasetOpsPanel {{ background: {palette['panel_bg']}; border: 1px solid {palette['border']}; border-radius: 8px; }}
-    """
-
-
 def _extract_supported_drop_paths(mime: QMimeData) -> list[str]:
     if not mime.hasUrls():
         return []
@@ -388,324 +141,6 @@ def _extract_supported_drop_paths(mime: QMimeData) -> list[str]:
         if is_supported_path(path):
             paths.append(path)
     return paths
-
-
-class DatasetTable(QTableWidget):
-    files_dropped = Signal(list)
-    # branch_name: str, list of (name: str, grid: RcsGrid | None) tuples
-    assembly_branch_dropped = Signal(str, list)
-    rows_reordered = Signal()
-    delete_requested = Signal()
-
-    def __init__(self, rows: int, columns: int, parent: QWidget | None = None) -> None:
-        super().__init__(rows, columns, parent)
-        self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DragDrop)
-        self.setDragEnabled(True)
-        self.setDropIndicatorShown(True)
-        self._pending_drag_data: tuple | None = None  # (name, RcsGrid|None)
-        self._pending_drag_rows: list[int] = []
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace) and self.selectionModel().hasSelection():
-            self.delete_requested.emit()
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def startDrag(self, _) -> None:
-        rows = sorted({item.row() for item in self.selectedItems()})
-        if not rows:
-            return
-        entries = []
-        for row in rows:
-            name_item = self.item(row, 0)
-            if name_item is not None:
-                entries.append((name_item.text(), name_item.data(Qt.UserRole)))
-        if not entries:
-            return
-        self._pending_drag_data = entries  # list of (name, RcsGrid|None)
-        self._pending_drag_rows = rows
-        mime = QMimeData()
-        mime.setData(MIME_DATASET, QByteArray(entries[0][0].encode("utf-8")))
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.CopyAction | Qt.MoveAction)
-        self._pending_drag_data = None
-        self._pending_drag_rows = []
-
-    def dragEnterEvent(self, event) -> None:
-        mime = event.mimeData()
-        if event.source() is self:
-            event.acceptProposedAction()
-        elif mime.hasUrls() or mime.hasFormat(MIME_BRANCH):
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event) -> None:
-        mime = event.mimeData()
-        if event.source() is self:
-            event.acceptProposedAction()
-        elif mime.hasUrls() or mime.hasFormat(MIME_BRANCH):
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def dropEvent(self, event) -> None:
-        mime = event.mimeData()
-        if event.source() is self and self._pending_drag_rows:
-            self._reorder_to_drop(event)
-            event.acceptProposedAction()
-            return
-        if mime.hasFormat(MIME_BRANCH):
-            src = event.source()
-            if hasattr(src, "_pending_branch_data") and src._pending_branch_data:
-                branch_name = bytes(mime.data(MIME_BRANCH)).decode("utf-8")
-                self.assembly_branch_dropped.emit(branch_name, src._pending_branch_data)
-            event.acceptProposedAction()
-        elif mime.hasUrls():
-            paths = [u.toLocalFile() for u in mime.urls() if u.isLocalFile()]
-            if paths:
-                self.files_dropped.emit(paths)
-            event.acceptProposedAction()
-        else:
-            super().dropEvent(event)
-
-    def _reorder_to_drop(self, event) -> None:
-        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-        drop_index = self.indexAt(pos)
-        if drop_index.isValid():
-            target_row = drop_index.row()
-            if self.dropIndicatorPosition() == QAbstractItemView.BelowItem:
-                target_row += 1
-        else:
-            target_row = self.rowCount()
-
-        src_rows = sorted(set(self._pending_drag_rows))
-        if not src_rows:
-            return
-        # No-op if dropping onto the same contiguous range.
-        if src_rows[0] <= target_row <= src_rows[-1] + 1 and src_rows == list(range(src_rows[0], src_rows[-1] + 1)):
-            return
-
-        col_count = self.columnCount()
-        # Snapshot rows to move (items only; row indices change as we remove).
-        snapshots: list[list[QTableWidgetItem | None]] = []
-        for r in src_rows:
-            snapshots.append([self.takeItem(r, c) for c in range(col_count)])
-
-        # Remove source rows bottom-up; adjust target for rows removed above it.
-        for r in reversed(src_rows):
-            self.removeRow(r)
-            if r < target_row:
-                target_row -= 1
-
-        # Insert at target in original order.
-        for offset, row_items in enumerate(snapshots):
-            insert_at = target_row + offset
-            self.insertRow(insert_at)
-            for c, item in enumerate(row_items):
-                if item is not None:
-                    self.setItem(insert_at, c, item)
-
-        self.clearSelection()
-        if snapshots:
-            self.setCurrentCell(target_row, 0)
-            selection = self.selectionModel()
-            for offset in range(len(snapshots)):
-                idx = self.model().index(target_row + offset, 0)
-                selection.select(
-                    idx,
-                    selection.Select | selection.Rows,
-                )
-        self.rows_reordered.emit()
-
-
-class ClickableLabel(QLabel):
-    doubleClicked = Signal()
-
-    def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton:
-            self.doubleClicked.emit()
-        else:
-            super().mouseDoubleClickEvent(event)
-
-
-class PlotSettingsPopup(QFrame):
-    """Scrollable, searchable top-level popup for one plot context.
-
-    Closing the window via its title bar untoggles the bound button so the
-    button state mirrors visibility.  ``content_widget`` deliberately remains
-    a plain widget: callers can keep using their existing grid layout while
-    the popup owns the search bar and scroll-area plumbing.
-    """
-
-    def __init__(
-        self,
-        parent: QWidget | None = None,
-        *,
-        title: str = "Plot Settings",
-    ) -> None:
-        super().__init__(parent)
-        self._toggle_button: QToolButton | None = None
-        self._filter_rows: list[tuple[str, tuple[QWidget, ...], QWidget | None]] = []
-        self.setWindowFlag(Qt.Window, True)
-        self.setWindowTitle(title)
-        # Keep the popup useful on a compact display.  Larger contents scroll
-        # in either direction instead of forcing the window beyond the screen.
-        self.setMinimumSize(420, 280)
-        self.resize(820, 540)
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(8)
-
-        filter_row = QHBoxLayout()
-        filter_label = QLabel("Find setting")
-        self.filter_edit = QLineEdit(self)
-        self.filter_edit.setObjectName("plotSettingsFilter")
-        self.filter_edit.setPlaceholderText("Search settings…")
-        self.filter_edit.setClearButtonEnabled(True)
-        self.filter_edit.setToolTip(
-            "Filter settings by label, control name, option, or help text."
-        )
-        filter_row.addWidget(filter_label)
-        filter_row.addWidget(self.filter_edit, 1)
-        outer.addLayout(filter_row)
-
-        self.no_matches_label = QLabel("No settings match this search.")
-        self.no_matches_label.setObjectName("settingsNoMatches")
-        self.no_matches_label.setVisible(False)
-        outer.addWidget(self.no_matches_label)
-
-        self.scroll_area = QScrollArea(self)
-        self.scroll_area.setObjectName("plotSettingsScroll")
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.content_widget = QWidget()
-        self.content_widget.setObjectName("plotSettingsContent")
-        self.scroll_area.setWidget(self.content_widget)
-        outer.addWidget(self.scroll_area, 1)
-
-        self.filter_edit.textChanged.connect(self._apply_filter)
-
-    @staticmethod
-    def _searchable_widget_text(widget: QWidget) -> str:
-        parts: list[str] = []
-        for accessor in ("text", "toolTip", "placeholderText", "windowTitle"):
-            method = getattr(widget, accessor, None)
-            if callable(method):
-                value = method()
-                if value:
-                    parts.append(str(value))
-        if isinstance(widget, QComboBox):
-            parts.extend(widget.itemText(index) for index in range(widget.count()))
-        return " ".join(parts)
-
-    def register_filter_grid(
-        self,
-        grid: QGridLayout,
-        *,
-        search_prefix: str = "",
-        section: QWidget | None = None,
-        excluded_widgets: tuple[QWidget, ...] = (),
-    ) -> None:
-        """Register each grid row as one searchable unit.
-
-        A matching row keeps all of its labels and controls together.  When a
-        nested ``section`` is supplied, the section itself disappears if none
-        of its rows match, avoiding an empty ISAR block during filtering.
-        """
-
-        excluded_ids = {id(widget) for widget in excluded_widgets}
-        for row in range(grid.rowCount()):
-            widgets: list[QWidget] = []
-            seen: set[int] = set()
-            for column in range(grid.columnCount()):
-                item = grid.itemAtPosition(row, column)
-                widget = item.widget() if item is not None else None
-                if widget is None or id(widget) in excluded_ids or id(widget) in seen:
-                    continue
-                seen.add(id(widget))
-                widgets.append(widget)
-            if not widgets:
-                continue
-            haystack = " ".join(
-                [search_prefix]
-                + [self._searchable_widget_text(widget) for widget in widgets]
-            ).casefold()
-            self._filter_rows.append((haystack, tuple(widgets), section))
-
-    def _apply_filter(self, text: str) -> None:
-        tokens = tuple(part.casefold() for part in text.split() if part)
-        section_matches: dict[QWidget, bool] = {}
-        any_match = False
-        for haystack, widgets, section in self._filter_rows:
-            matches = all(token in haystack for token in tokens)
-            any_match = any_match or matches
-            for widget in widgets:
-                widget.setVisible(matches)
-            if section is not None:
-                section_matches[section] = section_matches.get(section, False) or matches
-        for section, matches in section_matches.items():
-            section.setVisible(matches)
-        self.no_matches_label.setVisible(bool(tokens) and not any_match)
-
-    def set_toggle_button(self, button: QToolButton) -> None:
-        self._toggle_button = button
-
-    def closeEvent(self, event) -> None:
-        if self._toggle_button is not None and self._toggle_button.isChecked():
-            self._toggle_button.setChecked(False)
-        super().closeEvent(event)
-
-
-class CollapsibleSection(QWidget):
-    """A titled panel whose body collapses when its header is clicked.
-
-    Purely presentational — it organises the control dock into Datasets /
-    Parameters / Operations / Plot Tools groups while holding the exact same
-    widgets the app has always used.
-    """
-
-    def __init__(self, title: str, parent: QWidget | None = None, expanded: bool = True) -> None:
-        super().__init__(parent)
-        self._title = title
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        self.header = QToolButton()
-        self.header.setObjectName("sectionHeader")
-        self.header.setCheckable(True)
-        self.header.setChecked(expanded)
-        self.header.setCursor(Qt.PointingHandCursor)
-        self.header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-        self._body = QWidget()
-        self._body.setObjectName("sectionBody")
-        self._body_layout = QVBoxLayout(self._body)
-        self._body_layout.setContentsMargins(8, 8, 8, 8)
-        self._body_layout.setSpacing(6)
-
-        outer.addWidget(self.header)
-        outer.addWidget(self._body)
-
-        self.header.toggled.connect(self._sync)
-        self._sync(expanded)
-
-    def _sync(self, on: bool) -> None:
-        self.header.setText(("▾  " if on else "▸  ") + self._title)
-        self._body.setVisible(on)
-
-    def addWidget(self, widget, stretch: int = 0) -> None:
-        self._body_layout.addWidget(widget, stretch)
-
-    def addLayout(self, layout, stretch: int = 0) -> None:
-        self._body_layout.addLayout(layout, stretch)
 
 
 class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
@@ -721,17 +156,13 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         )
         self.application_palette_group = QActionGroup(self)
         self.application_palette_group.setExclusive(True)
-        descriptions = {
-            "Colorful": "Purple, cyan, and magenta dark application chrome",
-            "Light": "Bright neutral application chrome with blue accents",
-            "Dark": "GRIM blue/slate dark application chrome",
-            "Raytheon": "Official white, black, cool gray, and Red 186 chrome",
-        }
         for palette_name in APPLICATION_PALETTES:
             action = QAction(palette_name, self)
             action.setCheckable(True)
             action.setData(palette_name)
-            action.setStatusTip(descriptions[palette_name])
+            action.setStatusTip(APPLICATION_PALETTE_DESCRIPTIONS.get(
+                palette_name, f"{palette_name} application colors"
+            ))
             action.setChecked(
                 palette_name == self.application_palette_name
             )
@@ -885,7 +316,11 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self._application_palette_actions: dict[str, QAction] = {}
 
         self.setWindowTitle("GRIM Cut")
-        self.resize(1550, 900)
+        screen = self.screen()
+        if screen is not None:
+            self.resize(initial_window_size(screen.availableGeometry().size()))
+        else:
+            self.resize(1280, 720)
         self._dock_width = 480
         self._build_application_palette_menu()
 
@@ -925,12 +360,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self._plot_splitters["plotting"] = plot_splitter
 
         plot_panel = QWidget()
-        dock = QScrollArea()
-        dock.setObjectName("controlDock")
-        dock.setWidgetResizable(True)
-        dock.setFrameShape(QFrame.NoFrame)
-        dock.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        dock.setMinimumWidth(360)
+        self.dataset_sidebar = dock = DatasetSidebar()
         plot_splitter.addWidget(dock)
         plot_splitter.addWidget(plot_panel)
         plot_splitter.setStretchFactor(0, 0)
@@ -939,119 +369,12 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
 
         self._plot_contexts["plotting"] = self._build_plot_left_context(plot_panel, "plotting")
 
-        dock_body = QWidget()
-        dock_body.setObjectName("dockBody")
-        dock_layout = QVBoxLayout(dock_body)
-        dock_layout.setContentsMargins(8, 8, 8, 8)
-        dock_layout.setSpacing(8)
-
-        # ---------- Datasets section (top, grows to fill the dock) ----------
-        sec_datasets = CollapsibleSection("Datasets")
-        sec_datasets.setObjectName("datasetsSection")
-        sec_datasets.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-
-        dataset_actions = QHBoxLayout()
-        self.btn_dataset_load = QToolButton(text="Load…")
-        self.btn_dataset_save = QToolButton(text="Save")
-        self.btn_dataset_save_dirty = QToolButton(text="Save Dirty")
-        self.btn_dataset_save_all = QToolButton(text="Save All")
-        self.btn_dataset_export = QToolButton(text="Export…")
-        self.btn_dataset_export.setPopupMode(QToolButton.InstantPopup)
-        dataset_export_menu = QMenu(self.btn_dataset_export)
-        action_export_pio = dataset_export_menu.addAction("Pioneer (.pio)…")
-        action_export_ptm = dataset_export_menu.addAction("PTM (.ptm)…")
-        action_export_csv = dataset_export_menu.addAction("CSV…")
-        action_export_pio.triggered.connect(self._export_pio_selected)
-        action_export_ptm.triggered.connect(self._export_ptm_selected)
-        action_export_csv.triggered.connect(self._export_csv_selected)
-        self.btn_dataset_export.setMenu(dataset_export_menu)
-        self.btn_dataset_export.setToolTip(
-            "Export selected rows to solver interchange (.pio/.ptm) or flat "
-            "CSV. Native .grim storage uses Save."
-        )
-        self.btn_dataset_delete = QToolButton(text="Delete")
-        self.btn_dataset_undo_delete = QToolButton(text="Undo Delete")
-        self.btn_dataset_undo_delete.setToolTip(
-            "Restore the most recently deleted batch of dataset rows, including "
-            "their stable identities, dirty state, and provenance."
-        )
-        self.btn_dataset_cancel = QToolButton(text="Cancel Job")
-        self.btn_dataset_cancel.setVisible(False)
-        self.btn_dataset_cancel.setToolTip(
-            "Request cooperative cancellation of the active dataset job. "
-            "The current numerical block or file finishes safely before stopping."
-        )
-        dataset_actions.addWidget(self.btn_dataset_load)
-        dataset_actions.addWidget(self.btn_dataset_save)
-        dataset_actions.addWidget(self.btn_dataset_save_dirty)
-        dataset_actions.addWidget(self.btn_dataset_save_all)
-        dataset_actions.addWidget(self.btn_dataset_export)
-        dataset_actions.addWidget(self.btn_dataset_delete)
-        dataset_actions.addWidget(self.btn_dataset_undo_delete)
-        dataset_actions.addWidget(self.btn_dataset_cancel)
-        dataset_actions.addStretch(1)
-        sec_datasets.addLayout(dataset_actions)
-
-        self.table = DatasetTable(0, 3)
-        self.table.setHorizontalHeaderLabels(["Name", "Source / Output", "History"])
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setEditTriggers(
-            QAbstractItemView.DoubleClicked
-            | QAbstractItemView.EditKeyPressed
-            | QAbstractItemView.SelectedClicked
-        )
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.setMinimumHeight(160)
-        sec_datasets.addWidget(self.table, 1)
-
-        # ---------- Parameters section (single 4-column strip) ----------
-        sec_params = CollapsibleSection("Parameters")
-        sec_params.setObjectName("parametersSection")
-        sec_params.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        params_grid = QGridLayout()
-        params_grid.setHorizontalSpacing(10)
-        params_grid.setVerticalSpacing(4)
-        for col in range(4):
-            params_grid.setColumnStretch(col, 1)
-        self.list_pol = QListWidget()
-        self.list_freq = QListWidget()
-        self.list_elev = QListWidget()
-        self.list_az = QListWidget()
-        for widget in (self.list_pol, self.list_freq, self.list_elev, self.list_az):
-            widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-            # Edits are committed through RcsGrid.edit_axis_value(), which
-            # validates the new coordinate/label and transactionally reorders
-            # every aligned sample array when a numeric axis changes order.
-            widget.setEditTriggers(
-                QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
-            )
-            widget.setToolTip(
-                "Double-click a value or press F2 to edit it. Numeric axes are "
-                "kept sorted and their samples move with the edited coordinate."
-            )
-            widget.setMinimumHeight(96)
-        self.lbl_pol = ClickableLabel("Polarization")
-        self.lbl_freq = ClickableLabel("Frequency")
-        self.lbl_elev = ClickableLabel("Elevation")
-        self.lbl_az = ClickableLabel("Azimuth")
-        lbl_pol = self.lbl_pol
-        lbl_freq = self.lbl_freq
-        lbl_elev = self.lbl_elev
-        lbl_az = self.lbl_az
-        for lbl in (lbl_pol, lbl_freq, lbl_elev, lbl_az):
-            lbl.setObjectName("paramHeader")
-        # One row of headers, one row of lists, four columns across.
-        params_grid.addWidget(lbl_pol, 0, 0)
-        params_grid.addWidget(lbl_freq, 0, 1)
-        params_grid.addWidget(lbl_elev, 0, 2)
-        params_grid.addWidget(lbl_az, 0, 3)
-        params_grid.addWidget(self.list_pol, 1, 0)
-        params_grid.addWidget(self.list_freq, 1, 1)
-        params_grid.addWidget(self.list_elev, 1, 2)
-        params_grid.addWidget(self.list_az, 1, 3)
-        sec_params.addLayout(params_grid)
+        # Retain controller-facing aliases while the sidebar owns its views.
+        for name in DatasetSidebar.WIDGET_BINDINGS:
+            setattr(self, name, getattr(dock, name))
+        dock.export_pio_requested.connect(self._export_pio_selected)
+        dock.export_ptm_requested.connect(self._export_ptm_selected)
+        dock.export_csv_requested.connect(self._export_csv_selected)
 
         # ---------- Dataset Operations (pop-out panel beside the table) ----------
         # Shared across plot tabs and toggled from each tab's "Dataset
@@ -1305,21 +628,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         for attr, tooltip in operation_tooltips.items():
             getattr(self, attr).setToolTip(tooltip)
 
-        # The vertical handle directly controls the balance between the
-        # dataset table and parameter lists. Moving it upward gives Parameters
-        # more height; moving it downward gives Datasets more height.
-        self.dataset_parameter_splitter = QSplitter(Qt.Vertical)
-        self.dataset_parameter_splitter.setObjectName(
-            "datasetParameterSplitter"
-        )
-        self.dataset_parameter_splitter.setChildrenCollapsible(False)
-        self.dataset_parameter_splitter.setHandleWidth(8)
-        self.dataset_parameter_splitter.addWidget(sec_datasets)
-        self.dataset_parameter_splitter.addWidget(sec_params)
-        self.dataset_parameter_splitter.setStretchFactor(0, 3)
-        self.dataset_parameter_splitter.setStretchFactor(1, 2)
-        self.dataset_parameter_splitter.setSizes([480, 260])
-        dock_layout.addWidget(self.dataset_parameter_splitter, 1)
         ops_content_layout.addStretch(1)
 
         # Dock the shared Dataset Operations panel between the control dock and
@@ -1332,7 +640,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             [self._dock_width, 260, 1550 - self._dock_width - 260]
         )
 
-        dock.setWidget(dock_body)
         self._shared_right_panel = dock
 
         self.tab_isar = QWidget()
@@ -1559,6 +866,15 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.table.customContextMenuRequested.connect(self._on_dataset_context_menu)
         self.table.horizontalHeader().sectionDoubleClicked.connect(self._on_dataset_header_double_clicked)
         for context in self._plot_contexts.values():
+            context.spin_compare_az_min.editingFinished.connect(
+                self._on_compare_sector_controls_changed
+            )
+            context.spin_compare_az_max.editingFinished.connect(
+                self._on_compare_sector_controls_changed
+            )
+            context.chk_compare_show_all_azimuths.toggled.connect(
+                self._on_compare_sector_controls_changed
+            )
             context.plot_canvas.setContextMenuPolicy(Qt.CustomContextMenu)
             context.plot_canvas.customContextMenuRequested.connect(self._on_plot_context_menu)
             context.plot_canvas.mpl_connect("scroll_event", self._on_plot_scroll_zoom)
@@ -1573,10 +889,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self._connect_param_list(self.list_freq, "frequency")
         self._connect_param_list(self.list_elev, "elevation")
         self._connect_param_list(self.list_az, "azimuth")
-        lbl_pol.doubleClicked.connect(lambda: self.list_pol.selectAll())
-        lbl_freq.doubleClicked.connect(lambda: self.list_freq.selectAll())
-        lbl_elev.doubleClicked.connect(lambda: self.list_elev.selectAll())
-        lbl_az.doubleClicked.connect(lambda: self.list_az.selectAll())
+        self.lbl_pol.doubleClicked.connect(lambda: self.list_pol.selectAll())
+        self.lbl_freq.doubleClicked.connect(lambda: self.list_freq.selectAll())
+        self.lbl_elev.doubleClicked.connect(lambda: self.list_elev.selectAll())
+        self.lbl_az.doubleClicked.connect(lambda: self.list_az.selectAll())
 
         for controls in self._plot_controls_by_tab.values():
             if "azimuth_rect" in controls:
@@ -1679,7 +995,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.btn_wedge_to_conic.clicked.connect(self._convert_wedge_to_conic_selected)
         self.btn_dataset_load.clicked.connect(self._load_dataset_files)
         self.btn_dataset_save.clicked.connect(self._save_selected_datasets)
-        self.btn_dataset_save_dirty.clicked.connect(self._save_dirty_datasets)
         self.btn_dataset_save_all.clicked.connect(self._save_all_datasets)
         self.btn_dataset_delete.clicked.connect(self._delete_selected_datasets)
         self.btn_dataset_undo_delete.clicked.connect(
@@ -2430,15 +1745,6 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         compare_sector_layout.addWidget(chk_compare_show_all_azimuths)
         compare_sector_layout.addStretch(1)
         compare_sector_bar.setVisible(False)
-        spin_compare_az_min.editingFinished.connect(
-            self._on_compare_sector_controls_changed
-        )
-        spin_compare_az_max.editingFinished.connect(
-            self._on_compare_sector_controls_changed
-        )
-        chk_compare_show_all_azimuths.toggled.connect(
-            self._on_compare_sector_controls_changed
-        )
         plot_layout.addWidget(compare_sector_bar)
         plot_layout.addWidget(plot_canvas, 1)
         hover_readout = QLabel("x: --   y: --")

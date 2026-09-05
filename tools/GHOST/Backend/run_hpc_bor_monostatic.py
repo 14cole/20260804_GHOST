@@ -54,6 +54,7 @@ from typing import Any, Dict, List, Tuple
 import hpc_scheduler
 import workflow_provenance as _workflow_provenance
 from geometry_io import material_sidecar_paths
+from solver_quality import accuracy_target_policy, validate_mesh_convergence_policy
 from workflow_provenance import (
     backend_source_fingerprint,
     backend_source_inventory,
@@ -115,6 +116,7 @@ MODE_TOL                = 1e-6
 MAX_ELEMENTS            = 50_000
 ASSEMBLY                = "auto"         # "auto" | "tables" | "streaming"
 TABLE_PRECISION         = "auto"         # "auto" | "single" | "double"
+ACCURACY_TARGET         = "standard"     # "standard" | "tight"; mesh comparison limits
 STREAM_BUDGET_GB        = 8.0            # held streaming-block budget per unit
 MESH_CERTIFICATION      = True           # recommended base/fine comparison;
                                          # False = base mesh only
@@ -543,6 +545,9 @@ def _solve_and_export(pair, snapshot, material_base, run_dir_str):
     solver_config = dict(manifest.get("solver_config", {}) or {})
     solve = (solve_monostatic_rcs_bor_certified if certified
              else solve_monostatic_rcs_bor_survey)
+    quality_kwargs = ({"mesh_convergence_policy": validate_mesh_convergence_policy(
+        solver_config.get("mesh_convergence_policy")
+    )} if certified else {})
     result = solve(
         geometry_snapshot=snapshot,
         frequencies_ghz=[float(pair["frequency_ghz"])],
@@ -566,6 +571,7 @@ def _solve_and_export(pair, snapshot, material_base, run_dir_str):
             "stream_budget_gb", STREAM_BUDGET_GB
         )),
         expand_to_360=False,
+        **quality_kwargs,
     )
     for w in result["metadata"].get("warnings", []) or []:
         print(f"      [warn] {pair['geometry_stem']}: {w}", flush=True)
@@ -688,6 +694,9 @@ def _build_slurm(script_path, run_dir, job_index):
 
 def submit():
     # type: () -> None
+    if ACCURACY_TARGET not in ("standard", "tight"):
+        sys.exit("ERROR: ACCURACY_TARGET must be 'standard' or 'tight'.")
+    mesh_policy = accuracy_target_policy(ACCURACY_TARGET)
     geometries = _discover_geometries()
     if not geometries:
         sys.exit(
@@ -815,6 +824,7 @@ def submit():
                     assembly=ASSEMBLY,
                     stream_budget_gb=STREAM_BUDGET_GB,
                     mesh_certification=bool(MESH_CERTIFICATION),
+                    fine_factor=float(mesh_policy["fine_factor"]),
                 )
             )
 
@@ -872,6 +882,8 @@ def submit():
             "table_precision":         TABLE_PRECISION,
             "stream_budget_gb":        STREAM_BUDGET_GB,
             "mesh_certification":      bool(MESH_CERTIFICATION),
+            "accuracy_target":         ACCURACY_TARGET,
+            "mesh_convergence_policy": mesh_policy,
             "workers_per_unit":        WORKERS_PER_UNIT,
             "blas_threads_per_worker": BLAS_THREADS_PER_WORKER,
             "cores_per_node":          CORES_PER_NODE,
@@ -1121,6 +1133,9 @@ def worker(run_dir_str, job_index, node_index):
             mesh_certification=bool(solver_config.get(
                 "mesh_certification", True
             )),
+            fine_factor=float(validate_mesh_convergence_policy(
+                solver_config.get("mesh_convergence_policy")
+            )["fine_factor"]),
         )
         unit["estimated_peak_gb"] = float(
             resource_estimate["estimated_peak_gb"]

@@ -30,6 +30,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
+from solver_metrics import active_metrics, profiled_solve, timed_stage
+from thin_sheet import ThinLayerDefinition, layer_for_mesh, solve_thin_layer_fields
+from refined_lu import RefinedLU, requested_precision
 from geometry_io import (
     is_legacy_tabulated_row,
     material_filename_from_row,
@@ -133,8 +136,10 @@ def _dense_backend_summary() -> 'Dict[str, Any]':
             1 for row in events if row.get("used") == "gpu_cupy"
         ),
         "dense_cpu_solve_count": sum(
-            1 for row in events if row.get("used") == "cpu"
+            1 for row in events if str(row.get("used", "")).startswith("cpu")
         ),
+        "dense_mixed_precision_solve_count": sum(1 for row in events if row.get("used") == "cpu_mixed_lu"),
+        "dense_fallback_reasons": reasons,
         "dense_gpu_fallback_reasons": reasons,
         "dense_gpu_devices": devices,
         "dense_largest_system": max(
@@ -481,6 +486,9 @@ class MaterialLibrary:
             if flag in seen_impedance_flags:
                 raise ValueError(f"Duplicate IBC material flag {flag}.")
             seen_impedance_flags.add(flag)
+            if len(row) > 1 and str(row[1]).lower() == "thin_dielectric":
+                impedance_models[flag] = ThinLayerDefinition.from_row(row)
+                continue
             if len(row) == 2:
                 filename = material_filename_from_row(row)
                 if filename is None:
@@ -572,6 +580,9 @@ class MaterialLibrary:
             )
             dielectric_models[flag] = (eps, mu)
 
+        for model in impedance_models.values():
+            if isinstance(model, ThinLayerDefinition) and model.dielectric_flag not in dielectric_models:
+                raise ValueError(f"Thin layer references undefined dielectric flag {model.dielectric_flag}.")
         return cls(impedance_models=impedance_models, dielectric_models=dielectric_models)
 
     def get_impedance(self, flag: 'int', freq_ghz: 'float', arc_s: 'Optional[float]' = None) -> 'complex':
@@ -580,6 +591,8 @@ class MaterialLibrary:
         model = self.impedance_models.get(flag)
         if model is None:
             raise ValueError(f"Undefined IBC flag {flag}.")
+        if isinstance(model, ThinLayerDefinition):
+            raise ValueError("A thin dielectric layer is a transmitting sheet, not an opaque IBC. Assign it only to TYPE 1.")
         if isinstance(model, ComplexTable):
             return _validate_passive_surface_impedance(
                 model.sample(freq_ghz),
@@ -3566,6 +3579,7 @@ def _warn_far_quadrature_override(materials: 'MaterialLibrary') -> 'None':
     )
 
 
+@timed_stage("operators")
 def _assemble_linear_operator_matrices_multi(
     mesh: 'LinearMesh',
     k0: 'Union[complex, float]',
@@ -4157,6 +4171,7 @@ def _assemble_linear_operator_matrices(
         ),
     )[0]
 
+@timed_stage("near_and_hypersingular")
 def _assemble_linear_hypersingular_matrix(
     mesh: 'LinearMesh',
     k0: 'Union[complex, float]',
@@ -4421,6 +4436,7 @@ def _build_linear_coupled_infos(
     ]
     return _build_coupled_panel_info(pseudo_panels, materials, freq_ghz, pol, k0)
 
+@timed_stage("excitation")
 def _linear_element_incident_load_many(
     elem: 'LinearElement',
     k_air: 'float',
@@ -4440,6 +4456,7 @@ def _linear_element_incident_load_many(
         out += float(w) * shape * phase[None, :]
     return out * float(elem.length)
 
+@timed_stage("excitation")
 def _linear_element_incident_dn_load_many(
     elem: 'LinearElement',
     k_air: 'float',
@@ -4472,6 +4489,7 @@ def _linear_element_incident_dn_load_many(
 
 
 
+@timed_stage("far_field")
 def _farfield_linear_density_many(
     mesh: 'LinearMesh',
     density: 'np.ndarray',
@@ -4928,6 +4946,9 @@ def _mesh_wavelength_for_snapshot(
         )
         pos_mat = _parse_flag(props[3])
         neg_mat = _parse_flag(props[4])
+        sheet_model = materials.impedance_models.get(_parse_flag(props[2]))
+        if seg_type == 1 and isinstance(sheet_model, ThinLayerDefinition):
+            material_flags.add(sheet_model.dielectric_flag)
         if seg_type in (3, 4) and pos_mat > 0:
             material_flags.add(pos_mat)
         elif seg_type == 5:
@@ -5116,6 +5137,10 @@ def _build_coupled_panel_info(
         flag = int(panel.ibc_flag)
         if flag <= 0:
             return 0.0 + 0.0j
+        if isinstance(materials.impedance_models.get(flag), ThinLayerDefinition):
+            if int(panel.seg_type) != 1:
+                raise ValueError("Thin dielectric layers can be assigned only to a free TYPE 1 sheet.")
+            return 0.0j  # No surface-impedance substitution; uses a separate sheet operator.
         if materials.is_tapered_impedance(flag):
             return materials.get_impedance(
                 flag, freq_ghz, arc_s=float(panel.arc_s_center)
@@ -5184,6 +5209,9 @@ def _build_coupled_panel_info(
         eps_minus, mu_minus, k_minus = region_state(minus_region)
         eps_plus, mu_plus, k_plus = region_state(plus_region)
         z_card = panel_impedance(panel)
+        thin_layer = isinstance(materials.impedance_models.get(panel.ibc_flag), ThinLayerDefinition)
+        if thin_layer:
+            bc_kind = "thin_layer"
         if bc_kind == "transmission":
             if seg_type == 1:
                 if abs(z_card) <= EPS:
@@ -5364,6 +5392,7 @@ def _equilibrated_condition_from_lu(
     a_mat: 'np.ndarray',
     lu: 'np.ndarray',
     piv: 'np.ndarray',
+    solve_override=None,
 ) -> 'float':
     """Estimate cond_1 of a row/column-equilibrated matrix from one LU.
 
@@ -5383,14 +5412,14 @@ def _equilibrated_condition_from_lu(
         rhs = row_scale * np.asarray(
             vector, dtype=np.complex128
         ).reshape(-1)
-        solved = _SCIPY_LINALG.lu_solve((lu, piv), rhs)
+        solved = solve_override(rhs) if solve_override is not None else _SCIPY_LINALG.lu_solve((lu, piv), rhs)
         return col_scale * solved
 
     def _inverse_rmatvec(vector):
         rhs = col_scale * np.asarray(
             vector, dtype=np.complex128
         ).reshape(-1)
-        solved = _SCIPY_LINALG.lu_solve((lu, piv), rhs, trans=2)
+        solved = solve_override(rhs, trans=2) if solve_override is not None else _SCIPY_LINALG.lu_solve((lu, piv), rhs, trans=2)
         return row_scale * solved
 
     inverse = _SCIPY_SPARSE_LINALG.LinearOperator(
@@ -5402,6 +5431,7 @@ def _equilibrated_condition_from_lu(
     return estimate if math.isfinite(estimate) else float("inf")
 
 
+@timed_stage("linear_solve")
 def _solve_dense_system(
     a_mat: 'np.ndarray',
     rhs: 'np.ndarray',
@@ -5420,6 +5450,10 @@ def _solve_dense_system(
     lu = piv = None
     solution = None
     gpu_candidate = requested_backend in {"auto", "gpu"}
+    if requested_precision() == "mixed":
+        if requested_backend == "gpu":
+            raise ValueError("Mixed LU currently requires the CPU backend; choose double precision for GPU solves.")
+        gpu_candidate = False
     if gpu_candidate and condition_diagnostics is not None:
         fallback_reason = "CPU LU required for certified condition estimation"
         gpu_candidate = False
@@ -5452,6 +5486,18 @@ def _solve_dense_system(
                     f"usable: {fallback_reason}"
                 ) from exc
 
+    if solution is None and requested_precision() == "mixed" and _SCIPY_LINALG is not None:
+        try:
+            factor = RefinedLU(a_eval)
+            solution = factor.solve(rhs_eval)
+            if condition_diagnostics is not None:
+                estimate = _equilibrated_condition_from_lu(a_eval, factor.lu, factor.piv, factor.solve)
+                condition_diagnostics.update(condition_est=estimate, condition_method="equilibrated_1norm_refined_inverse", mixed_precision_corrections=factor.max_corrections)
+            backend_used = "cpu_mixed_lu"
+        except (np.linalg.LinAlgError, ValueError, FloatingPointError, RuntimeWarning) as exc:
+            solution = None
+            fallback_reason = f"Mixed precision fell back to double LU: {exc}"
+
     if solution is None and _SCIPY_LINALG is None:
         solution = np.linalg.solve(a_eval, rhs_eval)
         if condition_diagnostics is not None:
@@ -5471,8 +5517,8 @@ def _solve_dense_system(
                 "equilibrated_1norm_numpy_fallback"
             )
     elif solution is None:
-        lu, piv = _SCIPY_LINALG.lu_factor(a_eval)
-        solution = _SCIPY_LINALG.lu_solve((lu, piv), rhs_eval)
+        lu, piv = timed_stage("factorization")(_SCIPY_LINALG.lu_factor)(a_eval)
+        solution = timed_stage("rhs_solve")(_SCIPY_LINALG.lu_solve)((lu, piv), rhs_eval)
         if condition_diagnostics is not None:
             condition_diagnostics["condition_est"] = (
                 _equilibrated_condition_from_lu(a_eval, lu, piv)
@@ -6282,6 +6328,9 @@ def _assert_no_type1_sheet_for_mixed(infos: 'List[PanelCoupledInfo]') -> 'None':
     rejected.  The error message points at the workaround (TYPE 2 with
     tapered IBC for edge treatments on bodies).
     """
+    if any(info.bc_kind == "thin_layer" for info in infos) and not all(
+            info.bc_kind == "thin_layer" for info in infos):
+        raise ValueError("Thin dielectric layers currently require an all-layer geometry; coupling to other boundary models is not implemented.")
     if _has_sheet(infos) and not _is_all_sheet(infos) and not _is_sheet_plus_pec(infos):
         raise ValueError(
             "Mixed TYPE 1 sheet + (IBC-coated body / dielectric body / "
@@ -7100,7 +7149,11 @@ def _dense_formulation_resources(
         if int(region) >= 0
     }
 
-    if _is_all_sheet(infos):
+    if any(info.bc_kind == "thin_layer" for info in infos):
+        formulation = "thin_dielectric_layer"
+        system_dofs = 2 * nnodes
+        operator_matrices = 20
+    elif _is_all_sheet(infos):
         formulation = "sheet"
         system_dofs = nnodes
         operator_matrices = 3
@@ -7540,6 +7593,7 @@ def _solve_multi_region_indirect(
     rcs_lin = _rcs_sigma_from_amp(amp, k0)
     return rcs_lin, amp, max_res, ext_density_global
 
+@profiled_solve
 def solve_monostatic_rcs_2d_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -7668,6 +7722,7 @@ def solve_monostatic_rcs_2d_single_polarization(
     reused_matrix_solve_count = 0
     max_parallel_workers_used = 1
     formulation_label = "2D BIE/MoM coupled dielectric trace formulation (linear Galerkin)"
+    thin_layer_evidence = []
     junction_treatment = "none"
     junction_constraints_applied = False
     junction_constraint_residual_applicable = False
@@ -7895,6 +7950,9 @@ def solve_monostatic_rcs_2d_single_polarization(
             )
 
         # --- TYPE 1 sheet dispatch ---
+        junction_stats.update(linear_mesh_stats_local)
+        junction_stats["linear_node_count"] = int(len(mesh.nodes))
+        junction_stats["linear_element_count"] = int(len(mesh.elements))
         # Pure-sheet geometries use a dedicated sheet BIE derived directly
         # from Maxwell's equations (see _solve_tm_sheet / _solve_te_sheet).
         # Mixed sheet+body is rejected above by the _for_mixed guard.
@@ -7906,13 +7964,18 @@ def solve_monostatic_rcs_2d_single_polarization(
             )
             sheet_solver = _solve_tm_sheet if pol == "TM" else _solve_te_sheet
             condition_diagnostics = {} if compute_condition_number else None
-            rcs_lin_vec, amp_vec, sheet_residual = sheet_solver(
-                mesh=mesh,
-                infos=coupled_infos,
-                k0=k0,
-                elevations_deg=elevations_arr,
-                condition_diagnostics=condition_diagnostics,
-            )
+            if any(info.bc_kind == "thin_layer" for info in coupled_infos):
+                eps, mu, thickness = layer_for_mesh(mesh, materials, freq_ghz)
+                rcs_lin_vec, amp_vec, sheet_residual, layer_evidence = solve_thin_layer_fields(
+                    mesh, k0, elevations_arr, pol, eps, mu, thickness,
+                    condition_diagnostics=condition_diagnostics)
+                formulation_label = "2D transmitting thin dielectric layer (normal and tangential polarization)"
+                thin_layer_evidence.append(dict(layer_evidence, frequency_ghz=float(freq_ghz), polarization=pol))
+            else:
+                rcs_lin_vec, amp_vec, sheet_residual = sheet_solver(
+                    mesh=mesh, infos=coupled_infos, k0=k0,
+                    elevations_deg=elevations_arr,
+                    condition_diagnostics=condition_diagnostics)
             rcs_db_vec = _rcs_db_from_sigma(rcs_lin_vec)
             residual_vec = np.full(len(elevations), sheet_residual, dtype=float)
             constraint_residual_vec = np.zeros(len(elevations), dtype=float)
@@ -8283,6 +8346,7 @@ def solve_monostatic_rcs_2d_single_polarization(
             "equilibrated_1norm_lu_onenormest"
             if condition_est_computed else "not_requested"
         ),
+        "thin_layer": thin_layer_evidence,
         "warnings": list(materials.warnings),
         "warning_count": int(len(materials.warnings)),
         "math_backend_real_bessel": _BESSEL.backend_name,
@@ -8564,6 +8628,7 @@ def _merge_co_polarized_2d_results(
         "preflight": dict(first_metadata.get("preflight", {}) or {}),
         "quality_gate": quality_gate,
         "channel_metadata": channel_metadata,
+        "thin_layer": {label: channel_metadata[label].get("thin_layer", []) for label in expected_channels},
         "amplitude_version": RCS_AMPLITUDE_VERSION,
         "co_solve_shared_discretization": True,
         "shared_operator_cache_enabled": any(
@@ -8743,6 +8808,7 @@ def _frequency_local_co_solve(solve, kwargs):
     return result
 
 
+@profiled_solve
 def solve_monostatic_rcs_2d(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -8799,6 +8865,7 @@ def solve_monostatic_rcs_2d(
     return _merge_co_polarized_2d_results(channel_results)
 
 
+@profiled_solve
 def solve_bistatic_rcs_2d_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -8880,6 +8947,7 @@ def solve_bistatic_rcs_2d_single_polarization(
     total_steps = len(frequencies) * len(inc_angles)
     done_steps = 0
     obs_arr = np.asarray(obs_angles, dtype=float)
+    thin_layer_evidence = []
     mesh_wavelength_values: 'List[float]' = []
     mesh_max_index_values: 'List[float]' = []
     mesh_material_flags_used: 'Set[int]' = set()
@@ -8984,6 +9052,7 @@ def solve_bistatic_rcs_2d_single_polarization(
                 "out-of-memory errors."
             )
 
+        use_thin_sheet = any(info.bc_kind == "thin_layer" for info in coupled_infos)
         # Pre-assemble system matrices (reused across incidence angles).
 
         # --- TM Robin BIE pre-assembly (shared with _solve_robin_bie) ---
@@ -9020,7 +9089,7 @@ def solve_bistatic_rcs_2d_single_polarization(
         # element coefficient Z/(jketa) on sheets and zero on PEC elements.
         sheet_a_sys = None
         sheet_endpoint_nodes = None
-        if use_sheet or use_mixed_sheet:
+        if (use_sheet or use_mixed_sheet) and not use_thin_sheet:
             z_elements_sheet = np.asarray([
                 complex(info.robin_impedance)
                 if int(info.seg_type) == 1 else 0.0 + 0.0j
@@ -9060,7 +9129,19 @@ def solve_bistatic_rcs_2d_single_polarization(
         batch_residuals = None
         batch_exterior_density = None
 
-        if use_sheet or use_mixed_sheet:
+        if use_thin_sheet:
+            eps, mu, thickness = layer_for_mesh(mesh, materials, freq_ghz)
+            condition_diagnostics = {} if compute_condition_number else None
+            _, batch_amp, residual, evidence = solve_thin_layer_fields(
+                mesh, k0, inc_all_arr, pol, eps, mu, thickness,
+                observation_angles_deg=obs_arr,
+                condition_diagnostics=condition_diagnostics)
+            thin_layer_evidence.append(dict(evidence, frequency_ghz=float(freq_ghz), polarization=pol))
+            batch_residuals = np.full(inc_all_arr.size, residual)
+            if condition_diagnostics is not None:
+                _consume_condition_estimate(cond_values, condition_diagnostics, "bistatic thin layer")
+                frequency_condition_recorded = True
+        elif use_sheet or use_mixed_sheet:
             rhs_all = np.zeros(
                 (nnodes, inc_all_arr.size), dtype=np.complex128
             )
@@ -9243,7 +9324,9 @@ def solve_bistatic_rcs_2d_single_polarization(
         # in one tiled pass. The geometry/quadrature phase matrix depends only
         # on observation angle, so rebuilding it once per incidence repeated
         # identical work for a rectangular bistatic sweep.
-        if use_sheet or use_mixed_sheet:
+        if use_thin_sheet:
+            batch_far_density = None  # Both single- and double-layer projections are already combined.
+        elif use_sheet or use_mixed_sheet:
             batch_far_density = batch_solution
             batch_far_potential = "SLP" if pol == "TM" else "DLP"
         elif use_multi_region:
@@ -9258,14 +9341,10 @@ def solve_bistatic_rcs_2d_single_polarization(
         else:
             raise AssertionError("Unreachable bistatic far-field dispatch.")
 
-        batch_amp = _farfield_linear_density_many(
-            mesh,
-            batch_far_density,
-            k0,
-            obs_arr,
-            batch_far_potential,
-            projection="grid",
-        )
+        if not use_thin_sheet:
+            batch_amp = _farfield_linear_density_many(
+                mesh, batch_far_density, k0, obs_arr, batch_far_potential,
+                projection="grid")
         batch_rcs_lin = _rcs_sigma_from_amp(batch_amp, k0)
         batch_rcs_db = _rcs_db_from_sigma(batch_rcs_lin)
 
@@ -9324,6 +9403,7 @@ def solve_bistatic_rcs_2d_single_polarization(
             "equilibrated_1norm_lu_onenormest"
             if compute_condition_number else "not_requested"
         ),
+        "thin_layer": thin_layer_evidence,
         "warnings": list(materials.warnings),
         "warning_count": int(len(materials.warnings)),
         "preflight": dict(preflight_report),
@@ -9348,6 +9428,7 @@ def solve_bistatic_rcs_2d_single_polarization(
     }
 
 
+@profiled_solve
 def solve_bistatic_rcs_2d(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -9549,6 +9630,7 @@ def _run_certified_2d_pair(
     return result
 
 
+@profiled_solve
 def solve_monostatic_rcs_2d_certified_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -9592,6 +9674,7 @@ def solve_monostatic_rcs_2d_certified_single_polarization(
     )
 
 
+@profiled_solve
 def solve_bistatic_rcs_2d_certified_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -9633,6 +9716,7 @@ def solve_bistatic_rcs_2d_certified_single_polarization(
     )
 
 
+@profiled_solve
 def solve_monostatic_rcs_2d_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -9703,6 +9787,7 @@ def _mark_co_polarized_survey_result(
     return result
 
 
+@profiled_solve
 def solve_monostatic_rcs_2d_survey(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -9740,6 +9825,7 @@ def solve_monostatic_rcs_2d_survey(
     )
 
 
+@profiled_solve
 def solve_bistatic_rcs_2d_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -9786,6 +9872,7 @@ def solve_bistatic_rcs_2d_certified(
     return result
 
 
+@profiled_solve
 def solve_bistatic_rcs_2d_survey(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',

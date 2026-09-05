@@ -13,6 +13,10 @@ import warnings
 import zipfile
 import numpy as np
 
+from grim_metadata import (
+    ADVISORY_METADATA_KEYS, canonical_time_convention, inspect_scalar_metadata,
+)
+
 C0 = 299_792_458.0
 
 # SENTRi's documented export convention: global origin, exp(+jwt), with the
@@ -2474,62 +2478,21 @@ class RcsGrid:
         unit = self._supported_unit(axis_name, _ANGLE_UNITS, "deg")
         return float(np.deg2rad(numeric)) if unit == "rad" else numeric
 
-    def _declared_scalar_metadata(self, key):
-        """Return consistent nonblank scalar metadata from units/extra.
-
-        A producer may place convention tags in either container.  Conflicting
-        declarations inside one dataset are an error rather than an arbitrary
-        units-first choice.
-        """
-
-        declared = []
-        advisory_key = key in {"amplitude_version", "phase_reference", "time_convention", "polarization_basis", "amplitude_convention", "complex_field_domain"}
-        for container in (self.units or {}, self.extra or {}):
-            if key not in container:
-                continue
-            raw = np.asarray(container[key])
-            if raw.size != 1:
-                if advisory_key:
-                    continue
-                raise ValueError(f"metadata {key!r} must be scalar")
-            value = raw.reshape(-1)[0]
-            if isinstance(value, np.generic):
-                value = value.item()
-            # Boolean/numeric False and 0 are meaningful declarations for
-            # fields such as motion_compensated.  ``value or ""`` silently
-            # erased them and could turn an explicit unsafe state into missing
-            # legacy metadata.
-            text = "" if value is None else str(value).strip()
-            if text:
-                declared.append(text)
-        if key == "time_convention":
-            normalized = {
-                self._canonical_time_convention(value) for value in declared
-            }
-        else:
-            normalized = {
-                " ".join(value.split()).casefold() for value in declared
-            }
-        if len(normalized) > 1:
-            if advisory_key:
-                return ""
-            raise ValueError(f"dataset contains contradictory {key} metadata")
-        return declared[0] if declared else ""
-
-    @staticmethod
-    def _canonical_time_convention(value):
-        text = str(value or "").strip()
-        compact = (
-            text.casefold()
-            .replace("ω", "omega")
-            .replace("*", "")
-            .replace(" ", "")
+    def inspect_scalar_metadata(self, key):
+        """Expose metadata evidence without changing numerical eligibility."""
+        return inspect_scalar_metadata(
+            key, self.units, self.extra,
+            canonicalizer=(
+                self._canonical_time_convention if key == "time_convention" else None
+            ),
         )
-        if re.search(r"exp\(\+?j(?:omega|w)t\)", compact):
-            return "+jwt"
-        if re.search(r"exp\(-j(?:omega|w)t\)", compact):
-            return "-jwt"
-        return compact
+
+    def _declared_scalar_metadata(self, key):
+        return self.inspect_scalar_metadata(key).scalar(
+            advisory=key in ADVISORY_METADATA_KEYS
+        )
+
+    _canonical_time_convention = staticmethod(canonical_time_convention)
 
     def linear_quantity(self):
         """Physical meaning of ``rcs_power`` (sigma_2d, sigma_3d, or ratio)."""

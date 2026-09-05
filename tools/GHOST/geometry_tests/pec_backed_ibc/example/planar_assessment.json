@@ -1,0 +1,130 @@
+{
+  "schema": "freddy.ghost.scalar-coating-check.v1",
+  "backing": "pec",
+  "frequency_range_ghz": [
+    1.0,
+    18.0
+  ],
+  "frequency_count": 171,
+  "thickness_m": 0.000762,
+  "reference_surface": "outer air/coating interface",
+  "free_space_k0d_max": 0.2874661032008216,
+  "angles": [
+    {
+      "angle_deg": 0.0,
+      "polarization": "TE",
+      "max_absolute_complex_reflection_error": 6.10780345318845e-16,
+      "worst_frequency_ghz": 2.9000000000000004,
+      "max_phase_error_deg": 3.3396268602980996e-14,
+      "max_magnitude_error_db": 3.857309866213149e-15
+    },
+    {
+      "angle_deg": 0.0,
+      "polarization": "TM",
+      "max_absolute_complex_reflection_error": 7.447602459741819e-16,
+      "worst_frequency_ghz": 11.4,
+      "max_phase_error_deg": 4.1482642167264994e-14,
+      "max_magnitude_error_db": 3.857309866213149e-15
+    },
+    {
+      "angle_deg": 15.0,
+      "polarization": "TE",
+      "max_absolute_complex_reflection_error": 0.0012350352186737102,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 0.07089136509876479,
+      "max_magnitude_error_db": 7.596043680258752e-05
+    },
+    {
+      "angle_deg": 15.0,
+      "polarization": "TM",
+      "max_absolute_complex_reflection_error": 0.011378876426073015,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 0.6531954890285289,
+      "max_magnitude_error_db": 0.0018878968112383734
+    },
+    {
+      "angle_deg": 30.0,
+      "polarization": "TE",
+      "max_absolute_complex_reflection_error": 0.004179269262198827,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 0.23984985484123458,
+      "max_magnitude_error_db": 0.0002599893482309404
+    },
+    {
+      "angle_deg": 30.0,
+      "polarization": "TM",
+      "max_absolute_complex_reflection_error": 0.046221586735838135,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 2.654883731025503,
+      "max_magnitude_error_db": 0.007782558212102941
+    },
+    {
+      "angle_deg": 45.0,
+      "polarization": "TE",
+      "max_absolute_complex_reflection_error": 0.006932597340964818,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 0.3977508455901432,
+      "max_magnitude_error_db": 0.0004381282359904264
+    },
+    {
+      "angle_deg": 45.0,
+      "polarization": "TM",
+      "max_absolute_complex_reflection_error": 0.1072568523471163,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 6.168868784946951,
+      "max_magnitude_error_db": 0.01864661144716837
+    },
+    {
+      "angle_deg": 60.0,
+      "polarization": "TE",
+      "max_absolute_complex_reflection_error": 0.0074725179586784835,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 0.42856043016454687,
+      "max_magnitude_error_db": 0.0004798597270212591
+    },
+    {
+      "angle_deg": 60.0,
+      "polarization": "TM",
+      "max_absolute_complex_reflection_error": 0.19888622310485848,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 11.470176257676966,
+      "max_magnitude_error_db": 0.03717757308063715
+    },
+    {
+      "angle_deg": 75.0,
+      "polarization": "TE",
+      "max_absolute_complex_reflection_error": 0.0048709472551043435,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 0.2792230966038204,
+      "max_magnitude_error_db": 0.00031648416140804385
+    },
+    {
+      "angle_deg": 75.0,
+      "polarization": "TM",
+      "max_absolute_complex_reflection_error": 0.2901891306644044,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 16.796763149045756,
+      "max_magnitude_error_db": 0.06535225991021787
+    },
+    {
+      "angle_deg": 85.0,
+      "polarization": "TE",
+      "max_absolute_complex_reflection_error": 0.0017519937496588017,
+      "worst_frequency_ghz": 18.0,
+      "max_phase_error_deg": 0.10039677037425304,
+      "max_magnitude_error_db": 0.00011425024784149666
+    },
+    {
+      "angle_deg": 85.0,
+      "polarization": "TM",
+      "max_absolute_complex_reflection_error": 0.28517744463038813,
+      "worst_frequency_ghz": 6.4,
+      "max_phase_error_deg": 16.462102823375844,
+      "max_magnitude_error_db": 0.07173611462017446
+    }
+  ],
+  "midpoint_absolute_reflection_error_max": 2.1097970229881348e-06,
+  "finite_body_accuracy_certified": false,
+  "interpretation": "Planar local scalar-IBC assessment only. Does not certify finite-body RCS, curvature, edges, creeping waves, or coupling. Midpoint checks do not exclude unresolved narrow resonances.",
+  "example_material": "Illustrative epsilon 4-j0.1, mu 1; not user material or a validated RCS coating."
+}
