@@ -77,7 +77,7 @@ def assess_scalar_coating(frequencies, layers, angles=(0., 15., 30., 45., 60., 7
 
 def coating_report_text(report):
     lo, hi = report["frequency_range_ghz"]
-    lines = [f"PEC-backed coating: {report['thickness_m']*1000:g} mm; {lo:g}-{hi:g} GHz.",
+    lines = [f"PEC-backed coating: {report['thickness_m']/0.0254:g} in; {lo:g}-{hi:g} GHz.",
              "Apply Z(f) on the OUTER coating envelope as TYPE 2 in 2D or BoR.",
              "No separate bulk layer or coincident PEC boundary is needed.",
              "", "Scalar IBC versus the complete planar stack:",

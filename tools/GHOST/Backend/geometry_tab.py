@@ -2,7 +2,7 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from material_models import segment_type_options, show_material_guide, choose_thin_layer
+from material_models import METERS_PER_INCH, segment_type_options, show_material_guide, choose_thin_layer
 
 try:
     from PySide6.QtCore import Qt, Signal, QItemSelectionModel
@@ -439,7 +439,7 @@ class GeometryTab(QWidget):
         if title_prefix == "IBCS/Resistances":
             # 6-column inline form: flag, kind, R_start, X_start, R_end, X_end.
             # Explicit CSV rows use only Flag and the second column.
-            headers = ["Flag", "Model / CSV", "R / d (m)", "X / material", "R_end", "X_end"]
+            headers = ["Flag", "Model / CSV", "R / d (in)", "X / material", "R_end", "X_end"]
             col_count = len(headers)
         elif title_prefix == "Dielectrics":
             col_count = 5
@@ -479,7 +479,17 @@ class GeometryTab(QWidget):
                     if len(tokens) < 2 or is_tabulated_row(tokens):
                         continue
                     if str(tokens[1]).lower() == "thin_dielectric":
-                        table.item(r, 2).setToolTip("Physical layer thickness in metres")
+                        item = table.item(r, 2)
+                        try:
+                            shown = format(float(tokens[2]) / METERS_PER_INCH, ".12g")
+                        except (ValueError, OverflowError):
+                            shown = tokens[2]
+                        item.setText(shown)
+                        table.setColumnWidth(2, max(table.columnWidth(2), table.fontMetrics().horizontalAdvance(shown) + 16))
+                        # Preserve the exact saved SI token until the user edits
+                        # this value; merely viewing a legacy file is lossless.
+                        item.setData(Qt.UserRole, (shown, tokens[2]))
+                        item.setToolTip("Physical layer thickness in inches")
                         table.item(r, 3).setToolTip("Flag in the Dielectrics table (epsilon and mu)")
                         continue
                     self._install_ibc_kind_combo(table, r, tokens[1])
@@ -1617,7 +1627,11 @@ class GeometryTab(QWidget):
         kind = info["kind"]
         if kind == "thin_dielectric":
             row = info["raw"]
-            return f"{base}  |  thin layer {row[2]} m, dielectric {row[3]}" if len(row) == 4 else f"{base} | malformed thin layer"
+            try:
+                thickness_in = float(row[2]) / METERS_PER_INCH
+            except (ValueError, IndexError):
+                return f"{base} | malformed thin layer"
+            return f"{base}  |  thin layer {thickness_in:.6g} in, dielectric {row[3]}" if len(row) == 4 else f"{base} | malformed thin layer"
         if kind == "tabulated":
             return (
                 f"{base}  |  IBC {ibc} -> tabulated "
@@ -2303,6 +2317,16 @@ class GeometryTab(QWidget):
                 tokens.append(val)
             while tokens and tokens[-1] == "":
                 tokens.pop()
+            if table is self.table_ibc and len(tokens) >= 3 and tokens[1].lower() == "thin_dielectric":
+                item = table.item(r, 2)
+                saved = item.data(Qt.UserRole) if item is not None else None
+                if saved is not None and tokens[2] == saved[0]:
+                    tokens[2] = saved[1]
+                else:
+                    try:
+                        tokens[2] = format(float(tokens[2]) * METERS_PER_INCH, ".17g")
+                    except (ValueError, OverflowError):
+                        pass  # Preserve invalid input for the normal validator.
             if tokens:
                 rows.append(tokens)
         return rows

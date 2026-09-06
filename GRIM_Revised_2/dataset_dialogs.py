@@ -652,18 +652,18 @@ class RangeCalibrationDialog(QDialog):
         form.addWidget(QLabel("Exact/reference response:"), 1, 0)
         form.addWidget(self.combo_exact, 1, 1)
 
-        self.spin_offset_m = QDoubleSpinBox()
-        self.spin_offset_m.setDecimals(9)
-        self.spin_offset_m.setRange(-1.0e6, 1.0e6)
-        self.spin_offset_m.setSingleStep(0.001)
-        self.spin_offset_m.setSuffix(" m")
-        self.spin_offset_m.setToolTip(
+        self.spin_offset_in = QDoubleSpinBox()
+        self.spin_offset_in.setDecimals(12)
+        self.spin_offset_in.setRange(-1.0e6 / 0.0254, 1.0e6 / 0.0254)
+        self.spin_offset_in.setSingleStep(0.001)
+        self.spin_offset_in.setSuffix(" in")
+        self.spin_offset_in.setToolTip(
             "Enter the one-way physical displacement. Positive means the "
             "measured calibration target is farther from radar than the "
             "DUT/reference plane; GRIM applies the monostatic two-way phase."
         )
         form.addWidget(QLabel("Signed calibrator range offset ΔR:"), 2, 0)
-        form.addWidget(self.spin_offset_m, 2, 1)
+        form.addWidget(self.spin_offset_in, 2, 1)
 
         gain_row = QHBoxLayout()
         self.chk_gain_limit = QCheckBox("Limit correction gain")
@@ -752,7 +752,7 @@ class RangeCalibrationDialog(QDialog):
         return {
             "measured": self._entries[measured_index],
             "exact": self._entries[exact_index],
-            "range_offset_m": float(self.spin_offset_m.value()),
+            "range_offset_m": float(self.spin_offset_in.value()) * 0.0254,
             "allow_singleton_angular_broadcast": self.chk_broadcast.isChecked(),
             "convention_attested": False,
             "maximum_correction_gain_db": (

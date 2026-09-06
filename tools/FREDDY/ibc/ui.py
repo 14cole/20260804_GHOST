@@ -624,10 +624,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         # layer thickness. The frequency grid is deliberately shared with the
         # single Impedance mode above.
         self.ibc_batch_layer_var = StringVar("")
-        self.ibc_batch_start_var = StringVar("15")
-        self.ibc_batch_stop_var = StringVar("30")
-        self.ibc_batch_step_var = StringVar("1")
-        self.ibc_batch_unit_var = StringVar("mil")
+        self.ibc_batch_start_var = StringVar("0.015")
+        self.ibc_batch_stop_var = StringVar("0.030")
+        self.ibc_batch_step_var = StringVar("0.001")
+        self.ibc_batch_unit_var = StringVar("in")
         self.ibc_batch_output_dir_var = StringVar(".")
         self.ibc_batch_prefix_var = StringVar("ibc")
         self.uncertainty_var = BooleanVar(False)
@@ -1345,7 +1345,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         )
         ibc_batch_sweep_grid.addWidget(QLabel("Units"), 2, 0, Qt.AlignLeft)
         ibc_batch_sweep_grid.addWidget(
-            make_combo(("mil", "in", "mm"), self.ibc_batch_unit_var, width=80),
+            make_combo(("in", "mil", "mm"), self.ibc_batch_unit_var, width=80),
             2,
             1,
             Qt.AlignLeft,

@@ -35,6 +35,7 @@ class ScalarCoatingTests(unittest.TestCase):
             self.assertAlmostEqual(row['max_absolute_complex_reflection_error'],max(errors),places=12)
         self.assertGreater(report['angles'][-1]['max_absolute_complex_reflection_error'], .03)
         self.assertIn('not an RCS percent error',coating_report_text(report))
+        self.assertIn('PEC-backed coating: 0.03 in;', coating_report_text(report))
 
     def test_refined_frequency_grid_reduces_interpolation_error(self):
         coarse=assess_scalar_coating([1.,18.],[layer()],[0.])

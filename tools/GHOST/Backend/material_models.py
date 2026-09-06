@@ -1,9 +1,11 @@
 """User-facing material meanings, separate from the legacy numeric file codes."""
 
+METERS_PER_INCH = 0.0254
+
 MATERIAL_MODELS = {
     1: ("Free sheet: impedance / thin dielectric", ("Air", "Sheet", "Air"),
         "Choose a surface flag: complex sheet impedance, or a thin_dielectric "
-        "row with thickness in metres and a dielectric material flag. The thin "
+        "layer with thickness in inches and a dielectric material flag. The thin "
         "layer transmits and includes normal polarization. It is a first-order "
         "2D approximation for a uniform layer in air: electrical thickness <= "
         "0.15 and thickness/curvature radius <= 0.05. Validate against bulk for "
@@ -52,10 +54,11 @@ def choose_thin_layer(parent, dielectric_options):
     for flag, label in dielectric_options:
         material.addItem(label, flag)
     thickness = QDoubleSpinBox()
-    thickness.setDecimals(6)
-    thickness.setRange(.000001, 1e6)
-    thickness.setValue(1.)
-    thickness.setSuffix(" mm")
+    thickness.setDecimals(12)
+    thickness.setRange(1e-9 / METERS_PER_INCH, 1000. / METERS_PER_INCH)
+    thickness.setSingleStep(.001)
+    thickness.setValue(.001 / METERS_PER_INCH)
+    thickness.setSuffix(" in")
     layout.addRow("Dielectric material", material)
     layout.addRow("Physical thickness", thickness)
     note = QLabel("Draw the layer midsurface as TYPE 1 and assign the new surface flag. "
@@ -69,7 +72,7 @@ def choose_thin_layer(parent, dielectric_options):
     layout.addRow(buttons)
     if dialog.exec() != QDialog.Accepted:
         return None
-    return ["thin_dielectric", format(thickness.value() / 1000., ".12g"), str(material.currentData())]
+    return ["thin_dielectric", format(thickness.value() * METERS_PER_INCH, ".12g"), str(material.currentData())]
 
 
 def show_material_guide(parent):

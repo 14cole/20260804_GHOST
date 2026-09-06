@@ -176,7 +176,8 @@ approximation; compare important cases against explicit thickness. See
 [solver updates](../../SOLVER_UPDATES.md) for the current scope.
 
 In the GUI, add the dielectric first, then choose **+ Thin layer**, select its
-dielectric flag and enter thickness in **mm**. The saved row converts thickness
+dielectric flag and enter thickness in **inches**. The material table also
+displays and edits thin-layer thickness in inches. The saved row converts thickness
 to **meters**, independently of coordinate units. Assign its new surface flag
 to TYPE 1 and keep both region flags zero.
 
@@ -634,7 +635,7 @@ See [BoR conventions](BOR_CONVENTIONS.md) and
 - Using an IBC flag on TYPE 3 or TYPE 5.
 - Assigning a `thin_dielectric` flag to TYPE 2 or TYPE 4.
 - Saving thin-layer thickness in inches or millimeters; the row always stores
-  meters, while the **+ Thin layer** dialog accepts millimeters.
+  meters, while the **+ Thin layer** dialog and material table accept inches.
 - Mixing thin-layer and bulk/conductor segments in the same scene.
 - Treating a TYPE 1 freestanding layer as a PEC-backed coating.
 - Referencing a material flag without defining it in the matching section.

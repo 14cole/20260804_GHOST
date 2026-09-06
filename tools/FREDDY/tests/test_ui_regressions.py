@@ -383,10 +383,40 @@ class MaterialMixUiTests(unittest.TestCase):
                 self.assertIn("16 nominal PEC-backed IBC file(s)", preview)
                 self.assertIn("171 frequency points each", preview)
                 self.assertIn("2,736 total rows", preview)
-                self.assertIn("skin_15mil.csv", preview)
-                self.assertIn("skin_30mil.csv", preview)
+                self.assertIn("skin_0p015in.csv", preview)
+                self.assertIn("skin_0p03in.csv", preview)
+                self.assertEqual(workspace.ibc_batch_unit_var.get(), "in")
+                plan = workspace._plan_ibc_batch()
+                self.assertAlmostEqual(plan[0].thickness_in, .015)
+                self.assertAlmostEqual(plan[-1].thickness_in, .030)
                 self.assertTrue(workspace.ibc_batch_export_btn.isEnabled())
                 self.assertIn("IBC Batch", workspace._mode_labels)
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_saved_batch_units_override_inch_defaults_without_rescaling_values(self) -> None:
+        workspace = ImpedanceGui()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                for unit, start, stop, step in (
+                    ("mm", "0.381", "0.762", "0.0254"),
+                    ("mil", "15", "30", "1"),
+                ):
+                    with self.subTest(unit=unit):
+                        state = workspace._collect_project_state()
+                        state["controls"].update(
+                            ibc_batch_unit=unit, ibc_batch_start=start,
+                            ibc_batch_stop=stop, ibc_batch_step=step,
+                            ibc_batch_output_dir=folder,
+                        )
+                        workspace._apply_project_state(state)
+                        self.assertEqual(workspace.ibc_batch_unit_var.get(), unit)
+                        self.assertEqual(workspace.ibc_batch_start_var.get(), start)
+                        plan = workspace._plan_ibc_batch()
+                        self.assertEqual(len(plan), 16)
+                        self.assertAlmostEqual(plan[0].thickness_in, .015)
+                        self.assertAlmostEqual(plan[-1].thickness_in, .030)
         finally:
             workspace.deleteLater()
             self.app.processEvents()

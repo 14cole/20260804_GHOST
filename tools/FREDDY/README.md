@@ -113,8 +113,9 @@ bounds are unwrapped about the nominal phase and can therefore lie outside
 
 Use **IBC Batch** to write one nominal solver-compatible IBC CSV for each
 requested thickness of one material layer. Choose the layer, thickness
-start/stop/step, and `mil`, `in`, or `mm`; the default 15-to-30 mil sweep writes
-`ibc_15mil.csv` through `ibc_30mil.csv`. The Impedance frequency sweep is shared
+start/stop/step, and `in`, `mil`, or `mm`; the default 0.015-to-0.030 inch sweep
+uses a 0.001 inch step and writes `ibc_0p015in.csv` through `ibc_0p03in.csv`.
+Saved projects retain their selected units. The Impedance frequency sweep is shared
 with this mode. Every batch output is broadside and PEC-backed, and all other
 layers, material tables, and stack ordering remain unchanged.
 

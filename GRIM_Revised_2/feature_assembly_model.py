@@ -1284,7 +1284,7 @@ def _surface_dimensions_summary(
     *,
     surface_units: Any,
 ) -> str:
-    """Describe interpreted mesh spans in meters and selected source units."""
+    """Describe interpreted mesh spans in inches and selected source units."""
 
     units = str(surface_units or "").strip()
     if surface_triangles_cad_m is None or units not in UNIT_SCALE_M:
@@ -1311,8 +1311,8 @@ def _surface_dimensions_summary(
 
     return (
         "Interpreted physical size: "
-        + format_triplet(spans_m)
-        + " m (x/y/z). Source-coordinate spans: "
+        + format_triplet(value / UNIT_SCALE_M["inches"] for value in spans_m)
+        + " in (x/y/z). Source-coordinate spans: "
         + format_triplet(spans_source)
         + f" {UNIT_ABBREVIATIONS[units]} ({units} selected)."
     )
@@ -2216,7 +2216,7 @@ class FeatureAssemblyFormModel:
             values.skin_phase_tol_deg, "Skin phase tolerance"
         )
         if skin > 0.1:
-            raise ValueError("Skin distance tolerance must not exceed 100 mm.")
+            raise ValueError("Skin distance tolerance must not exceed 3.93700787402 in.")
         if not 0.0 < phase <= 90.0:
             raise ValueError(
                 "Skin phase tolerance must be above 0 and at most 90 degrees."

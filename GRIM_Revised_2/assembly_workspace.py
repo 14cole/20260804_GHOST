@@ -1111,7 +1111,7 @@ if GUI_AVAILABLE:
             self.setMinimumSize(360, 280)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.model = model if model is not None else AssemblySceneModel()
-            self._display_units = "Meters"
+            self._display_units = "Inches"
             self._orientation_scale = 1.0
             self._orientation_vectors_visible = True
             self._orthographic_projection = True
@@ -1196,7 +1196,7 @@ if GUI_AVAILABLE:
             for group_id in self.model.group_ids:
                 self._add_artist(self.model.group(group_id))
             self.refresh_scene_feedback()
-            self.set_display_units("Meters")
+            self.set_display_units("Inches")
             self.mpl_connect("button_press_event", self._begin_interaction_lod)
             self.mpl_connect("button_release_event", self._end_interaction_lod)
             self.fit_visible()
@@ -1985,6 +1985,7 @@ if GUI_AVAILABLE:
                 self.cmb_display_units.addItem(
                     f"{unit_name} ({suffix})", unit_name
                 )
+            self.cmb_display_units.setCurrentIndex(self.cmb_display_units.findData("Inches"))
             self.cmb_display_units.setToolTip(
                 "Changes 3-D axis labels and tick values only. CAD and physics "
                 "coordinates always remain meters."
@@ -2070,7 +2071,7 @@ if GUI_AVAILABLE:
             display_layout.addLayout(detail_row)
 
             self.lbl_body_detail = QLabel(
-                "Display units: meters. No body preview loaded. Original geometry "
+                "Display units: inches. No body preview loaded. Original geometry "
                 "is unchanged for validation, shadowing, and assembly."
             )
             self.lbl_body_detail.setWordWrap(True)

@@ -314,7 +314,7 @@ def main():
         print(
             "Geometric shadowing enabled: "
             f"{len(plan.surface.triangles)} triangles, "
-            f"ray bias {plan.occluder.bias * 1e3:.4g} mm"
+            f"ray bias {plan.occluder.bias / .0254:.6g} in"
         )
     try:
         saved = execute_feature_assembly(

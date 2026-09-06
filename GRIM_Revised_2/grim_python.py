@@ -2036,6 +2036,7 @@ def plot_datasets(
 
         dataset = selected[0][1]
         options = dict(isar_options or {})
+        options.setdefault("length_unit", "in")
         # This helper produces a rendered plot, not a scientific result
         # artifact. Formation remains full fidelity, then the same
         # peak-preserving display reduction as the GUI bounds image/log
@@ -2109,7 +2110,7 @@ def plot_datasets(
                 axis.set_aspect("equal", adjustable="datalim")
             meshes.append(mesh)
 
-        unit_name, _unit_scale = _length_unit(options.get("length_unit", "m"))
+        unit_name, _unit_scale = _length_unit(options["length_unit"])
         elevation_native = float(np.asarray(dataset.elevations)[el_idx])
         elevation_deg = float(
             plot_common.convert_axis_values(

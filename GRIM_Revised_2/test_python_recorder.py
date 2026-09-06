@@ -334,6 +334,17 @@ class PythonRecorderTests(unittest.TestCase):
         self.assertIn("Cartesian PFA", axis.get_title())
         self.assertEqual(float(axis.get_aspect()), 1.0)
 
+        with mock.patch(
+            "plot_modes.isar_mode.form_isar", return_value=([band], 0.01)
+        ) as form:
+            default_figure = plot_datasets(
+                [("Dataset", grid)], mode="isar_image", azimuths=[-180.0, 0.0],
+                elevations=[0.0], frequencies=[9.0, 10.0], polarization="VV",
+                show_colorbar=False,
+            )
+        self.assertEqual(form.call_args.kwargs["length_unit"], "in")
+        self.assertEqual(default_figure.axes[0].get_xlabel(), "Cross-Range (in)")
+
     def test_identical_plot_specs_are_deduplicated(self):
         recorder = PythonScriptRecorder()
         source = DatasetReference("id", "Data", "input.grim")

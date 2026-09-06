@@ -209,7 +209,7 @@ def render(self) -> None:
         return
 
     units_combo = getattr(self, "combo_isar_units", None)
-    unit_name, unit_scale = computation._length_unit(units_combo.currentText() if units_combo else "m")
+    unit_name, unit_scale = computation._length_unit(units_combo.currentText() if units_combo else "in")
 
     recon_combo = getattr(self, "combo_isar_recon", None)
     recon_text = recon_combo.currentText() if recon_combo is not None else "FFT"

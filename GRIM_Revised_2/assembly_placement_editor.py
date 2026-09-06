@@ -387,7 +387,7 @@ class PlacementEditor(QDialog):
     def _projection_done(self, result):
         if not self._cancel.is_set():
             self.change(result[0])
-            self.status.setText(f"Surface helper complete; maximum original offset {result[1]*1000:.6g} mm. Check roll directions and run physical validation. Undo restores the authored values.")
+            self.status.setText(f"Surface helper complete; maximum original offset {result[1]/0.0254:.6g} in. Check roll directions and run physical validation. Undo restores the authored values.")
 
     def _projection_finished(self):
         self._thread.deleteLater()

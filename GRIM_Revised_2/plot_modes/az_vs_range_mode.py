@@ -190,7 +190,7 @@ def render(self) -> None:
 
     units_combo = getattr(self, "combo_isar_units", None)
     unit_name, unit_scale = _length_unit(
-        units_combo.currentText() if units_combo else "m"
+        units_combo.currentText() if units_combo else "in"
     )
     c0 = 299_792_458.0
     range_axis = (

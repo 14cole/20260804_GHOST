@@ -428,6 +428,8 @@ class AssemblyGuiTests(unittest.TestCase):
 
     def test_canvas_artist_visibility_and_fit(self):
         canvas = AssemblySceneCanvas()
+        self.assertEqual(canvas.display_units, "Inches")
+        canvas.set_display_units("Meters")
         self.assertEqual(canvas.preview_state, "empty")
         self.assertIn("Nothing to preview", canvas.feedback_text)
         np.testing.assert_allclose(
@@ -960,7 +962,9 @@ class AssemblyGuiTests(unittest.TestCase):
         body = workspace.scene_model.group(body_id)
         original_geometry = body.geometry
         original_visibility = body.visible
-        workspace.cmb_display_units.setCurrentIndex(1)
+        self.assertEqual(workspace.cmb_display_units.currentData(), "Inches")
+        workspace.cmb_display_units.setCurrentIndex(workspace.cmb_display_units.findData("Meters"))
+        workspace.cmb_display_units.setCurrentIndex(workspace.cmb_display_units.findData("Inches"))
         self.assertEqual(workspace.scene_canvas.display_units, "Inches")
         self.assertIs(body.geometry, original_geometry)
         workspace.cmb_body_render.setCurrentText("Wireframe")

@@ -82,7 +82,7 @@ def geometry_dimensions(snapshot, units):
     scale = .0254 if units == 'inches' else 1.
     width = (max(x for x,y in points) - min(x for x,y in points)) * scale
     height = (max(y for x,y in points) - min(y for x,y in points)) * scale
-    return f'X span {width:g} m \u00d7 Y span {height:g} m ({width/.0254:g} \u00d7 {height/.0254:g} in)'
+    return f'X span {width/.0254:g} in \u00d7 Y span {height/.0254:g} in'
 
 
 class RunSetupMixin:

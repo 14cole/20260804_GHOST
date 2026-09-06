@@ -1219,11 +1219,11 @@ if GUI_AVAILABLE:
             self.host_stack = QLineEdit(body_group)
             self.host_stack.setPlaceholderText("Characterized coating / layer-stack ID, if applicable")
             self.host_radius = QLineEdit(body_group)
-            self.host_radius.setPlaceholderText("Minimum principal radius in meters; blank = unknown")
+            self.host_radius.setPlaceholderText("Minimum principal radius in inches; blank = unknown")
             self.host_radius.setToolTip("Conservative minimum radius over every feature footprint, in both surface directions. A flat mesh facet does not prove a flat host. Enter a finite lower bound for a planar surface.")
             body_form.addRow("Host material:", self.host_material)
             body_form.addRow("Host stack ID:", self.host_stack)
-            body_form.addRow("Host curvature bound:", self.host_radius)
+            body_form.addRow("Host curvature bound (in):", self.host_radius)
             for control in (self.host_material, self.host_stack, self.host_radius):
                 control.editingFinished.connect(self._host_changed)
             body_geometry = QWidget(body_content)
@@ -1541,14 +1541,16 @@ if GUI_AVAILABLE:
             advanced_form.setContentsMargins(8, 8, 8, 8)
             advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
             self.skin_tol = QDoubleSpinBox(advanced)
-            self.skin_tol.setDecimals(6)
-            self.skin_tol.setRange(0.0, 100.0)
-            self.skin_tol.setSingleStep(0.01)
-            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM)
-            self.skin_tol.setSuffix(" mm")
+            self.skin_tol.setDecimals(12)
+            # Round down at the displayed precision to stay within the 0.1 m
+            # physical limit when the maximum is converted back to SI.
+            self.skin_tol.setRange(0.0, 3.937007874015)
+            self.skin_tol.setSingleStep(0.001)
+            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM / 25.4)
+            self.skin_tol.setSuffix(" in")
             self.skin_tol.setToolTip(
                 "Maximum accepted distance from a feature to the host skin. This "
-                "control is displayed in millimeters; recipes store meters."
+                "control is displayed in inches."
             )
             self.phase_tol = QDoubleSpinBox(advanced)
             self.phase_tol.setDecimals(1)
@@ -1597,12 +1599,12 @@ if GUI_AVAILABLE:
                 "Reset placement-check defaults", advanced
             )
             self.reset_qa_defaults_button.setToolTip(
-                "Restore 1 mm skin distance, 15° phase, and 15° normal limits."
+                "Restore 0.03937007874 in skin distance, 15° phase, and 15° normal limits."
             )
             advanced_form.addRow("Maximum skin distance:", self.skin_tol)
             advanced_form.addRow("Maximum two-way phase error:", self.phase_tol)
             advanced_form.addRow("Maximum normal mismatch:", self.normal_tol)
-            advanced_form.addRow("Shadow ray bias (m):", self.shadow_bias)
+            advanced_form.addRow("Shadow ray bias (in):", self.shadow_bias)
             advanced_form.addRow("Validation profile:", self.validation_profile)
             advanced_form.addRow("", self.reset_qa_defaults_button)
             self.advanced_section = _DisclosureSection(
@@ -1990,7 +1992,7 @@ if GUI_AVAILABLE:
 
         @Slot()
         def _reset_qa_defaults(self) -> None:
-            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM)
+            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM / 25.4)
             self.phase_tol.setValue(DEFAULT_SKIN_PHASE_TOL_DEG)
             self.normal_tol.setValue(DEFAULT_NORMAL_TOL_DEG)
             self.shadow_bias.clear()
@@ -2220,16 +2222,16 @@ if GUI_AVAILABLE:
                 self.shadow.setChecked(values.shadow)
                 self.host_material.setText(values.host_material)
                 self.host_stack.setText(values.host_stack_id)
-                self.host_radius.setText("" if values.host_minimum_radius_m is None else str(values.host_minimum_radius_m))
+                self.host_radius.setText("" if values.host_minimum_radius_m is None else format(values.host_minimum_radius_m / UNIT_SCALE_M["inches"], ".17g"))
                 for key, control in self.study_fields.items():
                     selected = getattr(values, key)
                     control.setText("" if selected is None else ", ".join(map(str, selected)))
-                self.skin_tol.setValue(values.skin_tol_m * 1.0e3)
+                self.skin_tol.setValue(values.skin_tol_m / UNIT_SCALE_M["inches"])
                 self.phase_tol.setValue(values.skin_phase_tol_deg)
                 self.normal_tol.setValue(values.normal_tol_deg)
                 self._set_validation_profile_from_values(values)
                 self.shadow_bias.setText(
-                    "" if values.shadow_bias_m is None else f"{values.shadow_bias_m:.12g}"
+                    "" if values.shadow_bias_m is None else format(values.shadow_bias_m / UNIT_SCALE_M["inches"], ".17g")
                 )
                 # Display saved mappings immediately, while readiness still
                 # requires the authoritative CSV re-scan before validation.
@@ -2642,7 +2644,7 @@ if GUI_AVAILABLE:
             values.surface_units = str(self.surface_units.currentData())
             values.flip_surface_normals = self.flip_normals.isChecked()
             values.shadow = self.shadow.isChecked()
-            values.skin_tol_m = self.skin_tol.value() * 1.0e-3
+            values.skin_tol_m = self.skin_tol.value() * UNIT_SCALE_M["inches"]
             values.skin_phase_tol_deg = self.phase_tol.value()
             values.normal_tol_deg = self.normal_tol.value()
             (
@@ -2843,7 +2845,7 @@ if GUI_AVAILABLE:
             self.effective_physics_label.setText(
                 "Effective settings — "
                 f"body shadowing: {shadow_state}; mesh normals: {normals_state}; "
-                f"skin distance ≤ {values.skin_tol_m * 1.0e3:.6g} mm; "
+                f"skin distance ≤ {values.skin_tol_m / UNIT_SCALE_M['inches']:.6g} in; "
                 f"two-way phase error ≤ {values.skin_phase_tol_deg:.4g}°; "
                 f"normal mismatch ≤ {values.normal_tol_deg:.4g}°."
             )
@@ -3444,7 +3446,7 @@ if GUI_AVAILABLE:
             ):
                 self.surface_dimensions_label.setText(
                     "Not interpreted yet: click Preview geometry to confirm the "
-                    "selected units and physical x/y/z dimensions in meters."
+                    "selected units and physical x/y/z dimensions in inches."
                 )
                 return
             try:
@@ -3466,7 +3468,7 @@ if GUI_AVAILABLE:
                 return
             self.surface_dimensions_label.setText(
                 "Not interpreted yet: click Preview geometry to confirm the "
-                "selected units and physical x/y/z dimensions in meters."
+                "selected units and physical x/y/z dimensions in inches."
             )
 
         def _save_template(self, kind: str) -> None:
@@ -3564,7 +3566,7 @@ if GUI_AVAILABLE:
             values.host_material = self.host_material.text().strip()
             values.host_stack_id = self.host_stack.text().strip()
             raw = self.host_radius.text().strip()
-            values.host_minimum_radius_m = None if not raw else _require_finite_nonnegative(raw, "Host minimum principal radius (m)")
+            values.host_minimum_radius_m = None if not raw else _require_finite_nonnegative(raw, "Host minimum principal radius (in)") * UNIT_SCALE_M["inches"]
 
         def _study_changed(self) -> None:
             try:
@@ -3588,14 +3590,14 @@ if GUI_AVAILABLE:
             values.shadow = self.shadow.isChecked()
             bias = self.shadow_bias.text().strip()
             try:
-                values.shadow_bias_m = None if not bias else float(bias)
+                values.shadow_bias_m = None if not bias else float(bias) * UNIT_SCALE_M["inches"]
             except ValueError as exc:
-                raise ValueError("Shadow bias must be a number in meters or blank.") from exc
+                raise ValueError("Shadow bias must be a number in inches or blank.") from exc
             values.point_locations_csv = self.point_csv_picker.path()
             values.line_locations_csv = self.line_csv_picker.path()
             values.point_datasets = self.point_mapping.mapping()
             values.line_datasets = self.line_mapping.mapping()
-            values.skin_tol_m = self.skin_tol.value() * 1.0e-3
+            values.skin_tol_m = self.skin_tol.value() * UNIT_SCALE_M["inches"]
             values.skin_phase_tol_deg = self.phase_tol.value()
             values.normal_tol_deg = self.normal_tol.value()
             (
@@ -3742,7 +3744,7 @@ if GUI_AVAILABLE:
                             else float("nan")
                         )
                     )
-                    offset_text = f"{offset * 1e3:.4g} mm"
+                    offset_text = f"{offset / UNIT_SCALE_M['inches']:.4g} in"
                     if math.isfinite(ratio):
                         offset_text += f" ({ratio:.1f}%)"
                 else:
@@ -3836,7 +3838,7 @@ if GUI_AVAILABLE:
                     "require review."
                 )
             if offsets:
-                summary += f" Worst skin offset {max(offsets) * 1e3:.4g} mm."
+                summary += f" Worst skin offset {max(offsets) / UNIT_SCALE_M['inches']:.4g} in."
             if normal_errors:
                 summary += f" Worst recorded normal error {max(normal_errors):.3g}°."
             summary += " Click a row to find that instance above."
@@ -4371,7 +4373,7 @@ if GUI_AVAILABLE:
                 )
                 skin_limit = getattr(result, "skin_limit_m", None)
                 skin_text = (
-                    f" Effective skin limit: {float(skin_limit) * 1e3:.3f} mm."
+                    f" Effective skin limit: {float(skin_limit) / UNIT_SCALE_M['inches']:.6g} in."
                     if skin_limit is not None
                     else ""
                 )

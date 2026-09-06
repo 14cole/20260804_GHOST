@@ -441,7 +441,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
         self.assertEqual(preview.coordinate_units, "")
         self.assertEqual(preview.surface_units, "")
 
-    def test_mesh_dimension_summary_exposes_4500_mm_as_4_5_m(self):
+    def test_mesh_dimension_summary_converts_to_inches_and_retains_source_units(self):
         triangles_m = np.asarray(
             [
                 [[0.0, 0.0, 0.0], [4.5, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -452,7 +452,7 @@ class FeatureAssemblyModelTests(unittest.TestCase):
             triangles_m,
             surface_units="millimeters",
         )
-        self.assertIn("4.5 x 1 x 0.5 m", summary)
+        self.assertIn("177.165 x 39.3701 x 19.685 in", summary)
         self.assertIn("4500 x 1000 x 500 mm", summary)
 
     def test_versioned_recipe_round_trip_preserves_all_effective_state(self):
@@ -1697,7 +1697,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 panel._active_kind = ""
 
                 self.assertIn(
-                    "4.5 x 1 x 0.5 m",
+                    "177.165 x 39.3701 x 19.685 in",
                     panel.surface_dimensions_label.text(),
                 )
                 self.assertIn(
@@ -1958,6 +1958,8 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                     point_locations_csv=str(points),
                     point_datasets={"fastener": str(response)},
                     excluded_point_placement_ids={"bolt_002"},
+                    host_minimum_radius_m=.254,
+                    shadow_bias_m=.0000254,
                 ),
                 root / "vehicle",
                 name="Test vehicle",
@@ -1972,7 +1974,14 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                     panel.recipe_variant_edit.text(), "No rear fastener"
                 )
                 self.assertFalse(panel._recipe_dirty)
-                self.assertEqual(panel.skin_tol.value(), 1.0)
+                self.assertAlmostEqual(panel.skin_tol.value(), 1.0 / 25.4)
+                self.assertAlmostEqual(float(panel.host_radius.text()), 10.)
+                self.assertAlmostEqual(float(panel.shadow_bias.text()), .001)
+                panel._pull_values()
+                self.assertEqual(panel.model.values.coordinate_units, "meters")
+                self.assertAlmostEqual(panel.model.values.skin_tol_m, .001, places=12)
+                self.assertAlmostEqual(panel.model.values.host_minimum_radius_m, .254, places=15)
+                self.assertAlmostEqual(panel.model.values.shadow_bias_m, .0000254, places=15)
                 self.assertFalse(hasattr(panel, "expected_host_material"))
                 self.assertIn("saved", panel.recipe_status_label.text())
                 self.assertEqual(
@@ -2103,8 +2112,8 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         )
         self.assertFalse(panel.body_geometry_section.header.isChecked())
         self.assertFalse(panel.feature_selection_section.header.isChecked())
-        self.assertEqual(panel.skin_tol.suffix().strip(), "mm")
-        self.assertAlmostEqual(panel.skin_tol.value(), 1.0)
+        self.assertEqual(panel.skin_tol.suffix().strip(), "in")
+        self.assertAlmostEqual(panel.skin_tol.value(), 1.0 / 25.4)
         self.assertLessEqual(panel.skin_tol.singleStep(), 0.01)
         self.assertEqual(panel.phase_tol.maximum(), 90.0)
         self.assertFalse(panel.scan_button.isEnabled())
@@ -2119,9 +2128,31 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         )
         _close_panel_without_prompt(panel)
 
+    def test_inch_controls_convert_to_recipe_meters(self):
+        panel = FeatureAssemblyPanel(service=_FakeWorkflow())
+        try:
+            panel.host_radius.setText("10")
+            panel.shadow_bias.setText(".001")
+            panel.skin_tol.setValue(.01)
+            panel._pull_values()
+            self.assertAlmostEqual(panel.model.values.host_minimum_radius_m, .254)
+            self.assertAlmostEqual(panel.model.values.shadow_bias_m, .0000254)
+            self.assertAlmostEqual(panel.model.values.skin_tol_m, .000254)
+            with tempfile.TemporaryDirectory() as folder:
+                path = write_feature_assembly_recipe(panel.model.values, Path(folder) / "inch-controls", name="Inch controls", variant="Test")
+                restored = read_feature_assembly_recipe(path).values
+                self.assertAlmostEqual(restored.host_minimum_radius_m, .254)
+                self.assertAlmostEqual(restored.shadow_bias_m, .0000254)
+                self.assertAlmostEqual(restored.skin_tol_m, .000254)
+            panel.skin_tol.setValue(panel.skin_tol.maximum())
+            panel._pull_values()
+            self.assertLessEqual(panel.model.values.skin_tol_m, .1)
+        finally:
+            _close_panel_without_prompt(panel)
+
     def test_qa_defaults_reset_in_display_units_without_changing_profile(self):
         panel = FeatureAssemblyPanel(service=_FakeWorkflow())
-        panel.skin_tol.setValue(22.0)
+        panel.skin_tol.setValue(1.0)
         panel.phase_tol.setValue(75.0)
         panel.normal_tol.setValue(33.0)
         panel.validation_profile.setCurrentIndex(2)
@@ -2129,7 +2160,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
         panel.reset_qa_defaults_button.click()
         panel._pull_values()
 
-        self.assertAlmostEqual(panel.skin_tol.value(), 1.0)
+        self.assertAlmostEqual(panel.skin_tol.value(), 1.0 / 25.4)
         self.assertAlmostEqual(panel.model.values.skin_tol_m, 1.0e-3)
         self.assertEqual(panel.phase_tol.value(), 15.0)
         self.assertEqual(panel.normal_tol.value(), 15.0)
@@ -2623,7 +2654,7 @@ class FeatureAssemblyPanelQtTests(unittest.TestCase):
                 )
                 # Imported fields and local deltas need no certified manifest.
                 self.assertEqual(panel.validation_profile.currentData()[0], "advisory")
-                panel.skin_tol.setValue(1.0e-5)  # millimeters = 1e-8 meters
+                panel.skin_tol.setValue(1.0e-8 / .0254)  # inches; same physical tolerance
                 panel.phase_tol.setValue(0.1)
                 panel.normal_tol.setValue(2.0)
                 panel._pull_values()

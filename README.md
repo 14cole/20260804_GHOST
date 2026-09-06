@@ -7,6 +7,14 @@ solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.
 
+Length inputs and displays default to inches: GHOST/Runs geometry, thin-layer
+thickness, FREDDY thickness sweeps, ISAR range axes, Assembly display/tolerance
+controls, and calibration range offsets. Saved unit selections are preserved.
+Imported unitless meshes and placement CSVs still require their source units
+to be selected explicitly. Solver calculations and existing SI file fields
+(including `.geo` thin-layer thickness and Assembly recipe distances) retain
+their documented units; the editors convert to and from inches.
+
 The dataset sidebar offers **Save** for selected rows and **Save All** for the
 whole catalog. Its actions occupy two rows, with a draggable divider between
 the dataset table and parameter lists. The main window chooses its initial

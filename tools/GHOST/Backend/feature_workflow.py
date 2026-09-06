@@ -1842,9 +1842,9 @@ def prepare_line_placements(
                 shadow_points.setflags(write=False)
         if offset > limit:
             raise ValueError(
-                f"{coordinates}: line_id {line_id!r} is {offset * 1e3:.3f} mm "
+                f"{coordinates}: line_id {line_id!r} is {offset / .0254:.6g} in "
                 f"off the skin ({720.0 * offset / wavelength:.1f} deg two-way "
-                f"phase); allowed {limit * 1e3:.3f} mm."
+                f"phase); allowed {limit / .0254:.6g} in."
             )
 
         if derived.shape != normal_points.shape or not np.all(np.isfinite(derived)):
@@ -2074,7 +2074,7 @@ def prepare_point_placements(
             shadow_location.setflags(write=False)
         if offset > limit:
             raise ValueError(
-                f"{coordinates}:line {csv_line} is {offset * 1e3:.3f} mm off "
+                f"{coordinates}:line {csv_line} is {offset / .0254:.6g} in off "
                 f"the skin ({720.0 * offset / wavelength:.1f} deg two-way phase)."
             )
         derived = unit_vector(derived_value, "derived normal")

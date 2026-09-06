@@ -186,12 +186,39 @@ class ThinSheetPhysicsTests(unittest.TestCase):
         tab = GeometryTab()
         try:
             tab._populate_small_table(tab.table_ibc, ibcs, tab.lbl_ibc, "IBCS/Resistances")
+            self.assertAlmostEqual(float(tab.table_ibc.item(0, 2).text()), .001 / .0254)
             self.assertEqual(tab._read_small_table(tab.table_ibc), ibcs)
             self.assertEqual(tab._ibcs_lookup()[1]["kind"], "thin_dielectric")
+            tab.table_ibc.item(0, 2).setText("0.02")
+            updated = tab._read_small_table(tab.table_ibc)
+            self.assertAlmostEqual(float(updated[0][2]), .000508, places=15)
+            saved = build_geometry_text("film", [], updated, dielectrics)
+            tab._populate_small_table(tab.table_ibc, parse_geometry(saved)[2], tab.lbl_ibc, "IBCS/Resistances")
+            self.assertEqual(tab._read_small_table(tab.table_ibc), updated)
+            self.assertAlmostEqual(float(tab.table_ibc.item(0, 2).text()), .02)
         finally:
             tab.close()
             tab.deleteLater()
             app.processEvents()
+
+    def test_thin_layer_dialog_accepts_inches_and_returns_meters(self):
+        from PySide6.QtWidgets import QApplication, QDialog, QDoubleSpinBox
+        from material_models import choose_thin_layer
+        app = QApplication.instance() or QApplication([])
+
+        def accept(dialog):
+            thickness = dialog.findChild(QDoubleSpinBox)
+            self.assertEqual(thickness.suffix().strip(), "in")
+            self.assertAlmostEqual(thickness.value() * .0254, .001, places=12)
+            thickness.setValue(.02)
+            return QDialog.Accepted
+
+        with mock.patch.object(QDialog, "exec", new=accept):
+            row = choose_thin_layer(None, [(2, "Test dielectric")])
+        self.assertEqual(row[0], "thin_dielectric")
+        self.assertEqual(row[2], "2")
+        self.assertAlmostEqual(float(row[1]), .000508, places=15)
+        app.processEvents()
 
     def test_memory_gate_precedes_operator_allocation(self):
         with mock.patch.object(rcs, "_solve_memory_limit_gb", return_value=1e-12), \

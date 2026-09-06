@@ -866,16 +866,25 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertFalse(ok_button.isEnabled())
         dialog.combo_measured.setCurrentIndex(1)
         dialog.combo_exact.setCurrentIndex(2)
-        dialog.spin_offset_m.setValue(0.125)
+        self.assertEqual(dialog.spin_offset_in.suffix().strip(), "in")
+        dialog.spin_offset_in.setValue(0.125)
         dialog.chk_broadcast.setChecked(True)
         self.assertTrue(ok_button.isEnabled())
         params = dialog.get_params()
         self.assertEqual(params["measured"][0], "Measured cylinder")
         self.assertEqual(params["exact"][0], "Exact")
-        self.assertAlmostEqual(params["range_offset_m"], 0.125)
+        self.assertAlmostEqual(params["range_offset_m"], 0.003175)
         self.assertTrue(params["allow_singleton_angular_broadcast"])
         self.assertFalse(params["convention_attested"])
         dialog.deleteLater()
+
+    def test_length_display_defaults_are_inches(self) -> None:
+        for context in self.window._plot_contexts.values():
+            self.assertEqual(context.combo_isar_units.currentText(), "in")
+        workspace = self.window.assembly_workspace
+        self.assertEqual(workspace.cmb_display_units.currentData(), "Inches")
+        self.assertEqual(workspace.scene_canvas.display_units, "Inches")
+        self.assertEqual(workspace.scene_canvas.axes.xaxis.get_major_formatter()(.0254), "1")
 
     def test_support_reference_button_and_dialog_make_roles_and_limits_explicit(self) -> None:
         self.assertEqual(self.window.btn_support_reference.text(), "Support Ref -")

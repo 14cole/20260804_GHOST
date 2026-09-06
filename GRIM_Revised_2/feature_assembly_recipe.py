@@ -387,7 +387,7 @@ def read_feature_assembly_recipe(
     )
     if skin_tol > 0.1:
         raise ValueError(
-            "Assembly recipe skin distance tolerance must not exceed 100 mm."
+            "Assembly recipe skin distance tolerance must not exceed 3.93700787402 in."
         )
     if not 0.0 < phase_tol <= 90.0:
         raise ValueError(

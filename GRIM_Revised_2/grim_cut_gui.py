@@ -1447,6 +1447,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         settings_layout.addWidget(QLabel("ISAR Units"), row, 2)
         combo_isar_units = QComboBox()
         combo_isar_units.addItems(["m", "in", "ft"])
+        combo_isar_units.setCurrentText("in")
         settings_layout.addWidget(combo_isar_units, row, 3)
         row += 1
 
