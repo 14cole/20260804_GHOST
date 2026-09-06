@@ -15,7 +15,7 @@ The existing G=+j H2/4 gives jumps [SLP q]=q and [DLP u]=-u.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import numpy as np
 from scipy.sparse import csc_matrix
 from scipy.sparse.linalg import splu
@@ -64,6 +64,55 @@ def validate_thin_layer(epsilon, permeability, thickness_m, k0):
     return eps, mu, d, electrical_thickness
 
 
+def _continuous_oriented_mesh(mesh):
+    """Join geometric nodes and orient each nonbranching midsurface consistently.
+
+    The general interface mesh splits traces by segment/material region. A
+    homogeneous collapsed layer instead has one continuous trace at a shared
+    geometric node, regardless of segment names or authoring direction. Work
+    on copies so other formulations and cached geometry remain unchanged.
+    """
+    from rcs_solver import LinearMesh
+    nodes_by_key = {}
+    incident = {}
+    ends = []
+    for index, element in enumerate(mesh.elements):
+        keys = tuple(mesh.nodes[node].key for node in element.node_ids)
+        if keys[0] == keys[1]:
+            raise ValueError("Thin-layer element collapses to one geometric node.")
+        ends.append(keys)
+        for key, node in zip(keys, element.node_ids):
+            nodes_by_key.setdefault(key, mesh.nodes[node])
+            incident.setdefault(key, []).append(index)
+    if any(len(edges) > 2 for edges in incident.values()):
+        raise ValueError("Thin-layer branching junctions require explicit bulk geometry.")
+    keys = sorted(nodes_by_key)
+    node_ids = {key: index for index, key in enumerate(keys)}
+    pending = set(range(len(mesh.elements)))
+    elements = []
+    # Endpoints first give open components an unambiguous traversal. Remaining
+    # components are loops; their smallest node/neighbor fixes the orientation.
+    starts = sorted(key for key in keys if len(incident[key]) == 1) + keys
+    for current in starts:
+        while True:
+            available = [edge for edge in incident[current] if edge in pending]
+            if not available:
+                break
+            edge = min(available, key=lambda i: ends[i][1] if ends[i][0] == current else ends[i][0])
+            pending.remove(edge)
+            a, b = ends[edge]
+            original = mesh.elements[edge]
+            reverse = a != current
+            following = a if reverse else b
+            changes = {"node_ids": (node_ids[current], node_ids[following])}
+            if reverse:
+                changes.update(p0=original.p1, p1=original.p0,
+                               tangent=-original.tangent, normal=-original.normal)
+            elements.append(replace(original, **changes))
+            current = following
+    return LinearMesh(nodes=[nodes_by_key[key] for key in keys], elements=elements)
+
+
 @timed_stage("thin_layer_operators_and_solve")
 def solve_thin_layer_fields(mesh, k0, incidence_angles_deg, polarization,
                             epsilon, permeability, thickness_m, *,
@@ -79,6 +128,7 @@ def solve_thin_layer_fields(mesh, k0, incidence_angles_deg, polarization,
     pol = str(polarization).upper()
     if pol not in {"TM", "TE"}:
         raise ValueError("Thin layer polarization must be TM or TE.")
+    mesh = _continuous_oriented_mesh(mesh)
     n = len(mesh.nodes)
     alpha, beta = (eps, mu) if pol == "TM" else (mu, eps)
     B = d * (beta - 1.0)

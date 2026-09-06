@@ -457,6 +457,7 @@ class MplCanvas(FigureCanvas):
 
 class _SolveWorker(QObject):
     progress = Signal(int, str)
+    setup_checked = Signal(str)
     finished = Signal(object, str)
     canceled = Signal(str)
     error = Signal(str)
@@ -478,6 +479,8 @@ class _SolveWorker(QObject):
         solver_kind: 'str' = "2d",
         accuracy_target: 'str' = "standard",
         lu_precision: 'str' = "double",
+        preflight_setup=None,
+        preflight_only=False,
     ):
         super().__init__()
         self.solver_kind = str(solver_kind)
@@ -491,6 +494,8 @@ class _SolveWorker(QObject):
         self.mesh_certification = bool(mesh_certification)
         self.mesh_policy = accuracy_target_policy(accuracy_target)
         self.lu_precision = lu_precision
+        self.preflight_setup = preflight_setup
+        self.preflight_only = preflight_only
         self.cfie_alpha = float(cfie_alpha)
         self.abort_event = abort_event
         self.scattering_mode = str(scattering_mode)
@@ -590,6 +595,16 @@ class _SolveWorker(QObject):
     @Slot()
     def run(self):
         try:
+            if self.preflight_setup is not None:
+                from run_setup import RunSetupMixin
+                self.progress.emit(0, 'Checking geometry, dimensions, and material coverage…')
+                summary = RunSetupMixin._run_setup_summary(None, self.snapshot, self.base_dir, self.preflight_setup)
+                if self.abort_event is not None and self.abort_event.is_set():
+                    raise InterruptedError('Setup check canceled.')
+                self.setup_checked.emit(summary)
+                if self.preflight_only:
+                    self.finished.emit({}, self.source_path)
+                    return
             if self.solver_kind == "bor":
                 result = self._run_bor()
             else:
@@ -726,7 +741,10 @@ class _BoundaryDensityWorker(QObject):
         self.finished.emit(self.run_id, summary, temporary)
 
 
-class SolverTab(QWidget):
+from run_setup import RunSetupMixin
+
+
+class SolverTab(RunSetupMixin, QWidget):
     # Unified hosts use this to load newly published solver files directly
     # into their dataset/project tree.  The second value is the stable result
     # family ("2d" or "bor"), not a display label.
@@ -775,6 +793,7 @@ class SolverTab(QWidget):
     @Slot()
     def _on_geometry_changed(self) -> 'None':
         self._mark_geometry_dependent_results_stale()
+        self._update_run_dimensions()
 
     @Slot(bool)
     def _on_geometry_dirty_changed(self, dirty: 'bool') -> 'None':
@@ -1039,6 +1058,9 @@ class SolverTab(QWidget):
 
         options_form.addRow("Solver", self.cmb_solver_kind)
         options_form.addRow("Units In Geometry", self.cmb_units)
+        self.lbl_run_dimensions = QLabel('Check geometry to display physical dimensions.')
+        self.lbl_run_dimensions.setWordWrap(True)
+        options_form.addRow(self.lbl_run_dimensions)
         options_form.addRow("Output Channels", QLabel("VV and HH (co-solved)"))
         options_form.addRow("Discretization", self.lbl_solve_method)
         self.cmb_accuracy_target = QComboBox()
@@ -1068,6 +1090,7 @@ class SolverTab(QWidget):
         options_form.addRow("Elevation Sweep", elev_sweep_row)
         options_form.addRow("Scattering Mode", self.cmb_scatter_mode)
         options_form.addRow(self.lbl_obs_angles, self.edit_obs_angles)
+        self._build_run_setup_controls(options_form)
         layout.addWidget(options_group)
 
         output_group = QGroupBox("Output")
@@ -1397,6 +1420,9 @@ class SolverTab(QWidget):
         is_bor = (self.cmb_solver_kind.currentData() == "bor")
         enable_2d_quality_thresholds = not busy and not is_bor
         self.btn_run.setEnabled(not busy)
+        for control in (self.save_run_setup_button, self.load_run_setup_button, self.run_preflight_button):
+            control.setEnabled(not busy and not is_bor)
+        self.run_preset_combo.setEnabled(not busy)
         self._sync_export_state()
         self.btn_currents.setEnabled(not busy and not is_bor)
         self.btn_browse_geo.setEnabled(not busy)
@@ -1931,6 +1957,9 @@ class SolverTab(QWidget):
                 obs_angles_list = self._parse_list(self.edit_obs_angles.text(), "Observation angles")
                 if not obs_angles_list:
                     raise ValueError("Bistatic mode requires at least one observation angle.")
+            preflight_setup = self._capture_run_setup() if solver_kind == '2d' else None
+            if preflight_setup is not None:
+                self._update_run_output_note()
         except Exception as exc:
             QMessageBox.critical(self, "Solver Error", str(exc))
             self.lbl_status.setText(f"Solve failed: {exc}")
@@ -1971,11 +2000,13 @@ class SolverTab(QWidget):
             solver_kind=solver_kind,
             accuracy_target=str(self.cmb_accuracy_target.currentData()),
             lu_precision=str(self.cmb_lu_precision.currentData()),
+            preflight_setup=preflight_setup,
         )
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
         worker.progress.connect(self._on_solver_progress)
+        worker.setup_checked.connect(self.run_setup_notice.setText)
         worker.finished.connect(self._on_solver_finished)
         worker.canceled.connect(self._on_solver_canceled)
         worker.error.connect(self._on_solver_error)

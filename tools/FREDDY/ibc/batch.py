@@ -210,6 +210,7 @@ def export_pec_ibc_thickness_batch(
     frequencies_ghz: list[float],
     *,
     max_total_points: int = MAX_IBC_BATCH_TOTAL_POINTS,
+    on_result=None,
 ) -> int:
     """Stage one computed CSV at a time, then atomically publish the batch."""
 
@@ -254,6 +255,8 @@ def export_pec_ibc_thickness_batch(
             impedance = compute_stack_impedance_many(
                 frequencies_ghz, stack, "pec"
             )
+            if on_result is not None:
+                on_result(item, impedance)
             rows = [
                 (frequency, value.real, value.imag)
                 for frequency, value in zip(frequencies_ghz, impedance)

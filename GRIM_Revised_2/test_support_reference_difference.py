@@ -162,12 +162,15 @@ class SupportReferenceDifferenceTest(unittest.TestCase):
             [1.0 + 0.0j, 1.0 + 0.0j],
             extra={"time_convention": "exp(-j*omega*t)"},
         )
-        with self.assertRaisesRegex(ValueError, "time conventions"):
-            combined.support_referenced_difference(
-                incompatible,
-                assumptions_attested=True,
-                metadata_attested=True,
-            )
+        result = combined.support_referenced_difference(
+            incompatible,
+            assumptions_attested=True,
+            metadata_attested=True,
+        )
+        np.testing.assert_allclose(result.rcs, combined.rcs - incompatible.rcs)
+        record = json.loads(result.extra["coherent_metadata_attestation_json"])
+        self.assertTrue(any("time conventions" in issue for issue in record["advisories"]))
+        self.assertIn("no phase or amplitude conversion", record["metadata_policy"])
 
     def test_explicit_acquisition_or_calibration_contradictions_cannot_be_attested(self) -> None:
         cases = (

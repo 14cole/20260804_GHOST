@@ -3663,7 +3663,9 @@ if GUI_AVAILABLE:
             )
 
 
-    class _DatasetMappingEditor(QWidget):
+    from assembly_workflow import MappingWorkflowMixin, AssemblyWorkflowMixin
+
+    class _DatasetMappingEditor(MappingWorkflowMixin, QWidget):
         mapping_changed = Signal()
         catalog_notice = Signal(str)
 
@@ -3709,6 +3711,9 @@ if GUI_AVAILABLE:
             layout.addWidget(self.empty_label)
             layout.addWidget(self.table)
             layout.addWidget(self.completeness_label)
+            self.suggest_folder_button = QPushButton('Suggest files from library folder…', self)
+            self.suggest_folder_button.clicked.connect(self._suggest_library_folder)
+            layout.addWidget(self.suggest_folder_button)
             self.response_summary_label = QLabel(self)
             self.response_summary_label.setWordWrap(True)
             self.response_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -3799,6 +3804,7 @@ if GUI_AVAILABLE:
                 self.table.setCellWidget(row, 3, button)
             self.table.blockSignals(False)
             has_rows = bool(self._ids)
+            self.suggest_folder_button.setEnabled(has_rows)
             self.empty_label.setVisible(not has_rows)
             self.table.setVisible(has_rows)
             self.table.setMinimumHeight(112 if has_rows else 0)
@@ -4126,7 +4132,7 @@ if GUI_AVAILABLE:
             return True
 
 
-    class FeatureAssemblyPanel(QWidget):
+    class FeatureAssemblyPanel(AssemblyWorkflowMixin, QWidget):
         """New-user-facing feature assembly form with background execution."""
 
         preview_ready = Signal(object)
@@ -4239,6 +4245,9 @@ if GUI_AVAILABLE:
             )
             recipe_actions.addWidget(self.save_recipe_as_button)
             recipe_layout.addLayout(recipe_actions)
+            self.create_variant_button = QPushButton('Create variant…', recipe_group)
+            self.create_variant_button.clicked.connect(self._create_variant)
+            recipe_layout.addWidget(self.create_variant_button)
             self.recipe_section = _DisclosureSection(
                 "Reusable recipe (optional)", self, expanded=False
             )
@@ -4823,6 +4832,10 @@ if GUI_AVAILABLE:
                 "Input checklist", review_content, expanded=False
             )
             self.readiness_section.addWidget(self.readiness_checklist)
+            self.readiness_checklist.itemDoubleClicked.connect(self._go_to_requirement)
+            self.fix_next_button = QPushButton('Go to next required step', self)
+            self.fix_next_button.clicked.connect(self._fix_next_requirement)
+            self.readiness_section.addWidget(self.fix_next_button)
             self.readiness_label = QLabel(review_group)
             self.readiness_label.setObjectName("featureReadiness")
             self.readiness_label.setWordWrap(True)
@@ -7248,6 +7261,7 @@ if GUI_AVAILABLE:
                 widget.setEnabled(not busy)
             self.load_recipe_button.setEnabled(not busy)
             self.save_recipe_as_button.setEnabled(not busy)
+            self.create_variant_button.setEnabled(not busy)
             if busy:
                 self.scan_button.setEnabled(False)
                 self.input_preview_button.setEnabled(False)

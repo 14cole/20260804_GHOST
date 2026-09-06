@@ -542,6 +542,19 @@ class RunsWorkspace(QWidget):
         schedule_form.addRow("Cores per node", self.cores_spin)
         schedule_form.addRow("Memory per node", self.memory_edit)
         schedule_form.addRow(self.mesh_certification_check)
+        # Keep the viewer usable when the optional GHOST backend is absent.
+        try:
+            from ghost_integration import load_ghost_module
+            from types import MethodType
+            setup_module = load_ghost_module('run_setup', self._backend_path)
+            for name, method in vars(setup_module.RunSetupMixin).items():
+                if callable(method):
+                    setattr(self, name, MethodType(method, self))
+            self._build_run_setup_controls(schedule_form, cluster=True)
+        except (ImportError, RuntimeError, FileNotFoundError) as exc:
+            notice = QLabel(f'Shared run setups unavailable: {exc}')
+            notice.setWordWrap(True)
+            schedule_form.addRow(notice)
         request_layout.addLayout(schedule_form)
 
         bundle_form = QFormLayout()
@@ -731,6 +744,10 @@ class RunsWorkspace(QWidget):
         self.walltime_edit.setText(str(self._setting("walltime", "")))
         self.memory_edit.setText(str(self._setting("memory", "0")))
         mesh_raw = self._setting("mesh_certification", True)
+        if hasattr(self, 'run_accuracy_combo'):
+            for combo,key,default in [(self.run_accuracy_combo,'accuracy_target','standard'), (self.run_lu_combo,'lu_precision','double')]:
+                index = combo.findData(str(self._setting(key,default)))
+                combo.setCurrentIndex(index if index >= 0 else 0)
         self.mesh_certification_check.setChecked(
             mesh_raw
             if isinstance(mesh_raw, bool)
@@ -829,6 +846,9 @@ class RunsWorkspace(QWidget):
             ("geometries", json.dumps(self.geometries(), separators=(",", ":"))),
         ):
             self._settings.setValue(f"{_SETTINGS_PREFIX}/{name}", value)
+        if hasattr(self, 'run_accuracy_combo'):
+            self._settings.setValue(f'{_SETTINGS_PREFIX}/accuracy_target', self.run_accuracy_combo.currentData())
+            self._settings.setValue(f'{_SETTINGS_PREFIX}/lu_precision', self.run_lu_combo.currentData())
         registry = {
             "schema": _TRACKED_RUNS_SCHEMA,
             "runs": [run.to_json_value() for run in self._tracked_runs.values()],
@@ -994,6 +1014,10 @@ class RunsWorkspace(QWidget):
             settings["BODY_AXIS_AZ_DEG"] = float(self.body_axis_az_spin.value())
             settings["BODY_AXIS_EL_DEG"] = float(self.body_axis_el_spin.value())
             settings["BODY_ROLL_DEG"] = float(self.body_roll_spin.value())
+        if hasattr(self, 'run_accuracy_combo'):
+            settings['ACCURACY_TARGET'] = self.run_accuracy_combo.currentData()
+            if solver == '2d':
+                settings['LU_PRECISION'] = self.run_lu_combo.currentData()
         optional = (
             ("SLURM_ACCOUNT", self.account_edit.text().strip()),
             ("SLURM_QOS", self.qos_edit.text().strip()),
@@ -2065,6 +2089,10 @@ class RunsWorkspace(QWidget):
 
     def _solver_changed(self) -> None:
         bor = self.solver_combo.currentData() == "bor"
+        if hasattr(self, 'run_lu_combo'):
+            self.run_lu_combo.setEnabled(not bor)
+            self.save_run_setup_button.setEnabled(not bor)
+            self.load_run_setup_button.setEnabled(not bor)
         self.elevation_label.setVisible(bor)
         self.elevation_edit.setVisible(bor)
         self.body_axis_az_label.setVisible(bor)

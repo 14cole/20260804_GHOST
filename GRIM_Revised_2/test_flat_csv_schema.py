@@ -307,7 +307,7 @@ class FlatCsvSchemaTest(unittest.TestCase):
             restored.units["polarization_basis"], "basis declared in extra"
         )
 
-    def test_writer_rejects_conflicting_convention_containers(self):
+    def test_writer_keeps_samples_with_advisory_convention_conflicts(self):
         for key in (
             "phase_reference",
             "time_convention",
@@ -331,11 +331,14 @@ class FlatCsvSchemaTest(unittest.TestCase):
                     extra={key: "right declaration"},
                 )
                 path = self._path("conflicting_{}.csv".format(key))
-                with self.assertRaisesRegex(
-                    ValueError, "contradictory {} metadata".format(key)
-                ):
-                    write_flat_csv(grid, path)
-                self.assertFalse(os.path.exists(path))
+                write_flat_csv(grid, path)
+                restored = load_flat_csv(path)
+                np.testing.assert_array_equal(restored.rcs_power, grid.rcs_power)
+                # A single CSV declaration cannot represent two contradictory
+                # annotations. Do not invent a resolved value or edit inputs.
+                self.assertFalse(restored._declared_scalar_metadata(key))
+                self.assertEqual(grid.units[key], "left declaration")
+                self.assertEqual(grid.extra[key], "right declaration")
 
     def test_shared_writer_dbke_round_trip_uses_declared_frequency_unit(self):
         for unit, frequency in (("GHz", 3.0), ("Hz", 3.0e9)):

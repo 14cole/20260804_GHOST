@@ -1053,6 +1053,26 @@ class PowerPointComBridge:
             if com_initialized and pythoncom is not None:
                 pythoncom.CoUninitialize()
 
+    def preflight_template(self, template_path: Path, selectors: Sequence[str]) -> None:
+        """Resolve actual PowerPoint master/layout names on an owned, read-only copy."""
+        application = presentation = None
+        initialized = False
+        try:
+            application, initialized = self._new_application()
+            presentation = self._open_presentation(application, Path(template_path).resolve())
+            for selector in selectors:
+                if str(selector).strip():
+                    self._find_custom_layout(presentation, str(selector).strip())
+        finally:
+            try:
+                if presentation is not None:
+                    presentation.Close()
+            finally:
+                presentation = None
+                application = None
+                if initialized and pythoncom is not None:
+                    pythoncom.CoUninitialize()
+
     @staticmethod
     def _open_presentation(application: Any, template_path: Path | None) -> Any:
         if template_path is None:

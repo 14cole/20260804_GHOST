@@ -664,6 +664,7 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
         self.ppt_workspace = PptWorkspace(
             self,
             selected_ids_provider=self._selected_dataset_ids_for_ppt,
+            current_plot_provider=self._current_plot_setup_for_ppt,
         )
         # One canonical Assembly workspace replaces the two independent,
         # hidden trees that used to live inside the Plotting and ISAR views.
@@ -2026,6 +2027,10 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             if dataset_id:
                 ids.append(str(dataset_id))
         return tuple(ids)
+
+    def _current_plot_setup_for_ppt(self):
+        from ppt_workflow import current_plot_report_setup
+        return current_plot_report_setup(self)
 
     def _notify_dataset_catalog_changed(self) -> None:
         update_actions = getattr(self, "_update_dataset_action_states", None)

@@ -267,7 +267,11 @@ def convention_scale(grim: 'Dict[str, Any]',
 def _load_grim(path: 'str') -> 'Dict[str, Any]':
     with np.load(path, allow_pickle=False) as z:
         d = {k: z[k] for k in z.files}
+    return _decode_grim_fields(d, path)
 
+
+def _validate_grim_axes(d, path):
+    """Shared axis validation for whole-grid and bounded sample readers."""
     axes = {}
     for key in ("azimuths", "elevations", "frequencies"):
         if key not in d:
@@ -290,6 +294,12 @@ def _load_grim(path: 'str') -> 'Dict[str, Any]':
     if any(not p.strip() for p in pols) or len(set(pols.tolist())) != len(pols):
         raise ValueError(
             f"{path}: polarization labels must be nonempty and unique.")
+    return axes, pols
+
+
+def _decode_grim_fields(d, path):
+    """Validate and normalize stored fields, including power/phase exports."""
+    axes, pols = _validate_grim_axes(d, path)
 
     shape = (
         len(axes["azimuths"]),
@@ -378,6 +388,69 @@ def _load_grim(path: 'str') -> 'Dict[str, Any]':
         d["_amp_from_power_phase"] = True
     d["_pol_primary"] = str(d.get("polarization_alias_primary", ""))
     return d
+
+
+def _load_grim_sample(path, frequency, azimuth, elevation, cancel_check=lambda: False):
+    """Decode one exact sample without allocating the full response arrays.
+
+    Numeric field gaps are streamed in chunks of at most 256 KiB, for both C
+    and Fortran storage. Field normalization and consistency checks are the
+    same as the Assembly whole-grid loader. The sealed plan validates the
+    rest of the grid before the inspector calls this function.
+    """
+    import zipfile
+
+    def check_cancelled():
+        if cancel_check():
+            raise InterruptedError("Inspection cancelled.")
+
+    check_cancelled()
+    with np.load(path, allow_pickle=False) as data:
+        metadata_keys = ("azimuths", "elevations", "frequencies", "polarizations",
+                         "units", "power_domain", "rcs_domain",
+                         "raw_complex_amplitude_preserved", "polarization_alias_primary")
+        d = {key: data[key] for key in metadata_keys if key in data.files}
+        fields = [key for key in ("rcs_power", "rcs_phase", "rcs_amp_real", "rcs_amp_imag")
+                  if key in data.files]
+    axes, pols = _validate_grim_axes(d, path)
+    original_shape = tuple(len(axis) for axis in axes.values()) + (len(pols),)
+    fixed = []
+    for key, value in zip(axes, (azimuth, elevation, frequency)):
+        match = np.flatnonzero(np.isclose(axes[key], value, rtol=0, atol=1e-10))
+        if len(match) != 1:
+            raise ValueError("Inspector requires an exact stored body azimuth/elevation/frequency sample.")
+        fixed.append(int(match[0]))
+        d[key] = axes[key][match]
+    with zipfile.ZipFile(path) as archive:
+        for field in fields:
+            check_cancelled()
+            with archive.open(field + ".npy") as stream:
+                version = np.lib.format.read_magic(stream)
+                readers = {(1, 0): np.lib.format.read_array_header_1_0,
+                           (2, 0): np.lib.format.read_array_header_2_0}
+                if version not in readers:
+                    raise ValueError(f"Unsupported body array format {version}.")
+                shape, fortran, dtype = readers[version](stream)
+                if shape != original_shape or dtype.kind not in "fiu":
+                    raise ValueError(f"Body {field} array does not match its numeric axes.")
+                start = stream.tell()
+                positions = [(start + int(np.ravel_multi_index(tuple(fixed) + (channel,), shape,
+                              order="F" if fortran else "C")) * dtype.itemsize, channel)
+                             for channel in range(len(pols))]
+                values = np.empty(len(pols), dtype=float)
+                for offset, channel in sorted(positions):
+                    check_cancelled()
+                    while stream.tell() < offset:
+                        check_cancelled()
+                        if not stream.read(min(262144, offset - stream.tell())):
+                            raise ValueError("Truncated body response.")
+                    raw = stream.read(dtype.itemsize)
+                    if len(raw) != dtype.itemsize:
+                        raise ValueError("Truncated body response.")
+                    values[channel] = np.frombuffer(raw, dtype=dtype, count=1)[0]
+                d[field] = values.reshape(1, 1, 1, -1)
+    check_cancelled()
+    return _decode_grim_fields(d, path)
 
 
 def _canon_pol(label: 'str') -> 'str':

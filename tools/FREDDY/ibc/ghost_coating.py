@@ -10,7 +10,7 @@ from .compute import (C0, compute_stack_impedance_many, compute_angle_metrics_ma
                       ambient_wave_impedance, validate_incidence_angle)
 
 
-def assess_scalar_coating(frequencies, layers, angles=(0., 15., 30., 45., 60., 75., 85.)):
+def assess_scalar_coating(frequencies, layers, angles=(0., 15., 30., 45., 60., 75., 85.), *, include_details=False):
     frequencies = [float(f) for f in frequencies]
     angles = [validate_incidence_angle(float(a)) for a in angles]
     if not frequencies or not angles or not layers:
@@ -26,6 +26,7 @@ def assess_scalar_coating(frequencies, layers, angles=(0., 15., 30., 45., 60., 7
     if not all(math.isfinite(z.real) and math.isfinite(z.imag) for z in zs):
         raise ValueError("Stack impedance contains a pole or nonfinite value; refine or change the sampled band.")
     rows = []
+    error_columns = {'TE': [], 'TM': []}
     for angle in angles:
         for pol in ("te", "tm"):
             full = compute_angle_metrics_many(frequencies, angle, layers, pol)
@@ -42,6 +43,8 @@ def assess_scalar_coating(frequencies, layers, angles=(0., 15., 30., 45., 60., 7
                     phases.append(abs(math.degrees(cmath.phase(scalar*reference.conjugate()))))
                     magnitudes.append(abs(20*math.log10(abs(scalar/reference))))
             worst = max(range(len(errors)), key=errors.__getitem__)
+            if include_details:
+                error_columns[pol.upper()].append(errors)
             rows.append(dict(angle_deg=angle, polarization=pol.upper(),
                              max_absolute_complex_reflection_error=errors[worst],
                              worst_frequency_ghz=frequencies[worst],
@@ -59,13 +62,17 @@ def assess_scalar_coating(frequencies, layers, angles=(0., 15., 30., 45., 60., 7
             raise ValueError("Nonfinite midpoint reflection; refine the frequency grid.")
         midpoint_error = max(errors)
     thickness = sum(layer.thickness_m for layer in layers if not layer.is_sheet)
-    return dict(schema="freddy.ghost.scalar-coating-check.v1", backing="pec",
+    report = dict(schema="freddy.ghost.scalar-coating-check.v1", backing="pec",
                 frequency_range_ghz=[frequencies[0],frequencies[-1]], frequency_count=len(frequencies),
                 thickness_m=thickness, reference_surface="outer air/coating interface",
                 free_space_k0d_max=2*math.pi*frequencies[-1]*1e9*thickness/C0,
                 angles=rows, midpoint_absolute_reflection_error_max=midpoint_error,
                 finite_body_accuracy_certified=False,
                 interpretation="Planar local scalar-IBC assessment only. Does not certify finite-body RCS, curvature, edges, creeping waves, or coupling. Midpoint checks do not exclude unresolved narrow resonances.")
+    if include_details:
+        report.update(frequencies_ghz=frequencies, sample_angles_deg=angles,
+                      error_grids={pol: [list(row) for row in zip(*columns)] for pol, columns in error_columns.items()})
+    return report
 
 
 def coating_report_text(report):

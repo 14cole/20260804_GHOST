@@ -3196,11 +3196,11 @@ def assembly_sampling_warnings(radar_grid, lines, points):
         step = np.deg2rad(np.max(np.diff(values)))
         phase_degrees = 720*extent*min(float(step), 2.)/wavelength
         if phase_degrees > 180:
-            warnings.append(f"Sampling: {key} spacing permits up to {phase_degrees:.0f}° translated-feature phase change between stored looks (conservative bound). Narrow lobes/nulls may be missed; use a finer body/library grid and check convergence. This diagnostic does not bound body scattering or intrinsic feature angular variation.")
+            warnings.append(f"Sampling: {key} spacing permits up to {phase_degrees:.0f} deg translated-feature phase change between stored looks (conservative bound). Narrow lobes/nulls may be missed; use a finer body/library grid and check convergence. This diagnostic does not bound body scattering or intrinsic feature angular variation.")
     if len(frequency) > 1:
         phase_degrees = 720*extent*float(np.max(np.diff(frequency)))*1e9/C0
         if phase_degrees > 180:
-            warnings.append(f"Sampling: frequency spacing permits up to {phase_degrees:.0f}° translated-feature phase change. Refine stored frequency samples before interpreting broadband structure; this diagnostic does not certify intrinsic spectral variation.")
+            warnings.append(f"Sampling: frequency spacing permits up to {phase_degrees:.0f} deg translated-feature phase change. Refine stored frequency samples before interpreting broadband structure; this diagnostic does not certify intrinsic spectral variation.")
     return warnings
 
 

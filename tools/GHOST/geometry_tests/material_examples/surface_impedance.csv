@@ -1,0 +1,4 @@
+frequency_hz,resistance_ohm,reactance_ohm
+800000000,12,-4
+1000000000,14,-3
+1200000000,17,-1

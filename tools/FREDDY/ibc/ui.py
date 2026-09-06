@@ -336,7 +336,6 @@ from .compute import (
     property_match_error,
     property_match_error_curve,
     project_bounded_fractions,
-    snap_to_increment,
     validate_incidence_angle,
     validate_fraction_bounds,
     validate_sweep_coverage,
@@ -442,8 +441,9 @@ More loss alone does not guarantee lower reflection.</p>
 <li>Enter its <b>minimum thickness, maximum thickness, and thickness step</b>.</li>
 <li>For a resistive sheet, enter resistance minimum, maximum, and step; leave
 minimum/maximum blank to keep it fixed.</li>
-<li>Choose the frequency and angle target, then run Inverse Design. Use a fixed
-seed when you need an exactly repeatable comparison.</li>
+<li>Choose the frequency and angle target, review the combination count, then
+choose <b>Analyze all combinations</b>. Each configured combination is evaluated;
+no seed or refinement is needed.</li>
 </ol>
 <p><b>Scope:</b> results are planar reflection/transmission properties, not finite-object RCS.
 Directional materials support measured principal axes only.</p>
@@ -842,7 +842,7 @@ class LayerDialog(QDialog):
         sep.setFrameShadow(QFrame.Sunken)
         grid.addWidget(sep, 6, 0, 1, 3)
         grid.addWidget(
-            QLabel("Optimization range — choose the thicknesses FREDDY may manufacture/search"),
+            QLabel("Inverse-design range — choose the allowed thicknesses"),
             7,
             0,
             1,
@@ -861,8 +861,8 @@ class LayerDialog(QDialog):
         tacc_edit = QLineEdit()
         bind_line_edit(self.inv_t_acc_var, tacc_edit)
         tacc_edit.setToolTip(
-            "Allowed manufacturing/search increment (for example 0.001 in). "
-            "A step makes reported candidates land on buildable thicknesses."
+            "Required when varying thickness (for example 0.001 in). Values start "
+            "at Minimum and advance by Step without exceeding Maximum."
         )
         grid.addWidget(tacc_edit, 10, 1)
 
@@ -1006,7 +1006,7 @@ class SheetDialog(QDialog):
         grid.addWidget(QLabel("Sheet resistance (\u03a9/sq)"), 0, 0, Qt.AlignLeft)
         rs_edit = QLineEdit()
         bind_line_edit(self.rs_var, rs_edit)
-        rs_edit.setToolTip("Nominal resistance; used when no search range is set.")
+        rs_edit.setToolTip("Nominal resistance; used when no inverse-design range is set.")
         grid.addWidget(rs_edit, 0, 1)
 
         sep = QFrame()
@@ -1033,7 +1033,8 @@ class SheetDialog(QDialog):
         racc_edit = QLineEdit()
         bind_line_edit(self.inv_rs_acc_var, racc_edit)
         racc_edit.setToolTip(
-            "Allowed manufacturing/search increment (for example 1 ohm)."
+            "Required when varying resistance (for example 1 ohm). Values start "
+            "at Minimum and advance by Step without exceeding Maximum."
         )
         grid.addWidget(racc_edit, 5, 1)
         grid.setColumnStretch(1, 1)
@@ -1230,7 +1231,15 @@ class MixComponentDialog(QDialog):
             messagebox.showerror("Invalid Component", str(exc), parent=self)
 
 
-class ImpedanceGui(QMainWindow):
+from .inverse_workflow import InverseWorkflowMixin, StopInverseSearch, search_identity, check_layers
+from .inverse_grid import DesignGrid
+from .inverse_results import InverseResultsMixin
+from .analysis_workflow import AnalysisWorkflowMixin, stack_description, tolerance_description
+from .analysis_data import (SweepResult, grid_metrics, impedance_result, reflection_from_impedance,
+                            extra_polarization, file_digest, expected_ibc_digest)
+
+
+class ImpedanceGui(AnalysisWorkflowMixin, InverseResultsMixin, InverseWorkflowMixin, QMainWindow):
     # Host integrations may consume this deliberately narrow artifact stream.
     # It is never emitted for off-angle/thickness analysis, uncertainty, or a
     # multi-file IBC batch with no unambiguous current file. ``kind`` is exactly
@@ -1319,6 +1328,7 @@ class ImpedanceGui(QMainWindow):
         self.inv_angle_stop_var = StringVar("80.0")
         self.inv_angle_step_var = StringVar("5.0")
         self.inv_wave_pol_var = StringVar("TE")
+        # Legacy project fields; exhaustive analysis ignores budget, seed, and refinement.
         self.inv_max_evals_var = StringVar("400")
         self.inv_top_n_var = StringVar("10")
         self.inv_percentile_var = StringVar("10")
@@ -1385,7 +1395,7 @@ class ImpedanceGui(QMainWindow):
         # x is angle or thickness depending on which tab is active.
         self.selected_x_idx: int | None = None
         self.selected_freq_idx: int | None = None
-        self.inv_results_list: QListWidget | None = None
+        self.inv_results_list = None
         self.inv_parameter_summary_label: QLabel | None = None
         self.left_tabs = None
         self.mode_stack = None
@@ -1682,7 +1692,7 @@ class ImpedanceGui(QMainWindow):
             group = QGroupBox("Uncertainty corners")
             grid = QGridLayout(group)
             check = QCheckBox(
-                "Enable (nominal solver CSV stays 3-column; bounds use a separate report)"
+                "Enable analyzed tolerance corners"
             )
             bind_check_box(enabled_var, check)
             check.clicked.connect(sync_cb)
@@ -1896,6 +1906,10 @@ class ImpedanceGui(QMainWindow):
         angle_grid.addWidget(make_combo(("TE", "TM"), self.wave_pol_var, width=70), 1, 1, Qt.AlignLeft)
         angle_grid.setColumnStretch(5, 1)
         angle_layout.addWidget(angle_group)
+        self.angle_compare_both = QCheckBox("Compute TE and TM comparison (adds a second polarization solve)")
+        self.angle_compare_both.setChecked(True)
+        self.angle_compare_both.setToolTip('Oblique TM is unavailable for the directional two-axis model. In that case a valid TE run is retained without a TM comparison.')
+        angle_layout.addWidget(self.angle_compare_both)
 
         (
             ang_unc_group,
@@ -1976,15 +1990,18 @@ class ImpedanceGui(QMainWindow):
         thk_layout.addWidget(self.thk_compute_btn, 0, Qt.AlignLeft)
         thk_layout.addStretch(1)
 
-        inv_tab = QWidget()
+        inv_tab = QScrollArea()
+        inv_tab.setWidgetResizable(True)
         self.inv_tab = inv_tab
-        inv_layout = QVBoxLayout(inv_tab)
+        inv_content = QWidget()
+        inv_tab.setWidget(inv_content)
+        inv_layout = QVBoxLayout(inv_content)
         _add_mode("Inverse Design", inv_tab)
 
         inv_intro = QLabel(
-            "Set each search parameter by editing its layer: enter Minimum, "
+            "Choose Fixed or Vary for each layer, then enter Minimum, "
             "Maximum, and Step for thickness or sheet resistance. FREDDY then "
-            "samples only those buildable values. The summary below shows "
+            "analyzes every combination of those values. The summary below shows "
             "exactly what will vary."
         )
         inv_intro.setWordWrap(True)
@@ -1993,6 +2010,7 @@ class ImpedanceGui(QMainWindow):
         self.inv_parameter_summary_label.setWordWrap(True)
         self.inv_parameter_summary_label.setObjectName("PreviewLabel")
         inv_layout.addWidget(self.inv_parameter_summary_label)
+        self._build_inverse_workflow(inv_layout)
 
         self.inv_freq_target_frame = CollapsibleFrame("Frequency target", expanded=True)
         inv_layout.addWidget(self.inv_freq_target_frame)
@@ -2032,26 +2050,19 @@ class ImpedanceGui(QMainWindow):
         angle_body.addWidget(make_combo(("TE", "TM"), self.inv_wave_pol_var, width=60), 0, 7, Qt.AlignLeft)
         angle_body.setColumnStretch(8, 1)
 
-        self.inv_search_frame = CollapsibleFrame("Monte Carlo search", expanded=True)
+        self.inv_search_frame = CollapsibleFrame("Analyze all combinations", expanded=True)
         inv_layout.addWidget(self.inv_search_frame)
         search_body = QGridLayout(self.inv_search_frame.body)
-        search_body.addWidget(QLabel("Samples"), 0, 0, Qt.AlignLeft)
-        search_body.addWidget(_entry(self.inv_max_evals_var, 8), 0, 1, Qt.AlignLeft)
-        search_body.addWidget(QLabel("Keep best"), 0, 2, Qt.AlignLeft)
-        search_body.addWidget(_entry(self.inv_top_n_var, 8), 0, 3, Qt.AlignLeft)
-        search_body.addWidget(QLabel("Repeatable seed"), 0, 4, Qt.AlignLeft)
-        search_body.addWidget(_entry(self.inv_seed_var, 10), 0, 5, Qt.AlignLeft)
-        refine_check = QCheckBox("Refine top candidates (local search)")
-        bind_check_box(self.inv_refine_var, refine_check)
-        search_body.addWidget(refine_check, 1, 0, 1, 6, Qt.AlignLeft)
+        search_body.addWidget(QLabel("Keep best for comparison"), 0, 0, Qt.AlignLeft)
+        search_body.addWidget(_entry(self.inv_top_n_var, 8), 0, 1, Qt.AlignLeft)
         search_help = QLabel(
-            "Samples controls how many unique candidates are tried. The seed "
-            "makes reruns repeatable. Local refinement is optional; parameter "
-            "steps are still enforced on the final candidates."
+            "Every combination of the configured layer values is analyzed. "
+            "Keep best only limits the results retained for comparison. "
+            "Values start at Minimum and advance by Step without exceeding Maximum."
         )
         search_help.setWordWrap(True)
-        search_body.addWidget(search_help, 2, 0, 1, 6)
-        search_body.setColumnStretch(6, 1)
+        search_body.addWidget(search_help, 1, 0, 1, 3)
+        search_body.setColumnStretch(2, 1)
 
         self.inv_score_frame = CollapsibleFrame("Robust scoring", expanded=False)
         inv_layout.addWidget(self.inv_score_frame)
@@ -2080,31 +2091,21 @@ class ImpedanceGui(QMainWindow):
         )
         score_body.setColumnStretch(5, 1)
 
-        self.inv_results_frame = CollapsibleFrame("Top candidates", expanded=False)
-        inv_layout.addWidget(self.inv_results_frame)
-        results_body = QVBoxLayout(self.inv_results_frame.body)
-        results_body.setContentsMargins(0, 0, 0, 0)
-        self.inv_results_list = QListWidget()
-        self.inv_results_list.setMinimumHeight(120)
-        self.inv_results_list.itemSelectionChanged.connect(self._update_plot)
-        results_body.addWidget(self.inv_results_list)
+        self.inv_results_list = self._create_inverse_candidate_table()
 
         inv_actions = QWidget()
         inv_actions_layout = QHBoxLayout(inv_actions)
         inv_actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.inv_run_btn = QPushButton("Run Inverse Design")
+        self.inv_run_btn = QPushButton("Analyze all combinations")
         self.inv_run_btn.clicked.connect(self._run_inverse_design)
         inv_actions_layout.addWidget(self.inv_run_btn)
         self.inv_apply_btn = QPushButton("Apply Selected")
         self.inv_apply_btn.clicked.connect(self._apply_inverse_candidate)
-        inv_actions_layout.addWidget(self.inv_apply_btn)
-        inv_actions_layout.addWidget(QLabel("Percentile"))
         self.inv_percentile_entry = _entry(self.inv_percentile_var, 6)
         self.inv_percentile_entry.editingFinished.connect(self._on_inverse_percentile_changed)
-        inv_actions_layout.addWidget(self.inv_percentile_entry)
-        inv_actions_layout.addWidget(QLabel("%"))
         inv_actions_layout.addStretch(1)
         inv_layout.addWidget(inv_actions)
+        self._build_inverse_continue_actions(inv_layout)
         inv_layout.addStretch(1)
 
         # --- Material Mix tab -------------------------------------------------
@@ -2470,7 +2471,6 @@ class ImpedanceGui(QMainWindow):
         # share the top band; the visualization spans the full width below.
         work_split = QSplitter(Qt.Vertical)
         self.work_split = work_split
-        root_layout.addWidget(work_split, 1)
 
         top_pane = QWidget()
         top_layout = QHBoxLayout(top_pane)
@@ -2570,6 +2570,8 @@ class ImpedanceGui(QMainWindow):
         work_split.setStretchFactor(0, 0)
         work_split.setStretchFactor(1, 1)
         work_split.setSizes([320, 380])
+        self._build_inverse_results_workspace(work_split, root_layout)
+        self._build_analysis_workspaces()
 
         # Status text and the busy indicator live in the window status bar.
         self.status_label = QLabel(self.status_var.get())
@@ -2863,6 +2865,7 @@ class ImpedanceGui(QMainWindow):
             "angle_step": self.angle_step_var.get(),
             "wave_pol": self.wave_pol_var.get(),
             "angle_output": self.angle_output_var.get(),
+            "angle_compare_both": self.angle_compare_both.isChecked(),
             "angle_uncertainty": self.angle_uncertainty_var.get(),
             "angle_unc_t_pct": self.angle_unc_t_pct_var.get(),
             "angle_unc_eps_pct": self.angle_unc_eps_pct_var.get(),
@@ -2897,7 +2900,6 @@ class ImpedanceGui(QMainWindow):
             "inv_angle_stop": self.inv_angle_stop_var.get(),
             "inv_angle_step": self.inv_angle_step_var.get(),
             "inv_wave_pol": self.inv_wave_pol_var.get(),
-            "inv_max_evals": self.inv_max_evals_var.get(),
             "inv_top_n": self.inv_top_n_var.get(),
             "inv_percentile": self.inv_percentile_var.get(),
             "inv_uncertainty": self.inv_uncertainty_var.get(),
@@ -2905,8 +2907,6 @@ class ImpedanceGui(QMainWindow):
             "inv_unc_eps_pct": self.inv_unc_eps_pct_var.get(),
             "inv_unc_mu_pct": self.inv_unc_mu_pct_var.get(),
             "inv_score_mode": self.inv_score_mode_var.get(),
-            "inv_seed": self.inv_seed_var.get(),
-            "inv_refine": self.inv_refine_var.get(),
             "mix_rule": self.mix_rule_var.get(),
             "mix_objective": self.mix_objective_var.get(),
             "mix_prop_source": self.mix_prop_source_var.get(),
@@ -3132,6 +3132,7 @@ class ImpedanceGui(QMainWindow):
         self.layers = loaded_layers
         self.mix_components = mix_components
         self._refresh_layers()
+        self.angle_compare_both.setChecked(self._coerce_bool(controls.get('angle_compare_both', True)))
         # The Thickness layer choices are rebuilt from the restored stack, so
         # the saved selection is re-applied after the combo is repopulated.
         if "thk_layer" in controls:
@@ -3165,6 +3166,17 @@ class ImpedanceGui(QMainWindow):
         self.selected_x_idx = None
         self.selected_freq_idx = None
         self.inverse_candidates = []
+        self._inverse_checkpoint = None
+        self._inverse_result_identity = None
+        self._inverse_progress = None
+        self.inv_extend_btn.setEnabled(False)
+        self.inv_setup_status.setText('Review the allowed values and combination count, then analyze the setup.')
+        self.inverse_result_metadata = {}
+        self._clear_analysis_results()
+        self._inverse_summary = ''
+        self._inverse_page_index = 0
+        self.inv_result_status.setText('Analyze all combinations from Setup to compare candidates here.')
+        self._sync_mode_chrome()
         self.mix_candidates = []
         self.mix_plot_data = []
         self.mix_preview = None
@@ -3293,24 +3305,26 @@ class ImpedanceGui(QMainWindow):
         text = self.inv_percentile_var.get().strip()
         if not text:
             self.inv_percentile_var.set("10")
-            self._update_plot()
+            self._refresh_inverse_results_list()
             return
         try:
             p = float(text)
         except Exception:
             messagebox.showerror("Inverse Plot", "Percentile must be a number between 0 and 100.")
             return
-        if p < 0.0 or p > 100.0:
+        if not math.isfinite(p) or p < 0.0 or p > 100.0:
             messagebox.showerror("Inverse Plot", "Percentile must be between 0 and 100.")
             return
         self.inv_percentile_var.set(f"{p:g}")
-        self._update_plot()
+        self._refresh_inverse_results_list()
 
     def _current_inverse_percentile(self) -> float:
         text = self.inv_percentile_var.get().strip()
         try:
             p = float(text)
         except Exception:
+            return 10.0
+        if not math.isfinite(p):
             return 10.0
         return max(0.0, min(100.0, p))
 
@@ -3347,7 +3361,9 @@ class ImpedanceGui(QMainWindow):
         )
 
     def _save_plot(self) -> None:
-        if not MPL_AVAILABLE or self.fig is None:
+        panel = self._active_analysis_panel()
+        figure = panel.figure if panel is not None else self.inv_figure if self._is_inverse_tab_active() else self.fig
+        if not MPL_AVAILABLE or figure is None:
             messagebox.showerror("Plot", "Matplotlib is not available.")
             return
         p = filedialog.asksaveasfilename(
@@ -3358,7 +3374,7 @@ class ImpedanceGui(QMainWindow):
         if not p:
             return
         try:
-            self.fig.savefig(p, dpi=300, bbox_inches="tight")
+            figure.savefig(p, dpi=300, bbox_inches="tight")
             messagebox.showinfo("Plot", f"Saved plot to:\n{p}")
         except Exception as exc:
             messagebox.showerror("Plot", str(exc))
@@ -3744,6 +3760,7 @@ class ImpedanceGui(QMainWindow):
         painter.drawRect(QRectF(x0, y0, x1 - x0, y1 - y0))
 
     def _refresh_layers(self) -> None:
+        self._schedule_inverse_work_count()
         self.layer_list.clear()
         for i, layer in enumerate(self.layers, start=1):
             if layer.is_sheet:
@@ -3788,7 +3805,7 @@ class ImpedanceGui(QMainWindow):
                     if layer.inv_rs_min is not None and layer.inv_rs_max is not None:
                         step = (
                             f", step {layer.inv_rs_accuracy:g} Ω"
-                            if layer.inv_rs_accuracy is not None else ", continuous"
+                            if layer.inv_rs_accuracy is not None else ", step required"
                         )
                         parameters.append(
                             f"Layer {index} resistance: {layer.inv_rs_min:g} to "
@@ -3797,7 +3814,7 @@ class ImpedanceGui(QMainWindow):
                 elif layer.inv_t_min_in is not None and layer.inv_t_max_in is not None:
                     step = (
                         f", step {layer.inv_t_accuracy_in:g} in"
-                        if layer.inv_t_accuracy_in is not None else ", continuous"
+                        if layer.inv_t_accuracy_in is not None else ", step required"
                     )
                     parameters.append(
                         f"Layer {index} thickness: {layer.inv_t_min_in:g} to "
@@ -3806,7 +3823,7 @@ class ImpedanceGui(QMainWindow):
             self.inv_parameter_summary_label.setText(
                 "Optimization parameters: " + " | ".join(parameters)
                 if parameters else
-                "No optimization parameters configured. Edit a layer and set its Minimum, Maximum, and Step."
+                "All layers are fixed. Choose Fixed / variable layers to vary a parameter, or run once to score the current stack."
             )
         self.layer_preview.update()
         self._refresh_thickness_layers()
@@ -4036,6 +4053,8 @@ class ImpedanceGui(QMainWindow):
             self.thk_compute_btn,
             self.inv_run_btn,
             self.inv_apply_btn,
+            self.inv_setup_btn, self.inv_check_btn,
+            self.inv_save_candidate_btn,
             self.layer_add_btn,
             self.layer_add_sheet_btn,
             self.layer_edit_btn,
@@ -4052,9 +4071,12 @@ class ImpedanceGui(QMainWindow):
         ):
             if btn is not None:
                 btn.setEnabled(not running)
+        self.inv_stop_btn.setEnabled(running and self._inverse_active)
+        self.inv_extend_btn.setEnabled(not running and self._inverse_can_resume())
         self._refresh_ibc_batch_preview()
         self.status_var.set(text)
         if self.status_progress is not None:
+            self.status_progress.setRange(0, 0)
             self.status_progress.setVisible(running)
 
     def _run_background_task(
@@ -4086,8 +4108,12 @@ class ImpedanceGui(QMainWindow):
             try:
                 status, payload = result_q.get_nowait()
             except queue.Empty:
+                if self._inverse_active:
+                    self._show_inverse_progress()
                 return
             timer.stop()
+            timer.deleteLater()
+            self._inverse_active = False
             self._set_task_state(False, "Ready")
             if status == "ok":
                 on_success(payload)  # type: ignore[arg-type]
@@ -4173,11 +4199,21 @@ class ImpedanceGui(QMainWindow):
         return self._is_angle_tab_active() or self._is_thickness_tab_active()
 
     def _sync_mode_chrome(self) -> None:
-        """Give informational modes a clean workspace without solver chrome."""
+        """Show shared solver plots or the dedicated inverse-design workspace."""
 
-        show_solver_workspace = not self._is_material_explorer_active()
+        if self._sync_analysis_chrome():
+            return
+        inverse = self._is_inverse_tab_active()
+        if hasattr(self, 'inverse_workspace_tabs'):
+            from PySide6.QtCore import QSignalBlocker
+            blocker = QSignalBlocker(self.inverse_workspace_tabs)
+            self.inverse_workspace_tabs.setCurrentIndex(self._inverse_page_index if inverse else 0)
+            self.inverse_workspace_tabs.setTabVisible(1, inverse)
+            self.inverse_workspace_tabs.tabBar().setVisible(inverse)
+            del blocker
+        show_solver_workspace = not (self._is_material_explorer_active() or inverse)
         if self.layers_group is not None:
-            self.layers_group.setVisible(show_solver_workspace)
+            self.layers_group.setVisible(not self._is_material_explorer_active())
         if self.results_pane is not None:
             if (
                 not show_solver_workspace
@@ -4422,174 +4458,6 @@ class ImpedanceGui(QMainWindow):
         self.selected_freq_idx = nearest_index(view.freqs, y)
         self._update_plot()
 
-    def _draw_inverse_placeholder(self, text: str) -> None:
-        if not MPL_AVAILABLE or self.ax_heatmap is None or self.canvas is None:
-            return
-        if self.heatmap_cbar is not None:
-            self.heatmap_cbar.remove()
-            self.heatmap_cbar = None
-        colors = self._colors
-        self.ax_heatmap.clear()
-        self.ax_heatmap.set_title("Inverse Candidate Analysis")
-        self.ax_heatmap.text(
-            0.5,
-            0.5,
-            text,
-            ha="center",
-            va="center",
-            transform=self.ax_heatmap.transAxes,
-            color=colors["muted_text"],
-        )
-        self._style_plot_axis(self.ax_heatmap)
-        self.ax_heatmap.grid(False)
-        if self.ax_freq_slice is not None:
-            self.ax_freq_slice.clear()
-            self.ax_freq_slice.set_title("Score vs Total Thickness", fontsize=9, pad=2)
-            self.ax_freq_slice.set_xlabel("Total thickness (in)", fontsize=8)
-            self.ax_freq_slice.set_ylabel("Score (dB)", fontsize=8)
-            self._style_plot_axis(self.ax_freq_slice)
-            self.ax_freq_slice.grid(False)
-        if self.ax_angle_slice is not None:
-            self.ax_angle_slice.clear()
-            self.ax_angle_slice.set_title("Robustness Gap", fontsize=9, pad=2)
-            self.ax_angle_slice.set_xlabel("Candidate rank", fontsize=8)
-            self.ax_angle_slice.set_ylabel("Worst - Nominal (dB)", fontsize=8)
-            self._style_plot_axis(self.ax_angle_slice)
-            self.ax_angle_slice.grid(False)
-        self.canvas.draw_idle()
-
-    def _update_inverse_plot(self) -> None:
-        if (
-            not MPL_AVAILABLE
-            or self.ax_heatmap is None
-            or self.ax_freq_slice is None
-            or self.ax_angle_slice is None
-            or self.canvas is None
-        ):
-            return
-        if self.heatmap_cbar is not None:
-            self.heatmap_cbar.remove()
-            self.heatmap_cbar = None
-        if not self.inverse_candidates:
-            self._draw_inverse_placeholder("Run inverse design to compare candidate stackups.")
-            return
-
-        colors = self._colors
-        n = len(self.inverse_candidates)
-        if (
-            len(self.inverse_plot_samples) != n
-            or not self.inverse_plot_freqs
-        ):
-            self._draw_inverse_placeholder("Run inverse design to compute percentile-vs-frequency curves.")
-            return
-
-        ranks = list(range(1, n + 1))
-        scores = [c.score_db for c in self.inverse_candidates]
-        worst = [c.worst_mean_db for c in self.inverse_candidates]
-        nominal = [c.nominal_mean_db for c in self.inverse_candidates]
-        total_thickness = [sum(c.thickness_in) for c in self.inverse_candidates]
-        robustness_gap = [c.worst_mean_db - c.nominal_mean_db for c in self.inverse_candidates]
-
-        selected_idx = 0
-        if self.inv_results_list is not None:
-            row = self.inv_results_list.currentRow()
-            if row >= 0:
-                selected_idx = int(row)
-        selected_idx = max(0, min(selected_idx, n - 1))
-
-        percentile = self._current_inverse_percentile()
-
-        def _percentile(vals: list[float], p: float) -> float:
-            if not vals:
-                return float("nan")
-            if NUMPY_AVAILABLE:
-                return float(np.percentile(np.asarray(vals, dtype=float), p))
-            sorted_vals = sorted(vals)
-            if len(sorted_vals) == 1:
-                return float(sorted_vals[0])
-            pos = (p / 100.0) * (len(sorted_vals) - 1)
-            lo = int(math.floor(pos))
-            hi = int(math.ceil(pos))
-            if lo == hi:
-                return float(sorted_vals[lo])
-            t = pos - lo
-            return float(sorted_vals[lo] * (1.0 - t) + sorted_vals[hi] * t)
-
-        curves: list[list[float]] = []
-        for cand_samples in self.inverse_plot_samples:
-            curve = [_percentile(freq_vals, percentile) for freq_vals in cand_samples]
-            curves.append(curve)
-
-        self.ax_heatmap.clear()
-        freqs = self.inverse_plot_freqs
-        for i, curve in enumerate(curves):
-            if i == selected_idx:
-                continue
-            self.ax_heatmap.plot(freqs, curve, color=colors["plot_line_freq"], linewidth=1.0, alpha=0.25)
-        self.ax_heatmap.plot(
-            freqs,
-            curves[selected_idx],
-            color=colors["plot_line_angle"],
-            linewidth=2.2,
-            marker="o",
-            markersize=3,
-            label=f"Selected candidate (P{percentile:g})",
-        )
-        self.ax_heatmap.set_title(f"PEC Reflection vs Frequency at P{percentile:g} across analyzed points")
-        self.ax_heatmap.set_xlabel("Frequency (GHz)")
-        self.ax_heatmap.set_ylabel("PEC reflection |Γ| (dB)")
-        self._style_plot_axis(self.ax_heatmap)
-        self.ax_heatmap.grid(True, color=colors["plot_grid"], alpha=0.3)
-        self.ax_heatmap.legend(loc="best", fontsize=8)
-
-        self.ax_freq_slice.clear()
-        self.ax_freq_slice.scatter(total_thickness, scores, color=colors["plot_line_freq"], s=24, alpha=0.9)
-        self.ax_freq_slice.scatter(
-            [total_thickness[selected_idx]],
-            [scores[selected_idx]],
-            color=colors["plot_line_angle"],
-            s=54,
-            marker="*",
-            zorder=3,
-        )
-        self.ax_freq_slice.set_title("Score vs Total Thickness", fontsize=9, pad=2)
-        self.ax_freq_slice.set_xlabel("Total thickness (in)", fontsize=8)
-        self.ax_freq_slice.set_ylabel("Score (dB)", fontsize=8)
-        self._style_plot_axis(self.ax_freq_slice)
-        self.ax_freq_slice.grid(True, color=colors["plot_grid"], alpha=0.3)
-
-        self.ax_angle_slice.clear()
-        self.ax_angle_slice.bar(ranks, robustness_gap, color=colors["plot_line_angle"], alpha=0.75)
-        self.ax_angle_slice.bar(
-            [ranks[selected_idx]],
-            [robustness_gap[selected_idx]],
-            color=colors["accent"],
-            alpha=0.95,
-        )
-        self.ax_angle_slice.set_title("Robustness Gap (Worst - Nominal)", fontsize=9, pad=2)
-        self.ax_angle_slice.set_xlabel("Candidate rank", fontsize=8)
-        self.ax_angle_slice.set_ylabel("Gap (dB)", fontsize=8)
-        self._style_plot_axis(self.ax_angle_slice)
-        self.ax_angle_slice.grid(True, color=colors["plot_grid"], alpha=0.3)
-
-        cand = self.inverse_candidates[selected_idx]
-        mat_names = ", ".join(Path(p).name for p in cand.material_files)
-        if len(mat_names) > 48:
-            mat_names = mat_names[:45] + "..."
-        self.ax_angle_slice.text(
-            0.02,
-            0.98,
-            f"#{selected_idx + 1} score={cand.score_db:.3f} dB\n"
-            f"nom={cand.nominal_mean_db:.3f}, worst={cand.worst_mean_db:.3f}\n"
-            f"materials: {mat_names}",
-            transform=self.ax_angle_slice.transAxes,
-            va="top",
-            ha="left",
-            fontsize=7.5,
-            color=colors["text"],
-        )
-        self.canvas.draw_idle()
-
     def _draw_plot_placeholder(self, text: str) -> None:
         if not MPL_AVAILABLE or self.ax_heatmap is None or self.canvas is None:
             return
@@ -4629,6 +4497,10 @@ class ImpedanceGui(QMainWindow):
         self.canvas.draw_idle()
 
     def _update_plot(self) -> None:
+        panel = self._active_analysis_panel()
+        if panel is not None:
+            panel.draw()
+            return
         if self._is_material_explorer_active():
             return
         if not MPL_AVAILABLE or self.ax_heatmap is None or self.canvas is None:
@@ -4874,6 +4746,7 @@ class ImpedanceGui(QMainWindow):
         uncertainty: UncertaintyConfig,
         sweep: list[float],
         wave_pol: str,
+        capture: dict | None = None,
     ) -> tuple[int, str]:
         for i, layer in enumerate(loaded_layers, start=1):
             if layer.is_sheet:
@@ -4885,6 +4758,9 @@ class ImpedanceGui(QMainWindow):
                 validate_sweep_coverage(sweep, layer.table_90deg, f"layer {i} 90 deg")
 
         z_nom = compute_stack_impedance_many(sweep, loaded_layers, backing)
+        if capture is not None:
+            capture['nominal'] = list(z_nom)
+            capture['cases'] = [list(z_nom)]
         scales = build_uncertainty_scales(uncertainty)
         envelope_enabled = uncertainty.enabled and len(scales) > 1
 
@@ -4914,6 +4790,8 @@ class ImpedanceGui(QMainWindow):
                     eps_scale=e_scale,
                     mu_scale=m_scale,
                 )
+                if capture is not None:
+                    capture['cases'].append(list(z_s))
                 for i, z in enumerate(z_s):
                     zr = z.real
                     zi = z.imag
@@ -5249,6 +5127,8 @@ class ImpedanceGui(QMainWindow):
         for t_scale, e_scale, m_scale in scales:
             values: list[float] = []
             for angle_deg in target_angles:
+                if self._inverse_active and self._inverse_stop_event.is_set():
+                    raise StopInverseSearch()
                 prepared = (
                     prepared_wave_terms.get((angle_deg, e_scale, m_scale))
                     if prepared_wave_terms is not None
@@ -5281,33 +5161,12 @@ class ImpedanceGui(QMainWindow):
         score_db = worst_mean if "worst" in score_mode.lower() else avg_mean
         return score_db, nominal_mean, worst_mean, avg_mean, best_mean
 
-    def _refresh_inverse_results_list(self) -> None:
-        if self.inv_results_list is None:
-            return
-        self.inv_results_list.clear()
-        for i, c in enumerate(self.inverse_candidates, start=1):
-            geom_parts = []
-            for li in range(len(c.thickness_in)):
-                if li < len(c.sheet_resistance_ohm) and c.sheet_resistance_ohm[li] > 0:
-                    geom_parts.append(f"{c.sheet_resistance_ohm[li]:g}Ω")
-                else:
-                    geom_parts.append(f"{c.thickness_in[li]:.4g}in")
-            geom_text = ", ".join(geom_parts)
-            m_text = ", ".join(Path(p).name for p in c.material_files if p)
-            line = (
-                f"{i:02d}: score={c.score_db:.3f} dB | nom={c.nominal_mean_db:.3f} | "
-                f"worst={c.worst_mean_db:.3f} | avg={c.avg_mean_db:.3f} | "
-                f"geom=[{geom_text}] | m=[{m_text}]"
-            )
-            self.inv_results_list.addItem(line)
-        self._update_plot()
-
     def _apply_inverse_candidate(self) -> None:
         try:
             if not self.inverse_candidates or self.inv_results_list is None:
                 messagebox.showwarning("Inverse Design", "Run inverse design first.")
                 return
-            row = self.inv_results_list.currentRow()
+            row = self._selected_inverse_index()
             if row < 0:
                 messagebox.showwarning("Inverse Design", "Select a candidate to apply.")
                 return
@@ -5316,6 +5175,7 @@ class ImpedanceGui(QMainWindow):
                 messagebox.showwarning("Inverse Design", "Selected candidate is out of range.")
                 return
 
+            self._ensure_inverse_result_current()
             cand = self.inverse_candidates[idx]
             if (
                 len(cand.thickness_in) != len(self.layers)
@@ -5343,7 +5203,9 @@ class ImpedanceGui(QMainWindow):
         except Exception as exc:
             messagebox.showerror("Inverse Design Error", str(exc))
 
-    def _run_inverse_design(self) -> None:
+    def _run_inverse_design(self, _checked=False, *, resume=False) -> None:
+        if self.job_is_running():
+            return
         try:
             if not self.layers:
                 raise ValueError("Add at least one layer before inverse design.")
@@ -5367,34 +5229,46 @@ class ImpedanceGui(QMainWindow):
             a_stop = validate_incidence_angle(a_stop)
             if a_stop < a_start:
                 raise ValueError("Inverse-design angle stop must be >= start.")
-            if abs(a_stop - a_start) <= 1e-12:
+            if a_stop == a_start:
                 target_angles = [a_start]
             else:
                 a_step = float(self.inv_angle_step_var.get().strip())
                 target_angles = make_sweep(a_start, a_stop, a_step)
 
-            max_evals = int(self.inv_max_evals_var.get().strip())
             top_n = int(self.inv_top_n_var.get().strip())
-            if max_evals <= 0:
-                raise ValueError("Inverse-design Max evals must be >= 1.")
             if top_n <= 0:
-                raise ValueError("Inverse-design Top N must be >= 1.")
+                raise ValueError("Keep best must be a positive integer.")
             score_mode = self.inv_score_mode_var.get().strip()
             uncertainty_cfg = self._read_inverse_uncertainty_config()
-            refine_top_candidates = bool(self.inv_refine_var.get())
-            if refine_top_candidates and (not NUMPY_AVAILABLE or not SCIPY_AVAILABLE):
-                raise ValueError(
-                    "Local inverse-design refinement requires NumPy and SciPy."
-                )
-            seed_text = self.inv_seed_var.get().strip()
-            search_seed: int | None = int(seed_text) if seed_text else None
+            check_layers(layer_snapshot, target_freqs, materials=False)
+            grid = DesignGrid(layer_snapshot)
         except Exception as exc:
             messagebox.showerror("Inverse Design Error", str(exc))
             return
 
-        def worker() -> tuple[list[InverseCandidate], str, list[float], list[list[list[float]]]]:
-            scales = build_uncertainty_scales(uncertainty_cfg)
+        checkpoint = copy.deepcopy(self._inverse_checkpoint) if resume else None
+        if resume and checkpoint is None:
+            messagebox.showerror("Inverse Design", "There is no interrupted analysis to resume.")
+            return
+        self._inverse_stop_event.clear()
+        self._inverse_active = True
+        self._inverse_progress = (checkpoint['next_index'] if checkpoint else 0, grid.total, 'Analyzing')
+        completed = {}
+        band_sweep = not self.inv_freq_mode_var.get().lower().startswith('discrete')
+        if self._is_inverse_tab_active():
+            self.inverse_workspace_tabs.setCurrentIndex(0)
 
+        def worker():
+            from array import array
+            import heapq
+            identity = search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
+                                       uncertainty_cfg, score_mode)
+            if checkpoint and checkpoint['identity'] != identity:
+                raise ValueError("Inputs or material files changed. Start a new analysis instead of resuming.")
+            def check_stop():
+                if self._inverse_stop_event.is_set():
+                    raise StopInverseSearch()
+            scales = build_uncertainty_scales(uncertainty_cfg)
             table_cache: dict[str, MaterialTable] = {}
 
             def get_table(path_str: str) -> MaterialTable:
@@ -5418,8 +5292,8 @@ class ImpedanceGui(QMainWindow):
                         validate_sweep_coverage(
                             target_freqs, table_0, f"inverse layer {i} 0deg/isotropic"
                         )
-                    except Exception:
-                        return False, [], []
+                    except Exception as exc:
+                        raise ValueError(f"Layer {i}: {exc}") from exc
                     table_90: MaterialTable | None = None
                     if layer.anisotropic:
                         table_90 = get_table(layer.file_90deg)
@@ -5427,14 +5301,13 @@ class ImpedanceGui(QMainWindow):
                             validate_sweep_coverage(
                                 target_freqs, table_90, f"inverse layer {i} 90deg"
                             )
-                        except Exception:
-                            return False, [], []
+                        except Exception as exc:
+                            raise ValueError(f"Layer {i}, 90 deg: {exc}") from exc
                     tables_0_local.append(table_0)
                     tables_90_local.append(table_90)
                 return True, tables_0_local, tables_90_local
 
-            # Materials are fixed during the search, so the validated tables
-            # (tables_0_mc / tables_90_mc, assigned below) are reused for every
+            # Validated material tables are reused for every
             # candidate. Each candidate is fully described by its per-layer
             # thicknesses (bulk) and resistances (sheets).
             def build_loaded_layers(
@@ -5460,105 +5333,17 @@ class ImpedanceGui(QMainWindow):
                                 thickness_m=thicknesses[i] * INCH_TO_M,
                                 anisotropic=layer.anisotropic,
                                 polarization_deg=layer.polarization_deg,
-                                table_0deg=tables_0_mc[i],
-                                table_90deg=tables_90_mc[i],
+                                table_0deg=tables_0[i],
+                                table_90deg=tables_90[i],
                             )
                         )
                 return out
 
-            def score_config(
-                thicknesses: list[float], resistances: list[float]
-            ) -> tuple[float, float, float, float, float]:
-                return self._score_inverse_candidate(
-                    target_freqs,
-                    target_angles,
-                    build_loaded_layers(thicknesses, resistances),
-                    wave_pol,
-                    scales,
-                    score_mode,
-                    prepared_inverse_wave_terms,
-                )
 
-            top_candidates: list[InverseCandidate] = []
-            eval_count = 0
-            refine_evals = 0
-            prepared_inverse_wave_terms: dict[
-                tuple[float, float, float],
-                list[tuple[np.ndarray, np.ndarray] | None],
-            ] = {}
-
-            # Monte Carlo: one fixed material per layer; validate coverage once.
-            chosen_files = [
-                "" if layer.is_sheet else layer.file_0deg for layer in layer_snapshot
-            ]
-            coverage_ok, tables_0_mc, tables_90_mc = prepare_material_combo(chosen_files)
-            if not coverage_ok:
-                raise ValueError(
-                    "Selected layer materials do not cover the inverse-design "
-                    "frequency target. Check each layer's property file range."
-                )
-
-            # Build the search-variable list. Each entry is
-            # (layer_index, kind, lo, hi, accuracy) where kind is "t" (bulk-layer
-            # thickness, in) or "rs" (sheet resistance, ohms). Bulk layers always
-            # require thickness bounds; sheets are searched only when R min/max
-            # are set, otherwise they stay fixed at their nominal resistance.
-            search_dims: list[tuple[int, str, float, float, float | None]] = []
-            base_thick: list[float] = [0.0] * len(layer_snapshot)
-            base_rs: list[float] = [0.0] * len(layer_snapshot)
-            for layer_idx, layer in enumerate(layer_snapshot):
-                human_idx = layer_idx + 1
-                if layer.is_sheet:
-                    rs0 = layer.sheet_resistance
-                    if layer.inv_rs_min is not None or layer.inv_rs_max is not None:
-                        if layer.inv_rs_min is None or layer.inv_rs_max is None:
-                            raise ValueError(
-                                f"Layer {human_idx}: set both sheet R min and max, "
-                                "or neither."
-                            )
-                        if layer.inv_rs_min <= 0 or layer.inv_rs_max <= 0:
-                            raise ValueError(
-                                f"Layer {human_idx}: sheet resistance bounds must be > 0."
-                            )
-                        if layer.inv_rs_max < layer.inv_rs_min:
-                            raise ValueError(
-                                f"Layer {human_idx}: sheet R max must be >= min."
-                            )
-                        rs0 = layer.inv_rs_min
-                        if layer.inv_rs_max > layer.inv_rs_min:
-                            search_dims.append(
-                                (
-                                    layer_idx,
-                                    "rs",
-                                    layer.inv_rs_min,
-                                    layer.inv_rs_max,
-                                    layer.inv_rs_accuracy,
-                                )
-                            )
-                    base_rs[layer_idx] = rs0
-                    continue
-
-                if layer.inv_t_min_in is None or layer.inv_t_max_in is None:
-                    raise ValueError(
-                        f"Layer {human_idx}: set inverse-design t_min and t_max "
-                        "on this layer before running Monte Carlo."
-                    )
-                if layer.inv_t_min_in <= 0 or layer.inv_t_max_in <= 0:
-                    raise ValueError(f"Layer {human_idx}: thickness bounds must be > 0.")
-                if layer.inv_t_max_in < layer.inv_t_min_in:
-                    raise ValueError(f"Layer {human_idx}: thickness max must be >= min.")
-                base_thick[layer_idx] = layer.inv_t_min_in
-                if layer.inv_t_max_in > layer.inv_t_min_in:
-                    search_dims.append(
-                        (
-                            layer_idx,
-                            "t",
-                            layer.inv_t_min_in,
-                            layer.inv_t_max_in,
-                            layer.inv_t_accuracy_in,
-                        )
-                    )
-
+            chosen_files = ['' if layer.is_sheet else layer.file_0deg for layer in layer_snapshot]
+            _coverage_ok, tables_0, tables_90 = prepare_material_combo(chosen_files)
+            base_thick, base_rs = grid.design(0)
+            prepared_inverse_wave_terms = {}
             if NUMPY_AVAILABLE:
                 reference_layers = build_loaded_layers(base_thick, base_rs)
                 prepared_properties = prepare_layer_properties_many(
@@ -5580,221 +5365,119 @@ class ImpedanceGui(QMainWindow):
                                 )
                             )
 
-            mc_rng = random.Random(search_seed)
-            proposals: list[tuple[list[float], list[float]]] = []
-            seen_proposals: set[tuple[float, ...]] = set()
 
-            def add_proposal(trial_t: list[float], trial_rs: list[float]) -> None:
-                key_values: list[float] = []
-                for idx, kind, _lo, _hi, _step in search_dims:
-                    key_values.append(trial_t[idx] if kind == "t" else trial_rs[idx])
-                key = tuple(round(value, 12) for value in key_values)
-                if key not in seen_proposals:
-                    seen_proposals.add(key)
-                    proposals.append((trial_t, trial_rs))
-
-            # Always begin with the current nominal design clipped to each
-            # user's range and snapped to the requested manufacturing step.
-            nominal_t = list(base_thick)
-            nominal_rs = list(base_rs)
-            for idx, kind, lo, hi, step in search_dims:
-                current = (
-                    layer_snapshot[idx].thickness_in
-                    if kind == "t" else layer_snapshot[idx].sheet_resistance
-                )
-                value = snap_to_increment(current, step, lo, hi)
-                if kind == "t":
-                    nominal_t[idx] = value
-                else:
-                    nominal_rs[idx] = value
-            add_proposal(nominal_t, nominal_rs)
-
-            attempts = 0
-            attempt_limit = max(100, max_evals * 50)
-            while search_dims and len(proposals) < max_evals and attempts < attempt_limit:
-                attempts += 1
-                trial_t = list(base_thick)
-                trial_rs = list(base_rs)
-                for idx, kind, lo, hi, acc in search_dims:
-                    val = snap_to_increment(mc_rng.uniform(lo, hi), acc, lo, hi)
-                    if kind == "t":
-                        trial_t[idx] = val
-                    else:
-                        trial_rs[idx] = val
-                add_proposal(trial_t, trial_rs)
-
-            for trial_t, trial_rs in proposals:
-                eval_count += 1
-                score_db, nominal_mean, worst_mean, avg_mean, best_mean = score_config(
-                    trial_t, trial_rs
-                )
-                top_candidates.append(
-                    InverseCandidate(
-                        score_db=score_db,
-                        nominal_mean_db=nominal_mean,
-                        worst_mean_db=worst_mean,
-                        avg_mean_db=avg_mean,
-                        best_mean_db=best_mean,
-                        thickness_in=[float(v) for v in trial_t],
-                        material_files=chosen_files[:],
-                        sheet_resistance_ohm=[float(v) for v in trial_rs],
-                    )
-                )
-                top_candidates.sort(key=lambda c: c.score_db, reverse=False)
-                if len(top_candidates) > top_n:
-                    del top_candidates[top_n:]
-
-            if not top_candidates:
-                raise ValueError("Inverse design found no valid candidates in the target region.")
-
-            if refine_top_candidates and search_dims:
-                # Refine every search variable (thickness and sheet resistance)
-                # in normalized [0, 1] coordinates so thickness (~0.1 in) and
-                # resistance (~100 ohm) carry equal weight in the simplex. The
-                # accuracy increment is applied at evaluation, so the optimizer
-                # only ever sees on-grid, in-bounds configurations.
-                def unpack(
-                    x_free: "np.ndarray", cand: InverseCandidate
-                ) -> tuple[list[float], list[float]]:
-                    trial_t = list(cand.thickness_in)
-                    trial_rs = list(cand.sheet_resistance_ohm)
-                    for di, (idx, kind, lo, hi, acc) in enumerate(search_dims):
-                        val = snap_to_increment(lo + float(x_free[di]) * (hi - lo), acc, lo, hi)
-                        if kind == "t":
-                            trial_t[idx] = val
-                        else:
-                            trial_rs[idx] = val
-                    return trial_t, trial_rs
-
-                bounds_arr = [(0.0, 1.0)] * len(search_dims)
-                refined: list[InverseCandidate] = []
-
-                for cand in top_candidates:
-                    x0 = np.array(
-                        [
-                            (
-                                (cand.thickness_in[idx] if kind == "t"
-                                 else cand.sheet_resistance_ohm[idx]) - lo
-                            )
-                            / (hi - lo)
-                            for idx, kind, lo, hi, _acc in search_dims
-                        ],
-                        dtype=float,
-                    )
-                    x0 = np.clip(x0, 0.0, 1.0)
-
-                    def objective(
-                        x_free: "np.ndarray", _cand: InverseCandidate = cand
-                    ) -> float:
-                        nonlocal refine_evals
-                        trial_t, trial_rs = unpack(x_free, _cand)
-                        refine_evals += 1
-                        s_db, *_ = score_config(trial_t, trial_rs)
-                        return s_db
-
-                    result = _scipy_optimize.minimize(
-                        objective,
-                        x0,
-                        method="Nelder-Mead",
-                        bounds=bounds_arr,
-                        options={
-                            "xatol": 1e-4,
-                            "fatol": 1e-3,
-                            "maxiter": 50 * max(1, len(search_dims)) * 4,
-                            "adaptive": True,
-                            "disp": False,
-                        },
-                    )
-
-                    final_t, final_rs = unpack(np.asarray(result.x, dtype=float), cand)
-                    refine_evals += 1
-                    final_score, final_nom, final_worst, final_avg, final_best = score_config(
-                        final_t, final_rs
-                    )
-
-                    if final_score > cand.score_db + 1e-9:
-                        refined.append(cand)
-                        continue
-
-                    refined.append(
-                        InverseCandidate(
-                            score_db=final_score,
-                            nominal_mean_db=final_nom,
-                            worst_mean_db=final_worst,
-                            avg_mean_db=final_avg,
-                            best_mean_db=final_best,
-                            thickness_in=final_t[:],
-                            material_files=cand.material_files[:],
-                            sheet_resistance_ohm=final_rs[:],
-                        )
-                    )
-
-                refined.sort(key=lambda c: c.score_db, reverse=False)
-                top_candidates = refined
-
+            # Store five scores per completed design, rather than millions of
+            # proposal objects or full response grids. The grid index recovers
+            # the exact design and permits resumption without repeating scores.
+            score_rows = checkpoint['score_rows'] if checkpoint else array('d')
+            next_index = checkpoint['next_index'] if checkpoint else 0
+            try:
+                while next_index < grid.total:
+                    check_stop()
+                    thicknesses, resistances = grid.design(next_index)
+                    scores = self._score_inverse_candidate(
+                        target_freqs, target_angles, build_loaded_layers(thicknesses, resistances),
+                        wave_pol, scales, score_mode, prepared_inverse_wave_terms)
+                    if len(scores) != 5 or not all(math.isfinite(v) for v in scores):
+                        raise ValueError(f'Combination {next_index + 1}: incomplete or nonfinite scores.')
+                    score_rows.extend(scores)
+                    next_index += 1
+                    self._inverse_progress = (next_index, grid.total, 'Analyzing')
+            except StopInverseSearch:
+                pass
+            top_candidates = []
+            for index in heapq.nsmallest(min(top_n, next_index), range(next_index),
+                                        key=lambda i: (score_rows[5*i], i)):
+                thicknesses, resistances = grid.design(index)
+                top_candidates.append(InverseCandidate(*score_rows[5*index:5*index+5],
+                                                       thicknesses, chosen_files[:], resistances))
+            completed.update(identity=identity, score_rows=score_rows, next_index=next_index,
+                             total=grid.total, plots_complete=False)
+            self._inverse_progress = (next_index, grid.total, 'Preparing comparison plots')
             inverse_samples: list[list[list[float]]] = []
-            for cand in top_candidates:
-                cand_layers = build_loaded_layers(cand.thickness_in, cand.sheet_resistance_ohm)
-                freq_samples = [[] for _ in target_freqs]
-                for t_scale, e_scale, m_scale in scales:
-                    for angle_deg in target_angles:
-                        metrics = compute_angle_metrics_many(
-                            target_freqs,
-                            angle_deg,
-                            cand_layers,
-                            wave_pol,
-                            thickness_scale=t_scale,
-                            eps_scale=e_scale,
-                            mu_scale=m_scale,
-                            prepared_wave_terms=prepared_inverse_wave_terms.get(
-                                (angle_deg, e_scale, m_scale)
-                            ),
-                        )
-                        for fi, val in enumerate(metrics["metal_loss_db"]):
-                            freq_samples[fi].append(val)
-                inverse_samples.append(freq_samples)
+            try:
+                for cand in top_candidates:
+                    cand_layers = build_loaded_layers(cand.thickness_in, cand.sheet_resistance_ohm)
+                    freq_samples = [[] for _ in target_freqs]
+                    for t_scale, e_scale, m_scale in scales:
+                        for angle_deg in target_angles:
+                            check_stop()
+                            metrics = compute_angle_metrics_many(
+                                target_freqs,
+                                angle_deg,
+                                cand_layers,
+                                wave_pol,
+                                thickness_scale=t_scale,
+                                eps_scale=e_scale,
+                                mu_scale=m_scale,
+                                prepared_wave_terms=prepared_inverse_wave_terms.get(
+                                    (angle_deg, e_scale, m_scale)
+                                ),
+                            )
+                            for fi, val in enumerate(metrics["metal_loss_db"]):
+                                freq_samples[fi].append(val)
+                    inverse_samples.append(freq_samples)
 
-            best = top_candidates[0]
-            unc_state = "enabled" if uncertainty_cfg.enabled else "disabled"
-            n_rs_dims = sum(1 for d in search_dims if d[1] == "rs")
-            n_t_dims = len(search_dims) - n_rs_dims
-            search_mode_text = (
-                f"Monte Carlo, {eval_count} random sample(s) over "
-                f"{n_t_dims} thickness + {n_rs_dims} sheet-R variable(s)"
-            )
-            seed_text_msg = (
-                f", seed={search_seed}" if search_seed is not None else ""
-            )
-            refine_text = (
-                f"Nelder-Mead, {refine_evals} extra evals"
-                if refine_top_candidates
-                else "disabled"
-            )
-            msg = (
-                f"Inverse design complete.\n"
-                f"Objective: {score_mode}\n"
-                f"Region: {target_freq_desc}, {a_start:g}-{a_stop:g} deg, pol={wave_pol.upper()}\n"
-                f"Uncertainty: {unc_state} ({len(scales)} corner(s))\n"
-                f"Search: {search_mode_text}{seed_text_msg}\n"
-                f"Evaluated: {eval_count} unique candidates (requested {max_evals})\n"
-                f"Refinement: {refine_text}\n"
-                f"Best score: {best.score_db:.3f} dB | nominal {best.nominal_mean_db:.3f} dB | "
-                f"worst-case {best.worst_mean_db:.3f} dB\n"
-                f"Stored top {len(top_candidates)} candidates. Use Apply Selected to update the stack."
-            )
+            except StopInverseSearch:
+                inverse_samples = []
+            completed['plots_complete'] = len(inverse_samples) == len(top_candidates)
+            if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
+                               uncertainty_cfg, score_mode) != identity:
+                raise ValueError("Material files changed during the analysis. Run again with stable inputs.")
+            complete = next_index == grid.total
+            status = ('All combinations analyzed' if complete else
+                      'Stopped; analysis is incomplete. Resume to analyze the remaining combinations')
+            if not completed['plots_complete']:
+                status += '. Comparison plots unfinished; Resume completes them'
+            best_text = (f'Best score: {top_candidates[0].score_db:.3f} dB' if top_candidates
+                         else 'No combination was fully evaluated.')
+            msg = (f'{status}.\n'
+                   f'Evaluated: {next_index:,} of {grid.total:,} combinations\n'
+                   f'Objective: {score_mode}\n'
+                   f'Region: {target_freq_desc}, {a_start:g}-{a_stop:g} deg, pol={wave_pol.upper()}\n'
+                   f'Tolerance/nominal cases per combination: {len(scales)}\n'
+                   f'Allowed values: {grid.description()}\n'
+                   'Values advance from each minimum by its step; an off-step maximum is excluded.\n'
+                   f'{best_text}\n'
+                   f'Retained {len(top_candidates)} best candidates for comparison. '
+                   'Keep best does not limit the combinations analyzed.')
             return top_candidates, msg, [float(v) for v in target_freqs], inverse_samples
 
         def on_success(result: tuple[list[InverseCandidate], str, list[float], list[list[list[float]]]]) -> None:
+            self._inverse_active = False
+            self._inverse_checkpoint = completed
+            self._inverse_result_identity = completed["identity"]
+            self.inv_extend_btn.setEnabled(self._inverse_can_resume())
             self.inverse_candidates, msg, freqs_plot, samples_plot = result
             self.inverse_plot_freqs = freqs_plot
             self.inverse_plot_samples = samples_plot
+            self.inverse_result_metadata = {
+                'band_sweep': band_sweep,
+                'scores': completed['score_rows'][::5],
+                'score_mode': score_mode,
+                'total': grid.total,
+                'complete': completed['next_index'] == grid.total,
+                'angles': list(target_angles),
+                'scales': build_uncertainty_scales(uncertainty_cfg),
+            }
+            self._inverse_summary = msg
+            self.inv_setup_status.setText(msg.splitlines()[0])
+            self.inv_result_status.setText(
+                f"{'Complete' if completed['next_index'] == grid.total else 'Incomplete'} · "
+                f"{completed['next_index']:,} / {grid.total:,} combinations analyzed · "
+                f"{len(self.inverse_candidates)} retained · {target_freq_desc} · "
+                f"{a_start:g}–{a_stop:g}° {wave_pol.upper()}"
+            )
+            # A new result set gets a fresh selection and default overlays.
+            from PySide6.QtCore import QSignalBlocker
+            blocker = QSignalBlocker(self.inv_results_list)
+            self.inv_results_list.setRowCount(0)
             self._refresh_inverse_results_list()
-            if self.inv_results_list is not None:
-                self.inv_results_list.clearSelection()
-                self.inv_results_list.setCurrentRow(0)
-            self.inv_results_frame.expand()
+            del blocker
+            self._inverse_page_index = 1
+            if self._is_inverse_tab_active():
+                self.inverse_workspace_tabs.setCurrentIndex(1)
             self._update_plot()
-            messagebox.showinfo("Inverse Design", msg)
 
         self._run_background_task("Inverse Design", worker, on_success, "Inverse Design Error")
 
@@ -7259,10 +6942,26 @@ class ImpedanceGui(QMainWindow):
 
         def worker() -> dict[str, object]:
             loaded_layers = self._load_layers(0, layer_snapshot)
+            import numpy as np
+            impedance = np.empty((len(frequencies), len(plan)), dtype=complex)
+            indices = {item.path: i for i, item in enumerate(plan)}
+            expected_hashes = [''] * len(plan)
+            def capture(item, values):
+                impedance[:, indices[item.path]] = values
+                expected_hashes[indices[item.path]] = expected_ibc_digest(frequencies, values)
             count = export_pec_ibc_thickness_batch(
-                plan, loaded_layers, layer_index, frequencies
+                plan, loaded_layers, layer_index, frequencies, on_result=capture
             )
-            return {"count": count, "frequency_count": len(frequencies)}
+            if any(file_digest(item.path) != expected_hashes[i] for i, item in enumerate(plan)):
+                raise ValueError('An exported IBC changed during publication. Re-export before comparing or attaching it.')
+            analysis = SweepResult(list(frequencies), [float(item.thickness_value) for item in plan],
+                f'Thickness ({plan[0].thickness_unit})',
+                f'IBC Batch · Layer {layer_index + 1} · {len(plan)} thicknesses · {frequencies[0]:g}–{frequencies[-1]:g} GHz · PEC · normal incidence',
+                {'TE': {'metal_loss_db': reflection_from_impedance(impedance)}},
+                impedance=impedance, files=[item.path.resolve() for item in plan],
+                file_hashes=expected_hashes, layers=stack_description(layer_snapshot))
+            analysis.summary = f'Exported {count} IBC files to {plan[0].path.parent.resolve()}. Each contains {len(frequencies)} frequency points.\nOnly the selected layer thickness was varied.'
+            return {"count": count, "frequency_count": len(frequencies), "analysis": analysis}
 
         def on_success(result: dict[str, object]) -> None:
             # A multi-file batch has no single honest "current" artifact for
@@ -7292,7 +6991,8 @@ class ImpedanceGui(QMainWindow):
                     "\n\nNo one batch file was auto-selected for GHOST; choose "
                     "the thickness-specific CSV you want to attach."
                 )
-            messagebox.showinfo("IBC Batch Complete", message, parent=self)
+            result['analysis'].summary = message
+            self._show_analysis_result('IBC Batch', result['analysis'])
 
         self._run_background_task(
             "IBC Batch", worker, on_success, "IBC Batch Error"
@@ -7314,14 +7014,12 @@ class ImpedanceGui(QMainWindow):
         from .ghost_coating import assess_scalar_coating, coating_report_text
 
         def worker():
-            return assess_scalar_coating(frequencies, self._load_layers(0, snapshot))
+            return assess_scalar_coating(frequencies, self._load_layers(0, snapshot), include_details=True)
 
         def on_success(report):
-            dialog = QMessageBox(self)
-            dialog.setWindowTitle("GHOST scalar coating approximation")
-            dialog.setText(coating_report_text(report))
-            dialog.setDetailedText(json.dumps(report, indent=2, allow_nan=False))
-            dialog.exec()
+            context = f'GHOST coating check · PEC · {frequencies[0]:g}–{frequencies[-1]:g} GHz · TE and TM'
+            self.analysis_panels['Impedance'].set_coating(report, context)
+            self._open_analysis_results('Impedance')
 
         self._run_background_task("GHOST coating check", worker, on_success, "GHOST coating check")
 
@@ -7368,6 +7066,7 @@ class ImpedanceGui(QMainWindow):
 
         def worker() -> dict[str, object]:
             loaded_layers = self._load_layers(0, layer_snapshot)
+            capture = {}
             n, summary = self._compute_frequency_mode(
                 output_path,
                 True,
@@ -7376,16 +7075,17 @@ class ImpedanceGui(QMainWindow):
                 uncertainty,
                 freqs,
                 wave_pol,
+                capture=capture,
             )
-            return {"count": n, "summary": summary}
+            metrics = compute_angle_metrics_many(freqs, 0., loaded_layers, wave_pol)
+            analysis = impedance_result(freqs, capture, metrics, backing,
+                f'Impedance · {backing.upper()} backing · normal incidence · {freqs[0]:g}–{freqs[-1]:g} GHz · {tolerance_description(uncertainty)}')
+            analysis.summary = summary + f'\nExport: {output_path.resolve()}'
+            analysis.layers = stack_description(layer_snapshot)
+            return {"count": n, "summary": summary, "analysis": analysis}
 
         def on_success(result: dict[str, object]) -> None:
-            self.last_heatmap_results = None
-            self.last_heatmap_uncertainty_min = None
-            self.last_heatmap_uncertainty_max = None
-            self.selected_x_idx = None
-            self.selected_freq_idx = None
-            self._update_plot()
+            self._show_analysis_result('Impedance', result['analysis'])
             # Only the PEC-backed broadside result is a physically suitable
             # one-sided IBC for a closed Type 2 GHOST body. Air-backed and all
             # other analysis products intentionally never enter the handoff.
@@ -7418,8 +7118,7 @@ class ImpedanceGui(QMainWindow):
                     "Type 2 conductor, or export/model dielectric layers "
                     "explicitly.",
                 )
-            else:
-                messagebox.showinfo("Complete", message)
+            self.status_var.set(f'Impedance complete: {output_path}')
 
         self._run_background_task("Impedance", worker, on_success, "Error")
 
@@ -7462,8 +7161,18 @@ class ImpedanceGui(QMainWindow):
         ):
             return
 
+        compare_both = self.angle_compare_both.isChecked()
         def worker() -> dict[str, object]:
             loaded_layers = self._load_layers(0, layer_snapshot)
+            other_pol = 'tm' if wave_pol == 'te' else 'te'
+            secondary = None
+            comparison_note = ''
+            if compare_both and any(layer.anisotropic for layer in loaded_layers) and max(angles) > 1e-12:
+                comparison_note = 'TM comparison unavailable for this directional stack at oblique angles. TE remains supported.'
+            elif compare_both:
+                secondary = extra_polarization(lambda t, e, m: self._compute_heatmap_data(
+                    loaded_layers, other_pol, angles, freqs=freqs,
+                    thickness_scale=t, eps_scale=e, mu_scale=m), uncertainty)
             n, out, env_min, env_max, summary = self._compute_angle_mode(
                 output_path,
                 True,
@@ -7473,7 +7182,23 @@ class ImpedanceGui(QMainWindow):
                 freqs,
                 wave_pol,
             )
+            pol = wave_pol.upper()
+            analysis = SweepResult(list(freqs), list(angles), 'Incidence angle (deg)',
+                f'Off Angle · {freqs[0]:g}–{freqs[-1]:g} GHz · {angles[0]:g}–{angles[-1]:g}° · ' +
+                ('TE and TM' if secondary is not None else pol) + ' · ' + tolerance_description(uncertainty)
+                + (' · TM comparison unavailable' if comparison_note else ''),
+                {pol: grid_metrics(out)}, polarization=pol,
+                lower={pol: grid_metrics(env_min)} if env_min else {},
+                upper={pol: grid_metrics(env_max)} if env_max else {},
+                summary=summary + f'\nExport: {output_path.resolve()} ({pol} only). Comparison polarization remains in Results.\n' + comparison_note,
+                layers=stack_description(layer_snapshot))
+            if secondary is not None:
+                analysis.metrics[other_pol.upper()] = secondary[0]
+                if secondary[1]:
+                    analysis.lower[other_pol.upper()] = secondary[1]
+                    analysis.upper[other_pol.upper()] = secondary[2]
             return {
+                "analysis": analysis,
                 "count": n,
                 "summary": summary,
                 "out": out,
@@ -7488,7 +7213,7 @@ class ImpedanceGui(QMainWindow):
             self.selected_x_idx = None
             self.selected_freq_idx = None
             self._update_plot()
-            messagebox.showinfo("Complete", f"Wrote {int(result['count'])} heatmap points to:\n{output_path}")
+            self._show_analysis_result('Off Angle', result['analysis'])
 
         self._run_background_task("Off Angle", worker, on_success, "Error")
 
@@ -7551,7 +7276,15 @@ class ImpedanceGui(QMainWindow):
                 wave_pol,
                 angle_deg,
             )
+            pol = wave_pol.upper()
+            analysis = SweepResult(list(freqs), list(thicknesses), 'Thickness (in)',
+                f'Thickness · Layer {layer_idx + 1} · {freqs[0]:g}–{freqs[-1]:g} GHz · {angle_deg:g}° {pol} · {tolerance_description(uncertainty)}',
+                {pol: grid_metrics(out)}, polarization=pol,
+                lower={pol: grid_metrics(env_min)} if env_min else {},
+                upper={pol: grid_metrics(env_max)} if env_max else {},
+                summary=summary + f'\nExport: {output_path.resolve()}', layers=stack_description(layer_snapshot))
             return {
+                "analysis": analysis,
                 "count": n,
                 "summary": summary,
                 "out": out,
@@ -7566,9 +7299,7 @@ class ImpedanceGui(QMainWindow):
             self.selected_x_idx = None
             self.selected_freq_idx = None
             self._update_plot()
-            messagebox.showinfo(
-                "Complete", f"Wrote {int(result['count'])} heatmap points to:\n{output_path}"
-            )
+            self._show_analysis_result('Thickness', result['analysis'])
 
         self._run_background_task("Thickness", worker, on_success, "Error")
 

@@ -21,8 +21,8 @@ grim
 ```
 
 The embedded tab and standalone window use the same authoritative code in
-this directory. FREDDY background jobs are not cancellable; GRIM prevents the
-application from closing while one is running.
+this directory. Inverse Design supports **Stop and keep best**; other FREDDY
+background jobs run to completion. GRIM prevents closing while a job is running.
 
 For a standalone window on Windows, double-click `Launch_FREDDY_GUI.bat` or
 run the following from this directory:
@@ -124,6 +124,96 @@ FREDDY computes and stages the complete set before publishing it, and restores
 prior files if publication fails, so a partial batch is not left behind. A
 multi-file batch is deliberately not auto-selected for GHOST; attach the CSV
 for the desired thickness explicitly.
+
+IBC Batch now opens **Results** after export. Compare reflection curves,
+frequency/thickness maps, passing bandwidth, coverage, resistance/reactance,
+and the sampled frequency of minimum reflection. The optional table links each
+thickness to its output file. **Use selected IBC for GHOST** verifies the chosen
+file against the exported result before enabling the existing GHOST handoff.
+Results are published only for a completed batch; changed output files cannot
+silently replace the data shown in its plots.
+
+## Analysis results workspaces
+
+**Impedance, IBC Batch, Thickness, and Off Angle** have separate Setup/Results
+tabs, large plots, optional comparison tables, and run-context image exports.
+Each mode retains its own last successful run. Editing setup does not relabel
+the cached results; loading a project clears the session's result caches.
+
+Thickness and Off Angle add reflection threshold contours, multiple frequency
+overlays, nominal/worst-case passing bandwidth and coverage, tolerance envelopes,
+and selected-frequency slices. Thickness also tracks the sampled null location.
+A user-selected comparison band reports passing sampled thickness/angle ranges.
+Bandwidth interpolates frequency samples without extrapolation, and grouped
+passing samples do not guarantee untested intermediate conditions.
+
+Off Angle can compute **TE and TM comparison** with a shared map scale. This
+adds a second solve; the existing CSV continues to contain the selected primary
+polarization. The comparison choice is stored in the project. For a directional
+stack at oblique incidence, a valid TE run remains available when the model
+cannot support the optional TM comparison.
+
+Impedance displays resistance/reactance, reflection, tolerance bounds, and
+nominal reflected/absorbed/transmitted power for its selected backing. The
+GHOST coating check supplies TE/TM approximation-error charts and maps, with
+the original report under Run details. It remains a planar scalar-IBC check,
+not finite-body RCS certification.
+
+See [Workflow shortcuts](../../WORKFLOW_GUIDE.md) for view definitions and the
+file-selection workflow. Frequency overlays above 5,000 points retain extrema
+while reducing display points only; exported values and band metrics are intact.
+
+## Inverse design: analyze all combinations
+
+**Fixed / variable layers…** defines fixed values or finite minimum/maximum/step
+ranges. **Analyze all combinations** evaluates their complete Cartesian product
+in a stable order. The setup displays the exact combination count, per-layer
+value count and sampled limits, and frequency/angle/tolerance workload. Values
+start at Minimum and advance by Step without exceeding Maximum; an off-step
+Maximum is excluded. A varying range needs an explicit step.
+
+There is no seed, sample budget, short search, or local refinement in Inverse
+Design. Legacy project settings for those controls are ignored. **Keep best for
+comparison** limits displayed candidates only, not evaluations. **Stop and keep
+best** retains complete scores and marks an interrupted analysis incomplete.
+**Resume remaining** finishes the same grid without rescoring completed designs,
+or finishes interrupted plots. It is disabled once the run is complete. Inputs
+and material contents must still match; checkpoints last for the session.
+Saved candidates receive separate project and output destinations. See the
+[workflow guide](../../WORKFLOW_GUIDE.md) for examples. Material Mix retains its
+separate recipe-search behavior.
+
+Inverse Design now separates **Setup** and **Results**. Results opens after a
+run and provides a full-width plot with three views: reflection overlays,
+null depth versus passing bandwidth, and analysis history. The
+candidate table can be shown for sorting and choosing overlays, or hidden for
+more plot height. The selected candidate can be applied or saved from Results;
+sorting does not change its identity. The plot toolbar exports the current view.
+
+An adjustable reflection target (initially −10 dB) supports comparison of deep
+narrow nulls against broader responses. The default curve is the pointwise
+worst analyzed angle/tolerance case; analyzed-point percentiles remain available.
+Band coverage and the widest contiguous passing interval are estimated by
+linear interpolation in dB on the sampled sweep, without extrapolation.
+Discrete targets report point coverage only, with no inferred bandwidth.
+These are display metrics for retained candidates; the search continues to
+rank its original mean-dB objective. Increase **Keep best** to review more
+alternatives and use a finer frequency sweep to verify narrow features.
+
+Analysis history shows every completed combination and the running best score,
+including work preserved by Resume. A complete run finds the best selected
+mean-dB objective on the specified finite grid, not between grid values or under
+untested conditions. A partial run is explicitly incomplete.
+
+The selected candidate also has an angle/frequency map and a tolerance envelope
+at a selected angle. The run retains explicit angle/tolerance labels for these
+views; later setup changes cannot change their interpretation.
+
+Combinations are generated by index without allocating all proposals. Five
+scores per evaluated design are retained in a compact numeric array; full
+response curves are computed only for the retained candidates. Material and
+wave-term preparation is reused across the grid. Equal scores retain stable
+grid order, making identical runs reproducible without a random seed.
 
 ## Numerical scope
 

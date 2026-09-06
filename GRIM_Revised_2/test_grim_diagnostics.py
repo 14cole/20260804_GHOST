@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,17 @@ import grim_diagnostics as diagnostics
 
 
 class GrimDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        # Each synthetic workspace models a fresh process. Other test modules
+        # import the real backend during discovery; those imports must not
+        # masquerade as a user loading this fixture from a different checkout.
+        # Individual conflict tests still insert their own stale modules.
+        module_patch = mock.patch.dict(sys.modules)
+        module_patch.start()
+        self.addCleanup(module_patch.stop)
+        for relative in diagnostics.GHOST_SENTINELS:
+            sys.modules.pop(Path(relative).stem, None)
+
     def _make_tree(self, root: Path) -> tuple[Path, Path, Path]:
         grim = root / "GRIM_Revised_2"
         ghost = root / "tools" / "GHOST" / "Backend"

@@ -31,6 +31,44 @@ class MaterialMixUiTests(unittest.TestCase):
         parent = signature.parameters["parent"]
         self.assertIsNone(parent.default)
 
+    def test_inverse_full_grid_is_repeatable_and_ignores_legacy_refinement(self):
+        workspace = ImpedanceGui()
+        try:
+            workspace.layers = [LayerConfig(0., False, "", "", 0., is_sheet=True,
+                sheet_resistance=10., inv_rs_min=10., inv_rs_max=20., inv_rs_accuracy=10.)]
+            workspace.inv_freq_mode_var.set("Discrete")
+            workspace.inv_freq_list_var.set("1")
+            workspace.inv_angle_start_var.set("0")
+            workspace.inv_angle_stop_var.set("0")
+            workspace.inv_max_evals_var.set("2")
+            workspace.inv_top_n_var.set("2")
+            workspace.inv_uncertainty_var.set(False)
+            results = []
+            original = workspace._score_inverse_candidate
+            # Repeated runs must start with fresh scores, even in one GUI.
+            for refine in (False, True, True):
+                workspace.inv_refine_var.set(refine)
+                calls = []
+                def score(*args, **kwargs):
+                    calls.append(tuple(layer.sheet_resistance for layer in args[2]))
+                    return original(*args, **kwargs)
+                def run_now(_name, worker, _success, _error):
+                    results.append(worker())
+                with mock.patch.object(workspace, "_score_inverse_candidate", side_effect=score), \
+                     mock.patch.object(workspace, "_run_background_task", side_effect=run_now), \
+                     mock.patch("ibc.ui.messagebox.showerror") as error:
+                    workspace._run_inverse_design()
+                error.assert_not_called()
+                self.assertEqual(sorted(calls), [(10.,), (20.,)])
+                self.assertIn("Evaluated: 2 of 2 combinations", results[-1][1])
+            for candidates, _message, frequencies, samples in results[1:]:
+                self.assertEqual(candidates, results[0][0])
+                self.assertEqual(frequencies, results[0][2])
+                self.assertEqual(samples, results[0][3])
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
     def test_coating_check_runs_read_only_and_shows_approximation_report(self):
         from ibc.compute import LoadedLayer
         workspace = ImpedanceGui()
@@ -45,12 +83,80 @@ class MaterialMixUiTests(unittest.TestCase):
                  mock.patch.object(workspace,'_run_background_task',side_effect=run_now), \
                  mock.patch.object(QMessageBox,'exec',return_value=0) as show:
                 workspace._check_ghost_coating()
-                show.assert_called_once()
+                show.assert_not_called()
+                panel = workspace.analysis_panels['Impedance']
+                self.assertIsNotNone(panel.coating)
+                self.assertEqual(panel.view.currentText(), 'Coating error vs angle')
+                self.assertEqual(workspace.inverse_workspace_tabs.currentIndex(), 1)
             self.assertEqual(published,[])
             workspace._set_task_state(True,'testing')
             self.assertFalse(workspace.coating_check_btn.isEnabled())
             workspace._set_task_state(False,'Ready')
             self.assertTrue(workspace.coating_check_btn.isEnabled())
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_inverse_grid_keeps_full_uncertainty_scores_and_new_target_is_fresh(self):
+        from types import SimpleNamespace
+        import numpy as np
+        workspace = ImpedanceGui()
+        try:
+            workspace.layers = [
+                LayerConfig(0., False, "", "", 0., is_sheet=True, sheet_resistance=100.,
+                            inv_rs_min=100., inv_rs_max=300., inv_rs_accuracy=100.),
+                LayerConfig(.1, False, "material.csv", "", 0.,
+                            inv_t_min_in=.1, inv_t_max_in=.3, inv_t_accuracy_in=.1)]
+            workspace.inv_freq_mode_var.set("Discrete")
+            workspace.inv_angle_start_var.set("0")
+            workspace.inv_angle_stop_var.set("45")
+            workspace.inv_angle_step_var.set("45")
+            workspace.inv_max_evals_var.set("1")
+            workspace.inv_top_n_var.set("1")
+            workspace.inv_uncertainty_var.set(True)
+            workspace.inv_refine_var.set(True)
+            table = MaterialTable([1., 10.], [3-.1j]*2, [1.]*2)
+            material_dir = tempfile.TemporaryDirectory()
+            self.addCleanup(material_dir.cleanup)
+            material_path = Path(material_dir.name) / 'material.csv'
+            material_path.write_text('1,3,-.1,1,0\n10,3,-.1,1,0\n')
+            workspace.layers[1].file_0deg = str(material_path)
+            original = workspace._score_inverse_candidate
+            nominal_scores = []
+            for frequencies in ("1,5", "2,6"):
+                workspace.inv_freq_list_var.set(frequencies)
+                calls, scores, results = [], {}, []
+                def score(*args, **kwargs):
+                    key = tuple((layer.thickness_m, layer.sheet_resistance) for layer in args[2])
+                    calls.append(key)
+                    scores[key] = original(*args, **kwargs)
+                    return scores[key]
+                def refine(objective, _x0, **_kwargs):
+                    # One new physical design is requested repeatedly and is
+                    # requested again for final reporting by the real worker.
+                    x = np.array([.5, .5])
+                    repeated = [objective(x) for _ in range(5)]
+                    self.assertEqual(repeated, [repeated[0]]*5)
+                    return SimpleNamespace(x=x)
+                def run_now(_name, worker, _success, _error):
+                    results.append(worker())
+                with mock.patch("ibc.ui.read_material_table", return_value=table), \
+                     mock.patch("ibc.ui._scipy_optimize.minimize", side_effect=refine), \
+                     mock.patch.object(workspace, "_score_inverse_candidate", side_effect=score), \
+                     mock.patch.object(workspace, "_run_background_task", side_effect=run_now), \
+                     mock.patch("ibc.ui.messagebox.showerror") as error:
+                    workspace._run_inverse_design()
+                error.assert_not_called()
+                self.assertEqual(len(calls), 9)
+                self.assertEqual(len(set(calls)), 9)
+                nominal_scores.append(scores[calls[0]])
+                candidate = results[0][0][0]
+                key = tuple((t*.0254, rs) for t, rs in
+                            zip(candidate.thickness_in, candidate.sheet_resistance_ohm))
+                self.assertEqual((candidate.score_db, candidate.nominal_mean_db,
+                    candidate.worst_mean_db, candidate.avg_mean_db, candidate.best_mean_db), scores[key])
+                self.assertIn("Evaluated: 9 of 9 combinations", results[0][1])
+            self.assertNotEqual(nominal_scores[0], nominal_scores[1])
         finally:
             workspace.deleteLater()
             self.app.processEvents()
@@ -143,7 +249,7 @@ class MaterialMixUiTests(unittest.TestCase):
                 to_hex(workspace.fig.get_facecolor()), "#203040"
             )
             self.assertEqual(
-                to_hex(workspace.ax_heatmap.get_facecolor()), "#304050"
+                to_hex(workspace.analysis_panels['Impedance'].figure.axes[0].get_facecolor()), "#304050"
             )
 
             workspace.clear_host_theme()

@@ -181,6 +181,13 @@ class InterferenceInspector(QWidget):
         self._result = result
         if not self._check_current_plan():
             return
+        selected = self.polarization.currentText()
+        self.polarization.blockSignals(True)
+        self.polarization.clear()
+        self.polarization.addItems(result.get("polarizations", ["VV", "HH", "VH"]))
+        index = self.polarization.findText(selected)
+        self.polarization.setCurrentIndex(max(0, index))
+        self.polarization.blockSignals(False)
         self.table.blockSignals(True)
         self.table.setRowCount(len(result["labels"]))
         for row, label in enumerate(result["labels"]):

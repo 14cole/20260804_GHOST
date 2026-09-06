@@ -37,6 +37,10 @@ of meshing both faces. For nonmagnetic TM, it also eliminates an identically zer
 field-jump density. Both co-polarized channels and mono/bistatic complex fields
 are supported. An air-valued layer is transparent.
 
+Connected segments share one continuous field trace. Segment names, grouping,
+and direction of entry do not change the layer response; the solver orients
+each connected midsurface before evaluating curvature and signed operators.
+
 Current limits: a uniform isotropic passive layer in air; all segments must be
 thin layers with the same thickness/material; no branch junctions. The solver
 rejects k0*d*max(1,abs(sqrt(epsilon*mu))) > 0.15 or d/local-radius > 0.05.
@@ -87,7 +91,10 @@ not be faster for every matrix. An explicit GPU request cannot use mixed mode.
 
 Validate an Assembly, open **Interference inspector**, and press **Inspect
 validated assembly**. Select an exact stored radar sample and inspect again to
-change angle/frequency. VV, HH and VH complex body fields must be present.
+change angle/frequency. Body fields may be stored as real/imaginary arrays or
+as power and phase. The inspector accepts the same polarization aliases as
+Assembly: VV, HH and one VH/HV channel are required. When the body stores both
+VH and HV, both remain independently selectable; neither is averaged away.
 
 The table reports each feature's complex amplitude, phase relative to all other
 contributions, interference term, and change in total RCS if it is removed.
@@ -99,6 +106,9 @@ Toggle Use or change gain/phase for an immediate cached sensitivity preview.
 These edits do not alter the Assembly, re-solve illumination or add mutual
 coupling. The contribution cache is capped at 16 MiB/eight samples. Each new
 inspection verifies source hashes; Assembly edits invalidate displayed results.
+Reading a late sample from a compressed file can take time because earlier
+bytes must be decompressed. Field reads use bounded chunks rather than loading
+the complete response into memory.
 
 **Check corner / termination / curvature / pair study** evaluates a study JSON.
 The supplied [13-case template](tools/GHOST/geometry_tests/feature_family_studies/study.template.json)

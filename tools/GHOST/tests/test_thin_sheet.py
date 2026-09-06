@@ -28,6 +28,23 @@ def sheet_mesh(points, panels=1):
     return rcs._build_linear_mesh_interface_aware(panels, infos)[0]
 
 
+def segmented_layer_snapshot(points, groups, *, reverse_alternate=False):
+    """Keep every physical primitive fixed while varying only its authorship."""
+    snapshot = sheet_snapshot(points)
+    pairs = snapshot["segments"][0]["point_pairs"]
+    snapshot["segments"] = []
+    for index, group in enumerate(np.array_split(np.arange(len(pairs)), groups)):
+        selected = [dict(pairs[i]) for i in group]
+        if reverse_alternate and index % 2:
+            selected = [dict(x1=p["x2"], y1=p["y2"], x2=p["x1"], y2=p["y1"])
+                        for p in selected[::-1]]
+        snapshot["segments"].append(dict(name=f"part_{index}", seg_type=1,
+            properties=["1", "1", "1", "0", "0"], point_pairs=selected))
+    snapshot["ibcs"] = [["1", "thin_dielectric", ".0005", "2"]]
+    snapshot["dielectrics"] = [["2", "3", "-.02", "1", "0"]]
+    return snapshot
+
+
 class ThinSheetPhysicsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -66,6 +83,77 @@ class ThinSheetPhysicsTests(unittest.TestCase):
             _, reversed_field, _, _ = solve_thin_layer_fields(reverse, *args, observation_angles_deg=[12., 48., 86.])
             np.testing.assert_allclose(field, reversed_field, rtol=1e-10, atol=1e-12)
             np.testing.assert_allclose(field, field.T, rtol=.005, atol=2e-6)
+
+    def test_public_fields_ignore_segment_names_grouping_and_local_direction(self):
+        points = np.column_stack((np.linspace(-.05, .05, 97), np.zeros(97)))
+        expected = None
+        for groups, reverse in ((1, False), (2, False), (24, False), (24, True)):
+            with self.subTest(groups=groups, reverse=reverse):
+                snapshot = segmented_layer_snapshot(points, groups, reverse_alternate=reverse)
+                snapshot["segments"].reverse()  # traversal must not depend on list order
+                result = rcs.solve_bistatic_rcs_2d(snapshot, [1.], [12., 48., 86.],
+                    [12., 48., 86.], geometry_units="meters")
+                fields = {pol: np.array([complex(row["rcs_amp_real"], row["rcs_amp_imag"])
+                    for row in result["co_solved_samples"][pol]]) for pol in ("VV", "HH")}
+                if expected is None:
+                    expected = fields
+                else:
+                    for pol in fields:
+                        np.testing.assert_allclose(fields[pol], expected[pol], rtol=1e-10, atol=1e-12)
+
+    def test_oriented_mesh_joins_curved_components_without_mutating_source(self):
+        from thin_sheet import _continuous_oriented_mesh
+        from dataclasses import replace
+        angle = np.linspace(0, 2*np.pi, 41)
+        points = np.column_stack((.08*np.cos(angle), .08*np.sin(angle)))
+        original = sheet_mesh(points)
+        # Split every shared node, reverse alternating elements, shuffle order.
+        nodes, elements = [], []
+        for index, element in enumerate(original.elements):
+            ids = element.node_ids[::-1] if index % 2 else element.node_ids
+            nodes.extend(original.nodes[node] for node in ids)
+            changes = dict(node_ids=(2*index, 2*index+1))
+            if index % 2:
+                changes.update(p0=element.p1, p1=element.p0,
+                               tangent=-element.tangent, normal=-element.normal)
+            elements.append(replace(element, **changes))
+        split = rcs.LinearMesh(nodes, elements[::-1])
+        normalized = _continuous_oriented_mesh(split)
+        self.assertEqual(len(normalized.nodes), len(original.nodes))
+        self.assertEqual(len(split.nodes), 2*len(original.elements))
+        for pol in ("TM", "TE"):
+            args = (self.k, [12., 48.], pol, 3-.02j, 1, .0005)
+            expected = solve_thin_layer_fields(original, *args)
+            actual = solve_thin_layer_fields(split, *args)
+            np.testing.assert_allclose(actual[1], expected[1], rtol=1e-10, atol=1e-12)
+            self.assertAlmostEqual(actual[3]["thickness_curvature_ratio"],
+                                   expected[3]["thickness_curvature_ratio"])
+
+    def test_branching_is_rejected_before_operators(self):
+        from dataclasses import replace
+        original = sheet_mesh([[-.05, 0.], [0., 0.], [.05, 0.]])
+        branched = rcs.LinearMesh(original.nodes, original.elements + [replace(original.elements[0])])
+        with mock.patch.object(rcs, "_assemble_linear_mass_matrix") as assembly:
+            with self.assertRaisesRegex(ValueError, "branching"):
+                solve_thin_layer_fields(branched, self.k, [0], "TE", 3, 1, .0005)
+            assembly.assert_not_called()
+
+    def test_tight_certification_agrees_across_authored_segment_boundaries(self):
+        from solver_quality import accuracy_target_policy
+        fields = []
+        for groups in (1, 24):
+            # Exercise meshing/refinement of distinct authored primitives,
+            # including floating-point differences from interpolating them.
+            points = np.column_stack((np.linspace(-.05, .05, groups+1), np.zeros(groups+1)))
+            snapshot = segmented_layer_snapshot(points, groups)
+            for segment in snapshot["segments"]:
+                segment["properties"][1] = str(96//groups)
+            result = rcs.solve_monostatic_rcs_2d_certified(snapshot, [1.], [12., 48., 86.],
+                geometry_units="meters", mesh_convergence_policy=accuracy_target_policy("tight"))
+            self.assertTrue(result["metadata"]["mesh_convergence_certified"])
+            fields.append([complex(row["rcs_amp_real"], row["rcs_amp_imag"])
+                           for pol in ("VV", "HH") for row in result["co_solved_samples"][pol]])
+        np.testing.assert_allclose(fields[0], fields[1], rtol=1e-10, atol=1e-12)
 
     def test_thick_layer_and_active_medium_are_rejected(self):
         for args in ((3, 1, .1, self.k), (3+.1j, 1, .001, self.k),

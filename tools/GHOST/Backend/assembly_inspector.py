@@ -1,8 +1,6 @@
 """Read-only complex contribution inspection of a sealed Assembly plan."""
 from collections import OrderedDict
 from pathlib import Path
-import json
-import zipfile
 import numpy as np
 
 
@@ -28,53 +26,15 @@ def interference_metrics(body, contributions, gains=None):
                 phase_derivative_m2_per_deg=8*np.pi*np.real(np.conj(total)*1j*applied)*np.pi/180.)
 
 
-def _stored_complex_sample(path, frequency, azimuth, elevation, cancel_check=lambda: False):
-    """Read one exact radar sample, streaming archive gaps in bounded chunks."""
-    with np.load(path, allow_pickle=False) as data:
-        axes = [np.asarray(data[key]) for key in ("azimuths", "elevations", "frequencies", "polarizations")]
-        units = json.loads(str(np.asarray(data["units"]).item()))
-    if units.get("rcs_linear_quantity") != "sigma_3d" or units.get("frequency") != "GHz":
-        raise ValueError("Inspector requires a 3-D body response in GHz and square metres.")
-    fixed = []
-    for axis, value in zip(axes[:3], (azimuth, elevation, frequency)):
-        match = np.flatnonzero(np.isclose(axis.astype(float), value, rtol=0, atol=1e-10))
-        if len(match) != 1:
-            raise ValueError("Inspector requires an exact stored body azimuth/elevation/frequency sample.")
-        fixed.append(int(match[0]))
-    out = np.zeros(3, complex)
-    with zipfile.ZipFile(path) as archive:
-        for field, multiplier in (("rcs_amp_real", 1.), ("rcs_amp_imag", 1j)):
-            if field+".npy" not in archive.namelist():
-                raise ValueError("Inspector requires preserved complex body amplitudes; power alone is insufficient.")
-            with archive.open(field+".npy") as stream:
-                version = np.lib.format.read_magic(stream)
-                reader = np.lib.format.read_array_header_1_0 if version == (1, 0) else np.lib.format.read_array_header_2_0
-                shape, fortran, dtype = reader(stream)
-                if shape != tuple(len(axis) for axis in axes) or dtype.kind != "f":
-                    raise ValueError("Body complex array does not match its axes.")
-                start = stream.tell()
-                positions = []
-                for channel, pol in enumerate(("VV", "HH", "VH")):
-                    match = np.flatnonzero(axes[3].astype(str) == pol)
-                    if not len(match) and pol == "VH":
-                        raise ValueError("Body cross-polarization is not stored; the inspector will not infer it.")
-                    if len(match) != 1:
-                        raise ValueError("Body requires unique VV, HH, VH channels.")
-                    index = np.ravel_multi_index(tuple(fixed)+(int(match[0]),), shape, order="F" if fortran else "C")
-                    positions.append((start+int(index)*dtype.itemsize, channel))
-                for offset, channel in sorted(positions):
-                    while stream.tell() < offset:
-                        if cancel_check():
-                            raise InterruptedError("Inspection cancelled.")
-                        if not stream.read(min(262144, offset-stream.tell())):
-                            raise ValueError("Truncated body response.")
-                    raw = stream.read(dtype.itemsize)
-                    if len(raw) != dtype.itemsize:
-                        raise ValueError("Truncated body response.")
-                    out[channel] += multiplier*np.frombuffer(raw, dtype=dtype, count=1)[0]
-    if not np.all(np.isfinite(out)):
-        raise ValueError("Body sample has nonfinite complex amplitudes.")
-    return out
+def _stored_complex_sample(path, frequency, azimuth, elevation, cancel_check=lambda: False,
+                           *, return_channels=False):
+    """Read the same coherent fields and channel aliases accepted by Assembly."""
+    from feature_sum import _load_grim_sample, _canonical_3d_channel_indices, _require_linear_quantity
+    data = _load_grim_sample(path, frequency, azimuth, elevation, cancel_check)
+    _require_linear_quantity(data, "Inspector body", "sigma_3d")
+    channels, indices = _canonical_3d_channel_indices(data["polarizations"], "Inspector body")
+    sample = np.asarray(data["_amp"][0, 0, 0, indices], complex)
+    return (sample, channels) if return_channels else sample
 
 
 class ContributionInspector:
@@ -109,7 +69,8 @@ class ContributionInspector:
         for field, value in (("frequencies_ghz", frequency), ("azimuths_deg", azimuth), ("elevations_deg", elevation)):
             if not np.any(np.isclose(np.asarray(grid[field], float), value, atol=1e-10, rtol=0)):
                 raise ValueError("Requested inspector sample lies outside the validated Assembly grid.")
-        body = _stored_complex_sample(plan.base_path, frequency, azimuth, elevation, cancel_check)
+        body, channels = _stored_complex_sample(
+            plan.base_path, frequency, azimuth, elevation, cancel_check, return_channels=True)
         directions, basis = radar_frame_basis([azimuth], [elevation], grid["axis_az_deg"], grid["axis_el_deg"], grid.get("roll_deg", 0.))
         placements = _prepared_line_placements_at_frequency(plan.line_placements, frequency, {})
         result = sum_features(None, placements, directions, frequency,
@@ -121,10 +82,13 @@ class ContributionInspector:
             matrix = np.array([[feature["F_vv"][0], feature["F_vh"][0]],
                                [feature["F_vh"][0], feature["F_hh"][0]]], complex)
             radar = basis[0].T @ matrix @ basis[0]
-            fields.append([radar[0,0], radar[1,1], radar[0,1]])
+            channel_fields = {"VV": radar[0,0], "HH": radar[1,1],
+                              "VH": radar[0,1], "HV": radar[1,0]}
+            fields.append([channel_fields[channel] for channel in channels])
         labels = (["Line "+str(item.get("line_id", i+1)) for i,item in enumerate(plan.line_placements)] +
                   ["Point "+str(item.get("placement_id", i+1)) for i,item in enumerate(plan.point_placements)])
-        output = dict(body=body, fields=np.asarray(fields, complex).reshape(-1, 3), labels=labels, key=key)
+        output = dict(body=body, fields=np.asarray(fields, complex).reshape(-1, len(channels)),
+                      polarizations=channels, labels=labels, key=key)
         for source, expected in plan.prepared_source_sha256.items():
             if cancel_check():
                 raise InterruptedError("Inspection cancelled.")

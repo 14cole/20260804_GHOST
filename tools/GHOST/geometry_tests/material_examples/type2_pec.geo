@@ -1,0 +1,16 @@
+Title: TYPE 2 PEC square
+
+# Coordinate units: meters. Start with 2D at 1 GHz.
+# Illustrative input example; use mesh convergence for production results.
+
+Segment: pec_body 2
+properties: 2 0 0 0 0
+-0.05 -0.05 -0.05 0.05
+-0.05 0.05 0.05 0.05
+0.05 0.05 0.05 -0.05
+0.05 -0.05 -0.05 -0.05
+
+IBCS_Resistances:
+
+
+Dielectrics:

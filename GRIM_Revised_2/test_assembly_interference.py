@@ -51,6 +51,19 @@ class InterferencePreviewTests(unittest.TestCase):
         self.assertEqual(self.widget.table.item(0, 8).text(), "undefined")
         self.assertIn("12.5664 m2", self.widget.total.text())
 
+    def test_four_channel_preview_keeps_hv_distinct_and_resets_for_three_channels(self):
+        four = dict(self.result, polarizations=["VV", "HH", "VH", "HV"],
+                    body=np.array([1, 1, 2, 3], complex), fields=np.full((1, 4), .5j))
+        self.widget._show(four)
+        self.widget.polarization.setCurrentText("HV")
+        self.assertIn("HV. Preview total: 116.239 m2", self.widget.total.text())
+        self.widget.polarization.setCurrentText("VH")
+        self.assertIn("VH. Preview total: 53.4071 m2", self.widget.total.text())
+        self.widget.polarization.setCurrentText("HV")
+        self.widget._show(self.result)
+        self.assertEqual(self.widget.polarization.count(), 3)
+        self.assertEqual(self.widget.polarization.currentText(), "VV")
+
 
 if __name__ == "__main__":
     unittest.main()

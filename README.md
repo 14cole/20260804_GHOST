@@ -21,6 +21,10 @@ the embedded workspaces. The existing Dark palette remains the default.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module responsibilities and extension
 boundaries.
 
+See [WORKFLOW_GUIDE.md](WORKFLOW_GUIDE.md) for fixed/variable FREDDY searches,
+stop/extend and candidate saves, shared GHOST/Runs setups, Assembly mapping and
+variants, and reusable PowerPoint report recipes.
+
 ## Folder layout
 
 ```text

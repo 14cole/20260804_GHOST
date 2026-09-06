@@ -265,7 +265,8 @@ class MaterialExplorerUiTests(unittest.TestCase):
             workspace.mode_stack.setCurrentIndex(0)
             self.app.processEvents()
             self.assertFalse(workspace.layers_group.isHidden())
-            self.assertFalse(workspace.results_pane.isHidden())
+            self.assertTrue(workspace.results_pane.isHidden())
+            self.assertIs(workspace.result_pages.currentWidget(), workspace.analysis_panels['Impedance'])
         finally:
             workspace.deleteLater()
             self.app.processEvents()

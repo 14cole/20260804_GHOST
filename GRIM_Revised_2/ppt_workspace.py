@@ -515,7 +515,9 @@ if GUI_AVAILABLE:
                 self.order_changed.emit()
 
 
-    class PptWorkspace(QWidget):
+    from ppt_workflow import ReportWorkflowMixin
+
+    class PptWorkspace(ReportWorkflowMixin, QWidget):
         """Top-level GRIM workspace for uniform, previewed PPTX reports."""
 
         report_exported = Signal(str)
@@ -528,10 +530,12 @@ if GUI_AVAILABLE:
             *,
             exporter: Callable[..., Any] = export_powerpoint_report,
             selected_ids_provider: Callable[[], Iterable[str]] | None = None,
+            current_plot_provider: Callable[[], dict] | None = None,
         ) -> None:
             super().__init__(parent)
             self._exporter = exporter
             self._selected_ids_provider = selected_ids_provider
+            self._current_plot_provider = current_plot_provider
             self._catalog: dict[str, DatasetCatalogEntry] = {}
             self._availability: Any = None
             self._syncing = False
@@ -555,6 +559,7 @@ if GUI_AVAILABLE:
             self._x_axis_customized: set[str] = set()
             self._series_line_widths: dict[str, float] = {}
             self._series_line_styles: dict[str, str] = {}
+            self._series_line_colors: dict[str, str] = {}
             self._preview_temp = tempfile.TemporaryDirectory(prefix="grim-ppt-preview-")
             # Embedded hosts normally call dispose(), but a Python/Qt wrapper
             # can outlive its native widget during teardown or abnormal
@@ -643,6 +648,7 @@ if GUI_AVAILABLE:
                 for dataset_id, value in self._series_line_styles.items()
                 if dataset_id in incoming
             }
+            self._series_line_colors = {key:value for key,value in self._series_line_colors.items() if key in incoming}
             self._refresh_series_style_datasets()
             self._dataset_selection_changed()
 
@@ -1163,6 +1169,7 @@ if GUI_AVAILABLE:
             self.template_options_widget.setVisible(False)
             deck_layout.addWidget(self.template_options_widget)
             controls.addWidget(deck_group)
+            self._build_report_workflow(controls)
 
             controls.addStretch(1)
             self.controls_scroll.setWidget(self.controls_content)
@@ -1437,6 +1444,7 @@ if GUI_AVAILABLE:
                 return
             self._series_line_widths.pop(dataset_id, None)
             self._series_line_styles.pop(dataset_id, None)
+            self._series_line_colors.pop(dataset_id, None)
             self._load_series_style_controls()
             self._mark_preview_stale()
 
@@ -1457,6 +1465,7 @@ if GUI_AVAILABLE:
                     styled_series.append(
                         replace(
                             series,
+                            color=self._series_line_colors.get(dataset_id, series.color),
                             line_width=float(
                                 self._series_line_widths.get(
                                     dataset_id,
@@ -2544,6 +2553,8 @@ if GUI_AVAILABLE:
         @Slot(str)
         def _export_succeeded(self, path: str) -> None:
             self._last_error = ""
+            self._last_exported_presentation = path
+            self.open_presentation_button.setEnabled(True)
             self._set_status(f"PowerPoint report saved: {path}")
             self.report_exported.emit(path)
 

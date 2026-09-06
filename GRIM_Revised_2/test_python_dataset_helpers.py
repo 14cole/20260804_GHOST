@@ -430,12 +430,18 @@ class PythonDatasetHelperTest(unittest.TestCase):
 
         declared_a = _grid(extra={"phase_reference": "origin A"})
         declared_b = _grid(extra={"phase_reference": "origin B"})
-        with self.assertRaisesRegex(ValueError, "matching phase references"):
-            combine_datasets(
-                (left, declared_a, declared_b),
-                "coherent-add",
-                coherent_metadata_attested=True,
-            )
+        combined = combine_datasets(
+            (left, declared_a, declared_b),
+            "coherent-add",
+            coherent_metadata_attested=True,
+        )
+        np.testing.assert_allclose(combined.rcs_power, 9 * left.rcs_power)
+        conventions = json.loads(combined.extra["coherent_source_conventions_json"])
+        self.assertEqual(conventions["declared_values"]["phase_reference"],
+                         ["origin A", "origin B"])
+        record = json.loads(combined.extra["coherent_metadata_attestation_json"])
+        self.assertTrue(any("phase references" in issue for issue in record["advisories"]))
+        self.assertFalse(record["declarations_inferred"])
         with self.assertRaisesRegex(TypeError, "must be True or False"):
             combine_datasets(
                 (left, right),
