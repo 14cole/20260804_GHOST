@@ -13,10 +13,24 @@ operations or numerical work.
 | `GRIM_Revised_2/grim_theme.py` | Convert palette tokens into Qt stylesheets and branch indicators. |
 | `GRIM_Revised_2/grim_cut_dataset_mixin.py` | Coordinate dataset operations, background jobs, saves, undo, and publication into the catalog. |
 | `GRIM_Revised_2/grim_dataset.py` | `RcsGrid` data representation, numerical operations, and existing dataset APIs. |
+| `GRIM_Revised_2/grim_format_io.py`, `grim_cst_io.py`, `grim_sentri_io.py`, `grim_legacy_io.py`, `grim_pio_io.py` | Native archive loading and format-specific adapters inherited by `RcsGrid`. Preserve classmethod dispatch, allocation checks, metadata, and existing reader/writer signatures. |
+| `GRIM_Revised_2/dataset_dialogs.py` | Dataset operation dialogs and input-unit presentation. |
+| `GRIM_Revised_2/dataset_jobs.py` | Background workers, loader memory admission, and bounded parallel loading. |
+| `GRIM_Revised_2/dataset_publication.py` | Atomic GRIM/CSV staging, rollback, and compression policy. |
+| `GRIM_Revised_2/feature_assembly_values.py` | Shared Qt-free form values and loaded recipe records. |
+| `GRIM_Revised_2/feature_assembly_model.py` | Qt-free Assembly form state, workload estimates, preflight, and backend adaptation. |
+| `GRIM_Revised_2/feature_assembly_recipe.py` | Portable recipe serialization and atomic recipe publication. |
+| `GRIM_Revised_2/feature_assembly_panel.py` | Qt controls and worker lifecycle, with compatibility exports for the form/recipe APIs. |
+| `GRIM_Revised_2/plot_modes/isar_render.py` | ISAR GUI selection capture and image presentation; numerical formation and caches remain in `isar_mode.py`. |
 | `GRIM_Revised_2/grim_metadata.py` | Inspect scalar metadata evidence and normalize convention declarations without Qt or dataset-object dependencies. |
 | `GRIM_Revised_2/grim_cut_plot_mixin.py` and `plot_modes/` | Plot orchestration and mode-specific rendering. |
 | `GRIM_Revised_2/ghost_integration.py` and `freddy_integration.py` | Discover and embed the authoritative tools and relay their artifacts/signals. |
 | `tools/GHOST/Backend/solver_tab.py` | Solver form, execution controls, and progress. Its form scrolls separately from its action footer. |
+| `tools/GHOST/Backend/rcs_solver.py` | 2-D solve orchestration, formulations, quality gates, resource admission, and compatibility imports for existing callers. |
+| `tools/GHOST/Backend/rcs_constants.py`, `rcs_special.py` | Shared physical/default constants and trusted Bessel/Hankel backends. |
+| `tools/GHOST/Backend/rcs_geometry.py` | Material tables, geometry validation, and panel/linear-mesh construction. |
+| `tools/GHOST/Backend/rcs_operators.py` | Quadrature, boundary operators, field evaluation, and operator tuning state. |
+| `tools/GHOST/Backend/driver_io.py` | Shared geometry-input verification, cache-aware snapshot loading, and durable submission journals. Each local driver supplies its own cache. |
 | `tools/GHOST/Backend/material_models.py` | Material explanations and thin-layer input dialog. Numerical material semantics remain in the backend. |
 | `tools/GHOST/Backend/thin_sheet.py` | Thin-layer validity checks, jump operators and field evaluation. Reuses 2D quadrature and linear-solve primitives. |
 | `tools/GHOST/Backend/refined_lu.py` | Opt-in factor/refinement policy, double residual checks and fallback signaling. No Qt dependencies. |
@@ -26,6 +40,10 @@ operations or numerical work.
 | `tools/GHOST/Backend/assembly_inspector.py` | Source-verified complex contribution evaluation, bounded sample cache and interference algebra. |
 | `GRIM_Revised_2/assembly_interference.py` | Inspector presentation and worker lifecycle; delegates numerical evaluation to the backend service. |
 | `tools/GHOST/Backend/feature_family_validation.py` | Reference-study definitions, convergence/reconstruction checks and evidence reports. Never generates purported full-wave truth. |
+| `tools/FREDDY/ibc/design_search.py` | Qt-free inverse-stack and bounded material-recipe searches over captured request data; callbacks provide cancellation, progress, and numerical adapters. |
+| `tools/FREDDY/ibc/ui_controls.py`, `ui_dialogs.py`, `ui_options.py` | Shared bindings, layer/material editors, and stable form option values. |
+| `tools/FREDDY/ibc/project_state.py` | Project capture/restoration between controls and portable dictionaries; path and file semantics remain in `ibc/io.py`. |
+| `GRIM_Revised_2/examples/_folder_common.py` | Shared folder discovery and axis-limit validation for the separate editable sweep examples. |
 | `tools/FREDDY/ibc/ghost_coating.py` | Planar reflection assessment of the scalar PEC-backed IBC approximation and frequency interpolation; no file writes, GUI dependencies or finite-body accuracy claims. |
 
 ## Dependency rules
@@ -46,6 +64,28 @@ operations or numerical work.
   changing numerical eligibility or guessing field transformations.
 - Keep GHOST and FREDDY numerical implementations within their tool trees.
   GRIM integration classes own embedding and handoff behavior.
+
+## Module boundaries and compatibility
+
+The established `RcsGrid` methods, dataset controller imports, Assembly form
+imports, ISAR entrypoints, and GHOST driver paths remain available. The
+controller/facade modules explicitly import moved symbols rather than retaining
+second implementations. Tests that inject failures into an implementation patch
+the module that now owns that implementation.
+
+The GHOST dependency direction is constants -> special functions -> geometry ->
+operators -> solve orchestration. Numerical functions/classes were moved with
+their decorators and formulas intact. Operator tuning uses the existing
+`rcs_solver.set_*` functions, whose implementation now owns state in
+`rcs_operators`; direct inspection or patching of private operator state belongs
+in that module. Both local drivers retain independent snapshot caches.
+
+Format adapters import model policies at call time so the data model can inherit
+the adapters without a module-initialization cycle. Assembly recipes share
+form record types directly and resolve model policy helpers when called. Headless model, search,
+and numerical modules must remain importable without a Qt installation. FREDDY
+search services receive captured inputs rather than reading widgets while a job
+runs; the GUI retains publication, selection, and background-job ownership.
 
 ## Saving and sizing
 

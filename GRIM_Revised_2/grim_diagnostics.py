@@ -25,13 +25,24 @@ import uuid
 
 MINIMUM_PYTHON = (3, 10)
 
-# Importing ``grim_cut_gui`` eagerly imports these repository modules before a
-# window can be shown.  Keep this explicit, standard-library-only manifest in
-# the diagnostics module so both the release builder and the diagnostic check
-# validate the same startup contract without importing Qt, Matplotlib, NumPy,
-# or SciPy.  Lazy format readers such as ``ptm_io`` and ``read_ss`` are still
-# packaged, but they are not part of the launch-time gate.
+# Source modules required by the integrated window and its built-in workspaces.
+# Most are eagerly imported; a few presentation adapters load on first use.
+# Keep this standard-library-only manifest shared by diagnostics and the release
+# builder so missing modules are detected without importing Qt, Matplotlib,
+# NumPy, or SciPy. Low-level lazy readers such as ``ptm_io`` and ``read_ss``
+# are packaged separately from this startup/workspace gate.
 GRIM_STARTUP_FILES = (
+    "grim_format_io.py",
+    "grim_cst_io.py",
+    "grim_sentri_io.py",
+    "grim_legacy_io.py",
+    "grim_pio_io.py",
+    "dataset_dialogs.py",
+    "dataset_publication.py",
+    "dataset_jobs.py",
+    "feature_assembly_model.py",
+    "feature_assembly_values.py",
+    "feature_assembly_recipe.py",
     "grim_cut_gui.py",
     "assembly_tree.py",
     "assembly_workspace.py",
@@ -66,6 +77,7 @@ GRIM_STARTUP_FILES = (
     Path("plot_modes") / "elevation_sweep_mode.py",
     Path("plot_modes") / "frequency_mode.py",
     Path("plot_modes") / "isar_mode.py",
+    Path("plot_modes") / "isar_render.py",
     Path("plot_modes") / "waterfall_mode.py",
 )
 
@@ -75,6 +87,11 @@ GRIM_SENTINELS = GRIM_STARTUP_FILES
 
 # Keep this aligned with the reusable workspace contract in ghost_integration.
 GHOST_SENTINELS = (
+    "driver_io.py",
+    "rcs_constants.py",
+    "rcs_special.py",
+    "rcs_geometry.py",
+    "rcs_operators.py",
     "material_models.py",
     "solver_metrics.py",
     "thin_sheet.py",
@@ -110,6 +127,11 @@ GHOST_SENTINELS = (
 )
 
 FREDDY_SENTINELS = (
+    Path("ibc") / "design_search.py",
+    Path("ibc") / "ui_controls.py",
+    Path("ibc") / "ui_dialogs.py",
+    Path("ibc") / "ui_options.py",
+    Path("ibc") / "project_state.py",
     Path("ibc") / "__init__.py",
     Path("ibc") / "batch.py",
     Path("ibc") / "compute.py",

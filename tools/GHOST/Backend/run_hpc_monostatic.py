@@ -78,6 +78,10 @@ from workflow_provenance import (
     verify_embedded_attestation,
 )
 
+# Compatibility imports retain the established module entrypoints.
+from driver_io import publish_submission_journal as _durably_publish_submitted_jobs
+
+
 # ===============================================================================
 # CONFIG -- the only section most users need to edit
 # ===============================================================================
@@ -470,30 +474,6 @@ def _solve_and_export_star(args):
 
 # --- submit mode (user-invoked) --------------------------------------------
 
-def _durably_publish_submitted_jobs(path, document):
-    # type: (Path, Dict[str, Any]) -> None
-    """Atomically publish a submission journal after its bytes reach disk."""
-
-    temporary_path = path.with_suffix(".json.tmp")
-    with temporary_path.open("w", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(document, indent=2) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(str(temporary_path), str(path))
-
-    # A file fsync makes the journal contents durable; on POSIX, also ask the
-    # filesystem to persist the rename itself.  Some network filesystems do
-    # not support directory fsync, so that second barrier is best effort.
-    if os.name == "posix":
-        try:
-            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            parent_fd = os.open(str(path.parent), flags)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
-        except OSError:
-            pass
 
 def _plan_schedule(units, n_slots, fine_factor, n_angles):
     # type: (List[Dict[str, Any]], int, float, int) -> Dict[str, Any]

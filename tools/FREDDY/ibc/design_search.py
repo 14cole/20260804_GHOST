@@ -1,0 +1,611 @@
+"""Qt-free inverse-stack and bounded material-recipe search services.
+
+Requests capture inputs before dispatch. Search execution never reads widgets;
+the caller supplies cancellation, progress, and optional evaluation adapters.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+try:
+    import numpy as np
+except ImportError:  # The scalar FREDDY path remains available.
+    np = None
+import math
+import random
+from pathlib import Path
+from .compute import (
+    INCH_TO_M,
+    InverseCandidate,
+    LayerConfig,
+    LoadedLayer,
+    MIX_RULE_LABELS,
+    MaterialTable,
+    MixCandidate,
+    MixComponent,
+    UncertaintyConfig,
+    blend_density_gcc,
+    build_uncertainty_scales,
+    combine_mix,
+    compute_angle_metrics_many,
+    interp_components_on_grid,
+    is_nominal_scale,
+    mix_model_advisories,
+    parts_to_fractions,
+    prepare_layer_properties_many,
+    prepare_layer_wave_terms_many,
+    project_bounded_fractions,
+    property_match_error,
+    validate_sweep_coverage,
+    weight_fractions_from_volume,
+)
+from .io import read_material_table
+from .inverse_workflow import StopInverseSearch, search_identity
+from .inverse_grid import DesignGrid
+from .inverse_grid import DesignGrid
+from .inverse_workflow import StopInverseSearch, search_identity
+
+
+def score_inverse_candidate(target_freqs, target_angles, candidate_layers, wave_pol,
+                            scales, score_mode, prepared_wave_terms=None, *,
+                            stop_requested, statistics,
+                            compute_metrics=compute_angle_metrics_many):
+    """Score a complete candidate, observing cancellation between responses."""
+    corner_means: list[float] = []
+    nominal_mean: float | None = None
+    for t_scale, e_scale, m_scale in scales:
+        values: list[float] = []
+        for angle_deg in target_angles:
+            if stop_requested():
+                raise StopInverseSearch()
+            prepared = (
+                prepared_wave_terms.get((angle_deg, e_scale, m_scale))
+                if prepared_wave_terms is not None
+                else None
+            )
+            metrics = compute_metrics(
+                target_freqs,
+                angle_deg,
+                candidate_layers,
+                wave_pol,
+                thickness_scale=t_scale,
+                eps_scale=e_scale,
+                mu_scale=m_scale,
+                prepared_wave_terms=prepared,
+            )
+            values.extend(metrics["metal_loss_db"])
+        mean_db, _mn, _mx = statistics(values)
+        corner_means.append(mean_db)
+        if abs(t_scale - 1.0) < 1e-12 and abs(e_scale - 1.0) < 1e-12 and abs(m_scale - 1.0) < 1e-12:
+            nominal_mean = mean_db
+
+    if not corner_means:
+        raise ValueError("No corner scores computed for inverse candidate.")
+    if nominal_mean is None:
+        nominal_mean = corner_means[0]
+
+    worst_mean = max(corner_means)
+    avg_mean = sum(corner_means) / len(corner_means)
+    best_mean = min(corner_means)
+    score_db = worst_mean if "worst" in score_mode.lower() else avg_mean
+    return score_db, nominal_mean, worst_mean, avg_mean, best_mean
+
+
+@dataclass(frozen=True)
+class InverseSearchRequest:
+    """Captured inputs for a background search, independent of widgets."""
+    layer_snapshot: list[LayerConfig]
+    target_freqs: list[float]
+    target_angles: list[float]
+    wave_pol: str
+    uncertainty_cfg: UncertaintyConfig
+    score_mode: str
+    checkpoint: dict | None
+    grid: DesignGrid
+    skiprows: int
+    top_n: int
+    target_freq_desc: str
+    a_start: float
+    a_stop: float
+    numpy_available: bool
+
+
+def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progress,
+                       score_candidate, read_table=read_material_table,
+                       compute_metrics=compute_angle_metrics_many):
+    """Evaluate captured inputs; callbacks carry cancellation/progress or pure calculations."""
+    completed = {}
+    layer_snapshot = request.layer_snapshot
+    target_freqs = request.target_freqs
+    target_angles = request.target_angles
+    wave_pol = request.wave_pol
+    uncertainty_cfg = request.uncertainty_cfg
+    score_mode = request.score_mode
+    checkpoint = request.checkpoint
+    grid = request.grid
+    skiprows = request.skiprows
+    top_n = request.top_n
+    target_freq_desc = request.target_freq_desc
+    a_start = request.a_start
+    a_stop = request.a_stop
+    numpy_available = request.numpy_available
+
+    from array import array
+    import heapq
+    identity = search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
+                               uncertainty_cfg, score_mode)
+    if checkpoint and checkpoint['identity'] != identity:
+        raise ValueError("Inputs or material files changed. Start a new analysis instead of resuming.")
+    def check_stop():
+        if stop_requested():
+            raise StopInverseSearch()
+    scales = build_uncertainty_scales(uncertainty_cfg)
+    table_cache: dict[str, MaterialTable] = {}
+
+    def get_table(path_str: str) -> MaterialTable:
+        key = str(Path(path_str))
+        if key not in table_cache:
+            table_cache[key] = read_table(Path(key), skiprows)
+        return table_cache[key]
+
+    def prepare_material_combo(
+        chosen_files: list[str],
+    ) -> tuple[bool, list[MaterialTable | None], list[MaterialTable | None]]:
+        tables_0_local: list[MaterialTable | None] = []
+        tables_90_local: list[MaterialTable | None] = []
+        for i, layer in enumerate(layer_snapshot, start=1):
+            if layer.is_sheet:
+                tables_0_local.append(None)
+                tables_90_local.append(None)
+                continue
+            table_0 = get_table(chosen_files[i - 1])
+            try:
+                validate_sweep_coverage(
+                    target_freqs, table_0, f"inverse layer {i} 0deg/isotropic"
+                )
+            except Exception as exc:
+                raise ValueError(f"Layer {i}: {exc}") from exc
+            table_90: MaterialTable | None = None
+            if layer.anisotropic:
+                table_90 = get_table(layer.file_90deg)
+                try:
+                    validate_sweep_coverage(
+                        target_freqs, table_90, f"inverse layer {i} 90deg"
+                    )
+                except Exception as exc:
+                    raise ValueError(f"Layer {i}, 90 deg: {exc}") from exc
+            tables_0_local.append(table_0)
+            tables_90_local.append(table_90)
+        return True, tables_0_local, tables_90_local
+
+    # Validated material tables are reused for every
+    # candidate. Each candidate is fully described by its per-layer
+    # thicknesses (bulk) and resistances (sheets).
+    def build_loaded_layers(
+        thicknesses: list[float], resistances: list[float]
+    ) -> list[LoadedLayer]:
+        out: list[LoadedLayer] = []
+        for i, layer in enumerate(layer_snapshot):
+            if layer.is_sheet:
+                out.append(
+                    LoadedLayer(
+                        thickness_m=0.0,
+                        anisotropic=False,
+                        polarization_deg=0.0,
+                        table_0deg=None,
+                        table_90deg=None,
+                        is_sheet=True,
+                        sheet_resistance=resistances[i],
+                    )
+                )
+            else:
+                out.append(
+                    LoadedLayer(
+                        thickness_m=thicknesses[i] * INCH_TO_M,
+                        anisotropic=layer.anisotropic,
+                        polarization_deg=layer.polarization_deg,
+                        table_0deg=tables_0[i],
+                        table_90deg=tables_90[i],
+                    )
+                )
+        return out
+
+
+    chosen_files = ['' if layer.is_sheet else layer.file_0deg for layer in layer_snapshot]
+    _coverage_ok, tables_0, tables_90 = prepare_material_combo(chosen_files)
+    base_thick, base_rs = grid.design(0)
+    prepared_inverse_wave_terms = {}
+    if numpy_available:
+        reference_layers = build_loaded_layers(base_thick, base_rs)
+        prepared_properties = prepare_layer_properties_many(
+            target_freqs, reference_layers
+        )
+        for _t_scale, e_scale, m_scale in scales:
+            for angle_deg in target_angles:
+                key = (angle_deg, e_scale, m_scale)
+                if key not in prepared_inverse_wave_terms:
+                    prepared_inverse_wave_terms[key] = (
+                        prepare_layer_wave_terms_many(
+                            target_freqs,
+                            angle_deg,
+                            reference_layers,
+                            wave_pol,
+                            eps_scale=e_scale,
+                            mu_scale=m_scale,
+                            prepared_properties=prepared_properties,
+                        )
+                    )
+
+
+    # Store five scores per completed design, rather than millions of
+    # proposal objects or full response grids. The grid index recovers
+    # the exact design and permits resumption without repeating scores.
+    score_rows = checkpoint['score_rows'] if checkpoint else array('d')
+    next_index = checkpoint['next_index'] if checkpoint else 0
+    try:
+        while next_index < grid.total:
+            check_stop()
+            thicknesses, resistances = grid.design(next_index)
+            scores = score_candidate(
+                target_freqs, target_angles, build_loaded_layers(thicknesses, resistances),
+                wave_pol, scales, score_mode, prepared_inverse_wave_terms)
+            if len(scores) != 5 or not all(math.isfinite(v) for v in scores):
+                raise ValueError(f'Combination {next_index + 1}: incomplete or nonfinite scores.')
+            score_rows.extend(scores)
+            next_index += 1
+            progress(next_index, grid.total, 'Analyzing')
+    except StopInverseSearch:
+        pass
+    top_candidates = []
+    for index in heapq.nsmallest(min(top_n, next_index), range(next_index),
+                                key=lambda i: (score_rows[5*i], i)):
+        thicknesses, resistances = grid.design(index)
+        top_candidates.append(InverseCandidate(*score_rows[5*index:5*index+5],
+                                               thicknesses, chosen_files[:], resistances))
+    completed.update(identity=identity, score_rows=score_rows, next_index=next_index,
+                     total=grid.total, plots_complete=False)
+    progress(next_index, grid.total, 'Preparing comparison plots')
+    inverse_samples: list[list[list[float]]] = []
+    try:
+        for cand in top_candidates:
+            cand_layers = build_loaded_layers(cand.thickness_in, cand.sheet_resistance_ohm)
+            freq_samples = [[] for _ in target_freqs]
+            for t_scale, e_scale, m_scale in scales:
+                for angle_deg in target_angles:
+                    check_stop()
+                    metrics = compute_metrics(
+                        target_freqs,
+                        angle_deg,
+                        cand_layers,
+                        wave_pol,
+                        thickness_scale=t_scale,
+                        eps_scale=e_scale,
+                        mu_scale=m_scale,
+                        prepared_wave_terms=prepared_inverse_wave_terms.get(
+                            (angle_deg, e_scale, m_scale)
+                        ),
+                    )
+                    for fi, val in enumerate(metrics["metal_loss_db"]):
+                        freq_samples[fi].append(val)
+            inverse_samples.append(freq_samples)
+
+    except StopInverseSearch:
+        inverse_samples = []
+    completed['plots_complete'] = len(inverse_samples) == len(top_candidates)
+    if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
+                       uncertainty_cfg, score_mode) != identity:
+        raise ValueError("Material files changed during the analysis. Run again with stable inputs.")
+    complete = next_index == grid.total
+    status = ('All combinations analyzed' if complete else
+              'Stopped; analysis is incomplete. Resume to analyze the remaining combinations')
+    if not completed['plots_complete']:
+        status += '. Comparison plots unfinished; Resume completes them'
+    best_text = (f'Best score: {top_candidates[0].score_db:.3f} dB' if top_candidates
+                 else 'No combination was fully evaluated.')
+    msg = (f'{status}.\n'
+           f'Evaluated: {next_index:,} of {grid.total:,} combinations\n'
+           f'Objective: {score_mode}\n'
+           f'Region: {target_freq_desc}, {a_start:g}-{a_stop:g} deg, pol={wave_pol.upper()}\n'
+           f'Tolerance/nominal cases per combination: {len(scales)}\n'
+           f'Allowed values: {grid.description()}\n'
+           'Values advance from each minimum by its step; an off-step maximum is excluded.\n'
+           f'{best_text}\n'
+           f'Retained {len(top_candidates)} best candidates for comparison. '
+           'Keep best does not limit the combinations analyzed.')
+    return (top_candidates, msg, [float(v) for v in target_freqs], inverse_samples), completed
+
+
+@dataclass(frozen=True)
+class MixSearchRequest:
+    """Captured inputs for a background search, independent of widgets."""
+    uncertainty_cfg: UncertaintyConfig
+    comp_snapshot: list[dict]
+    target_freqs: list[float]
+    rule_norm: str
+    property_mode: bool
+    performance_mode: bool
+    target: dict | None
+    thickness_in: float
+    performance_config: dict | None
+    score_mode: str
+    search_seed: int | None
+    lower: list[float]
+    upper: list[float]
+    max_evals: int
+    top_n: int
+    refine: bool
+    prop_desc: str
+    target_desc: str
+    numpy_available: bool
+
+
+def run_mix_search(request: MixSearchRequest, *, evaluate_performance, build_display,
+                   read_table=read_material_table, optimizer=None):
+    """Evaluate captured inputs; callbacks carry cancellation/progress or pure calculations."""
+    if request.refine and optimizer is None:
+        from scipy import optimize as optimizer
+    uncertainty_cfg = request.uncertainty_cfg
+    comp_snapshot = request.comp_snapshot
+    target_freqs = request.target_freqs
+    rule_norm = request.rule_norm
+    property_mode = request.property_mode
+    performance_mode = request.performance_mode
+    target = request.target
+    thickness_in = request.thickness_in
+    performance_config = request.performance_config
+    score_mode = request.score_mode
+    search_seed = request.search_seed
+    lower = request.lower
+    upper = request.upper
+    max_evals = request.max_evals
+    top_n = request.top_n
+    refine = request.refine
+    prop_desc = request.prop_desc
+    target_desc = request.target_desc
+    numpy_available = request.numpy_available
+
+    scales = build_uncertainty_scales(uncertainty_cfg)
+    cache: dict[str, MaterialTable] = {}
+    comps: list[dict] = []
+    for index, component in enumerate(comp_snapshot, start=1):
+        path = component["file"]
+        if not path:
+            raise ValueError(f"Material {index}: property file is required.")
+        key = str(Path(path))
+        if key not in cache:
+            cache[key] = read_table(Path(key), 0)
+        comps.append({**component, "file": key, "table": cache[key]})
+
+    base_components = [
+        MixComponent(table=component["table"], parts=1.0)
+        for component in comps
+    ]
+    eps_cols, mu_cols = interp_components_on_grid(
+        base_components, target_freqs
+    )
+    component_files = [component["file"] for component in comps]
+    densities = [component["density"] for component in comps]
+
+    def score_fractions(fractions: list[float]):
+        table = combine_mix(
+            target_freqs, eps_cols, mu_cols, fractions, rule_norm
+        )
+        corner_values: list[float] = []
+        nominal: float | None = None
+        for t_scale, eps_scale, mu_scale in scales:
+            if property_mode:
+                error = property_match_error(
+                    table.eps_r,
+                    table.mu_r,
+                    target["eps"],
+                    target["mu"],
+                    target["w_eps"],
+                    target["w_mu"],
+                    eps_scale,
+                    mu_scale,
+                )
+            else:
+                error = evaluate_performance(
+                    table,
+                    thickness_in,
+                    performance_config,
+                    thickness_scale=t_scale,
+                    eps_scale=eps_scale,
+                    mu_scale=mu_scale,
+                )["gap"]
+            corner_values.append(error)
+            if is_nominal_scale(t_scale, eps_scale, mu_scale):
+                nominal = error
+        if nominal is None:
+            nominal = corner_values[0]
+        worst = max(corner_values)
+        average = sum(corner_values) / len(corner_values)
+        score = worst if "worst" in score_mode.lower() else average
+        return score, nominal, worst, average, min(corner_values)
+
+    rng = random.Random(search_seed)
+    current_amounts = [component["parts"] for component in comps]
+    if sum(current_amounts) > 0:
+        seed_values = parts_to_fractions(current_amounts)
+    else:
+        # An all-zero forward recipe is still meaningful while setting
+        # inverse bounds; begin the search at the middle of those bounds.
+        seed_values = [0.5 * (lo + hi) for lo, hi in zip(lower, upper)]
+    recipe_seed = project_bounded_fractions(seed_values, lower, upper)
+    proposals = [recipe_seed]
+    seen = {tuple(round(value, 12) for value in recipe_seed)}
+    attempts = 0
+    while len(proposals) < max_evals and attempts < max_evals * 30:
+        attempts += 1
+        # Exponential variates normalized to a simplex give broad
+        # coverage; projection then enforces the engineer's vol-% bounds.
+        raw = [-math.log(max(rng.random(), 1e-15)) for _ in comps]
+        proposal = project_bounded_fractions(
+            parts_to_fractions(raw), lower, upper
+        )
+        key = tuple(round(value, 10) for value in proposal)
+        if key not in seen:
+            seen.add(key)
+            proposals.append(proposal)
+
+    candidates_raw: list[dict] = []
+    invalid_count = 0
+    for fractions in proposals:
+        try:
+            score, nominal, worst, average, best = score_fractions(fractions)
+        except ValueError:
+            invalid_count += 1
+            continue
+        candidates_raw.append(
+            {
+                "score": score,
+                "nominal": nominal,
+                "worst": worst,
+                "avg": average,
+                "best": best,
+                "fractions": fractions,
+            }
+        )
+    candidates_raw.sort(key=lambda candidate: candidate["score"])
+    candidates_raw = candidates_raw[:top_n]
+    if not candidates_raw:
+        raise ValueError(
+            "No physically valid recipe was found for these model "
+            "assumptions and volume bounds."
+        )
+
+    refine_evals = 0
+    if refine and numpy_available:
+        refined: list[dict] = []
+        bounds = list(zip(lower, upper))
+        constraint = {
+            "type": "eq",
+            "fun": lambda x: float(np.sum(x) - 1.0),
+        }
+        for candidate in candidates_raw:
+            def objective(x: "np.ndarray") -> float:
+                nonlocal refine_evals
+                refine_evals += 1
+                try:
+                    fractions = project_bounded_fractions(
+                        [float(value) for value in x], lower, upper
+                    )
+                    return score_fractions(fractions)[0]
+                except ValueError:
+                    return 1e12
+
+            result = optimizer.minimize(
+                objective,
+                np.asarray(candidate["fractions"], dtype=float),
+                method="SLSQP",
+                bounds=bounds,
+                constraints=(constraint,),
+                options={"ftol": 1e-9, "maxiter": 300, "disp": False},
+            )
+            try:
+                fractions = project_bounded_fractions(
+                    [float(value) for value in result.x], lower, upper
+                )
+                score, nominal, worst, average, best = score_fractions(fractions)
+                refined_candidate = {
+                    "score": score,
+                    "nominal": nominal,
+                    "worst": worst,
+                    "avg": average,
+                    "best": best,
+                    "fractions": fractions,
+                }
+                refined.append(
+                    refined_candidate
+                    if score <= candidate["score"] + 1e-10
+                    else candidate
+                )
+            except Exception:
+                refined.append(candidate)
+        refined.sort(key=lambda candidate: candidate["score"])
+        candidates_raw = refined[:top_n]
+
+    candidates: list[MixCandidate] = []
+    plot_data: list[dict] = []
+    for candidate in candidates_raw:
+        fractions = candidate["fractions"]
+        candidates.append(
+            MixCandidate(
+                score_db=candidate["score"],
+                nominal_mean_db=candidate["nominal"],
+                worst_mean_db=candidate["worst"],
+                avg_mean_db=candidate["avg"],
+                best_mean_db=candidate["best"],
+                fractions=list(fractions),
+                thickness_in=thickness_in,
+                component_files=list(component_files),
+                rule=rule_norm,
+                objective_kind="property" if property_mode else "performance",
+                score_unit="%" if property_mode else performance_config["unit"],
+                weight_fractions=weight_fractions_from_volume(
+                    fractions, densities
+                ),
+                density_gcc=blend_density_gcc(fractions, densities),
+            )
+        )
+        display_components = [
+            MixComponent(table=comps[i]["table"], parts=fractions[i])
+            for i in range(len(comps))
+        ]
+        plot_data.append(
+            build_display(
+                display_components,
+                rule_norm,
+                thickness_in,
+                target_freqs,
+                target=target if property_mode else None,
+                performance=performance_config if performance_mode else None,
+                densities=densities,
+                component_names=[Path(path).name for path in component_files],
+            )
+        )
+
+    best_candidate = candidates[0]
+    recipe = " | ".join(
+        f"{Path(path).name}: {100 * fraction:.1f}%"
+        for path, fraction in zip(
+            best_candidate.component_files, best_candidate.fractions
+        )
+    )
+    advisories = " ".join(
+        mix_model_advisories(rule_norm, best_candidate.fractions)
+    )
+    if property_mode:
+        target_text = f"Target: {prop_desc}; {target_desc}"
+        result_text = (
+            f"Match error: {best_candidate.score_db:.3f}% "
+            f"(nominal {best_candidate.nominal_mean_db:.3f}%, "
+            f"worst {best_candidate.worst_mean_db:.3f}%)"
+        )
+    else:
+        relation = "<=" if performance_config["direction"] == "at_most" else ">="
+        angles = performance_config["angles"]
+        status = "PASS" if best_candidate.worst_mean_db <= 0.0 else "MISS"
+        target_text = (
+            f"Target: {performance_config['label']} {relation} "
+            f"{performance_config['target']:g} {performance_config['unit']}; "
+            f"{target_desc}; angles {angles[0]:g}-{angles[-1]:g} deg; "
+            f"pol={performance_config['wave_pol'].upper()}"
+        )
+        result_text = (
+            f"Search score: {best_candidate.score_db:+.3f} "
+            f"{best_candidate.score_unit}; certified worst-corner gap "
+            f"{best_candidate.worst_mean_db:+.3f} {best_candidate.score_unit} "
+            f"({status}; gap <= 0 passes); nominal gap "
+            f"{best_candidate.nominal_mean_db:+.3f}"
+        )
+    message = (
+        "Inverse material recipe search complete.\n"
+        f"{target_text}\n"
+        f"Model: {MIX_RULE_LABELS[rule_norm]}\n"
+        f"Best volume recipe: {recipe}\n"
+        f"{result_text}\n"
+        f"Evaluated {len(proposals)} bounded recipe(s); "
+        f"{invalid_count} invalid under model; refinement evaluations "
+        f"{refine_evals}.\nApplicability: {advisories}"
+    )
+    return candidates, plot_data, message

@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 import grim_cut_gui
+import dataset_jobs
 import grim_cut_dataset_mixin
 import freddy_integration
 import ghost_integration
@@ -1400,7 +1401,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         payloads = []
         worker.finished.connect(payloads.append)
         with mock.patch.object(
-            grim_cut_dataset_mixin,
+            dataset_jobs,
             "_recommended_loader_workers",
             side_effect=RuntimeError("pool unavailable"),
         ):
@@ -1435,12 +1436,12 @@ class UnifiedGuiShellTest(unittest.TestCase):
         with (
             mock.patch.object(os.path, "getsize", return_value=1024**2),
             mock.patch.object(
-                grim_cut_dataset_mixin,
+                dataset_jobs,
                 "_grim_archive_uncompressed_bytes",
                 return_value=expanded,
             ),
             mock.patch.object(
-                grim_cut_dataset_mixin,
+                dataset_jobs,
                 "_available_memory_bytes",
                 return_value=1024**3,
             ),
@@ -1471,12 +1472,12 @@ class UnifiedGuiShellTest(unittest.TestCase):
         with (
             mock.patch.object(os.path, "getsize", return_value=1024**2),
             mock.patch.object(
-                grim_cut_dataset_mixin,
+                dataset_jobs,
                 "_grim_archive_uncompressed_bytes",
                 return_value=300 * 1024**2,
             ),
             mock.patch.object(
-                grim_cut_dataset_mixin,
+                dataset_jobs,
                 "_available_memory_bytes",
                 return_value=None,
             ),

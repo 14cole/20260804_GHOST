@@ -269,7 +269,7 @@ class TestCsvExport(unittest.TestCase):
             raise OSError("simulated CSV failure")
 
         with mock.patch(
-            "grim_cut_dataset_mixin.write_flat_csv",
+            "dataset_publication.write_flat_csv",
             side_effect=fail_after_partial,
         ):
             with self.assertRaisesRegex(OSError, "simulated CSV failure"):

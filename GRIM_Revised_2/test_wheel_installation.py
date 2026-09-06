@@ -44,6 +44,15 @@ import assembly_placement_editor as editor_module
 from feature_assembly_panel import POINT_PLACEMENT_COLUMNS
 from PySide6.QtWidgets import QApplication
 assert Path(editor_module.__file__).resolve().parent == installed
+# Exercise extracted modules from the wheel, with checkout imports disabled.
+import importlib
+for name in ('grim_format_io', 'grim_cst_io', 'grim_sentri_io', 'grim_pio_io',
+             'grim_legacy_io', 'dataset_jobs', 'dataset_dialogs',
+             'dataset_publication', 'feature_assembly_model',
+             'feature_assembly_recipe', 'feature_assembly_values', 'plot_modes.isar_render'):
+    module = importlib.import_module(name)
+    assert Path(module.__file__).resolve().is_relative_to(installed), name
+
 app = QApplication([])
 editor = editor_module.PlacementEditor('point', columns=POINT_PLACEMENT_COLUMNS, units='meters')
 editor.change([['p','f','0','0','0','0','0','1','1','0','0']])
