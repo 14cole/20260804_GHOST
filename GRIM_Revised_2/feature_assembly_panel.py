@@ -3268,8 +3268,6 @@ if GUI_AVAILABLE:
             self._refresh_spatial_feature_tree()
             self._update_workflow_readiness()
 
-        def _input_setting_changed(self, *_args: Any) -> None:
-            self._mark_preview_stale()
 
         def _surface_path_changed(self) -> None:
             """Default a newly selected mesh to physically safer shadowing."""

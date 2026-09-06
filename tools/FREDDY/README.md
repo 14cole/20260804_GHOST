@@ -178,7 +178,17 @@ comparison** limits displayed candidates only, not evaluations. **Stop and keep
 best** retains complete scores and marks an interrupted analysis incomplete.
 **Resume remaining** finishes the same grid without rescoring completed designs,
 or finishes interrupted plots. It is disabled once the run is complete. Inputs
-and material contents must still match; checkpoints last for the session.
+and material contents must still match. For recovery after closing the
+application, choose an optional **Recovery file** before starting. Completed
+scores are saved about every 30 seconds at combination boundaries and when
+scoring stops or completes. **Choose / save...** can also save an idle search.
+Reopen the matching saved project, choose **Load checkpoint...**, then
+**Resume remaining**. Clearing the recovery field disables disk saves.
+Recovery archives contain scores and identity checks, not a project or material
+copies; changed code, changed inputs, and corrupted scores are rejected. Plots
+are rebuilt after loading without rescoring completed combinations. Recovery
+files are limited to 512 MiB of scores; larger grids can still run with the
+optional recovery field cleared.
 Saved candidates receive separate project and output destinations. See the
 [workflow guide](../../WORKFLOW_GUIDE.md) for examples. Material Mix retains its
 separate recipe-search behavior.

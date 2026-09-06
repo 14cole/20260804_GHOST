@@ -210,6 +210,48 @@ SUBMIT        = True                     # False -> write .slurm files but don't
 
 # ===============================================================================
 
+from driver_config import (load_driver_configuration, configuration_source_records,
+                           copy_configuration)
+_CONFIG_KIND = '2d'
+_CONFIG_KEYS = (
+    'FRD_DIR',
+    'OPN_DIR',
+    'FREQUENCIES_GHZ',
+    'AZIMUTHS_DEG',
+    'OUTPUT_DIR',
+    'N_NODES',
+    'N_JOBS',
+    'ARRAY_THROTTLE',
+    'SLURM_PARTITION',
+    'SLURM_ACCOUNT',
+    'SLURM_QOS',
+    'SLURM_TIME',
+    'CORES_PER_NODE',
+    'MEM_PER_NODE',
+    'MAX_WORKERS_PER_NODE',
+    'MEMORY_HEADROOM',
+    'MEMORY_SAFETY',
+    'MAX_SOLVE_GB',
+    'SLURM_MAIL_TYPE',
+    'SLURM_MAIL_USER',
+    'SLURM_EXTRA_SBATCH',
+    'JOB_PROLOGUE',
+    'GEOMETRY_UNITS',
+    'MAX_PANELS',
+    'MESH_CERTIFICATION',
+    'ACCURACY_TARGET',
+    'LU_PRECISION',
+    'BLAS_THREADS_PER_WORKER',
+    'ASSEMBLY_THREADS',
+    'TASKS_PER_CHILD',
+    'CLAIM_STALE_SECONDS',
+    'GEOMETRY_EXTS',
+    'PYTHON_EXE',
+    'SUBMIT',
+)
+_ACTIVE_CONFIG_PATH = load_driver_configuration(globals(), __file__, _CONFIG_KIND, _CONFIG_KEYS)
+
+
 _SBATCH = shutil.which("sbatch") or "sbatch"
 MANIFEST_SCHEMA = "ghost.hpc.2d-run.v2"
 SCHEDULE_SCHEMA = "ghost.hpc.2d-schedule.v2"
@@ -232,7 +274,7 @@ def _solver_source_records():
     """
 
     backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
-    return backend_dir, {"driver_configured.py": str(Path(__file__).resolve())}
+    return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
 def _solver_source_fingerprint():
@@ -756,6 +798,7 @@ def submit():
 
     script_path = run_dir / "driver_configured.py"
     shutil.copy2(str(source_driver), str(script_path))
+    copy_configuration(_ACTIVE_CONFIG_PATH, script_path)
     slurm_paths = []  # type: List[Path]
     for j in range(int(N_JOBS)):
         sp = run_dir / f"submit_job{j}.slurm"
@@ -1215,6 +1258,7 @@ def worker(run_dir_str, submission_index, task_index):
 def main():
     # type: () -> None
     ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--config", help="Validated JSON driver configuration")
     ap.add_argument(
         "--worker", nargs=3,
         metavar=("RUN_DIR", "SUBMISSION_INDEX", "TASK_INDEX"),

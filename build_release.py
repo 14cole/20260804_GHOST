@@ -43,6 +43,9 @@ from GRIM_Revised_2.grim_diagnostics import (
 )
 
 
+from verify_project import acceptance_suites, run_suite
+
+
 PRODUCT_NAME = "GRIM"
 MANIFEST_NAME = "SHA256SUMS.txt"
 BUILD_INFO_NAME = "BUILD-INFO.json"
@@ -96,6 +99,7 @@ REQUIRED_FILES = (
     "requirements/test_wheelhouse_manifest.py",
     "README.md",
     "build_release.py",
+    "verify_project.py",
     "clean_utf8.py",
     "Build_GRIM_Release.bat",
     "Launch_GRIM_GUI.bat",
@@ -816,27 +820,7 @@ def _validate_dependency_lock(source_root: Path) -> None:
 
 
 def _run_test_suite(name: str, cwd: Path, arguments: Sequence[str]) -> None:
-    print(f"Release gate: running {name} ...", flush=True)
-    try:
-        completed = subprocess.run(
-            (sys.executable, *arguments),
-            cwd=cwd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=60 * 60,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ReleaseBuildError(f"Cannot run {name}: {exc}") from exc
-    if completed.returncode != 0:
-        tail = completed.stdout[-12000:].strip()
-        raise ReleaseBuildError(
-            f"{name} failed with exit code {completed.returncode}. Last output:\n{tail}"
-        )
-    print(f"Release gate: {name} passed.", flush=True)
+    run_suite(name, cwd, arguments, error_type=ReleaseBuildError)
 
 
 def run_acceptance_gates(
@@ -896,53 +880,7 @@ def run_acceptance_gates(
     if native_policy == "warn" and not native_ready:
         print(f"Release gate warning: {native_summary}", flush=True)
 
-    suites = (
-        (
-            "UTF-8 cleaner tests",
-            source_root,
-            ("-W", "error", "-m", "unittest", "-v", "test_clean_utf8.py"),
-        ),
-        (
-            "offline wheelhouse tests",
-            source_root / "requirements",
-            ("-m", "unittest", "discover", "-s", ".", "-p", "test*.py", "-v"),
-        ),
-        (
-            "GRIM tests",
-            source_root,
-            ("-m", "unittest", "discover", "-s", "GRIM_Revised_2", "-p", "test*.py", "-v"),
-        ),
-        (
-            "GHOST tests",
-            source_root / "tools" / "GHOST",
-            ("-m", "unittest", "discover", "-s", "tests", "-p", "test*.py", "-v"),
-        ),
-        (
-            "GHOST CEM tools tests",
-            source_root / "tools" / "GHOST" / "CEM_Tools",
-            ("-m", "unittest", "discover", "-s", "tests", "-p", "test*.py", "-v"),
-        ),
-        (
-            "GHOST HPC scheduling integration",
-            source_root / "tools" / "GHOST",
-            ("tests/test_hpc_scheduling.py",),
-        ),
-        (
-            "GHOST local-driver integration",
-            source_root / "tools" / "GHOST",
-            ("tests/test_local_drivers.py",),
-        ),
-        (
-            "GHOST ASCII-transfer compatibility",
-            source_root / "tools" / "GHOST",
-            ("tests/test_source_is_ascii.py",),
-        ),
-        (
-            "FREDDY tests",
-            source_root / "tools" / "FREDDY",
-            ("-m", "unittest", "discover", "-s", "tests", "-p", "test*.py", "-v"),
-        ),
-    )
+    suites = acceptance_suites(source_root)
     for name, cwd, command in suites:
         _run_test_suite(name, cwd, command)
 

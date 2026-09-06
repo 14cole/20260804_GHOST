@@ -29,10 +29,16 @@ class RejectQt(importlib.abc.MetaPathFinder):
 guard = RejectQt()
 sys.meta_path.insert(0, guard)
 import grim_dataset
+import grim_dataset_audit
 import feature_assembly_model
 import feature_assembly_recipe
 import ibc.design_search
+import ibc.mix_analysis
+import ibc.search_checkpoint
 import rcs_solver
+import driver_config
+import feature_preparation
+import feature_library_contracts
 from plot_modes import isar_mode
 assert not guard.attempts, guard.attempts
 assert 'ibc.ui' not in sys.modules
@@ -43,6 +49,7 @@ from feature_assembly_values import FeatureAssemblyValues, LoadedFeatureAssembly
 assert typing.get_type_hints(feature_assembly_recipe.feature_assembly_recipe_payload)['values'] is FeatureAssemblyValues
 assert typing.get_type_hints(feature_assembly_recipe.read_feature_assembly_recipe)['return'] is LoadedFeatureAssemblyRecipe
 assert typing.get_type_hints(rcs_solver._assemble_linear_operator_matrices)['mesh'] is rcs_solver.LinearMesh
+assert typing.get_type_hints(feature_preparation.capture_assembly_sources)['return'] is feature_preparation.AssemblySources
 """
         result = subprocess.run(
             [sys.executable, '-c', script, str(root)],

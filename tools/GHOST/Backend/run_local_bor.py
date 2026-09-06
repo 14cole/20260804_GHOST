@@ -116,6 +116,37 @@ TASKS_PER_CHILD = 2
 
 # ===============================================================================
 
+from driver_config import (load_driver_configuration, configuration_source_records,
+                           copy_configuration)
+_CONFIG_KIND = 'bor'
+_CONFIG_KEYS = (
+    'GEOMETRY_DIRS',
+    'FREQUENCIES_GHZ',
+    'AZIMUTHS_DEG',
+    'ELEVATIONS_DEG',
+    'BODY_AXIS_AZ_DEG',
+    'BODY_AXIS_EL_DEG',
+    'BODY_ROLL_DEG',
+    'OUTPUT_DIR',
+    'WORKERS',
+    'GEOMETRY_UNITS',
+    'CFIE_ALPHA',
+    'N_MODES',
+    'MODE_TOL',
+    'MAX_ELEMENTS',
+    'ASSEMBLY',
+    'TABLE_PRECISION',
+    'ACCURACY_TARGET',
+    'STREAM_BUDGET_GB',
+    'MESH_CERTIFICATION',
+    'WORKERS_PER_UNIT',
+    'BLAS_THREADS_PER_WORKER',
+    'MEMORY_HEADROOM',
+    'TASKS_PER_CHILD',
+)
+_ACTIVE_CONFIG_PATH = load_driver_configuration(globals(), __file__, _CONFIG_KIND, _CONFIG_KEYS)
+
+
 MANIFEST_SCHEMA = "ghost.local.bor-run.v2"
 
 # Parsed geometry snapshots, filled in the parent before the pool forks so
@@ -125,7 +156,7 @@ _SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
 
 def _solver_source_records() -> 'Tuple[str, Dict[str, str]]':
     backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
-    return backend_dir, {"driver_configured.py": str(Path(__file__).resolve())}
+    return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
 def _solver_source_fingerprint() -> 'str':

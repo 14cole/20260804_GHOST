@@ -343,6 +343,7 @@ class ProjectStateMixin:
         self.selected_freq_idx = None
         self.inverse_candidates = []
         self._inverse_checkpoint = None
+        self.inverse_recovery_path.clear()
         self._inverse_result_identity = None
         self._inverse_progress = None
         self.inv_extend_btn.setEnabled(False)

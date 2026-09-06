@@ -35,7 +35,7 @@ def main():
     offenders = []
     scanned = 0
     tracked = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.py"],
+        ["git", "ls-files", "-c", "-o", "--exclude-standard", "-z", "--", "*.py"],
         cwd=str(REPO),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,

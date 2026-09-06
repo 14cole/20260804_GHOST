@@ -30,7 +30,12 @@ Restart GRIM to load the updated application code.
    marks the analysis incomplete. **Resume remaining** finishes the same grid
    without repeating their scores. If all scoring finished but plotting was
    interrupted, Resume finishes the comparison plots. The button is disabled
-   after completion. The checkpoint lasts for this application session.
+   after completion. To recover after restarting the application, select an
+   optional **Recovery file** before starting. Completed scores are saved at
+   combination boundaries about every 30 seconds and when scoring stops.
+   Open the matching saved project, **Load checkpoint...**, and **Resume
+   remaining** to restore the work. Recovery files do not contain the project
+   or material files; keep those alongside your normal study inputs.
    Changes to layers, ranges, targets, polarization, scoring, tolerances, or
    material-file contents require analysis of the new setup.
 6. Select a candidate and use **Save selected stack…** to create a separate

@@ -4,6 +4,39 @@ GHOST is bundled inside the GRIM distribution. This folder is a complete
 solver project so its backend, tests, geometry studies, CEM utilities, and
 launchers retain their established relative paths.
 
+Local and HPC batch drivers accept `--config path/to/settings.config.json`.
+They also automatically load an adjacent file with the same stem and the
+`.config.json` suffix. For example:
+
+```json
+{
+  "schema": "ghost.driver-config",
+  "version": 1,
+  "driver": "2d",
+  "settings": {
+    "FRD_DIR": "geometries/FRD",
+    "OPN_DIR": "geometries/OPN",
+    "OUTPUT_DIR": "rcs_runs",
+    "FREQUENCIES_GHZ": [2.0, 4.0],
+    "AZIMUTHS_DEG": [0.0, 90.0],
+    "MESH_CERTIFICATION": true
+  }
+}
+```
+
+Use `"driver": "bor"` and `GEOMETRY_DIRS` for BoR. Each driver declares its
+accepted setting names in `_CONFIG_KEYS`; omitted settings keep its defaults.
+Paths in settings retain the driver's existing working-directory semantics.
+An optional `run_setup` object can embed an exported desktop 2-D run recipe.
+Batch drivers accept its monostatic/default-quality subset and reject
+unsupported options or conflicting explicit settings.
+
+`hpc_common.configure_driver` now stages unchanged Python source and writes
+validated JSON instead of rewriting assignments. Submission copies both into
+the run directory. Configuration content joins source/runtime provenance, so
+workers reject changes to the settings that produced an existing run.
+New source/configuration versions should use a fresh staging directory.
+
 The recommended desktop workflow is the top-level GRIM application. Its
 **GHOST** tab embeds the same `Backend/ghost_gui.py` workspace and the same
 2-D/BoR numerical implementation found here; no solver is duplicated.

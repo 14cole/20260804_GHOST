@@ -286,8 +286,6 @@ def _sorted_polarization_indices(values, indices) -> list[int]:
     )
 
 
-def _sorted_polarization_values(values) -> list:
-    return [values[idx] for idx in _sorted_polarization_indices(values, range(len(values)))]
 
 
 def _wedge_to_conic_deg(phi_deg: np.ndarray, tau_deg: np.ndarray):
@@ -2307,11 +2305,6 @@ class DatasetOpsMixin:
             )
 
 
-    def _prompt_choice(self, title: str, label: str, choices: list[str], default_idx: int = 0) -> str | None:
-        value, ok = QInputDialog.getItem(self, title, label, choices, default_idx, False)
-        if not ok:
-            return None
-        return str(value)
 
     def _slice_selected(self) -> None:
         datasets = self._selected_datasets_ordered(

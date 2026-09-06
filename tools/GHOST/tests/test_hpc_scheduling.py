@@ -5,7 +5,7 @@ Integration test for the HPC sweep scheduler.
 Exercises the parts that are easy to get subtly wrong and expensive to debug
 on a cluster:
 
-* `hpc_common.configure_driver` can still rewrite every CONFIG constant.
+* `hpc_common.configure_driver` validates and stages every requested setting.
 * Submission builds a manifest, a schedule, and sbatch scripts, and the
   scheduling plan is genuinely balanced by cost rather than by index.
 * Several array tasks working the same run in parallel each solve every unit at
@@ -1010,7 +1010,7 @@ def test_end_to_end():
         except ValueError as exc:
             check(False, f"configure_driver rejected a CONFIG name: {exc}")
             return
-        check(True, "configure_driver rewrote every requested CONFIG constant")
+        check(True, "configure_driver validated every requested setting")
 
         result = _run(driver, [])
         if result.returncode != 0:

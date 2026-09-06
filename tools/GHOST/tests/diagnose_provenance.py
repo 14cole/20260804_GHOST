@@ -53,6 +53,9 @@ def main():
         run_dir / "driver_configured.py"
     )
     extra = {"driver_configured.py": str(driver)} if driver.is_file() else {}
+    configuration = driver.with_suffix('.config.json')
+    if configuration.is_file():
+        extra['driver_configured.config.json'] = str(configuration)
     if not extra:
         print(f"[warn] {driver} not found; checking Backend/ only, so the "
               "driver copy is excluded from this comparison.\n")

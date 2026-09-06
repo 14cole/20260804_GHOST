@@ -447,11 +447,13 @@ class PortableBundleTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["driver_ran"])
         self.assertIsNone(result["run_dir"])
-        driver = Path(result["driver_path"]).read_text(encoding="utf-8")
-        self.assertIn(f"OUTPUT_DIR = {str(Path(result['output_root']))!r}", driver)
-        self.assertIn(f"PYTHON_EXE = {sys.executable!r}", driver)
-        self.assertIn("SUBMIT = False", driver)
-        self.assertNotIn(str(self.temporary / "source"), driver)
+        driver = Path(result["driver_path"])
+        self.assertEqual(driver.read_bytes(), Path(hpc_bundle.TWOD_DRIVER).read_bytes())
+        settings = json.loads(driver.with_suffix('.config.json').read_text(encoding='utf-8'))['settings']
+        self.assertEqual(settings['OUTPUT_DIR'], str(Path(result['output_root'])))
+        self.assertEqual(settings['PYTHON_EXE'], sys.executable)
+        self.assertFalse(settings['SUBMIT'])
+        self.assertNotIn(str(self.temporary / "source"), json.dumps(settings))
         stage_dir = Path(result["stage_dir"])
         staged_geometry = stage_dir.joinpath(
             *request["geometries"][0]["path"].split("/")
@@ -506,10 +508,12 @@ class PortableBundleTests(unittest.TestCase):
             result = hpc_bundle.stage_portable_bundle(
                 target, self.temporary / "bor_workspace"
             )
-        driver = Path(result["driver_path"]).read_text(encoding="utf-8")
+        driver = Path(result["driver_path"])
+        self.assertEqual(driver.read_bytes(), Path(hpc_bundle.BOR_DRIVER).read_bytes())
+        settings = json.loads(driver.with_suffix('.config.json').read_text(encoding='utf-8'))['settings']
         bor_root = Path(result["stage_dir"]) / "payload" / "BOR"
-        self.assertIn(f"GEOMETRY_DIRS = {[str(bor_root)]!r}", driver)
-        self.assertNotIn("FRD_DIR =", driver)
+        self.assertEqual(settings['GEOMETRY_DIRS'], [str(bor_root)])
+        self.assertNotIn('FRD_DIR', settings)
         self.assertEqual(request["geometries"][0]["role"], "BOR")
 
     def test_driver_result_is_machine_readable_and_idempotent(self) -> None:

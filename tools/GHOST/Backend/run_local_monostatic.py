@@ -127,6 +127,32 @@ GEOMETRY_EXTS = (".geo",)
 
 # ===============================================================================
 
+from driver_config import (load_driver_configuration, configuration_source_records,
+                           copy_configuration)
+_CONFIG_KIND = '2d'
+_CONFIG_KEYS = (
+    'FRD_DIR',
+    'OPN_DIR',
+    'FREQUENCIES_GHZ',
+    'AZIMUTHS_DEG',
+    'OUTPUT_DIR',
+    'WORKERS',
+    'GEOMETRY_UNITS',
+    'MAX_PANELS',
+    'BLAS_THREADS_PER_WORKER',
+    'MESH_CERTIFICATION',
+    'ACCURACY_TARGET',
+    'LU_PRECISION',
+    'MEMORY_HEADROOM',
+    'MEMORY_SAFETY',
+    'MAX_SOLVE_GB',
+    'ASSEMBLY_THREADS',
+    'TASKS_PER_CHILD',
+    'GEOMETRY_EXTS',
+)
+_ACTIVE_CONFIG_PATH = load_driver_configuration(globals(), __file__, _CONFIG_KIND, _CONFIG_KEYS)
+
+
 MANIFEST_SCHEMA = "ghost.local.2d-run.v3"
 OUTPUT_POLARIZATIONS = ("VV", "HH")
 
@@ -137,7 +163,7 @@ _SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
 
 def _solver_source_records() -> 'Tuple[str, Dict[str, str]]':
     backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
-    return backend_dir, {"driver_configured.py": str(Path(__file__).resolve())}
+    return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
 def _solver_source_fingerprint() -> 'str':

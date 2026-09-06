@@ -5,6 +5,7 @@ the caller supplies cancellation, progress, and optional evaluation adapters.
 """
 from __future__ import annotations
 
+from .mix_analysis import evaluate_mix_performance, build_mix_display
 from dataclasses import dataclass
 try:
     import numpy as np
@@ -12,6 +13,7 @@ except ImportError:  # The scalar FREDDY path remains available.
     np = None
 import math
 import random
+import time
 from pathlib import Path
 from .compute import (
     INCH_TO_M,
@@ -111,7 +113,8 @@ class InverseSearchRequest:
 
 def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progress,
                        score_candidate, read_table=read_material_table,
-                       compute_metrics=compute_angle_metrics_many):
+                       compute_metrics=compute_angle_metrics_many,
+                       checkpoint_callback=None, checkpoint_interval=30.0):
     """Evaluate captured inputs; callbacks carry cancellation/progress or pure calculations."""
     completed = {}
     layer_snapshot = request.layer_snapshot
@@ -132,7 +135,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
     from array import array
     import heapq
     identity = search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                               uncertainty_cfg, score_mode)
+                               uncertainty_cfg, score_mode, skiprows=skiprows)
     if checkpoint and checkpoint['identity'] != identity:
         raise ValueError("Inputs or material files changed. Start a new analysis instead of resuming.")
     def check_stop():
@@ -241,6 +244,28 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
     # the exact design and permits resumption without repeating scores.
     score_rows = checkpoint['score_rows'] if checkpoint else array('d')
     next_index = checkpoint['next_index'] if checkpoint else 0
+    if checkpoint and (checkpoint.get('total') != grid.total or
+                       type(next_index) is not int or not 0 <= next_index <= grid.total or
+                       len(score_rows) != 5 * next_index):
+        raise ValueError('Checkpoint does not match the design grid.')
+    last_checkpoint = -math.inf
+
+    def publish_checkpoint(*, force=False, plots_complete=False):
+        nonlocal last_checkpoint
+        if checkpoint_callback is None:
+            return
+        now = time.monotonic()
+        if not force and now - last_checkpoint < checkpoint_interval:
+            return
+        if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
+                           uncertainty_cfg, score_mode, skiprows=skiprows) != identity:
+            raise ValueError('Material files changed during the analysis. Run again with stable inputs.')
+        checkpoint_callback(dict(identity=identity, score_rows=score_rows,
+                                 next_index=next_index, total=grid.total,
+                                 plots_complete=plots_complete))
+        last_checkpoint = now
+
+    publish_checkpoint(force=True)
     try:
         while next_index < grid.total:
             check_stop()
@@ -253,6 +278,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
             score_rows.extend(scores)
             next_index += 1
             progress(next_index, grid.total, 'Analyzing')
+            publish_checkpoint()
     except StopInverseSearch:
         pass
     top_candidates = []
@@ -263,6 +289,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
                                                thicknesses, chosen_files[:], resistances))
     completed.update(identity=identity, score_rows=score_rows, next_index=next_index,
                      total=grid.total, plots_complete=False)
+    publish_checkpoint(force=True)
     progress(next_index, grid.total, 'Preparing comparison plots')
     inverse_samples: list[list[list[float]]] = []
     try:
@@ -292,9 +319,10 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
         inverse_samples = []
     completed['plots_complete'] = len(inverse_samples) == len(top_candidates)
     if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                       uncertainty_cfg, score_mode) != identity:
+                       uncertainty_cfg, score_mode, skiprows=skiprows) != identity:
         raise ValueError("Material files changed during the analysis. Run again with stable inputs.")
     complete = next_index == grid.total
+    publish_checkpoint(force=True, plots_complete=completed['plots_complete'])
     status = ('All combinations analyzed' if complete else
               'Stopped; analysis is incomplete. Resume to analyze the remaining combinations')
     if not completed['plots_complete']:
@@ -338,7 +366,8 @@ class MixSearchRequest:
     numpy_available: bool
 
 
-def run_mix_search(request: MixSearchRequest, *, evaluate_performance, build_display,
+def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_mix_performance,
+                   build_display=build_mix_display,
                    read_table=read_material_table, optimizer=None):
     """Evaluate captured inputs; callbacks carry cancellation/progress or pure calculations."""
     if request.refine and optimizer is None:

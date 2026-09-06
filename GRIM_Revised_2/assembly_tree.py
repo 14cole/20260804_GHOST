@@ -2553,16 +2553,6 @@ class AssemblyTreePanel(QWidget):
         if not self._suppress_dirty:
             self._set_dirty(True)
 
-    def _document(self) -> dict:
-        root = self.tree.invisibleRootItem()
-        nodes = []
-        for index in range(root.childCount()):
-            serialized = _item_to_dict(root.child(index))
-            if serialized is not None:
-                nodes.append(serialized)
-        # Version 5 adds the explicit branch-only Auto add mode. Older files
-        # remain readable; a branch with no mode adopts Auto on load.
-        return {"version": 5, "tree": nodes}
 
     def _save_document_snapshot(self) -> dict:
         """Capture tree fields quickly; array compression happens in a worker."""

@@ -1307,16 +1307,6 @@ def _surface_distances_points_and_normals(
     )
 
 
-def _surface_distances_and_normals(
-    surface: TriangleSurface,
-    points: np.ndarray,
-    *,
-    normal_hints: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, np.ndarray]:
-    distances, _nearest_points, normals = _surface_distances_points_and_normals(
-        surface, points, normal_hints=normal_hints
-    )
-    return distances, normals
 
 
 def _validate_bor_surface_agreement(
@@ -3786,455 +3776,7 @@ def validate_installed_host(manifest, *, material, stack_id="", minimum_radius_m
             "declaration_source": "user; match to library evidence", "warnings": warnings}
 
 
-def _apply_feature_library_contracts(
-    *,
-    line_placements: Sequence[Mapping[str, Any]],
-    line_records: Sequence[dict[str, Any]],
-    point_placements: Sequence[Mapping[str, Any]],
-    point_records: Sequence[dict[str, Any]],
-    radar_grid: Mapping[str, Any],
-    require_manifests: bool,
-    cancel_check: Optional[Callable[[], bool]] = None,
-    host_material: str = "",
-    host_stack_id: str = "",
-    host_minimum_radius_m: Optional[float] = None,
-) -> tuple[dict[str, Any], list[str], dict[str, str], set[str]]:
-    """Bind manifests, applicability gates, and component identities to a plan."""
-
-    frequencies = np.asarray(radar_grid["frequencies_ghz"], dtype=float)
-    directions = _vehicle_radar_directions(radar_grid)
-    contracts: dict[str, Any] = {}
-    warnings: list[str] = []
-    source_hashes: dict[str, str] = {}
-    absent_source_paths: set[str] = set()
-    seen_components: dict[str, tuple[str, str]] = {}
-    footprint_components: list[dict[str, Any]] = []
-    groups = (
-        ("line", line_placements, line_records),
-        ("point", point_placements, point_records),
-    )
-    for feature_kind, placements, records in groups:
-        if len(placements) != len(records):
-            raise ValueError(
-                f"Prepared {feature_kind} placement/record counts disagree."
-            )
-        manifests: dict[str, Optional[dict[str, Any]]] = {}
-        response_identities: dict[str, str] = {}
-        response_content_identities: dict[str, str] = {}
-        response_frequency_bounds: dict[str, tuple[float, float]] = {}
-        line_coefficients: dict[str, tuple[Any, ...]] = {}
-        for placement, record in zip(placements, records):
-            if cancel_check is not None and cancel_check():
-                raise InterruptedError("Feature placement validation cancelled.")
-            dataset_id = str(record["dataset_id"])
-            dataset_value = record.get("dataset")
-            dataset_digest = record.get("dataset_sha256")
-            required_geometry = (
-                {"perimeter", "segment_normals"}
-                if feature_kind == "line"
-                else {"location", "aperture_normal", "roll_ref"}
-            )
-            if (
-                dataset_value is None
-                or dataset_digest is None
-                or not required_geometry.issubset(placement)
-            ):
-                message = (
-                    f"Injected/custom {feature_kind} dataset {dataset_id!r} "
-                    "predates the production manifest/component-identity "
-                    "contract."
-                )
-                if require_manifests:
-                    raise ValueError(message)
-                warnings.append(message)
-                contracts[f"{feature_kind}:{dataset_id}"] = {
-                    "status": "legacy_injected_placement",
-                }
-                continue
-            dataset = str(dataset_value)
-            contract_key = f"{feature_kind}:{dataset_id}"
-            if dataset_id not in manifests:
-                try:
-                    manifest, sources = load_feature_library_manifest(
-                        dataset, dataset_id=dataset_id, feature_kind=feature_kind
-                    )
-                except (ValueError, TypeError, KeyError, OSError) as exc:
-                    if require_manifests:
-                        raise
-                    manifest, sources = None, []
-                    warnings.append(f"Metadata advisory for {feature_kind} {dataset_id!r}: {exc}; response samples remain usable.")
-                advisory_manifest = manifest if not require_manifests else None
-                if not require_manifests:
-                    manifest = None
-                for source in sources:
-                    if source.get("absent") == "true" and "path" in source:
-                        absent_source_paths.add(str(source["path"]))
-                    elif "path" in source and "sha256" in source:
-                        source_hashes[str(source["path"])] = str(
-                            source["sha256"]
-                        )
-                manifests[dataset_id] = manifest
-                if manifest is not None:
-                    response_content_identities[dataset_id] = str(
-                        manifest["response_content_sha256"]
-                    )
-                else:
-                    try:
-                        response_content_identities[dataset_id] = (
-                            feature_response_content_sha256(dataset)
-                        )
-                    except ValueError:
-                        # Injected compatibility tests/services may not provide
-                        # an actual NPZ. Production response loaders reject such
-                        # a file later; retain the prepared raw identity here.
-                        response_content_identities[dataset_id] = str(
-                            dataset_digest
-                        )
-                if manifest is None:
-                    description = "has an advisory" if advisory_manifest is not None else "has no"
-                    message = (
-                        f"{feature_kind} dataset {dataset_id!r} {description} "
-                        "feature-library manifest; phase/frame are accepted "
-                        "through the selected dataset role; host/curvature/"
-                        "footprint annotations are advisory."
-                    )
-                    if require_manifests:
-                        raise ValueError(message)
-                    warnings.append(message)
-                    contracts[contract_key] = {
-                        "status": "metadata_advisory",
-                        "dataset": dataset,
-                        "source_manifest": advisory_manifest,
-                    }
-                else:
-                    if manifest["schema"] != FEATURE_LIBRARY_MANIFEST_SCHEMA:
-                        message = (
-                            f"{feature_kind} dataset {dataset_id!r} uses "
-                            f"Legacy manifest schema {manifest['schema']!r}; "
-                            f"Production requires {FEATURE_LIBRARY_MANIFEST_SCHEMA!r} "
-                            "so passing full-wave cases, all four artifacts, "
-                            "and the exact exercised response are bound. "
-                            "Migrate it with the supported manifest tool."
-                        )
-                        if require_manifests:
-                            raise ValueError(message)
-                        warnings.append(message)
-                    contracts[contract_key] = {
-                        "status": manifest["validation"]["status"],
-                        "dataset": dataset,
-                        "manifest": manifest,
-                        "sources": sources,
-                    }
-                    if manifest["validation"]["status"] != "validated":
-                        message = (
-                            f"{feature_kind} dataset {dataset_id!r} manifest "
-                            f"is {manifest['validation']['status']}, not validated."
-                        )
-                        if require_manifests:
-                            raise ValueError(message)
-                        warnings.append(message)
-
-                if feature_kind == "line":
-                    response_payload = _load_grim(dataset)
-                    response_frequencies = np.asarray(
-                        response_payload["frequencies"], dtype=float
-                    )
-                    prepared_coefficients = []
-                    for requested_frequency in frequencies:
-                        prepared_coefficients.append(load_seam_from_grim(
-                            dataset,
-                            float(requested_frequency),
-                            declared_coherent_delta=True,
-                            delta_sign=1.0,
-                            _grim_payload=response_payload,
-                        ))
-                    response_identities[dataset_id] = (
-                        _prepared_line_response_physics_sha256(
-                            prepared_coefficients
-                        )
-                    )
-                    line_coefficients[dataset_id] = tuple(prepared_coefficients)
-                    response_frequency_bounds[dataset_id] = (
-                        float(np.min(response_frequencies)),
-                        float(np.max(response_frequencies)),
-                    )
-                else:
-                    response_identities[dataset_id] = (
-                        _prepared_point_response_physics_sha256(
-                            placement["pattern"]
-                        )
-                    )
-                    point_frequencies = np.asarray(
-                        placement["pattern"].frequencies, dtype=float
-                    )
-                    response_frequency_bounds[dataset_id] = (
-                        float(np.min(point_frequencies)),
-                        float(np.max(point_frequencies)),
-                    )
-            manifest = manifests[dataset_id]
-            if feature_kind == "point":
-                point_support = _validate_point_requested_support(
-                    placement, directions, frequencies, dataset_id=dataset_id
-                )
-                record.update(point_support)
-                if point_support["illuminated_requested_look_count"] == 0:
-                    warnings.append(
-                        f"Point {str(record['placement_id'])!r} has zero "
-                        "illuminated requested looks, so its enabled response "
-                        "contributes zero on this radar grid. Review its "
-                        "outward normal/orientation and requested aperture. If "
-                        "intentional, review and accept the existing one-time "
-                        "release-warning waiver before Build."
-                    )
-            if manifest is not None:
-                host_result = validate_installed_host(
-                    manifest, material=host_material, stack_id=host_stack_id,
-                    minimum_radius_m=host_minimum_radius_m,
-                    required=require_manifests, label=f"{feature_kind} dataset {dataset_id!r}",
-                )
-                record["host_applicability"] = host_result
-                for message in host_result["warnings"]:
-                    if message not in warnings:
-                        warnings.append(message)
-                applicability = manifest["applicability"]
-                frequency_range = applicability["frequency_ghz"]
-                if (
-                    float(np.min(frequencies)) < frequency_range["min"] - 1e-12
-                    or float(np.max(frequencies)) > frequency_range["max"] + 1e-12
-                ):
-                    raise ValueError(
-                        f"{feature_kind} dataset {dataset_id!r} is certified "
-                        f"only for {frequency_range['min']:g}-"
-                        f"{frequency_range['max']:g} GHz; the Assembly grid is "
-                        f"{float(np.min(frequencies)):g}-"
-                        f"{float(np.max(frequencies)):g} GHz."
-                    )
-                response_min, response_max = response_frequency_bounds[dataset_id]
-                if (
-                    frequency_range["min"] < response_min - 1.0e-12
-                    or frequency_range["max"] > response_max + 1.0e-12
-                ):
-                    raise ValueError(
-                        f"{feature_kind} dataset {dataset_id!r} manifest declares "
-                        f"{frequency_range['min']:g}-{frequency_range['max']:g} "
-                        "GHz applicability, outside the bound response data "
-                        f"range {response_min:g}-{response_max:g} GHz."
-                    )
-
-            if feature_kind == "line":
-                metrics = _line_applicability_metrics(
-                    placement,
-                    directions,
-                    requested_frequencies_ghz=frequencies,
-                    cancel_check=cancel_check,
-                )
-                installed_radius = float(metrics[
-                    "estimated_min_along_line_normal_turn_radius_m"
-                ])
-                public_metrics = dict(metrics)
-                if not math.isfinite(installed_radius):
-                    # Strict JSON has no Infinity token.  ``null`` plus the
-                    # explicit boolean is an unambiguous straight/constant-
-                    # normal result for external provenance consumers.
-                    public_metrics[
-                        "estimated_min_along_line_normal_turn_radius_m"
-                    ] = None
-                record.update(public_metrics)
-                if metrics["illuminated_requested_look_count"] == 0:
-                    warnings.append(
-                        f"Line {str(record['line_id'])!r} has zero illuminated "
-                        "requested looks, so its enabled response contributes "
-                        "zero on this radar grid. Review its endpoint normals "
-                        "and requested aperture. If intentional, review and "
-                        "accept the existing one-time release-warning waiver "
-                        "before Build."
-                    )
-                for coefficient, cut_range in zip(
-                    line_coefficients[dataset_id],
-                    metrics["required_cut_angle_ranges_deg"],
-                ):
-                    cut_min = cut_range["minimum_deg"]
-                    cut_max = cut_range["maximum_deg"]
-                    if cut_min is None:
-                        continue
-                    support_min = float(coefficient.phi_deg[0])
-                    support_max = float(coefficient.phi_deg[-1])
-                    if (
-                        float(cut_min) < support_min - 1.0e-9
-                        or float(cut_max) > support_max + 1.0e-9
-                    ):
-                        raise ValueError(
-                            f"line dataset {dataset_id!r} at "
-                            f"{float(coefficient.frequency_ghz):g} GHz covers "
-                            f"cut angles [{support_min:g}, {support_max:g}] deg, "
-                            f"but installed line {record['line_id']!r} needs "
-                            f"[{float(cut_min):.6g}, {float(cut_max):.6g}] deg "
-                            "over lit requested looks. Extend the coupon sweep "
-                            "or change the requested/installed envelope."
-                        )
-                if manifest is not None:
-                    applicability = manifest["applicability"]
-                    conical_limit = applicability[
-                        "maximum_conical_incidence_deg"
-                    ]
-                    if (
-                        metrics["maximum_requested_conical_incidence_deg"]
-                        > conical_limit + 1.0e-9
-                    ):
-                        raise ValueError(
-                            f"line dataset {dataset_id!r} is certified through "
-                            f"{conical_limit:g} deg conical incidence, but line "
-                            f"{record['line_id']!r} reaches "
-                            f"{metrics['maximum_requested_conical_incidence_deg']:.3g} "
-                            "deg over illuminated requested looks. The 2-D line "
-                            "coefficient lookup does not model arbitrary d.t."
-                        )
-                    curvature_limit = applicability[
-                        "minimum_along_line_normal_turn_radius_m"
-                    ]
-                    if (
-                        installed_radius + 1.0e-12 < curvature_limit
-                    ):
-                        raise ValueError(
-                            f"line dataset {dataset_id!r} requires an along-line "
-                            f"normal-turn radius >= {curvature_limit:g} m, but line "
-                            f"{record['line_id']!r} is approximately "
-                            f"{installed_radius:.3g} "
-                            "m. This does not certify transverse/principal host "
-                            "curvature."
-                        )
-                    path_turn_limit = applicability[
-                        "maximum_path_vertex_turn_deg"
-                    ]
-                    installed_path_turn = float(
-                        metrics["maximum_path_vertex_turn_deg"]
-                    )
-                    if installed_path_turn > path_turn_limit + 1.0e-9:
-                        raise ValueError(
-                            f"line dataset {dataset_id!r} permits at most "
-                            f"{path_turn_limit:g} deg path turn at a shared "
-                            f"vertex, but line {record['line_id']!r} reaches "
-                            f"{installed_path_turn:.6g} deg. Split/validate the "
-                            "corner as its own interaction or use matching "
-                            "corner evidence."
-                        )
-                    footprint_radius = float(
-                        applicability["footprint_radius_m"]
-                    )
-                    self_overlap = _line_self_footprint_overlap(
-                        np.asarray(placement["perimeter"], dtype=float),
-                        footprint_radius,
-                        cancel_check=cancel_check,
-                    )
-                    if self_overlap is not None:
-                        left_index, right_index, clearance = self_overlap
-                        message = (
-                            f"Line {record['line_id']!r} folds back within its "
-                            "own applicability footprint: segments "
-                            f"{left_index + 1} and {right_index + 1} are "
-                            f"nonlocally {clearance:.6g} m apart, below "
-                            f"{2.0 * footprint_radius:.6g} m. Independent "
-                            "straight-seam superposition omits this self/corner "
-                            "coupling."
-                        )
-                        if require_manifests:
-                            raise ValueError(message)
-                        warnings.append(message)
-                signature = _component_signature(
-                    feature_kind,
-                    response_identities[dataset_id],
-                    placement["perimeter"],
-                    placement["segment_normals"],
-                )
-                instance_id = str(record["line_id"])
-            else:
-                effective_roll = _canonical_point_roll(
-                    np.asarray(placement["aperture_normal"], dtype=float),
-                    np.asarray(placement["roll_ref"], dtype=float),
-                )
-                signature = _component_signature(
-                    feature_kind,
-                    response_identities[dataset_id],
-                    placement["location"],
-                    placement["aperture_normal"],
-                    effective_roll,
-                )
-                instance_id = str(record["placement_id"])
-            prior = seen_components.get(signature)
-            if prior is not None:
-                raise ValueError(
-                    f"Duplicate physical feature component: {feature_kind} "
-                    f"{instance_id!r} repeats {prior[0]} {prior[1]!r} with the "
-                    "same response, location/path, and orientation."
-                )
-            seen_components[signature] = (feature_kind, instance_id)
-            record["component_signature"] = signature
-            record["dataset_content_sha256"] = response_content_identities[
-                dataset_id
-            ]
-            record["dataset_physics_sha256"] = response_identities[dataset_id]
-            if manifest is not None:
-                record["feature_library_manifest_schema"] = manifest["schema"]
-                record["feature_library_validation_status"] = manifest[
-                    "validation"
-                ]["status"]
-                record["feature_library_footprint_radius_m"] = manifest[
-                    "applicability"
-                ]["footprint_radius_m"]
-                footprint = {
-                    "kind": feature_kind,
-                    "instance_id": instance_id,
-                    "radius_m": float(manifest["applicability"][
-                        "footprint_radius_m"
-                    ]),
-                }
-                if feature_kind == "point":
-                    footprint["location"] = np.asarray(
-                        placement["location"], dtype=float
-                    )
-                else:
-                    footprint["segments"] = np.asarray(
-                        placement["perimeter"], dtype=float
-                    )
-                footprint_components.append(footprint)
-
-    point_ids = {str(record["placement_id"]) for record in point_records}
-    line_ids = {str(record["line_id"]) for record in line_records}
-    collisions = sorted(point_ids & line_ids)
-    if collisions:
-        raise ValueError(
-            "Point placement_id and line_id values share one Assembly identity "
-            f"namespace; rename duplicate ID(s) {collisions}."
-        )
-    overlap_warning_limit = 100
-    overlap_count = 0
-    for left, right in _footprint_candidate_pairs(
-        footprint_components, cancel_check=cancel_check
-    ):
-        clearance = _component_clearance(left, right)
-        required_clearance = left["radius_m"] + right["radius_m"]
-        if clearance + 1.0e-12 >= required_clearance:
-            continue
-        overlap_count += 1
-        message = (
-            f"Feature applicability footprints overlap: {left['kind']} "
-            f"{left['instance_id']!r} and {right['kind']} "
-            f"{right['instance_id']!r} are {clearance:.6g} m apart, below "
-            f"their combined {required_clearance:.6g} m footprint. "
-            "Independent superposition omits cluster coupling."
-        )
-        if require_manifests:
-            raise ValueError(message)
-        if overlap_count <= overlap_warning_limit:
-            warnings.append(message)
-        elif overlap_count == overlap_warning_limit + 1:
-            warnings.append(
-                "More than 100 feature applicability-footprint overlaps were "
-                "found; additional pairs are not rendered. Use Production "
-                "validation and resolve clustered-feature coupling before release."
-            )
-            break
-    return contracts, warnings, source_hashes, absent_source_paths
+from feature_library_contracts import _apply_feature_library_contracts
 
 
 def _prepared_assembly_workload(
@@ -4325,6 +3867,9 @@ def bor_shadow_triangles(profile, *, max_sag_m, normal_tolerance_deg):
     return triangles[valid], {"azimuth_sector_count": count, "maximum_radial_sag_m": radius*(1-math.cos(math.pi/count)), "source": "authoritative embedded BoR profile"}
 
 
+from feature_preparation import capture_assembly_sources, prepare_assembly_placements
+
+
 def prepare_feature_assembly(
     request: FeatureAssemblyRequest,
     *,
@@ -4333,131 +3878,32 @@ def prepare_feature_assembly(
 ) -> FeatureAssemblyPlan:
     """Resolve, validate, and prepare one feature-assembly request."""
 
-    if not isinstance(request, FeatureAssemblyRequest):
-        raise TypeError("request must be a FeatureAssemblyRequest.")
-    if cancel_check is not None and cancel_check():
-        raise InterruptedError("Feature placement validation cancelled.")
-    if progress_callback is not None:
-        progress_callback(0, 100, "Checking Assembly inputs")
-    base = resolve_path(request.base_grim, base_dir=request.base_dir)
-    output = _canonical_grim_output_path(
-        request.output_grim, base_dir=request.base_dir
-    )
-    features_only_output = Path(feature_only_output_path(str(output)))
-    _reject_output_aliases(request, base=base, output=output)
-    active_features = bool(
-        (request.point_locations_csv is not None and request.enabled_point_placement_ids != ())
-        or (request.line_locations_csv is not None and request.enabled_line_ids != ())
-    )
-    coordinate_scale = _required_unit_scale(
-        request.coordinate_units,
-        label="coordinate_units",
-        used_for="a point or line placement CSV",
-    ) if request.point_locations_csv is not None or request.line_locations_csv is not None else 1.0
-    surface_scale: Optional[float] = None
-    if request.surface_mesh is not None:
-        surface_scale = _required_unit_scale(
-            request.surface_units,
-            label="surface_units",
-            used_for="surface_mesh",
-        )
-    if not base.is_file():
-        raise FileNotFoundError(f"Base monostatic GRIM not found: {base}")
-    if output.exists() and not output.is_file():
-        raise ValueError(f"Assembly output exists but is not a file: {output}")
-    if features_only_output.exists() and not features_only_output.is_file():
-        raise ValueError(
-            "Feature-only Assembly output exists but is not a file: "
-            f"{features_only_output}"
-        )
-    prepared_output_absent = not output.is_file()
-    prepared_output_sha256 = (
-        None if prepared_output_absent else sha256_file(str(output))
-    )
-    prepared_features_only_output_absent = not features_only_output.is_file()
-    prepared_features_only_output_sha256 = (
-        None
-        if prepared_features_only_output_absent
-        else sha256_file(str(features_only_output))
-    )
-    base_sha256 = sha256_file(str(base))
-    prepared_source_sha256 = {str(base): base_sha256}
-    prepared_input_sources: dict[str, dict[str, str]] = {
-        "base_grim": {"path": str(base), "sha256": base_sha256}
-    }
-    if cancel_check is not None and cancel_check():
-        raise InterruptedError("Feature placement validation cancelled.")
-    if progress_callback is not None:
-        progress_callback(12, 100, "Reading clean-body response")
-
-    def snapshot_input_source(
-        role: str,
-        value: Optional[PathValue],
-        *,
-        label: str,
-    ) -> Optional[Path]:
-        if value is None:
-            return None
-        source = resolve_path(value, base_dir=request.base_dir)
-        if not source.is_file():
-            raise FileNotFoundError(f"{label} not found: {source}")
-        digest = sha256_file(str(source))
-        previous = prepared_source_sha256.get(str(source))
-        if previous is not None and previous != digest:
-            raise RuntimeError(
-                f"Feature-assembly source changed while input files were "
-                f"being snapshotted: {source}. Revalidate the assembly."
-            )
-        prepared_source_sha256[str(source)] = digest
-        prepared_input_sources[role] = {
-            "path": str(source),
-            "sha256": digest,
-        }
-        return source
-
-    # Snapshot every spatial-definition file before the first parser/mesh
-    # reader sees it.  The end-of-prepare check below then proves that all
-    # prepared geometry came from one immutable set of input bytes.
-    surface_path = snapshot_input_source(
-        "surface_mesh", request.surface_mesh, label="Surface mesh"
-    )
-    line_coordinates_path = snapshot_input_source(
-        "line_locations_csv",
-        request.line_locations_csv,
-        label="Line-placement CSV",
-    )
-    point_coordinates_path = snapshot_input_source(
-        "point_locations_csv",
-        request.point_locations_csv,
-        label="Point-placement CSV",
-    )
-    if cancel_check is not None and cancel_check():
-        raise InterruptedError("Feature placement validation cancelled.")
+    sources = capture_assembly_sources(request, cancel_check=cancel_check, progress_callback=progress_callback)
 
     # NPZ access is lazy: read only the small axes before admitting the full
     # coherent response and its metadata. The complete feature/mesh estimate
     # is repeated at execution after the prepared geometry is known.
-    with np.load(str(base), allow_pickle=False) as archive:
+    with np.load(str(sources.base), allow_pickle=False) as archive:
         capacity_grid = {
             "frequencies_ghz": archive["frequencies"],
             "azimuths_deg": archive["azimuths"],
             "elevations_deg": archive["elevations"],
         }
-    preflight_feature_assembly_capacity(str(base), str(output), radar_grid=capacity_grid)
-    base_payload = _load_grim(str(base))
+    preflight_feature_assembly_capacity(str(sources.base), str(sources.output), radar_grid=capacity_grid)
+    base_payload = _load_grim(str(sources.base))
     body_mesh_certification = None
     if request.require_body_mesh_certification:
         if progress_callback is not None:
             progress_callback(10, 100, "Checking body mesh certification")
         body_mesh_certification = audit_body_mesh_certification(
-            str(base), loaded_grim=base_payload
+            str(sources.base), loaded_grim=base_payload
         )
     existing_feature_records = _decoded_feature_provenance(
-        base_payload, base.name
+        base_payload, sources.base.name
     )
     if request.require_feature_manifests and existing_feature_records:
         raise ValueError(
-            f"{base.name}: Production Assembly requires one complete batch "
+            f"{sources.base.name}: Production Assembly requires one complete batch "
             "starting from the clean-body response. This base already carries "
             "feature provenance, so cross-build applicability/coupling cannot "
             "be re-evaluated safely. Select the clean body and enable every "
@@ -4465,19 +3911,19 @@ def prepare_feature_assembly(
         )
     validated_base_payload = _validate_declared_coherent_base(
         base_payload,
-        str(base),
+        str(sources.base),
         allow_legacy_metadata=request.allow_legacy_base_metadata,
     )
     _canonical_3d_channel_indices(
         validated_base_payload["polarizations"],
-        str(base),
+        str(sources.base),
         require_all=True,
     )
     coherent_base_missing_metadata = tuple(
         validated_base_payload.get(_LEGACY_BASE_ASSUMPTIONS_KEY, ())
     )
 
-    embedded_grid = load_body_requested_radar_grid(str(base))
+    embedded_grid = load_body_requested_radar_grid(str(sources.base))
     pre_validation_warnings: list[str] = []
     pre_absent_paths: set[str] = set()
     surface_geometry_contract: dict[str, Any] = {
@@ -4486,7 +3932,7 @@ def prepare_feature_assembly(
     }
     profile: Optional[np.ndarray] = None
     if embedded_grid is not None:
-        profile = load_body_profile_grim(str(base))
+        profile = load_body_profile_grim(str(sources.base))
         grid = dict(embedded_grid)
         base_grid_contract = {
             "schema": "ghost.assembly-base-grid-contract.v1",
@@ -4513,7 +3959,7 @@ def prepare_feature_assembly(
         base_grid_contract = validate_assembly_base_grid_metadata(
             base_payload,
             grid,
-            str(base),
+            str(sources.base),
             allow_legacy_metadata=request.allow_legacy_base_metadata,
         )
 
@@ -4528,150 +3974,39 @@ def prepare_feature_assembly(
     _subset_payload, grid = exact_assembly_subset({key: base_payload[key] for key in ("frequencies", "azimuths", "elevations")}, grid)
     del _subset_payload
 
-    skin_limit, wavelength = compute_skin_limit(grid["frequencies_ghz"], skin_tol_m=request.skin_tol_m, skin_phase_tol_deg=request.skin_phase_tol_deg)
-    normal_tolerance = validate_normal_tolerance(request.normal_tol_deg)
-    auto_shadow_report = None
-    surface: Optional[TriangleSurface] = None
-    surface_triangles_cad_m: Optional[np.ndarray] = None
-    mesh_topology_report = None
-    if surface_path is not None:
-        assert surface_scale is not None
-        surface_triangles_cad_m = (
-            np.asarray(read_surface_mesh(str(surface_path)), dtype=float)
-            * surface_scale
-        )
-        surface_triangles_cad_m.setflags(write=False)
-        triangles = to_axis_frame(surface_triangles_cad_m)
-        surface = TriangleSurface(
-            triangles,
-            flip_normals=bool(request.flip_surface_normals),
-        )
-        # STL/facet files do not carry trustworthy topology. Reconstruct it
-        # once so normal and shadow risks are visible in the same validation
-        # report as the feature instances. This is diagnostic rather than an
-        # automatic repair: an intentional open placement patch remains usable.
-        mesh_topology_report = surface.topology_report
-    elif embedded_grid is not None and active_features and request.shadow:
-        triangles, auto_shadow_report = bor_shadow_triangles(profile, max_sag_m=skin_limit/4, normal_tolerance_deg=max(normal_tolerance/2, 1e-6))
-        surface = TriangleSurface(triangles)
-        surface_triangles_cad_m = triangles @ CAD2AXIS
-        surface_triangles_cad_m.setflags(write=False)
-        mesh_topology_report = surface.topology_report
-    elif embedded_grid is None and active_features:
-        raise ValueError(
-            "A non-BoR base requires surface_mesh=.facet or .stl for skin "
-            "validation and outward normals."
-        )
-    if request.shadow and active_features and surface is None:
-        raise ValueError("shadow=True requires surface_mesh.")
-    if surface is not None and active_features and not request.shadow:
-        pre_validation_warnings.append(
-            "Geometric body shadowing is OFF while a body mesh is selected. "
-            "Hidden point and line features are not occlusion-tested and can "
-            "contribute at full modeled amplitude whenever they are front-face "
-            "illuminated. Enable body shadowing for vehicle placement work, or "
-            "review and accept the existing one-time release-warning waiver if "
-            "this no-shadow trade study is intentional."
-        )
-    if cancel_check is not None and cancel_check():
-        raise InterruptedError("Feature placement validation cancelled.")
-    if progress_callback is not None:
-        progress_callback(35, 100, "Checking body surface and topology")
-
-    if embedded_grid is not None:
-        if surface is None:
-            surface_geometry_contract = {
-                "schema": SURFACE_BINDING_SCHEMA,
-                "status": "embedded_bor_profile_is_authoritative_surface",
-            }
-        else:
-            surface_geometry_contract = _validate_bor_surface_agreement(
-                profile,
-                surface,
-                skin_limit_m=skin_limit,
-                shadow_requested=bool(request.shadow),
-                cancel_check=cancel_check,
-            )
-            surface_geometry_contract["surface_mesh"] = str(surface_path)
-            if auto_shadow_report is not None:
-                surface_geometry_contract["surface_mesh"] = None
-                surface_geometry_contract["generated_shadow_surface"] = auto_shadow_report
-    point_preview_lists: dict[str, list[np.ndarray]] = {}
-    point_preview_normals: dict[str, list[np.ndarray]] = {}
-    point_preview_roll_references: dict[str, list[np.ndarray]] = {}
-    line_preview_paths: dict[str, dict[str, np.ndarray]] = {}
-    line_preview_endpoint_normals: dict[str, dict[str, np.ndarray]] = {}
-    lines, line_records = prepare_line_placements(
-        profile,
-        surface,
-        coordinate_scale=coordinate_scale,
-        skin_limit_m=skin_limit,
-        wavelength_m=wavelength,
-        normal_tolerance_deg=normal_tolerance,
-        locations_csv=line_coordinates_path,
-        datasets=request.line_datasets,
-        enabled_line_ids=request.enabled_line_ids,
-        base_dir=request.base_dir,
-        preview_paths_cad_m=line_preview_paths,
-        preview_endpoint_normals_cad=line_preview_endpoint_normals,
-        prepare_shadow_origins=bool(request.shadow),
-        cancel_check=cancel_check,
+    placements = prepare_assembly_placements(
+        request, sources, embedded_grid=embedded_grid, grid=grid, profile=profile,
+        pre_validation_warnings=pre_validation_warnings, surface_geometry_contract=surface_geometry_contract,
+        cancel_check=cancel_check, progress_callback=progress_callback,
     )
-    if progress_callback is not None:
-        progress_callback(55, 100, "Checking line paths")
-    points, point_records = prepare_point_placements(
-        profile,
-        surface,
-        coordinate_scale=coordinate_scale,
-        skin_limit_m=skin_limit,
-        wavelength_m=wavelength,
-        normal_tolerance_deg=normal_tolerance,
-        locations_csv=point_coordinates_path,
-        datasets=request.point_datasets,
-        enabled_point_placement_ids=request.enabled_point_placement_ids,
-        base_dir=request.base_dir,
-        preview_locations_cad_m=point_preview_lists,
-        preview_normals_cad=point_preview_normals,
-        preview_roll_references_cad=point_preview_roll_references,
-        prepare_shadow_origins=bool(request.shadow),
-        cancel_check=cancel_check,
-    )
-    if progress_callback is not None:
-        progress_callback(72, 100, "Checking point placements")
 
-    point_preview_ids: dict[str, list[str]] = {}
-    for record in point_records:
-        point_preview_ids.setdefault(str(record["dataset_id"]), []).append(
-            str(record["placement_id"])
-        )
-
-    if embedded_grid is None and (lines or points):
-        surface_digest = prepared_source_sha256[str(surface_path)]
+    if embedded_grid is None and (placements.lines or placements.points):
+        surface_digest = sources.prepared_source_sha256[str(sources.surface_path)]
         try:
             binding, binding_path, binding_digest = load_surface_binding(
-                base,
-                surface_path,
-                base_grim_sha256=base_sha256,
+                sources.base,
+                sources.surface_path,
+                base_grim_sha256=sources.base_sha256,
                 surface_sha256=surface_digest,
                 surface_units=request.surface_units,
             )
         except (ValueError, TypeError, KeyError, OSError) as exc:
             if request.require_feature_manifests:
                 raise
-            binding, binding_path, binding_digest = None, surface_binding_path(surface_path), None
+            binding, binding_path, binding_digest = None, surface_binding_path(sources.surface_path), None
             pre_validation_warnings.append(f"Surface metadata advisory: {exc}; registration is assumed from the selected body and mesh.")
         if binding is None:
             message = (
-                f"{base.name}: external body fields do not embed geometry, so "
+                f"{sources.base.name}: external body fields do not embed geometry, so "
                 f"Production requires the reviewed surface binding {binding_path}. "
                 "Create it with the supported binding tool after confirming "
                 "that this exact mesh, units, CAD frame, and origin correspond "
                 "to this exact clean-body response."
             )
-            surface_geometry_contract = {
+            placements.surface_geometry_contract = {
                 "schema": SURFACE_BINDING_SCHEMA,
                 "status": "unbound_missing_reviewed_sidecar",
-                "surface_mesh": str(surface_path),
+                "surface_mesh": str(sources.surface_path),
                 "expected_sidecar": str(binding_path),
             }
             if request.require_feature_manifests:
@@ -4679,15 +4014,15 @@ def prepare_feature_assembly(
             pre_validation_warnings.append("Surface metadata advisory: selected body and mesh are assumed to share units, frame, and origin; no registration certificate is required.")
         else:
             if request.require_feature_manifests:
-                prepared_source_sha256[str(binding_path)] = str(binding_digest)
-                prepared_input_sources["surface_binding"] = {
+                sources.prepared_source_sha256[str(binding_path)] = str(binding_digest)
+                sources.prepared_input_sources["surface_binding"] = {
                     "path": str(binding_path),
                     "sha256": str(binding_digest),
                 }
-            surface_geometry_contract = {
+            placements.surface_geometry_contract = {
                 **binding,
                 "status": "reviewed_exact_file_binding",
-                "surface_mesh": str(surface_path),
+                "surface_mesh": str(sources.surface_path),
                 "sidecar": str(binding_path),
             }
 
@@ -4698,10 +4033,10 @@ def prepare_feature_assembly(
         manifest_absent_paths,
     ) = (
         _apply_feature_library_contracts(
-            line_placements=lines,
-            line_records=line_records,
-            point_placements=points,
-            point_records=point_records,
+            line_placements=placements.lines,
+            line_records=placements.line_records,
+            point_placements=placements.points,
+            point_records=placements.point_records,
             radar_grid=grid,
             require_manifests=bool(request.require_feature_manifests),
             cancel_check=cancel_check,
@@ -4711,7 +4046,7 @@ def prepare_feature_assembly(
         )
     )
     validation_warnings = pre_validation_warnings + list(contract_warnings)
-    validation_warnings.extend(assembly_sampling_warnings(grid, lines, points))
+    validation_warnings.extend(assembly_sampling_warnings(grid, placements.lines, placements.points))
     manifest_absent_paths.update(pre_absent_paths)
     if progress_callback is not None:
         progress_callback(88, 100, "Checking feature-library applicability")
@@ -4730,20 +4065,20 @@ def prepare_feature_assembly(
             f"{grid_missing_metadata}; the selected body role supplies those "
             "semantics as a recorded assumption."
         )
-    if mesh_topology_report is not None:
+    if placements.mesh_topology_report is not None:
         strict_mesh_errors = []
-        if mesh_topology_report.duplicate_triangle_count:
+        if placements.mesh_topology_report.duplicate_triangle_count:
             strict_mesh_errors.append("duplicate facets")
-        if mesh_topology_report.nonmanifold_edge_count:
+        if placements.mesh_topology_report.nonmanifold_edge_count:
             strict_mesh_errors.append("non-manifold edges")
-        if mesh_topology_report.inconsistent_winding_edge_count:
+        if placements.mesh_topology_report.inconsistent_winding_edge_count:
             strict_mesh_errors.append("mixed face winding")
         normals_flipped = bool(request.flip_surface_normals)
         outward_components = int(
-            mesh_topology_report.outward_closed_component_count
+            placements.mesh_topology_report.outward_closed_component_count
         )
         inward_components = int(
-            mesh_topology_report.inward_closed_component_count
+            placements.mesh_topology_report.inward_closed_component_count
         )
         if outward_components and inward_components:
             strict_mesh_errors.append("mixed closed-component orientation")
@@ -4755,7 +4090,7 @@ def prepare_feature_assembly(
             strict_mesh_errors.append(
                 "outward closed mesh made inward by Flip normals"
             )
-        if request.shadow and mesh_topology_report.boundary_edge_count:
+        if request.shadow and placements.mesh_topology_report.boundary_edge_count:
             strict_mesh_errors.append("open boundaries with body shadow enabled")
         if request.require_feature_manifests and strict_mesh_errors:
             raise ValueError(
@@ -4765,31 +4100,31 @@ def prepare_feature_assembly(
                 "profile for an intentional open placement patch."
             )
         validation_warnings.extend(
-            mesh_topology_report.messages(
+            placements.mesh_topology_report.messages(
                 shadow_requested=bool(request.shadow),
                 normals_flipped=normals_flipped,
             )
         )
     for source, digest in manifest_source_hashes.items():
-        previous = prepared_source_sha256.get(source)
+        previous = sources.prepared_source_sha256.get(source)
         if previous is not None and previous != digest:
             raise ValueError(
                 f"Prepared manifest source has conflicting hashes: {source}."
             )
-        prepared_source_sha256[source] = digest
+        sources.prepared_source_sha256[source] = digest
 
     normal_fn = (
-        surface.normal
-        if surface is not None
+        placements.surface.normal
+        if placements.surface is not None
         else (surface_of_revolution_normal(profile) if profile is not None else None)
     )
     occluder = None
     maximum_shadow_registration_offset = 0.0
-    if request.shadow and active_features:
-        occluder = Occluder(surface.triangles, bias=request.shadow_bias_m)
+    if request.shadow and sources.active_features:
+        occluder = Occluder(placements.surface.triangles, bias=request.shadow_bias_m)
         maximum_shadow_registration_offset = max(
-            [float(record.get("max_skin_offset_m", 0.0)) for record in line_records]
-            + [float(record.get("skin_offset_m", 0.0)) for record in point_records]
+            [float(record.get("max_skin_offset_m", 0.0)) for record in placements.line_records]
+            + [float(record.get("skin_offset_m", 0.0)) for record in placements.point_records]
             + [0.0]
         )
         if (
@@ -4804,9 +4139,9 @@ def prepare_feature_assembly(
 
     assembly_workload = _prepared_assembly_workload(
         grid,
-        lines,
-        points,
-        triangle_count=(0 if surface is None else len(surface.triangles)),
+        placements.lines,
+        placements.points,
+        triangle_count=(0 if placements.surface is None else len(placements.surface.triangles)),
         shadow_enabled=bool(request.shadow),
     )
     workload_warning = workload_review_warning(assembly_workload)
@@ -4815,19 +4150,19 @@ def prepare_feature_assembly(
 
     requirements = FeatureDatasetRequirements(
         point_dataset_ids=tuple(dict.fromkeys(
-            str(record["dataset_id"]) for record in point_records
+            str(record["dataset_id"]) for record in placements.point_records
         )),
         line_dataset_ids=tuple(dict.fromkeys(
-            str(record["dataset_id"]) for record in line_records
+            str(record["dataset_id"]) for record in placements.line_records
         )),
-        point_placement_count=len(point_records),
-        line_path_count=len(line_records),
+        point_placement_count=len(placements.point_records),
+        line_path_count=len(placements.line_records),
         line_segment_count=sum(
-            int(record["segment_count"]) for record in line_records
+            int(record["segment_count"]) for record in placements.line_records
         ),
         point_instances=tuple(
             (str(record["placement_id"]), str(record["dataset_id"]))
-            for record in point_records
+            for record in placements.point_records
         ),
         line_instances=tuple(
             (
@@ -4835,14 +4170,14 @@ def prepare_feature_assembly(
                 str(record["dataset_id"]),
                 int(record["segment_count"]),
             )
-            for record in line_records
+            for record in placements.line_records
         ),
     )
     preview = FeaturePreviewGeometry(
         surface_triangles_cad_m=(
             None
-            if surface_triangles_cad_m is None
-            else np.asarray(surface_triangles_cad_m, dtype=float)
+            if placements.surface_triangles_cad_m is None
+            else np.asarray(placements.surface_triangles_cad_m, dtype=float)
         ),
         body_profile_rho_z_m=(
             None
@@ -4851,33 +4186,33 @@ def prepare_feature_assembly(
         ),
         point_locations_cad_m={
             dataset_id: np.asarray(locations, dtype=float).reshape(-1, 3)
-            for dataset_id, locations in point_preview_lists.items()
+            for dataset_id, locations in placements.point_preview_lists.items()
         },
         line_paths_cad_m={
             dataset_id: {
                 line_id: np.array(path, dtype=float, copy=True)
                 for line_id, path in paths.items()
             }
-            for dataset_id, paths in line_preview_paths.items()
+            for dataset_id, paths in placements.line_preview_paths.items()
         },
         point_normals_cad={
             dataset_id: np.asarray(vectors, dtype=float).reshape(-1, 3)
-            for dataset_id, vectors in point_preview_normals.items()
+            for dataset_id, vectors in placements.point_preview_normals.items()
         },
         point_roll_references_cad={
             dataset_id: np.asarray(vectors, dtype=float).reshape(-1, 3)
-            for dataset_id, vectors in point_preview_roll_references.items()
+            for dataset_id, vectors in placements.point_preview_roll_references.items()
         },
         line_endpoint_normals_cad={
             dataset_id: {
                 line_id: np.array(vectors, dtype=float, copy=True)
                 for line_id, vectors in groups.items()
             }
-            for dataset_id, groups in line_preview_endpoint_normals.items()
+            for dataset_id, groups in placements.line_preview_endpoint_normals.items()
         },
         point_placement_ids={
             dataset_id: tuple(placement_ids)
-            for dataset_id, placement_ids in point_preview_ids.items()
+            for dataset_id, placement_ids in placements.point_preview_ids.items()
         },
     )
     provenance = {
@@ -4889,15 +4224,15 @@ def prepare_feature_assembly(
             "source": "user-declared installation region; not inferred from body RCS",
         },
         "coordinate_units": request.coordinate_units,
-        "surface_mesh": None if surface_path is None else str(surface_path),
+        "surface_mesh": None if sources.surface_path is None else str(sources.surface_path),
         "surface_units": (
-            None if surface_path is None else request.surface_units
+            None if sources.surface_path is None else request.surface_units
         ),
         "surface_normals_flipped": bool(request.flip_surface_normals),
         "surface_mesh_topology": (
             None
-            if mesh_topology_report is None
-            else mesh_topology_report.as_dict()
+            if placements.mesh_topology_report is None
+            else placements.mesh_topology_report.as_dict()
         ),
         "shadow": bool(request.shadow),
         "shadow_bias_m": (
@@ -4914,12 +4249,12 @@ def prepare_feature_assembly(
             if occluder is None
             else float(maximum_shadow_registration_offset)
         ),
-        "surface_geometry_binding": surface_geometry_contract,
+        "surface_geometry_binding": placements.surface_geometry_contract,
         "enabled_selection": {
             "point_placement_ids": [
-                str(record["placement_id"]) for record in point_records
+                str(record["placement_id"]) for record in placements.point_records
             ],
-            "line_ids": [str(record["line_id"]) for record in line_records],
+            "line_ids": [str(record["line_id"]) for record in placements.line_records],
         },
         "line_phase_mapping_deg": {
             "TM": float(PSI_HH_DEG),
@@ -4957,11 +4292,11 @@ def prepare_feature_assembly(
         },
         "prepared_input_sources": {
             role: dict(source)
-            for role, source in prepared_input_sources.items()
+            for role, source in sources.prepared_input_sources.items()
         },
-        "placements": line_records + point_records,
+        "placements": placements.line_records + placements.point_records,
     }
-    for record in line_records + point_records:
+    for record in placements.line_records + placements.point_records:
         dataset = record.get("dataset")
         dataset_sha256 = record.get("dataset_sha256")
         if dataset is None or dataset_sha256 is None:
@@ -4970,16 +4305,16 @@ def prepare_feature_assembly(
             continue
         source = str(resolve_path(dataset, base_dir=request.base_dir))
         digest = str(dataset_sha256)
-        previous = prepared_source_sha256.get(source)
+        previous = sources.prepared_source_sha256.get(source)
         if previous is not None and previous != digest:
             raise ValueError(
                 f"Prepared response source has conflicting hashes: {source}."
             )
-        prepared_source_sha256[source] = digest
+        sources.prepared_source_sha256[source] = digest
 
     # Establish one coherent snapshot at the end of preparation.  This catches
     # a source modified while placement validation itself was still running.
-    for source, expected in prepared_source_sha256.items():
+    for source, expected in sources.prepared_source_sha256.items():
         if cancel_check is not None and cancel_check():
             raise InterruptedError("Feature placement validation cancelled.")
         try:
@@ -5000,68 +4335,68 @@ def prepare_feature_assembly(
                 "Feature-library sidecar state changed during preparation: "
                 f"{absent_path} now exists. Revalidate the assembly."
             )
-    if prepared_output_absent:
-        if output.exists():
+    if sources.prepared_output_absent:
+        if sources.output.exists():
             raise RuntimeError(
-                f"Assembly output was created during validation: {output}. "
+                f"Assembly output was created during validation: {sources.output}. "
                 "Review the current destination and validate again."
             )
     elif (
-        not output.is_file()
-        or sha256_file(str(output)) != prepared_output_sha256
+        not sources.output.is_file()
+        or sha256_file(str(sources.output)) != sources.prepared_output_sha256
     ):
         raise RuntimeError(
-            f"Assembly output changed during validation: {output}. Review "
+            f"Assembly output changed during validation: {sources.output}. Review "
             "the newer destination and validate again."
         )
-    if prepared_features_only_output_absent:
-        if features_only_output.exists():
+    if sources.prepared_features_only_output_absent:
+        if sources.features_only_output.exists():
             raise RuntimeError(
                 "Feature-only Assembly output was created during validation: "
-                f"{features_only_output}. Review the current destination and "
+                f"{sources.features_only_output}. Review the current destination and "
                 "validate again."
             )
     elif (
-        not features_only_output.is_file()
-        or sha256_file(str(features_only_output))
-        != prepared_features_only_output_sha256
+        not sources.features_only_output.is_file()
+        or sha256_file(str(sources.features_only_output))
+        != sources.prepared_features_only_output_sha256
     ):
         raise RuntimeError(
             "Feature-only Assembly output changed during validation: "
-            f"{features_only_output}. Review the newer destination and "
+            f"{sources.features_only_output}. Review the newer destination and "
             "validate again."
         )
     if progress_callback is not None:
         progress_callback(100, 100, "Placement validation complete")
     plan = FeatureAssemblyPlan(
         request=request,
-        base_path=base,
-        output_path=output,
+        base_path=sources.base,
+        output_path=sources.output,
         radar_grid=grid,
         body_profile=profile,
-        surface_path=surface_path,
-        surface=surface,
+        surface_path=sources.surface_path,
+        surface=placements.surface,
         surface_normal_fn=normal_fn,
         occluder=occluder,
-        line_placements=lines,
-        point_placements=points,
-        line_records=line_records,
-        point_records=point_records,
+        line_placements=placements.lines,
+        point_placements=placements.points,
+        line_records=placements.line_records,
+        point_records=placements.point_records,
         dataset_requirements=requirements,
         preview_geometry=preview,
-        skin_limit_m=float(skin_limit),
-        highest_frequency_wavelength_m=float(wavelength),
+        skin_limit_m=float(placements.skin_limit),
+        highest_frequency_wavelength_m=float(placements.wavelength),
         feature_provenance=provenance,
         validation_warnings=tuple(validation_warnings),
-        prepared_source_sha256=prepared_source_sha256,
+        prepared_source_sha256=sources.prepared_source_sha256,
         prepared_absent_paths=tuple(sorted(manifest_absent_paths)),
-        prepared_output_sha256=prepared_output_sha256,
-        prepared_output_absent=bool(prepared_output_absent),
+        prepared_output_sha256=sources.prepared_output_sha256,
+        prepared_output_absent=bool(sources.prepared_output_absent),
         prepared_features_only_output_sha256=(
-            prepared_features_only_output_sha256
+            sources.prepared_features_only_output_sha256
         ),
         prepared_features_only_output_absent=bool(
-            prepared_features_only_output_absent
+            sources.prepared_features_only_output_absent
         ),
     )
     object.__setattr__(

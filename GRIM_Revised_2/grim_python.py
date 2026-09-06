@@ -513,16 +513,6 @@ except ModuleNotFoundError as exc:
         return True
 
 
-def _minimal_physics_extra(dataset: RcsGrid, *, include_phase_reference=True) -> dict:
-    extra = {}
-    keys = ["time_convention", "polarization_basis"]
-    if include_phase_reference:
-        keys.insert(0, "phase_reference")
-    for key in keys:
-        value = dataset._declared_scalar_metadata(key)
-        if value:
-            extra[key] = value
-    return extra
 
 
 def _derived_response_extra(dataset: RcsGrid) -> dict:

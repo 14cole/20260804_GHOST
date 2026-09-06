@@ -352,16 +352,6 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         unit = dataset.default_log_unit() if isinstance(dataset, RcsGrid) else "dBsm"
         return f"{quantity_name} ({unit})"
 
-    def _rcs_p50_axis_label(self) -> str:
-        if self._button_checked(self.btn_phase):
-            return "Phase P50 (deg)"
-        dataset = getattr(self, "active_dataset", None)
-        quantity = dataset.linear_quantity() if isinstance(dataset, RcsGrid) else "sigma_3d"
-        quantity_name, linear_unit = self._linear_quantity_label_and_unit(quantity)
-        if self._plot_scale_is_linear():
-            return f"{quantity_name} P50 ({linear_unit})"
-        unit = dataset.default_log_unit() if isinstance(dataset, RcsGrid) else "dBsm"
-        return f"{quantity_name} P50 ({unit})"
 
     def _polar_zero_location(self) -> str:
         loc = self.combo_polar_zero.currentData()
@@ -1733,60 +1723,6 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         self._update_current_python_plot_style()
         self.plot_canvas.draw_idle()
 
-    def _fit_polar_x_range(self) -> tuple[float, float]:
-        theta_values: list[np.ndarray] = []
-        for line in self.plot_ax.lines:
-            try:
-                x = np.asarray(line.get_xdata(), dtype=float)
-            except Exception:
-                continue
-            if x.size == 0:
-                continue
-            finite = x[np.isfinite(x)]
-            if finite.size:
-                theta_values.append(np.degrees(finite))
-
-        if not theta_values:
-            xmin, xmax = np.degrees(self.plot_ax.get_xlim())
-            xmin = float(xmin)
-            xmax = float(xmax)
-            if not np.isfinite(xmin) or not np.isfinite(xmax) or np.isclose(xmin, xmax):
-                return -180.0, 180.0
-            if xmax < xmin:
-                xmax += 360.0
-            if (xmax - xmin) >= 359.0:
-                return -180.0, 180.0
-            return xmin, xmax
-
-        theta = np.mod(np.concatenate(theta_values), 360.0)
-        theta.sort()
-        if theta.size == 1:
-            center = float(theta[0])
-            return center - 5.0, center + 5.0
-
-        wrapped = np.concatenate([theta, [theta[0] + 360.0]])
-        gaps = np.diff(wrapped)
-        gap_idx = int(np.argmax(gaps))
-        largest_gap = float(gaps[gap_idx])
-        span = 360.0 - largest_gap
-        if span >= 359.0:
-            return -180.0, 180.0
-
-        start = float(theta[(gap_idx + 1) % theta.size])
-        end = start + span
-        pad = max(1.0, 0.03 * span)
-        xmin = start - pad
-        xmax = end + pad
-        if (xmax - xmin) >= 359.0:
-            return -180.0, 180.0
-
-        while xmin > 180.0:
-            xmin -= 360.0
-            xmax -= 360.0
-        while xmin <= -180.0:
-            xmin += 360.0
-            xmax += 360.0
-        return xmin, xmax
 
     def _fit_polar_y_range(self) -> tuple[float, float]:
         radial_values: list[np.ndarray] = []
@@ -1874,43 +1810,6 @@ class PlotOpsMixin(DatasetPlotStyleMixin):
         self.spin_plot_ymax.blockSignals(False)
         self._apply_plot_limits()
 
-    def _collect_azimuth_series(
-        self,
-        dataset: RcsGrid,
-        dataset_name: str,
-        az_values_sel: list,
-        elev_values_sel: list,
-        freq_values_sel: list,
-        pol_value_sel,
-    ) -> tuple[np.ndarray, list[tuple[np.ndarray, str]]] | None:
-        az_indices = self._indices_for_values(dataset.azimuths, az_values_sel)
-        elev_indices = self._indices_for_values(dataset.elevations, elev_values_sel)
-        freq_indices = self._indices_for_values(dataset.frequencies, freq_values_sel)
-        pol_indices = self._indices_for_values(dataset.polarizations, [pol_value_sel], tol=0.0)
-        if az_indices is None or elev_indices is None or freq_indices is None or pol_indices is None:
-            return None
-
-        az_values = dataset.azimuths[az_indices]
-        order = np.argsort(az_values)
-        az_values = az_values[order]
-        pol_value = dataset.polarizations[pol_indices[0]]
-        series: list[tuple[np.ndarray, str]] = []
-        for freq_idx in freq_indices:
-            freq_value = dataset.frequencies[freq_idx]
-            for elev_idx in elev_indices:
-                elev_value = dataset.elevations[elev_idx]
-                if self._button_checked(self.btn_phase):
-                    rcs_values = dataset.rcs_slice((az_indices, elev_idx, freq_idx, pol_indices[0]))
-                else:
-                    rcs_values = dataset.rcs_power[az_indices, elev_idx, freq_idx, pol_indices[0]]
-                rcs_display = self._rcs_display_values(dataset, rcs_values)
-                rcs_display = rcs_display[order]
-                label = (
-                    f"{dataset_name} | Pol {pol_value}, Freq {freq_value} GHz, El {elev_value} deg"
-                )
-                series.append((rcs_display, label))
-
-        return az_values, series
 
     def _legend_kwargs(self) -> dict[str, object]:
         kwargs: dict[str, object] = {

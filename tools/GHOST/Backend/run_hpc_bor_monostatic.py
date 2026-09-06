@@ -146,6 +146,53 @@ SUBMIT        = True
 
 # ===============================================================================
 
+from driver_config import (load_driver_configuration, configuration_source_records,
+                           copy_configuration)
+_CONFIG_KIND = 'bor'
+_CONFIG_KEYS = (
+    'GEOMETRY_DIRS',
+    'FREQUENCIES_GHZ',
+    'AZIMUTHS_DEG',
+    'ELEVATIONS_DEG',
+    'BODY_AXIS_AZ_DEG',
+    'BODY_AXIS_EL_DEG',
+    'BODY_ROLL_DEG',
+    'OUTPUT_DIR',
+    'N_NODES',
+    'N_JOBS',
+    'SLURM_PARTITION',
+    'SLURM_ACCOUNT',
+    'SLURM_QOS',
+    'SLURM_TIME',
+    'CORES_PER_NODE',
+    'MEM_PER_NODE',
+    'MAX_WORKERS_PER_NODE',
+    'SLURM_MAIL_TYPE',
+    'SLURM_MAIL_USER',
+    'SLURM_EXTRA_SBATCH',
+    'JOB_PROLOGUE',
+    'GEOMETRY_UNITS',
+    'CFIE_ALPHA',
+    'N_MODES',
+    'MODE_TOL',
+    'MAX_ELEMENTS',
+    'ASSEMBLY',
+    'TABLE_PRECISION',
+    'ACCURACY_TARGET',
+    'STREAM_BUDGET_GB',
+    'MESH_CERTIFICATION',
+    'WORKERS_PER_UNIT',
+    'BLAS_THREADS_PER_WORKER',
+    'MEMORY_HEADROOM',
+    'CLAIM_STALE_SECONDS',
+    'TASKS_PER_CHILD',
+    'GEOMETRY_EXTS',
+    'PYTHON_EXE',
+    'SUBMIT',
+)
+_ACTIVE_CONFIG_PATH = load_driver_configuration(globals(), __file__, _CONFIG_KIND, _CONFIG_KEYS)
+
+
 _SBATCH = shutil.which("sbatch") or "sbatch"
 
 
@@ -154,7 +201,7 @@ _SBATCH = shutil.which("sbatch") or "sbatch"
 def _solver_source_records():
     # type: () -> Tuple[str, Dict[str, str]]
     backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
-    return backend_dir, {"driver_configured.py": str(Path(__file__).resolve())}
+    return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
 def _solver_source_fingerprint():
@@ -882,6 +929,7 @@ def submit():
 
     script_path = run_dir / "driver_configured.py"
     shutil.copy2(str(source_driver), str(script_path))
+    copy_configuration(_ACTIVE_CONFIG_PATH, script_path)
     slurm_paths = []  # type: List[Path]
     for j in range(int(N_JOBS)):
         sp = run_dir / f"submit_job{j}.slurm"
@@ -1273,6 +1321,7 @@ def _pool_initializer(blas_threads):
 def main():
     # type: () -> None
     ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--config", help="Validated JSON driver configuration")
     ap.add_argument(
         "--worker", nargs=3, metavar=("RUN_DIR", "JOB_INDEX", "NODE_INDEX"),
         help="Internal: execute one array-task slice. Invoked by SLURM.",

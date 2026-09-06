@@ -82,7 +82,7 @@ def geometry_dimensions(snapshot, units):
     scale = .0254 if units == 'inches' else 1.
     width = (max(x for x,y in points) - min(x for x,y in points)) * scale
     height = (max(y for x,y in points) - min(y for x,y in points)) * scale
-    return f'X span {width:g} m × Y span {height:g} m ({width/.0254:g} × {height/.0254:g} in)'
+    return f'X span {width:g} m \u00d7 Y span {height:g} m ({width/.0254:g} \u00d7 {height/.0254:g} in)'
 
 
 class RunSetupMixin:
@@ -102,15 +102,15 @@ class RunSetupMixin:
             form.addRow('Accuracy target', self.run_accuracy_combo)
             form.addRow('2D LU precision', self.run_lu_combo)
         self.run_preset_combo = QComboBox()
-        self.run_preset_combo.addItems(['Choose a run preset…', 'Quick survey', 'Convergence check'])
+        self.run_preset_combo.addItems(['Choose a run preset\u2026', 'Quick survey', 'Convergence check'])
         self.run_preset_combo.setToolTip('Quick survey uses one base mesh. Convergence check compares meshes with tight tolerances. Both preserve your frequencies and angles.')
         self.run_preset_combo.activated.connect(self._apply_run_preset)
         form.addRow('Run preset', self.run_preset_combo)
         row = QWidget()
         buttons = QHBoxLayout(row)
         buttons.setContentsMargins(0,0,0,0)
-        self.save_run_setup_button = QPushButton('Save 2D setup…')
-        self.load_run_setup_button = QPushButton('Load 2D setup…')
+        self.save_run_setup_button = QPushButton('Save 2D setup\u2026')
+        self.load_run_setup_button = QPushButton('Load 2D setup\u2026')
         buttons.addWidget(self.save_run_setup_button)
         buttons.addWidget(self.load_run_setup_button)
         self.save_run_setup_button.clicked.connect(self._save_run_setup)
@@ -250,7 +250,7 @@ class RunSetupMixin:
         if value['scattering']=='bistatic': count *= len(value['observation_angles_deg'])
         return (f"{result['segment_count']} segments; {result['primitive_count']} primitives. "
                 + geometry_dimensions(snapshot,value['units']) + '\n'
-                + f"{len(value['frequencies_ghz'])} frequencies × {len(value['angles_deg'])} incident angles; {count} samples per channel, VV + HH. "
+                + f"{len(value['frequencies_ghz'])} frequencies \u00d7 {len(value['angles_deg'])} incident angles; {count} samples per channel, VV + HH. "
                 + ('Base/fine mesh comparison' if value['mesh_certification'] else 'Survey; no mesh certificate')
                 + f"; {value['accuracy']} target; {value['lu_precision']} LU.\n"
                 + ('Warnings: ' + '; '.join(warnings) if warnings else 'Geometry and material checks passed.')
@@ -300,7 +300,7 @@ class RunSetupMixin:
         self._active_solve_run_id=run_id
         self._pending_solve_context=None
         self._set_solving_state(True)
-        self.run_setup_notice.setText('Checking the current geometry and setup…')
+        self.run_setup_notice.setText('Checking the current geometry and setup\u2026')
         thread=QThread(self)
         worker=_SolveWorker(snapshot,'',base_dir,value['frequencies_ghz'],value['angles_deg'],value['units'],value['quality'],
                             abort_event=self._abort_event,preflight_setup=value,preflight_only=True)

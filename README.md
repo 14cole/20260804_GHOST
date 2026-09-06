@@ -44,6 +44,16 @@ Keep this tree together when copying it to another machine. Do not copy only
 
 ## Build a copy-ready release
 
+For development verification with the repository Python 3.12 environment, run
+`.venv\Scripts\python.exe verify_project.py --mode quick`. This checks startup,
+source inventories, headless boundaries, the installed wheel, release-builder
+behavior, and GHOST ASCII compatibility. Use `--mode full` for all unit suites,
+CEM tools, and the standalone HPC/local-driver integration checks. Both modes
+work with uncommitted changes and stop with a nonzero exit code on failure.
+They create no release artifacts. The release builder uses the same full suite
+inventory and still requires its clean-source, version-tag, dependency-lock,
+and complete acceptance gates.
+
 On 64-bit x86 Windows with CPython 3.12, double-click
 `Build_GRIM_Release.bat` or run `python -m build_release` at the top level.
 The release gate deliberately refuses another operating system or architecture

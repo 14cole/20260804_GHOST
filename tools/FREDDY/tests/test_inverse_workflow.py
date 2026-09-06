@@ -70,6 +70,32 @@ class InverseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.ui._inverse_checkpoint['next_index'],0)
         self.assertTrue(self.ui.inv_extend_btn.isEnabled())
 
+    def test_recovery_file_survives_project_reload_and_resumes_remaining_scores(self):
+        from ibc.search_checkpoint import load_checkpoint
+        recovery = Path(self.temp.name) / 'interrupted.fsearch'
+        state = self.ui._collect_project_state()
+        self.ui.inverse_recovery_path.setText(str(recovery))
+        original = self.ui._score_inverse_candidate
+        calls = []
+        def score(*args, **kwargs):
+            calls.append(args[2][0].sheet_resistance)
+            result = original(*args, **kwargs)
+            if len(calls) == 2:
+                self.ui._inverse_stop_event.set()
+            return result
+        with mock.patch.object(self.ui, '_score_inverse_candidate', side_effect=score):
+            self.ui._run_inverse_design()
+        self.assertEqual(load_checkpoint(recovery)['next_index'], 2)
+        self.ui._apply_project_state(state)
+        self.assertEqual(self.ui.inverse_recovery_path.text(), '')
+        with mock.patch('PySide6.QtWidgets.QFileDialog.getOpenFileName', return_value=(str(recovery), '')):
+            self.ui._load_inverse_checkpoint()
+        self.assertTrue(self.ui.inv_extend_btn.isEnabled())
+        with mock.patch.object(self.ui, '_score_inverse_candidate', side_effect=score):
+            self.ui._run_inverse_design(resume=True)
+        self.assertEqual(calls, [100., 200., 300., 400., 500.])
+        self.assertEqual(load_checkpoint(recovery)['next_index'], 5)
+
     def test_stop_during_plots_resumes_without_repeating_any_scores(self):
         original=self.ui._score_inverse_candidate
         with mock.patch('ibc.ui.compute_angle_metrics_many',side_effect=StopInverseSearch):

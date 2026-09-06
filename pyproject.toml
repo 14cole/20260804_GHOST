@@ -28,6 +28,7 @@ ppt-image-imprinter = "ppt_image_imprinter:main"
 [tool.setuptools]
 package-dir = {"" = "GRIM_Revised_2"}
 py-modules = [
+  "grim_dataset_audit",
   "grim_format_io",
   "grim_cst_io",
   "grim_sentri_io",

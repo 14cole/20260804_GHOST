@@ -172,15 +172,6 @@ def _small_metadata(container: dict | None) -> dict[str, Any]:
     return result
 
 
-def _numerical_magnitude(band: dict) -> np.ndarray:
-    """Return full-resolution magnitude, independent of GUI decimation."""
-
-    if "complex_image" in band:
-        return np.abs(np.asarray(band["complex_image"])).astype(np.float32)
-    raw = np.asarray(band["magnitude"])
-    if np.iscomplexobj(raw):
-        raise ValueError("ISAR artifact magnitude must not be complex")
-    return raw.astype(np.float32, copy=False)
 
 
 def _numeric_array(name: str, value: Any, *, ndim: int) -> np.ndarray:

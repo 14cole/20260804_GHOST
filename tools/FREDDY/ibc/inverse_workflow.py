@@ -44,7 +44,7 @@ def configure_layers(layers, rows):
     return result
 
 
-def search_identity(layers, frequencies, angles, polarization, uncertainty, score_mode):
+def search_identity(layers, frequencies, angles, polarization, uncertainty, score_mode, *, skiprows=0):
     """Hash physics inputs, not run budget, display choices, or output paths."""
     sources = {}
     for index, layer in enumerate(layers,1):
@@ -62,7 +62,8 @@ def search_identity(layers, frequencies, angles, polarization, uncertainty, scor
             sources[str(path)] = digest.hexdigest()
     value = {'layers': [asdict(l) for l in layers], 'frequencies': frequencies,
              'angles': angles, 'polarization': polarization.strip().lower(), 'uncertainty': asdict(uncertainty),
-             'score_mode': score_mode, 'sources': sources, 'method': 'all-combinations-v1'}
+             'score_mode': score_mode, 'sources': sources, 'skiprows': skiprows,
+             'method': 'all-combinations-v1'}
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
@@ -129,7 +130,7 @@ class InverseWorkflowMixin:
         self._schedule_inverse_work_count()
 
     def _build_inverse_continue_actions(self, layout):
-        from PySide6.QtWidgets import QHBoxLayout, QPushButton
+        from PySide6.QtWidgets import QHBoxLayout, QPushButton, QLineEdit, QLabel
         row = QHBoxLayout()
         self.inv_stop_btn = QPushButton('Stop and keep best')
         self.inv_extend_btn = QPushButton('Resume remaining')
@@ -141,8 +142,69 @@ class InverseWorkflowMixin:
         self.inv_stop_btn.clicked.connect(self._stop_inverse_search)
         self.inv_extend_btn.clicked.connect(self._resume_inverse_analysis)
         self.inv_save_candidate_btn.clicked.connect(self._save_inverse_candidate)
-        self.inv_extend_btn.setToolTip('Finish an interrupted analysis without repeating completed combinations. Inputs and material files must still match. Available in this session.')
+        self.inv_extend_btn.setToolTip('Finish an interrupted analysis without repeating completed combinations. Inputs and material files must still match.')
         layout.addLayout(row)
+        recovery = QHBoxLayout()
+        recovery.addWidget(QLabel('Recovery file'))
+        self.inverse_recovery_path = QLineEdit()
+        self.inverse_recovery_path.setPlaceholderText('Optional: choose a file before a long search')
+        recovery.addWidget(self.inverse_recovery_path, 1)
+        self.inv_checkpoint_save_btn = QPushButton('Choose / save...')
+        self.inv_checkpoint_load_btn = QPushButton('Load checkpoint...')
+        self.inv_checkpoint_save_btn.clicked.connect(self._choose_inverse_checkpoint)
+        self.inv_checkpoint_load_btn.clicked.connect(self._load_inverse_checkpoint)
+        self.inv_checkpoint_load_btn.setToolTip('Open the matching project first. Resume validates the setup and material contents before reusing scores.')
+        recovery.addWidget(self.inv_checkpoint_save_btn)
+        recovery.addWidget(self.inv_checkpoint_load_btn)
+        layout.addLayout(recovery)
+
+    def _choose_inverse_checkpoint(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from .search_checkpoint import save_checkpoint
+        if self.job_is_running():
+            return
+        path, _ = QFileDialog.getSaveFileName(self, 'Choose search recovery file',
+                                             self.inverse_recovery_path.text() or 'search.fsearch',
+                                             'FREDDY search checkpoint (*.fsearch)')
+        if not path:
+            return
+        if not path.lower().endswith('.fsearch'):
+            path += '.fsearch'
+        try:
+            if self._inverse_checkpoint is not None:
+                self._ensure_inverse_result_current()
+                save_checkpoint(path, self._inverse_checkpoint)
+            self.inverse_recovery_path.setText(str(Path(path).resolve()))
+            self.status_var.set('Recovery file selected. Complete scores are saved every 30 seconds and when the search stops.')
+        except Exception as exc:
+            QMessageBox.warning(self, 'Search checkpoint', str(exc))
+
+    def _load_inverse_checkpoint(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from .search_checkpoint import load_checkpoint
+        if self.job_is_running():
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Load search checkpoint', '',
+                                             'FREDDY search checkpoint (*.fsearch)')
+        if not path:
+            return
+        try:
+            checkpoint = load_checkpoint(path)
+        except Exception as exc:
+            QMessageBox.warning(self, 'Search checkpoint', str(exc))
+            return
+        self._inverse_checkpoint = checkpoint
+        self._inverse_result_identity = None
+        self.inverse_candidates = []
+        self.inverse_plot_freqs = []
+        self.inverse_plot_samples = []
+        self.inverse_result_metadata = {}
+        self._inverse_summary = ''
+        self._inverse_page_index = 0
+        self._refresh_inverse_results_list()
+        self.inverse_recovery_path.setText(str(Path(path).resolve()))
+        self.inv_extend_btn.setEnabled(True)
+        self.inv_setup_status.setText(f"Loaded {checkpoint['next_index']:,} completed combinations. Resume checks the current setup and material files, then rebuilds the comparison plots.")
 
     def _edit_inverse_layers(self):
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QTableWidget, QTableWidgetItem,

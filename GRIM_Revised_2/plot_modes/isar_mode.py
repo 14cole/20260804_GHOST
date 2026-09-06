@@ -389,31 +389,6 @@ def _resample_azimuth_to_target(
     return target, out, gap_info
 
 
-def _resample_complex_uniform(
-    values: np.ndarray,
-    samples: np.ndarray,
-    axis: int,
-    rel_tol: float = 1e-3,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Linearly resample complex `samples` onto a uniform grid along `axis`.
-
-    Returns (uniform_values, resampled_samples, non_uniformity).
-    `non_uniformity` is the relative spread of the original spacings —
-    `(max_diff - min_diff) / median_diff`. When this is below `rel_tol`,
-    the inputs are returned unchanged (no work done) and the value is
-    reported so callers can warn the user.
-
-    Complex values are interpolated linearly (equivalent to interpolating
-    real and imaginary parts independently) — for ISAR that's what you want,
-    since interpolating |z| or arg(z) introduces phase-wrap artefacts.
-    """
-    values = np.asarray(values, dtype=float)
-    if values.size < 2:
-        return values, samples, 0.0
-    plan = _uniform_resample_plan(values, rel_tol=rel_tol)
-    target = np.asarray(plan["target"], dtype=float)
-    out = _apply_resample_plan(values, samples, axis=axis, plan=plan)
-    return target, out, float(plan["info"]["non_uniformity"])
 
 
 def _block_reduce_max(a: np.ndarray, factor: int, axis: int) -> np.ndarray:

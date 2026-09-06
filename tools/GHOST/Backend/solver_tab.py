@@ -597,7 +597,7 @@ class _SolveWorker(QObject):
         try:
             if self.preflight_setup is not None:
                 from run_setup import RunSetupMixin
-                self.progress.emit(0, 'Checking geometry, dimensions, and material coverage…')
+                self.progress.emit(0, 'Checking geometry, dimensions, and material coverage\u2026')
                 summary = RunSetupMixin._run_setup_summary(None, self.snapshot, self.base_dir, self.preflight_setup)
                 if self.abort_event is not None and self.abort_event.is_set():
                     raise InterruptedError('Setup check canceled.')

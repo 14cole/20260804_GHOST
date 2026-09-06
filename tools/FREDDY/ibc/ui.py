@@ -97,6 +97,9 @@ from .ui_controls import (
 )
 
 
+from .mix_analysis import (mix_performance_values, mix_performance_gap,
+                           evaluate_mix_performance, build_mix_display)
+
 from .design_search import (
     InverseSearchRequest, MixSearchRequest, run_inverse_search, run_mix_search,
     score_inverse_candidate,
@@ -540,6 +543,56 @@ from .analysis_data import (SweepResult, grid_metrics, impedance_result, reflect
 from .project_state import ProjectStateMixin
 
 
+def _entry(var: StringVar, chars: int | None = None) -> QLineEdit:
+    edit = QLineEdit()
+    bind_line_edit(var, edit)
+    if chars is not None:
+        edit.setMaximumWidth(chars * 9 + 16)
+    return edit
+
+
+def _output_row(
+    var: StringVar,
+    browse_cb: Callable[[], None],
+    label: str = "Output file",
+) -> QWidget:
+    row = QWidget()
+    row_layout = QHBoxLayout(row)
+    row_layout.setContentsMargins(0, 0, 0, 0)
+    row_layout.addWidget(QLabel(label))
+    row_layout.addWidget(_entry(var), 1)
+    browse = QPushButton("Browse")
+    browse.clicked.connect(browse_cb)
+    row_layout.addWidget(browse)
+    return row
+
+
+def _uncertainty_group(enabled_var, t_var, eps_var, mu_var, sync_cb):
+    group = QGroupBox("Uncertainty corners")
+    grid = QGridLayout(group)
+    check = QCheckBox(
+        "Enable analyzed tolerance corners"
+    )
+    bind_check_box(enabled_var, check)
+    check.clicked.connect(sync_cb)
+    grid.addWidget(check, 0, 0, 1, 6, Qt.AlignLeft)
+    details = QWidget()
+    dgrid = QGridLayout(details)
+    dgrid.setContentsMargins(0, 0, 0, 0)
+    dgrid.addWidget(QLabel("Thickness ±%"), 0, 0, Qt.AlignLeft)
+    t_entry = _entry(t_var, 8)
+    dgrid.addWidget(t_entry, 0, 1, Qt.AlignLeft)
+    dgrid.addWidget(QLabel("Eps ±%"), 0, 2, Qt.AlignLeft)
+    eps_entry = _entry(eps_var, 8)
+    dgrid.addWidget(eps_entry, 0, 3, Qt.AlignLeft)
+    dgrid.addWidget(QLabel("Mu ±%"), 0, 4, Qt.AlignLeft)
+    mu_entry = _entry(mu_var, 8)
+    dgrid.addWidget(mu_entry, 0, 5, Qt.AlignLeft)
+    dgrid.setColumnStretch(6, 1)
+    grid.addWidget(details, 1, 0, 1, 6)
+    return group, details, t_entry, eps_entry, mu_entry
+
+
 class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin, InverseWorkflowMixin, QMainWindow):
     # Host integrations may consume this deliberately narrow artifact stream.
     # It is never emitted for off-angle/thickness analysis, uncertainty, or a
@@ -905,12 +958,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         super().closeEvent(event)
 
     def _build_ui(self) -> None:
-        def _entry(var: StringVar, chars: int | None = None) -> QLineEdit:
-            edit = QLineEdit()
-            bind_line_edit(var, edit)
-            if chars is not None:
-                edit.setMaximumWidth(chars * 9 + 16)
-            return edit
 
         # Global actions live in a menu bar (File / View / Help) rather than an
         # inline button row, and the window is organized as a left navigation
@@ -974,47 +1021,220 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             nav_layout.addWidget(button)
             self._mode_labels.append(label)
 
-        def _output_row(
-            var: StringVar,
-            browse_cb: Callable[[], None],
-            label: str = "Output file",
-        ) -> QWidget:
-            row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.addWidget(QLabel(label))
-            row_layout.addWidget(_entry(var), 1)
-            browse = QPushButton("Browse")
-            browse.clicked.connect(browse_cb)
-            row_layout.addWidget(browse)
-            return row
 
-        def _uncertainty_group(enabled_var, t_var, eps_var, mu_var, sync_cb):
-            group = QGroupBox("Uncertainty corners")
-            grid = QGridLayout(group)
-            check = QCheckBox(
-                "Enable analyzed tolerance corners"
+        self._build_impedance_tab(_add_mode)
+
+        self._build_ibc_batch_tab(_add_mode)
+
+        self._build_angle_tab(_add_mode)
+
+        self._build_thickness_tab(_add_mode)
+
+        self._build_inverse_tab(_add_mode)
+
+        self._build_mix_tab(_add_mode)
+
+        # Material Explorer is informational and session-only. It deliberately
+        # lives inside FREDDY so the same workspace appears in GRIM and in the
+        # standalone launcher, while its file list stays out of project state.
+        self.material_explorer = MaterialExplorerWidget(
+            presets=BUILTIN_MATERIAL_PRESETS,
+            stack_source_provider=self._material_explorer_stack_sources,
+            mix_source_provider=self._material_explorer_mix_sources,
+        )
+        _add_mode("Material Explorer", self.material_explorer)
+
+        # Keep the essential material definitions inside the workspace instead
+        # of hiding them only in a modal About dialog. This page is deliberately
+        # read-only and does not participate in project state.
+        about_tab = QScrollArea()
+        about_tab.setWidgetResizable(True)
+        about_content = QWidget()
+        about_layout = QVBoxLayout(about_content)
+        about_layout.setContentsMargins(18, 14, 18, 18)
+        about_text = QLabel(MATERIAL_GUIDE_HTML)
+        about_text.setTextFormat(Qt.RichText)
+        about_text.setWordWrap(True)
+        about_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        about_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        about_layout.addWidget(about_text)
+        about_layout.addStretch(1)
+        about_tab.setWidget(about_content)
+        _add_mode("About & Guide", about_tab)
+
+        layers_group = QGroupBox("Layers (top to bottom)")
+        self.layers_group = layers_group
+        layers_layout = QHBoxLayout(layers_group)
+        self.layer_list = QListWidget()
+        self.layer_list.setMinimumHeight(200)
+        layers_layout.addWidget(self.layer_list, 1)
+
+        preview_container = QWidget()
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.addWidget(QLabel("Visual stack (real-time)"))
+        self.layer_preview = LayerPreview(self._draw_layer_preview)
+        preview_layout.addWidget(self.layer_preview, 1)
+        layers_layout.addWidget(preview_container, 1)
+
+        btns = QWidget()
+        btns_layout = QVBoxLayout(btns)
+        btns_layout.setContentsMargins(0, 0, 0, 0)
+        self.layer_add_btn = QPushButton("Add Layer")
+        self.layer_add_btn.clicked.connect(self._add_layer)
+        btns_layout.addWidget(self.layer_add_btn)
+        self.layer_add_sheet_btn = QPushButton("Add Sheet")
+        self.layer_add_sheet_btn.clicked.connect(self._add_sheet)
+        btns_layout.addWidget(self.layer_add_sheet_btn)
+        self.layer_edit_btn = QPushButton("Edit")
+        self.layer_edit_btn.clicked.connect(self._edit_layer)
+        btns_layout.addWidget(self.layer_edit_btn)
+        self.layer_remove_btn = QPushButton("Remove")
+        self.layer_remove_btn.clicked.connect(self._remove_layer)
+        btns_layout.addWidget(self.layer_remove_btn)
+        self.layer_up_btn = QPushButton("Move Up")
+        self.layer_up_btn.clicked.connect(self._move_up)
+        btns_layout.addWidget(self.layer_up_btn)
+        self.layer_down_btn = QPushButton("Move Down")
+        self.layer_down_btn.clicked.connect(self._move_down)
+        btns_layout.addWidget(self.layer_down_btn)
+        btns_layout.addStretch(1)
+        layers_layout.addWidget(btns)
+        # Finish the navigation rail and wire mode switching.
+        nav_layout.addStretch(1)
+        self.nav_group.idClicked.connect(self._select_mode)
+        self.mode_stack.currentChanged.connect(self._on_left_tab_changed)
+
+        # Vertical workspace splitter: parameter inputs and the material stack
+        # share the top band; the visualization spans the full width below.
+        work_split = QSplitter(Qt.Vertical)
+        self.work_split = work_split
+
+        top_pane = QWidget()
+        top_layout = QHBoxLayout(top_pane)
+        top_layout.setContentsMargins(12, 12, 12, 6)
+        top_layout.addWidget(self.mode_stack, 3)
+        top_layout.addWidget(layers_group, 2)
+        work_split.addWidget(top_pane)
+
+        bottom_pane = QWidget()
+        self.results_pane = bottom_pane
+        right_layout = QVBoxLayout(bottom_pane)
+        right_layout.setContentsMargins(12, 6, 12, 12)
+        work_split.addWidget(bottom_pane)
+
+        plot_opts = QGroupBox("Heatmap Controls")
+        opts_grid = QGridLayout(plot_opts)
+        opts_grid.addWidget(QLabel("Metric"), 0, 0, Qt.AlignLeft)
+        metric_combo = make_combo(
+            [label for label, _key in HEATMAP_METRIC_OPTIONS],
+            self.heatmap_metric_var,
+            on_change=self._update_plot,
+        )
+        opts_grid.addWidget(metric_combo, 0, 1)
+        opts_grid.addWidget(QLabel("Uncertainty view"), 0, 2, Qt.AlignLeft)
+        unc_view_combo = make_combo(
+            [label for label, _key in UNCERTAINTY_VIEW_OPTIONS],
+            self.uncertainty_view_var,
+            width=130,
+            on_change=self._update_plot,
+        )
+        opts_grid.addWidget(unc_view_combo, 0, 3)
+        update_btn = QPushButton("Update Plot")
+        update_btn.clicked.connect(self._update_plot)
+        opts_grid.addWidget(update_btn, 0, 4)
+        self.slice_x_label = QLabel("Angle slice (deg)")
+        opts_grid.addWidget(self.slice_x_label, 1, 0, Qt.AlignLeft)
+        self.slice_angle_entry = _entry(self.slice_angle_var, 10)
+        self.slice_angle_entry.returnPressed.connect(self._apply_manual_slices)
+        opts_grid.addWidget(self.slice_angle_entry, 1, 1, Qt.AlignLeft)
+        opts_grid.addWidget(QLabel("Freq slice (GHz)"), 1, 2, Qt.AlignLeft)
+        self.slice_freq_entry = _entry(self.slice_freq_var, 10)
+        self.slice_freq_entry.returnPressed.connect(self._apply_manual_slices)
+        opts_grid.addWidget(self.slice_freq_entry, 1, 3, Qt.AlignLeft)
+        cbar_auto_check = QCheckBox("Auto color scale")
+        bind_check_box(self.cbar_auto_var, cbar_auto_check)
+        cbar_auto_check.clicked.connect(self._sync_cbar_state)
+        opts_grid.addWidget(cbar_auto_check, 1, 4, Qt.AlignLeft)
+        opts_grid.addWidget(QLabel("Min"), 1, 5, Qt.AlignRight)
+        self.cbar_min_entry = _entry(self.cbar_min_var, 10)
+        self.cbar_min_entry.returnPressed.connect(self._update_plot)
+        opts_grid.addWidget(self.cbar_min_entry, 1, 6, Qt.AlignLeft)
+        opts_grid.addWidget(QLabel("Max"), 1, 7, Qt.AlignRight)
+        self.cbar_max_entry = _entry(self.cbar_max_var, 10)
+        self.cbar_max_entry.returnPressed.connect(self._update_plot)
+        opts_grid.addWidget(self.cbar_max_entry, 1, 8, Qt.AlignLeft)
+        save_plot_btn = QPushButton("Save Plot")
+        save_plot_btn.clicked.connect(self._save_plot)
+        opts_grid.addWidget(save_plot_btn, 1, 9)
+        save_heatmap_btn = QPushButton("Save Heatmap Only")
+        save_heatmap_btn.clicked.connect(self._save_heatmap_only)
+        opts_grid.addWidget(save_heatmap_btn, 1, 10)
+        opts_grid.setColumnStretch(1, 1)
+        opts_grid.setColumnStretch(3, 1)
+        right_layout.addWidget(plot_opts)
+        self._sync_cbar_state()
+
+        self.plot_frame = QGroupBox("Heatmap")
+        plot_frame_layout = QVBoxLayout(self.plot_frame)
+        plot_frame_layout.setContentsMargins(4, 4, 4, 4)
+        if MPL_AVAILABLE:
+            self.fig = Figure(figsize=(8.0, 4.6), dpi=100)
+            # Heatmap occupies the full-height left column; the frequency and
+            # angle slice plots stack in the right column (two rows).
+            gs = self.fig.add_gridspec(
+                2, 2, width_ratios=[2.3, 1.0], wspace=0.5, hspace=0.85
             )
-            bind_check_box(enabled_var, check)
-            check.clicked.connect(sync_cb)
-            grid.addWidget(check, 0, 0, 1, 6, Qt.AlignLeft)
-            details = QWidget()
-            dgrid = QGridLayout(details)
-            dgrid.setContentsMargins(0, 0, 0, 0)
-            dgrid.addWidget(QLabel("Thickness ±%"), 0, 0, Qt.AlignLeft)
-            t_entry = _entry(t_var, 8)
-            dgrid.addWidget(t_entry, 0, 1, Qt.AlignLeft)
-            dgrid.addWidget(QLabel("Eps ±%"), 0, 2, Qt.AlignLeft)
-            eps_entry = _entry(eps_var, 8)
-            dgrid.addWidget(eps_entry, 0, 3, Qt.AlignLeft)
-            dgrid.addWidget(QLabel("Mu ±%"), 0, 4, Qt.AlignLeft)
-            mu_entry = _entry(mu_var, 8)
-            dgrid.addWidget(mu_entry, 0, 5, Qt.AlignLeft)
-            dgrid.setColumnStretch(6, 1)
-            grid.addWidget(details, 1, 0, 1, 6)
-            return group, details, t_entry, eps_entry, mu_entry
+            self.ax_heatmap = self.fig.add_subplot(gs[:, 0])
+            self.ax_freq_slice = self.fig.add_subplot(gs[0, 1])
+            self.ax_angle_slice = self.fig.add_subplot(gs[1, 1])
+            self.canvas = FigureCanvas(self.fig)
+            self.heatmap_cbar = None
+            self.heatmap_click_cid = self.canvas.mpl_connect("button_press_event", self._on_plot_click)
+            plot_frame_layout.addWidget(self.canvas)
+            self._draw_plot_placeholder("Run the Off Angle compute to populate plot.")
+        else:
+            self.fig = None
+            self.ax_heatmap = None
+            self.ax_freq_slice = None
+            self.ax_angle_slice = None
+            self.canvas = None
+            self.heatmap_cbar = None
+            plot_frame_layout.addWidget(
+                QLabel("Matplotlib not available. Install matplotlib to enable plotting.")
+            )
+        right_layout.addWidget(self.plot_frame, 1)
 
-        # --- Impedance mode: frequency sweep + backing -> freq/R/X file ---
+        work_split.setStretchFactor(0, 0)
+        work_split.setStretchFactor(1, 1)
+        work_split.setSizes([320, 380])
+        self._build_inverse_results_workspace(work_split, root_layout)
+        self._build_analysis_workspaces()
+
+        # Status text and the busy indicator live in the window status bar.
+        self.status_label = QLabel(self.status_var.get())
+        self.status_var.valueChanged.connect(self.status_label.setText)
+        self.statusBar().addWidget(self.status_label)
+        self.status_progress = QProgressBar()
+        self.status_progress.setRange(0, 0)
+        self.status_progress.setMaximumWidth(120)
+        self.status_progress.setVisible(False)
+        self.statusBar().addPermanentWidget(self.status_progress)
+
+        self._sync_uncertainty_state()
+        self._sync_angle_uncertainty_state()
+        self._sync_thickness_uncertainty_state()
+        self._sync_inverse_freq_mode_state()
+        self._sync_inverse_uncertainty_state()
+        self._sync_mix_freq_mode_state()
+        self._sync_mix_uncertainty_state()
+        self._sync_mix_objective_state()
+        self._refresh_mix_components_list()
+        self._refresh_thickness_layers()
+        self._sync_mode_chrome()
+
+    def _build_impedance_tab(self, _add_mode) -> None:
+        """Construct the impedance sweep and backing controls."""
         imp_tab = QWidget()
         imp_layout = QVBoxLayout(imp_tab)
         _add_mode("Impedance", imp_tab)
@@ -1075,7 +1295,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         imp_layout.addLayout(imp_btn_row)
         imp_layout.addStretch(1)
 
-        # --- IBC Batch: one nominal PEC-backed IBC per layer thickness ---
+
+    def _build_ibc_batch_tab(self, _add_mode) -> None:
+        """Construct the IBC thickness-batch export controls."""
         ibc_batch_tab = QWidget()
         ibc_batch_layout = QVBoxLayout(ibc_batch_tab)
         _add_mode("IBC Batch", ibc_batch_tab)
@@ -1178,7 +1400,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                 lambda _value: self._refresh_ibc_batch_preview()
             )
 
-        # --- Off Angle tab: frequency x angle heatmap ---
+
+    def _build_angle_tab(self, _add_mode) -> None:
+        """Construct the off-angle sweep controls."""
         angle_tab = QWidget()
         self.angle_tab = angle_tab
         angle_layout = QVBoxLayout(angle_tab)
@@ -1233,7 +1457,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         angle_layout.addWidget(self.angle_compute_btn, 0, Qt.AlignLeft)
         angle_layout.addStretch(1)
 
-        # --- Thickness tab: thickness x frequency heatmap for one layer ---
+
+    def _build_thickness_tab(self, _add_mode) -> None:
+        """Construct the layer-thickness sweep controls."""
         thickness_tab = QWidget()
         self.thickness_tab = thickness_tab
         thk_layout = QVBoxLayout(thickness_tab)
@@ -1291,6 +1517,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         thk_layout.addWidget(self.thk_compute_btn, 0, Qt.AlignLeft)
         thk_layout.addStretch(1)
 
+    def _build_inverse_tab(self, _add_mode) -> None:
+        """Construct the inverse-design setup controls."""
         inv_tab = QScrollArea()
         inv_tab.setWidgetResizable(True)
         self.inv_tab = inv_tab
@@ -1409,7 +1637,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self._build_inverse_continue_actions(inv_layout)
         inv_layout.addStretch(1)
 
-        # --- Material Mix tab -------------------------------------------------
+
+    def _build_mix_tab(self, _add_mode) -> None:
+        """Construct the material recipe and target controls."""
         mix_tab = QScrollArea()
         mix_tab.setWidgetResizable(True)
         self.mix_tab = mix_tab
@@ -1697,207 +1927,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self._bind_mix_input_invalidation()
         mix_layout.addStretch(1)
 
-        # Material Explorer is informational and session-only. It deliberately
-        # lives inside FREDDY so the same workspace appears in GRIM and in the
-        # standalone launcher, while its file list stays out of project state.
-        self.material_explorer = MaterialExplorerWidget(
-            presets=BUILTIN_MATERIAL_PRESETS,
-            stack_source_provider=self._material_explorer_stack_sources,
-            mix_source_provider=self._material_explorer_mix_sources,
-        )
-        _add_mode("Material Explorer", self.material_explorer)
-
-        # Keep the essential material definitions inside the workspace instead
-        # of hiding them only in a modal About dialog. This page is deliberately
-        # read-only and does not participate in project state.
-        about_tab = QScrollArea()
-        about_tab.setWidgetResizable(True)
-        about_content = QWidget()
-        about_layout = QVBoxLayout(about_content)
-        about_layout.setContentsMargins(18, 14, 18, 18)
-        about_text = QLabel(MATERIAL_GUIDE_HTML)
-        about_text.setTextFormat(Qt.RichText)
-        about_text.setWordWrap(True)
-        about_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        about_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        about_layout.addWidget(about_text)
-        about_layout.addStretch(1)
-        about_tab.setWidget(about_content)
-        _add_mode("About & Guide", about_tab)
-
-        layers_group = QGroupBox("Layers (top to bottom)")
-        self.layers_group = layers_group
-        layers_layout = QHBoxLayout(layers_group)
-        self.layer_list = QListWidget()
-        self.layer_list.setMinimumHeight(200)
-        layers_layout.addWidget(self.layer_list, 1)
-
-        preview_container = QWidget()
-        preview_layout = QVBoxLayout(preview_container)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_layout.addWidget(QLabel("Visual stack (real-time)"))
-        self.layer_preview = LayerPreview(self._draw_layer_preview)
-        preview_layout.addWidget(self.layer_preview, 1)
-        layers_layout.addWidget(preview_container, 1)
-
-        btns = QWidget()
-        btns_layout = QVBoxLayout(btns)
-        btns_layout.setContentsMargins(0, 0, 0, 0)
-        self.layer_add_btn = QPushButton("Add Layer")
-        self.layer_add_btn.clicked.connect(self._add_layer)
-        btns_layout.addWidget(self.layer_add_btn)
-        self.layer_add_sheet_btn = QPushButton("Add Sheet")
-        self.layer_add_sheet_btn.clicked.connect(self._add_sheet)
-        btns_layout.addWidget(self.layer_add_sheet_btn)
-        self.layer_edit_btn = QPushButton("Edit")
-        self.layer_edit_btn.clicked.connect(self._edit_layer)
-        btns_layout.addWidget(self.layer_edit_btn)
-        self.layer_remove_btn = QPushButton("Remove")
-        self.layer_remove_btn.clicked.connect(self._remove_layer)
-        btns_layout.addWidget(self.layer_remove_btn)
-        self.layer_up_btn = QPushButton("Move Up")
-        self.layer_up_btn.clicked.connect(self._move_up)
-        btns_layout.addWidget(self.layer_up_btn)
-        self.layer_down_btn = QPushButton("Move Down")
-        self.layer_down_btn.clicked.connect(self._move_down)
-        btns_layout.addWidget(self.layer_down_btn)
-        btns_layout.addStretch(1)
-        layers_layout.addWidget(btns)
-        # Finish the navigation rail and wire mode switching.
-        nav_layout.addStretch(1)
-        self.nav_group.idClicked.connect(self._select_mode)
-        self.mode_stack.currentChanged.connect(self._on_left_tab_changed)
-
-        # Vertical workspace splitter: parameter inputs and the material stack
-        # share the top band; the visualization spans the full width below.
-        work_split = QSplitter(Qt.Vertical)
-        self.work_split = work_split
-
-        top_pane = QWidget()
-        top_layout = QHBoxLayout(top_pane)
-        top_layout.setContentsMargins(12, 12, 12, 6)
-        top_layout.addWidget(self.mode_stack, 3)
-        top_layout.addWidget(layers_group, 2)
-        work_split.addWidget(top_pane)
-
-        bottom_pane = QWidget()
-        self.results_pane = bottom_pane
-        right_layout = QVBoxLayout(bottom_pane)
-        right_layout.setContentsMargins(12, 6, 12, 12)
-        work_split.addWidget(bottom_pane)
-
-        plot_opts = QGroupBox("Heatmap Controls")
-        opts_grid = QGridLayout(plot_opts)
-        opts_grid.addWidget(QLabel("Metric"), 0, 0, Qt.AlignLeft)
-        metric_combo = make_combo(
-            [label for label, _key in HEATMAP_METRIC_OPTIONS],
-            self.heatmap_metric_var,
-            on_change=self._update_plot,
-        )
-        opts_grid.addWidget(metric_combo, 0, 1)
-        opts_grid.addWidget(QLabel("Uncertainty view"), 0, 2, Qt.AlignLeft)
-        unc_view_combo = make_combo(
-            [label for label, _key in UNCERTAINTY_VIEW_OPTIONS],
-            self.uncertainty_view_var,
-            width=130,
-            on_change=self._update_plot,
-        )
-        opts_grid.addWidget(unc_view_combo, 0, 3)
-        update_btn = QPushButton("Update Plot")
-        update_btn.clicked.connect(self._update_plot)
-        opts_grid.addWidget(update_btn, 0, 4)
-        self.slice_x_label = QLabel("Angle slice (deg)")
-        opts_grid.addWidget(self.slice_x_label, 1, 0, Qt.AlignLeft)
-        self.slice_angle_entry = _entry(self.slice_angle_var, 10)
-        self.slice_angle_entry.returnPressed.connect(self._apply_manual_slices)
-        opts_grid.addWidget(self.slice_angle_entry, 1, 1, Qt.AlignLeft)
-        opts_grid.addWidget(QLabel("Freq slice (GHz)"), 1, 2, Qt.AlignLeft)
-        self.slice_freq_entry = _entry(self.slice_freq_var, 10)
-        self.slice_freq_entry.returnPressed.connect(self._apply_manual_slices)
-        opts_grid.addWidget(self.slice_freq_entry, 1, 3, Qt.AlignLeft)
-        cbar_auto_check = QCheckBox("Auto color scale")
-        bind_check_box(self.cbar_auto_var, cbar_auto_check)
-        cbar_auto_check.clicked.connect(self._sync_cbar_state)
-        opts_grid.addWidget(cbar_auto_check, 1, 4, Qt.AlignLeft)
-        opts_grid.addWidget(QLabel("Min"), 1, 5, Qt.AlignRight)
-        self.cbar_min_entry = _entry(self.cbar_min_var, 10)
-        self.cbar_min_entry.returnPressed.connect(self._update_plot)
-        opts_grid.addWidget(self.cbar_min_entry, 1, 6, Qt.AlignLeft)
-        opts_grid.addWidget(QLabel("Max"), 1, 7, Qt.AlignRight)
-        self.cbar_max_entry = _entry(self.cbar_max_var, 10)
-        self.cbar_max_entry.returnPressed.connect(self._update_plot)
-        opts_grid.addWidget(self.cbar_max_entry, 1, 8, Qt.AlignLeft)
-        save_plot_btn = QPushButton("Save Plot")
-        save_plot_btn.clicked.connect(self._save_plot)
-        opts_grid.addWidget(save_plot_btn, 1, 9)
-        save_heatmap_btn = QPushButton("Save Heatmap Only")
-        save_heatmap_btn.clicked.connect(self._save_heatmap_only)
-        opts_grid.addWidget(save_heatmap_btn, 1, 10)
-        opts_grid.setColumnStretch(1, 1)
-        opts_grid.setColumnStretch(3, 1)
-        right_layout.addWidget(plot_opts)
-        self._sync_cbar_state()
-
-        self.plot_frame = QGroupBox("Heatmap")
-        plot_frame_layout = QVBoxLayout(self.plot_frame)
-        plot_frame_layout.setContentsMargins(4, 4, 4, 4)
-        if MPL_AVAILABLE:
-            self.fig = Figure(figsize=(8.0, 4.6), dpi=100)
-            # Heatmap occupies the full-height left column; the frequency and
-            # angle slice plots stack in the right column (two rows).
-            gs = self.fig.add_gridspec(
-                2, 2, width_ratios=[2.3, 1.0], wspace=0.5, hspace=0.85
-            )
-            self.ax_heatmap = self.fig.add_subplot(gs[:, 0])
-            self.ax_freq_slice = self.fig.add_subplot(gs[0, 1])
-            self.ax_angle_slice = self.fig.add_subplot(gs[1, 1])
-            self.canvas = FigureCanvas(self.fig)
-            self.heatmap_cbar = None
-            self.heatmap_click_cid = self.canvas.mpl_connect("button_press_event", self._on_plot_click)
-            plot_frame_layout.addWidget(self.canvas)
-            self._draw_plot_placeholder("Run the Off Angle compute to populate plot.")
-        else:
-            self.fig = None
-            self.ax_heatmap = None
-            self.ax_freq_slice = None
-            self.ax_angle_slice = None
-            self.canvas = None
-            self.heatmap_cbar = None
-            plot_frame_layout.addWidget(
-                QLabel("Matplotlib not available. Install matplotlib to enable plotting.")
-            )
-        right_layout.addWidget(self.plot_frame, 1)
-
-        work_split.setStretchFactor(0, 0)
-        work_split.setStretchFactor(1, 1)
-        work_split.setSizes([320, 380])
-        self._build_inverse_results_workspace(work_split, root_layout)
-        self._build_analysis_workspaces()
-
-        # Status text and the busy indicator live in the window status bar.
-        self.status_label = QLabel(self.status_var.get())
-        self.status_var.valueChanged.connect(self.status_label.setText)
-        self.statusBar().addWidget(self.status_label)
-        self.status_progress = QProgressBar()
-        self.status_progress.setRange(0, 0)
-        self.status_progress.setMaximumWidth(120)
-        self.status_progress.setVisible(False)
-        self.statusBar().addPermanentWidget(self.status_progress)
-
-        self._sync_uncertainty_state()
-        self._sync_angle_uncertainty_state()
-        self._sync_thickness_uncertainty_state()
-        self._sync_inverse_freq_mode_state()
-        self._sync_inverse_uncertainty_state()
-        self._sync_mix_freq_mode_state()
-        self._sync_mix_uncertainty_state()
-        self._sync_mix_objective_state()
-        self._refresh_mix_components_list()
-        self._refresh_thickness_layers()
-        self._sync_mode_chrome()
-
-    def _on_theme_toggle(self) -> None:
-        self._apply_theme()
 
     def _theme_colors(self) -> dict[str, object]:
         if self._host_theme_override is not None:
@@ -3011,6 +3040,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             self.inv_apply_btn,
             self.inv_setup_btn, self.inv_check_btn,
             self.inv_save_candidate_btn,
+            self.inv_checkpoint_save_btn, self.inv_checkpoint_load_btn,
+            self.inverse_recovery_path,
             self.layer_add_btn,
             self.layer_add_sheet_btn,
             self.layer_edit_btn,
@@ -4166,6 +4197,16 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             uncertainty_cfg = self._read_inverse_uncertainty_config()
             check_layers(layer_snapshot, target_freqs, materials=False)
             grid = DesignGrid(layer_snapshot)
+            recovery_text = self.inverse_recovery_path.text().strip()
+            recovery_path = Path(recovery_text).expanduser().resolve() if recovery_text else None
+            if recovery_path is not None:
+                from .search_checkpoint import MAX_SCORE_BYTES
+                if recovery_path.suffix.lower() != '.fsearch':
+                    raise ValueError('Choose a recovery file with the .fsearch suffix.')
+                if not recovery_path.parent.is_dir():
+                    raise ValueError('The recovery file folder does not exist.')
+                if grid.total * 40 > MAX_SCORE_BYTES:
+                    raise ValueError('This grid exceeds the 512 MiB recovery-file limit. Reduce the grid or clear the optional recovery file.')
         except Exception as exc:
             messagebox.showerror("Inverse Design Error", str(exc))
             return
@@ -4203,10 +4244,13 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         )
 
         def worker():
+            from .search_checkpoint import save_checkpoint
             result, checkpoint_result = run_inverse_search(
                 request, stop_requested=self._inverse_stop_event.is_set,
                 progress=report_progress, score_candidate=self._score_inverse_candidate,
                 read_table=read_material_table, compute_metrics=compute_angle_metrics_many,
+                checkpoint_callback=(lambda state: save_checkpoint(recovery_path, state))
+                if recovery_path is not None else None,
             )
             completed.update(checkpoint_result)
             return result
@@ -4249,7 +4293,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
         self._run_background_task("Inverse Design", worker, on_success, "Inverse Design Error")
 
-    # --- Material Mix tab ---------------------------------------------------
     def _bind_mix_input_invalidation(self) -> None:
         """Prevent results from silently surviving a changed design problem."""
         string_inputs = (
@@ -4315,8 +4358,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
     def _mix_objective_is_performance(self) -> bool:
         return "performance" in self.mix_objective_var.get().strip().lower()
 
-    def _mix_objective_is_inverse(self) -> bool:
-        return self._mix_objective_is_property() or self._mix_objective_is_performance()
 
     def _sync_mix_objective_state(self) -> None:
         property_mode = self._mix_objective_is_property()
@@ -4598,18 +4639,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
     @staticmethod
     def _mix_performance_values(metrics: dict[str, list[float]], config: dict) -> list[float]:
-        values = [float(value) for value in metrics[config["metric_key"]]]
-        if config["unit"] == "%":
-            return [100.0 * 10.0 ** (value / 10.0) for value in values]
-        return values
+        return mix_performance_values(metrics, config)
 
     @staticmethod
     def _mix_performance_gap(values: list[float], config: dict) -> float:
-        if not values:
-            raise ValueError("A performance target requires at least one grid point.")
-        if config["direction"] == "at_most":
-            return max(values) - config["target"]
-        return config["target"] - min(values)
+        return mix_performance_gap(values, config)
 
     def _evaluate_mix_performance(
         self,
@@ -4621,40 +4655,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         eps_scale: float = 1.0,
         mu_scale: float = 1.0,
     ) -> dict:
-        layer = LoadedLayer(
-            thickness_m=thickness_in * INCH_TO_M,
-            anisotropic=False,
-            polarization_deg=0.0,
-            table_0deg=table,
-            table_90deg=None,
-        )
-        freqs = list(table.freq_ghz)
-        prepared_properties = (
-            prepare_layer_properties_many(freqs, [layer]) if NUMPY_AVAILABLE else None
-        )
-        grid = [[0.0 for _angle in config["angles"]] for _freq in freqs]
-        all_values: list[float] = []
-        for angle_index, angle_deg in enumerate(config["angles"]):
-            metrics = compute_angle_metrics_many(
-                freqs,
-                angle_deg,
-                [layer],
-                config["wave_pol"],
-                thickness_scale=thickness_scale,
-                eps_scale=eps_scale,
-                mu_scale=mu_scale,
-                prepared_properties=prepared_properties,
-            )
-            values = self._mix_performance_values(metrics, config)
-            all_values.extend(values)
-            for freq_index, value in enumerate(values):
-                grid[freq_index][angle_index] = value
-        return {
-            **config,
-            "freqs": freqs,
-            "grid": grid,
-            "gap": self._mix_performance_gap(all_values, config),
-        }
+        return evaluate_mix_performance(table, thickness_in, config, thickness_scale=thickness_scale, eps_scale=eps_scale, mu_scale=mu_scale)
 
     def _load_mix_components(self) -> list[dict]:
         if len(self.mix_components) < 2:
@@ -4689,94 +4690,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         # per-frequency mismatch.
         # A model comparison at the band midpoint makes morphology sensitivity
         # visible rather than implying that one mixing law is ground truth.
-        disp_table = mix_material_tables(components, rule, grid_ghz)
-        lo, hi = disp_table.freq_ghz[0], disp_table.freq_ghz[-1]
-        fractions = parts_to_fractions([component.parts for component in components])
-        eps_tan = [
-            (-value.imag / value.real) if value.real > 0 else math.nan
-            for value in disp_table.eps_r
-        ]
-        mu_tan = [
-            (-value.imag / value.real) if value.real > 0 else math.nan
-            for value in disp_table.mu_r
-        ]
-        midpoint = disp_table.freq_ghz[len(disp_table.freq_ghz) // 2]
-        comparison: list[dict] = []
-        for candidate_rule in MIX_RULES:
-            try:
-                candidate_table = mix_material_tables(
-                    components, candidate_rule, [midpoint]
-                )
-            except Exception:
-                continue
-            comparison.append(
-                {
-                    "rule": candidate_rule,
-                    "label": MIX_RULE_LABELS[candidate_rule].split(" — ")[0],
-                    "eps_re": candidate_table.eps_r[0].real,
-                    "eps_im": candidate_table.eps_r[0].imag,
-                    "mu_re": candidate_table.mu_r[0].real,
-                    "mu_im": candidate_table.mu_r[0].imag,
-                }
-            )
-        density_values = (
-            densities
-            if densities is not None and len(densities) == len(fractions)
-            else None
-        )
-        names = (
-            component_names
-            if component_names is not None
-            and len(component_names) == len(fractions)
-            else [f"Material {index}" for index in range(1, len(fractions) + 1)]
-        )
-        out = {
-            "freqs": list(disp_table.freq_ghz),
-            "eps_re": [v.real for v in disp_table.eps_r],
-            "eps_im": [v.imag for v in disp_table.eps_r],
-            "mu_re": [v.real for v in disp_table.mu_r],
-            "mu_im": [v.imag for v in disp_table.mu_r],
-            "loss_tan_eps": eps_tan,
-            "loss_tan_mu": mu_tan,
-            "thickness_in": thickness_in,
-            "fractions": fractions,
-            "component_names": names,
-            "weight_fractions": weight_fractions_from_volume(
-                fractions, density_values
-            ) if density_values is not None else None,
-            "density_gcc": blend_density_gcc(fractions, density_values)
-            if density_values is not None
-            else None,
-            "model": normalize_mix_rule(rule),
-            "advisories": mix_model_advisories(rule, fractions),
-            "comparison_frequency": midpoint,
-            "model_comparison": comparison,
-        }
-        if target is not None:
-            sel = [
-                (f, te, tm)
-                for f, te, tm in zip(target["freqs"], target["eps"], target["mu"])
-                if lo - 1e-9 <= f <= hi + 1e-9
-            ]
-            if sel:
-                tg_f = [s[0] for s in sel]
-                tg_eps = [s[1] for s in sel]
-                tg_mu = [s[2] for s in sel]
-                blend_eps = interp_complex_many(tg_f, disp_table.freq_ghz, disp_table.eps_r)
-                blend_mu = interp_complex_many(tg_f, disp_table.freq_ghz, disp_table.mu_r)
-                out["target_freqs"] = tg_f
-                out["target_eps_re"] = [v.real for v in tg_eps]
-                out["target_eps_im"] = [v.imag for v in tg_eps]
-                out["target_mu_re"] = [v.real for v in tg_mu]
-                out["target_mu_im"] = [v.imag for v in tg_mu]
-                out["err_pct"] = property_match_error_curve(
-                    blend_eps, blend_mu, tg_eps, tg_mu, target["w_eps"], target["w_mu"]
-                )
-        if performance is not None:
-            out["performance"] = self._evaluate_mix_performance(
-                disp_table, thickness_in, performance
-            )
-        return out
+        return build_mix_display(components, rule, thickness_in, grid_ghz, target, performance, densities, component_names)
 
     def _preview_mix(self) -> None:
         try:

@@ -2,14 +2,11 @@
 """
 Shared plumbing for the HPC steps -- three small jobs, all of them explicit.
 
-1. CONFIGURE A DRIVER.  The canonical Backend drivers
-   (run_hpc_bor_monostatic.py and run_hpc_monostatic.py) keep their settings
-   in a CONFIG block of module-level constants, and the SLURM script they write
-   execs THE SAME FILE with --worker.  So the compute nodes read the constants
-   out of whichever copy submitted the job.  ``configure_driver`` therefore
-   writes a COPY of the driver
-   with those constants replaced -- and submitting that copy is what makes the
-   settings reach the nodes.  Overriding them in your own process would not.
+1. CONFIGURE A DRIVER. The canonical drivers retain editable defaults for
+   standalone use. ``configure_driver`` copies their source without rewriting
+   it, and writes validated settings to an adjacent .config.json. The driver
+   loads that file before submission and carries it into the run directory
+   for workers. Source and configuration bytes both participate in provenance.
 
 2. STAGE GEOMETRY.  The drivers discover every .geo under FRD_DIR / OPN_DIR, so
    each step stages exactly the files it wants into its own outputs/geometries/
@@ -97,38 +94,27 @@ def _unit_output_contract(unit: 'Dict[str, Any]', schema: 'str') -> 'tuple':
 # -----------------------------------------------------------------------------
 
 def configure_driver(driver: 'Path', out_path: 'Path', settings: 'Dict[str, Any]') -> 'Path':
-    """Copy ``driver`` to ``out_path`` with each CONFIG constant in ``settings``
-    replaced.  Every name must already exist as a top-level assignment in the
-    driver, so a typo is an error here rather than a silently ignored setting.
-
-    A PYTHONPATH line is added to JOB_PROLOGUE, because the SLURM script cd's to
-    the configured copy's folder and the solver modules live in the repo root.
-    """
-    src = Path(driver).read_text().splitlines(keepends=True)
+    """Copy unchanged driver source and publish its validated JSON settings."""
+    from driver_config import driver_contract, configuration_payload, write_configuration
+    import shlex
+    driver, out_path = Path(driver), Path(out_path)
+    if driver.resolve() == out_path.resolve():
+        raise ValueError('Configure a separate driver copy, not the canonical source.')
+    kind, keys = driver_contract(driver)
     want = dict(settings)
-    want.setdefault("JOB_PROLOGUE",
-                    [f"export PYTHONPATH={REPO_ROOT}:${{PYTHONPATH:-}}"])
-    seen = set()
-    out: 'List[str]' = []
-    for line in src:
-        m = re.match(r"^([A-Z_][A-Z0-9_]*)\s*=", line)
-        if m and m.group(1) in want:
-            key = m.group(1)
-            if key in seen:                     # only the first (CONFIG) binding
-                out.append(line)
-                continue
-            seen.add(key)
-            out.append(f"{key} = {want[key]!r}\n")
-        else:
-            out.append(line)
-    missing = sorted(set(want) - seen)
-    if missing:
-        raise ValueError(f"{driver.name}: no top-level assignment for {missing} "
-                         f"-- check the spelling against the driver's CONFIG block.")
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(out_path).write_text("".join(out))
-    Path(out_path).chmod(0o755)
-    return Path(out_path)
+    if 'JOB_PROLOGUE' in keys:
+        want.setdefault('JOB_PROLOGUE',
+                        [f'export PYTHONPATH={shlex.quote(str(REPO_ROOT))}:${{PYTHONPATH:-}}'])
+    payload = configuration_payload(kind, want, keys)
+    source = driver.read_bytes()
+    if out_path.exists() and out_path.read_bytes() != source:
+        raise ValueError('The staged driver differs from the current source. Choose a new stage folder.')
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not out_path.exists():
+        shutil.copy2(driver, out_path)
+    out_path.chmod(0o755)
+    write_configuration(out_path.with_suffix('.config.json'), payload)
+    return out_path
 
 
 def stage_geometry(files: 'Sequence[os.PathLike]', geom_root: 'Path') -> 'Path':

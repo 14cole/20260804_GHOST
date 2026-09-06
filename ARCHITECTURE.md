@@ -13,6 +13,7 @@ operations or numerical work.
 | `GRIM_Revised_2/grim_theme.py` | Convert palette tokens into Qt stylesheets and branch indicators. |
 | `GRIM_Revised_2/grim_cut_dataset_mixin.py` | Coordinate dataset operations, background jobs, saves, undo, and publication into the catalog. |
 | `GRIM_Revised_2/grim_dataset.py` | `RcsGrid` data representation, numerical operations, and existing dataset APIs. |
+| `GRIM_Revised_2/grim_dataset_audit.py` | Non-mutating dataset health diagnostics, with bounded array scans and the existing `RcsGrid.audit()` API. |
 | `GRIM_Revised_2/grim_format_io.py`, `grim_cst_io.py`, `grim_sentri_io.py`, `grim_legacy_io.py`, `grim_pio_io.py` | Native archive loading and format-specific adapters inherited by `RcsGrid`. Preserve classmethod dispatch, allocation checks, metadata, and existing reader/writer signatures. |
 | `GRIM_Revised_2/dataset_dialogs.py` | Dataset operation dialogs and input-unit presentation. |
 | `GRIM_Revised_2/dataset_jobs.py` | Background workers, loader memory admission, and bounded parallel loading. |
@@ -31,6 +32,9 @@ operations or numerical work.
 | `tools/GHOST/Backend/rcs_geometry.py` | Material tables, geometry validation, and panel/linear-mesh construction. |
 | `tools/GHOST/Backend/rcs_operators.py` | Quadrature, boundary operators, field evaluation, and operator tuning state. |
 | `tools/GHOST/Backend/driver_io.py` | Shared geometry-input verification, cache-aware snapshot loading, and durable submission journals. Each local driver supplies its own cache. |
+| `tools/GHOST/Backend/driver_config.py` | Typed JSON setting validation, unchanged driver staging, desktop 2-D recipe adaptation, and configuration provenance. |
+| `tools/GHOST/Backend/feature_preparation.py` | Capture source/output identities and prepare surface, line, and point placements in explicit stage records. |
+| `tools/GHOST/Backend/feature_library_contracts.py` | Bind feature manifests, applicability limits, and component identities to an Assembly plan. |
 | `tools/GHOST/Backend/material_models.py` | Material explanations and thin-layer input dialog. Numerical material semantics remain in the backend. |
 | `tools/GHOST/Backend/thin_sheet.py` | Thin-layer validity checks, jump operators and field evaluation. Reuses 2D quadrature and linear-solve primitives. |
 | `tools/GHOST/Backend/refined_lu.py` | Opt-in factor/refinement policy, double residual checks and fallback signaling. No Qt dependencies. |
@@ -41,6 +45,8 @@ operations or numerical work.
 | `GRIM_Revised_2/assembly_interference.py` | Inspector presentation and worker lifecycle; delegates numerical evaluation to the backend service. |
 | `tools/GHOST/Backend/feature_family_validation.py` | Reference-study definitions, convergence/reconstruction checks and evidence reports. Never generates purported full-wave truth. |
 | `tools/FREDDY/ibc/design_search.py` | Qt-free inverse-stack and bounded material-recipe searches over captured request data; callbacks provide cancellation, progress, and numerical adapters. |
+| `tools/FREDDY/ibc/mix_analysis.py` | Qt-free material recipe curves, target comparisons, and stack-performance evaluation. |
+| `tools/FREDDY/ibc/search_checkpoint.py` | Atomic recovery archives with completed scores, search/source identity, size checks, and content checksums. |
 | `tools/FREDDY/ibc/ui_controls.py`, `ui_dialogs.py`, `ui_options.py` | Shared bindings, layer/material editors, and stable form option values. |
 | `tools/FREDDY/ibc/project_state.py` | Project capture/restoration between controls and portable dictionaries; path and file semantics remain in `ibc/io.py`. |
 | `GRIM_Revised_2/examples/_folder_common.py` | Shared folder discovery and axis-limit validation for the separate editable sweep examples. |
@@ -87,6 +93,21 @@ and numerical modules must remain importable without a Qt installation. FREDDY
 search services receive captured inputs rather than reading widgets while a job
 runs; the GUI retains publication, selection, and background-job ownership.
 
+FREDDY's layout construction has separate builders for Impedance, IBC Batch,
+Off Angle, Thickness, Inverse Design, and Material Mix. Shared form factories
+construct entries, output rows, and uncertainty controls. Search recovery is
+optional and uses a captured destination; workers never read the path widget.
+
+Assembly stage services resolve compatibility policy helpers from
+`feature_workflow` at call time. That module remains the public orchestration
+facade, including existing injection points. Stage records carry explicit
+source identities and prepared placement geometry between operations.
+
+The obsolete private helpers identified in the audit have been removed.
+Public sidecar/artifact-manifest functions in `workflow_provenance` remain for
+external script compatibility; current integrated drivers use embedded
+attestations. Retiring those public APIs requires an external-consumer review.
+
 ## Saving and sizing
 
 Save operates on selected catalog rows; Save All operates on every row. There
@@ -110,3 +131,9 @@ cover the unchanged controller interfaces.
 New eagerly imported modules must also appear in the `pyproject.toml`
 `py-modules` list and `grim_diagnostics.GRIM_STARTUP_FILES`, so installed and
 copy-ready distributions include the same runtime contract.
+
+`verify_project.py --mode quick` checks the declared inventories against local
+imports, including deferred imports, and runs packaging/startup smoke checks.
+`--mode full` uses the same suite inventory as the mandatory release gate,
+including standalone integration scripts. Inventory analysis does not execute
+application code; dynamic imports and non-Python assets remain explicit entries.
