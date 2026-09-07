@@ -55,6 +55,49 @@ class HpcRuntimeTests(unittest.TestCase):
         workload = AssemblyWorkload(available=True)
         self.assertEqual(workload.as_dict()['review_reasons'], ())
 
+    def test_lu_without_new_scipy_warning_export_preserves_double_fallback(self):
+        # A fresh process reproduces the import failure even if the main test
+        # process already imported refined_lu through another solver module.
+        script = """
+import numpy as np
+import scipy.linalg as linalg
+if hasattr(linalg, 'LinAlgWarning'):
+    del linalg.LinAlgWarning
+from refined_lu import RefinedLU, linear_precision
+import rcs_solver as rcs
+a = np.array([[3+1j, 1-2j], [2+0j, 5-1j]])
+b = np.array([1+2j, -3+1j])
+np.testing.assert_allclose(RefinedLU(a).solve(b), np.linalg.solve(a, b),
+                           rtol=1e-10, atol=1e-11)
+# This matrix becomes singular in complex64 but remains solvable in double.
+a = np.array([[1, 1], [1, 1+1e-10]], dtype=complex)
+b = np.array([2, 2+1e-10], dtype=complex)
+rcs._reset_dense_backend_telemetry()
+with linear_precision('mixed'):
+    actual = rcs._solve_dense_system(a, b)
+np.testing.assert_allclose(actual, np.linalg.solve(a, b), rtol=1e-10)
+assert any('fell back' in reason for reason in
+           rcs._dense_backend_summary()['dense_fallback_reasons'])
+"""
+        result = subprocess.run(
+            [sys.executable, '-c', script],
+            env={**os.environ, 'PYTHONPATH': str(BACKEND)},
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_lu_still_rejects_old_scipy_runtime_warning(self):
+        import numpy as np
+        import refined_lu
+        import warnings
+        def old_factor(_matrix):
+            warnings.warn('Singular matrix.', RuntimeWarning)
+            self.fail('A singular single-precision factorization was accepted')
+        with mock.patch.object(refined_lu, 'lu_factor', side_effect=old_factor):
+            with self.assertRaisesRegex(RuntimeWarning, 'Singular matrix'):
+                refined_lu.RefinedLU(np.eye(2))
+
     def test_solver_scope_restores_exceptions_and_isolates_threads(self):
         # Exercise both the current interpreter's implementation and the
         # fallback, so desktop CI can protect the cluster's thread semantics.

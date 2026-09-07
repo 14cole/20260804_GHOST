@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from ghost_runtime import ScopedValue
 import warnings
 import numpy as np
-from scipy.linalg import lu_factor, lu_solve, LinAlgWarning
+from scipy.linalg import lu_factor, lu_solve
 from solver_metrics import timed_stage
 
 _PRECISION = ScopedValue("ghost_lu_precision", default="double")
@@ -32,8 +32,9 @@ class RefinedLU:
         self.matrix = np.asarray(matrix, dtype=np.complex128)
         self.max_corrections = 0
         with warnings.catch_warnings():
+            # Older SciPy emits RuntimeWarning directly; newer LinAlgWarning
+            # inherits it. Catch both without requiring the newer export.
             warnings.simplefilter("error", RuntimeWarning)
-            warnings.simplefilter("error", LinAlgWarning)
             self.lu, self.piv = lu_factor(self.matrix.astype(np.complex64))
         if not np.all(np.isfinite(self.lu)):
             raise np.linalg.LinAlgError("Single-precision LU was nonfinite.")
