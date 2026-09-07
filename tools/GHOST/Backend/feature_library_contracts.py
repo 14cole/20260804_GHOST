@@ -1,20 +1,19 @@
 """Feature library identities, applicability checks, and contracts."""
-from __future__ import annotations
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 def _apply_feature_library_contracts(
     *,
-    line_placements: Sequence[Mapping[str, Any]],
-    line_records: Sequence[dict[str, Any]],
-    point_placements: Sequence[Mapping[str, Any]],
-    point_records: Sequence[dict[str, Any]],
-    radar_grid: Mapping[str, Any],
-    require_manifests: bool,
-    cancel_check: Optional[Callable[[], bool]] = None,
-    host_material: str = "",
-    host_stack_id: str = "",
-    host_minimum_radius_m: Optional[float] = None,
-) -> tuple[dict[str, Any], list[str], dict[str, str], set[str]]:
+    line_placements: 'Sequence[Mapping[str, Any]]',
+    line_records: 'Sequence[dict[str, Any]]',
+    point_placements: 'Sequence[Mapping[str, Any]]',
+    point_records: 'Sequence[dict[str, Any]]',
+    radar_grid: 'Mapping[str, Any]',
+    require_manifests: 'bool',
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+    host_material: 'str' = "",
+    host_stack_id: 'str' = "",
+    host_minimum_radius_m: 'Optional[float]' = None,
+) -> 'tuple[dict[str, Any], list[str], dict[str, str], set[str]]':
     """Bind manifests, applicability gates, and component identities to a plan."""
     from feature_workflow import (
         Any,
@@ -41,12 +40,12 @@ def _apply_feature_library_contracts(
 
     frequencies = np.asarray(radar_grid["frequencies_ghz"], dtype=float)
     directions = _vehicle_radar_directions(radar_grid)
-    contracts: dict[str, Any] = {}
-    warnings: list[str] = []
-    source_hashes: dict[str, str] = {}
-    absent_source_paths: set[str] = set()
-    seen_components: dict[str, tuple[str, str]] = {}
-    footprint_components: list[dict[str, Any]] = []
+    contracts: 'dict[str, Any]' = {}
+    warnings: 'list[str]' = []
+    source_hashes: 'dict[str, str]' = {}
+    absent_source_paths: 'set[str]' = set()
+    seen_components: 'dict[str, tuple[str, str]]' = {}
+    footprint_components: 'list[dict[str, Any]]' = []
     groups = (
         ("line", line_placements, line_records),
         ("point", point_placements, point_records),
@@ -56,11 +55,11 @@ def _apply_feature_library_contracts(
             raise ValueError(
                 f"Prepared {feature_kind} placement/record counts disagree."
             )
-        manifests: dict[str, Optional[dict[str, Any]]] = {}
-        response_identities: dict[str, str] = {}
-        response_content_identities: dict[str, str] = {}
-        response_frequency_bounds: dict[str, tuple[float, float]] = {}
-        line_coefficients: dict[str, tuple[Any, ...]] = {}
+        manifests: 'dict[str, Optional[dict[str, Any]]]' = {}
+        response_identities: 'dict[str, str]' = {}
+        response_content_identities: 'dict[str, str]' = {}
+        response_frequency_bounds: 'dict[str, tuple[float, float]]' = {}
+        line_coefficients: 'dict[str, tuple[Any, ...]]' = {}
         for placement, record in zip(placements, records):
             if cancel_check is not None and cancel_check():
                 raise InterruptedError("Feature placement validation cancelled.")

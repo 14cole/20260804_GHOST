@@ -60,7 +60,7 @@ Conventions:
 """
 
 import math
-from dataclasses import dataclass
+from ghost_runtime import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np

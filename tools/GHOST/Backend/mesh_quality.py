@@ -8,9 +8,8 @@ the actual triangle vertices and reports the conditions that matter to those
 two uses.  It does not mutate or repair user geometry.
 """
 
-from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from ghost_runtime import asdict, dataclass
 from typing import Optional
 
 import numpy as np
@@ -18,32 +17,32 @@ import numpy as np
 
 @dataclass(frozen=True)
 class MeshTopologyReport:
-    schema: str
-    triangle_count: int
-    welded_vertex_count: int
-    unique_edge_count: int
-    boundary_edge_count: int
-    nonmanifold_edge_count: int
-    inconsistent_winding_edge_count: int
-    duplicate_triangle_count: int
-    weld_tolerance_m: float
-    watertight: bool
-    edge_manifold: bool
-    consistently_wound: bool
-    connected_component_count: int
-    closed_component_count: int
-    outward_closed_component_count: int
-    inward_closed_component_count: int
-    indeterminate_component_count: int
-    signed_component_volumes_m3: tuple[float, ...]
-    global_orientation: str
+    schema: 'str'
+    triangle_count: 'int'
+    welded_vertex_count: 'int'
+    unique_edge_count: 'int'
+    boundary_edge_count: 'int'
+    nonmanifold_edge_count: 'int'
+    inconsistent_winding_edge_count: 'int'
+    duplicate_triangle_count: 'int'
+    weld_tolerance_m: 'float'
+    watertight: 'bool'
+    edge_manifold: 'bool'
+    consistently_wound: 'bool'
+    connected_component_count: 'int'
+    closed_component_count: 'int'
+    outward_closed_component_count: 'int'
+    inward_closed_component_count: 'int'
+    indeterminate_component_count: 'int'
+    signed_component_volumes_m3: 'tuple[float, ...]'
+    global_orientation: 'str'
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> 'dict':
         return asdict(self)
 
     def messages(
-        self, *, shadow_requested: bool = False, normals_flipped: bool = False
-    ) -> tuple[str, ...]:
+        self, *, shadow_requested: 'bool' = False, normals_flipped: 'bool' = False
+    ) -> 'tuple[str, ...]':
         messages = []
         if self.duplicate_triangle_count:
             messages.append(
@@ -93,7 +92,7 @@ class MeshTopologyReport:
         return tuple(messages)
 
 
-def _validated_triangles(triangles: np.ndarray) -> np.ndarray:
+def _validated_triangles(triangles: 'np.ndarray') -> 'np.ndarray':
     values = np.asarray(triangles, dtype=np.float64)
     if values.ndim != 3 or values.shape[1:] != (3, 3) or len(values) == 0:
         raise ValueError("triangles must have shape (n, 3, 3) with n > 0.")
@@ -103,8 +102,8 @@ def _validated_triangles(triangles: np.ndarray) -> np.ndarray:
 
 
 def audit_triangle_topology(
-    triangles: np.ndarray, *, weld_tolerance_m: Optional[float] = None
-) -> MeshTopologyReport:
+    triangles: 'np.ndarray', *, weld_tolerance_m: 'Optional[float]' = None
+) -> 'MeshTopologyReport':
     """Reconstruct mesh edge incidence and return production-facing QA.
 
     Vertices closer than ``weld_tolerance_m`` are treated as one topological
@@ -143,7 +142,7 @@ def audit_triangle_topology(
     )
     parent = np.arange(len(exact_vertices), dtype=np.intp)
 
-    def find(index: int) -> int:
+    def find(index: 'int') -> 'int':
         while parent[index] != index:
             parent[index] = parent[parent[index]]
             index = int(parent[index])
@@ -211,13 +210,13 @@ def audit_triangle_topology(
     # Relative edge winding alone cannot see that global reversal.
     face_parent = np.arange(len(tris), dtype=np.intp)
 
-    def face_find(index: int) -> int:
+    def face_find(index: 'int') -> 'int':
         while face_parent[index] != index:
             face_parent[index] = face_parent[face_parent[index]]
             index = int(face_parent[index])
         return index
 
-    def face_union(left: int, right: int) -> None:
+    def face_union(left: 'int', right: 'int') -> 'None':
         left_root = face_find(left)
         right_root = face_find(right)
         if left_root == right_root:

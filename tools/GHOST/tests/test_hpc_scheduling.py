@@ -22,6 +22,7 @@ Usage:
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -920,6 +921,9 @@ def _stage_run(root):
     settings["FRD_DIR"] = str(geom_root / "FRD")
     settings["OPN_DIR"] = str(geom_root / "OPN")
     settings["OUTPUT_DIR"] = str(root / "runs")
+    # Exercise an externally staged driver whose module setup refers to an
+    # unrelated checkout instead of relying on configure_driver's default.
+    settings["JOB_PROLOGUE"] = ["export PYTHONPATH=/unrelated/old/Backend"]
     return hpc_common.configure_driver(
         BACKEND / "run_hpc_monostatic.py", root / "driver.py", settings
     )
@@ -1003,7 +1007,7 @@ def test_no_task_starvation():
 
 def test_end_to_end():
     print("\nend-to-end sweep")
-    root = Path(tempfile.mkdtemp(prefix="ghost-hpc-test-"))
+    root = Path(tempfile.mkdtemp(prefix="ghost hpc test "))
     try:
         try:
             driver = _stage_run(root)
@@ -1047,6 +1051,21 @@ def test_end_to_end():
         check("--requeue" in slurm_text, "array tasks are requeueable")
         check("OMP_NUM_THREADS=1" in slurm_text,
               "BLAS threads are pinned before the interpreter starts")
+        exports = [shlex.split(line)[1].split("=", 1)[1]
+                   for line in slurm_text.splitlines()
+                   if line.startswith("export PYTHONPATH=")]
+        suffix = ":${PYTHONPATH:-}"
+        worker_backend = (exports[-1][:-len(suffix)]
+                          if exports and exports[-1].endswith(suffix) else "")
+        check(worker_backend == str(BACKEND.resolve()),
+              "SLURM pins the submitting Backend after custom module setup")
+        worker_command = next(line for line in slurm_text.splitlines()
+                              if line.startswith("exec "))
+        check(shlex.split(worker_command)[4] == str(run_dir),
+              "the worker run-directory argument preserves spaces")
+        # Use only the backend recovered from the actual generated script:
+        # _subprocess_env would mask a missing path in the SLURM launch.
+        worker_env = {**os.environ, "PYTHONPATH": worker_backend}
 
         # A worker must never recreate the old zero-reservation fallback when
         # its submit-time plan is missing or corrupt.
@@ -1078,10 +1097,11 @@ def test_end_to_end():
         started = time.time()
         procs = [
             subprocess.Popen(
-                [sys.executable, str(driver), "--worker", str(run_dir), "0", str(task)],
+                [sys.executable, str(run_dir / "driver_configured.py"),
+                 "--worker", str(run_dir), "0", str(task)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 universal_newlines=True,
-                env=_subprocess_env(),
+                env=worker_env, cwd=run_dir,
             )
             for task in (0, 1)
         ]

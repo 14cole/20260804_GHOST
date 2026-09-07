@@ -1,5 +1,10 @@
 # Reproducible Windows dependency bundle
 
+For the separate headless GHOST Python 3.6.8 HPC environment, use
+[`hpc-py36.txt`](hpc-py36.txt) and the
+[cluster setup/test instructions](../tools/GHOST/HPC.md). That profile is not
+the desktop dependency lock described below.
+
 The supported internal release target is 64-bit CPython 3.12 on Windows. The
 exact reviewed dependency graph is in `constraints-windows-py312.txt`; do not
 upgrade one package in isolation. A source release never contacts a package

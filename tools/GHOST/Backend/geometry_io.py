@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from ghost_runtime import dataclass, field, unlink_if_exists
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -122,7 +122,7 @@ class AtomicFileTransaction:
             with temporary.open("r+b") as stream:
                 os.fsync(stream.fileno())
         except Exception:
-            temporary.unlink(missing_ok=True)
+            unlink_if_exists(temporary)
             raise
         self._staged.append((target, temporary))
 
@@ -137,7 +137,7 @@ class AtomicFileTransaction:
                 stream.flush()
                 os.fsync(stream.fileno())
         except Exception:
-            temporary.unlink(missing_ok=True)
+            unlink_if_exists(temporary)
             raise
         self._staged.append((target, temporary))
 
@@ -160,7 +160,7 @@ class AtomicFileTransaction:
                         with backup.open("r+b") as stream:
                             os.fsync(stream.fileno())
                     except Exception:
-                        backup.unlink(missing_ok=True)
+                        unlink_if_exists(backup)
                         raise
                     self._backups[destination] = backup
                 else:
@@ -188,7 +188,7 @@ class AtomicFileTransaction:
             backup = self._backups.get(destination)
             try:
                 if backup is None:
-                    destination.unlink(missing_ok=True)
+                    unlink_if_exists(destination)
                 else:
                     os.replace(backup, destination)
             except Exception as exc:
@@ -232,14 +232,14 @@ class AtomicFileTransaction:
         for _destination, temporary in self._staged:
             if temporary not in preserve:
                 try:
-                    temporary.unlink(missing_ok=True)
+                    unlink_if_exists(temporary)
                 except OSError:
                     pass
         self._staged.clear()
         for backup in self._backups.values():
             if backup is not None and backup not in preserve:
                 try:
-                    backup.unlink(missing_ok=True)
+                    unlink_if_exists(backup)
                 except OSError:
                     pass
 

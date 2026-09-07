@@ -96,6 +96,7 @@ GRIM_SENTINELS = GRIM_STARTUP_FILES
 
 # Keep this aligned with the reusable workspace contract in ghost_integration.
 GHOST_SENTINELS = (
+    "_ghost_dataclasses.py",
     "assembly_inspector.py",
     "assembly_workload.py",
     "bor_dispatch.py",
@@ -103,6 +104,7 @@ GHOST_SENTINELS = (
     "bor_solver.py",
     "bor_streaming.py",
     "components.py",
+    "check_hpc_environment.py",
     "driver_config.py",
     "driver_io.py",
     "feature_family_validation.py",
@@ -114,6 +116,7 @@ GHOST_SENTINELS = (
     "geometry_io.py",
     "geometry_tab.py",
     "ghost_gui.py",
+    "ghost_runtime.py",
     "grim_compat.py",
     "grim_io.py",
     "grim_naming.py",

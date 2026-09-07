@@ -52,6 +52,7 @@ import argparse
 import json
 import math
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -817,9 +818,18 @@ def submit():
             mail_type=SLURM_MAIL_TYPE,
             mail_user=SLURM_MAIL_USER,
             extra_sbatch=SLURM_EXTRA_SBATCH,
-            prologue=JOB_PROLOGUE,
+            # The driver is copied into the run directory.  Pin the Backend
+            # that produced its manifest after module/environment setup, just
+            # as the BoR driver does, including for manually copied drivers.
+            prologue=[
+                *JOB_PROLOGUE,
+                ("export PYTHONPATH="
+                 f"{shlex.quote(str(Path(_workflow_provenance.__file__).resolve().parent))}"
+                 ":${PYTHONPATH:-}"),
+            ],
             python_exe=PYTHON_EXE,
-            worker_args=f"--worker {run_dir} {j} ${{SLURM_ARRAY_TASK_ID}}",
+            worker_args=(f"--worker {shlex.quote(str(run_dir))} {j} "
+                         "${SLURM_ARRAY_TASK_ID}"),
             submission_index=j,
             blas_threads=int(BLAS_THREADS_PER_WORKER),
             extra_env=(

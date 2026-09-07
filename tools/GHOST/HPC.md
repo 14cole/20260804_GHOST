@@ -21,6 +21,113 @@ cancelled, or is preempted cannot strand work.
 Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
 knobs below mean the same thing in each.
 
+### Python environment and a driver in your own folder
+
+The headless GHOST HPC/local drivers support **Python 3.6.8** with NumPy
+1.19.5 and SciPy 1.5.4. The tested dependency profile, including optional
+psutil 5.9.8 memory sampling, is in
+[`requirements/hpc-py36.txt`](../../requirements/hpc-py36.txt). The desktop
+application retains its separate Python 3.10+ packaging requirement and
+Windows Python 3.12 release environment; installing the desktop package is
+not required on the cluster.
+
+The backend bundles its Python 3.6 dataclasses support. Copy the **complete
+updated Backend**, including `ghost_runtime.py` and `_ghost_dataclasses.py`;
+do not add your own `dataclasses.py`. The compatibility changes also cover
+annotations, nested/threaded solver settings, file cleanup, and bundle CLI
+operations. Numerical assembly and solve algorithms are shared with desktop
+Python. Python 3.6 solver settings are thread-local; asynchronous task-local
+contexts are available only on Python 3.7+.
+
+From the repository root, check the environment using the same interpreter
+you will use to launch the driver:
+
+```bash
+python tools/GHOST/Backend/check_hpc_environment.py
+```
+
+It reports the interpreter, loaded backend, dependency versions, and a complex
+LU check. If dependencies are missing or older than the tested profile, install
+the pinned headless requirements in your permitted cluster environment:
+
+```bash
+python -m pip install --user -r requirements/hpc-py36.txt
+```
+
+For an offline cluster, obtain matching **Linux CPython 3.6** wheels on a
+connected machine and install with `--no-index --find-links /path/to/wheels`.
+Windows wheels cannot be used on Linux.
+
+You can keep a copy of `run_hpc_monostatic.py` or
+`run_hpc_bor_monostatic.py` in your study folder. Make the complete matching
+`Backend` available on shared storage, and add this before the driver's
+backend imports (replace the example with your absolute Linux path):
+
+```python
+import sys
+sys.path.insert(0, "/shared/path/to/GHOST/Backend")
+```
+
+`sys.path.insert` needs both the index and the path. A relative `"Backend"`
+path is resolved against the current working directory; it can stop working
+when a worker starts in the generated run directory. The drivers export the
+absolute backend path into their SLURM scripts after `JOB_PROLOGUE`, so workers
+can import the same solver source used for submission.
+
+Launch the driver with the selected interpreter, for example:
+
+```bash
+/shared/path/to/venv/bin/python --version
+/shared/path/to/venv/bin/python /scratch/my_study/run_hpc_monostatic.py
+```
+
+The default `PYTHON_EXE = sys.executable` carries that interpreter to the
+workers. Both its environment and the backend must be accessible on compute
+nodes. If your cluster requires modules, load them before launching the driver
+and put the corresponding setup in `JOB_PROLOGUE`. Changing `PYTHON_EXE` alone
+does not change the Python already interpreting the submitting script.
+
+### First cluster acceptance test
+
+1. Run `check_hpc_environment.py` on the login node and in your usual compute
+   allocation. Both must pass and identify the same interpreter, backend, and
+   numerical dependency versions. Native BoR acceleration additionally requires
+   a Linux build on the target environment.
+2. In a fresh copy of your configured driver, select **one small geometry, one
+   frequency within its material tables, and two azimuths**. Set `N_NODES = 1`,
+   `N_JOBS = 1`, `MAX_WORKERS_PER_NODE = 1`, and `SUBMIT = False`. Run the driver
+   and check that it creates a manifest, schedule, and `.slurm` script. Retain
+   your site's partition, account, memory, and module settings.
+3. Submit that generated script with `sbatch /absolute/path/to/submit_job0.slurm`.
+   Check the job logs for `failed=0` and the results for both VV and HH. Verify
+   the run with `python /path/to/Backend/hpc_bundle.py run-status /path/to/run`;
+   expect `complete: true` and `attestation_verified: true` in its JSON output.
+4. Submit the **same generated SLURM script** again. It should verify and skip
+   the existing outputs with `wrote=0`, without changing the result files. Do
+   not rerun the top-level submitting driver for this test; that creates a new
+   run directory.
+5. Repeat with one of your CSV/Hz material or IBC geometries, then a small
+   multi-frequency sweep with two array tasks. Open the results in GRIM and
+   compare a matching small case against the desktop result. Keep frequency,
+   angles, geometry units, materials, and solver/certification settings equal.
+
+For additional automated checks, run these **inside a compute allocation**
+from the repository root; they execute real worker solves locally without
+calling `sbatch`:
+
+```bash
+python tools/GHOST/tests/test_hpc_runtime.py
+python tools/GHOST/tests/test_hpc_scheduling.py
+python tools/GHOST/tests/test_local_drivers.py
+```
+
+Development validation used actual CPython 3.6.8 on Windows with the pinned
+libraries, including copied worker processes, CSV coatings, mixed precision,
+BoR, bundle/recovery contracts, and mesh/file-transaction checks. Those checks
+do not establish your cluster's Linux native libraries, SLURM setup, shared
+filesystem behavior, or large-job resource limits; the acceptance steps above
+cover the remaining deployment checks.
+
 ### Headless materials, accuracy, and Assembly
 
 The numerical workflows run without a display, Qt, or an open GRIM/FREDDY

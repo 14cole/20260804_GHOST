@@ -11,7 +11,6 @@ the canonical coherent OPN-FRD (installed/featured minus clean-skin) delta.
 The workflow never guesses or reverses the subtraction order.
 """
 
-from __future__ import annotations
 
 import csv
 import copy
@@ -19,9 +18,9 @@ import hashlib
 import json
 import math
 import os
-from dataclasses import dataclass, field, replace
+from ghost_runtime import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence, Union
 import uuid
 import zipfile
 
@@ -132,7 +131,7 @@ SURFACE_BINDING_SCHEMA = "ghost.assembly-surface-binding.v1"
 SURFACE_FRAME_CONVENTION = "CAD:+y=nose;+x=right;+z=up"
 _OUTWARD_ALIGNMENT_EPS = 1.0e-12
 
-PathValue = str | os.PathLike[str]
+PathValue = Union[str, os.PathLike]
 
 
 @dataclass(frozen=True)
@@ -145,74 +144,74 @@ class FeatureAssemblyRequest:
     respective CSV files.
     """
 
-    base_grim: PathValue
-    output_grim: PathValue
+    base_grim: 'PathValue'
+    output_grim: 'PathValue'
     # Physical units are deliberately unset until the caller chooses them.
     # Placement files do not carry a trustworthy length unit, so silently
     # interpreting an omitted value as inches can scale an otherwise
     # self-consistent vehicle by exactly 25.4x without tripping skin/normal QA.
-    coordinate_units: Optional[str] = None
+    coordinate_units: 'Optional[str]' = None
 
-    surface_mesh: Optional[PathValue] = None
+    surface_mesh: 'Optional[PathValue]' = None
     # Required only when ``surface_mesh`` is supplied.  Embedded BoR geometry
     # is already stored in meters inside the clean-body response.
-    surface_units: Optional[str] = None
-    flip_surface_normals: bool = False
-    shadow: bool = False
-    shadow_bias_m: Optional[float] = None
+    surface_units: 'Optional[str]' = None
+    flip_surface_normals: 'bool' = False
+    shadow: 'bool' = False
+    shadow_bias_m: 'Optional[float]' = None
 
-    point_locations_csv: Optional[PathValue] = None
-    point_datasets: Mapping[str, PathValue] = field(default_factory=dict)
-    line_locations_csv: Optional[PathValue] = None
-    line_datasets: Mapping[str, PathValue] = field(default_factory=dict)
+    point_locations_csv: 'Optional[PathValue]' = None
+    point_datasets: 'Mapping[str, PathValue]' = field(default_factory=dict)
+    line_locations_csv: 'Optional[PathValue]' = None
+    line_datasets: 'Mapping[str, PathValue]' = field(default_factory=dict)
 
-    skin_tol_m: float = 1.0e-3
-    skin_phase_tol_deg: float = 15.0
-    normal_tol_deg: float = 15.0
+    skin_tol_m: 'float' = 1.0e-3
+    skin_phase_tol_deg: 'float' = 15.0
+    normal_tol_deg: 'float' = 15.0
 
-    base_dir: Optional[PathValue] = None
-    history: str = "feature_workflow.py coherent platform line/compact placement"
+    base_dir: 'Optional[PathValue]' = None
+    history: 'str' = "feature_workflow.py coherent platform line/compact placement"
     # Appended for positional backward compatibility with v1 script callers.
     # None means every strictly parsed instance; an empty tuple means none.
-    enabled_point_placement_ids: Optional[tuple[str, ...]] = None
-    enabled_line_ids: Optional[tuple[str, ...]] = None
+    enabled_point_placement_ids: 'Optional[tuple[str, ...]]' = None
+    enabled_line_ids: 'Optional[tuple[str, ...]]' = None
     # Legacy GUI grids can omit descriptive coherent/angle tags.  Present
     # contradictions are always rejected; this switch controls only missing
     # metadata and its use is recorded in output provenance.
-    allow_legacy_base_metadata: bool = True
+    allow_legacy_base_metadata: 'bool' = True
     # Feature-library manifests are optional for existing team libraries.  In
     # strict production deployments this makes their applicability evidence a
     # hard requirement instead of a recorded validation warning.
-    require_feature_manifests: bool = False
+    require_feature_manifests: 'bool' = False
     # Production builds from a locally solved GHOST body can require the
     # embedded, dual-polarization fine-mesh certificate. External/HPC body
     # responses need an explicit caller-selected waiver because GRIM cannot
     # reconstruct solver convergence evidence that is absent from the file.
     # Appended for positional compatibility with earlier request layouts.
-    require_body_mesh_certification: bool = False
+    require_body_mesh_certification: 'bool' = False
     # Declarations about the installation region, not guessed from mesh shape.
     # Use a material/stack identity shared with the characterized feature library.
-    host_material: str = ""
-    host_stack_id: str = ""
-    host_minimum_radius_m: Optional[float] = None
-    study_frequencies_ghz: Optional[tuple[float, ...]] = None
-    study_azimuths_deg: Optional[tuple[float, ...]] = None
-    study_elevations_deg: Optional[tuple[float, ...]] = None
+    host_material: 'str' = ""
+    host_stack_id: 'str' = ""
+    host_minimum_radius_m: 'Optional[float]' = None
+    study_frequencies_ghz: 'Optional[tuple[float, ...]]' = None
+    study_azimuths_deg: 'Optional[tuple[float, ...]]' = None
+    study_elevations_deg: 'Optional[tuple[float, ...]]' = None
 
 
 @dataclass(frozen=True)
 class FeatureDatasetRequirements:
     """Dataset IDs discovered from already schema-validated placement CSVs."""
 
-    point_dataset_ids: tuple[str, ...] = ()
-    line_dataset_ids: tuple[str, ...] = ()
-    point_placement_count: int = 0
-    line_path_count: int = 0
-    line_segment_count: int = 0
+    point_dataset_ids: 'tuple[str, ...]' = ()
+    line_dataset_ids: 'tuple[str, ...]' = ()
+    point_placement_count: 'int' = 0
+    line_path_count: 'int' = 0
+    line_segment_count: 'int' = 0
     # Stable spatial-instance descriptors used by GRIM's feature-definition
     # tree. These are parsed placement identities, never response-grid leaves.
-    point_instances: tuple[tuple[str, str], ...] = ()
-    line_instances: tuple[tuple[str, str, int], ...] = ()
+    point_instances: 'tuple[tuple[str, str], ...]' = ()
+    line_instances: 'tuple[tuple[str, str, int], ...]' = ()
 
 
 @dataclass(frozen=True)
@@ -225,23 +224,23 @@ class FeaturePreviewGeometry:
     was constructed.
     """
 
-    surface_triangles_cad_m: Optional[np.ndarray]
-    body_profile_rho_z_m: Optional[np.ndarray]
-    point_locations_cad_m: dict[str, np.ndarray]
-    line_paths_cad_m: dict[str, dict[str, np.ndarray]]
+    surface_triangles_cad_m: 'Optional[np.ndarray]'
+    body_profile_rho_z_m: 'Optional[np.ndarray]'
+    point_locations_cad_m: 'dict[str, np.ndarray]'
+    line_paths_cad_m: 'dict[str, dict[str, np.ndarray]]'
     # Orientation vectors are unitless and remain in the same user-visible
     # CAD frame as the placement coordinates.  GRIM projects each point roll
     # reference onto the plane normal to local +z when it draws the frame,
     # matching the point-scatterer convention without changing placement
     # validation or solver inputs.
-    point_normals_cad: dict[str, np.ndarray] = field(default_factory=dict)
-    point_roll_references_cad: dict[str, np.ndarray] = field(default_factory=dict)
-    line_endpoint_normals_cad: dict[str, dict[str, np.ndarray]] = field(
+    point_normals_cad: 'dict[str, np.ndarray]' = field(default_factory=dict)
+    point_roll_references_cad: 'dict[str, np.ndarray]' = field(default_factory=dict)
+    line_endpoint_normals_cad: 'dict[str, dict[str, np.ndarray]]' = field(
         default_factory=dict
     )
     # Line paths retain line_id as dictionary keys. Point arrays are grouped by
     # response dataset, so carry their IDs explicitly for exact GUI QA focus.
-    point_placement_ids: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    point_placement_ids: 'dict[str, tuple[str, ...]]' = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -254,41 +253,41 @@ class FeatureInputPreview:
     :func:`prepare_feature_assembly` remains the authoritative physical gate.
     """
 
-    preview_geometry: FeaturePreviewGeometry
-    dataset_requirements: FeatureDatasetRequirements
-    body_source: str
-    preview_stage: str = "input"
+    preview_geometry: 'FeaturePreviewGeometry'
+    dataset_requirements: 'FeatureDatasetRequirements'
+    body_source: 'str'
+    preview_stage: 'str' = "input"
 
     @property
-    def surface_triangles_cad_m(self) -> Optional[np.ndarray]:
+    def surface_triangles_cad_m(self) -> 'Optional[np.ndarray]':
         return self.preview_geometry.surface_triangles_cad_m
 
     @property
-    def body_profile_rho_z_m(self) -> Optional[np.ndarray]:
+    def body_profile_rho_z_m(self) -> 'Optional[np.ndarray]':
         return self.preview_geometry.body_profile_rho_z_m
 
     @property
-    def point_locations_cad_m(self) -> dict[str, np.ndarray]:
+    def point_locations_cad_m(self) -> 'dict[str, np.ndarray]':
         return self.preview_geometry.point_locations_cad_m
 
     @property
-    def line_paths_cad_m(self) -> dict[str, dict[str, np.ndarray]]:
+    def line_paths_cad_m(self) -> 'dict[str, dict[str, np.ndarray]]':
         return self.preview_geometry.line_paths_cad_m
 
     @property
-    def point_normals_cad(self) -> dict[str, np.ndarray]:
+    def point_normals_cad(self) -> 'dict[str, np.ndarray]':
         return self.preview_geometry.point_normals_cad
 
     @property
-    def point_roll_references_cad(self) -> dict[str, np.ndarray]:
+    def point_roll_references_cad(self) -> 'dict[str, np.ndarray]':
         return self.preview_geometry.point_roll_references_cad
 
     @property
-    def line_endpoint_normals_cad(self) -> dict[str, dict[str, np.ndarray]]:
+    def line_endpoint_normals_cad(self) -> 'dict[str, dict[str, np.ndarray]]':
         return self.preview_geometry.line_endpoint_normals_cad
 
     @property
-    def point_placement_ids(self) -> dict[str, tuple[str, ...]]:
+    def point_placement_ids(self) -> 'dict[str, tuple[str, ...]]':
         return self.preview_geometry.point_placement_ids
 
 
@@ -296,101 +295,101 @@ class FeatureInputPreview:
 class FeatureAssemblyPlan:
     """Prepared, physically validated inputs ready for coherent execution."""
 
-    request: FeatureAssemblyRequest
-    base_path: Path
-    output_path: Path
-    radar_grid: dict[str, Any]
-    body_profile: Optional[np.ndarray]
-    surface_path: Optional[Path]
-    surface: Optional[TriangleSurface]
-    surface_normal_fn: Callable[[np.ndarray], np.ndarray]
-    occluder: Optional[Occluder]
-    line_placements: list[dict[str, Any]]
-    point_placements: list[dict[str, Any]]
-    line_records: list[dict[str, Any]]
-    point_records: list[dict[str, Any]]
-    dataset_requirements: FeatureDatasetRequirements
-    preview_geometry: FeaturePreviewGeometry
-    skin_limit_m: float
-    highest_frequency_wavelength_m: float
-    feature_provenance: dict[str, Any]
+    request: 'FeatureAssemblyRequest'
+    base_path: 'Path'
+    output_path: 'Path'
+    radar_grid: 'dict[str, Any]'
+    body_profile: 'Optional[np.ndarray]'
+    surface_path: 'Optional[Path]'
+    surface: 'Optional[TriangleSurface]'
+    surface_normal_fn: 'Callable[[np.ndarray], np.ndarray]'
+    occluder: 'Optional[Occluder]'
+    line_placements: 'list[dict[str, Any]]'
+    point_placements: 'list[dict[str, Any]]'
+    line_records: 'list[dict[str, Any]]'
+    point_records: 'list[dict[str, Any]]'
+    dataset_requirements: 'FeatureDatasetRequirements'
+    preview_geometry: 'FeaturePreviewGeometry'
+    skin_limit_m: 'float'
+    highest_frequency_wavelength_m: 'float'
+    feature_provenance: 'dict[str, Any]'
     # Exact bytes validated during preparation.  The default preserves
     # compatibility with callers that constructed plans before this guard was
     # introduced; plans returned by prepare_feature_assembly always populate it.
-    prepared_source_sha256: dict[str, str] = field(default_factory=dict)
+    prepared_source_sha256: 'dict[str, str]' = field(default_factory=dict)
     # Appended after the existing prepared-source field so positional service
     # callers from the v1 plan layout retain their historical binding.
-    validation_warnings: tuple[str, ...] = ()
+    validation_warnings: 'tuple[str, ...]' = ()
     # Legal feature-manifest sidecar names that did not exist during
     # preparation. Creation of one before publication invalidates the plan just
     # like changing an existing sidecar, because it could contradict the
     # claims that were actually validated.
-    prepared_absent_paths: tuple[str, ...] = ()
+    prepared_absent_paths: 'tuple[str, ...]' = ()
     # Destination state observed by the authoritative validation.  Execution
     # checks it while holding the interprocess publication lock so a second
     # window cannot replace a newer output that the user never reviewed.
-    prepared_output_sha256: Optional[str] = None
-    prepared_output_absent: bool = True
+    prepared_output_sha256: 'Optional[str]' = None
+    prepared_output_absent: 'bool' = True
     # Canonical hash of every mutable plan input consumed by execution. This
     # prevents a cached/headless caller from editing validated placement arrays
     # or provenance between Validate and Build.
-    prepared_plan_sha256: str = ""
+    prepared_plan_sha256: 'str' = ""
     # Keep all v2 additions after prepared_plan_sha256.  It was the final field
     # in the original positional plan layout, and older injected services may
     # still bind that field positionally.
-    prepared_features_only_output_sha256: Optional[str] = None
-    prepared_features_only_output_absent: bool = True
+    prepared_features_only_output_sha256: 'Optional[str]' = None
+    prepared_features_only_output_absent: 'bool' = True
 
     @property
-    def surface_triangles_cad_m(self) -> Optional[np.ndarray]:
+    def surface_triangles_cad_m(self) -> 'Optional[np.ndarray]':
         return self.preview_geometry.surface_triangles_cad_m
 
     @property
-    def body_profile_rho_z_m(self) -> Optional[np.ndarray]:
+    def body_profile_rho_z_m(self) -> 'Optional[np.ndarray]':
         return self.preview_geometry.body_profile_rho_z_m
 
     @property
-    def point_locations_cad_m(self) -> dict[str, np.ndarray]:
+    def point_locations_cad_m(self) -> 'dict[str, np.ndarray]':
         return self.preview_geometry.point_locations_cad_m
 
     @property
-    def line_paths_cad_m(self) -> dict[str, dict[str, np.ndarray]]:
+    def line_paths_cad_m(self) -> 'dict[str, dict[str, np.ndarray]]':
         return self.preview_geometry.line_paths_cad_m
 
     @property
-    def point_normals_cad(self) -> dict[str, np.ndarray]:
+    def point_normals_cad(self) -> 'dict[str, np.ndarray]':
         return self.preview_geometry.point_normals_cad
 
     @property
-    def point_roll_references_cad(self) -> dict[str, np.ndarray]:
+    def point_roll_references_cad(self) -> 'dict[str, np.ndarray]':
         return self.preview_geometry.point_roll_references_cad
 
     @property
-    def line_endpoint_normals_cad(self) -> dict[str, dict[str, np.ndarray]]:
+    def line_endpoint_normals_cad(self) -> 'dict[str, dict[str, np.ndarray]]':
         return self.preview_geometry.line_endpoint_normals_cad
 
     @property
-    def point_placement_ids(self) -> dict[str, tuple[str, ...]]:
+    def point_placement_ids(self) -> 'dict[str, tuple[str, ...]]':
         return self.preview_geometry.point_placement_ids
 
     @property
-    def preview_stage(self) -> str:
+    def preview_stage(self) -> 'str':
         """Identify this scene as physically prepared, not an input-only view."""
 
         return "validated"
 
     @property
-    def features_only_output_path(self) -> Path:
+    def features_only_output_path(self) -> 'Path':
         return Path(feature_only_output_path(str(self.output_path)))
 
 
-def feature_assembly_plan_sha256(plan: FeatureAssemblyPlan) -> str:
+def feature_assembly_plan_sha256(plan: 'FeatureAssemblyPlan') -> 'str':
     """Return the canonical execution-input digest for a prepared plan."""
 
     digest = hashlib.sha256()
     digest.update(b"ghost-feature-assembly-plan-v1\0")
 
-    def normalize(value: Any) -> Any:
+    def normalize(value: 'Any') -> 'Any':
         if isinstance(value, Mapping):
             return {
                 str(key): normalize(child)
@@ -441,7 +440,7 @@ def feature_assembly_plan_sha256(plan: FeatureAssemblyPlan) -> str:
         state, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8"))
 
-    def update_array(label: str, value: Any) -> None:
+    def update_array(label: 'str', value: 'Any') -> 'None':
         raw = np.asarray(value)
         array = np.ascontiguousarray(
             raw, dtype="<c16" if np.iscomplexobj(raw) else "<f8"
@@ -480,7 +479,7 @@ def feature_assembly_plan_sha256(plan: FeatureAssemblyPlan) -> str:
             for key, value in placement.items()
             if key not in {"perimeter", "segment_normals", "shadow_points"}
         }), sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    unique_patterns: dict[int, int] = {}
+    unique_patterns: 'dict[int, int]' = {}
     for index, placement in enumerate(plan.point_placements):
         for key in (
             "location", "aperture_normal", "roll_ref", "shadow_location"
@@ -514,7 +513,7 @@ def feature_assembly_plan_sha256(plan: FeatureAssemblyPlan) -> str:
     return digest.hexdigest()
 
 
-def resolve_path(value: PathValue, *, base_dir: Optional[PathValue] = None) -> Path:
+def resolve_path(value: 'PathValue', *, base_dir: 'Optional[PathValue]' = None) -> 'Path':
     """Resolve one user path without imposing a repository-specific root."""
 
     path = Path(value).expanduser()
@@ -525,8 +524,8 @@ def resolve_path(value: PathValue, *, base_dir: Optional[PathValue] = None) -> P
 
 
 def _canonical_grim_output_path(
-    value: PathValue, *, base_dir: Optional[PathValue] = None
-) -> Path:
+    value: 'PathValue', *, base_dir: 'Optional[PathValue]' = None
+) -> 'Path':
     """Resolve the path exactly as the GRIM writer will publish it."""
 
     resolved = resolve_path(value, base_dir=base_dir)
@@ -535,7 +534,7 @@ def _canonical_grim_output_path(
     return Path(str(resolved) + ".grim")
 
 
-def _paths_alias(first: Path, second: Path) -> bool:
+def _paths_alias(first: 'Path', second: 'Path') -> 'bool':
     """Return whether two resolved paths name the same filesystem target."""
 
     if first == second:
@@ -547,8 +546,8 @@ def _paths_alias(first: Path, second: Path) -> bool:
 
 
 def _reject_output_aliases(
-    request: FeatureAssemblyRequest, *, base: Path, output: Path
-) -> None:
+    request: 'FeatureAssemblyRequest', *, base: 'Path', output: 'Path'
+) -> 'None':
     """Protect every selected input from accidental output overwrite."""
 
     outputs = (
@@ -591,7 +590,7 @@ def _reject_output_aliases(
                 )
 
 
-def _csv_rows(path: Path, *, label: str) -> list[tuple[list[str], int]]:
+def _csv_rows(path: 'Path', *, label: 'str') -> 'list[tuple[list[str], int]]':
     try:
         with path.open(newline="", encoding="utf-8-sig") as stream:
             return [
@@ -607,11 +606,11 @@ _CSV_ERROR_DISPLAY_LIMIT = 25
 
 
 def _raise_csv_row_errors(
-    source: Path,
+    source: 'Path',
     *,
-    label: str,
-    errors: Sequence[tuple[int, str]],
-) -> None:
+    label: 'str',
+    errors: 'Sequence[tuple[int, str]]',
+) -> 'None':
     """Raise one bounded, actionable report for independent CSV row errors."""
 
     if not errors:
@@ -633,7 +632,7 @@ def _raise_csv_row_errors(
     raise ValueError("\n".join(lines))
 
 
-def _compact_csv_values(values: Sequence[Any], *, limit: int = 12) -> str:
+def _compact_csv_values(values: 'Sequence[Any]', *, limit: 'int' = 12) -> 'str':
     """Render a bounded sequence inside a CSV validation message."""
 
     selected = list(values[:limit])
@@ -643,10 +642,10 @@ def _compact_csv_values(values: Sequence[Any], *, limit: int = 12) -> str:
 
 
 def read_point_placement_csv(
-    path: PathValue,
+    path: 'PathValue',
     *,
-    base_dir: Optional[PathValue] = None,
-) -> list[dict[str, Any]]:
+    base_dir: 'Optional[PathValue]' = None,
+) -> 'list[dict[str, Any]]':
     """Read the one strict point-placement CSV schema."""
 
     source = resolve_path(path, base_dir=base_dir)
@@ -662,9 +661,9 @@ def read_point_placement_csv(
     if not rows:
         raise ValueError(f"{source}: placement CSV has a header but no placements.")
 
-    parsed: list[dict[str, Any]] = []
-    errors: list[tuple[int, str]] = []
-    seen: set[str] = set()
+    parsed: 'list[dict[str, Any]]' = []
+    errors: 'list[tuple[int, str]]' = []
+    seen: 'set[str]' = set()
     numeric_columns = POINT_CSV_COLUMNS[2:]
     for row, number in rows:
         if len(row) != len(POINT_CSV_COLUMNS):
@@ -675,7 +674,7 @@ def read_point_placement_csv(
             ))
             continue
         placement_id, dataset_id = row[:2]
-        row_errors: list[str] = []
+        row_errors: 'list[str]' = []
         if not placement_id or not dataset_id:
             row_errors.append("placement_id and dataset_id are required")
         if placement_id:
@@ -686,8 +685,8 @@ def read_point_placement_csv(
             else:
                 seen.add(placement_id)
 
-        numeric: list[float] = []
-        nonnumeric: list[str] = []
+        numeric: 'list[float]' = []
+        nonnumeric: 'list[str]' = []
         for column, value in zip(numeric_columns, row[2:]):
             try:
                 numeric.append(float(value))
@@ -710,7 +709,7 @@ def read_point_placement_csv(
         if row_errors:
             errors.extend((number, message) for message in row_errors)
             continue
-        values: dict[str, Any] = {
+        values: 'dict[str, Any]' = {
             "placement_id": placement_id,
             "dataset_id": dataset_id,
         }
@@ -722,10 +721,10 @@ def read_point_placement_csv(
 
 
 def read_line_placement_csv(
-    path: PathValue,
+    path: 'PathValue',
     *,
-    base_dir: Optional[PathValue] = None,
-) -> list[dict[str, Any]]:
+    base_dir: 'Optional[PathValue]' = None,
+) -> 'list[dict[str, Any]]':
     """Read the one strict ordered-segment line-placement CSV schema."""
 
     source = resolve_path(path, base_dir=base_dir)
@@ -741,11 +740,11 @@ def read_line_placement_csv(
     if not rows:
         raise ValueError(f"{source}: line-placement CSV has a header but no segments.")
 
-    parsed: list[dict[str, Any]] = []
-    errors: list[tuple[int, str]] = []
-    semantic_rows: list[dict[str, Any]] = []
-    sequence_tainted_line_ids: set[str] = set()
-    identity_tainted_line_ids: set[str] = set()
+    parsed: 'list[dict[str, Any]]' = []
+    errors: 'list[tuple[int, str]]' = []
+    semantic_rows: 'list[dict[str, Any]]' = []
+    sequence_tainted_line_ids: 'set[str]' = set()
+    identity_tainted_line_ids: 'set[str]' = set()
     numeric_columns = LINE_CSV_COLUMNS[3:]
     for row, number in rows:
         if len(row) != len(LINE_CSV_COLUMNS):
@@ -759,11 +758,11 @@ def read_line_placement_csv(
                 identity_tainted_line_ids.add(row[0])
             continue
         line_id, dataset_id, raw_index = row[:3]
-        row_errors: list[str] = []
+        row_errors: 'list[str]' = []
         if not line_id or not dataset_id:
             row_errors.append("line_id and dataset_id are required")
 
-        segment_index: Optional[int]
+        segment_index: 'Optional[int]'
         try:
             segment_index = int(raw_index)
         except ValueError:
@@ -779,8 +778,8 @@ def read_line_placement_csv(
             if line_id:
                 sequence_tainted_line_ids.add(line_id)
 
-        numeric: list[float] = []
-        nonnumeric: list[str] = []
+        numeric: 'list[float]' = []
+        nonnumeric: 'list[str]' = []
         for column, value in zip(numeric_columns, row[3:]):
             try:
                 numeric.append(float(value))
@@ -810,14 +809,14 @@ def read_line_placement_csv(
         if row_errors:
             errors.extend((number, message) for message in row_errors)
             continue
-        values: dict[str, Any] = dict(semantic_rows[-1])
+        values: 'dict[str, Any]' = dict(semantic_rows[-1])
         values.update(dict(zip(numeric_columns, numeric)))
         parsed.append(values)
 
     # Sequence checks are reported once per path, not once per downstream row.
     # A malformed identity/index row taints only that line_id so it cannot
     # generate a cascade of misleading "expected N" messages.
-    completed_line_ids: set[str] = set()
+    completed_line_ids: 'set[str]' = set()
     start = 0
     while start < len(semantic_rows):
         line_id = str(semantic_rows[start]["line_id"])
@@ -868,15 +867,15 @@ def read_line_placement_csv(
     return parsed
 
 
-def _ordered_dataset_ids(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+def _ordered_dataset_ids(rows: 'Sequence[Mapping[str, Any]]') -> 'tuple[str, ...]':
     return tuple(dict.fromkeys(str(row["dataset_id"]) for row in rows))
 
 
 def _line_instance_descriptors(
-    rows: Sequence[Mapping[str, Any]],
-) -> tuple[tuple[str, str, int], ...]:
+    rows: 'Sequence[Mapping[str, Any]]',
+) -> 'tuple[tuple[str, str, int], ...]':
     """Return one stable descriptor for each already validated line path."""
-    descriptors: list[tuple[str, str, int]] = []
+    descriptors: 'list[tuple[str, str, int]]' = []
     start = 0
     while start < len(rows):
         line_id = str(rows[start]["line_id"])
@@ -890,12 +889,12 @@ def _line_instance_descriptors(
 
 
 def _filter_enabled_rows(
-    rows: Sequence[Mapping[str, Any]],
+    rows: 'Sequence[Mapping[str, Any]]',
     *,
-    id_key: str,
-    enabled_ids: Optional[Sequence[str]],
-    label: str,
-) -> list[Mapping[str, Any]]:
+    id_key: 'str',
+    enabled_ids: 'Optional[Sequence[str]]',
+    label: 'str',
+) -> 'list[Mapping[str, Any]]':
     """Filter after strict parsing and reject stale selections fail-closed."""
     parsed = list(rows)
     if enabled_ids is None:
@@ -923,10 +922,10 @@ def _filter_enabled_rows(
 
 def discover_feature_dataset_ids(
     *,
-    point_locations_csv: Optional[PathValue] = None,
-    line_locations_csv: Optional[PathValue] = None,
-    base_dir: Optional[PathValue] = None,
-) -> FeatureDatasetRequirements:
+    point_locations_csv: 'Optional[PathValue]' = None,
+    line_locations_csv: 'Optional[PathValue]' = None,
+    base_dir: 'Optional[PathValue]' = None,
+) -> 'FeatureDatasetRequirements':
     """Validate selected CSVs and return dataset IDs in first-use order."""
 
     point_rows = (
@@ -952,13 +951,13 @@ def discover_feature_dataset_ids(
 
 
 def _input_line_preview_paths(
-    rows: Sequence[Mapping[str, Any]],
+    rows: 'Sequence[Mapping[str, Any]]',
     *,
-    coordinate_scale: float,
-) -> dict[str, dict[str, np.ndarray]]:
+    coordinate_scale: 'float',
+) -> 'dict[str, dict[str, np.ndarray]]':
     """Build CAD-meter polylines from already schema-validated line rows."""
 
-    result: dict[str, dict[str, np.ndarray]] = {}
+    result: 'dict[str, dict[str, np.ndarray]]' = {}
     start = 0
     while start < len(rows):
         line_id = str(rows[start]["line_id"])
@@ -1010,8 +1009,8 @@ def _input_line_preview_paths(
 
 
 def _input_line_preview_normals(
-    rows: Sequence[Mapping[str, Any]],
-) -> dict[str, dict[str, np.ndarray]]:
+    rows: 'Sequence[Mapping[str, Any]]',
+) -> 'dict[str, dict[str, np.ndarray]]':
     """Collect supplied line endpoint normals without certifying them.
 
     Input preview is intentionally visual QA only.  The authoritative line
@@ -1019,7 +1018,7 @@ def _input_line_preview_normals(
     agreement check in :func:`prepare_line_placements`.
     """
 
-    result: dict[str, dict[str, np.ndarray]] = {}
+    result: 'dict[str, dict[str, np.ndarray]]' = {}
     start = 0
     while start < len(rows):
         line_id = str(rows[start]["line_id"])
@@ -1047,16 +1046,16 @@ def _input_line_preview_normals(
 
 def prepare_feature_input_preview(
     *,
-    base_grim: Optional[PathValue] = None,
-    surface_mesh: Optional[PathValue] = None,
-    coordinate_units: Optional[str] = None,
-    surface_units: Optional[str] = None,
-    point_locations_csv: Optional[PathValue] = None,
-    line_locations_csv: Optional[PathValue] = None,
-    enabled_point_placement_ids: Optional[Sequence[str]] = None,
-    enabled_line_ids: Optional[Sequence[str]] = None,
-    base_dir: Optional[PathValue] = None,
-) -> FeatureInputPreview:
+    base_grim: 'Optional[PathValue]' = None,
+    surface_mesh: 'Optional[PathValue]' = None,
+    coordinate_units: 'Optional[str]' = None,
+    surface_units: 'Optional[str]' = None,
+    point_locations_csv: 'Optional[PathValue]' = None,
+    line_locations_csv: 'Optional[PathValue]' = None,
+    enabled_point_placement_ids: 'Optional[Sequence[str]]' = None,
+    enabled_line_ids: 'Optional[Sequence[str]]' = None,
+    base_dir: 'Optional[PathValue]' = None,
+) -> 'FeatureInputPreview':
     """Prepare an input-only CAD preview without response-dataset mappings.
 
     The same strict placement parsers and unit conversions used by local/HPC
@@ -1070,7 +1069,7 @@ def prepare_feature_input_preview(
             "Select a base GRIM, STL/facet mesh, or placement CSV to preview."
         )
 
-    surface_scale: Optional[float] = None
+    surface_scale: 'Optional[float]' = None
     if surface_mesh is not None:
         surface_scale = _required_unit_scale(
             surface_units,
@@ -1085,7 +1084,7 @@ def prepare_feature_input_preview(
             used_for="a point or line placement CSV",
         )
 
-    profile: Optional[np.ndarray] = None
+    profile: 'Optional[np.ndarray]' = None
     body_source = "none"
     if base_grim is not None:
         base = resolve_path(base_grim, base_dir=base_dir)
@@ -1098,7 +1097,7 @@ def prepare_feature_input_preview(
             )
             body_source = "embedded_bor_profile"
 
-    surface_triangles: Optional[np.ndarray] = None
+    surface_triangles: 'Optional[np.ndarray]' = None
     if surface_mesh is not None:
         surface_path = resolve_path(surface_mesh, base_dir=base_dir)
         if not surface_path.is_file():
@@ -1136,10 +1135,10 @@ def prepare_feature_input_preview(
     # feature mask therefore renders the body with no feature artists while
     # retaining the complete parsed descriptor catalog for re-enabling items.
     # Authoritative validation/build still rejects an empty feature set.
-    point_groups: dict[str, list[np.ndarray]] = {}
-    point_id_groups: dict[str, list[str]] = {}
-    point_normal_groups: dict[str, list[np.ndarray]] = {}
-    point_roll_groups: dict[str, list[np.ndarray]] = {}
+    point_groups: 'dict[str, list[np.ndarray]]' = {}
+    point_id_groups: 'dict[str, list[str]]' = {}
+    point_normal_groups: 'dict[str, list[np.ndarray]]' = {}
+    point_roll_groups: 'dict[str, list[np.ndarray]]' = {}
     for row in point_rows:
         dataset_id = str(row["dataset_id"])
         point_id_groups.setdefault(dataset_id, []).append(
@@ -1207,7 +1206,7 @@ def prepare_feature_input_preview(
     )
 
 
-def unit_vector(value: Any, label: str) -> np.ndarray:
+def unit_vector(value: 'Any', label: 'str') -> 'np.ndarray':
     vector = np.asarray(value, dtype=float)
     magnitude = float(np.linalg.norm(vector))
     if (
@@ -1219,7 +1218,7 @@ def unit_vector(value: Any, label: str) -> np.ndarray:
     return vector / magnitude
 
 
-def validate_normal_tolerance(value: float) -> float:
+def validate_normal_tolerance(value: 'float') -> 'float':
     tolerance = float(value)
     if not math.isfinite(tolerance) or not 0.0 <= tolerance <= 180.0:
         raise ValueError(
@@ -1229,11 +1228,11 @@ def validate_normal_tolerance(value: float) -> float:
 
 
 def compute_skin_limit(
-    frequencies_ghz: Sequence[float],
+    frequencies_ghz: 'Sequence[float]',
     *,
-    skin_tol_m: float,
-    skin_phase_tol_deg: float,
-) -> tuple[float, float]:
+    skin_tol_m: 'float',
+    skin_phase_tol_deg: 'float',
+) -> 'tuple[float, float]':
     """Return the enforced distance and highest-frequency wavelength."""
 
     frequencies = np.asarray(frequencies_ghz, dtype=float).ravel()
@@ -1258,8 +1257,8 @@ def compute_skin_limit(
 
 
 def _sample_perimeter(
-    perimeter: np.ndarray, samples_per_segment: int = 33
-) -> np.ndarray:
+    perimeter: 'np.ndarray', samples_per_segment: 'int' = 33
+) -> 'np.ndarray':
     """Return evenly sampled segment points for legacy placement callers.
 
     The feature workflow now performs its production surface query directly so
@@ -1276,11 +1275,11 @@ def _sample_perimeter(
 
 
 def _surface_distances_points_and_normals(
-    surface: TriangleSurface,
-    points: np.ndarray,
+    surface: 'TriangleSurface',
+    points: 'np.ndarray',
     *,
-    normal_hints: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    normal_hints: 'Optional[np.ndarray]' = None,
+) -> 'tuple[np.ndarray, np.ndarray, np.ndarray]':
     """Query a production surface once for distance, registration, and normal.
 
     Lightweight service tests historically supplied surface-like doubles with
@@ -1310,13 +1309,13 @@ def _surface_distances_points_and_normals(
 
 
 def _validate_bor_surface_agreement(
-    profile: np.ndarray,
-    surface: TriangleSurface,
+    profile: 'np.ndarray',
+    surface: 'TriangleSurface',
     *,
-    skin_limit_m: float,
-    shadow_requested: bool,
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> dict[str, Any]:
+    skin_limit_m: 'float',
+    shadow_requested: 'bool',
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+) -> 'dict[str, Any]':
     """Bind a selected mesh geometrically to the embedded analytic BoR skin."""
 
     triangles = np.asarray(surface.triangles, dtype=float)
@@ -1418,13 +1417,13 @@ def _validate_bor_surface_agreement(
 
 
 def _resolved_dataset_paths(
-    datasets: Mapping[str, PathValue],
+    datasets: 'Mapping[str, PathValue]',
     *,
-    kind: str,
-    base_dir: Optional[PathValue],
-) -> tuple[dict[str, Path], dict[str, str]]:
-    paths: dict[str, Path] = {}
-    hashes: dict[str, str] = {}
+    kind: 'str',
+    base_dir: 'Optional[PathValue]',
+) -> 'tuple[dict[str, Path], dict[str, str]]':
+    paths: 'dict[str, Path]' = {}
+    hashes: 'dict[str, str]' = {}
     for dataset_id, value in datasets.items():
         if not isinstance(dataset_id, str):
             raise ValueError(f"{kind}_datasets keys must be strings.")
@@ -1445,8 +1444,8 @@ def _resolved_dataset_paths(
 
 
 def validate_declared_feature_delta_response(
-    dataset: PathValue,
-) -> dict[str, Any]:
+    dataset: 'PathValue',
+) -> 'dict[str, Any]':
     """Enforce and describe the response role behind an Assembly mapping.
 
     The canonical filename grammar is authoritative when it explicitly says
@@ -1463,8 +1462,8 @@ def validate_declared_feature_delta_response(
     path = resolve_path(dataset)
     variation = require_role_free_declared_delta(str(path))
     metadata_access = "readable"
-    metadata: dict[str, Any] = {}
-    embedded_domain: Optional[str] = None
+    metadata: 'dict[str, Any]' = {}
+    embedded_domain: 'Optional[str]' = None
     try:
         stored_context = np.load(path, allow_pickle=False)
     except (OSError, EOFError, ValueError, zipfile.BadZipFile):
@@ -1515,11 +1514,11 @@ def validate_declared_feature_delta_response(
 
 
 def _require_known_dataset_ids(
-    rows: Sequence[Mapping[str, Any]],
-    dataset_paths: Mapping[str, Path],
+    rows: 'Sequence[Mapping[str, Any]]',
+    dataset_paths: 'Mapping[str, Path]',
     *,
-    coordinates: Path,
-) -> None:
+    coordinates: 'Path',
+) -> 'None':
     unknown = sorted(
         {str(row["dataset_id"]) for row in rows} - set(dataset_paths)
     )
@@ -1531,24 +1530,22 @@ def _require_known_dataset_ids(
 
 
 def prepare_line_placements(
-    profile: Optional[np.ndarray],
-    surface: Optional[TriangleSurface],
+    profile: 'Optional[np.ndarray]',
+    surface: 'Optional[TriangleSurface]',
     *,
-    coordinate_scale: float,
-    skin_limit_m: float,
-    wavelength_m: float,
-    normal_tolerance_deg: float,
-    locations_csv: Optional[PathValue],
-    datasets: Mapping[str, PathValue],
-    enabled_line_ids: Optional[Sequence[str]] = None,
-    base_dir: Optional[PathValue] = None,
-    preview_paths_cad_m: Optional[dict[str, dict[str, np.ndarray]]] = None,
-    preview_endpoint_normals_cad: Optional[
-        dict[str, dict[str, np.ndarray]]
-    ] = None,
-    prepare_shadow_origins: bool = False,
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    coordinate_scale: 'float',
+    skin_limit_m: 'float',
+    wavelength_m: 'float',
+    normal_tolerance_deg: 'float',
+    locations_csv: 'Optional[PathValue]',
+    datasets: 'Mapping[str, PathValue]',
+    enabled_line_ids: 'Optional[Sequence[str]]' = None,
+    base_dir: 'Optional[PathValue]' = None,
+    preview_paths_cad_m: 'Optional[dict[str, dict[str, np.ndarray]]]' = None,
+    preview_endpoint_normals_cad: 'Optional[\n        dict[str, dict[str, np.ndarray]]\n    ]' = None,
+    prepare_shadow_origins: 'bool' = False,
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+) -> 'tuple[list[dict[str, Any]], list[dict[str, Any]]]':
     """Validate and prepare line-expanded feature placements."""
 
     if locations_csv is None:
@@ -1615,8 +1612,8 @@ def prepare_line_placements(
     ):
         raise ValueError("Skin limit and wavelength are invalid.")
 
-    placements: list[dict[str, Any]] = []
-    records: list[dict[str, Any]] = []
+    placements: 'list[dict[str, Any]]' = []
+    records: 'list[dict[str, Any]]' = []
     start = 0
     while start < len(rows):
         if cancel_check is not None and cancel_check():
@@ -1932,26 +1929,24 @@ def prepare_line_placements(
 
 
 def prepare_point_placements(
-    profile: Optional[np.ndarray],
-    surface: Optional[TriangleSurface],
+    profile: 'Optional[np.ndarray]',
+    surface: 'Optional[TriangleSurface]',
     *,
-    coordinate_scale: float,
-    skin_limit_m: float,
-    wavelength_m: float,
-    normal_tolerance_deg: float,
-    locations_csv: Optional[PathValue],
-    datasets: Mapping[str, PathValue],
-    enabled_point_placement_ids: Optional[Sequence[str]] = None,
-    base_dir: Optional[PathValue] = None,
-    pattern_loader: Optional[Callable[..., Any]] = None,
-    preview_locations_cad_m: Optional[dict[str, list[np.ndarray]]] = None,
-    preview_normals_cad: Optional[dict[str, list[np.ndarray]]] = None,
-    preview_roll_references_cad: Optional[
-        dict[str, list[np.ndarray]]
-    ] = None,
-    prepare_shadow_origins: bool = False,
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    coordinate_scale: 'float',
+    skin_limit_m: 'float',
+    wavelength_m: 'float',
+    normal_tolerance_deg: 'float',
+    locations_csv: 'Optional[PathValue]',
+    datasets: 'Mapping[str, PathValue]',
+    enabled_point_placement_ids: 'Optional[Sequence[str]]' = None,
+    base_dir: 'Optional[PathValue]' = None,
+    pattern_loader: 'Optional[Callable[..., Any]]' = None,
+    preview_locations_cad_m: 'Optional[dict[str, list[np.ndarray]]]' = None,
+    preview_normals_cad: 'Optional[dict[str, list[np.ndarray]]]' = None,
+    preview_roll_references_cad: 'Optional[\n        dict[str, list[np.ndarray]]\n    ]' = None,
+    prepare_shadow_origins: 'bool' = False,
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+) -> 'tuple[list[dict[str, Any]], list[dict[str, Any]]]':
     """Validate and prepare compact 3-D point-feature placements."""
 
     if locations_csv is None:
@@ -2019,9 +2014,9 @@ def prepare_point_placements(
         raise ValueError("Skin limit and wavelength are invalid.")
 
     load_pattern = prepare_point_pattern if pattern_loader is None else pattern_loader
-    points: list[dict[str, Any]] = []
-    records: list[dict[str, Any]] = []
-    patterns: dict[str, Any] = {}
+    points: 'list[dict[str, Any]]' = []
+    records: 'list[dict[str, Any]]' = []
+    patterns: 'dict[str, Any]' = {}
     for row_index, row in enumerate(rows, 1):
         if cancel_check is not None and cancel_check():
             raise InterruptedError("Feature placement validation cancelled.")
@@ -2148,7 +2143,7 @@ def prepare_point_placements(
     return points, records
 
 
-def _library_unit_scale(units: str, *, label: str) -> float:
+def _library_unit_scale(units: 'str', *, label: 'str') -> 'float':
     """Use the canonical frame conversion without allowing a library exit."""
 
     try:
@@ -2158,11 +2153,11 @@ def _library_unit_scale(units: str, *, label: str) -> float:
 
 
 def _required_unit_scale(
-    units: Optional[str],
+    units: 'Optional[str]',
     *,
-    label: str,
-    used_for: str,
-) -> float:
+    label: 'str',
+    used_for: 'str',
+) -> 'float':
     """Return a unit scale only after a deliberate physical-unit choice."""
 
     if units is None or not str(units).strip():
@@ -2172,19 +2167,19 @@ def _required_unit_scale(
     return _library_unit_scale(str(units), label=label)
 
 
-def surface_binding_path(surface_path: PathValue) -> Path:
+def surface_binding_path(surface_path: 'PathValue') -> 'Path':
     """Canonical reviewed binding sidecar for an external placement mesh."""
 
     return Path(str(Path(surface_path)) + ".assembly.json")
 
 
 def validate_surface_binding(
-    binding: Mapping[str, Any],
+    binding: 'Mapping[str, Any]',
     *,
-    base_grim_sha256: str,
-    surface_sha256: str,
-    surface_units: str,
-) -> dict[str, Any]:
+    base_grim_sha256: 'str',
+    surface_sha256: 'str',
+    surface_units: 'str',
+) -> 'dict[str, Any]':
     """Validate an operator-reviewed external body/surface identity binding."""
 
     if not isinstance(binding, Mapping):
@@ -2202,7 +2197,7 @@ def validate_surface_binding(
             f"{SURFACE_BINDING_SCHEMA!r}."
         )
 
-    def normalized_digest(value: Any, label: str) -> str:
+    def normalized_digest(value: 'Any', label: 'str') -> 'str':
         digest = str(value).strip().lower()
         if len(digest) != 64 or any(
             character not in "0123456789abcdef" for character in digest
@@ -2263,13 +2258,13 @@ def validate_surface_binding(
 
 
 def load_surface_binding(
-    base_path: Path,
-    surface_path: Path,
+    base_path: 'Path',
+    surface_path: 'Path',
     *,
-    base_grim_sha256: str,
-    surface_sha256: str,
-    surface_units: str,
-) -> tuple[Optional[dict[str, Any]], Path, Optional[str]]:
+    base_grim_sha256: 'str',
+    surface_sha256: 'str',
+    surface_units: 'str',
+) -> 'tuple[Optional[dict[str, Any]], Path, Optional[str]]':
     """Load the canonical external surface sidecar, failing on contradictions."""
 
     sidecar = surface_binding_path(surface_path)
@@ -2294,9 +2289,9 @@ def load_surface_binding(
 
 
 def _surface_binding_inputs(
-    base_grim: PathValue,
-    surface_mesh: PathValue,
-) -> tuple[Path, Path]:
+    base_grim: 'PathValue',
+    surface_mesh: 'PathValue',
+) -> 'tuple[Path, Path]':
     """Resolve the two exact files accepted by the reviewed binding tools."""
 
     base = resolve_path(base_grim)
@@ -2314,7 +2309,7 @@ def _surface_binding_inputs(
     return base, surface
 
 
-def _stable_binding_source_digest(path: Path) -> tuple[str, tuple[int, int, int]]:
+def _stable_binding_source_digest(path: 'Path') -> 'tuple[str, tuple[int, int, int]]':
     """Hash one binding source once and reject an ordinary concurrent write."""
 
     before = path.stat()
@@ -2334,7 +2329,7 @@ def _stable_binding_source_digest(path: Path) -> tuple[str, tuple[int, int, int]
     return digest, after_key
 
 
-def _binding_stat_identity(path: Path) -> Optional[tuple[int, int, int]]:
+def _binding_stat_identity(path: 'Path') -> 'Optional[tuple[int, int, int]]':
     try:
         value = path.stat()
     except FileNotFoundError:
@@ -2343,11 +2338,11 @@ def _binding_stat_identity(path: Path) -> Optional[tuple[int, int, int]]:
 
 
 def check_surface_binding(
-    base_grim: PathValue,
-    surface_mesh: PathValue,
+    base_grim: 'PathValue',
+    surface_mesh: 'PathValue',
     *,
-    surface_units: str,
-) -> tuple[dict[str, Any], Path]:
+    surface_units: 'str',
+) -> 'tuple[dict[str, Any], Path]':
     """Check one canonical external-body binding against exact current bytes.
 
     This is intentionally an explicit operation for desktop clients: hashing a
@@ -2373,15 +2368,15 @@ def check_surface_binding(
 
 
 def write_surface_binding(
-    base_grim: PathValue,
-    surface_mesh: PathValue,
+    base_grim: 'PathValue',
+    surface_mesh: 'PathValue',
     *,
-    surface_units: str,
-    geometry_id: str,
-    attestation_case_id: str,
-    attest_reviewed_registration: bool,
-    overwrite: bool = False,
-) -> tuple[dict[str, Any], Path]:
+    surface_units: 'str',
+    geometry_id: 'str',
+    attestation_case_id: 'str',
+    attest_reviewed_registration: 'bool',
+    overwrite: 'bool' = False,
+) -> 'tuple[dict[str, Any], Path]':
     """Atomically create the canonical reviewed external-body binding.
 
     The attestation records a responsible team's registration review; it does
@@ -2496,7 +2491,7 @@ _FEATURE_PHASE_ORIGINS = {
 }
 
 
-def _finite_manifest_number(value: Any, label: str) -> float:
+def _finite_manifest_number(value: 'Any', label: 'str') -> 'float':
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
@@ -2506,7 +2501,7 @@ def _finite_manifest_number(value: Any, label: str) -> float:
     return number
 
 
-def _manifest_sha256(value: Any, label: str) -> str:
+def _manifest_sha256(value: 'Any', label: 'str') -> 'str':
     digest = str(value).strip().lower()
     if len(digest) != 64 or any(
         character not in "0123456789abcdef" for character in digest
@@ -2516,10 +2511,10 @@ def _manifest_sha256(value: Any, label: str) -> str:
 
 
 def _normalize_feature_validation_evidence(
-    value: Any,
+    value: 'Any',
     *,
-    response_content_sha256: str,
-) -> list[dict[str, Any]]:
+    response_content_sha256: 'str',
+) -> 'list[dict[str, Any]]':
     """Validate machine-generated full-wave evidence bound to this response."""
 
     if not isinstance(value, list) or not value:
@@ -2632,8 +2627,8 @@ def _normalize_feature_validation_evidence(
 
 
 def validate_feature_library_manifest(
-    manifest: Mapping[str, Any], *, dataset_id: str, feature_kind: str
-) -> dict[str, Any]:
+    manifest: 'Mapping[str, Any]', *, dataset_id: 'str', feature_kind: 'str'
+) -> 'dict[str, Any]':
     """Validate and normalize one reusable point/line response manifest.
 
     The manifest makes the local-model assumptions machine readable instead
@@ -2753,9 +2748,9 @@ def validate_feature_library_manifest(
     if footprint_radius <= 0.0:
         raise ValueError("footprint_radius_m must be positive.")
 
-    conical_max: Optional[float] = None
-    curvature_min: Optional[float] = None
-    path_turn_max: Optional[float] = None
+    conical_max: 'Optional[float]' = None
+    curvature_min: 'Optional[float]' = None
+    path_turn_max: 'Optional[float]' = None
     if feature_kind == "line":
         curvature_min = _finite_manifest_number(
             applicability.get("minimum_along_line_normal_turn_radius_m"),
@@ -2873,7 +2868,7 @@ def validate_feature_library_manifest(
         raise ValueError(
             "Feature-library manifest validation.case_ids must be unique."
         )
-    evidence: list[dict[str, Any]] = []
+    evidence: 'list[dict[str, Any]]' = []
     if manifest_schema == FEATURE_LIBRARY_MANIFEST_SCHEMA:
         if status == "validated":
             evidence = _normalize_feature_validation_evidence(
@@ -2938,7 +2933,7 @@ def validate_feature_library_manifest(
     return normalized
 
 
-def _json_object(value: Any, *, label: str) -> dict[str, Any]:
+def _json_object(value: 'Any', *, label: 'str') -> 'dict[str, Any]':
     if isinstance(value, bytes):
         value = value.decode("utf-8")
     if isinstance(value, str):
@@ -2951,7 +2946,7 @@ def _json_object(value: Any, *, label: str) -> dict[str, Any]:
     return value
 
 
-def feature_response_content_sha256(dataset: PathValue) -> str:
+def feature_response_content_sha256(dataset: 'PathValue') -> 'str':
     """Hash the exact serialized response payload, excluding its manifest.
 
     GRIM files are NPZ archives. Hashing each uncompressed member makes the
@@ -2996,7 +2991,7 @@ def feature_response_content_sha256(dataset: PathValue) -> str:
         ) from exc
 
 
-def feature_response_physics_sha256(dataset: PathValue) -> str:
+def feature_response_physics_sha256(dataset: 'PathValue') -> 'str':
     """Hash canonical response axes/complex field and physical conventions.
 
     This identity deliberately ignores packaging and provenance such as ZIP
@@ -3010,7 +3005,7 @@ def feature_response_physics_sha256(dataset: PathValue) -> str:
     digest = hashlib.sha256()
     digest.update(b"ghost-feature-response-physics-v1\0")
 
-    def update_array(name: str, value: Any) -> None:
+    def update_array(name: 'str', value: 'Any') -> 'None':
         array = np.asarray(value)
         digest.update(name.encode("utf-8") + b"\0")
         digest.update(json.dumps(array.shape).encode("ascii") + b"\0")
@@ -3058,8 +3053,8 @@ def feature_response_physics_sha256(dataset: PathValue) -> str:
 
 
 def load_feature_library_manifest(
-    dataset: PathValue, *, dataset_id: str, feature_kind: str
-) -> tuple[Optional[dict[str, Any]], list[dict[str, str]]]:
+    dataset: 'PathValue', *, dataset_id: 'str', feature_kind: 'str'
+) -> 'tuple[Optional[dict[str, Any]], list[dict[str, str]]]':
     """Load an embedded or adjacent feature-library manifest.
 
     Supported adjacent names are ``name.grim.feature.json`` and
@@ -3068,9 +3063,7 @@ def load_feature_library_manifest(
     """
 
     path = resolve_path(dataset)
-    candidates: list[
-        tuple[str, dict[str, Any], Optional[Path], Optional[str]]
-    ] = []
+    candidates: 'list[\n        tuple[str, dict[str, Any], Optional[Path], Optional[str]]\n    ]' = []
     try:
         stored_context = np.load(path, allow_pickle=False)
     except (OSError, EOFError, ValueError):
@@ -3194,7 +3187,7 @@ def assembly_sampling_warnings(radar_grid, lines, points):
     return warnings
 
 
-def _vehicle_radar_directions(radar_grid: Mapping[str, Any]) -> np.ndarray:
+def _vehicle_radar_directions(radar_grid: 'Mapping[str, Any]') -> 'np.ndarray':
     azimuths, elevations = validate_radar_grid(
         radar_grid["azimuths_deg"], radar_grid["elevations_deg"]
     )
@@ -3209,12 +3202,12 @@ def _vehicle_radar_directions(radar_grid: Mapping[str, Any]) -> np.ndarray:
 
 
 def _line_applicability_metrics(
-    placement: Mapping[str, Any],
-    radar_directions: np.ndarray,
+    placement: 'Mapping[str, Any]',
+    radar_directions: 'np.ndarray',
     *,
-    requested_frequencies_ghz: Sequence[float],
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> dict[str, Any]:
+    requested_frequencies_ghz: 'Sequence[float]',
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+) -> 'dict[str, Any]':
     """Measure the exact installed line frame over every requested solve.
 
     The returned cut-angle ranges are calculated from the same piece grid and
@@ -3233,8 +3226,8 @@ def _line_applicability_metrics(
         raise ValueError("requested line frequencies must be positive and finite.")
     fixed_piece_length = placement.get("max_piece_length_m")
     def measure_frame(
-        maximum_piece_length: float,
-    ) -> tuple[float, float | None, float | None, int, int]:
+        maximum_piece_length: 'float',
+    ) -> 'tuple[float, float | None, float | None, int, int]':
         (
             _starts,
             _path_tangents,
@@ -3409,8 +3402,8 @@ def _line_applicability_metrics(
 
 
 def _component_signature(
-    feature_kind: str, dataset_sha256: str, *arrays: np.ndarray
-) -> str:
+    feature_kind: 'str', dataset_sha256: 'str', *arrays: 'np.ndarray'
+) -> 'str':
     digest = hashlib.sha256()
     digest.update(b"ghost-feature-component-v1\0")
     digest.update(feature_kind.encode("ascii") + b"\0")
@@ -3423,8 +3416,8 @@ def _component_signature(
 
 
 def _canonical_point_roll(
-    aperture_normal: np.ndarray, roll_reference: np.ndarray
-) -> np.ndarray:
+    aperture_normal: 'np.ndarray', roll_reference: 'np.ndarray'
+) -> 'np.ndarray':
     """Return the solver-effective local point-pattern ``+x`` direction."""
 
     normal = unit_vector(aperture_normal, "point aperture normal")
@@ -3434,8 +3427,8 @@ def _canonical_point_roll(
 
 
 def _update_physics_digest_array(
-    digest: Any, label: str, value: Any
-) -> None:
+    digest: 'Any', label: 'str', value: 'Any'
+) -> 'None':
     raw = np.asarray(value)
     array = np.ascontiguousarray(
         raw,
@@ -3446,7 +3439,7 @@ def _update_physics_digest_array(
     digest.update(array.tobytes())
 
 
-def _prepared_point_response_physics_sha256(pattern: Any) -> str:
+def _prepared_point_response_physics_sha256(pattern: 'Any') -> 'str':
     """Hash the canonical point Jones pattern actually consumed by physics."""
 
     digest = hashlib.sha256()
@@ -3463,7 +3456,7 @@ def _prepared_point_response_physics_sha256(pattern: Any) -> str:
     return digest.hexdigest()
 
 
-def _prepared_line_response_physics_sha256(coefficients: Sequence[Any]) -> str:
+def _prepared_line_response_physics_sha256(coefficients: 'Sequence[Any]') -> 'str':
     """Hash canonical TM/TE seam samples at every requested frequency."""
 
     digest = hashlib.sha256()
@@ -3485,12 +3478,12 @@ def _prepared_line_response_physics_sha256(coefficients: Sequence[Any]) -> str:
 
 
 def _validate_point_requested_support(
-    placement: Mapping[str, Any],
-    radar_directions: np.ndarray,
-    requested_frequencies: np.ndarray,
+    placement: 'Mapping[str, Any]',
+    radar_directions: 'np.ndarray',
+    requested_frequencies: 'np.ndarray',
     *,
-    dataset_id: str,
-) -> dict[str, int]:
+    dataset_id: 'str',
+) -> 'dict[str, int]':
     """Preflight exact point frequency and lit-elevation support."""
 
     pattern = placement["pattern"]
@@ -3542,7 +3535,7 @@ def _validate_point_requested_support(
     }
 
 
-def _point_segment_distance(point: np.ndarray, segment: np.ndarray) -> float:
+def _point_segment_distance(point: 'np.ndarray', segment: 'np.ndarray') -> 'float':
     start, end = np.asarray(segment, dtype=float)
     chord = end - start
     fraction = float(np.dot(point - start, chord) / np.dot(chord, chord))
@@ -3550,7 +3543,7 @@ def _point_segment_distance(point: np.ndarray, segment: np.ndarray) -> float:
     return float(np.linalg.norm(point - nearest))
 
 
-def _segment_segment_distance(left: np.ndarray, right: np.ndarray) -> float:
+def _segment_segment_distance(left: 'np.ndarray', right: 'np.ndarray') -> 'float':
     """Exact closest distance between two finite non-degenerate 3-D segments."""
 
     p1, q1 = np.asarray(left, dtype=float)
@@ -3579,11 +3572,11 @@ def _segment_segment_distance(left: np.ndarray, right: np.ndarray) -> float:
 
 
 def _line_self_footprint_overlap(
-    segments: np.ndarray,
-    footprint_radius_m: float,
+    segments: 'np.ndarray',
+    footprint_radius_m: 'float',
     *,
-    cancel_check: Optional[Callable[[], bool]] = None,
-) -> Optional[tuple[int, int, float]]:
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+) -> 'Optional[tuple[int, int, float]]':
     """Return the first nonlocal within-line footprint overlap, if any.
 
     Adjacent segments necessarily meet at one endpoint, so their footprint
@@ -3603,11 +3596,11 @@ def _line_self_footprint_overlap(
     closed = bool(
         np.linalg.norm(values[-1, 1] - values[0, 0]) <= 1.0e-9 * extent
     )
-    active: list[int] = []
+    active: 'list[int]' = []
 
     def adjacent_retrace_clearance(
-        left_index: int, right_index: int
-    ) -> Optional[float]:
+        left_index: 'int', right_index: 'int'
+    ) -> 'Optional[float]':
         wrap = bool(
             closed
             and {left_index, right_index} == {0, len(values) - 1}
@@ -3671,7 +3664,7 @@ def _line_self_footprint_overlap(
     return None
 
 
-def _component_clearance(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+def _component_clearance(left: 'Mapping[str, Any]', right: 'Mapping[str, Any]') -> 'float':
     if left["kind"] == "point" and right["kind"] == "point":
         return float(np.linalg.norm(left["location"] - right["location"]))
     if left["kind"] == "point":
@@ -3689,9 +3682,9 @@ def _component_clearance(left: Mapping[str, Any], right: Mapping[str, Any]) -> f
 
 
 def _footprint_candidate_pairs(
-    components: Sequence[Mapping[str, Any]],
+    components: 'Sequence[Mapping[str, Any]]',
     *,
-    cancel_check: Optional[Callable[[], bool]] = None,
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
 ):
     """Yield broad-phase-overlapping footprint pairs with an x-axis sweep.
 
@@ -3716,7 +3709,7 @@ def _footprint_candidate_pairs(
             vertices.max(axis=0) + radius,
         ))
     bounded.sort(key=lambda value: (float(value[1][0]), value[0]))
-    active: list[tuple[int, np.ndarray, np.ndarray]] = []
+    active: 'list[tuple[int, np.ndarray, np.ndarray]]' = []
     comparisons = 0
     for index, lower, upper in bounded:
         active = [
@@ -3780,12 +3773,12 @@ from feature_library_contracts import _apply_feature_library_contracts
 
 
 def _prepared_assembly_workload(
-    radar_grid: Mapping[str, Any],
-    lines: Sequence[Mapping[str, Any]],
-    points: Sequence[Mapping[str, Any]],
+    radar_grid: 'Mapping[str, Any]',
+    lines: 'Sequence[Mapping[str, Any]]',
+    points: 'Sequence[Mapping[str, Any]]',
     *,
-    triangle_count: int,
-    shadow_enabled: bool,
+    triangle_count: 'int',
+    shadow_enabled: 'bool',
 ):
     """Count the exact field grid and a conservative shadow-ray upper bound."""
 
@@ -3871,11 +3864,11 @@ from feature_preparation import capture_assembly_sources, prepare_assembly_place
 
 
 def prepare_feature_assembly(
-    request: FeatureAssemblyRequest,
+    request: 'FeatureAssemblyRequest',
     *,
-    cancel_check: Optional[Callable[[], bool]] = None,
-    progress_callback: Optional[Callable[[int, int, str], None]] = None,
-) -> FeatureAssemblyPlan:
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+) -> 'FeatureAssemblyPlan':
     """Resolve, validate, and prepare one feature-assembly request."""
 
     sources = capture_assembly_sources(request, cancel_check=cancel_check, progress_callback=progress_callback)
@@ -3924,13 +3917,13 @@ def prepare_feature_assembly(
     )
 
     embedded_grid = load_body_requested_radar_grid(str(sources.base))
-    pre_validation_warnings: list[str] = []
-    pre_absent_paths: set[str] = set()
-    surface_geometry_contract: dict[str, Any] = {
+    pre_validation_warnings: 'list[str]' = []
+    pre_absent_paths: 'set[str]' = set()
+    surface_geometry_contract: 'dict[str, Any]' = {
         "schema": "ghost.assembly-surface-geometry-binding.v1",
         "status": "not_applicable_embedded_bor",
     }
-    profile: Optional[np.ndarray] = None
+    profile: 'Optional[np.ndarray]' = None
     if embedded_grid is not None:
         profile = load_body_profile_grim(str(sources.base))
         grid = dict(embedded_grid)
@@ -4405,7 +4398,7 @@ def prepare_feature_assembly(
     return plan
 
 
-def _execution_plan_snapshot(plan: FeatureAssemblyPlan) -> FeatureAssemblyPlan:
+def _execution_plan_snapshot(plan: 'FeatureAssemblyPlan') -> 'FeatureAssemblyPlan':
     """Copy every mutable execution input away from caller-owned containers.
 
     The snapshot is hashed *after* copying. A concurrent mutation during the
@@ -4414,14 +4407,14 @@ def _execution_plan_snapshot(plan: FeatureAssemblyPlan) -> FeatureAssemblyPlan:
     private snapshot, so they cannot alter validated physics mid-build.
     """
 
-    def frozen_array(value: Any) -> np.ndarray:
+    def frozen_array(value: 'Any') -> 'np.ndarray':
         result = np.array(value, copy=True)
         result.setflags(write=False)
         return result
 
-    pattern_copies: dict[int, Any] = {}
+    pattern_copies: 'dict[int, Any]' = {}
 
-    def copied_pattern(pattern: Any) -> Any:
+    def copied_pattern(pattern: 'Any') -> 'Any':
         if not isinstance(pattern, PreparedPointPattern):
             return copy.deepcopy(pattern)
         identity = id(pattern)
@@ -4438,7 +4431,7 @@ def _execution_plan_snapshot(plan: FeatureAssemblyPlan) -> FeatureAssemblyPlan:
         pattern_copies[identity] = frozen
         return frozen
 
-    def placement_copy(placement: Mapping[str, Any]) -> dict[str, Any]:
+    def placement_copy(placement: 'Mapping[str, Any]') -> 'dict[str, Any]':
         result = {}
         for key, value in placement.items():
             if isinstance(value, np.ndarray):
@@ -4484,11 +4477,11 @@ def _execution_plan_snapshot(plan: FeatureAssemblyPlan) -> FeatureAssemblyPlan:
 
 
 def execute_feature_assembly(
-    plan: FeatureAssemblyPlan, *,
-    acknowledged_plan_sha256: Optional[str] = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
-    progress_callback: Optional[Callable[[int, int, str], None]] = None,
-) -> str:
+    plan: 'FeatureAssemblyPlan', *,
+    acknowledged_plan_sha256: 'Optional[str]' = None,
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+) -> 'str':
     """Coherently execute a prepared plan using the authoritative physics API."""
 
     if not isinstance(plan, FeatureAssemblyPlan):
@@ -4566,11 +4559,11 @@ def execute_feature_assembly(
 
 
 def run_feature_assembly(
-    request: FeatureAssemblyRequest, *,
-    acknowledged_plan_sha256: Optional[str] = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
-    progress_callback: Optional[Callable[[int, int, str], None]] = None,
-) -> str:
+    request: 'FeatureAssemblyRequest', *,
+    acknowledged_plan_sha256: 'Optional[str]' = None,
+    cancel_check: 'Optional[Callable[[], bool]]' = None,
+    progress_callback: 'Optional[Callable[[int, int, str], None]]' = None,
+) -> 'str':
     """Prepare and execute one coherent feature assembly.
 
     Preparation occupies the first quarter of the public progress range and
@@ -4579,11 +4572,11 @@ def run_feature_assembly(
     to zero between the two phases.
     """
 
-    def mapped_progress(start: int, span: int):
+    def mapped_progress(start: 'int', span: 'int'):
         if progress_callback is None:
             return None
 
-        def report(done: int, total: int, message: str) -> None:
+        def report(done: 'int', total: 'int', message: 'str') -> 'None':
             fraction = max(0.0, min(1.0, float(done) / max(1, int(total))))
             progress_callback(
                 int(round(start + span * fraction)), 100, str(message)

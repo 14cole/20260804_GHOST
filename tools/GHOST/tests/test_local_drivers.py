@@ -40,7 +40,8 @@ def check(condition, label):
 def _run(script, cwd):
     return subprocess.run(
         [sys.executable, "-c", script],
-        cwd=str(cwd), capture_output=True, text=True, timeout=1800,
+        cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True, timeout=1800,
     )
 
 
@@ -280,7 +281,8 @@ def test_bor_driver_loads():
     )
     result = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=str(REPO), capture_output=True, text=True, timeout=600,
+        cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True, timeout=600,
     )
     check(result.returncode == 0 and "OK" in result.stdout,
           f"imports, validates its config, and forwards only real solver "

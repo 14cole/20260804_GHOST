@@ -33,7 +33,7 @@ def _find_compiler(requested: 'str | None') -> 'str | None':
     return None
 
 
-def _compiler_environment(compiler: str, system_name: str) -> dict[str, str]:
+def _compiler_environment(compiler: str, system_name: str) -> 'dict[str, str]':
     """Return an environment in which the compiler's helper tools can run.
 
     A native Windows MSYS2 GCC keeps cc1.exe's runtime DLLs beside gcc.exe.
@@ -107,14 +107,14 @@ def main() -> int:
     compiler_environment = _compiler_environment(compiler, system_name)
     try:
         completed = None
-        failures: list[tuple[list[str], subprocess.CompletedProcess[str]]] = []
+        failures: 'list[tuple[list[str], subprocess.CompletedProcess[str]]]' = []
         for candidate in commands:
             completed = subprocess.run(
                 candidate,
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                universal_newlines=True,
                 env=compiler_environment,
             )
             if completed.returncode == 0:
@@ -141,7 +141,7 @@ def main() -> int:
             "import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); "
             "[getattr(lib,s) for s in ('sample_g','sample_mfie','sample_ibc')]",
             str(temporary),
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         os.replace(temporary, output)
     finally:
         try:

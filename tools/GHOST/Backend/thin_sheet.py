@@ -15,7 +15,7 @@ The existing G=+j H2/4 gives jumps [SLP q]=q and [DLP u]=-u.
 """
 
 import math
-from dataclasses import dataclass, replace
+from ghost_runtime import dataclass, replace
 import numpy as np
 from scipy.sparse import csc_matrix
 from scipy.sparse.linalg import splu

@@ -5,24 +5,21 @@ factorization work, not the quadratic operator-assembly cost. Any stalled or
 nonfinite correction must trigger a full double-precision factorization.
 """
 from contextlib import contextmanager
-from contextvars import ContextVar
+from ghost_runtime import ScopedValue
 import warnings
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve, LinAlgWarning
 from solver_metrics import timed_stage
 
-_PRECISION = ContextVar("ghost_lu_precision", default="double")
+_PRECISION = ScopedValue("ghost_lu_precision", default="double")
 
 
 @contextmanager
 def linear_precision(value):
     if value not in {"double", "mixed"}:
         raise ValueError("LU precision must be double or mixed.")
-    token = _PRECISION.set(value)
-    try:
+    with _PRECISION.override(value):
         yield
-    finally:
-        _PRECISION.reset(token)
 
 
 def requested_precision():

@@ -6,9 +6,8 @@ cost can vary by orders of magnitude with mesh/ray geometry, CPU, and native
 acceleration availability.
 """
 
-from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from ghost_runtime import asdict, dataclass
 from typing import Any
 
 
@@ -29,34 +28,34 @@ WORKLOAD_REVIEW_WARNING_PREFIX = "Assembly workload review required"
 class AssemblyWorkload:
     """Auditable operation counts for one Assembly plan."""
 
-    available: bool
-    quantities_validated: bool = False
-    look_count: int = 0
-    frequency_count: int = 0
-    point_count: int = 0
-    line_path_count: int = 0
-    line_segment_count: int = 0
-    line_piece_count: int = 0
-    line_piece_count_exact: bool = False
-    mesh_triangle_count: int = 0
-    mesh_triangle_count_exact: bool = False
-    shadow_enabled: bool = False
-    radar_grid_cell_count: int = 0
-    point_field_cell_count: int = 0
-    line_field_cell_count: int = 0
-    shadow_ray_upper_bound: int = 0
-    packed_visibility_bytes_upper_bound: int = 0
-    review_reasons: tuple[str, ...] = ()
+    available: 'bool'
+    quantities_validated: 'bool' = False
+    look_count: 'int' = 0
+    frequency_count: 'int' = 0
+    point_count: 'int' = 0
+    line_path_count: 'int' = 0
+    line_segment_count: 'int' = 0
+    line_piece_count: 'int' = 0
+    line_piece_count_exact: 'bool' = False
+    mesh_triangle_count: 'int' = 0
+    mesh_triangle_count_exact: 'bool' = False
+    shadow_enabled: 'bool' = False
+    radar_grid_cell_count: 'int' = 0
+    point_field_cell_count: 'int' = 0
+    line_field_cell_count: 'int' = 0
+    shadow_ray_upper_bound: 'int' = 0
+    packed_visibility_bytes_upper_bound: 'int' = 0
+    review_reasons: 'tuple[str, ...]' = ()
 
     @property
-    def review_required(self) -> bool:
+    def review_required(self) -> 'bool':
         return bool(self.available and self.review_reasons)
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> 'dict[str, Any]':
         return asdict(self)
 
 
-def _count(value: Any) -> int:
+def _count(value: 'Any') -> 'int':
     try:
         result = int(value)
     except (TypeError, ValueError, OverflowError):
@@ -66,18 +65,18 @@ def _count(value: Any) -> int:
 
 def estimate_assembly_workload(
     *,
-    look_count: int,
-    frequency_count: int,
-    point_count: int,
-    line_path_count: int,
-    line_segment_count: int,
-    line_piece_count: int,
-    mesh_triangle_count: int = 0,
-    shadow_enabled: bool = False,
-    quantities_validated: bool = False,
-    line_piece_count_exact: bool = False,
-    mesh_triangle_count_exact: bool = False,
-) -> AssemblyWorkload:
+    look_count: 'int',
+    frequency_count: 'int',
+    point_count: 'int',
+    line_path_count: 'int',
+    line_segment_count: 'int',
+    line_piece_count: 'int',
+    mesh_triangle_count: 'int' = 0,
+    shadow_enabled: 'bool' = False,
+    quantities_validated: 'bool' = False,
+    line_piece_count_exact: 'bool' = False,
+    mesh_triangle_count_exact: 'bool' = False,
+) -> 'AssemblyWorkload':
     """Return exact/upper-bound counts without turning them into an ETA."""
 
     looks = _count(look_count)
@@ -101,7 +100,7 @@ def estimate_assembly_workload(
         (points + pieces) * ((looks + 7) // 8) if shadow_enabled else 0
     )
 
-    reasons: list[str] = []
+    reasons: 'list[str]' = []
     if radar_cells >= ASSEMBLY_REVIEW_RADAR_GRID_CELLS:
         reasons.append(
             f"{radar_cells:,} radar look-frequency cells "
@@ -154,7 +153,7 @@ def estimate_assembly_workload(
     )
 
 
-def workload_review_warning(workload: AssemblyWorkload) -> str | None:
+def workload_review_warning(workload: 'AssemblyWorkload') -> 'str | None':
     """Return the sealed-plan warning used by GUI and headless review gates."""
 
     if not workload.review_required or not workload.quantities_validated:
@@ -175,7 +174,7 @@ def workload_review_warning(workload: AssemblyWorkload) -> str | None:
     )
 
 
-def warnings_require_workload_acknowledgement(warnings: Any) -> bool:
+def warnings_require_workload_acknowledgement(warnings: 'Any') -> 'bool':
     """Whether a warning collection contains the count-based review gate."""
 
     return any(

@@ -1,13 +1,13 @@
 """Solve-local wall timings and sampled process memory, without Qt dependencies."""
 
 from contextlib import contextmanager
-from contextvars import ContextVar
+from ghost_runtime import ScopedValue
 from functools import wraps
 import threading
 import time
 
 
-_ACTIVE = ContextVar("ghost_solver_metrics", default=None)
+_ACTIVE = ScopedValue("ghost_solver_metrics", default=None)
 
 
 class SolveMetrics:
@@ -111,13 +111,12 @@ def profiled_solve(function):
         if active_metrics() is not None:
             return function(*args, **kwargs)
         metrics = SolveMetrics()
-        token = _ACTIVE.set(metrics)
-        metrics.start()
-        try:
-            result = function(*args, **kwargs)
-        finally:
-            metrics.finish()
-            _ACTIVE.reset(token)
+        with _ACTIVE.override(metrics):
+            metrics.start()
+            try:
+                result = function(*args, **kwargs)
+            finally:
+                metrics.finish()
         if isinstance(result, dict):
             container = result.get("metadata", result)
             container["runtime_profile"] = metrics.report()

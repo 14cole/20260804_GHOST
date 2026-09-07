@@ -1,6 +1,5 @@
 """Tests for topology checks that protect placement normals and shadowing."""
 
-from __future__ import annotations
 
 import sys
 import unittest

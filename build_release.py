@@ -94,6 +94,7 @@ REQUIRED_FILES = (
     "pyproject.toml",
     CONSTRAINTS_PATH,
     "requirements/windows-py312.txt",
+    "requirements/hpc-py36.txt",
     "requirements/README.md",
     "requirements/wheelhouse_manifest.py",
     "requirements/test_wheelhouse_manifest.py",
@@ -121,6 +122,8 @@ REQUIRED_FILES = (
         for relative in GHOST_SENTINELS
     ),
     "tools/GHOST/Backend/build_bor_stream_kernel.py",
+    "tools/GHOST/Backend/DATACLASSES_LICENSE.txt",
+    "tools/GHOST/Backend/THIRD_PARTY.md",
     "tools/GHOST/Backend/create_feature_manifest.py",
     "tools/GHOST/Backend/grim_compat.py",
     "tools/GHOST/Backend/grim_naming.py",

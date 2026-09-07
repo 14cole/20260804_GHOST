@@ -12,7 +12,6 @@ Windows paths and a Windows numerical-runtime fingerprint, neither of which
 describes the solver that runs under SLURM.
 """
 
-from __future__ import annotations
 
 import argparse
 import errno
@@ -44,6 +43,7 @@ try:  # Keep direct lease tests functional on Windows.
 except ImportError:  # pragma: no cover - exercised on POSIX
     msvcrt = None
 
+from ghost_runtime import write_text_lf
 from geometry_io import material_sidecar_paths
 from hpc_common import BOR_DRIVER, TWOD_DRIVER, configure_driver
 
@@ -140,11 +140,11 @@ class BundleError(ValueError):
     """A portable request is unsafe, corrupt, or internally inconsistent."""
 
 
-def _utc_now() -> str:
+def _utc_now() -> 'str':
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: 'Path') -> 'str':
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -152,11 +152,11 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _sha256_bytes(value: bytes) -> str:
+def _sha256_bytes(value: 'bytes') -> 'str':
     return hashlib.sha256(value).hexdigest()
 
 
-def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+def _write_json_atomic(path: 'Path', payload: 'Mapping[str, Any]') -> 'None':
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
     fd, temporary = tempfile.mkstemp(
@@ -177,7 +177,7 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
         raise
 
 
-def _fsync_directory(directory: Path) -> None:
+def _fsync_directory(directory: 'Path') -> 'None':
     """Best-effort persistence barrier for a completed directory update."""
 
     if os.name != "posix":
@@ -208,11 +208,11 @@ class _StageLease:
 
     def __init__(
         self,
-        path: Path,
+        path: 'Path',
         *,
-        stale_seconds: float = _STAGE_LEASE_STALE_SECONDS,
-        heartbeat_seconds: float = _STAGE_LEASE_HEARTBEAT_SECONDS,
-    ) -> None:
+        stale_seconds: 'float' = _STAGE_LEASE_STALE_SECONDS,
+        heartbeat_seconds: 'float' = _STAGE_LEASE_HEARTBEAT_SECONDS,
+    ) -> 'None':
         self.path = Path(path)
         self.guard_path = self.path.with_name(self.path.name + ".guard")
         self.stale_seconds = float(stale_seconds)
@@ -225,10 +225,10 @@ class _StageLease:
         self.generation = 0
         self.recovered_stale = False
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: 'Optional[threading.Thread]' = None
 
     @staticmethod
-    def _read_document(path: Path) -> Optional[Dict[str, Any]]:
+    def _read_document(path: 'Path') -> 'Optional[Dict[str, Any]]':
         try:
             if path.is_symlink() or path.stat().st_size > 64 * 1024:
                 return None
@@ -240,7 +240,7 @@ class _StageLease:
         return document if isinstance(document, dict) else None
 
     @staticmethod
-    def _identity(document: Optional[Mapping[str, Any]]) -> Tuple[str, int]:
+    def _identity(document: 'Optional[Mapping[str, Any]]') -> 'Tuple[str, int]':
         if not document:
             return "", 0
         token = str(document.get("owner_token") or "")
@@ -254,7 +254,7 @@ class _StageLease:
         return token, max(generation, 0)
 
     @staticmethod
-    def _write_exclusive(path: Path, payload: Mapping[str, Any]) -> None:
+    def _write_exclusive(path: 'Path', payload: 'Mapping[str, Any]') -> 'None':
         encoded = (
             json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
             + "\n"
@@ -265,13 +265,13 @@ class _StageLease:
             stream.flush()
             os.fsync(stream.fileno())
 
-    def _matches(self) -> bool:
+    def _matches(self) -> 'bool':
         return self._identity(self._read_document(self.path)) == (
             self.owner_token,
             self.generation,
         )
 
-    def require_current(self) -> None:
+    def require_current(self) -> 'None':
         try:
             current = self._matches()
         except OSError as exc:
@@ -285,7 +285,7 @@ class _StageLease:
                 "generation may have recovered it. No stage journals were changed."
             )
 
-    def _guard_payload(self, token: str) -> Dict[str, Any]:
+    def _guard_payload(self, token: 'str') -> 'Dict[str, Any]':
         return {
             "schema": "ghost.hpc.stage-lease-guard.v1",
             "owner_token": token,
@@ -295,7 +295,7 @@ class _StageLease:
         }
 
     @staticmethod
-    def _try_lock_file(path: Path) -> Optional[int]:
+    def _try_lock_file(path: 'Path') -> 'Optional[int]':
         if path.is_symlink():
             raise BundleError(f"Stage lease guard cannot be a symbolic link: {path}")
         flags = os.O_CREAT | os.O_RDWR
@@ -354,7 +354,7 @@ class _StageLease:
             raise
 
     @staticmethod
-    def _unlock_file(fd: int) -> None:
+    def _unlock_file(fd: 'int') -> 'None':
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -364,7 +364,7 @@ class _StageLease:
         finally:
             os.close(fd)
 
-    def _acquire_guard(self) -> Tuple[int, str]:
+    def _acquire_guard(self) -> 'Tuple[int, str]':
         token = uuid.uuid4().hex
         fd = self._try_lock_file(self.guard_path)
         if fd is None:
@@ -391,14 +391,14 @@ class _StageLease:
             self._unlock_file(fd)
             raise
 
-    def _release_guard(self, guard: Tuple[int, str]) -> None:
+    def _release_guard(self, guard: 'Tuple[int, str]') -> 'None':
         try:
             self._unlock_file(guard[0])
         except OSError:
             pass
 
     @classmethod
-    def _release_owned_file(cls, path: Path, token: str, generation: Optional[int] = None) -> None:
+    def _release_owned_file(cls, path: 'Path', token: 'str', generation: 'Optional[int]' = None) -> 'None':
         try:
             document = cls._read_document(path)
         except OSError:
@@ -412,7 +412,7 @@ class _StageLease:
         except OSError:
             pass
 
-    def _lease_payload(self, generation: int) -> Dict[str, Any]:
+    def _lease_payload(self, generation: 'int') -> 'Dict[str, Any]':
         return {
             "schema": "ghost.hpc.stage-lease.v1",
             "owner_token": self.owner_token,
@@ -427,7 +427,7 @@ class _StageLease:
         if self.path.is_symlink():
             raise BundleError(f"Stage lease cannot be a symbolic link: {self.path}")
         guard = self._acquire_guard()
-        temporary: Optional[Path] = None
+        temporary: 'Optional[Path]' = None
         try:
             prior = self._read_document(self.path)
             if self.path.exists():
@@ -477,7 +477,7 @@ class _StageLease:
 
         self._stop.clear()
 
-        def _beat() -> None:
+        def _beat() -> 'None':
             while not self._stop.wait(self.heartbeat_seconds):
                 try:
                     heartbeat_guard = self._acquire_guard()
@@ -504,7 +504,7 @@ class _StageLease:
         self._thread.start()
         return self
 
-    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+    def __exit__(self, _exc_type, _exc, _traceback) -> 'None':
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=max(5.0, self.heartbeat_seconds * 2.0))
@@ -523,7 +523,7 @@ class _StageLease:
             self._release_guard(release_guard)
 
 
-def _safe_relative_path(raw_value: Any, *, label: str) -> str:
+def _safe_relative_path(raw_value: 'Any', *, label: 'str') -> 'str':
     if not isinstance(raw_value, str):
         raise BundleError(f"{label} must be a relative POSIX path string.")
     value = raw_value
@@ -541,7 +541,7 @@ def _safe_relative_path(raw_value: Any, *, label: str) -> str:
     return "/".join(parts)
 
 
-def _resolved_bundle_file(root: Path, relative: str, *, label: str) -> Path:
+def _resolved_bundle_file(root: 'Path', relative: 'str', *, label: 'str') -> 'Path':
     safe = _safe_relative_path(relative, label=label)
     candidate = root.joinpath(*safe.split("/"))
     if candidate.is_symlink():
@@ -559,7 +559,7 @@ def _resolved_bundle_file(root: Path, relative: str, *, label: str) -> Path:
     return resolved
 
 
-def _require_number(value: Any, *, name: str, positive: bool = False) -> float:
+def _require_number(value: 'Any', *, name: 'str', positive: 'bool' = False) -> 'float':
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise BundleError(f"{name} must be a number.")
     number = float(value)
@@ -569,7 +569,7 @@ def _require_number(value: Any, *, name: str, positive: bool = False) -> float:
     return number
 
 
-def _require_positive_int(value: Any, *, name: str, optional: bool = False) -> None:
+def _require_positive_int(value: 'Any', *, name: 'str', optional: 'bool' = False) -> 'None':
     if optional and value is None:
         return
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -578,12 +578,12 @@ def _require_positive_int(value: Any, *, name: str, optional: bool = False) -> N
 
 
 def _validate_numeric_list(
-    value: Any,
+    value: 'Any',
     *,
-    name: str,
-    positive: bool = False,
-    unique: bool = True,
-) -> List[float]:
+    name: 'str',
+    positive: 'bool' = False,
+    unique: 'bool' = True,
+) -> 'List[float]':
     if not isinstance(value, list) or not value:
         raise BundleError(f"{name} must be a non-empty JSON array.")
     numbers = [
@@ -595,7 +595,7 @@ def _validate_numeric_list(
     return numbers
 
 
-def _validate_slurm_text(value: Any, *, name: str, optional: bool = False) -> None:
+def _validate_slurm_text(value: 'Any', *, name: 'str', optional: 'bool' = False) -> 'None':
     if optional and value is None:
         return
     if not isinstance(value, str) or not value or not _SLURM_VALUE_RE.fullmatch(value):
@@ -606,7 +606,7 @@ def _validate_slurm_text(value: Any, *, name: str, optional: bool = False) -> No
         )
 
 
-def _validate_settings(solver: str, raw_settings: Any) -> Dict[str, Any]:
+def _validate_settings(solver: 'str', raw_settings: 'Any') -> 'Dict[str, Any]':
     if solver not in _SETTINGS_BY_SOLVER:
         raise BundleError("solver must be exactly '2d' or 'bor'.")
     if not isinstance(raw_settings, dict):
@@ -711,7 +711,7 @@ def _validate_settings(solver: str, raw_settings: Any) -> Dict[str, Any]:
     return settings
 
 
-def _bundle_readme() -> str:
+def _bundle_readme() -> 'str':
     return (
         "GRIM / GHOST portable HPC request\n"
         "=================================\n\n"
@@ -732,18 +732,18 @@ def _bundle_readme() -> str:
 
 
 def _copy_geometry_payload(
-    temporary_root: Path,
-    geometries: Sequence[Mapping[str, Any]],
-    solver: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    temporary_root: 'Path',
+    geometries: 'Sequence[Mapping[str, Any]]',
+    solver: 'str',
+) -> 'Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]':
     allowed_roles = {"FRD", "OPN"} if solver == "2d" else {"BOR"}
     if not isinstance(geometries, Sequence) or isinstance(geometries, (str, bytes)):
         raise BundleError("geometries must be a non-empty sequence.")
     if not geometries:
         raise BundleError("At least one geometry is required.")
 
-    geometry_records: List[Dict[str, Any]] = []
-    file_records: List[Dict[str, Any]] = []
+    geometry_records: 'List[Dict[str, Any]]' = []
+    file_records: 'List[Dict[str, Any]]' = []
     stems = set()
     source_paths = set()
     for index, raw_record in enumerate(geometries):
@@ -795,7 +795,7 @@ def _copy_geometry_payload(
         _safe_relative_path(geometry_relative, label=f"Geometry entry {index} path")
         geometry_destination = destination_folder / source.name
         shutil.copy2(source, geometry_destination)
-        sidecar_relatives: List[str] = []
+        sidecar_relatives: 'List[str]' = []
         for sidecar in sidecars:
             relative = f"{relative_folder}/{sidecar.name}"
             _safe_relative_path(relative, label=f"Geometry entry {index} sidecar")
@@ -825,13 +825,13 @@ def _copy_geometry_payload(
 
 
 def create_portable_bundle(
-    bundle_dir: os.PathLike[str] | str,
+    bundle_dir: 'os.PathLike[str] | str',
     *,
-    solver: str,
-    geometries: Sequence[Mapping[str, Any]],
-    settings: Mapping[str, Any],
-    bundle_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    solver: 'str',
+    geometries: 'Sequence[Mapping[str, Any]]',
+    settings: 'Mapping[str, Any]',
+    bundle_id: 'Optional[str]' = None,
+) -> 'Dict[str, Any]':
     """Create a portable directory bundle and return its verified request."""
 
     normalized_solver = str(solver).strip().lower()
@@ -852,7 +852,7 @@ def create_portable_bundle(
             temporary, geometries, normalized_solver
         )
         readme_path = temporary / README_NAME
-        readme_path.write_text(_bundle_readme(), encoding="utf-8", newline="\n")
+        write_text_lf(readme_path, _bundle_readme())
         file_records.append(
             {
                 "path": README_NAME,
@@ -882,7 +882,7 @@ def create_portable_bundle(
     return verify_portable_bundle(target)
 
 
-def _read_request(bundle_root: Path) -> Tuple[Dict[str, Any], bytes]:
+def _read_request(bundle_root: 'Path') -> 'Tuple[Dict[str, Any], bytes]':
     request_path = bundle_root / REQUEST_NAME
     if request_path.is_symlink() or not request_path.is_file():
         raise BundleError(f"Bundle has no regular {REQUEST_NAME} file.")
@@ -898,7 +898,7 @@ def _read_request(bundle_root: Path) -> Tuple[Dict[str, Any], bytes]:
     return value, raw
 
 
-def verify_portable_bundle(bundle_dir: os.PathLike[str] | str) -> Dict[str, Any]:
+def verify_portable_bundle(bundle_dir: 'os.PathLike[str] | str') -> 'Dict[str, Any]':
     """Verify every declared byte and the complete portable request contract."""
 
     root = Path(bundle_dir).expanduser().resolve()
@@ -932,7 +932,7 @@ def verify_portable_bundle(bundle_dir: os.PathLike[str] | str) -> Dict[str, Any]
     raw_files = request.get("files")
     if not isinstance(raw_files, list) or not raw_files:
         raise BundleError("request.json files must be a non-empty array.")
-    file_by_path: Dict[str, Dict[str, Any]] = {}
+    file_by_path: 'Dict[str, Dict[str, Any]]' = {}
     for index, raw_record in enumerate(raw_files):
         if not isinstance(raw_record, dict) or set(raw_record) != {
             "path",
@@ -1052,11 +1052,11 @@ def verify_portable_bundle(bundle_dir: os.PathLike[str] | str) -> Dict[str, Any]
     return request
 
 
-def _linux_staging_available() -> bool:
+def _linux_staging_available() -> 'bool':
     return sys.platform.startswith("linux")
 
 
-def _copy_verified_files(bundle_root: Path, stage_dir: Path, request: Mapping[str, Any]) -> None:
+def _copy_verified_files(bundle_root: 'Path', stage_dir: 'Path', request: 'Mapping[str, Any]') -> 'None':
     for record in request["files"]:
         relative = str(record["path"])
         source = _resolved_bundle_file(bundle_root, relative, label="Bundle payload file")
@@ -1065,7 +1065,7 @@ def _copy_verified_files(bundle_root: Path, stage_dir: Path, request: Mapping[st
         shutil.copy2(source, destination)
 
 
-def _verify_staged_files(stage_dir: Path, request: Mapping[str, Any]) -> None:
+def _verify_staged_files(stage_dir: 'Path', request: 'Mapping[str, Any]') -> 'None':
     for record in request["files"]:
         relative = str(record["path"])
         path = _resolved_bundle_file(stage_dir, relative, label="Staged payload file")
@@ -1079,7 +1079,7 @@ def _verify_staged_files(stage_dir: Path, request: Mapping[str, Any]) -> None:
         if str(record["path"]).startswith("payload/")
     }
     payload_root = stage_dir / "payload"
-    actual_payload: set[str] = set()
+    actual_payload: 'set[str]' = set()
     if payload_root.exists():
         for path in payload_root.rglob("*"):
             if path.is_symlink():
@@ -1103,15 +1103,15 @@ def _verify_staged_files(stage_dir: Path, request: Mapping[str, Any]) -> None:
         )
 
 
-def _parse_job_ids(output: str) -> List[str]:
-    found: List[str] = []
+def _parse_job_ids(output: 'str') -> 'List[str]':
+    found: 'List[str]' = []
     for value in _JOB_ID_RE.findall(output):
         if value not in found:
             found.append(value)
     return found
 
 
-def _read_submitted_job_ids(run_dir: Optional[str]) -> List[str]:
+def _read_submitted_job_ids(run_dir: 'Optional[str]') -> 'List[str]':
     """Recover IDs persisted after each successful sbatch invocation."""
 
     if not run_dir:
@@ -1133,10 +1133,10 @@ def _read_submitted_job_ids(run_dir: Optional[str]) -> List[str]:
     return [str(value) for value in values if str(value).isdigit()]
 
 
-def _read_all_submitted_job_ids(output_root: Path) -> List[str]:
+def _read_all_submitted_job_ids(output_root: 'Path') -> 'List[str]':
     """Return every journaled job ID under a stage, in deterministic order."""
 
-    found: List[str] = []
+    found: 'List[str]' = []
     if not output_root.is_dir() or output_root.is_symlink():
         return found
     for run_path in sorted(output_root.glob("run_*"), key=lambda path: path.name):
@@ -1148,7 +1148,7 @@ def _read_all_submitted_job_ids(output_root: Path) -> List[str]:
     return found
 
 
-def recover_staged_bundle(stage_directory: os.PathLike[str] | str) -> Dict[str, Any]:
+def recover_staged_bundle(stage_directory: 'os.PathLike[str] | str') -> 'Dict[str, Any]':
     """Reconstruct stage state without submitting or executing anything.
 
     This is the reconnect path for a lost SSH session.  A running state and
@@ -1183,7 +1183,7 @@ def recover_staged_bundle(stage_directory: os.PathLike[str] | str) -> Dict[str, 
     ):
         raise BundleError("Recovery stage metadata does not match its directory.")
 
-    state: Dict[str, Any] = {}
+    state: 'Dict[str, Any]' = {}
     state_path = stage_dir / "stage_state.json"
     if state_path.is_file():
         try:
@@ -1286,12 +1286,12 @@ def recover_staged_bundle(stage_directory: os.PathLike[str] | str) -> Dict[str, 
 
 
 def stage_portable_bundle(
-    bundle_dir: os.PathLike[str] | str,
-    workspace_root: os.PathLike[str] | str,
+    bundle_dir: 'os.PathLike[str] | str',
+    workspace_root: 'os.PathLike[str] | str',
     *,
-    run_driver: bool = False,
-    submit: bool = False,
-) -> Dict[str, Any]:
+    run_driver: 'bool' = False,
+    submit: 'bool' = False,
+) -> 'Dict[str, Any]':
     """Verify and stage a request on Linux, optionally building/submitting it.
 
     ``submit=True`` implies ``run_driver=True``.  The returned mapping is also
@@ -1338,14 +1338,14 @@ def stage_portable_bundle(
 
 def _stage_portable_bundle_with_lease(
     *,
-    bundle_root: Path,
-    workspace: Path,
-    request: Mapping[str, Any],
-    bundle_hash: str,
-    run_driver: bool,
-    submit: bool,
-    stage_lease: _StageLease,
-) -> Dict[str, Any]:
+    bundle_root: 'Path',
+    workspace: 'Path',
+    request: 'Mapping[str, Any]',
+    bundle_hash: 'str',
+    run_driver: 'bool',
+    submit: 'bool',
+    stage_lease: '_StageLease',
+) -> 'Dict[str, Any]':
     """Complete one verified stage operation while its workspace lease is held."""
 
     stage_lease.require_current()
@@ -1353,7 +1353,7 @@ def _stage_portable_bundle_with_lease(
     metadata_path = stage_dir / "stage_metadata.json"
     result_path = stage_dir / "stage_result.json"
     state_path = stage_dir / "stage_state.json"
-    prior_result: Optional[Dict[str, Any]] = None
+    prior_result: 'Optional[Dict[str, Any]]' = None
 
     if stage_dir.exists():
         if not metadata_path.is_file():
@@ -1425,7 +1425,7 @@ def _stage_portable_bundle_with_lease(
         canonical_driver, stage_dir / "driver_configured.py", settings
     )
 
-    base_result: Dict[str, Any] = {
+    base_result: 'Dict[str, Any]' = {
         "schema": STAGE_RESULT_SCHEMA,
         "ok": True,
         "bundle_id": request["bundle_id"],
@@ -1443,7 +1443,7 @@ def _stage_portable_bundle_with_lease(
         "log_path": None,
         "returncode": None,
     }
-    state: Dict[str, Any] = {}
+    state: 'Dict[str, Any]' = {}
     if state_path.is_file():
         parsed_state = json.loads(state_path.read_text(encoding="utf-8"))
         if isinstance(parsed_state, dict):
@@ -1584,14 +1584,14 @@ def _stage_portable_bundle_with_lease(
             env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            universal_newlines=True,
             encoding="utf-8",
             errors="replace",
         )
     except OSError as exc:
         stage_lease.require_current()
         message = f"Could not start the configured Linux HPC driver: {exc}"
-        log_path.write_text(message + "\n", encoding="utf-8", newline="\n")
+        write_text_lf(log_path, message + "\n")
         failed_result = dict(base_result)
         failed_result.update(
             {
@@ -1618,7 +1618,7 @@ def _stage_portable_bundle_with_lease(
         )
         return failed_result
     stage_lease.require_current()
-    log_path.write_text(completed.stdout, encoding="utf-8", newline="\n")
+    write_text_lf(log_path, completed.stdout)
     after_runs = {path.resolve() for path in output_root.glob("run_*") if path.is_dir()}
     new_runs = sorted(after_runs - before_runs, key=lambda path: path.name)
     run_dir = str(new_runs[-1]) if new_runs else None
@@ -1661,7 +1661,7 @@ def _stage_portable_bundle_with_lease(
     return result
 
 
-def _parse_geometry_argument(value: str) -> Dict[str, str]:
+def _parse_geometry_argument(value: 'str') -> 'Dict[str, str]':
     if "=" not in value:
         raise argparse.ArgumentTypeError("geometry must be ROLE=/path/to/file.geo")
     role, path = value.split("=", 1)
@@ -1670,7 +1670,7 @@ def _parse_geometry_argument(value: str) -> Dict[str, str]:
     return {"role": role.strip(), "path": path.strip()}
 
 
-def inspect_hpc_run(run_directory: os.PathLike[str] | str) -> Dict[str, Any]:
+def inspect_hpc_run(run_directory: 'os.PathLike[str] | str') -> 'Dict[str, Any]':
     """Return the solver's manifest-exact, attested completion state.
 
     This command is deliberately read-only and JSON-safe so a Windows GRIM
@@ -1683,7 +1683,7 @@ def inspect_hpc_run(run_directory: os.PathLike[str] | str) -> Dict[str, Any]:
     run_dir = Path(run_directory).expanduser().resolve()
     status = run_status(run_dir)
 
-    def _relative(paths: Sequence[os.PathLike[str] | str]) -> List[str]:
+    def _relative(paths: 'Sequence[os.PathLike[str] | str]') -> 'List[str]':
         relative = []
         for value in paths:
             path = Path(value).resolve()
@@ -1727,13 +1727,14 @@ def inspect_hpc_run(run_directory: os.PathLike[str] | str) -> Dict[str, Any]:
     }
 
 
-def _json_output(payload: Mapping[str, Any]) -> None:
+def _json_output(payload: 'Mapping[str, Any]') -> 'None':
     print(json.dumps(payload, sort_keys=True, allow_nan=False))
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: 'Optional[Sequence[str]]' = None) -> 'int':
     parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.required = True
 
     create_parser = subparsers.add_parser("create", help="Create a portable bundle.")
     create_parser.add_argument("--solver", required=True, choices=("2d", "bor"))
@@ -1777,7 +1778,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 geometries=args.geometry,
                 settings=settings,
             )
-            payload: Dict[str, Any] = {
+            payload: 'Dict[str, Any]' = {
                 "ok": True,
                 "schema": request["schema"],
                 "bundle_id": request["bundle_id"],

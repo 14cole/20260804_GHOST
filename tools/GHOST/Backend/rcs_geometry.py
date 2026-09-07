@@ -4,7 +4,7 @@ import cmath
 import csv
 import math
 import os
-from dataclasses import dataclass
+from ghost_runtime import dataclass
 import numpy as np
 from thin_sheet import ThinLayerDefinition
 from geometry_io import material_filename_from_row

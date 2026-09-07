@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Material-sidecar grammar and atomic publication regression tests."""
 
-from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -23,7 +22,7 @@ from geometry_io import (  # noqa: E402
 
 
 class MaterialFilenameGrammarTests(unittest.TestCase):
-    def test_safe_sidecar_rows_round_trip(self) -> None:
+    def test_safe_sidecar_rows_round_trip(self) -> 'None':
         text = build_geometry_text(
             "body",
             [],
@@ -36,7 +35,7 @@ class MaterialFilenameGrammarTests(unittest.TestCase):
         self.assertEqual(ibcs, [["1", "coating_ibc.csv"]])
         self.assertEqual(dielectrics, [["2", "substrate.csv"]])
 
-    def test_writer_rejects_unquoted_whitespace_in_sidecar_name(self) -> None:
+    def test_writer_rejects_unquoted_whitespace_in_sidecar_name(self) -> 'None':
         for unsafe_name in (
             "My IBC.csv",
             "leading.csv ",
@@ -51,7 +50,7 @@ class MaterialFilenameGrammarTests(unittest.TestCase):
 
 
 class AtomicFileTransactionTests(unittest.TestCase):
-    def test_read_only_source_can_be_staged(self) -> None:
+    def test_read_only_source_can_be_staged(self) -> 'None':
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "read_only.csv"
@@ -73,7 +72,7 @@ class AtomicFileTransactionTests(unittest.TestCase):
                 # original source retains its read-only attribute.
                 os.chmod(source, stat.S_IWRITE | stat.S_IREAD)
 
-    def test_successful_multi_file_publication_replaces_complete_set(self) -> None:
+    def test_successful_multi_file_publication_replaces_complete_set(self) -> 'None':
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "source.csv"
@@ -100,7 +99,7 @@ class AtomicFileTransactionTests(unittest.TestCase):
                 ["body.geo", "sidecar.csv", "source.csv"],
             )
 
-    def test_later_publish_failure_restores_every_previous_file(self) -> None:
+    def test_later_publish_failure_restores_every_previous_file(self) -> 'None':
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "source.csv"
@@ -117,7 +116,7 @@ class AtomicFileTransactionTests(unittest.TestCase):
             real_replace = os.replace
             call_count = 0
 
-            def fail_second_publish(source_path: object, target_path: object) -> None:
+            def fail_second_publish(source_path: 'object', target_path: 'object') -> 'None':
                 nonlocal call_count
                 call_count += 1
                 if call_count == 2:
@@ -141,7 +140,7 @@ class AtomicFileTransactionTests(unittest.TestCase):
                 ["body.geo", "sidecar.csv", "source.csv"],
             )
 
-    def test_explicit_rollback_restores_file_after_ui_failure(self) -> None:
+    def test_explicit_rollback_restores_file_after_ui_failure(self) -> 'None':
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = root / "source.csv"

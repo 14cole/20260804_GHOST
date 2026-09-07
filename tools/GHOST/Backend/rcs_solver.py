@@ -26,7 +26,7 @@ import os
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass
+from ghost_runtime import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
@@ -309,7 +309,7 @@ def _probe_cupy_backend() -> 'Tuple[bool, str]':
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 check=False,
-                text=True,
+                universal_newlines=True,
                 timeout=DENSE_GPU_PROBE_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired:

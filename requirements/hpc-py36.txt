@@ -1,0 +1,5 @@
+# Headless GHOST only: tested CPython 3.6.8 dependency profile.
+# dataclasses is bundled in Backend; Qt/FREDDY GUI dependencies are not needed.
+numpy==1.19.5
+scipy==1.5.4
+psutil==5.9.8

@@ -1,6 +1,5 @@
 """Source snapshots and placement preparation for feature Assembly."""
-from __future__ import annotations
-from dataclasses import dataclass
+from ghost_runtime import dataclass
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -8,45 +7,45 @@ from surface_mesh import TriangleSurface
 
 @dataclass
 class AssemblySources:
-    active_features: bool
-    base: Path
-    base_sha256: str | None
-    coordinate_scale: float
-    features_only_output: Path
-    line_coordinates_path: Path | None
-    output: Path
-    point_coordinates_path: Path | None
-    prepared_features_only_output_absent: bool
-    prepared_features_only_output_sha256: str | None
-    prepared_input_sources: dict[str, dict[str, str]]
-    prepared_output_absent: bool
-    prepared_output_sha256: str | None
-    prepared_source_sha256: dict[str, str]
-    surface_path: Path | None
-    surface_scale: float | None
+    active_features: 'bool'
+    base: 'Path'
+    base_sha256: 'str | None'
+    coordinate_scale: 'float'
+    features_only_output: 'Path'
+    line_coordinates_path: 'Path | None'
+    output: 'Path'
+    point_coordinates_path: 'Path | None'
+    prepared_features_only_output_absent: 'bool'
+    prepared_features_only_output_sha256: 'str | None'
+    prepared_input_sources: 'dict[str, dict[str, str]]'
+    prepared_output_absent: 'bool'
+    prepared_output_sha256: 'str | None'
+    prepared_source_sha256: 'dict[str, str]'
+    surface_path: 'Path | None'
+    surface_scale: 'float | None'
 
 
 @dataclass
 class PreparedPlacements:
-    line_preview_endpoint_normals: dict[str, Any]
-    line_preview_paths: dict[str, Any]
-    line_records: list[dict[str, Any]]
-    lines: list[dict[str, Any]]
-    mesh_topology_report: dict[str, Any] | None
-    point_preview_ids: dict[str, Any]
-    point_preview_lists: dict[str, Any]
-    point_preview_normals: dict[str, Any]
-    point_preview_roll_references: dict[str, Any]
-    point_records: list[dict[str, Any]]
-    points: list[dict[str, Any]]
-    skin_limit: float
-    surface: TriangleSurface | None
-    surface_geometry_contract: dict[str, Any]
-    surface_triangles_cad_m: np.ndarray | None
-    wavelength: float
+    line_preview_endpoint_normals: 'dict[str, Any]'
+    line_preview_paths: 'dict[str, Any]'
+    line_records: 'list[dict[str, Any]]'
+    lines: 'list[dict[str, Any]]'
+    mesh_topology_report: 'dict[str, Any] | None'
+    point_preview_ids: 'dict[str, Any]'
+    point_preview_lists: 'dict[str, Any]'
+    point_preview_normals: 'dict[str, Any]'
+    point_preview_roll_references: 'dict[str, Any]'
+    point_records: 'list[dict[str, Any]]'
+    points: 'list[dict[str, Any]]'
+    skin_limit: 'float'
+    surface: 'TriangleSurface | None'
+    surface_geometry_contract: 'dict[str, Any]'
+    surface_triangles_cad_m: 'np.ndarray | None'
+    wavelength: 'float'
 
 
-def capture_assembly_sources(request, *, cancel_check=None, progress_callback=None) -> AssemblySources:
+def capture_assembly_sources(request, *, cancel_check=None, progress_callback=None) -> 'AssemblySources':
     from feature_workflow import (
         FeatureAssemblyRequest,
         Optional,
@@ -80,7 +79,7 @@ def capture_assembly_sources(request, *, cancel_check=None, progress_callback=No
         label="coordinate_units",
         used_for="a point or line placement CSV",
     ) if request.point_locations_csv is not None or request.line_locations_csv is not None else 1.0
-    surface_scale: Optional[float] = None
+    surface_scale: 'Optional[float]' = None
     if request.surface_mesh is not None:
         surface_scale = _required_unit_scale(
             request.surface_units,
@@ -108,7 +107,7 @@ def capture_assembly_sources(request, *, cancel_check=None, progress_callback=No
     )
     base_sha256 = sha256_file(str(base))
     prepared_source_sha256 = {str(base): base_sha256}
-    prepared_input_sources: dict[str, dict[str, str]] = {
+    prepared_input_sources: 'dict[str, dict[str, str]]' = {
         "base_grim": {"path": str(base), "sha256": base_sha256}
     }
     if cancel_check is not None and cancel_check():
@@ -117,11 +116,11 @@ def capture_assembly_sources(request, *, cancel_check=None, progress_callback=No
         progress_callback(12, 100, "Reading clean-body response")
 
     def snapshot_input_source(
-        role: str,
-        value: Optional[PathValue],
+        role: 'str',
+        value: 'Optional[PathValue]',
         *,
-        label: str,
-    ) -> Optional[Path]:
+        label: 'str',
+    ) -> 'Optional[Path]':
         if value is None:
             return None
         source = resolve_path(value, base_dir=request.base_dir)
@@ -180,9 +179,9 @@ def capture_assembly_sources(request, *, cancel_check=None, progress_callback=No
     )
 
 
-def prepare_assembly_placements(request, sources: AssemblySources, *, embedded_grid, grid,
+def prepare_assembly_placements(request, sources: 'AssemblySources', *, embedded_grid, grid,
                                 profile, pre_validation_warnings, surface_geometry_contract,
-                                cancel_check=None, progress_callback=None) -> PreparedPlacements:
+                                cancel_check=None, progress_callback=None) -> 'PreparedPlacements':
     from feature_workflow import (
         CAD2AXIS,
         Optional,
@@ -201,8 +200,8 @@ def prepare_assembly_placements(request, sources: AssemblySources, *, embedded_g
     skin_limit, wavelength = compute_skin_limit(grid["frequencies_ghz"], skin_tol_m=request.skin_tol_m, skin_phase_tol_deg=request.skin_phase_tol_deg)
     normal_tolerance = validate_normal_tolerance(request.normal_tol_deg)
     auto_shadow_report = None
-    surface: Optional[TriangleSurface] = None
-    surface_triangles_cad_m: Optional[np.ndarray] = None
+    surface: 'Optional[TriangleSurface]' = None
+    surface_triangles_cad_m: 'Optional[np.ndarray]' = None
     mesh_topology_report = None
     if sources.surface_path is not None:
         assert sources.surface_scale is not None
@@ -266,11 +265,11 @@ def prepare_assembly_placements(request, sources: AssemblySources, *, embedded_g
             if auto_shadow_report is not None:
                 surface_geometry_contract["surface_mesh"] = None
                 surface_geometry_contract["generated_shadow_surface"] = auto_shadow_report
-    point_preview_lists: dict[str, list[np.ndarray]] = {}
-    point_preview_normals: dict[str, list[np.ndarray]] = {}
-    point_preview_roll_references: dict[str, list[np.ndarray]] = {}
-    line_preview_paths: dict[str, dict[str, np.ndarray]] = {}
-    line_preview_endpoint_normals: dict[str, dict[str, np.ndarray]] = {}
+    point_preview_lists: 'dict[str, list[np.ndarray]]' = {}
+    point_preview_normals: 'dict[str, list[np.ndarray]]' = {}
+    point_preview_roll_references: 'dict[str, list[np.ndarray]]' = {}
+    line_preview_paths: 'dict[str, dict[str, np.ndarray]]' = {}
+    line_preview_endpoint_normals: 'dict[str, dict[str, np.ndarray]]' = {}
     lines, line_records = prepare_line_placements(
         profile,
         surface,
@@ -309,7 +308,7 @@ def prepare_assembly_placements(request, sources: AssemblySources, *, embedded_g
     if progress_callback is not None:
         progress_callback(72, 100, "Checking point placements")
 
-    point_preview_ids: dict[str, list[str]] = {}
+    point_preview_ids: 'dict[str, list[str]]' = {}
     for record in point_records:
         point_preview_ids.setdefault(str(record["dataset_id"]), []).append(
             str(record["placement_id"])

@@ -21,7 +21,7 @@ phase-1 gate battery before any solver uses them.
 """
 
 import math
-from dataclasses import dataclass, field
+from ghost_runtime import dataclass, field
 from functools import lru_cache
 from typing import List, Tuple
 

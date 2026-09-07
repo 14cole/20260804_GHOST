@@ -1,9 +1,8 @@
 """Validated JSON configuration for the existing local and HPC driver entrypoints."""
-from __future__ import annotations
 
 import argparse
 import ast
-from dataclasses import dataclass
+from ghost_runtime import dataclass
 import hashlib
 import json
 import math
@@ -18,8 +17,8 @@ SCHEMA = 'ghost.driver-config'
 
 @dataclass(frozen=True)
 class LoadedConfiguration:
-    path: Path
-    sha256: str
+    path: 'Path'
+    sha256: 'str'
 
     def verify(self):
         if hashlib.sha256(self.path.read_bytes()).hexdigest() != self.sha256:

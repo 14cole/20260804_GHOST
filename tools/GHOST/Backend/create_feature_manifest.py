@@ -6,7 +6,6 @@ and proves that each selected passing case exercised the exact response being
 certified. Surface registration remains a separately reviewed attestation.
 """
 
-from __future__ import annotations
 
 import argparse
 import hashlib
@@ -61,14 +60,14 @@ _SURFACE_UNIT_ALIASES = {
 }
 
 
-def _legal_sidecars(response: Path) -> tuple[Path, ...]:
+def _legal_sidecars(response: 'Path') -> 'tuple[Path, ...]':
     return tuple(dict.fromkeys((
         Path(str(response) + ".feature.json"),
         response.with_suffix(".feature.json"),
     )))
 
 
-def _decode_manifest(value: Any, *, label: str) -> dict[str, Any]:
+def _decode_manifest(value: 'Any', *, label: 'str') -> 'dict[str, Any]':
     if isinstance(value, bytes):
         value = value.decode("utf-8")
     if isinstance(value, str):
@@ -78,7 +77,7 @@ def _decode_manifest(value: Any, *, label: str) -> dict[str, Any]:
     return value
 
 
-def _embedded_manifest(response: Path) -> dict[str, Any] | None:
+def _embedded_manifest(response: 'Path') -> 'dict[str, Any] | None':
     """Read only an advertised embedded manifest; malformed data fails hard."""
 
     try:
@@ -103,8 +102,8 @@ def _embedded_manifest(response: Path) -> dict[str, Any] | None:
             ) from exc
 
 
-def _raw_manifest_candidates(response: Path) -> list[tuple[str, dict[str, Any]]]:
-    candidates: list[tuple[str, dict[str, Any]]] = []
+def _raw_manifest_candidates(response: 'Path') -> 'list[tuple[str, dict[str, Any]]]':
+    candidates: 'list[tuple[str, dict[str, Any]]]' = []
     embedded = _embedded_manifest(response)
     if embedded is not None:
         candidates.append(("embedded manifest", embedded))
@@ -119,7 +118,7 @@ def _raw_manifest_candidates(response: Path) -> list[tuple[str, dict[str, Any]]]
     return candidates
 
 
-def _finite_number(value: Any, label: str) -> float:
+def _finite_number(value: 'Any', label: 'str') -> 'float':
     try:
         result = float(value)
     except (TypeError, ValueError) as exc:
@@ -129,11 +128,11 @@ def _finite_number(value: Any, label: str) -> float:
     return result
 
 
-def _sha256_bytes(value: bytes) -> str:
+def _sha256_bytes(value: 'bytes') -> 'str':
     return hashlib.sha256(value).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
+def _sha256_file(path: 'Path') -> 'str':
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -141,7 +140,7 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _digest_text(value: Any, *, label: str) -> str:
+def _digest_text(value: 'Any', *, label: 'str') -> 'str':
     digest = str(value).strip().lower()
     if len(digest) != 64 or any(
         character not in "0123456789abcdef" for character in digest
@@ -150,7 +149,7 @@ def _digest_text(value: Any, *, label: str) -> str:
     return digest
 
 
-def _comparison_sha256(comparison: Mapping[str, Any]) -> str:
+def _comparison_sha256(comparison: 'Mapping[str, Any]') -> 'str':
     encoded = json.dumps(
         dict(comparison),
         sort_keys=True,
@@ -161,8 +160,8 @@ def _comparison_sha256(comparison: Mapping[str, Any]) -> str:
 
 
 def _validated_gate_limits(
-    comparison: Mapping[str, Any], *, label: str
-) -> dict[str, float]:
+    comparison: 'Mapping[str, Any]', *, label: 'str'
+) -> 'dict[str, float]':
     """Require all three comparisons and every polarization to pass safe gates."""
 
     sections = (
@@ -240,11 +239,11 @@ def _validated_gate_limits(
 
 
 def _validation_evidence_from_reports(
-    report_paths: Sequence[str],
+    report_paths: 'Sequence[str]',
     *,
-    requested_case_ids: Sequence[str],
-    response_content_sha256: str,
-) -> tuple[list[dict[str, Any]], list[str]]:
+    requested_case_ids: 'Sequence[str]',
+    response_content_sha256: 'str',
+) -> 'tuple[list[dict[str, Any]], list[str]]':
     """Extract passing, artifact-bound evidence for one exact feature response."""
 
     if not report_paths:
@@ -256,8 +255,8 @@ def _validation_evidence_from_reports(
     if any(not value for value in requested) or len(set(requested)) != len(requested):
         raise ValueError("--validation-case-id values must be nonempty and unique.")
     requested_set = set(requested)
-    evidence: list[dict[str, Any]] = []
-    seen_case_ids: set[str] = set()
+    evidence: 'list[dict[str, Any]]' = []
+    seen_case_ids: 'set[str]' = set()
     for raw_report_path in report_paths:
         report_path = Path(raw_report_path).expanduser().resolve()
         if not report_path.is_file():
@@ -388,7 +387,7 @@ def _validation_evidence_from_reports(
     return evidence, [item["case_id"] for item in evidence]
 
 
-def _normalized_surface_units(value: Any) -> str:
+def _normalized_surface_units(value: 'Any') -> 'str':
     key = str(value or "").strip().casefold()
     try:
         return _SURFACE_UNIT_ALIASES[key]
@@ -399,7 +398,7 @@ def _normalized_surface_units(value: Any) -> str:
         ) from exc
 
 
-def _check_line_extensions(manifest: Mapping[str, Any], *, label: str) -> None:
+def _check_line_extensions(manifest: 'Mapping[str, Any]', *, label: 'str') -> 'None':
     """Check line fields that travel with the current fixed solver behavior."""
 
     applicability = manifest.get("applicability")
@@ -428,8 +427,8 @@ def _check_line_extensions(manifest: Mapping[str, Any], *, label: str) -> None:
 
 
 def _validate_cli_manifest(
-    manifest: Mapping[str, Any], *, dataset_id: str, feature_kind: str, label: str
-) -> dict[str, Any]:
+    manifest: 'Mapping[str, Any]', *, dataset_id: 'str', feature_kind: 'str', label: 'str'
+) -> 'dict[str, Any]':
     normalized = validate_feature_library_manifest(
         manifest, dataset_id=dataset_id, feature_kind=feature_kind
     )
@@ -438,7 +437,7 @@ def _validate_cli_manifest(
     return normalized
 
 
-def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, Any]:
+def _manifest_from_args(args: 'argparse.Namespace', response: 'Path') -> 'dict[str, Any]':
     dataset_id = str(args.dataset_id).strip()
     host_material = " ".join(str(args.host_material).split())
     validation_case_ids = [
@@ -452,7 +451,7 @@ def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, A
     if not host_material:
         raise ValueError("--host-material must not be blank.")
     response_content_sha256 = feature_response_content_sha256(response)
-    validation_evidence: list[dict[str, Any]] = []
+    validation_evidence: 'list[dict[str, Any]]' = []
     if args.validation_status == "validated":
         validation_evidence, validation_case_ids = (
             _validation_evidence_from_reports(
@@ -467,14 +466,14 @@ def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, A
             "--validation-status validated."
         )
 
-    applicability: dict[str, Any] = {
+    applicability: 'dict[str, Any]' = {
         "frequency_ghz": {
             "min": args.frequency_min_ghz,
             "max": args.frequency_max_ghz,
         },
         "footprint_radius_m": args.footprint_radius_m,
     }
-    manifest: dict[str, Any] = {
+    manifest: 'dict[str, Any]' = {
         "schema": FEATURE_LIBRARY_MANIFEST_SCHEMA,
         "dataset_id": dataset_id,
         "feature_kind": args.feature_kind,
@@ -551,7 +550,7 @@ def _manifest_from_args(args: argparse.Namespace, response: Path) -> dict[str, A
     return manifest
 
 
-def _atomic_write_json(path: Path, value: Mapping[str, Any], *, force: bool) -> None:
+def _atomic_write_json(path: 'Path', value: 'Mapping[str, Any]', *, force: 'bool') -> 'None':
     if not path.parent.is_dir():
         raise ValueError(f"Manifest parent directory does not exist: {path.parent}")
     if path.exists() and not force:
@@ -571,7 +570,7 @@ def _atomic_write_json(path: Path, value: Mapping[str, Any], *, force: bool) -> 
             pass
 
 
-def _resolve_response(value: str) -> Path:
+def _resolve_response(value: 'str') -> 'Path':
     response = resolve_path(value)
     if not response.is_file():
         raise FileNotFoundError(f"Feature response not found: {response}")
@@ -579,7 +578,7 @@ def _resolve_response(value: str) -> Path:
     return response
 
 
-def _create(args: argparse.Namespace) -> Path:
+def _create(args: 'argparse.Namespace') -> 'Path':
     response = _resolve_response(args.response)
     legal_sidecars = _legal_sidecars(response)
     output = (
@@ -616,7 +615,7 @@ def _create(args: argparse.Namespace) -> Path:
     return output
 
 
-def _check(args: argparse.Namespace) -> dict[str, Any]:
+def _check(args: 'argparse.Namespace') -> 'dict[str, Any]':
     response = _resolve_response(args.response)
     manifest, _sources = load_feature_library_manifest(
         response,
@@ -640,7 +639,7 @@ def _check(args: argparse.Namespace) -> dict[str, Any]:
     return manifest
 
 
-def _resolve_surface(value: str) -> Path:
+def _resolve_surface(value: 'str') -> 'Path':
     surface = resolve_path(value)
     if not surface.is_file():
         raise FileNotFoundError(f"Assembly surface not found: {surface}")
@@ -651,7 +650,7 @@ def _resolve_surface(value: str) -> Path:
     return surface
 
 
-def _resolve_base_grim(value: str) -> Path:
+def _resolve_base_grim(value: 'str') -> 'Path':
     base_grim = resolve_path(value)
     if not base_grim.is_file():
         raise FileNotFoundError(f"External clean-body GRIM not found: {base_grim}")
@@ -660,7 +659,7 @@ def _resolve_base_grim(value: str) -> Path:
     return base_grim
 
 
-def _create_surface_binding(args: argparse.Namespace) -> Path:
+def _create_surface_binding(args: 'argparse.Namespace') -> 'Path':
     base_grim = _resolve_base_grim(args.base_grim)
     surface = _resolve_surface(args.surface)
     geometry_id = str(args.geometry_id).strip()
@@ -682,7 +681,7 @@ def _create_surface_binding(args: argparse.Namespace) -> Path:
     return output
 
 
-def _check_surface_binding(args: argparse.Namespace) -> dict[str, str]:
+def _check_surface_binding(args: 'argparse.Namespace') -> 'dict[str, str]':
     base_grim = _resolve_base_grim(args.base_grim)
     surface = _resolve_surface(args.surface)
     manifest, _binding = _check_backend_surface_binding(
@@ -708,7 +707,7 @@ def _check_surface_binding(args: argparse.Namespace) -> dict[str, str]:
     return dict(manifest)
 
 
-def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_identity_arguments(parser: 'argparse.ArgumentParser') -> 'None':
     parser.add_argument("--dataset-id", required=True, help="Exact placement CSV dataset_id.")
     parser.add_argument(
         "--feature-kind", required=True, choices=("point", "line"),
@@ -716,9 +715,10 @@ def _add_identity_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> 'argparse.ArgumentParser':
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
+    commands.required = True
 
     create = commands.add_parser(
         "create",
@@ -835,7 +835,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: 'Sequence[str] | None' = None) -> 'int':
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

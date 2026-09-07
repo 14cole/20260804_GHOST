@@ -3,7 +3,6 @@
 Geometry, output destinations, and machine/account settings remain explicit in
 each workspace. This recipe cannot reinterpret BoR aspects as 2-D angles.
 """
-from __future__ import annotations
 import json
 import math
 import os
