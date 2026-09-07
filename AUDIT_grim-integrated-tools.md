@@ -64,7 +64,7 @@ All suites were run from a clean checkout of `3e6c0a1`.
 | UTF-8 cleaner tests | pass | |
 | Offline wheelhouse tests | pass | |
 | GRIM tests (`GRIM_Revised_2`) | 1041 / 1045 | 4 failures, all environment-coupled; see findings M4, M5, L1. |
-| GHOST unit tests (`tools/GHOST/tests`) | GHOST_UNIT_PLACEHOLDER | |
+| GHOST unit tests (`tools/GHOST/tests`) | 526 / 526 | Run per test file in parallel; sequential discover order takes hours because of the BoR Mie regression tests. |
 | GHOST CEM tools tests | 13 / 16 | 3 errors, real regression; see finding H1. |
 | GHOST HPC scheduling integration | pass | |
 | GHOST local-driver integration | pass | |
