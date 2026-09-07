@@ -9,10 +9,6 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 # IBCS row shapes are documented in GEOMETRY_INPUT_CHEATSHEET.md.
 IBC_KINDS = ("constant", "linear", "cosine", "exp")
-# Legacy compatibility only: a one-token flag above this threshold resolves
-# to the historical whitespace/GHz ``mat.<flag>`` sidecar.  New file-backed
-# rows use ``flag filename.csv`` for every positive flag value.
-TABULATED_FLAG_THRESHOLD = 50
 
 
 def is_ibc_inline_row(row: 'List[str]') -> 'bool':
@@ -31,19 +27,9 @@ def is_file_material_row(row: 'List[str]') -> 'bool':
     )
 
 
-def is_legacy_tabulated_row(row: 'List[str]') -> 'bool':
-    """True for the deprecated one-token ``flag -> mat.<flag>`` form."""
-    if len(row) != 1:
-        return False
-    try:
-        return int(row[0]) > TABULATED_FLAG_THRESHOLD
-    except (ValueError, TypeError):
-        return False
-
-
 def is_tabulated_row(row: 'List[str]') -> 'bool':
-    """True if the row references an explicit CSV or legacy material table."""
-    return is_file_material_row(row) or is_legacy_tabulated_row(row)
+    """True if the row references a CSV material table in Hz."""
+    return is_file_material_row(row)
 
 
 def _validate_material_filename(filename: 'str', context: 'str') -> 'str':
@@ -264,8 +250,6 @@ def material_filename_from_row(row: 'List[str]') -> 'Optional[str]':
         return _validate_material_filename(
             row[1], f"Material flag {row[0]} CSV reference"
         )
-    if is_legacy_tabulated_row(row):
-        return f"mat.{int(row[0])}"
     return None
 
 
@@ -274,7 +258,6 @@ def _validate_ibc_row(tokens: 'List[str]', lineno_for_err: 'str') -> 'None':
 
     Supported shapes (the `flag R X` and `flag taper kind ...` forms are not accepted):
       * CSV: `flag filename.csv`, for any positive integer flag.
-      * Legacy tabulated: one token `flag` with flag > TABULATED_FLAG_THRESHOLD.
       * Inline: `flag kind R_start X_start R_end X_end` with kind in IBC_KINDS.
         For ``kind == "constant"`` only R_start/X_start matter; the end values
         are placeholders (write 0) and are ignored on read.
@@ -303,13 +286,11 @@ def _validate_ibc_row(tokens: 'List[str]', lineno_for_err: 'str') -> 'None':
         )
         return
     if len(tokens) == 1:
-        if flag <= TABULATED_FLAG_THRESHOLD:
-            raise ValueError(
-                f"IBC flag {flag} has no definition. Use either "
-                "'flag filename.csv' or "
-                "'flag kind R_start X_start R_end X_end'."
-            )
-        return
+        raise ValueError(
+            f"IBC flag {flag} has no definition. Use either "
+            "'flag filename.csv' (comma-separated, header required, frequency in Hz) or "
+            "'flag kind R_start X_start R_end X_end'."
+        )
     if len(tokens) != 6:
         raise ValueError(
             f"Inline IBC row must have 6 tokens (flag kind R_start X_start R_end X_end); "
@@ -355,13 +336,11 @@ def _validate_dielectric_row(tokens: 'List[str]', lineno_for_err: 'str') -> 'Non
         )
         return
     if len(tokens) == 1:
-        if flag <= TABULATED_FLAG_THRESHOLD:
-            raise ValueError(
-                f"Dielectric flag {flag} has no definition. Use either "
-                "'flag filename.csv' or "
-                "'flag eps_real eps_imag mu_real mu_imag'."
-            )
-        return
+        raise ValueError(
+            f"Dielectric flag {flag} has no definition. Use either "
+            "'flag filename.csv' (comma-separated, header required, frequency in Hz) or "
+            "'flag eps_real eps_imag mu_real mu_imag'."
+        )
     if len(tokens) != 5:
         raise ValueError(
             "Inline dielectric row must have 5 tokens "

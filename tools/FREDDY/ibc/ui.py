@@ -157,6 +157,7 @@ from .compute import (
 from .io import (
     HZ_PER_GHZ,
     _atomic_text_file,
+    _validate_csv_path,
     layer_config_from_dict,
     layer_config_to_dict,
     load_project_file,
@@ -206,6 +207,22 @@ Directional-material principal-axis orientation is a separate layer setting.</p>
 permittivity and permeability versus frequency using the
 <b>e<sup>+jωt</sup></b> convention. Passive loss therefore has a
 <b>negative imaginary part</b>.</p>
+
+<h3>Material and IBC files</h3>
+<p>GHOST and FREDDY use <b>comma-separated .csv files with frequency in Hz</b>.
+A header is required. Material inputs and mixed-material exports use:</p>
+<pre>frequency_hz,eps_real,eps_imag,mu_real,mu_imag
+1000000000,3.2,-0.15,1,0</pre>
+<p>Nominal IBC exports and GHOST IBC inputs use:</p>
+<pre>frequency_hz,resistance_ohm,reactance_ohm
+1000000000,120,15</pre>
+<p>1000000000 Hz is 1 GHz. CSV files use Hz even though sweep controls and plots
+show GHz. Epsilon and mu are relative; impedance is in ohms. Headers and column
+order must match these examples. Use finite values and positive, unique
+frequencies. Blank lines and full-line # comments are allowed; UTF-8 files with
+or without a BOM are accepted. Whitespace-delimited and headerless files are
+rejected. Uncertainty, off-angle and thickness CSVs are analysis reports;
+use the nominal three-column CSV when assigning an IBC in GHOST.</p>
 
 <h3>Material variables</h3>
 <table cellspacing="6" cellpadding="4">
@@ -2984,7 +3001,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self._refresh_layers()
         self.layer_list.setCurrentRow(idx + 1)
 
-    def _load_layers(self, skiprows: int, layer_configs: list[LayerConfig] | None = None) -> list[LoadedLayer]:
+    def _load_layers(self, layer_configs: list[LayerConfig] | None = None) -> list[LoadedLayer]:
         source_layers = self.layers if layer_configs is None else layer_configs
         loaded: list[LoadedLayer] = []
         for i, layer in enumerate(source_layers, start=1):
@@ -3008,9 +3025,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             if t_m <= 0:
                 raise ValueError(f"Layer {i}: thickness must be > 0.")
 
-            table_0 = read_material_table(Path(layer.file_0deg), skiprows)
+            table_0 = read_material_table(Path(layer.file_0deg))
             table_90 = (
-                read_material_table(Path(layer.file_90deg), skiprows)
+                read_material_table(Path(layer.file_90deg))
                 if layer.anisotropic
                 else None
             )
@@ -3758,7 +3775,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
     def _compute_frequency_mode(
         self,
         output_path: Path,
-        include_header: bool,
         loaded_layers: list[LoadedLayer],
         backing: str,
         uncertainty: UncertaintyConfig,
@@ -3834,7 +3850,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         write_impedance_bundle(
             output_path,
             nominal_rows,
-            include_header,
             uncertainty_path,
             uncertainty_rows,
         )
@@ -3853,7 +3868,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
     def _compute_angle_mode(
         self,
         output_path: Path,
-        include_header: bool,
         loaded_layers: list[LoadedLayer],
         uncertainty: UncertaintyConfig,
         angles: list[float],
@@ -3946,33 +3960,33 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         insertion_loss = out["insertion_loss_db"]
         insertion_phase = out["insertion_phase_deg"]
 
+        _validate_csv_path(output_path)
         with _atomic_text_file(output_path) as f:
-            if include_header:
-                if envelope_enabled:
-                    f.write(
-                        "frequency_hz,angle_deg,"
-                        "pec_reflection_db,pec_reflection_db_min,pec_reflection_db_max,"
-                        "pec_reflection_phase_deg,pec_reflection_phase_deg_min,pec_reflection_phase_deg_max,"
-                        "pec_absorbed_power_db,pec_absorbed_power_db_min,pec_absorbed_power_db_max,"
-                        "air_reflection_db,air_reflection_db_min,air_reflection_db_max,"
-                        "air_reflection_phase_deg,air_reflection_phase_deg_min,air_reflection_phase_deg_max,"
-                        "air_absorbed_power_db,air_absorbed_power_db_min,air_absorbed_power_db_max,"
-                        "transmission_db,transmission_db_min,transmission_db_max,"
-                        "transmission_phase_deg,transmission_phase_deg_min,transmission_phase_deg_max\n"
-                    )
-                else:
-                    f.write(
-                        "frequency_hz,angle_deg,pec_reflection_db,pec_reflection_phase_deg,pec_absorbed_power_db,"
-                        "air_reflection_db,air_reflection_phase_deg,air_absorbed_power_db,"
-                        "transmission_db,transmission_phase_deg\n"
-                    )
+            if envelope_enabled:
+                f.write(
+                    "frequency_hz,angle_deg,"
+                    "pec_reflection_db,pec_reflection_db_min,pec_reflection_db_max,"
+                    "pec_reflection_phase_deg,pec_reflection_phase_deg_min,pec_reflection_phase_deg_max,"
+                    "pec_absorbed_power_db,pec_absorbed_power_db_min,pec_absorbed_power_db_max,"
+                    "air_reflection_db,air_reflection_db_min,air_reflection_db_max,"
+                    "air_reflection_phase_deg,air_reflection_phase_deg_min,air_reflection_phase_deg_max,"
+                    "air_absorbed_power_db,air_absorbed_power_db_min,air_absorbed_power_db_max,"
+                    "transmission_db,transmission_db_min,transmission_db_max,"
+                    "transmission_phase_deg,transmission_phase_deg_min,transmission_phase_deg_max\n"
+                )
+            else:
+                f.write(
+                    "frequency_hz,angle_deg,pec_reflection_db,pec_reflection_phase_deg,pec_absorbed_power_db,"
+                    "air_reflection_db,air_reflection_phase_deg,air_absorbed_power_db,"
+                    "transmission_db,transmission_phase_deg\n"
+                )
             for i, f_ghz in enumerate(freq):
                 for j, a in enumerate(ang):
                     if envelope_enabled:
                         if envelope_min is None or envelope_max is None:
                             raise ValueError("Internal error: uncertainty envelopes are unavailable.")
                         f.write(
-                            f"{f_ghz * HZ_PER_GHZ:.12g},{a:.12g},"
+                            f"{f_ghz * HZ_PER_GHZ:.17g},{a:.12g},"
                             f"{metal_loss[i][j]:.12g},"
                             f"{envelope_min['metal_loss_db'][i][j]:.12g},{envelope_max['metal_loss_db'][i][j]:.12g},"
                             f"{metal_phase[i][j]:.12g},"
@@ -3992,7 +4006,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                         )
                     else:
                         f.write(
-                            f"{f_ghz * HZ_PER_GHZ:.12g},{a:.12g},"
+                            f"{f_ghz * HZ_PER_GHZ:.17g},{a:.12g},"
                             f"{metal_loss[i][j]:.12g},{metal_phase[i][j]:.12g},{metal_abs[i][j]:.12g},"
                             f"{air_loss[i][j]:.12g},{air_phase[i][j]:.12g},{air_abs[i][j]:.12g},"
                             f"{insertion_loss[i][j]:.12g},{insertion_phase[i][j]:.12g}\n"
@@ -4004,7 +4018,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
     def _compute_thickness_mode(
         self,
         output_path: Path,
-        include_header: bool,
         loaded_layers: list[LoadedLayer],
         layer_idx: int,
         uncertainty: UncertaintyConfig,
@@ -4062,15 +4075,15 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                             if val > envelope_max[key][i][j]:
                                 envelope_max[key][i][j] = val
 
+        _validate_csv_path(output_path)
         with _atomic_text_file(output_path) as f:
-            if include_header:
-                cols = ["frequency_hz", "thickness_in"]
-                for key in HEATMAP_METRIC_KEYS:
-                    export_key = METRIC_EXPORT_NAMES[key]
-                    cols.append(export_key)
-                    if envelope_enabled:
-                        cols.extend((f"{export_key}_min", f"{export_key}_max"))
-                f.write(",".join(cols) + "\n")
+            cols = ["frequency_hz", "thickness_in"]
+            for key in HEATMAP_METRIC_KEYS:
+                export_key = METRIC_EXPORT_NAMES[key]
+                cols.append(export_key)
+                if envelope_enabled:
+                    cols.extend((f"{export_key}_min", f"{export_key}_max"))
+            f.write(",".join(cols) + "\n")
             for i, f_ghz in enumerate(freqs):
                 for j, t_in in enumerate(thicknesses_in):
                     vals = [f_ghz * HZ_PER_GHZ, t_in]
@@ -4083,7 +4096,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                                 )
                             vals.append(envelope_min[key][i][j])
                             vals.append(envelope_max[key][i][j])
-                    f.write(",".join(f"{v:.12g}" for v in vals) + "\n")
+                    f.write(",".join(f"{v:.17g}" for v in vals) + "\n")
 
         summary = self._summarize_thickness_run(out, wave_pol, angle_deg, envelope_enabled)
         return len(freqs) * len(thicknesses_in), out, envelope_min, envelope_max, summary
@@ -4197,7 +4210,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                 raise ValueError("Add at least one layer before inverse design.")
 
             layer_snapshot = self._snapshot_layers()
-            skiprows = 0
             wave_pol = normalize_wave_polarization(self.inv_wave_pol_var.get())
             freq_mode = self.inv_freq_mode_var.get().strip().lower()
             if freq_mode.startswith("discrete"):
@@ -4271,7 +4283,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             score_mode=score_mode,
             checkpoint=checkpoint,
             grid=grid,
-            skiprows=skiprows,
             top_n=top_n,
             target_freq_desc=target_freq_desc,
             a_start=a_start,
@@ -4616,7 +4627,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                     "Select a target material CSV "
                     "(5 columns: frequency_hz,eps_real,eps_imag,mu_real,mu_imag)."
                 )
-            table = read_material_table(Path(path), 0)
+            table = read_material_table(Path(path))
             validate_sweep_coverage(grid, table, "target material")
             target_eps = interp_complex_many(grid, table.freq_ghz, table.eps_r)
             target_mu = interp_complex_many(grid, table.freq_ghz, table.mu_r)
@@ -4714,7 +4725,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                 raise ValueError(f"Component {i}: property file is required.")
             key = str(Path(path))
             if key not in cache:
-                cache[key] = read_material_table(Path(key), 0)
+                cache[key] = read_material_table(Path(key))
             entry = dict(c)
             entry["table"] = cache[key]
             out.append(entry)
@@ -5477,7 +5488,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             self.nominal_artifact_cleared.emit()
 
         def worker() -> dict[str, object]:
-            loaded_layers = self._load_layers(0, layer_snapshot)
+            loaded_layers = self._load_layers(layer_snapshot)
             import numpy as np
             impedance = np.empty((len(frequencies), len(plan)), dtype=complex)
             indices = {item.path: i for i, item in enumerate(plan)}
@@ -5550,7 +5561,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         from .ghost_coating import assess_scalar_coating, coating_report_text
 
         def worker():
-            return assess_scalar_coating(frequencies, self._load_layers(0, snapshot), include_details=True)
+            return assess_scalar_coating(frequencies, self._load_layers(snapshot), include_details=True)
 
         def on_success(report):
             context = f'GHOST coating check · PEC · {frequencies[0]:g}–{frequencies[-1]:g} GHz · TE and TM'
@@ -5566,6 +5577,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
             layer_snapshot = self._snapshot_layers()
             output_path = Path(self.output_var.get().strip())
+            _validate_csv_path(output_path)
             uncertainty = self._read_uncertainty_config(
                 self.uncertainty_var,
                 self.unc_t_pct_var,
@@ -5601,11 +5613,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         wave_pol = normalize_wave_polarization("TE")
 
         def worker() -> dict[str, object]:
-            loaded_layers = self._load_layers(0, layer_snapshot)
+            loaded_layers = self._load_layers(layer_snapshot)
             capture = {}
             n, summary = self._compute_frequency_mode(
                 output_path,
-                True,
                 loaded_layers,
                 backing,
                 uncertainty,
@@ -5665,6 +5676,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
             layer_snapshot = self._snapshot_layers()
             output_path = Path(self.angle_output_var.get().strip())
+            _validate_csv_path(output_path)
             uncertainty = self._read_uncertainty_config(
                 self.angle_uncertainty_var,
                 self.angle_unc_t_pct_var,
@@ -5699,7 +5711,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
         compare_both = self.angle_compare_both.isChecked()
         def worker() -> dict[str, object]:
-            loaded_layers = self._load_layers(0, layer_snapshot)
+            loaded_layers = self._load_layers(layer_snapshot)
             other_pol = 'tm' if wave_pol == 'te' else 'te'
             secondary = None
             comparison_note = ''
@@ -5711,7 +5723,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
                     thickness_scale=t, eps_scale=e, mu_scale=m), uncertainty)
             n, out, env_min, env_max, summary = self._compute_angle_mode(
                 output_path,
-                True,
                 loaded_layers,
                 uncertainty,
                 angles,
@@ -5761,6 +5772,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             layer_idx = self._selected_thickness_layer_index()
             layer_snapshot = self._snapshot_layers()
             output_path = Path(self.thk_output_var.get().strip())
+            _validate_csv_path(output_path)
             uncertainty = self._read_uncertainty_config(
                 self.thk_uncertainty_var,
                 self.thk_unc_t_pct_var,
@@ -5800,10 +5812,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             return
 
         def worker() -> dict[str, object]:
-            loaded_layers = self._load_layers(0, layer_snapshot)
+            loaded_layers = self._load_layers(layer_snapshot)
             n, out, env_min, env_max, summary = self._compute_thickness_mode(
                 output_path,
-                True,
                 loaded_layers,
                 layer_idx,
                 uncertainty,

@@ -269,7 +269,7 @@ class AtomicFreddyWriterTests(unittest.TestCase):
             path.write_text("previous\n", encoding="utf-8")
             with mock.patch("ibc.io.os.replace", side_effect=OSError("blocked")):
                 with self.assertRaisesRegex(OSError, "blocked"):
-                    write_output(path, [(1.0, 120.0, 15.0)], True)
+                    write_output(path, [(1.0, 120.0, 15.0)])
             self.assertEqual(path.read_text(encoding="utf-8"), "previous\n")
             self._assert_no_temporary_files(path)
 
@@ -325,7 +325,6 @@ class AtomicFreddyWriterTests(unittest.TestCase):
                     write_impedance_bundle(
                         nominal,
                         nominal_rows,
-                        True,
                         uncertainty,
                         uncertainty_rows,
                     )

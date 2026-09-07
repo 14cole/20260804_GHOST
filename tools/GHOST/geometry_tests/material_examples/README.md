@@ -3,7 +3,7 @@
 These inputs accompany the [geometry cheat sheet](../../GEOMETRY_INPUT_CHEATSHEET.md).
 They cover TYPE 1-5, including free impedance sheets, the new thin dielectric
 layer, PEC, opaque IBC, bulk dielectric and magnetic material, explicit coatings,
-two-material regions, spatial tapers, CSV tables, and legacy tables.
+two-material regions, spatial tapers and CSV tables.
 
 1. Load one `.geo` in GHOST Geometry.
 2. Set geometry units to **meters** and select the **2D** solver.
@@ -11,10 +11,10 @@ two-material regions, spatial tapers, CSV tables, and legacy tables.
 4. For production results, request mesh convergence and inspect the accuracy
    report. The thin-layer approximation also needs a physical applicability check.
 
-Each file is a complete geometry. Keep the four material sidecars in this folder
-when copying CSV or legacy examples. All tables span 0.8-1.2 GHz; CSV frequencies
-are in Hz and `mat.*` frequencies are in GHz. The two formats describe the same
-illustrative values. CSV headers may be omitted while retaining column order.
+Each file is a complete geometry. Keep `surface_impedance.csv` and
+`radome_material.csv` beside the geometry when copying CSV examples. Both use
+required headers and comma-separated values with frequency in Hz. All tables
+span 800000000-1200000000 Hz (0.8-1.2 GHz).
 
 | Example files | Purpose |
 |---|---|
@@ -30,7 +30,6 @@ illustrative values. CSV headers may be omitted while retaining column order.
 | [type1_linear_taper.geo](type1_linear_taper.geo), [type1_cosine_taper.geo](type1_cosine_taper.geo), [type1_exp_taper.geo](type1_exp_taper.geo) | Each supported spatial impedance taper |
 | [type2_csv_ibc.geo](type2_csv_ibc.geo), [type3_csv_dielectric.geo](type3_csv_dielectric.geo) | Explicit nominal material CSV references |
 | [type1_csv_thin_dielectric.geo](type1_csv_thin_dielectric.geo) | Fixed thickness with frequency-dependent epsilon and mu |
-| [type2_legacy_ibc.geo](type2_legacy_ibc.geo), [type3_legacy_dielectric.geo](type3_legacy_dielectric.geo) | Older `mat.<flag>` references |
 
 Most squares are 100 mm across. The explicit coating examples have an 80 mm
 core; the two-dielectric example has a 50 mm core. All closed contours are
@@ -45,6 +44,6 @@ These are instructional fixtures with invented material values, not material
 recommendations or certified scattering benchmarks. They are 2D cross sections;
 BoR requires its own appropriate generating curve. Syntax, material loading,
 round-trip serialization, and small two-polarization solves were checked on
-September 5, 2026: all 17 files loaded and solved at 1 GHz for incidence and
+September 5, 2026: the original 17-file set loaded and solved at 1 GHz for incidence and
 observation angles 12, 48 and 86 degrees, yielding nine finite samples per
 polarization. Production accuracy requires separate convergence.

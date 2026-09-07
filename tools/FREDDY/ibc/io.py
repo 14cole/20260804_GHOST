@@ -253,7 +253,7 @@ def _validate_frequency_rows(
         raise ValueError(f"{context} requires at least {minimum_rows} data {row_word}.")
     previous: float | None = None
     for index, freq_ghz in enumerate(frequencies_ghz, start=1):
-        if not math.isfinite(freq_ghz) or freq_ghz <= 0:
+        if not math.isfinite(freq_ghz) or freq_ghz <= 0 or not math.isfinite(freq_ghz * HZ_PER_GHZ):
             raise ValueError(
                 f"{context} row {index} has invalid frequency {freq_ghz!r} GHz; "
                 "frequencies must be finite and > 0."
@@ -267,30 +267,36 @@ def _validate_frequency_rows(
         previous = freq_ghz
 
 
-def read_material_table(path: Path, skiprows: int = 0) -> MaterialTable:
+def _validate_csv_path(path: Path) -> None:
+    if Path(path).suffix.lower() != ".csv":
+        raise ValueError(f"Material/IBC file must use the .csv extension: {path}")
+
+
+def read_material_table(path: Path) -> MaterialTable:
     """Read the exact five-column material CSV accepted by the RCS solvers.
 
     Frequencies are stored in Hz in the file and converted to GHz internally.
-    Blank lines and ``#`` comments may precede the header or appear between
-    data rows. ``skiprows`` is retained for old project files, but the first
-    remaining non-comment row must still be the exact schema header.
+    UTF-8 with or without a BOM is accepted. Blank lines and full-line ``#``
+    comments may precede the header or appear between data rows. The first
+    non-comment row must be the exact schema header.
     """
     rows: list[tuple[float, complex, complex]] = []
     header_found = False
-    with path.open("r", encoding="utf-8", newline="") as f:
+    _validate_csv_path(path)
+    with path.open("r", encoding="utf-8-sig", newline="") as f:
         for idx, raw_line in enumerate(f, start=1):
-            if idx <= skiprows:
-                continue
             stripped = raw_line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            parts = next(csv.reader([raw_line]))
-            parts = [part.strip() for part in parts]
+            try:
+                parts = [part.strip() for part in next(csv.reader([raw_line], strict=True))]
+            except csv.Error as exc:
+                raise ValueError(f"{path}: line {idx} contains invalid CSV: {exc}") from exc
             if not header_found:
                 found = ",".join(parts)
                 if found != MATERIAL_HEADER:
                     raise ValueError(
-                        f"{path}: line {idx} must have header {MATERIAL_HEADER}; "
+                        f"{path}: line {idx} must have comma-separated header {MATERIAL_HEADER} (frequency in Hz); "
                         f"found {found}."
                     )
                 header_found = True
@@ -341,14 +347,14 @@ def read_material_table(path: Path, skiprows: int = 0) -> MaterialTable:
 def write_output(
     path: Path,
     rows: list[tuple[float, float, float]],
-    include_header: bool,
 ) -> None:
     """Write a solver-compatible frequency/impedance CSV in Hz and ohms.
 
     ``rows`` carries frequency in GHz (the internal unit)."""
+    _validate_csv_path(path)
     _validate_impedance_rows(rows)
     with _atomic_text_file(path) as f:
-        _write_impedance_rows(f, rows, include_header)
+        _write_impedance_rows(f, rows)
 
 
 def _validate_impedance_rows(
@@ -364,19 +370,16 @@ def _validate_impedance_rows(
 def _write_impedance_rows(
     stream: TextIO,
     rows: list[tuple[float, float, float]],
-    include_header: bool,
 ) -> None:
-    if include_header:
-        stream.write(IMPEDANCE_HEADER + "\n")
+    stream.write(IMPEDANCE_HEADER + "\n")
     for freq_ghz, zr, zi in rows:
         stream.write(
-            f"{freq_ghz * HZ_PER_GHZ:.12g},{zr:.12g},{zi:.12g}\n"
+            f"{freq_ghz * HZ_PER_GHZ:.17g},{zr:.17g},{zi:.17g}\n"
         )
 
 
 def write_impedance_batch(
     outputs: Iterable[tuple[Path, list[tuple[float, float, float]]]],
-    include_header: bool = True,
 ) -> None:
     """Atomically publish nominal solver-compatible IBC CSVs.
 
@@ -393,13 +396,14 @@ def write_impedance_batch(
             except StopIteration:
                 return
             output_index += 1
+            _validate_csv_path(path)
             _validate_impedance_rows(rows, f"Impedance export {output_index}")
 
             def write_nominal(
                 stream: TextIO,
                 batch_rows: list[tuple[float, float, float]] = rows,
             ) -> None:
-                _write_impedance_rows(stream, batch_rows, include_header)
+                _write_impedance_rows(stream, batch_rows)
 
             yield Path(path), write_nominal
             # Release generator-side references before computing the next
@@ -422,6 +426,7 @@ def write_impedance_uncertainty_report(
     rows: list[tuple[float, float, float, float, float, float, float]],
 ) -> None:
     """Write nominal/min/max impedance values to an analysis-only sidecar."""
+    _validate_csv_path(path)
     frequencies = [float(row[0]) for row in rows]
     _validate_frequency_rows(frequencies, "Impedance uncertainty report")
     for index, row in enumerate(rows, start=1):
@@ -449,13 +454,12 @@ def write_impedance_uncertainty_report(
         for row in rows:
             freq_hz = row[0] * HZ_PER_GHZ
             values = (freq_hz, *row[1:])
-            f.write(",".join(f"{value:.12g}" for value in values) + "\n")
+            f.write(",".join(f"{value:.17g}" for value in values) + "\n")
 
 
 def write_impedance_bundle(
     nominal_path: Path,
     nominal_rows: list[tuple[float, float, float]],
-    include_header: bool,
     uncertainty_path: Path | None = None,
     uncertainty_rows: (
         list[tuple[float, float, float, float, float, float, float]] | None
@@ -463,6 +467,9 @@ def write_impedance_bundle(
 ) -> None:
     """Atomically publish a nominal IBC and its optional uncertainty sidecar."""
 
+    _validate_csv_path(nominal_path)
+    if uncertainty_path is not None:
+        _validate_csv_path(uncertainty_path)
     _validate_impedance_rows(nominal_rows)
     frequencies = [float(row[0]) for row in nominal_rows]
 
@@ -500,7 +507,7 @@ def write_impedance_bundle(
                 )
 
     def write_nominal(stream: TextIO) -> None:
-        _write_impedance_rows(stream, nominal_rows, include_header)
+        _write_impedance_rows(stream, nominal_rows)
 
     entries: list[tuple[Path, Callable[[TextIO], None]]] = [
         (Path(nominal_path), write_nominal)
@@ -511,19 +518,20 @@ def write_impedance_bundle(
             for row in uncertainty_rows:
                 values = (row[0] * HZ_PER_GHZ, *row[1:])
                 stream.write(
-                    ",".join(f"{value:.12g}" for value in values) + "\n"
+                    ",".join(f"{value:.17g}" for value in values) + "\n"
                 )
 
         entries.append((Path(uncertainty_path), write_uncertainty))
     _atomic_text_batch(entries)
 
 
-def write_material_table(path: Path, table: MaterialTable, include_header: bool = True) -> None:
+def write_material_table(path: Path, table: MaterialTable) -> None:
     """Write a MaterialTable in the 5-column property-file format
     (frequency_hz,eps_real,eps_imag,mu_real,mu_imag) so a blended material can
     be reloaded as a normal layer material. The imaginary parts are written as
     stored (already signed for the e^{+jwt} convention used by
     ``read_material_table``)."""
+    _validate_csv_path(path)
     n = len(table.freq_ghz)
     if not (len(table.eps_r) == len(table.mu_r) == n):
         raise ValueError("MaterialTable columns must have matching lengths.")
@@ -533,12 +541,11 @@ def write_material_table(path: Path, table: MaterialTable, include_header: bool 
     ):
         _validate_medium(eps, mu, f"Material export row {index}")
     with _atomic_text_file(path) as f:
-        if include_header:
-            f.write(MATERIAL_HEADER + "\n")
+        f.write(MATERIAL_HEADER + "\n")
         for freq_ghz, eps, mu in zip(table.freq_ghz, table.eps_r, table.mu_r):
             f.write(
-                f"{freq_ghz * HZ_PER_GHZ:.12g},{eps.real:.12g},{eps.imag:.12g},"
-                f"{mu.real:.12g},{mu.imag:.12g}\n"
+                f"{freq_ghz * HZ_PER_GHZ:.17g},{eps.real:.17g},{eps.imag:.17g},"
+                f"{mu.real:.17g},{mu.imag:.17g}\n"
             )
 
 

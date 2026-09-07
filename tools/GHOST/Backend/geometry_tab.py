@@ -175,6 +175,7 @@ class GeometryTab(QWidget):
         ibc_btn_row = QHBoxLayout()
         self.btn_ibc_add = QPushButton("+")
         self.btn_ibc_add_csv = QPushButton("+ CSV")
+        self.btn_ibc_add_csv.setToolTip("Comma-separated CSV with header: frequency_hz,resistance_ohm,reactance_ohm. Frequency in Hz; impedance in ohms.")
         self.btn_thin_layer_add = QPushButton("+ Thin layer")
         self.btn_ibc_remove = QPushButton("-")
         ibc_btn_row.addWidget(self.btn_ibc_add)
@@ -197,6 +198,7 @@ class GeometryTab(QWidget):
         diel_btn_row = QHBoxLayout()
         self.btn_diel_add = QPushButton("+")
         self.btn_diel_add_csv = QPushButton("+ CSV")
+        self.btn_diel_add_csv.setToolTip("Comma-separated CSV with header: frequency_hz,eps_real,eps_imag,mu_real,mu_imag. Frequency in Hz; relative epsilon and mu.")
         self.btn_diel_remove = QPushButton("-")
         diel_btn_row.addWidget(self.btn_diel_add)
         diel_btn_row.addWidget(self.btn_diel_add_csv)
@@ -473,7 +475,7 @@ class GeometryTab(QWidget):
 
             # IBC Kind cell (col 1) on inline rows becomes a dropdown so the
             # user picks from constant/linear/cosine/exp instead of typing.
-            # CSV and legacy tabulated rows skip the kind dropdown.
+            # CSV rows skip the kind dropdown.
             if title_prefix == "IBCS/Resistances":
                 for r, tokens in enumerate(rows):
                     if len(tokens) < 2 or is_tabulated_row(tokens):
@@ -672,7 +674,7 @@ class GeometryTab(QWidget):
         self._refresh_segment_dropdowns()
         self._set_dirty(True)
 
-    def _choose_material_csv(self, title: 'str') -> 'str':
+    def _choose_material_csv(self, title: 'str', *, kind: 'Optional[str]' = None) -> 'str':
         if not self.loaded_path:
             QMessageBox.warning(
                 self,
@@ -707,6 +709,18 @@ class GeometryTab(QWidget):
                 f"This CSV cannot be referenced by a .geo file:\n{exc}",
             )
             return ""
+        if kind is not None:
+            try:
+                from rcs_geometry import MaterialLibrary
+                rows = [["1", validated_name]]
+                MaterialLibrary.from_entries(
+                    rows if kind == "ibc" else [],
+                    rows if kind == "material" else [],
+                    base_dir,
+                )
+            except (ValueError, OSError) as exc:
+                QMessageBox.warning(self, "Invalid Material CSV", str(exc))
+                return ""
         return validated_name
 
     def attach_material_artifact(
@@ -996,7 +1010,7 @@ class GeometryTab(QWidget):
         return True
 
     def _ibc_add_csv_row(self) -> 'None':
-        filename = self._choose_material_csv("Choose IBC Material CSV")
+        filename = self._choose_material_csv("Choose IBC Material CSV (Hz)", kind="ibc")
         if not filename:
             return
         current = self._read_small_table(self.table_ibc)
@@ -1049,7 +1063,7 @@ class GeometryTab(QWidget):
         self._set_dirty(True)
 
     def _diel_add_csv_row(self) -> 'None':
-        filename = self._choose_material_csv("Choose Dielectric Material CSV")
+        filename = self._choose_material_csv("Choose Dielectric Material CSV (Hz)", kind="material")
         if not filename:
             return
         current = self._read_small_table(self.table_diel)

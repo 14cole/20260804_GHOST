@@ -44,7 +44,7 @@ def configure_layers(layers, rows):
     return result
 
 
-def search_identity(layers, frequencies, angles, polarization, uncertainty, score_mode, *, skiprows=0):
+def search_identity(layers, frequencies, angles, polarization, uncertainty, score_mode):
     """Hash physics inputs, not run budget, display choices, or output paths."""
     sources = {}
     for index, layer in enumerate(layers,1):
@@ -62,7 +62,7 @@ def search_identity(layers, frequencies, angles, polarization, uncertainty, scor
             sources[str(path)] = digest.hexdigest()
     value = {'layers': [asdict(l) for l in layers], 'frequencies': frequencies,
              'angles': angles, 'polarization': polarization.strip().lower(), 'uncertainty': asdict(uncertainty),
-             'score_mode': score_mode, 'sources': sources, 'skiprows': skiprows,
+             'score_mode': score_mode, 'sources': sources,
              'method': 'all-combinations-v1'}
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
@@ -88,7 +88,7 @@ def check_layers(layers, frequencies, *, materials=True):
         if materials and not layer.is_sheet:
             for axis, raw in [('0 deg / isotropic', layer.file_0deg)] + ([('90 deg', layer.file_90deg)] if layer.anisotropic else []):
                 try:
-                    table = read_material_table(Path(raw), 0)
+                    table = read_material_table(Path(raw))
                     validate_sweep_coverage(frequencies, table, f'layer {index} {axis}')
                 except Exception as exc:
                     errors.append(f'Layer {index}, {axis}, {Path(raw).name or "missing material"}: {exc}')

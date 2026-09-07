@@ -34,7 +34,6 @@ from solver_metrics import active_metrics, profiled_solve, timed_stage
 from thin_sheet import ThinLayerDefinition, layer_for_mesh, solve_thin_layer_fields
 from refined_lu import RefinedLU, requested_precision
 from geometry_io import (
-    is_legacy_tabulated_row,
     material_filename_from_row,
 )
 
@@ -101,9 +100,7 @@ from rcs_geometry import (
     _linear_panel_signature_from_info,
     _linear_shape_values,
     _load_dielectric_csv,
-    _load_dielectric_table,
     _load_impedance_csv,
-    _load_impedance_table,
     _material_base_dir_for_snapshot,
     _medium_eta,
     _medium_n,
@@ -123,9 +120,7 @@ from rcs_geometry import (
     _primitive_length,
     _q_plus_beta,
     _read_csv_numeric_rows,
-    _read_numeric_rows,
     _region_medium,
-    _resolve_mat_file,
     _resolve_material_file,
     _reverse_point_pairs,
     _safe_complex_div,

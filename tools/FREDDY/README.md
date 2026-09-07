@@ -88,12 +88,17 @@ same-directory atomic, so a failed write does not truncate an existing file.
 ## Material CSV format
 
 Material inputs and mixed-material exports use exactly five comma-separated
-columns:
+columns with a required header:
 
-```text
+```csv
 frequency_hz,eps_real,eps_imag,mu_real,mu_imag
 1000000000,3.2,-0.15,1.0,0.0
 ```
+
+Use a `.csv` extension. Both tools accept UTF-8 with or without a BOM, blank
+lines, and full-line `#` comments. Header names and order must match the example;
+surrounding cell whitespace is ignored. Space/tab-separated and headerless
+files are rejected. See the [shared file format](../../MATERIAL_CSV_FORMAT.md).
 
 Frequency is in Hz. FREDDY and GHOST use the `e^(+j omega t)` convention, so a
 passive lossy material has negative imaginary permittivity and permeability.
@@ -103,10 +108,12 @@ property components and extrapolation is not performed.
 
 ## Impedance CSV format
 
-Nominal impedance exports use the solver-compatible schema:
+Nominal impedance exports and GHOST IBC inputs use the same required header,
+comma separator, Hz frequency and impedance in ohms:
 
-```text
+```csv
 frequency_hz,resistance_ohm,reactance_ohm
+1000000000,120,15
 ```
 
 Uncertainty bounds are written to a separate `_uncertainty.csv` analysis file

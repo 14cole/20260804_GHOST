@@ -118,7 +118,7 @@ class MaterialIoTests(unittest.TestCase):
     def test_nominal_impedance_stays_three_column_with_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             nominal = Path(tmp) / "coating.csv"
-            write_output(nominal, [(1.0, 120.0, 15.0)], True)
+            write_output(nominal, [(1.0, 120.0, 15.0)])
             self.assertEqual(
                 nominal.read_text(encoding="utf-8").splitlines()[0],
                 IMPEDANCE_HEADER,
@@ -142,9 +142,9 @@ class MaterialIoTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.csv"
             with self.assertRaises(ValueError):
-                write_output(path, [(1.0, -1.0, 0.0)], True)
+                write_output(path, [(1.0, -1.0, 0.0)])
             with self.assertRaises(ValueError):
-                write_output(path, [(1.0, math.nan, 0.0)], True)
+                write_output(path, [(1.0, math.nan, 0.0)])
 
 
 class PhysicsTests(unittest.TestCase):

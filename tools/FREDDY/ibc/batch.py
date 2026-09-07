@@ -268,5 +268,5 @@ def export_pec_ibc_thickness_batch(
     # The shared writer consumes this generator one file at a time. No
     # destination is published until every thickness has computed and staged;
     # a later failure removes all stages or rolls back the complete publication.
-    write_impedance_batch(outputs(), include_header=True)
+    write_impedance_batch(outputs())
     return len(items)

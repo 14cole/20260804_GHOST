@@ -31,14 +31,13 @@ These are illustrative inputs, not measured materials or certified results.
 | Frequency-dependent impedance | [CSV IBC](geometry_tests/material_examples/type2_csv_ibc.geo) | TYPE 2 and `40 surface_impedance.csv` |
 | Frequency-dependent dielectric | [CSV bulk material](geometry_tests/material_examples/type3_csv_dielectric.geo) | TYPE 3 and `50 radome_material.csv` |
 | Frequency-dependent thin layer | [CSV thin layer](geometry_tests/material_examples/type1_csv_thin_dielectric.geo) | `10 thin_dielectric 0.0005 50` plus dielectric CSV |
-| Legacy frequency tables | [Legacy IBC](geometry_tests/material_examples/type2_legacy_ibc.geo), [legacy dielectric](geometry_tests/material_examples/type3_legacy_dielectric.geo) | One-token flags resolving to `mat.61` / `mat.62` |
 | FREDDY-collapsed PEC-backed coating | [2D outer-envelope example](geometry_tests/pec_backed_ibc/example/2d_outer_envelope.geo) | Existing TYPE 2 plus nominal IBC CSV; this separate example uses **inches** |
 
 Load a geometry through GHOST Geometry, set its coordinate units, then select
 2D, 1 GHz and a few observation angles (for example 12, 48 and 86 degrees).
 Use the default double precision. Select an accuracy target and request mesh
 convergence for production work; a successful single-mesh solve is a setup
-check, not certification. Keep all referenced CSV or `mat.*` files beside the
+check, not certification. Keep all referenced CSV files beside the
 geometry when copying an example.
 
 ## Sign conventions first
@@ -463,7 +462,7 @@ interface or turn the TYPE 1 thin-layer model into a metal-backed stack.
 
 ## Explicit CSV material tables
 
-CSV sidecars are the preferred frequency-dependent format. The `.csv` file
+Headered CSV sidecars in Hz are the frequency-dependent format. The `.csv` file
 must be in the **same directory** as the `.geo` file, and the geometry row
 uses only its filename. Directory components, spaces, and other whitespace
 in the filename are not supported; use names such as `radome_material.csv`.
@@ -496,29 +495,22 @@ frequency_hz,eps_real,eps_imag,mu_real,mu_imag
 1200000000,3.15,-0.052,1.0,0.0
 ```
 
-CSV rules:
+CSV rules (also see the [shared file format](../../MATERIAL_CSV_FORMAT.md)):
 
-- Headers are optional. If present, their names and order must match the
-  examples (capitalization and surrounding whitespace are normalized).
-  Headerless files must contain the same numeric columns in the same order.
-  Frequencies remain **Hz** with or without a header.
+- Headers are required. Names and column order must match the lowercase
+  examples exactly; surrounding cell whitespace is ignored. All material and
+  IBC inputs/outputs use comma-separated `.csv` with frequency in **Hz**,
+  matching FREDDY. Space/tab-separated and headerless files are rejected.
 - Frequencies are positive, unique, and expressed in Hz.
 - Every data field must be finite and numeric; extra columns are rejected.
-- Keep CSV files free of comment rows. Blank data rows are allowed.
+- UTF-8 with or without a BOM is accepted. Blank lines and full-line `#`
+  comments are allowed. Do not add trailing inline comments to data rows.
 - Real and imaginary parts are interpolated linearly with frequency.
 - Extrapolation is forbidden. Every solve frequency must lie inside the
   table's characterized frequency range.
 - `eps_imag` and `mu_imag` must be nonpositive; zero represents no loss in
   that property.
 - IBC resistance must remain nonnegative in every row.
-
-For example, this headerless FREDDY nominal impedance CSV is also accepted:
-
-```csv
-800000000,12.0,-4.0
-1000000000,14.0,-3.0
-1200000000,17.0,-1.0
-```
 
 These examples span **0.8-1.2 GHz**, so 1 GHz is a valid starting frequency.
 
@@ -534,41 +526,6 @@ properties: 3 0 0 50 0
 
 One flag cannot simultaneously combine a spatial taper and a frequency table.
 That would require a two-dimensional `Z(s,f)` model, which is not implemented.
-
-## Legacy `mat.<flag>` tables
-
-Legacy tables remain readable but new inputs should use explicit CSV names.
-A one-token material definition with a flag greater than 50 resolves to a
-same-directory file named `mat.<flag>`:
-
-```text
-IBCS_Resistances:
-61
-Dielectrics:
-62
-```
-
-`mat.61` is a whitespace table in GHz with no header:
-
-```text
-# frequency_GHz  resistance_ohm  reactance_ohm
-0.8 12.0 -4.0
-1.0 14.0 -3.0
-1.2 17.0 -1.0
-```
-
-`mat.62` is a whitespace table in GHz with no header:
-
-```text
-# frequency_GHz  eps_real  eps_imag  mu_real  mu_imag
-0.8 3.20 -0.040 1.0 0.0
-1.0 3.18 -0.045 1.0 0.0
-1.2 3.15 -0.052 1.0 0.0
-```
-
-Unlike CSV files, legacy whitespace tables allow `#` comments. Frequencies
-must still be positive and unique, and interpolation/extrapolation rules are
-the same as for CSV.
 
 ## TYPE 5: complete two-dielectric example
 
@@ -642,7 +599,7 @@ See [BoR conventions](BOR_CONVENTIONS.md) and
 - Reusing a flag twice in one material section.
 - Putting a CSV in another directory or writing a path instead of a basename.
 - Running outside a table's characterized frequency interval.
-- Entering GHz in a CSV frequency column; CSV uses Hz, legacy `mat.*` uses GHz.
+- Entering GHz in a CSV frequency column; all material and IBC CSVs use Hz.
 - Assuming geometry coordinates are meters without matching the driver's
   `GEOMETRY_UNITS`/API `geometry_units` setting.
 - Using disconnected primitives inside one `Segment:` instead of starting a

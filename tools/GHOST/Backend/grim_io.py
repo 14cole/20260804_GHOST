@@ -977,7 +977,7 @@ def export_result_to_dbke_csv(
     history: 'str' = '',
 ) -> 'str':
     """
-    Export 2-D scattering-width samples with an absolute dBke column.
+    Export comma-separated 2-D scattering-width samples in Hz, with a header and absolute dBke column.
 
     This format is intentionally limited to ``sigma_2d``.  A BoR result stores
     three-dimensional RCS (``sigma_3d``), whose logarithmic unit is dBsm; writing
@@ -1013,7 +1013,7 @@ def export_result_to_dbke_csv(
         ),
     )
     header = [
-        'frequency_ghz',
+        'frequency_hz',
         'theta_inc_deg',
         'theta_scat_deg',
         'rcs_linear',
@@ -1038,7 +1038,7 @@ def export_result_to_dbke_csv(
                 rcs_db = 10.0 * math.log10(max(lin, EPS))
             dbke = compute_dbke_from_linear(lin, freq_ghz, frequency_unit='GHz')
             vals = [
-                f"{freq_ghz:.12g}",
+                f"{freq_ghz * 1e9:.17g}",
                 f"{float(row.get('theta_inc_deg', 0.0)):.12g}",
                 f"{float(row.get('theta_scat_deg', 0.0)):.12g}",
                 f"{lin:.12g}",

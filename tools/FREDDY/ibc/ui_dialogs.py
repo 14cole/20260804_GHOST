@@ -135,6 +135,7 @@ class LayerDialog(QDialog):
 
         grid.addWidget(QLabel("File (0 deg / isotropic)"), 3, 0, Qt.AlignLeft)
         file0_edit = QLineEdit()
+        file0_edit.setToolTip("Comma-separated .csv with required header: frequency_hz,eps_real,eps_imag,mu_real,mu_imag. Frequency in Hz; relative epsilon and mu.")
         bind_line_edit(self.file_0deg_var, file0_edit)
         grid.addWidget(file0_edit, 3, 1)
         browse0 = QPushButton("Browse")
@@ -144,6 +145,7 @@ class LayerDialog(QDialog):
         self.lbl_90 = QLabel("File (90 deg)")
         grid.addWidget(self.lbl_90, 4, 0, Qt.AlignLeft)
         self.ent_90 = QLineEdit()
+        self.ent_90.setToolTip("Comma-separated .csv with required header: frequency_hz,eps_real,eps_imag,mu_real,mu_imag. Frequency in Hz; relative epsilon and mu.")
         bind_line_edit(self.file_90deg_var, self.ent_90)
         grid.addWidget(self.ent_90, 4, 1)
         self.btn_90 = QPushButton("Browse")
@@ -203,12 +205,12 @@ class LayerDialog(QDialog):
             widget.setEnabled(enabled)
 
     def _browse_0deg(self) -> None:
-        p = filedialog.askopenfilename(title="Select 0 deg/isotropic property file", parent=self, filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
+        p = filedialog.askopenfilename(title="Select 0 deg/isotropic property file", parent=self, filetypes=[("Material CSV (Hz)", "*.csv")])
         if p:
             self.file_0deg_var.set(p)
 
     def _browse_90deg(self) -> None:
-        p = filedialog.askopenfilename(title="Select 90 deg property file", parent=self, filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
+        p = filedialog.askopenfilename(title="Select 90 deg property file", parent=self, filetypes=[("Material CSV (Hz)", "*.csv")])
         if p:
             self.file_90deg_var.set(p)
 
@@ -445,6 +447,7 @@ class MixComponentDialog(QDialog):
 
         grid.addWidget(QLabel("Property file"), 1, 0, Qt.AlignLeft)
         file_edit = QLineEdit()
+        file_edit.setToolTip("Comma-separated .csv with required header: frequency_hz,eps_real,eps_imag,mu_real,mu_imag. Frequency in Hz; relative epsilon and mu.")
         bind_line_edit(self.file_var, file_edit)
         grid.addWidget(file_edit, 1, 1)
         browse = QPushButton("Browse")
@@ -500,7 +503,7 @@ class MixComponentDialog(QDialog):
         outer.addWidget(buttons)
 
     def _browse(self) -> None:
-        p = filedialog.askopenfilename(title="Select property file", parent=self, filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")])
+        p = filedialog.askopenfilename(title="Select property file", parent=self, filetypes=[("Material CSV (Hz)", "*.csv")])
         if p:
             self.file_var.set(p)
 
@@ -534,7 +537,7 @@ class MixComponentDialog(QDialog):
                 raise ValueError("Density must be >= 0 (blank or 0 = unknown).")
             # Fail immediately on a bad schema/passivity convention rather
             # than waiting until a long recipe search starts.
-            read_material_table(Path(file_str), 0)
+            read_material_table(Path(file_str))
             self.result = {
                 "file": file_str,
                 "parts": parts,

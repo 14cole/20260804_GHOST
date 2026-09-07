@@ -103,7 +103,6 @@ class InverseSearchRequest:
     score_mode: str
     checkpoint: dict | None
     grid: DesignGrid
-    skiprows: int
     top_n: int
     target_freq_desc: str
     a_start: float
@@ -125,7 +124,6 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
     score_mode = request.score_mode
     checkpoint = request.checkpoint
     grid = request.grid
-    skiprows = request.skiprows
     top_n = request.top_n
     target_freq_desc = request.target_freq_desc
     a_start = request.a_start
@@ -135,7 +133,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
     from array import array
     import heapq
     identity = search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                               uncertainty_cfg, score_mode, skiprows=skiprows)
+                               uncertainty_cfg, score_mode)
     if checkpoint and checkpoint['identity'] != identity:
         raise ValueError("Inputs or material files changed. Start a new analysis instead of resuming.")
     def check_stop():
@@ -147,7 +145,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
     def get_table(path_str: str) -> MaterialTable:
         key = str(Path(path_str))
         if key not in table_cache:
-            table_cache[key] = read_table(Path(key), skiprows)
+            table_cache[key] = read_table(Path(key))
         return table_cache[key]
 
     def prepare_material_combo(
@@ -258,7 +256,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
         if not force and now - last_checkpoint < checkpoint_interval:
             return
         if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                           uncertainty_cfg, score_mode, skiprows=skiprows) != identity:
+                           uncertainty_cfg, score_mode) != identity:
             raise ValueError('Material files changed during the analysis. Run again with stable inputs.')
         checkpoint_callback(dict(identity=identity, score_rows=score_rows,
                                  next_index=next_index, total=grid.total,
@@ -319,7 +317,7 @@ def run_inverse_search(request: InverseSearchRequest, *, stop_requested, progres
         inverse_samples = []
     completed['plots_complete'] = len(inverse_samples) == len(top_candidates)
     if search_identity(layer_snapshot, target_freqs, target_angles, wave_pol,
-                       uncertainty_cfg, score_mode, skiprows=skiprows) != identity:
+                       uncertainty_cfg, score_mode) != identity:
         raise ValueError("Material files changed during the analysis. Run again with stable inputs.")
     complete = next_index == grid.total
     publish_checkpoint(force=True, plots_complete=completed['plots_complete'])
@@ -420,7 +418,7 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
             raise ValueError(f"Material {index}: property file is required.")
         key = str(Path(path))
         if key not in cache:
-            cache[key] = read_table(Path(key), 0)
+            cache[key] = read_table(Path(key))
         comps.append({**component, "file": key, "table": cache[key]})
 
     base_components = [

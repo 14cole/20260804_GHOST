@@ -196,7 +196,7 @@ def point_pattern_convention_metadata() -> 'Dict[str, str]':
 def geometry_input_fingerprint(path: 'str', geometry_units: 'str') -> 'str':
     """SHA-256 of all inputs that can change one geometry solve.
 
-    A .geo may refer to explicit CSV (or legacy ``mat.<flag>``) files beside it, and
+    A .geo may refer to headered CSV files in Hz beside it, and
     the same coordinates mean different physical sizes under different unit
     settings.  Body caches must bind to all three: geometry bytes, every
     sidecar material table, and the declared units.

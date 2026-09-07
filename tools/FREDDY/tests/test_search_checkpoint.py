@@ -70,7 +70,7 @@ class SearchCheckpointTests(unittest.TestCase):
         layers = [LayerConfig(0., False, '', '', 0., is_sheet=True, sheet_resistance=100.,
                               inv_rs_min=100., inv_rs_max=500., inv_rs_accuracy=100.)]
         request = InverseSearchRequest(layers, [1.], [0.], 'te', UncertaintyConfig(False, 0., 0., 0.),
-                                       'Worst case', None, DesignGrid(layers), 0, 3,
+                                       'Worst case', None, DesignGrid(layers), 3,
                                        '1 GHz', 0., 0., False)
         calls = []
         def score(_freq, _angle, layers, *_args):
@@ -89,7 +89,7 @@ class SearchCheckpointTests(unittest.TestCase):
                                            compute_metrics=plots)
         self.assertEqual(calls, [100., 200., 300., 400., 500.])
         self.assertEqual(completed['next_index'], 5)
-        for changed in (replace(resumed, target_freqs=[2.]), replace(resumed, skiprows=1)):
+        for changed in (replace(resumed, target_freqs=[2.]), replace(resumed, wave_pol='tm')):
             with self.assertRaisesRegex(ValueError, 'Inputs or material files changed'):
                 run_inverse_search(changed, stop_requested=lambda: False,
                                    progress=lambda *_: None, score_candidate=score)

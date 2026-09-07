@@ -44,7 +44,7 @@ from feature_family_validation import study_template
 layer = LoadedLayer(.000762, False, 0., MaterialTable([1.,18.], [4-.1j]*2, [1.]*2), None)
 frequencies = [1., 9.5, 18.]
 zs = compute_stack_impedance_many(frequencies, [layer], 'pec')
-write_output(Path(sys.argv[1]), [(f,z.real,z.imag) for f,z in zip(frequencies,zs)], True)
+write_output(Path(sys.argv[1]), [(f,z.real,z.imag) for f,z in zip(frequencies,zs)])
 report = assess_scalar_coating(frequencies, [layer])
 assert not report['finite_body_accuracy_certified']
 assert interference_metrics(1+0j, [-1+0j])['sigma_total'] == 0

@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass
 import numpy as np
 from thin_sheet import ThinLayerDefinition
-from geometry_io import is_legacy_tabulated_row, material_filename_from_row
+from geometry_io import material_filename_from_row
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 from rcs_constants import (
     C0,
@@ -103,7 +103,7 @@ class PanelCoupledInfo:
     bc_kind: 'str'
     # Surface impedance Z_s for Leontovich IBC, stored exactly as entered
     # (no sign conversion happens anywhere: `MaterialLibrary.from_entries`
-    # and `_load_impedance_table` pass values through verbatim).  Z_s uses
+    # and `_load_impedance_csv` pass values through verbatim).  Z_s uses
     # the standard physics convention E_t = Z_s * (n_out x H) with n_out
     # pointing away from the conductor; `_surface_robin_alpha` converts it
     # to the Robin coefficient under the solver's stored-normal convention
@@ -274,10 +274,6 @@ class MaterialLibrary:
                 path = _resolve_material_file(base_dir, filename)
                 impedance_models[flag] = _load_impedance_csv(path)
                 continue
-            if is_legacy_tabulated_row(row):
-                path = _resolve_mat_file(base_dir, flag)
-                impedance_models[flag] = _load_impedance_table(path)
-                continue
 
             # Inline format (6 tokens including flag):
             #   flag  <kind>  R_start  X_start  R_end  X_end
@@ -321,10 +317,6 @@ class MaterialLibrary:
                     )
                 path = _resolve_material_file(base_dir, filename)
                 dielectric_models[flag] = _load_dielectric_csv(path)
-                continue
-            if is_legacy_tabulated_row(row):
-                path = _resolve_mat_file(base_dir, flag)
-                dielectric_models[flag] = _load_dielectric_table(path)
                 continue
             if len(row) != 5 or any(
                     str(token).strip() == "" for token in row):
@@ -556,13 +548,6 @@ def _validate_passive_medium(
     return eps_eval, mu_eval
 
 
-def _resolve_mat_file(base_dir: 'str', flag: 'int') -> 'str':
-    """Resolve a legacy mat.<flag> relative to the geometry directory."""
-
-    name = f"mat.{flag}"
-    return _resolve_material_file(base_dir, name)
-
-
 def _resolve_material_file(base_dir: 'str', filename: 'str') -> 'str':
     """Resolve a validated material sidecar in the geometry directory only."""
 
@@ -600,146 +585,61 @@ def _material_base_dir_for_snapshot(
     return os.path.abspath(os.getcwd())
 
 
-def _read_numeric_rows(path: 'str', expected_columns: 'int') -> 'List[List[float]]':
-    """Read a strict material table and return rows sorted by frequency.
-
-    Every non-comment row must have exactly ``expected_columns`` finite numeric
-    fields.  Frequencies must be positive and unique.  A malformed row must
-    never disappear silently: doing so can change an intended dispersion model
-    into a different, apparently valid one.
-    """
-
-    rows: 'List[List[float]]' = []
-    with open(path, "r") as f:
-        for lineno, raw in enumerate(f, start=1):
-            line = raw.split("#", 1)[0].strip()
-            if not line:
-                continue
-            tokens = line.split()
-            if len(tokens) != expected_columns:
-                raise ValueError(
-                    f"Material file '{path}' line {lineno} must contain exactly "
-                    f"{expected_columns} numeric columns; found {len(tokens)}."
-                )
-            try:
-                parsed = [float(token) for token in tokens]
-            except ValueError as exc:
-                raise ValueError(
-                    f"Material file '{path}' line {lineno} contains a "
-                    f"non-numeric value."
-                ) from exc
-            if not all(math.isfinite(v) for v in parsed):
-                raise ValueError(
-                    f"Material file '{path}' line {lineno} contains non-finite "
-                    f"numeric value(s): {tokens}."
-                )
-            if parsed[0] <= 0.0:
-                raise ValueError(
-                    f"Material file '{path}' line {lineno} has non-positive "
-                    f"frequency {parsed[0]:g} GHz."
-                )
-            rows.append(parsed)
-    if not rows:
-        raise ValueError(f"No numeric material rows found in {path}")
-    rows.sort(key=lambda row: row[0])
-    for previous, current in zip(rows, rows[1:]):
-        if current[0] == previous[0]:
-            raise ValueError(
-                f"Material file '{path}' contains duplicate frequency "
-                f"{current[0]:g} GHz."
-            )
-    return rows
-
-def _load_impedance_table(path: 'str') -> 'ComplexTable':
-    """Load frequency -> complex impedance table: f(GHz) z_real z_imag."""
-
-    rows = _read_numeric_rows(path, 3)
-    freqs = np.asarray([r[0] for r in rows], dtype=float)
-    vals = np.asarray([complex(r[1], r[2]) for r in rows], dtype=np.complex128)
-    for row_index, value in enumerate(vals, start=1):
-        _validate_passive_surface_impedance(
-            value, f"Impedance table '{path}' data row {row_index}"
-        )
-    return ComplexTable(freqs_ghz=freqs, values=vals)
-
-def _load_dielectric_table(path: 'str') -> 'MediumTable':
-    """Load frequency -> (eps, mu) table: f eps_r eps_i mu_r mu_i.
-
-    Imaginary parts are used as entered (exp(+j*omega*t) convention):
-    lossy media use NEGATIVE eps''/mu'' columns in the mat.<N> file.
-    """
-
-    rows = _read_numeric_rows(path, 5)
-    freqs = np.asarray([r[0] for r in rows], dtype=float)
-    eps_vals = np.asarray([complex(r[1], r[2]) for r in rows], dtype=np.complex128)
-    mu_vals = np.asarray([complex(r[3], r[4]) for r in rows], dtype=np.complex128)
-    for row_index, (eps, mu) in enumerate(zip(eps_vals, mu_vals), start=1):
-        _validate_passive_medium(
-            eps, mu, f"Dielectric table '{path}' data row {row_index}"
-        )
-    return MediumTable(freqs_ghz=freqs, eps_values=eps_vals, mu_values=mu_vals)
-
-
 def _read_csv_numeric_rows(
-    path: 'str',
-    expected_header: 'List[str]',
+    path: 'str', expected_header: 'List[str]'
 ) -> 'List[List[float]]':
-    """Read a nominal material CSV in Hz, with or without FREDDY's header."""
+    """Read a headered, comma-separated material/IBC CSV with frequency in Hz.
 
+    GHOST and FREDDY accept the same UTF-8 CSV contract: an optional BOM,
+    blank lines and full-line # comments, exact headers (cell whitespace is
+    ignored), and finite numeric data with positive, unique frequencies.
+    """
+    if not str(path).lower().endswith(".csv"):
+        raise ValueError(f"Material/IBC file must use the .csv extension: {path}")
     rows: 'List[List[float]]' = []
+    header_found = False
     with open(path, "r", encoding="utf-8-sig", newline="") as csv_file:
-        reader = csv.reader(csv_file)
-        first_row = True
-        for raw_row in reader:
-            lineno = reader.line_num
-            if not raw_row or all(not str(value).strip() for value in raw_row):
+        for lineno, raw_line in enumerate(csv_file, start=1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
                 continue
-            if first_row:
-                first_row = False
-                header = [str(value).strip().lower() for value in raw_row]
-                if header == expected_header:
-                    continue
-                try:
-                    [float(value) for value in raw_row]
-                except ValueError as exc:
+            try:
+                parts = [part.strip() for part in next(csv.reader([raw_line], strict=True))]
+            except csv.Error as exc:
+                raise ValueError(f"{path}: line {lineno} contains invalid CSV: {exc}") from exc
+            if not header_found:
+                if parts != expected_header:
                     raise ValueError(
-                        f"CSV material file '{path}' must have header "
-                        f"{','.join(expected_header)} or contain headerless numeric rows in Hz; "
-                        f"found {','.join(header)}."
-                    ) from exc
-            if len(raw_row) != len(expected_header):
+                        f"{path}: line {lineno} must have comma-separated header "
+                        f"{','.join(expected_header)} (frequency in Hz); "
+                        f"found {','.join(parts)}."
+                    )
+                header_found = True
+                continue
+            if len(parts) != len(expected_header):
                 raise ValueError(
-                    f"CSV material file '{path}' line {lineno} must contain "
-                    f"exactly {len(expected_header)} columns; found "
-                    f"{len(raw_row)}."
+                    f"{path}: line {lineno} must contain exactly "
+                    f"{len(expected_header)} comma-separated columns; found {len(parts)}."
                 )
             try:
-                parsed = [float(str(value).strip()) for value in raw_row]
+                values = [float(part) for part in parts]
             except ValueError as exc:
+                raise ValueError(f"{path}: line {lineno} contains a non-numeric value.") from exc
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError(f"{path}: line {lineno} contains a non-finite value.")
+            if values[0] <= 0:
                 raise ValueError(
-                    f"CSV material file '{path}' line {lineno} contains a "
-                    "non-numeric value."
-                ) from exc
-            if not all(math.isfinite(value) for value in parsed):
-                raise ValueError(
-                    f"CSV material file '{path}' line {lineno} contains "
-                    "non-finite numeric value(s)."
+                    f"{path}: line {lineno} has non-positive frequency {values[0]:g} Hz."
                 )
-            if parsed[0] <= 0.0:
-                raise ValueError(
-                    f"CSV material file '{path}' line {lineno} has "
-                    f"non-positive frequency {parsed[0]:g} Hz."
-                )
-            rows.append(parsed)
+            rows.append(values)
+    if not header_found:
+        raise ValueError(f"{path}: missing required header {','.join(expected_header)}.")
     if not rows:
-        raise ValueError(f"No numeric material rows found in {path}")
+        raise ValueError(f"{path}: no material data rows found after the header.")
     rows.sort(key=lambda row: row[0])
     for previous, current in zip(rows, rows[1:]):
         if current[0] == previous[0]:
-            raise ValueError(
-                f"CSV material file '{path}' contains duplicate frequency "
-                f"{current[0]:g} Hz."
-            )
+            raise ValueError(f"{path}: duplicate frequency {current[0]:g} Hz.")
     return rows
 
 
@@ -750,7 +650,7 @@ def _load_impedance_csv(path: 'str') -> 'ComplexTable':
         path,
         ["frequency_hz", "resistance_ohm", "reactance_ohm"],
     )
-    freqs = np.asarray([row[0] * 1.0e-9 for row in rows], dtype=float)
+    freqs = np.asarray([row[0] / 1.0e9 for row in rows], dtype=float)
     values = np.asarray(
         [complex(row[1], row[2]) for row in rows],
         dtype=np.complex128,
@@ -769,7 +669,7 @@ def _load_dielectric_csv(path: 'str') -> 'MediumTable':
         path,
         ["frequency_hz", "eps_real", "eps_imag", "mu_real", "mu_imag"],
     )
-    freqs = np.asarray([row[0] * 1.0e-9 for row in rows], dtype=float)
+    freqs = np.asarray([row[0] / 1.0e9 for row in rows], dtype=float)
     eps_values = np.asarray(
         [complex(row[1], row[2]) for row in rows],
         dtype=np.complex128,

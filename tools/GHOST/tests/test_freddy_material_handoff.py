@@ -100,7 +100,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
         warning.assert_called_once()
 
     @mock.patch("geometry_tab.QMessageBox.information")
-    def test_actual_headerless_freddy_exports_attach_to_geometry(self, _information):
+    def test_actual_freddy_exports_attach_to_geometry(self, _information):
         freddy = Path(__file__).resolve().parents[2]/"FREDDY"
         if str(freddy) not in sys.path:
             sys.path.insert(0, str(freddy))
@@ -110,10 +110,31 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             root = Path(directory)
             self._saved_geometry(root)
             ibc, medium = root/"coating.csv", root/"dielectric.csv"
-            write_output(ibc, [(1., 20., -3.), (2., 30., 4.)], False)
-            write_material_table(medium, MaterialTable([1., 2.], [2-.1j, 3-.2j], [1+0j, 1+0j]), False)
+            write_output(ibc, [(1., 20., -3.), (2., 30., 4.)])
+            write_material_table(medium, MaterialTable([1., 2.], [2-.1j, 3-.2j], [1+0j, 1+0j]))
             self.assertTrue(self.tab.attach_material_artifact("ibc", str(ibc)))
             self.assertTrue(self.tab.attach_material_artifact("material", str(medium)))
+
+    @mock.patch("geometry_tab.QMessageBox.warning")
+    @mock.patch("geometry_tab.QFileDialog.getOpenFileName")
+    def test_manual_picker_validates_schema_before_adding_a_row(self, dialog, warning):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._saved_geometry(root)
+            path = root / "external.csv"
+            dialog.return_value = (str(path), "CSV Files (*.csv)")
+            for callback, table, valid, invalid in (
+                (self.tab._ibc_add_csv_row, self.tab.table_ibc, IBC_TEXT, MATERIAL_TEXT),
+                (self.tab._diel_add_csv_row, self.tab.table_diel, MATERIAL_TEXT, IBC_TEXT),
+            ):
+                with self.subTest(callback=callback.__name__):
+                    path.write_text(invalid, encoding="utf-8")
+                    callback()
+                    self.assertEqual(table.rowCount(), 0)
+                    self.assertIn("Invalid Material CSV", warning.call_args.args)
+                    path.write_text(valid, encoding="utf-8")
+                    callback()
+                    self.assertEqual(self.tab._read_small_table(table), [["1", path.name]])
 
     @mock.patch("geometry_tab.QMessageBox.information")
     def test_nominal_ibc_is_copied_and_added_to_ibc_table(

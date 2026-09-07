@@ -129,7 +129,7 @@ def expected_ibc_digest(frequencies, impedance):
             # The export writer opens a native text stream (newline=None).
             digest.update(text.replace('\n', os.linesep).encode('utf-8'))
     rows = ((f, z.real, z.imag) for f, z in zip(frequencies, impedance))
-    _write_impedance_rows(HashStream(), rows, True)
+    _write_impedance_rows(HashStream(), rows)
     return digest.hexdigest()
 
 

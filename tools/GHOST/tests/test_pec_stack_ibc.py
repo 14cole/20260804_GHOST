@@ -26,7 +26,7 @@ class PecStackHandoffTests(unittest.TestCase):
         impedance=compute_stack_impedance_many(frequencies,[layer],'pec')
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)
-            write_output(root/'coating.csv',[(f,z.real,z.imag) for f,z in zip(frequencies,impedance)],True)
+            write_output(root/'coating.csv',[(f,z.real,z.imag) for f,z in zip(frequencies,impedance)])
             radius=.006
             circle={'segments':[_circle_segment(radius,64,2,ibc=1)],'ibcs':[['1','coating.csv']],'dielectrics':[]}
             angle=np.linspace(0.,np.pi,33)

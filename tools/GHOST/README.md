@@ -206,3 +206,11 @@ From this folder:
 ```powershell
 py -m unittest discover -s tests -p "test*.py" -v
 ```
+
+## Material and IBC files
+
+Use headered, comma-separated `.csv` files with frequency in Hz, following the
+[shared GHOST/FREDDY file format](../../MATERIAL_CSV_FORMAT.md). FREDDY material
+and nominal IBC exports can be used directly. The geometry editor validates
+CSV selections before adding them. Space/tab-separated tables, headerless
+CSVs, and implicit `mat.<flag>` references are not accepted.
