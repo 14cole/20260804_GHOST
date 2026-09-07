@@ -460,7 +460,7 @@ class ReleaseBuilderTests(unittest.TestCase):
             mock.patch.object(build_release, "_validate_utf8_payload"),
             mock.patch.object(build_release, "_validate_forbidden_terms"),
             mock.patch.object(build_release, "_validate_dependency_lock"),
-            mock.patch.object(build_release, "collect_diagnostics", return_value=[diagnostic]),
+            mock.patch.object(build_release, "_payload_diagnostics", return_value=[diagnostic]),
             mock.patch.object(build_release, "startup_exit_code", return_value=0),
         ):
             with self.assertRaisesRegex(build_release.ReleaseBuildError, "Native acceleration"):
@@ -486,7 +486,7 @@ class ReleaseBuilderTests(unittest.TestCase):
             mock.patch.object(build_release, "_validate_dependency_lock"),
             mock.patch.object(
                 build_release,
-                "collect_diagnostics",
+                "_payload_diagnostics",
                 return_value=diagnostics,
             ),
             mock.patch.object(
@@ -506,6 +506,45 @@ class ReleaseBuilderTests(unittest.TestCase):
         self.assertIn("GHOST local-driver integration", names)
         self.assertIn("GHOST ASCII-transfer compatibility", names)
         self.assertEqual(tuple(names), report.tests)
+
+    def test_acceptance_uses_staged_tree_and_native_library_is_in_all_manifests(self):
+        native_name = 'tools/GHOST/Backend/bor_stream_kernel.windows-amd64.dll'
+        visited = []
+        def compile_native(root, policy):
+            self.assertNotEqual(root, self.source)
+            self.assertEqual(policy, 'require')
+            library = root / native_name
+            library.write_bytes(b'test native library')
+            digest, size = build_release._hash_file(library)
+            return (build_release.FileRecord(native_name, size, digest),)
+        def gates(root, files, *, native_policy):
+            visited.append(root)
+            self.assertTrue((root / native_name).is_file())
+            (root / 'generated-cache.pyc').write_bytes(b'not a release file')
+            return build_release.AcceptanceReport(('staged tests',), 'pass', 'pass', 'pass', 'pass', native_policy, 'native_bor=PASS')
+        with mock.patch.object(build_release, '_prepare_release_native', side_effect=compile_native), \
+             mock.patch.object(build_release, 'run_acceptance_gates', side_effect=gates):
+            result = build_release.build_release(self.source, self.root / 'release',
+                                                source_inventory=self.inventory, native_policy='require')
+        self.assertEqual(len(visited), 1)
+        self.assertNotEqual(visited[0], self.source)
+        output = self.root / 'release' / 'GRIM-7.8.9'
+        self.assertTrue((output / native_name).is_file())
+        self.assertFalse((output / 'generated-cache.pyc').exists())
+        self.assertIn(native_name, _manifest_entries((output / 'SHA256SUMS.txt').read_text()))
+        info = json.loads((output / 'BUILD-INFO.json').read_text())
+        self.assertEqual(info['generated_files'][0]['sha256'], _sha256(output / native_name))
+        with zipfile.ZipFile(self.root / 'release' / 'GRIM-7.8.9.zip') as archive:
+            self.assertIn('GRIM-7.8.9/' + native_name, archive.namelist())
+            self.assertNotIn('GRIM-7.8.9/generated-cache.pyc', archive.namelist())
+
+    def test_required_native_compile_failure_does_not_publish(self):
+        failed = SimpleNamespace(returncode=1, stdout='', stderr='compiler unavailable')
+        with mock.patch.object(build_release.subprocess, 'run', return_value=failed):
+            with self.assertRaisesRegex(build_release.ReleaseBuildError, 'Native acceleration build failed'):
+                build_release._prepare_release_native(self.source, 'require')
+            self.assertEqual(build_release._prepare_release_native(self.source, 'warn'), ())
+            self.assertEqual(build_release._prepare_release_native(self.source, 'ignore'), ())
 
     def test_dependency_lock_must_cover_new_project_dependency(self) -> None:
         (self.source / "pyproject.toml").write_text(

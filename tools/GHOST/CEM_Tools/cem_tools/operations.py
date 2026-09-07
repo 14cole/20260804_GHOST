@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
+from typing import Callable
 import uuid
 
 import numpy as np
@@ -14,6 +15,15 @@ from .grim_bridge import INPUT_EXTENSIONS, OUTPUT_EXTENSIONS, convert_dataset
 from .grim_native import join_payloads, load_grim, save_grim_atomic, subtract_payloads
 from .naming import group_stem
 from .solver_pairing import pairing_module
+
+
+ProgressCallback = Callable[[int, int, str], None]
+
+
+def _report(progress, completed: 'int', total: 'int', message: 'str') -> 'None':
+    """Report completed batch items; total zero means discovery is underway."""
+    if progress is not None:
+        progress(completed, total, message)
 
 
 @dataclass(frozen=True)
@@ -65,14 +75,26 @@ def _group_grim(folder: 'Path', remove: 'str') -> 'dict[str, list[Path]]':
     return dict(groups)
 
 
-def _join_files(paths: 'list[Path]', axis: 'str') -> 'dict':
-    payloads = [load_grim(path) for path in paths]
+def _join_files(paths: 'list[Path]', axis: 'str', status=None) -> 'dict':
+    payloads = []
+    for index, path in enumerate(paths, start=1):
+        if status is not None:
+            status(f"Reading {index}/{len(paths)}: {path.name}")
+        payloads.append(load_grim(path))
+    if status is not None:
+        status("Combining samples")
     return join_payloads(payloads, axis=axis, labels=[str(path) for path in paths])
 
 
-def _join_library_group(paths: 'list[Path]') -> 'dict':
+def _join_library_group(paths: 'list[Path]', status=None) -> 'dict':
     """Join arbitrary single- or multi-pol/frequency files into one grid."""
-    payloads = [(path, load_grim(path)) for path in paths]
+    payloads = []
+    for index, path in enumerate(paths, start=1):
+        if status is not None:
+            status(f"Reading {index}/{len(paths)}: {path.name}")
+        payloads.append((path, load_grim(path)))
+    if status is not None:
+        status("Combining input samples")
     frequency_buckets: 'dict[tuple[float, ...], list[tuple[Path, dict]]]' = defaultdict(list)
     for path, payload in payloads:
         key = tuple(np.asarray(payload["frequencies"], dtype=float).tolist())
@@ -123,16 +145,24 @@ def _concatenate(
     axis: 'str',
     remove: 'str',
     overwrite: 'bool',
+    progress: 'ProgressCallback | None' = None,
 ) -> 'BatchResult':
+    _report(progress, 0, 0, "Scanning input files")
     source = _directory(input_dir)
     destination = _directory(output_dir, create=True)
     _require_separate_output(destination, source)
     written = []
-    for stem, paths in _group_grim(source, remove).items():
-        payload = _join_files(paths, axis)
+    groups = _group_grim(source, remove)
+    total = len(groups)
+    for completed, (stem, paths) in enumerate(groups.items()):
+        def status(message):
+            _report(progress, completed, total, f"{stem}: {message}")
+        payload = _join_files(paths, axis, status=status)
+        status(f"Writing {stem}.grim")
         written.append(
             save_grim_atomic(payload, destination / f"{stem}.grim", overwrite=overwrite)
         )
+        _report(progress, completed + 1, total, f"Saved {stem}.grim")
     return BatchResult(tuple(written))
 
 
@@ -141,10 +171,11 @@ def concatenate_polarizations(
     output_dir: 'str | os.PathLike[str]',
     *,
     overwrite: 'bool' = False,
+    progress: 'ProgressCallback | None' = None,
 ) -> 'BatchResult':
     return _concatenate(
         input_dir, output_dir, axis="polarizations",
-        remove="polarization", overwrite=overwrite,
+        remove="polarization", overwrite=overwrite, progress=progress,
     )
 
 
@@ -153,10 +184,11 @@ def concatenate_frequencies(
     output_dir: 'str | os.PathLike[str]',
     *,
     overwrite: 'bool' = False,
+    progress: 'ProgressCallback | None' = None,
 ) -> 'BatchResult':
     return _concatenate(
         input_dir, output_dir, axis="frequencies",
-        remove="frequency", overwrite=overwrite,
+        remove="frequency", overwrite=overwrite, progress=progress,
     )
 
 
@@ -166,8 +198,10 @@ def subtract_datasets(
     output_dir: 'str | os.PathLike[str]',
     *,
     overwrite: 'bool' = False,
+    progress: 'ProgressCallback | None' = None,
 ) -> 'BatchResult':
     """Coherently subtract OPN - FRD using solver raw far-field amplitudes."""
+    _report(progress, 0, 0, "Scanning OPN and FRD libraries")
     opn_path = _directory(opn_dir)
     frd_path = _directory(frd_dir)
     opn = _variation_groups(opn_path, "OPN")
@@ -187,21 +221,27 @@ def subtract_datasets(
     destination = _directory(output_dir, create=True)
     _require_separate_output(destination, opn_path, frd_path)
     written = []
-    for pair in pairs:
+    total = len(pairs)
+    for completed, pair in enumerate(pairs):
         featured_variation = Path(pair["featured"]).stem
         clean_variation = Path(pair["clean"]).stem
-        featured = _join_library_group(opn[featured_variation])
-        clean = _join_library_group(frd[clean_variation])
+        def status(message):
+            _report(progress, completed, total, f"{pair['delta_name']}: {message}")
+        featured = _join_library_group(opn[featured_variation], status=status)
+        clean = _join_library_group(frd[clean_variation], status=status)
+        status("Subtracting complex fields")
         delta = subtract_payloads(
             featured, clean,
             featured_label=f"OPN/{featured_variation}",
             clean_label=f"FRD/{clean_variation}",
         )
+        status("Writing delta")
         written.append(
             save_grim_atomic(
                 delta, destination / pair["delta_name"], overwrite=overwrite
             )
         )
+        _report(progress, completed + 1, total, f"Saved {pair['delta_name']}")
     warnings = tuple(
         f"{Path(item['path']).name}: {item['reason']}" for item in unmatched
     )
@@ -216,7 +256,9 @@ def rename_files(
     *,
     in_place: 'bool' = False,
     overwrite: 'bool' = False,
+    progress: 'ProgressCallback | None' = None,
 ) -> 'BatchResult':
+    _report(progress, 0, 0, "Checking filenames and destinations")
     source = _directory(input_dir)
     if not keyword:
         raise CemToolError("rename keyword cannot be empty")
@@ -234,23 +276,30 @@ def rename_files(
         if target.exists() and target.resolve() not in source_set and not overwrite:
             raise CemToolError(f"output exists: {target}")
 
+    total = len(mappings)
+    _report(progress, 0, total, f"{total} matching files")
     written: 'list[Path]' = []
     if not in_place:
-        for source_path, target in mappings:
+        for completed, (source_path, target) in enumerate(mappings):
+            _report(progress, completed, total, f"Copying {source_path.name} to {target.name}")
             shutil.copy2(source_path, target)
             written.append(target)
+            _report(progress, completed + 1, total, f"Saved {target.name}")
     else:
         staged: 'list[tuple[Path, Path]]' = []
         try:
-            for source_path, target in mappings:
+            for index, (source_path, target) in enumerate(mappings, start=1):
+                _report(progress, 0, total, f"Preparing rename {index}/{total}: {source_path.name}")
                 temporary = source / f".cemtools-rename-{uuid.uuid4().hex}"
                 os.replace(source_path, temporary)
                 staged.append((temporary, target))
-            for temporary, target in staged:
+            for completed, (temporary, target) in enumerate(staged):
+                _report(progress, completed, total, f"Renaming to {target.name}")
                 if target.exists() and overwrite:
                     target.unlink()
                 os.replace(temporary, target)
                 written.append(target)
+                _report(progress, completed + 1, total, f"Renamed {target.name}")
         except Exception:
             for temporary, target in staged:
                 if temporary.exists():
@@ -268,7 +317,9 @@ def convert_files(
     extension: 'str',
     *,
     overwrite: 'bool' = False,
+    progress: 'ProgressCallback | None' = None,
 ) -> 'BatchResult':
+    _report(progress, 0, 0, "Scanning input datasets")
     source = _directory(input_dir)
     destination = _directory(output_dir, create=True)
     _require_separate_output(destination, source)
@@ -283,6 +334,9 @@ def convert_files(
     if not files:
         raise CemToolError(f"no supported dataset files found in {source}")
     written: 'list[Path]' = []
-    for path in files:
+    total = len(files)
+    for completed, path in enumerate(files):
+        _report(progress, completed, total, f"Converting {path.name} to {normalized}")
         written.extend(convert_dataset(path, destination, normalized, overwrite=overwrite))
+        _report(progress, completed + 1, total, f"Converted {path.name}")
     return BatchResult(tuple(written))

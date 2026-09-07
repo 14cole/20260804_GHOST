@@ -1025,7 +1025,9 @@ if GUI_AVAILABLE:
             outer.setSpacing(6)
 
             intro = QLabel(
-                "Choose a body, add point or line features, then review and assemble.",
+                "Choose a body, add point or line features, then review and assemble. "
+                "Use feature responses only within their reference-validated geometry, "
+                "material and radar range; a placement preview does not establish RCS accuracy.",
                 self,
             )
             intro.setWordWrap(True)

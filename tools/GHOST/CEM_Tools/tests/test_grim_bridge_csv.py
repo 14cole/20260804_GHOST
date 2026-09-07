@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import subprocess
+from unittest import mock
 
 import numpy as np
 
@@ -17,6 +19,40 @@ from cem_tools.grim_bridge import (
 
 
 class GrimBridgeCsvTest(unittest.TestCase):
+    def test_source_conversion_without_editable_install_paths(self):
+        source = Path(__file__).resolve().parents[1]
+        code = """
+import sys
+from pathlib import Path
+sys.path[:] = [p for p in sys.path if Path(p).name != 'GRIM_Revised_2']
+sys.path.insert(0, sys.argv[1])
+from cem_tools.grim_bridge import _rcs_grid_class
+import numpy as np
+grid = _rcs_grid_class()([0.], [0.], [1.], ['VV'], rcs_power=np.ones((1,1,1,1)))
+assert not grid.audit()['errors']
+assert _rcs_grid_class() is type(grid)
+"""
+        completed = subprocess.run([sys.executable, '-I', '-c', code, str(source)],
+                                   capture_output=True, text=True, timeout=60)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_failed_import_can_be_retried_without_partial_module(self):
+        from cem_tools import grim_bridge
+        name = '_cem_tools_external_grim_dataset'
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop(name, None)
+            with mock.patch.object(grim_bridge.importlib.util, 'spec_from_file_location') as factory:
+                import types
+                loader = mock.Mock()
+                loader.create_module.return_value = types.ModuleType(name)
+                loader.exec_module.side_effect = RuntimeError('interrupted import')
+                from importlib.machinery import ModuleSpec
+                factory.return_value = ModuleSpec(name, loader)
+                with self.assertRaisesRegex(RuntimeError, 'interrupted import'):
+                    _rcs_grid_class()
+            self.assertNotIn(name, sys.modules)
+            self.assertEqual(_rcs_grid_class().__name__, 'RcsGrid')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

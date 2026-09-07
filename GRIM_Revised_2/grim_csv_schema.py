@@ -102,7 +102,7 @@ def has_flat_csv_signature(path):
 
 def _canonical_frequency_unit(value):
     aliases = {"hz": "Hz", "khz": "kHz", "mhz": "MHz", "ghz": "GHz"}
-    text = str(value or "").strip().lower()
+    text = str(value or "GHz").strip().lower()
     if text not in aliases:
         raise ValueError("unsupported frequency unit {!r}".format(value))
     return aliases[text]
@@ -117,7 +117,7 @@ def _canonical_angle_unit(value):
         "radian": "rad",
         "radians": "rad",
     }
-    text = str(value or "").strip().lower()
+    text = str(value or "deg").strip().lower()
     if text not in aliases:
         raise ValueError("unsupported angular unit {!r}; use deg or rad".format(value))
     return aliases[text]

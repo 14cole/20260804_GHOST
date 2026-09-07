@@ -32,7 +32,9 @@ def evaluate_mix_performance(
     thickness_scale: float = 1.0,
     eps_scale: float = 1.0,
     mu_scale: float = 1.0,
+    check_stop=lambda: None,
 ) -> dict:
+    check_stop()
     layer = LoadedLayer(
         thickness_m=thickness_in * INCH_TO_M,
         anisotropic=False,
@@ -47,6 +49,7 @@ def evaluate_mix_performance(
     grid = [[0.0 for _angle in config["angles"]] for _freq in freqs]
     all_values: list[float] = []
     for angle_index, angle_deg in enumerate(config["angles"]):
+        check_stop()
         metrics = compute_angle_metrics_many(
             freqs,
             angle_deg,
@@ -78,7 +81,9 @@ def build_mix_display(
     performance: dict | None = None,
     densities: list[float] | None = None,
     component_names: list[str] | None = None,
+    check_stop=lambda: None,
 ) -> dict:
+    check_stop()
     # Synthesize on the frequency grid selected in the Material Mix tab.
     # When a property target is given, also carry target curves and
     # per-frequency mismatch.
@@ -98,6 +103,7 @@ def build_mix_display(
     midpoint = disp_table.freq_ghz[len(disp_table.freq_ghz) // 2]
     comparison: list[dict] = []
     for candidate_rule in MIX_RULES:
+        check_stop()
         try:
             candidate_table = mix_material_tables(
                 components, candidate_rule, [midpoint]
@@ -169,6 +175,6 @@ def build_mix_display(
             )
     if performance is not None:
         out["performance"] = evaluate_mix_performance(
-            disp_table, thickness_in, performance
+            disp_table, thickness_in, performance, check_stop=check_stop
         )
     return out

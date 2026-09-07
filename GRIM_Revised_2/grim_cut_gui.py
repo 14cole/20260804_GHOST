@@ -1777,6 +1777,9 @@ class GrimCutWindow(DatasetOpsMixin, PlotOpsMixin, QMainWindow):
             btn = QToolButton(text=label)
             if role in ("hold", "auto_plot", "auto_scale", "pbp", "phase", "zoom_box", "pan"):
                 btn.setCheckable(True)
+            if role == "auto_scale":
+                btn.setChecked(tab_key == "plotting")
+                btn.setToolTip("Fit the current data after plotting. Turn off to keep fixed comparison limits.")
             plot_controls[role] = btn
             if role == "compare":
                 btn.setToolTip(

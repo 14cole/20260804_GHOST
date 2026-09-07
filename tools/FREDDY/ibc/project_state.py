@@ -241,6 +241,7 @@ class ProjectStateMixin:
             "dark_mode": self.dark_mode_var,
         }
 
+        restored_controls = {}
         for key, var in str_vars.items():
             if key in controls:
                 value = str(controls[key])
@@ -280,30 +281,34 @@ class ProjectStateMixin:
                         value = MIX_OBJECTIVE_PROPERTY
                     elif lowered.startswith("predict"):
                         value = MIX_OBJECTIVE_FORWARD
-                var.set(value)
-        for key, var in bool_vars.items():
-            if key in controls:
-                var.set(self._coerce_bool(controls[key]))
+                restored_controls[key] = value
+        restored_bools = {key: self._coerce_bool(controls[key])
+                          for key in bool_vars if key in controls}
 
         mixes = state.get("mixes", {})
         mix_components: list[dict] = []
-        if isinstance(mixes, dict):
-            raw_components = mixes.get("components", [])
-            if isinstance(raw_components, list):
-                for raw in raw_components:
-                    if isinstance(raw, dict):
-                        try:
-                            migrated = dict(raw)
-                            if migrated.get("units") != "volume_percent":
-                                # Old projects stored ambiguous relative-parts
-                                # search ranges. Preserve the recipe ratio but
-                                # reset inverse bounds to explicit 0..100 vol%.
-                                migrated["min"] = 0.0
-                                migrated["max"] = 100.0
-                                migrated["units"] = "volume_percent"
-                            mix_components.append(self._coerce_mix_component(migrated))
-                        except Exception:
-                            continue
+        if not isinstance(mixes, dict):
+            raise ValueError("Project mixes must be an object.")
+        raw_components = mixes.get("components", [])
+        if not isinstance(raw_components, list):
+            raise ValueError("Project mix components must be a list.")
+        for index, raw in enumerate(raw_components, start=1):
+            if not isinstance(raw, dict):
+                raise ValueError(f"Mix component {index}: expected an object.")
+            try:
+                migrated = dict(raw)
+                if migrated.get("units") != "volume_percent":
+                    migrated.update(min=0.0, max=100.0, units="volume_percent")
+                mix_components.append(self._coerce_mix_component(migrated))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Mix component {index}: {exc}") from exc
+
+        # Finish parsing the complete project before touching controls, layers,
+        # results or dirty-state signals. An invalid load leaves the study intact.
+        for key, value in restored_controls.items():
+            str_vars[key].set(value)
+        for key, value in restored_bools.items():
+            bool_vars[key].set(value)
 
         self.layers = loaded_layers
         self.mix_components = mix_components

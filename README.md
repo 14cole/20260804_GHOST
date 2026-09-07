@@ -7,6 +7,17 @@ solvers; FREDDY supplies planar material-stack, impedance, reflection,
 transmission, absorption, and material-mixing analysis. PPT builds uniform,
 previewed PowerPoint reports from loaded RCS datasets.
 
+Use results within their demonstrated physical scope: FREDDY predicts infinite
+planar stacks, GHOST 2-D predicts scattering width, and GHOST BoR models bodies
+of revolution. These quantities are not interchangeable. Review convergence,
+polarization, units, and material applicability before drawing conclusions.
+Assembly reconstructs a featured response from a body and characterized feature
+responses; production use requires reference validation covering those features
+and their actual parameter range. The 13 new corner/termination/curvature/pair
+studies still await independent full-wave artifacts. Their templates and passing
+software tests do not establish feature-family accuracy. See
+[the validation scope](tools/GHOST/geometry_tests/feature_family_studies/README.md).
+
 Length inputs and displays default to inches: GHOST/Runs geometry, thin-layer
 thickness, FREDDY thickness sweeps, ISAR range axes, Assembly display/tolerance
 controls, and calibration range offsets. Saved unit selections are preserved.
@@ -81,9 +92,15 @@ installed at the reviewed version, strict UTF-8,
 prohibited release terms, startup diagnostics, the GRIM/GHOST/FREDDY unit
 tests, the separate GHOST CEM-tools suite, the standalone GHOST HPC-scheduling
 and local-driver integration tests, the GHOST ASCII-transfer check,
-and the selected native-acceleration policy. Missing native acceleration is a
-recorded warning by default; pass `--native-policy require` for a
-performance-ready build that must contain the matching BoR native library.
+and the selected native-acceleration policy. Source is first copied into a staging
+folder, and acceptance runs against that payload. The builder compiles the
+reviewed BoR C source there and checks it in a fresh interpreter. A compiler is
+required for `--native-policy require`; compilation or loading failure blocks
+publication. The default `warn` policy attempts the same build and records a
+NumPy fallback if compilation is unavailable. `ignore` deliberately packages the
+fallback without building native code. Locally cached binaries are never copied.
+Generated libraries are included in the ZIP, checksum manifests, and build info;
+test caches and generated test outputs are excluded from the delivered folder.
 
 The ZIP keeps the complete GRIM, GHOST, and FREDDY tracked source layout,
 assets, and launchers while omitting Git data, untracked files, virtual

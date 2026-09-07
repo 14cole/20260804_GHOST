@@ -58,8 +58,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
             'thk_start': '.04', 'thk_stop': '.12', 'thk_step': '.04',
             'thk_angle': '0', 'output': str(self.folder / 'imp.csv'),
             'thk_output': str(self.folder / 'thickness.csv'), 'angle_output': str(self.folder / 'angle.csv'),
-            'ibc_batch_output_dir': str(self.folder), 'ibc_batch_start': '40', 'ibc_batch_stop': '120',
-            'ibc_batch_step': '40', 'ibc_batch_unit': 'mil',
+            'ibc_batch_output_dir': str(self.folder), 'ibc_batch_start': '.04', 'ibc_batch_stop': '.12',
+            'ibc_batch_step': '.04', 'ibc_batch_unit': 'in',
             'inv_freq_mode': 'Band sweep', 'inv_target_start': '2', 'inv_target_stop': '6',
             'inv_target_step': '1', 'inv_angle_start': '0', 'inv_angle_stop': '45', 'inv_angle_step': '45',
             'inv_max_evals': '4', 'inv_top_n': '2',
@@ -198,7 +198,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
         y = np.full((len(f), 1), -2.)
         y[12345, 0] = -70.
         panel = self.ui.analysis_panels['IBC Batch']
-        panel.set_result(SweepResult(f.tolist(), [40.], 'Thickness (mil)', 'Large example', {'TE': {'metal_loss_db': y}}))
+        panel.set_result(SweepResult(f.tolist(), [.04], 'Thickness (in)', 'Large example', {'TE': {'metal_loss_db': y}}))
         line = panel.figure.axes[0].lines[0]
         self.assertLessEqual(len(line.get_xdata()), 5000)
         self.assertEqual(min(line.get_ydata()), -70.)

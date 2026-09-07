@@ -62,6 +62,38 @@ class InverseWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Inputs or material files changed'):
             self.ui._run_inverse_design(resume=True)
 
+    def test_fresh_search_preserves_loaded_checkpoint_when_first_score_fails(self):
+        from ibc.search_checkpoint import load_checkpoint
+        recovery = Path(self.temp.name) / 'original.fsearch'
+        self.ui.inverse_recovery_path.setText(str(recovery))
+        self.ui._run_inverse_design()
+        before = recovery.read_bytes()
+        with mock.patch('PySide6.QtWidgets.QFileDialog.getOpenFileName', return_value=(str(recovery), '')):
+            self.ui._load_inverse_checkpoint()
+        with mock.patch.object(self.ui, '_score_inverse_candidate', side_effect=RuntimeError('score failed')):
+            with self.assertRaisesRegex(RuntimeError, 'score failed'):
+                self.ui._run_inverse_design()
+        self.assertEqual(recovery.read_bytes(), before)
+        self.assertEqual(load_checkpoint(recovery)['next_index'], 5)
+        fresh = Path(self.ui.inverse_recovery_path.text())
+        self.assertNotEqual(fresh, recovery)
+        self.assertEqual(load_checkpoint(fresh)['next_index'], 0)
+
+    def test_loaded_checkpoint_can_be_copied_before_rebuilding_plots(self):
+        from ibc.search_checkpoint import load_checkpoint
+        recovery = Path(self.temp.name) / 'original.fsearch'
+        self.ui.inverse_recovery_path.setText(str(recovery))
+        self.ui._run_inverse_design()
+        with mock.patch('PySide6.QtWidgets.QFileDialog.getOpenFileName', return_value=(str(recovery), '')):
+            self.ui._load_inverse_checkpoint()
+        destination = recovery.with_name('copied.fsearch')
+        with mock.patch('PySide6.QtWidgets.QFileDialog.getSaveFileName', return_value=(str(destination), '')), \
+             mock.patch('PySide6.QtWidgets.QMessageBox.warning') as warning:
+            self.ui._choose_inverse_checkpoint()
+        warning.assert_not_called()
+        self.assertEqual(load_checkpoint(destination)['score_rows'], load_checkpoint(recovery)['score_rows'])
+        self.assertEqual(Path(self.ui.inverse_recovery_path.text()), destination)
+
     def test_partial_score_is_not_retained(self):
         with mock.patch.object(self.ui,'_score_inverse_candidate',side_effect=StopInverseSearch):
             self.ui._run_inverse_design()

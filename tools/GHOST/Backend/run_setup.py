@@ -101,11 +101,6 @@ class RunSetupMixin:
             self.run_lu_combo.addItem('Mixed precision + refinement', 'mixed')
             form.addRow('Accuracy target', self.run_accuracy_combo)
             form.addRow('2D LU precision', self.run_lu_combo)
-        self.run_preset_combo = QComboBox()
-        self.run_preset_combo.addItems(['Choose a run preset\u2026', 'Quick survey', 'Convergence check'])
-        self.run_preset_combo.setToolTip('Quick survey uses one base mesh. Convergence check compares meshes with tight tolerances. Both preserve your frequencies and angles.')
-        self.run_preset_combo.activated.connect(self._apply_run_preset)
-        form.addRow('Run preset', self.run_preset_combo)
         row = QWidget()
         buttons = QHBoxLayout(row)
         buttons.setContentsMargins(0,0,0,0)
@@ -132,17 +127,6 @@ class RunSetupMixin:
 
     def _setup_busy(self):
         return self.job_is_running() if self._run_setup_is_cluster else self._job_is_active()
-
-    def _apply_run_preset(self, index):
-        if index == 0 or self._setup_busy():
-            return
-        mesh = self.mesh_certification_check if self._run_setup_is_cluster else self.chk_mesh_certification
-        accuracy = self.run_accuracy_combo if self._run_setup_is_cluster else self.cmb_accuracy_target
-        lu = self.run_lu_combo if self._run_setup_is_cluster else self.cmb_lu_precision
-        mesh.setChecked(index == 2)
-        accuracy.setCurrentIndex(accuracy.findData('tight' if index == 2 else 'standard'))
-        lu.setCurrentIndex(lu.findData('double'))
-        self.run_setup_notice.setText('Survey: one base mesh, no convergence certificate.' if index == 1 else 'Convergence check: compare meshes against tight numerical tolerances; inspect the resulting quality report.')
 
     def _capture_run_setup(self):
         cluster = self._run_setup_is_cluster
@@ -194,7 +178,6 @@ class RunSetupMixin:
         (self.mesh_certification_check if cluster else self.chk_mesh_certification).setChecked(value['mesh_certification'])
         for combo,key in [((self.run_accuracy_combo if cluster else self.cmb_accuracy_target),'accuracy'), ((self.run_lu_combo if cluster else self.cmb_lu_precision),'lu_precision')]:
             combo.setCurrentIndex(combo.findData(value[key]))
-        self.run_preset_combo.setCurrentIndex(0)
         self.run_setup_notice.setText('2D setup loaded. Check geometry, dimensions, and output before running.')
 
     def _save_run_setup(self):

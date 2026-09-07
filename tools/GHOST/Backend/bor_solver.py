@@ -32,7 +32,7 @@ e^{+jk d.r} (matches the 2D solver), theta-pol (VV) / phi-pol (HH).
 import math
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from solver_metrics import active_metrics, profiled_solve, timed_stage

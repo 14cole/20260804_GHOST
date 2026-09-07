@@ -183,7 +183,9 @@ class WorkflowUpdatesTests(unittest.TestCase):
         local.edit_freq_list.setText('1, 2.75')
         local.edit_elev_list.setText('-10, 0, 90')
         local.cmb_units.setCurrentText('meters')
-        local._apply_run_preset(2)
+        local.chk_mesh_certification.setChecked(True)
+        local.cmb_accuracy_target.setCurrentIndex(local.cmb_accuracy_target.findData('tight'))
+        local.cmb_lu_precision.setCurrentIndex(local.cmb_lu_precision.findData('double'))
         value=local._capture_run_setup()
         path=self.root/'target.run.json'
         module.save_setup(path,value)

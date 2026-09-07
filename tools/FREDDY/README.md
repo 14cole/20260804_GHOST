@@ -24,6 +24,11 @@ The embedded tab and standalone window use the same authoritative code in
 this directory. Inverse Design supports **Stop and keep best**; other FREDDY
 background jobs run to completion. GRIM prevents closing while a job is running.
 
+**About & Guide** is the single home for application help, angle and polarization
+conventions, material definitions, result metrics, and the optimization guide.
+It fills the workspace without layer controls or plots. File and View actions
+remain in the menu bar.
+
 For a standalone window on Windows, double-click `Launch_FREDDY_GUI.bat` or
 run the following from this directory:
 
@@ -113,9 +118,9 @@ bounds are unwrapped about the nominal phase and can therefore lie outside
 
 Use **IBC Batch** to write one nominal solver-compatible IBC CSV for each
 requested thickness of one material layer. Choose the layer, thickness
-start/stop/step, and `in`, `mil`, or `mm`; the default 0.015-to-0.030 inch sweep
+start/stop/step, and `in` or `mm`; the default 0.015-to-0.030 inch sweep
 uses a 0.001 inch step and writes `ibc_0p015in.csv` through `ibc_0p03in.csv`.
-Saved projects retain their selected units. The Impedance frequency sweep is shared
+Saved projects retain inches or millimeters. The Impedance frequency sweep is shared
 with this mode. Every batch output is broadside and PEC-backed, and all other
 layers, material tables, and stack ordering remain unchanged.
 
@@ -185,6 +190,10 @@ scores are saved about every 30 seconds at combination boundaries and when
 scoring stops or completes. **Choose / save...** can also save an idle search.
 Reopen the matching saved project, choose **Load checkpoint...**, then
 **Resume remaining**. Clearing the recovery field disables disk saves.
+Starting a fresh analysis with an existing recovery path selects a new
+`-fresh-...fsearch` file automatically and leaves the existing file intact.
+The Recovery file field shows the new destination. A loaded checkpoint can be
+copied with **Choose / save...** before Resume rebuilds its plots.
 Recovery archives contain scores and identity checks, not a project or material
 copies; changed code, changed inputs, and corrupted scores are rejected. Plots
 are rebuilt after loading without rescoring completed combinations. Recovery
@@ -250,6 +259,19 @@ The Material Mix tab supports three related jobs:
 - Search bounded volume fractions and a specified layer thickness for a
   reflection, absorption, or transmission requirement across a frequency and
   incidence-angle grid.
+
+Recipe samples are evaluated as they are generated; at most 100 candidates are
+retained for comparison. Fixed bounds defining one recipe evaluate it once.
+The setup shows the sample budget plus up to 300 additional refinement
+evaluations per retained candidate. **Stop search** cancels sampling, refinement,
+or result preparation without publishing an incomplete result. Changing inputs
+while a search runs invalidates its eventual result.
+
+**Export selected CSV** and **Add selected as layer** use the properties,
+frequency grid, and thickness captured in the displayed result. They do not
+recalculate from material files that may have changed on disk. Recalculate
+explicitly to analyze updated material data. Project loading rejects malformed
+recipe entries before changing the open study.
 
 Performance targets can use PEC or air backing and TE or TM polarization. A
 candidate's requirement gap is evaluated at every requested frequency/angle

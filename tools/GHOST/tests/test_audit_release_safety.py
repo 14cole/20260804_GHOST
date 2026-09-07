@@ -27,6 +27,31 @@ from grim_dataset import RcsGrid  # noqa: E402
 
 
 class AuditReleaseSafetyTests(unittest.TestCase):
+    def test_staging_rejects_values_rejected_by_drivers(self):
+        import importlib
+        import driver_config
+        import hpc_common
+        for name, settings in (
+            ('run_local_bor', {'CFIE_ALPHA': 0}),
+            ('run_local_bor', {'CFIE_ALPHA': 1}),
+            ('run_local_monostatic', {'MEMORY_SAFETY': .5}),
+            ('run_hpc_monostatic', {'CLAIM_STALE_SECONDS': 1}),
+            ('run_hpc_monostatic', {'FREQUENCIES_GHZ': [1.0001, 1.0002]}),
+        ):
+            module = importlib.import_module(name)
+            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as directory:
+                destination = Path(directory) / 'driver.py'
+                with self.assertRaises(ValueError):
+                    hpc_common.configure_driver(Path(module.__file__), destination, settings)
+                self.assertFalse(destination.exists())
+                with self.assertRaises(ValueError):
+                    driver_config.validate_settings(settings, module._CONFIG_KEYS)
+
+    def test_bor_streaming_annotations_resolve(self):
+        from typing import get_type_hints
+        self.assertTrue(get_type_hints(bor_solver._plan_multisurface_assembly))
+        self.assertTrue(get_type_hints(bor_solver._MultiRegionBor.enable_streaming))
+
     def test_bor_rejects_invalid_cfie_alpha_before_geometry_work(self) -> None:
         for value in (0.0, -0.1, 1.0, 1.1, float("nan")):
             with self.subTest(value=value):

@@ -45,7 +45,7 @@ from ibc.io import (
     write_output,
 )
 from ibc.ui import (
-    ABOUT_TEXT,
+    ABOUT_GUIDE_HTML,
     APP_ACRONYM,
     APP_NAME,
     APP_TITLE,
@@ -64,7 +64,7 @@ from ibc.ui import (
 )
 
 __all__ = [
-    "ABOUT_TEXT",
+    "ABOUT_GUIDE_HTML",
     "APP_ACRONYM",
     "APP_NAME",
     "APP_TITLE",

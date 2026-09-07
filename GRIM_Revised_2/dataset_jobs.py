@@ -22,7 +22,9 @@ def _available_memory_bytes() -> int | None:
     try:
         import psutil
         return int(psutil.virtual_memory().available)
-    except (ImportError, AttributeError, OSError):
+    except Exception:
+        # Optional telemetry must not prevent loading a dataset. Use the OS
+        # probe or a conservative unknown-memory budget if psutil fails.
         pass
 
     # GRIM is commonly copied to a clean workstation where psutil is not yet

@@ -172,7 +172,10 @@ class InverseWorkflowMixin:
             path += '.fsearch'
         try:
             if self._inverse_checkpoint is not None:
-                self._ensure_inverse_result_current()
+                # A loaded checkpoint can be copied before Resume has rebuilt
+                # its plots. It already passed the checkpoint reader's checks.
+                if self._inverse_result_identity is not None:
+                    self._ensure_inverse_result_current()
                 save_checkpoint(path, self._inverse_checkpoint)
             self.inverse_recovery_path.setText(str(Path(path).resolve()))
             self.status_var.set('Recovery file selected. Complete scores are saved every 30 seconds and when the search stops.')

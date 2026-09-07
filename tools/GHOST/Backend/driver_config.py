@@ -61,6 +61,8 @@ def validate_settings(settings, allowed_keys):
                 for v in value)
             if valid:
                 valid = len(value) == len(set(value))
+                if key == 'FREQUENCIES_GHZ':
+                    valid = valid and len(value) == len({f'{v:06.3f}' for v in value})
                 value = list(value)
         elif key in TEXT_LISTS:
             valid = isinstance(value, (list, tuple)) and all(isinstance(v, str) and '\n' not in v and '\r' not in v for v in value)
@@ -74,7 +76,11 @@ def validate_settings(settings, allowed_keys):
                 if key == 'MEMORY_HEADROOM':
                     valid = 0 < value <= 1
                 elif key == 'CFIE_ALPHA':
-                    valid = 0 <= value <= 1
+                    valid = 0 < value < 1
+                elif key == 'MEMORY_SAFETY':
+                    valid = value >= 1
+                elif key == 'CLAIM_STALE_SECONDS':
+                    valid = value >= 60
                 elif key not in {'BODY_AXIS_AZ_DEG', 'BODY_AXIS_EL_DEG', 'BODY_ROLL_DEG'}:
                     valid = value > 0
         elif key in CHOICES:

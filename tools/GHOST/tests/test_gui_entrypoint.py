@@ -205,7 +205,7 @@ class TestGuiEntrypoint(unittest.TestCase):
                     mock.patch(
                         "solver_tab.QFileDialog.getSaveFileName",
                         return_value=(output, "JSON Files (*.json)"),
-                    ),
+                    ) as save_dialog,
                     mock.patch("solver_tab.QThread.start") as start,
                     mock.patch(
                         "solver_tab.compute_boundary_densities"
@@ -214,6 +214,7 @@ class TestGuiEntrypoint(unittest.TestCase):
                     solver._compute_currents()
 
                 start.assert_called_once()
+                save_dialog.assert_not_called()
                 compute.assert_not_called()
                 self.assertTrue(solver._is_computing_density)
                 self.assertFalse(solver.btn_run.isEnabled())
@@ -293,43 +294,26 @@ class TestGuiEntrypoint(unittest.TestCase):
         finally:
             workspace.close()
 
-    def test_geometry_edit_discards_staged_boundary_density_output(self):
+    def test_geometry_edit_discards_boundary_density_result_before_plotting(self):
         workspace = GhostWorkspace()
         try:
             solver = workspace.solver_tab
-            with tempfile.TemporaryDirectory() as folder:
-                output = str(Path(folder) / "densities.json")
-                # Import after BACKEND is installed on sys.path above.
-                import solver_tab
-
-                staged = solver_tab._stage_json_output(output, {"value": 1})
-                solver._active_density_run_id = 3
-                solver._density_abort_event = threading.Event()
-                solver._is_computing_density = True
-                solver._pending_density_context = {
-                    "uses_geometry_tab": True,
-                    "geometry_stale": False,
-                    "input_sha256": {},
-                    "output_path": output,
-                    "expect_output_absent": True,
-                    "expected_output_sha256": None,
-                }
-                workspace.geometry_tab.geometry_changed.emit()
-                self.assertTrue(
-                    solver._pending_density_context["geometry_stale"]
-                )
-                with mock.patch("solver_tab.QMessageBox.warning") as warning:
-                    solver._on_density_finished(
-                        3,
-                        {"element_count": 1, "formulations": "test"},
-                        staged,
-                    )
-
-                warning.assert_called_once()
-                self.assertFalse(Path(output).exists())
-                self.assertFalse(Path(staged).exists())
-                self.assertFalse(solver._is_computing_density)
-                self.assertIn("stale", solver.lbl_status.text().lower())
+            solver._active_density_run_id = 3
+            solver._density_abort_event = threading.Event()
+            solver._is_computing_density = True
+            solver._pending_density_context = {
+                "uses_geometry_tab": True, "geometry_stale": False, "input_sha256": {},
+            }
+            workspace.geometry_tab.geometry_changed.emit()
+            self.assertTrue(solver._pending_density_context["geometry_stale"])
+            with mock.patch("solver_tab.QMessageBox.warning") as warning, \
+                 mock.patch.object(solver, "_plot_boundary_densities") as plot:
+                solver._on_density_finished(3, {"channels": {}})
+            warning.assert_called_once()
+            plot.assert_not_called()
+            self.assertIsNone(solver.last_density_result)
+            self.assertFalse(solver._is_computing_density)
+            self.assertIn("stale", solver.lbl_status.text().lower())
         finally:
             workspace.close()
 
@@ -343,7 +327,7 @@ class TestGuiEntrypoint(unittest.TestCase):
             solver._density_abort_event = threading.Event()
             solver._density_abort_event.set()
             with mock.patch("solver_tab.QMessageBox.critical") as critical:
-                solver._on_density_error(8, "staging failed during shutdown")
+                solver._on_density_error(8, "calculation failed during shutdown")
 
             critical.assert_not_called()
             self.assertFalse(solver._is_computing_density)

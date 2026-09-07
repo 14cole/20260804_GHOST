@@ -31,6 +31,49 @@ class MaterialMixUiTests(unittest.TestCase):
         parent = signature.parameters["parent"]
         self.assertIsNone(parent.default)
 
+    def test_about_is_a_full_guide_and_restores_analysis_on_return(self) -> None:
+        from PySide6.QtWidgets import QLabel
+
+        workspace = ImpedanceGui()
+        try:
+            workspace.resize(1250, 850)
+            workspace.show()
+            self.app.processEvents()
+            original_state = workspace._collect_project_state()
+            self.assertEqual(
+                [action.text() for action in workspace.menuBar().actions()],
+                ["File", "View"],
+            )
+            about_index = workspace._mode_labels.index("About & Guide")
+            for source_mode in ("Material Mix", "Impedance", "Off Angle"):
+                source_index = workspace._mode_labels.index(source_mode)
+                workspace.mode_stack.setCurrentIndex(source_index)
+                self.app.processEvents()
+                results_were_visible = workspace.results_pane.isVisible()
+                with mock.patch.object(workspace, "_draw_plot_placeholder") as plot:
+                    workspace.mode_stack.setCurrentIndex(about_index)
+                    workspace._update_plot()
+                    self.app.processEvents()
+                plot.assert_not_called()
+                self.assertFalse(workspace.layers_group.isVisible())
+                self.assertFalse(workspace.results_pane.isVisible())
+                self.assertFalse(workspace.inverse_workspace_tabs.tabBar().isVisible())
+                self.assertGreater(workspace.mode_stack.width(), workspace.work_split.width() * .9)
+                workspace.mode_stack.setCurrentIndex(source_index)
+                self.app.processEvents()
+                self.assertTrue(workspace.layers_group.isVisible())
+                self.assertEqual(workspace.results_pane.isVisible(), results_were_visible)
+            guide = " ".join(
+                label.text() for label in workspace.mode_stack.widget(about_index).findChildren(QLabel)
+            )
+            for content in ("Physical scope", "Angles and polarization", "GHOST VV with FREDDY TM",
+                            "Material variables", "PEC-backed absorbed power", "Optimization quick start"):
+                self.assertIn(content, guide)
+            self.assertEqual(workspace._collect_project_state(), original_state)
+        finally:
+            workspace.deleteLater()
+            self.app.processEvents()
+
     def test_inverse_full_grid_is_repeatable_and_ignores_legacy_refinement(self):
         workspace = ImpedanceGui()
         try:
@@ -386,6 +429,8 @@ class MaterialMixUiTests(unittest.TestCase):
                 self.assertIn("skin_0p015in.csv", preview)
                 self.assertIn("skin_0p03in.csv", preview)
                 self.assertEqual(workspace.ibc_batch_unit_var.get(), "in")
+                combo = workspace.ibc_batch_unit_combo
+                self.assertEqual([combo.itemText(i) for i in range(combo.count())], ["in", "mm"])
                 plan = workspace._plan_ibc_batch()
                 self.assertAlmostEqual(plan[0].thickness_in, .015)
                 self.assertAlmostEqual(plan[-1].thickness_in, .030)
@@ -395,13 +440,15 @@ class MaterialMixUiTests(unittest.TestCase):
             workspace.deleteLater()
             self.app.processEvents()
 
-    def test_saved_batch_units_override_inch_defaults_without_rescaling_values(self) -> None:
+    def test_saved_batch_units_preserve_physical_thickness(self) -> None:
+        from ibc.batch import plan_ibc_thickness_batch
+
         workspace = ImpedanceGui()
         try:
             with tempfile.TemporaryDirectory() as folder:
-                for unit, start, stop, step in (
-                    ("mm", "0.381", "0.762", "0.0254"),
-                    ("mil", "15", "30", "1"),
+                for unit, start, stop, step, displayed_unit, displayed_values in (
+                    ("in", "0.015", "0.030", "0.001", "in", ("0.015", "0.030", "0.001")),
+                    ("mm", "0.381", "0.762", "0.0254", "mm", ("0.381", "0.762", "0.0254")),
                 ):
                     with self.subTest(unit=unit):
                         state = workspace._collect_project_state()
@@ -411,12 +458,21 @@ class MaterialMixUiTests(unittest.TestCase):
                             ibc_batch_output_dir=folder,
                         )
                         workspace._apply_project_state(state)
-                        self.assertEqual(workspace.ibc_batch_unit_var.get(), unit)
-                        self.assertEqual(workspace.ibc_batch_start_var.get(), start)
+                        self.assertEqual(state["controls"]["ibc_batch_unit"], unit)
+                        self.assertEqual(state["controls"]["ibc_batch_start"], start)
+                        self.assertEqual(workspace.ibc_batch_unit_var.get(), displayed_unit)
+                        self.assertEqual(workspace.ibc_batch_unit_combo.currentText(), displayed_unit)
+                        self.assertEqual(tuple(getattr(workspace, f"ibc_batch_{key}_var").get()
+                                               for key in ("start", "stop", "step")), displayed_values)
                         plan = workspace._plan_ibc_batch()
+                        original = plan_ibc_thickness_batch(folder, "original", start, stop, step, unit)
                         self.assertEqual(len(plan), 16)
-                        self.assertAlmostEqual(plan[0].thickness_in, .015)
-                        self.assertAlmostEqual(plan[-1].thickness_in, .030)
+                        self.assertEqual([item.thickness_in for item in plan],
+                                         [item.thickness_in for item in original])
+                        saved = workspace._collect_project_state()
+                        self.assertEqual(saved["controls"]["ibc_batch_unit"], displayed_unit)
+                        workspace._apply_project_state(saved)
+                        self.assertEqual(workspace._collect_project_state()["controls"], saved["controls"])
         finally:
             workspace.deleteLater()
             self.app.processEvents()

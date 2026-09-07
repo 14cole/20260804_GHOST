@@ -17,11 +17,12 @@ import json
 import math
 import os
 import re
-import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 try:
     from PySide6.QtCore import QObject, QStandardPaths, QThread, Qt, Signal, Slot
@@ -49,6 +50,8 @@ except ImportError:
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
+from matplotlib.collections import LineCollection
+from matplotlib.ticker import MaxNLocator
 
 from geometry_io import (
     build_geometry_snapshot,
@@ -371,83 +374,51 @@ def _verify_input_sha256(identities: 'Dict[str, str]') -> 'None':
         except (OSError, RuntimeError) as exc:
             raise RuntimeError(
                 f"Input changed during the boundary-density calculation: {path}. "
-                "No output was published."
+                "The result was not displayed."
             ) from exc
         if observed != expected:
             raise RuntimeError(
                 f"Input changed during the boundary-density calculation: {path}. "
-                "No output was published."
+                "The result was not displayed."
             )
 
 
-def _stage_json_output(
-    destination: 'str', payload: 'Dict[str, Any]'
-) -> 'str':
-    """Write and sync JSON beside its destination without publishing it."""
-
-    output = os.path.abspath(destination)
-    parent = os.path.dirname(output) or os.getcwd()
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{os.path.basename(output)}.", suffix=".tmp", dir=parent
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(
-                payload,
-                stream,
-                allow_nan=False,
-                ensure_ascii=False,
-                indent=2,
-            )
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-    return temporary
-
-
-def _publish_staged_json(
-    temporary: 'str',
-    destination: 'str',
-    *,
-    expect_absent: 'bool',
-    expected_sha256: 'Optional[str]',
-) -> 'None':
-    """Revalidate the reviewed destination, then atomically replace it."""
-
-    output = os.path.abspath(destination)
-    if expect_absent:
-        if os.path.exists(output):
-            raise RuntimeError(
-                f"{output}: output was created while boundary densities were "
-                "being computed; the newer file was not overwritten."
-            )
-    else:
-        if not os.path.isfile(output):
-            raise RuntimeError(
-                f"{output}: reviewed output was removed or replaced while "
-                "boundary densities were being computed."
-            )
-        if expected_sha256 is None or _stable_sha256(output) != expected_sha256:
-            raise RuntimeError(
-                f"{output}: output changed while boundary densities were being "
-                "computed; the newer file was not overwritten."
-            )
-    os.replace(temporary, output)
+def _boundary_density_plot_data(result):
+    """Prepare separate element segments; never join disconnected contours."""
+    units = result.get("geometry_units_in", "inches")
+    if units not in ("inches", "meters"):
+        raise ValueError(f"Unsupported density display units: {units!r}.")
+    scale, unit_label = (0.0254, "in") if units == "inches" else (1.0, "m")
+    channels = []
+    for label in ("VV", "HH"):
+        channel = result["channels"][label]
+        if channel.get("coordinate_units", "meters") != "meters":
+            raise ValueError("Boundary-density coordinates must be in meters.")
+        names = ("centers_x", "centers_y", "normals_x", "normals_y",
+                 "lengths", "density_real", "density_imag")
+        arrays = [np.asarray(channel[name], dtype=float) for name in names]
+        count = int(channel["element_count"])
+        if count < 1 or any(a.shape != (count,) or not np.all(np.isfinite(a)) for a in arrays):
+            raise ValueError(f"{label} boundary-density samples are incomplete or nonfinite.")
+        x, y, nx, ny, lengths, real, imag = arrays
+        normal_lengths = np.hypot(nx, ny)
+        if np.any(lengths <= 0) or np.any(normal_lengths <= 0):
+            raise ValueError(f"{label} boundary elements need positive lengths and valid normals.")
+        centers = np.column_stack((x, y)) / scale
+        tangents = np.column_stack((-ny, nx)) / normal_lengths[:, None]
+        half_edges = tangents * lengths[:, None] / (2 * scale)
+        density = real + 1j * imag
+        magnitude = np.abs(density)
+        phase = np.where(magnitude > 0, np.degrees(np.angle(density)), np.nan)
+        channels.append(dict(label=label, centers=centers,
+                             segments=np.stack((centers - half_edges, centers + half_edges), axis=1),
+                             real=real, imag=imag, magnitude=magnitude, phase=phase))
+    return unit_label, channels
 
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=6, height=5, dpi=100):
-        self.fig = Figure(figsize=(width, height), dpi=dpi)
+        self.fig = Figure(figsize=(width, height), dpi=dpi, layout="constrained")
         self.ax = self.fig.add_subplot(111)
         super().__init__(self.fig)
         self.setParent(parent)
@@ -627,28 +598,19 @@ class _SolveWorker(QObject):
 
 
 class _BoundaryDensityWorker(QObject):
-    """Compute and stage one immutable VV/HH density diagnostic off-thread."""
+    """Compute one captured VV/HH density diagnostic off the GUI thread."""
 
     progress = Signal(int, str)
-    finished = Signal(int, object, str)
+    finished = Signal(int, object)
     canceled = Signal(int, str)
     error = Signal(int, str)
 
     def __init__(
-        self,
-        *,
-        run_id: 'int',
-        snapshot: 'Dict[str, Any]',
-        source_path: 'str',
-        base_dir: 'str',
-        frequency_ghz: 'float',
-        elevation_deg: 'float',
-        units: 'str',
-        output_path: 'str',
-        snapshot_sha256: 'str',
-        input_sha256: 'Dict[str, str]',
-        abort_event: 'threading.Event',
-    ) -> 'None':
+        self, *, run_id: int, snapshot: Dict[str, Any], source_path: str,
+        base_dir: str, frequency_ghz: float, elevation_deg: float, units: str,
+        snapshot_sha256: str, input_sha256: Dict[str, str],
+        abort_event: threading.Event,
+    ) -> None:
         super().__init__()
         self.run_id = int(run_id)
         self.snapshot = snapshot
@@ -657,30 +619,21 @@ class _BoundaryDensityWorker(QObject):
         self.frequency_ghz = float(frequency_ghz)
         self.elevation_deg = float(elevation_deg)
         self.units = str(units)
-        self.output_path = str(output_path)
         self.snapshot_sha256 = str(snapshot_sha256)
         self.input_sha256 = dict(input_sha256)
         self.abort_event = abort_event
 
-    def _check_canceled(self) -> 'None':
+    def _check_canceled(self) -> None:
         if self.abort_event.is_set():
-            raise InterruptedError(
-                "Boundary-density calculation canceled by user."
-            )
+            raise InterruptedError("Boundary-density calculation canceled by user.")
 
     @Slot()
-    def run(self) -> 'None':
-        temporary = ""
+    def run(self) -> None:
         try:
             channels = {}
-            for index, (label, polarization) in enumerate(
-                (("VV", "TE"), ("HH", "TM"))
-            ):
+            for index, (label, polarization) in enumerate((("VV", "TE"), ("HH", "TM"))):
                 self._check_canceled()
-                self.progress.emit(
-                    index * 45,
-                    f"Computing {label} boundary-integral density...",
-                )
+                self.progress.emit(index * 45, f"Computing {label} boundary-integral density...")
                 channels[label] = compute_boundary_densities(
                     geometry_snapshot=self.snapshot,
                     frequency_ghz=self.frequency_ghz,
@@ -692,6 +645,7 @@ class _BoundaryDensityWorker(QObject):
                     abort_event=self.abort_event,
                 )
             self._check_canceled()
+            _verify_input_sha256(self.input_sha256)
             result = {
                 "polarizations": ["VV", "HH"],
                 "frequency_ghz": self.frequency_ghz,
@@ -703,42 +657,17 @@ class _BoundaryDensityWorker(QObject):
                 "input_files_sha256": dict(self.input_sha256),
                 "channels": channels,
             }
-            self.progress.emit(92, "Staging boundary-density JSON...")
-            temporary = _stage_json_output(self.output_path, result)
-            self._check_canceled()
-            summary = {
-                "element_count": int(channels["VV"].get("element_count", 0)),
-                "formulations": ", ".join(
-                    f"{label}={channels[label].get('formulation', '?')}"
-                    for label in ("VV", "HH")
-                ),
-            }
+            self.progress.emit(95, "Preparing boundary-density plots...")
         except InterruptedError as exc:
-            if temporary:
-                try:
-                    os.unlink(temporary)
-                except FileNotFoundError:
-                    pass
-            self.canceled.emit(
-                self.run_id,
-                str(exc) or "Boundary-density calculation canceled by user.",
-            )
+            self.canceled.emit(self.run_id, str(exc) or "Boundary-density calculation canceled by user.")
             return
         except Exception as exc:
-            if temporary:
-                try:
-                    os.unlink(temporary)
-                except FileNotFoundError:
-                    pass
             if self.abort_event.is_set():
-                self.canceled.emit(
-                    self.run_id,
-                    "Boundary-density calculation canceled by user.",
-                )
-                return
-            self.error.emit(self.run_id, str(exc))
+                self.canceled.emit(self.run_id, "Boundary-density calculation canceled by user.")
+            else:
+                self.error.emit(self.run_id, str(exc))
             return
-        self.finished.emit(self.run_id, summary, temporary)
+        self.finished.emit(self.run_id, result)
 
 
 from run_setup import RunSetupMixin
@@ -770,6 +699,9 @@ class SolverTab(RunSetupMixin, QWidget):
         self._density_run_serial: 'int' = 0
         self._active_density_run_id: 'Optional[int]' = None
         self._is_computing_density: 'bool' = False
+        self.last_density_result: 'Optional[Dict[str, Any]]' = None
+        self.last_density_context: 'Optional[Dict[str, Any]]' = None
+        self._last_density_stale = False
         self._plot_theme: 'Optional[Dict[str, str]]' = None
         self._last_result_stale: 'bool' = False
 
@@ -811,6 +743,10 @@ class SolverTab(RunSetupMixin, QWidget):
         density = self._pending_density_context
         if density is not None and bool(density.get("uses_geometry_tab", False)):
             density["geometry_stale"] = True
+        if self.last_density_result is not None and (self.last_density_context or {}).get("uses_geometry_tab"):
+            self._last_density_stale = True
+            if self.cmb_result_view.currentData() != "rcs":
+                self.lbl_result_details.setText(self._density_result_text())
         if (
             self.last_result is not None
             and self.last_solve_context is not None
@@ -885,28 +821,29 @@ class SolverTab(RunSetupMixin, QWidget):
         self._apply_plot_theme_to_axes()
         self.canvas.draw_idle()
 
-    def _apply_plot_theme_to_axes(self) -> 'None':
+    def _apply_plot_theme_to_axes(self) -> None:
         if self._plot_theme is None:
             return
         background = self._plot_theme["background"]
         text = self._plot_theme["text"]
         grid = self._plot_theme["grid"]
         self.canvas.fig.patch.set_facecolor(background)
-        ax = self.canvas.ax
-        ax.set_facecolor(background)
-        ax.title.set_color(text)
-        ax.xaxis.label.set_color(text)
-        ax.yaxis.label.set_color(text)
-        ax.tick_params(axis="both", colors=text)
-        for spine in ax.spines.values():
-            spine.set_color(grid)
-        ax.grid(True, color=grid, alpha=0.45)
-        legend = ax.get_legend()
-        if legend is not None:
-            legend.get_frame().set_facecolor(background)
-            legend.get_frame().set_edgecolor(grid)
-            for legend_text in legend.get_texts():
-                legend_text.set_color(text)
+        for ax in self.canvas.fig.axes:
+            ax.set_facecolor(background)
+            ax.title.set_color(text)
+            ax.xaxis.label.set_color(text)
+            ax.yaxis.label.set_color(text)
+            ax.tick_params(axis="both", colors=text)
+            for spine in ax.spines.values():
+                spine.set_color(grid)
+            if ax.get_label() != "<colorbar>":
+                ax.grid(True, color=grid, alpha=0.45)
+            legend = ax.get_legend()
+            if legend is not None:
+                legend.get_frame().set_facecolor(background)
+                legend.get_frame().set_edgecolor(grid)
+                for legend_text in legend.get_texts():
+                    legend_text.set_color(text)
 
     def _build_left_panel(self) -> 'QWidget':
         panel = QWidget()
@@ -1116,9 +1053,9 @@ class SolverTab(RunSetupMixin, QWidget):
         self.btn_export = QPushButton("Export Last Result")
         self.btn_currents = QPushButton("Boundary Densities")
         self.btn_currents.setToolTip(
-            "Compute formulation-specific boundary-integral unknowns for the first "
-            "frequency and elevation. These layer densities are not generally "
-            "physical electric or magnetic surface currents."
+            "Plot VV/HH boundary-integral density magnitude and phase on the "
+            "geometry at the first frequency and incidence angle. "
+            "These are formulation-specific layer densities, not surface currents."
         )
         btn_row.addWidget(self.btn_run)
         btn_row.addWidget(self.btn_cancel)
@@ -1152,6 +1089,19 @@ class SolverTab(RunSetupMixin, QWidget):
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("Result view"))
+        self.cmb_result_view = QComboBox()
+        self.cmb_result_view.addItem("RCS", "rcs")
+        self.cmb_result_view.addItem("Boundary density magnitude", "density_abs")
+        self.cmb_result_view.addItem("Boundary density phase", "density_phase")
+        self.cmb_result_view.setEnabled(False)
+        self.cmb_result_view.currentIndexChanged.connect(self._show_result_view)
+        view_row.addWidget(self.cmb_result_view, 1)
+        layout.addLayout(view_row)
+        self.lbl_result_details = QLabel()
+        self.lbl_result_details.setWordWrap(True)
+        layout.addWidget(self.lbl_result_details)
         self.canvas = MplCanvas(panel)
         self.toolbar = NavigationToolbar(self.canvas, panel)
         layout.addWidget(self.toolbar)
@@ -1422,7 +1372,6 @@ class SolverTab(RunSetupMixin, QWidget):
         self.btn_run.setEnabled(not busy)
         for control in (self.save_run_setup_button, self.load_run_setup_button, self.run_preflight_button):
             control.setEnabled(not busy and not is_bor)
-        self.run_preset_combo.setEnabled(not busy)
         self._sync_export_state()
         self.btn_currents.setEnabled(not busy and not is_bor)
         self.btn_browse_geo.setEnabled(not busy)
@@ -1494,7 +1443,7 @@ class SolverTab(RunSetupMixin, QWidget):
         self._apply_job_state()
 
     def _compute_currents(self) -> 'None':
-        """Compute boundary-integral densities at first freq/elev and save JSON."""
+        """Compute boundary-integral densities at first freq/elev for plotting."""
         if self._job_is_active():
             QMessageBox.information(
                 self,
@@ -1534,36 +1483,6 @@ class SolverTab(RunSetupMixin, QWidget):
             QMessageBox.critical(self, "Boundary Density Error", str(exc))
             return
 
-        save_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Boundary Densities", "boundary_densities_vv_hh.json", "JSON Files (*.json)",
-        )
-        if not save_path:
-            self.lbl_status.setText("Boundary-density calculation canceled before start.")
-            return
-        save_path = os.path.abspath(save_path)
-        if not os.path.splitext(save_path)[1]:
-            save_path += ".json"
-        try:
-            if not self._confirm_boundary_density_replacement(save_path):
-                self.lbl_status.setText(
-                    "Boundary-density calculation canceled before start."
-                )
-                return
-            if os.path.exists(save_path) and not os.path.isfile(save_path):
-                raise ValueError(f"Boundary-density output is not a file: {save_path}")
-            expect_absent = not os.path.exists(save_path)
-            expected_output_sha256 = (
-                None if expect_absent else _stable_sha256(save_path)
-            )
-            output_parent = os.path.dirname(save_path) or os.getcwd()
-            if not os.path.isdir(output_parent):
-                raise FileNotFoundError(
-                    f"Output folder does not exist: {output_parent}"
-                )
-        except Exception as exc:
-            QMessageBox.critical(self, "Boundary Density Error", str(exc))
-            return
-
         abort_event = threading.Event()
         self._density_abort_event = abort_event
         self._density_run_serial += 1
@@ -1573,9 +1492,6 @@ class SolverTab(RunSetupMixin, QWidget):
             "uses_geometry_tab": uses_geometry_tab,
             "geometry_stale": False,
             "input_sha256": dict(input_sha256),
-            "output_path": save_path,
-            "expect_output_absent": expect_absent,
-            "expected_output_sha256": expected_output_sha256,
         }
 
         thread = QThread(self)
@@ -1587,7 +1503,6 @@ class SolverTab(RunSetupMixin, QWidget):
             frequency_ghz=float(frequencies[0]),
             elevation_deg=float(elevations[0]),
             units=units,
-            output_path=save_path,
             snapshot_sha256=snapshot_digest,
             input_sha256=input_sha256,
             abort_event=abort_event,
@@ -1620,18 +1535,6 @@ class SolverTab(RunSetupMixin, QWidget):
         self._set_density_state(True)
         thread.start()
 
-    def _confirm_boundary_density_replacement(self, path: 'str') -> 'bool':
-        if not os.path.exists(path):
-            return True
-        buttons = getattr(QMessageBox, "StandardButton", QMessageBox)
-        answer = QMessageBox.question(
-            self,
-            "Replace Existing Boundary Densities?",
-            f"The output already exists:\n\n  {path}\n\nReplace it?",
-            buttons.Yes | buttons.No,
-            buttons.No,
-        )
-        return answer == buttons.Yes
 
     def _cancel_solver(self):
         """Signal the active solver-tab calculation to abort."""
@@ -1653,68 +1556,41 @@ class SolverTab(RunSetupMixin, QWidget):
         if message:
             self.lbl_status.setText(message)
 
-    @Slot(int, object, str)
-    def _on_density_finished(
-        self, run_id: 'int', summary: 'Dict[str, Any]', temporary: 'str'
-    ) -> 'None':
+    @Slot(int, object)
+    def _on_density_finished(self, run_id: int, result: Dict[str, Any]) -> None:
+        if self._active_density_run_id != int(run_id):
+            return
         try:
-            if self._active_density_run_id != int(run_id):
-                return
             context = self._pending_density_context
             if context is None:
-                raise RuntimeError(
-                    "Boundary-density job context was lost; no output was published."
-                )
-            if (
-                self._density_abort_event is not None
-                and self._density_abort_event.is_set()
-            ):
-                self.progress.setValue(0)
-                self.lbl_status.setText(
-                    "Boundary-density calculation canceled; no output was published."
-                )
+                raise RuntimeError("Boundary-density job context was lost; run the calculation again.")
+            if self._density_abort_event is not None and self._density_abort_event.is_set():
+                self._on_density_canceled(run_id, "Boundary-density calculation canceled by user.")
                 return
-            if bool(context.get("geometry_stale", False)):
+            if context.get("geometry_stale", False):
                 self.progress.setValue(0)
-                self.lbl_status.setText(
-                    "Geometry changed during the boundary-density calculation; "
-                    "the stale output was not published."
-                )
-                QMessageBox.warning(
-                    self,
-                    "Boundary Densities Not Saved",
-                    "Geometry changed while boundary densities were being "
-                    "computed. Run the calculation again for the current geometry.",
-                )
+                self.lbl_status.setText("Geometry changed during the boundary-density calculation; stale results were not plotted.")
+                QMessageBox.warning(self, "Boundary Densities Out of Date",
+                                    "Geometry changed during calculation. Run Boundary Densities again for the current geometry.")
                 return
             _verify_input_sha256(dict(context.get("input_sha256", {})))
-            output_path = str(context["output_path"])
-            _publish_staged_json(
-                temporary,
-                output_path,
-                expect_absent=bool(context["expect_output_absent"]),
-                expected_sha256=context.get("expected_output_sha256"),
-            )
-            temporary = ""
+            _boundary_density_plot_data(result)
+            self.last_density_result = result
+            self.last_density_context = dict(context)
+            self._last_density_stale = False
+            self._select_result_view("density_abs")
             self.progress.setValue(100)
             self.lbl_status.setText(
-                f"Boundary densities saved: {output_path} "
-                f"({int(summary.get('element_count', 0))} elements, "
-                f"{summary.get('formulations', '')})"
+                f"Boundary densities plotted at {result['frequency_ghz']:g} GHz, "
+                f"{result['cut_angle_deg']:g} deg incidence. Choose magnitude or phase above the plot."
             )
         except Exception as exc:
             self.progress.setValue(0)
-            self.lbl_status.setText(f"Boundary-density output not saved: {exc}")
-            QMessageBox.warning(self, "Boundary Density Save Error", str(exc))
+            self.lbl_status.setText(f"Boundary densities not plotted: {exc}")
+            QMessageBox.warning(self, "Boundary Density Plot Error", str(exc))
         finally:
-            if temporary:
-                try:
-                    os.unlink(temporary)
-                except FileNotFoundError:
-                    pass
-            if self._active_density_run_id == int(run_id):
-                self._pending_density_context = None
-                self._set_density_state(False)
+            self._pending_density_context = None
+            self._set_density_state(False)
 
     @Slot(int, str)
     def _on_density_canceled(self, run_id: 'int', _message: 'str') -> 'None':
@@ -1723,7 +1599,7 @@ class SolverTab(RunSetupMixin, QWidget):
         self._pending_density_context = None
         self.progress.setValue(0)
         self.lbl_status.setText(
-            "Boundary-density calculation canceled; no output was published."
+            "Boundary-density calculation canceled; previous results kept."
         )
         self._set_density_state(False)
 
@@ -1777,8 +1653,7 @@ class SolverTab(RunSetupMixin, QWidget):
         )
         self._pending_solve_context = None
         self._sync_export_state()
-        self._populate_results_table(result)
-        self._plot_results(result)
+        self._select_result_view("rcs")
 
         metadata = result.get("metadata", {}) or {}
         units = str(metadata.get("geometry_units_in", self.cmb_units.currentText()))
@@ -2164,6 +2039,83 @@ class SolverTab(RunSetupMixin, QWidget):
     ) -> 'float':
         return _display_db_value(result, row)
 
+    def _select_result_view(self, view):
+        for index in range(self.cmb_result_view.count()):
+            available = self.last_result is not None if index == 0 else self.last_density_result is not None
+            self.cmb_result_view.model().item(index).setEnabled(available)
+        self.cmb_result_view.setEnabled(self.last_result is not None or self.last_density_result is not None)
+        blocked = self.cmb_result_view.blockSignals(True)
+        self.cmb_result_view.setCurrentIndex(self.cmb_result_view.findData(view))
+        self.cmb_result_view.blockSignals(blocked)
+        self._show_result_view()
+
+    def _show_result_view(self, _index=0):
+        view = self.cmb_result_view.currentData()
+        if view == "rcs" and self.last_result is not None:
+            self.lbl_result_details.setText("")
+            self._populate_results_table(self.last_result)
+            self._plot_results(self.last_result)
+        elif view != "rcs" and self.last_density_result is not None:
+            self._plot_boundary_densities(self.last_density_result, phase=view == "density_phase")
+
+    def _density_result_text(self):
+        result = self.last_density_result
+        if result is None:
+            return ""
+        stale = "Geometry changed; rerun Boundary Densities.\n" if self._last_density_stale else ""
+        forms = "\n".join(f"{label}: {result['channels'][label]['formulation']}" for label in ("VV", "HH"))
+        return (f"{stale}{result['frequency_ghz']:g} GHz | {result['cut_angle_deg']:g} deg incidence\n"
+                f"{forms}\nSLP/DLP representation densities; magnitude units depend on the formulation. "
+                "Phase is undefined at zero magnitude.")
+
+    def _plot_boundary_densities(self, result, *, phase=False):
+        unit_label, channels = _boundary_density_plot_data(result)
+        figure = self.canvas.fig
+        figure.clear()
+        axes = figure.subplots(1, 2, sharex=True, sharey=True)
+        self.canvas.ax = axes[0]
+        for ax, channel in zip(axes, channels):
+            segments = channel["segments"]
+            ax.add_collection(LineCollection(segments, colors="0.55", linewidths=1))
+            values = channel["phase"] if phase else channel["magnitude"]
+            colored = LineCollection(segments, cmap="twilight" if phase else "viridis", linewidths=3)
+            colored.set_array(np.ma.masked_invalid(values))
+            colored.set_clim(-180 if phase else 0, 180 if phase else max(float(np.max(values)), 1e-30))
+            ax.add_collection(colored)
+            ax.autoscale_view()
+            ax.margins(0.1)
+            ax.set_aspect("equal", adjustable="box")
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=3))
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+            pol = "TE" if channel["label"] == "VV" else "TM"
+            ax.set(title=f"{channel['label']} ({pol})", xlabel=f"X ({unit_label})", ylabel=f"Y ({unit_label})")
+            ax.grid(True, alpha=0.3)
+            bar = figure.colorbar(colored, ax=ax, shrink=0.8, pad=0.04)
+            bar.set_label("Density phase (deg)" if phase else "Density magnitude")
+        self.lbl_result_details.setText(self._density_result_text())
+        self.table_results.clear()
+        self.table_results.setColumnCount(8)
+        self.table_results.setHorizontalHeaderLabels([
+            "Pol", "Element", f"X ({unit_label})", f"Y ({unit_label})",
+            "Density real", "Density imag", "Magnitude", "Phase (deg)",
+        ])
+        self.table_results.setRowCount(sum(len(channel["real"]) for channel in channels))
+        row = 0
+        for channel in channels:
+            for index, (x, y) in enumerate(channel["centers"]):
+                values = (channel["label"], str(index + 1), f"{x:.8g}", f"{y:.8g}",
+                          f"{channel['real'][index]:.8g}", f"{channel['imag'][index]:.8g}",
+                          f"{channel['magnitude'][index]:.8g}",
+                          f"{channel['phase'][index]:.6g}" if np.isfinite(channel['phase'][index]) else "undefined")
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    self.table_results.setItem(row, column, item)
+                row += 1
+        self._apply_plot_theme_to_axes()
+        self.toolbar.update()
+        self.canvas.draw_idle()
+
     def _populate_results_table(self, result: 'Dict[str, Any]'):
         kind = _result_kind(result)
         rows = sorted(
@@ -2248,8 +2200,9 @@ class SolverTab(RunSetupMixin, QWidget):
     def _plot_results(self, result: 'Dict[str, Any]'):
         kind = _result_kind(result)
         plot_groups = _result_plot_groups(result)
+        self.canvas.fig.clear()
+        self.canvas.ax = self.canvas.fig.add_subplot(111)
         ax = self.canvas.ax
-        ax.clear()
         for freq, incidence, polarization in sorted(
             plot_groups.keys(),
             key=lambda key: (
@@ -2287,4 +2240,5 @@ class SolverTab(RunSetupMixin, QWidget):
         if len(plot_groups) <= 12:
             ax.legend(loc="best")
         self._apply_plot_theme_to_axes()
+        self.toolbar.update()
         self.canvas.draw_idle()

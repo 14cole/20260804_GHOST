@@ -46,7 +46,7 @@ def _validate_header(value):
         raise ValueError('Checkpoint scores exceed the 512 MiB recovery-file limit.')
 
 
-def save_checkpoint(path, checkpoint):
+def save_checkpoint(path, checkpoint, *, overwrite=True):
     """Publish an archive only after its full score stream is durable.
 
     The caller must use a stable captured checkpoint on the search thread or
@@ -81,7 +81,12 @@ def save_checkpoint(path, checkpoint):
                 archive.writestr('checkpoint.json', json.dumps(metadata, sort_keys=True, allow_nan=False))
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        if overwrite:
+            os.replace(temporary, path)
+        else:
+            # Publish a fresh search without racing an existing file. Both
+            # files are in the same directory/filesystem; link is atomic.
+            os.link(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

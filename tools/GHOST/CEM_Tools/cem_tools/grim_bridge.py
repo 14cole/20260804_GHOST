@@ -30,44 +30,52 @@ def grim_project_path() -> 'Path':
     return Path.cwd() / "GRIM_Revised_2"
 
 
-def _rcs_grid_class() -> 'type':
-    module_path = grim_project_path() / "grim_dataset.py"
+def _load_grim_module(filename: str, module_name: str):
+    """Load one selected flat GRIM tree and roll back interrupted imports."""
+    project = grim_project_path().resolve()
+    module_path = project / filename
     if not module_path.is_file():
         raise CemToolError(
-            f"GRIM dataset library not found at {module_path}; set "
+            f"GRIM library not found at {module_path}; set "
             "GRIM_REVISED_2_PATH to its folder"
         )
-    module_name = "_cem_tools_external_grim_dataset"
     existing = sys.modules.get(module_name)
+    if existing is not None and Path(getattr(existing, '__file__', '')).resolve() != module_path:
+        raise CemToolError("GRIM source changed during this session; restart CEM Tools.")
     if existing is None:
         spec = importlib.util.spec_from_file_location(module_name, module_path)
         if spec is None or spec.loader is None:
             raise CemToolError(f"cannot import {module_path}")
         existing = importlib.util.module_from_spec(spec)
+        # GRIM is a flat module tree, including lazily imported operations.
+        # Keep its selected source directory available without an editable install.
+        for name in (p.stem for p in project.glob('grim_*.py')):
+            loaded = sys.modules.get(name)
+            if loaded is not None and Path(getattr(loaded, '__file__', '')).resolve().parent != project:
+                raise CemToolError(f"Conflicting GRIM module {name}; restart with one GRIM source tree.")
+        source_path = str(project)
+        if source_path not in sys.path:
+            sys.path.insert(0, source_path)
+        before = set(sys.modules)
         sys.modules[module_name] = existing
-        spec.loader.exec_module(existing)
-    return existing.RcsGrid
+        try:
+            spec.loader.exec_module(existing)
+        except Exception:
+            for name in set(sys.modules) - before:
+                module = sys.modules.get(name)
+                origin = getattr(module, '__file__', None)
+                if name == module_name or (origin and Path(origin).resolve().parent == project):
+                    sys.modules.pop(name, None)
+            raise
+    return existing
+
+
+def _rcs_grid_class() -> 'type':
+    return _load_grim_module('grim_dataset.py', '_cem_tools_external_grim_dataset').RcsGrid
 
 
 def _flat_csv_schema_module() -> 'Any':
-    """Load GRIM's dependency-light shared CSV contract without importing Qt."""
-
-    module_path = grim_project_path() / "grim_csv_schema.py"
-    if not module_path.is_file():
-        raise CemToolError(
-            f"GRIM flat CSV schema library not found at {module_path}; update "
-            "the GRIM_Revised_2 folder or set GRIM_REVISED_2_PATH"
-        )
-    module_name = "_cem_tools_external_grim_csv_schema"
-    existing = sys.modules.get(module_name)
-    if existing is None:
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        if spec is None or spec.loader is None:
-            raise CemToolError(f"cannot import {module_path}")
-        existing = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = existing
-        spec.loader.exec_module(existing)
-    return existing
+    return _load_grim_module('grim_csv_schema.py', '_cem_tools_external_grim_csv_schema')
 
 
 def load_dataset(path: 'str | os.PathLike[str]') -> 'Any':

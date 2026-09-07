@@ -102,11 +102,13 @@ from .mix_analysis import (mix_performance_values, mix_performance_gap,
 
 from .design_search import (
     InverseSearchRequest, MixSearchRequest, run_inverse_search, run_mix_search,
+    StopMixSearch, MIX_REFINE_MAX_EVALS, MAX_MIX_RETAINED,
     score_inverse_candidate,
 )
 
 from .batch import (
     IbcBatchItem,
+    THICKNESS_UNITS,
     export_pec_ibc_thickness_batch,
     ibc_batch_frequency_count,
     plan_ibc_thickness_batch,
@@ -170,40 +172,37 @@ from .plot import nearest_index, style_axis, style_colorbar
 APP_ACRONYM = "FREDDY"
 APP_NAME = "Frequency-Dependent Reflection and EM Dielectric Dimensional Yield"
 APP_TITLE = f"{APP_ACRONYM} - {APP_NAME}"
-ABOUT_TEXT = (
-    f"{APP_TITLE}\n\n"
-    f"Acronym: {APP_NAME}\n\n"
-    "Physical scope:\n"
-    "Infinite planar material-stack reflection, transmission, absorption, and input impedance.\n"
-    "FREDDY does not calculate finite-object RCS or dBsm.\n\n"
-    "Angle convention:\n"
-    "0 deg = normal incidence (broadside)\n"
-    "angles must be < 90 deg; exact grazing has singular field normalization\n\n"
-    "Polarization convention:\n"
-    "Use plane-wave TE/TM labels. Legacy HH=TE and VV=TM aliases follow the\n"
-    "usual vertical plane-of-incidence convention, but the companion 2D RCS\n"
-    "elevation-cut solver uses different HH/VV aliases.\n\n"
-    "Coefficient metric definitions:\n"
-    "coefficient_db = 20*log10(|x|)\n"
-    "PEC-backed reflection uses x = Gamma_metal\n"
-    "air-backed reflection uses x = Gamma_air\n"
-    "transmission uses x = S21\n\n"
-    "Sign interpretation:\n"
-    "negative coefficient dB => |x| < 1 (attenuation)\n"
-    "zero coefficient dB => |x| = 1\n"
-    "positive coefficient dB => |x| > 1 (effective gain/non-passive)\n\n"
-    "Absorption metric definitions:\n"
-    "metal_absorption_db = 10*log10(1 - |Gamma_metal|^2)\n"
-    "air_absorption_db = 10*log10(1 - |Gamma_air|^2 - |S21|^2)\n\n"
-    "Metal absorption: power absorbed by the stack on a\n"
-    "PEC ground plane in dB (0 dB = perfect absorption).\n"
-    "Air absorption: power absorbed by a free-standing\n"
-    "slab in dB (accounts for both reflection and transmission)."
-)
+ABOUT_GUIDE_HTML = f"<h2>{APP_ACRONYM}</h2><p>{APP_NAME}</p>" + """
+<h3>Physical scope</h3>
+<p>FREDDY calculates reflection, transmission, absorption, and front-face input
+impedance of an infinite planar material stack. It does not calculate
+finite-object RCS or dBsm. Layers run from the incident side to the backing.</p>
 
-MATERIAL_GUIDE_HTML = """
-<h2>FREDDY material and result guide</h2>
-<p>FREDDY models an infinite planar stack. A material CSV supplies relative
+<h3>Angles and polarization</h3>
+<p>Incidence angle is measured from the surface normal: <b>0° is normal incidence
+(broadside)</b>. Angles must be less than 90° because exact grazing has singular
+field normalization. The <b>plane of incidence</b> contains the incoming ray and
+the surface normal.</p>
+<ul>
+<li><b>TE (s):</b> electric field perpendicular to the plane of incidence.</li>
+<li><b>TM (p):</b> electric field within that plane, perpendicular to the incoming ray.</li>
+</ul>
+<p>Choose using the <b>electric-field direction</b>. With a vertical incidence
+plane, TE is horizontal and TM is vertical. FREDDY's HH/VV input aliases mean
+HH = TE and VV = TM; the controls use TE/TM to avoid ambiguity.</p>
+<p><b>Comparing with GHOST:</b> in GHOST's 2D elevation cut, drawing x/y is the
+cross-section and the out-of-plane z span is horizontal. GHOST VV has its electric
+field in x/y (its solver calls this TE); GHOST HH has its electric field along z
+(its solver calls this TM). When the local incidence plane is that cross-section,
+compare <b>GHOST VV with FREDDY TM</b> and <b>GHOST HH with FREDDY TE</b>.
+GHOST's body-of-revolution VV is the meridian-plane electric field; HH is the
+azimuthal electric field. Its rotation axis uses a different coordinate frame.</p>
+<p>For an isotropic stack at normal incidence, TE and TM give the same result.
+At oblique incidence, compare both if the incident polarization is unknown.
+Directional-material principal-axis orientation is a separate layer setting.</p>
+
+<h3>Material convention</h3>
+<p>A material CSV supplies relative
 permittivity and permeability versus frequency using the
 <b>e<sup>+jωt</sup></b> convention. Passive loss therefore has a
 <b>negative imaginary part</b>.</p>
@@ -245,6 +244,15 @@ More loss alone does not guarantee lower reflection.</p>
 <li><b>Absorbed power (dB)</b> = 10 log<sub>10</sub>(absorbed fraction). 0 dB is 100% absorption.</li>
 <li><b>Resistance/reactance</b> are the real/imaginary parts of front-face input impedance in ohms.</li>
 </ul>
+<p>For coefficient dB, negative means magnitude below 1, zero means magnitude 1,
+and positive means magnitude above 1 (effective gain/non-passive response in
+this air-to-air normalization). PEC-backed reflection uses Γ<sub>metal</sub>;
+air-backed reflection uses Γ<sub>air</sub>; transmission uses S21.</p>
+<p><b>PEC-backed absorbed power:</b>
+10 log<sub>10</sub>(1 − |Γ<sub>metal</sub>|<sup>2</sup>), for a stack on a metal
+ground plane. <b>Air-backed absorbed power:</b>
+10 log<sub>10</sub>(1 − |Γ<sub>air</sub>|<sup>2</sup> − |S21|<sup>2</sup>), for a
+free-standing stack. Both use 0 dB for perfect absorption.</p>
 
 <h3>Optimization quick start</h3>
 <ol>
@@ -826,6 +834,12 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self.mix_preview_btn = None
         self.mix_apply_btn = None
         self.mix_export_btn = None
+        self.mix_stop_btn = None
+        self.mix_budget_note = None
+        self._mix_stop_event = threading.Event()
+        self._mix_active = False
+        self._mix_progress = None
+        self._mix_input_revision = 0
         self.mix_target_start_entry = None
         self.mix_target_stop_entry = None
         self.mix_target_step_entry = None
@@ -959,7 +973,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
     def _build_ui(self) -> None:
 
-        # Global actions live in a menu bar (File / View / Help) rather than an
+        # Global actions live in a menu bar (File / View) rather than an
         # inline button row, and the window is organized as a left navigation
         # rail driving a stacked workspace above a full-width results band.
         menubar = self.menuBar()
@@ -978,10 +992,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self.dark_mode_var.valueChanged.connect(self.dark_mode_action.setChecked)
         self.dark_mode_var.valueChanged.connect(lambda _v: self._apply_theme())
         self.view_menu.addAction(self.dark_mode_action)
-        help_menu = menubar.addMenu("Help")
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self._show_about)
-        help_menu.addAction(about_action)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -1011,7 +1021,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             self.mode_stack.addWidget(page)
             button = QToolButton()
             button.setObjectName("ModeNavButton")
-            button.setText(label)
+            button.setText(label.replace("&", "&&"))
             button.setCheckable(True)
             button.setToolButtonStyle(Qt.ToolButtonTextOnly)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1044,15 +1054,14 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         )
         _add_mode("Material Explorer", self.material_explorer)
 
-        # Keep the essential material definitions inside the workspace instead
-        # of hiding them only in a modal About dialog. This page is deliberately
-        # read-only and does not participate in project state.
+        # One read-only home for application help and material definitions.
+        # It does not participate in project state or show analysis controls.
         about_tab = QScrollArea()
         about_tab.setWidgetResizable(True)
         about_content = QWidget()
         about_layout = QVBoxLayout(about_content)
         about_layout.setContentsMargins(18, 14, 18, 18)
-        about_text = QLabel(MATERIAL_GUIDE_HTML)
+        about_text = QLabel(ABOUT_GUIDE_HTML)
         about_text.setTextFormat(Qt.RichText)
         about_text.setWordWrap(True)
         about_text.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1344,8 +1353,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             _entry(self.ibc_batch_step_var, 10), 1, 5, Qt.AlignLeft
         )
         ibc_batch_sweep_grid.addWidget(QLabel("Units"), 2, 0, Qt.AlignLeft)
+        self.ibc_batch_unit_combo = make_combo(
+            THICKNESS_UNITS, self.ibc_batch_unit_var, width=80
+        )
         ibc_batch_sweep_grid.addWidget(
-            make_combo(("in", "mil", "mm"), self.ibc_batch_unit_var, width=80),
+            self.ibc_batch_unit_combo,
             2,
             1,
             Qt.AlignLeft,
@@ -1887,6 +1899,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             Qt.AlignLeft,
         )
         mix_search_body.setColumnStretch(5, 1)
+        self.mix_budget_note = QLabel()
+        self.mix_budget_note.setWordWrap(True)
+        mix_search_body.addWidget(self.mix_budget_note, 6, 0, 1, 6)
+        self._refresh_mix_budget()
 
         self.mix_results_frame = CollapsibleFrame(
             "Results and candidate recipes", expanded=True
@@ -1914,6 +1930,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         self.mix_run_btn = QPushButton("Find matching recipes")
         self.mix_run_btn.clicked.connect(self._run_mix_design)
         mix_actions_layout.addWidget(self.mix_run_btn)
+        self.mix_stop_btn = QPushButton("Stop search")
+        self.mix_stop_btn.setEnabled(False)
+        self.mix_stop_btn.clicked.connect(self._stop_mix_search)
+        mix_actions_layout.addWidget(self.mix_stop_btn)
         mix_actions_layout.addStretch(1)
         mix_actions_layout.addWidget(QLabel("Stack-layer thickness (in)"))
         mix_actions_layout.addWidget(_entry(self.mix_thickness_var, 7))
@@ -2428,9 +2448,6 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             messagebox.showinfo("Heatmap", f"Saved heatmap to:\n{p}")
         except Exception as exc:
             messagebox.showerror("Heatmap", str(exc))
-
-    def _show_about(self) -> None:
-        messagebox.showinfo(f"About {APP_ACRONYM}", ABOUT_TEXT)
 
     def _get_color_limits(self) -> tuple[float | None, float | None]:
         if self.cbar_auto_var.get():
@@ -3059,6 +3076,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             if btn is not None:
                 btn.setEnabled(not running)
         self.inv_stop_btn.setEnabled(running and self._inverse_active)
+        if self.mix_stop_btn is not None:
+            self.mix_stop_btn.setEnabled(running and self._mix_active)
         self.inv_extend_btn.setEnabled(not running and self._inverse_can_resume())
         self._refresh_ibc_batch_preview()
         self.status_var.set(text)
@@ -3097,13 +3116,21 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             except queue.Empty:
                 if self._inverse_active:
                     self._show_inverse_progress()
+                if self._mix_active and self._mix_progress is not None:
+                    done, total, phase = self._mix_progress
+                    self.status_var.set(f'Material Mix: {phase} {done:,} / {total:,}')
+                    self.status_progress.setRange(0, 1000)
+                    self.status_progress.setValue(int(1000 * done / max(1, total)))
                 return
             timer.stop()
             timer.deleteLater()
             self._inverse_active = False
+            self._mix_active = False
             self._set_task_state(False, "Ready")
             if status == "ok":
                 on_success(payload)  # type: ignore[arg-type]
+            elif isinstance(payload, StopMixSearch):
+                self.status_var.set(str(payload))
             else:
                 messagebox.showerror(error_title, str(payload))
 
@@ -3179,6 +3206,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
     def _is_material_explorer_active(self) -> bool:
         return self._active_left_tab_label() == "Material Explorer"
 
+    def _is_about_active(self) -> bool:
+        return self._active_left_tab_label() == "About & Guide"
+
     def _is_thickness_tab_active(self) -> bool:
         return self._active_left_tab_label() == "Thickness"
 
@@ -3198,9 +3228,10 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             self.inverse_workspace_tabs.setTabVisible(1, inverse)
             self.inverse_workspace_tabs.tabBar().setVisible(inverse)
             del blocker
-        show_solver_workspace = not (self._is_material_explorer_active() or inverse)
+        read_only_page = self._is_material_explorer_active() or self._is_about_active()
+        show_solver_workspace = not (read_only_page or inverse)
         if self.layers_group is not None:
-            self.layers_group.setVisible(not self._is_material_explorer_active())
+            self.layers_group.setVisible(not read_only_page)
         if self.results_pane is not None:
             if (
                 not show_solver_workspace
@@ -3488,7 +3519,7 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         if panel is not None:
             panel.draw()
             return
-        if self._is_material_explorer_active():
+        if self._is_material_explorer_active() or self._is_about_active():
             return
         if not MPL_AVAILABLE or self.ax_heatmap is None or self.canvas is None:
             return
@@ -4215,6 +4246,11 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         if resume and checkpoint is None:
             messagebox.showerror("Inverse Design", "There is no interrupted analysis to resume.")
             return
+        if recovery_path is not None and not resume and recovery_path.exists():
+            from uuid import uuid4
+            recovery_path = recovery_path.with_name(
+                f'{recovery_path.stem}-fresh-{uuid4().hex[:12]}.fsearch')
+            self.inverse_recovery_path.setText(str(recovery_path))
         self._inverse_stop_event.clear()
         self._inverse_active = True
         self._inverse_progress = (checkpoint['next_index'] if checkpoint else 0, grid.total, 'Analyzing')
@@ -4245,11 +4281,18 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
 
         def worker():
             from .search_checkpoint import save_checkpoint
+            first_write = True
+
+            def publish_checkpoint(state):
+                nonlocal first_write
+                save_checkpoint(recovery_path, state, overwrite=resume or not first_write)
+                first_write = False
+
             result, checkpoint_result = run_inverse_search(
                 request, stop_requested=self._inverse_stop_event.is_set,
                 progress=report_progress, score_candidate=self._score_inverse_candidate,
                 read_table=read_material_table, compute_metrics=compute_angle_metrics_many,
-                checkpoint_callback=(lambda state: save_checkpoint(recovery_path, state))
+                checkpoint_callback=publish_checkpoint
                 if recovery_path is not None else None,
             )
             completed.update(checkpoint_result)
@@ -4497,6 +4540,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         return row
 
     def _invalidate_mix_results(self) -> None:
+        self._mix_input_revision += 1
+        self._refresh_mix_budget()
         self.mix_candidates = []
         self.mix_plot_data = []
         self.mix_preview = None
@@ -4654,8 +4699,9 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         thickness_scale: float = 1.0,
         eps_scale: float = 1.0,
         mu_scale: float = 1.0,
+        check_stop=lambda: None,
     ) -> dict:
-        return evaluate_mix_performance(table, thickness_in, config, thickness_scale=thickness_scale, eps_scale=eps_scale, mu_scale=mu_scale)
+        return evaluate_mix_performance(table, thickness_in, config, thickness_scale=thickness_scale, eps_scale=eps_scale, mu_scale=mu_scale, check_stop=check_stop)
 
     def _load_mix_components(self) -> list[dict]:
         if len(self.mix_components) < 2:
@@ -4684,13 +4730,14 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
         performance: dict | None = None,
         densities: list[float] | None = None,
         component_names: list[str] | None = None,
+        check_stop=lambda: None,
     ) -> dict:
         # Synthesize on the frequency grid selected in the Material Mix tab.
         # When a property target is given, also carry target curves and
         # per-frequency mismatch.
         # A model comparison at the band midpoint makes morphology sensitivity
         # visible rather than implying that one mixing law is ground truth.
-        return build_mix_display(components, rule, thickness_in, grid_ghz, target, performance, densities, component_names)
+        return build_mix_display(components, rule, thickness_in, grid_ghz, target, performance, densities, component_names, check_stop=check_stop)
 
     def _preview_mix(self) -> None:
         try:
@@ -4782,8 +4829,29 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             )
         return summary
 
+    def _refresh_mix_budget(self) -> None:
+        if self.mix_budget_note is None:
+            return
+        try:
+            samples = int(self.mix_max_evals_var.get())
+            kept = min(int(self.mix_top_n_var.get()), samples)
+            extra = kept * MIX_REFINE_MAX_EVALS if self.mix_refine_var.get() else 0
+            self.mix_budget_note.setText(
+                f'Up to {samples:,} recipe samples + {extra:,} refinement evaluations. '
+                f'Each evaluates the selected band, angles and tolerance corners. '
+                f'Keep at most {MAX_MIX_RETAINED} recipes. Stop search cancels without publishing a new result.')
+        except ValueError:
+            self.mix_budget_note.setText('Enter whole numbers for recipe samples and recipes kept.')
+
+    def _stop_mix_search(self) -> None:
+        self._mix_stop_event.set()
+        self.mix_stop_btn.setEnabled(False)
+        self.status_var.set('Stopping Material Mix search…')
+
     def _run_mix_design(self) -> None:
         """Find bounded recipes for a property or stack-performance target."""
+        if self.job_is_running():
+            return
         property_mode = self._mix_objective_is_property()
         performance_mode = self._mix_objective_is_performance()
         if not (property_mode or performance_mode):
@@ -4822,6 +4890,8 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             if max_evals < 1 or top_n < 1:
                 raise ValueError("Recipe samples and number kept must be >= 1.")
             top_n = min(top_n, max_evals)
+            if top_n > MAX_MIX_RETAINED:
+                raise ValueError(f'Keep at most {MAX_MIX_RETAINED} recipes for comparison.')
             score_mode = self.mix_score_mode_var.get().strip()
             uncertainty_cfg = self._read_uncertainty_config(
                 self.mix_uncertainty_var,
@@ -4873,14 +4943,27 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             numpy_available=NUMPY_AVAILABLE,
         )
 
+        self._mix_stop_event.clear()
+        self._mix_active = True
+        self._mix_progress = None
+        input_revision = self._mix_input_revision
+
+        def progress(done, total, phase):
+            self._mix_progress = (done, total, phase)
+
         def worker():
             return run_mix_search(
                 request, evaluate_performance=self._evaluate_mix_performance,
                 build_display=self._build_mix_display, read_table=read_material_table,
                 optimizer=_scipy_optimize,
+                stop_requested=self._mix_stop_event.is_set, progress=progress,
             )
 
         def on_success(result: tuple[list[MixCandidate], list[dict], str]) -> None:
+            self._mix_active = False
+            if input_revision != self._mix_input_revision:
+                messagebox.showwarning('Material Mix', 'Inputs changed during the search. Recalculate before using results.')
+                return
             self.mix_candidates, self.mix_plot_data, message = result
             self.mix_preview = None
             self._refresh_mix_results_list()
@@ -4950,33 +5033,23 @@ class ImpedanceGui(ProjectStateMixin, AnalysisWorkflowMixin, InverseResultsMixin
             if self.mix_results_list is not None and self.mix_results_list.currentRow() >= 0:
                 idx = self.mix_results_list.currentRow()
             idx = max(0, min(idx, len(self.mix_candidates) - 1))
-            cand = self.mix_candidates[idx]
-            loaded = self._load_mix_components()
-            if len(loaded) != len(cand.fractions):
-                raise ValueError(
-                    "Components changed since the search ran. Re-run the search before applying."
-                )
-            components = [
-                MixComponent(table=loaded[i]["table"], parts=cand.fractions[i])
-                for i in range(len(loaded))
-            ]
             if idx >= len(self.mix_plot_data):
                 raise ValueError("Candidate frequency grid is unavailable; re-run the search.")
-            grid = [float(value) for value in self.mix_plot_data[idx]["freqs"]]
-            table = mix_material_tables(components, cand.rule, grid)
-            return table, cand.thickness_in, f"blend candidate #{idx + 1}"
-        if self.mix_preview is not None:
-            loaded = self._load_mix_components()
-            components = [
-                MixComponent(table=c["table"], parts=float(c["parts"])) for c in loaded
-            ]
-            grid = [float(value) for value in self.mix_preview["freqs"]]
-            table = mix_material_tables(
-                components, self.mix_rule_var.get(), grid
-            )
-            thickness_in = float(self.mix_thickness_var.get().strip())
-            return table, thickness_in, "previewed blend"
-        raise ValueError("Preview a blend or run a search first.")
+            display = self.mix_plot_data[idx]
+            label = f"blend candidate #{idx + 1}"
+        elif self.mix_preview is not None:
+            display = self.mix_preview
+            label = "previewed blend"
+        else:
+            raise ValueError("Preview a blend or run a search first.")
+        # The plotted properties, recipe and thickness are one captured result.
+        # Export/apply must not reread mutable CSV files or current controls.
+        table = MaterialTable(
+            list(display["freqs"]),
+            [complex(re, im) for re, im in zip(display["eps_re"], display["eps_im"])],
+            [complex(re, im) for re, im in zip(display["mu_re"], display["mu_im"])],
+        )
+        return table, float(display["thickness_in"]), label
 
     def _export_mix_material(self) -> None:
         try:

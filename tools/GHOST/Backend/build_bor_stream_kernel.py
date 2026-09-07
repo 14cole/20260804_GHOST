@@ -97,7 +97,7 @@ def main() -> int:
         # A release must load in a fresh Python process without the compiler's
         # bin directory. Link GCC/OpenMP/pthread runtime archives into the DLL;
         # Windows system libraries remain normal system dependencies.
-        command.extend(["-static", "-static-libgcc"])
+        command.extend(["-static", "-static-libgcc", "-Wl,--no-insert-timestamp"])
     else:
         command.append("-fPIC")
     command.extend(["-o", str(temporary), str(source), "-lm"])

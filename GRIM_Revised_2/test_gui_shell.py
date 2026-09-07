@@ -551,6 +551,23 @@ class UnifiedGuiShellTest(unittest.TestCase):
         self.assertIs(self.window.active_dataset, first_row_dataset)
         self.assertEqual(self.window._isar_input_revision, revision)
 
+    def test_first_plot_fits_positive_data_and_explicit_scale_lock_is_preserved(self):
+        self.window.main_tabs.setCurrentWidget(self.window.tab_simple_plots)
+        self.window._add_dataset_row(_grid(100.), 'Positive RCS', '', 'positive.grim')
+        self.window.table.selectRow(0)
+        self.app.processEvents()
+        self.assertTrue(self.window.btn_auto_scale.isChecked())
+        self.window._plot_azimuth_rect()
+        values = np.concatenate([line.get_ydata() for line in self.window.plot_ax.lines])
+        low, high = self.window.plot_ax.get_ylim()
+        self.assertLess(low, min(values))
+        self.assertGreater(high, max(values))
+        self.window.btn_auto_scale.setChecked(False)
+        self.window.spin_plot_ymin.setValue(-50.)
+        self.window.spin_plot_ymax.setValue(50.)
+        self.window._plot_azimuth_rect()
+        self.assertEqual(self.window.plot_ax.get_ylim(), (-50., 50.))
+
     def test_tabs_have_one_canonical_assembly_workspace(self) -> None:
         labels = [
             self.window.main_tabs.tabText(index)

@@ -35,10 +35,10 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from GRIM_Revised_2.grim_diagnostics import (
+    DiagnosticResult,
     FREDDY_SENTINELS,
     GHOST_SENTINELS,
     GRIM_STARTUP_FILES,
-    collect_diagnostics,
     startup_exit_code,
 )
 
@@ -823,6 +823,55 @@ def _run_test_suite(name: str, cwd: Path, arguments: Sequence[str]) -> None:
     run_suite(name, cwd, arguments, error_type=ReleaseBuildError)
 
 
+def _payload_diagnostics(root: Path) -> list[DiagnosticResult]:
+    """Check the staged source and libraries in a fresh interpreter."""
+    code = (
+        "import sys,json; from pathlib import Path; from dataclasses import asdict; "
+        "root=Path(sys.argv[1]); sys.path[:0]=[str(root),str(root/'GRIM_Revised_2')]; "
+        "from GRIM_Revised_2.grim_diagnostics import collect_diagnostics; "
+        "print(json.dumps([asdict(r) for r in collect_diagnostics(root)]))"
+    )
+    environment = dict(os.environ)
+    for name in ('GHOST_BACKEND_PATH', 'FREDDY_ROOT_PATH', 'GRIM_MODULE_DIR', 'PYTHONPATH'):
+        environment.pop(name, None)
+    try:
+        result = subprocess.run(
+            [sys.executable, '-I', '-c', code, str(root)], cwd=root,
+            env=environment, capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=120, check=True,
+        )
+        return [DiagnosticResult(**entry) for entry in json.loads(result.stdout)]
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
+        raise ReleaseBuildError(f'Cannot diagnose the staged release: {exc}') from exc
+
+
+def _prepare_release_native(root: Path, policy: str) -> tuple[FileRecord, ...]:
+    """Compile reviewed C source into the payload; never copy a local binary."""
+    if policy not in NATIVE_POLICIES:
+        raise ReleaseBuildError(f'Unknown native acceleration policy {policy!r}.')
+    if policy == 'ignore':
+        return ()
+    backend = root / 'tools/GHOST/Backend'
+    try:
+        result = subprocess.run(
+            [sys.executable, '-I', str(backend / 'build_bor_stream_kernel.py')],
+            cwd=root, capture_output=True, text=True, encoding='utf-8',
+            errors='replace', timeout=300, check=False,
+        )
+        if result.returncode:
+            raise ReleaseBuildError((result.stdout + result.stderr).strip())
+        extension = '.dll' if platform.system().lower() == 'windows' else '.so'
+        name = f'bor_stream_kernel.{platform.system().lower()}-{platform.machine().lower()}{extension}'
+        library = backend / name
+        digest, size = _hash_file(library)
+        return (FileRecord(library.relative_to(root).as_posix(), size, digest),)
+    except (OSError, subprocess.SubprocessError, ReleaseBuildError) as exc:
+        if policy == 'require':
+            raise ReleaseBuildError(f'Native acceleration build failed: {exc}') from exc
+        print(f'Release gate warning: native build unavailable; shipping NumPy fallback: {exc}', flush=True)
+        return ()
+
+
 def run_acceptance_gates(
     source_root: Path,
     relative_files: Sequence[Path],
@@ -845,7 +894,7 @@ def run_acceptance_gates(
     _validate_dependency_lock(source_root)
 
     print("Release gate: running startup diagnostics ...", flush=True)
-    diagnostic_results = collect_diagnostics(source_root)
+    diagnostic_results = _payload_diagnostics(source_root)
     if startup_exit_code(diagnostic_results):
         blockers = [
             f"{result.name}: {result.summary}"
@@ -993,6 +1042,7 @@ def _build_info_text(
     source_records: Sequence[FileRecord],
     acceptance: AcceptanceReport,
     constraints_sha256: str,
+    generated_records: Sequence[FileRecord] = (),
 ) -> tuple[str, str]:
     tree_sha256 = _source_tree_digest(source_records)
     identity = source.revision if source.kind == "git" else tree_sha256
@@ -1015,6 +1065,8 @@ def _build_info_text(
             "target": "windows-x86_64-python312",
         },
         "product": PRODUCT_NAME,
+        "generated_files": [dict(path=record.relative_path, sha256=record.sha256, bytes=record.size)
+                            for record in generated_records],
         "release_name": release_name,
         "schema_version": 1,
         "source": {
@@ -1168,13 +1220,7 @@ def build_release(
         else None
     )
 
-    if run_acceptance:
-        acceptance = run_acceptance_gates(
-            source_root,
-            relative_files,
-            native_policy=native_policy,
-        )
-    else:
+    if not run_acceptance:
         # Deliberately private-looking API behavior for isolated builder unit
         # tests. The CLI never exposes a switch that can bypass acceptance.
         acceptance = AcceptanceReport(
@@ -1252,6 +1298,31 @@ def build_release(
                         "copied. No release was published; re-run from a stable checkout."
                     )
 
+            generated_records = ()
+            if run_acceptance:
+                generated_records = _prepare_release_native(staged_release, native_policy)
+                acceptance = run_acceptance_gates(
+                    staged_release, relative_files, native_policy=native_policy)
+                if reviewed_source.kind == 'git':
+                    after_tests = discover_source_inventory(source_root, expected_version=project_version)
+                    if (after_tests.revision != reviewed_source.revision
+                            or after_tests.tag != reviewed_source.tag
+                            or after_tests.relative_files != reviewed_source.relative_files):
+                        raise ReleaseBuildError('Reviewed source changed during staged acceptance.')
+
+            # Test runs can create caches and temporary results. Publish only
+            # the reviewed source plus the exact compiled libraries we verified.
+            expected_records = tuple(sorted((*source_records, *generated_records),
+                                            key=lambda record: record.relative_path))
+            clean_release = temporary_root / 'payload' / release_name
+            clean_release.mkdir(parents=True)
+            copied_records = _copy_payload(staged_release,
+                                          [Path(record.relative_path) for record in expected_records],
+                                          clean_release)
+            if copied_records != expected_records:
+                raise ReleaseBuildError('Staged payload changed during acceptance; no release was published.')
+            staged_release = clean_release
+
             build_info_text, build_id = _build_info_text(
                 release_name=release_name,
                 version=release_version,
@@ -1259,6 +1330,7 @@ def build_release(
                 source_records=source_records,
                 acceptance=acceptance,
                 constraints_sha256=constraints_sha256,
+                generated_records=generated_records,
             )
             build_info_path = staged_release / BUILD_INFO_NAME
             _write_text_file(build_info_path, build_info_text)
@@ -1267,6 +1339,7 @@ def build_release(
                 sorted(
                     (
                         *source_records,
+                        *generated_records,
                         FileRecord(BUILD_INFO_NAME, build_info_size, build_info_sha256),
                     ),
                     key=lambda record: record.relative_path,

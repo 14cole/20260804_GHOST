@@ -1,6 +1,6 @@
 # Workflow shortcuts
 
-Updated September 5, 2026. These additions use the existing tabs and file formats.
+Updated September 7, 2026. These additions use the existing tabs and file formats.
 Restart GRIM to load the updated application code.
 
 ## FREDDY: analyze every allowed design combination
@@ -38,6 +38,9 @@ Restart GRIM to load the updated application code.
    or material files; keep those alongside your normal study inputs.
    Changes to layers, ranges, targets, polarization, scoring, tolerances, or
    material-file contents require analysis of the new setup.
+   Fresh Analyze automatically chooses a new recovery filename when the selected
+   file already exists. The earlier checkpoint remains available. A loaded
+   checkpoint can also be copied with **Choose / save...** before resuming.
 6. Select a candidate and use **Save selected stack…** to create a separate
    FREDDY project with separate output destinations. **Apply Selected** changes
    the active stack. Candidates cannot be applied or saved against changed inputs.
@@ -201,11 +204,20 @@ finite-body RCS accuracy, and it does not overwrite an existing impedance run.
 
 ## GHOST and Runs: reuse a 2D setup
 
+**Boundary Densities** computes VV/HH at the first frequency and incident angle
+and opens their magnitude on the geometry in GHOST's existing plot area.
+Use **Result view** to inspect phase or return to the last RCS plot. The table
+shows each element's coordinates and complex density values; the plot toolbar
+can save an image. This action does not require a JSON output file. These are
+formulation-specific SLP/DLP representation densities, with magnitude units
+that depend on the formulation. Geometry or material edits during calculation
+discard the out-of-date result; cancellation keeps previous results intact.
+
 1. In **GHOST → Solver**, choose the geometry and its units. The dimensions beside
    the units show the X/Y spans in meters and inches.
-2. Choose **Quick survey** for one base mesh, or **Convergence check** for a
-   base/fine comparison with tight tolerances. Both preserve the frequency and
-   angle samples and use double precision. A survey does not certify convergence.
+2. Set the mesh-convergence checkbox, accuracy target, and LU precision directly.
+   Mesh convergence compares base/fine results; disabling it runs one base mesh
+   without a convergence certificate. Frequency and angle samples stay as entered.
 3. Use **Check geometry and run setup**. The background check summarizes
    dimensions, geometry/material errors and warnings, sample/channel counts,
    quality settings, and the output destination. It includes thin-layer

@@ -12,7 +12,9 @@ try:
 except ImportError:  # The scalar FREDDY path remains available.
     np = None
 import math
+import heapq
 import random
+from collections import deque
 import time
 from pathlib import Path
 from .compute import (
@@ -43,8 +45,6 @@ from .compute import (
 from .io import read_material_table
 from .inverse_workflow import StopInverseSearch, search_identity
 from .inverse_grid import DesignGrid
-from .inverse_grid import DesignGrid
-from .inverse_workflow import StopInverseSearch, search_identity
 
 
 def score_inverse_candidate(target_freqs, target_angles, candidate_layers, wave_pol,
@@ -366,9 +366,18 @@ class MixSearchRequest:
     numpy_available: bool
 
 
+MIX_REFINE_MAX_EVALS = 300
+MAX_MIX_RETAINED = 100
+
+
+class StopMixSearch(RuntimeError):
+    """A requested stop, distinct from an invalid material or calculation error."""
+
+
 def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_mix_performance,
                    build_display=build_mix_display,
-                   read_table=read_material_table, optimizer=None):
+                   read_table=read_material_table, optimizer=None,
+                   stop_requested=lambda: False, progress=lambda *_args: None):
     """Evaluate captured inputs; callbacks carry cancellation/progress or pure calculations."""
     if request.refine and optimizer is None:
         from scipy import optimize as optimizer
@@ -392,10 +401,20 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
     target_desc = request.target_desc
     numpy_available = request.numpy_available
 
+    if max_evals < 1 or not 1 <= top_n <= MAX_MIX_RETAINED:
+        raise ValueError(f'Recipe samples must be positive; keep between 1 and {MAX_MIX_RETAINED} recipes.')
+
+    def check_stop():
+        if stop_requested():
+            raise StopMixSearch('Material Mix search stopped. No new result was published.')
+
+    check_stop()
+
     scales = build_uncertainty_scales(uncertainty_cfg)
     cache: dict[str, MaterialTable] = {}
     comps: list[dict] = []
     for index, component in enumerate(comp_snapshot, start=1):
+        check_stop()
         path = component["file"]
         if not path:
             raise ValueError(f"Material {index}: property file is required.")
@@ -415,12 +434,14 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
     densities = [component["density"] for component in comps]
 
     def score_fractions(fractions: list[float]):
+        check_stop()
         table = combine_mix(
             target_freqs, eps_cols, mu_cols, fractions, rule_norm
         )
         corner_values: list[float] = []
         nominal: float | None = None
         for t_scale, eps_scale, mu_scale in scales:
+            check_stop()
             if property_mode:
                 error = property_match_error(
                     table.eps_r,
@@ -440,6 +461,7 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
                     thickness_scale=t_scale,
                     eps_scale=eps_scale,
                     mu_scale=mu_scale,
+                    check_stop=check_stop,
                 )["gap"]
             corner_values.append(error)
             if is_nominal_scale(t_scale, eps_scale, mu_scale):
@@ -449,6 +471,8 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
         worst = max(corner_values)
         average = sum(corner_values) / len(corner_values)
         score = worst if "worst" in score_mode.lower() else average
+        if not all(math.isfinite(v) for v in (score, nominal, worst, average, min(corner_values))):
+            raise ValueError('Material recipe produced a nonfinite score.')
         return score, nominal, worst, average, min(corner_values)
 
     rng = random.Random(search_seed)
@@ -460,42 +484,70 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
         # inverse bounds; begin the search at the middle of those bounds.
         seed_values = [0.5 * (lo + hi) for lo, hi in zip(lower, upper)]
     recipe_seed = project_bounded_fractions(seed_values, lower, upper)
-    proposals = [recipe_seed]
-    seen = {tuple(round(value, 12) for value in recipe_seed)}
-    attempts = 0
-    while len(proposals) < max_evals and attempts < max_evals * 30:
-        attempts += 1
-        # Exponential variates normalized to a simplex give broad
-        # coverage; projection then enforces the engineer's vol-% bounds.
-        raw = [-math.log(max(rng.random(), 1e-15)) for _ in comps]
-        proposal = project_bounded_fractions(
-            parts_to_fractions(raw), lower, upper
-        )
-        key = tuple(round(value, 10) for value in proposal)
-        if key not in seen:
-            seen.add(key)
-            proposals.append(proposal)
+    fixed = (sum(hi - lo > 1e-12 for lo, hi in zip(lower, upper)) <= 1
+             or abs(sum(lower) - 1.0) <= 1e-12 or abs(sum(upper) - 1.0) <= 1e-12)
+    sample_budget = 1 if fixed else max_evals
 
-    candidates_raw: list[dict] = []
+    def fraction_key(values):
+        return tuple(round(value, 10) for value in values)
+
+    def proposals():
+        # Bound duplicate bookkeeping and score immediately; a large requested
+        # budget must not allocate the entire search before its first result.
+        recent = deque([fraction_key(recipe_seed)])
+        seen = set(recent)
+        yield recipe_seed
+        generated, attempts, duplicates = 1, 0, 0
+        while generated < sample_budget and attempts < sample_budget * 30:
+            check_stop()
+            attempts += 1
+            raw = [-math.log(max(rng.random(), 1e-15)) for _ in comps]
+            proposal = project_bounded_fractions(parts_to_fractions(raw), lower, upper)
+            key = fraction_key(proposal)
+            if key in seen:
+                duplicates += 1
+                if duplicates >= max(100, 50 * len(comps)):
+                    break
+                continue
+            duplicates = 0
+            if len(recent) == 4096:
+                seen.remove(recent.popleft())
+            seen.add(key)
+            recent.append(key)
+            generated += 1
+            yield proposal
+
+    def scored_recipe(fractions):
+        score, nominal, worst, average, best = score_fractions(fractions)
+        return dict(score=score, nominal=nominal, worst=worst, avg=average,
+                    best=best, fractions=list(fractions))
+
+    kept = []
+    kept_keys = set()
     invalid_count = 0
-    for fractions in proposals:
+    evaluated = 0
+    for fractions in proposals():
+        check_stop()
+        evaluated += 1
         try:
-            score, nominal, worst, average, best = score_fractions(fractions)
+            candidate = scored_recipe(fractions)
         except ValueError:
             invalid_count += 1
+            progress(evaluated, sample_budget, 'Sampling')
             continue
-        candidates_raw.append(
-            {
-                "score": score,
-                "nominal": nominal,
-                "worst": worst,
-                "avg": average,
-                "best": best,
-                "fractions": fractions,
-            }
-        )
-    candidates_raw.sort(key=lambda candidate: candidate["score"])
-    candidates_raw = candidates_raw[:top_n]
+        key = fraction_key(fractions)
+        entry = (-candidate['score'], -evaluated, candidate)
+        if key not in kept_keys:
+            if len(kept) < top_n:
+                heapq.heappush(kept, entry)
+                kept_keys.add(key)
+            elif entry[:2] > kept[0][:2]:
+                removed = heapq.heapreplace(kept, entry)
+                kept_keys.remove(fraction_key(removed[2]['fractions']))
+                kept_keys.add(key)
+        progress(evaluated, sample_budget, 'Sampling')
+    check_stop()
+    candidates_raw = [entry[2] for entry in sorted(kept, key=lambda item: (-item[0], -item[1]))]
     if not candidates_raw:
         raise ValueError(
             "No physically valid recipe was found for these model "
@@ -503,7 +555,10 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
         )
 
     refine_evals = 0
-    if refine and numpy_available:
+    if refine and numpy_available and not fixed:
+        class RefinementBudgetReached(Exception):
+            pass
+
         refined: list[dict] = []
         bounds = list(zip(lower, upper))
         constraint = {
@@ -511,51 +566,45 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
             "fun": lambda x: float(np.sum(x) - 1.0),
         }
         for candidate in candidates_raw:
+            check_stop()
+            best_refined = candidate
+            local_evals = 0
+
             def objective(x: "np.ndarray") -> float:
-                nonlocal refine_evals
+                nonlocal refine_evals, local_evals, best_refined
+                check_stop()
+                if local_evals >= MIX_REFINE_MAX_EVALS:
+                    raise RefinementBudgetReached()
+                local_evals += 1
                 refine_evals += 1
+                progress(refine_evals, len(candidates_raw) * MIX_REFINE_MAX_EVALS, 'Refining')
                 try:
                     fractions = project_bounded_fractions(
                         [float(value) for value in x], lower, upper
                     )
-                    return score_fractions(fractions)[0]
+                    result = scored_recipe(fractions)
+                    if result['score'] < best_refined['score']:
+                        best_refined = result
+                    return result['score']
                 except ValueError:
                     return 1e12
 
-            result = optimizer.minimize(
-                objective,
-                np.asarray(candidate["fractions"], dtype=float),
-                method="SLSQP",
-                bounds=bounds,
-                constraints=(constraint,),
-                options={"ftol": 1e-9, "maxiter": 300, "disp": False},
-            )
             try:
-                fractions = project_bounded_fractions(
-                    [float(value) for value in result.x], lower, upper
+                optimizer.minimize(
+                    objective, np.asarray(candidate["fractions"], dtype=float),
+                    method="SLSQP", bounds=bounds, constraints=(constraint,),
+                    options={"ftol": 1e-9, "maxiter": 300, "disp": False},
                 )
-                score, nominal, worst, average, best = score_fractions(fractions)
-                refined_candidate = {
-                    "score": score,
-                    "nominal": nominal,
-                    "worst": worst,
-                    "avg": average,
-                    "best": best,
-                    "fractions": fractions,
-                }
-                refined.append(
-                    refined_candidate
-                    if score <= candidate["score"] + 1e-10
-                    else candidate
-                )
-            except Exception:
-                refined.append(candidate)
+            except (RefinementBudgetReached, ValueError):
+                pass
+            refined.append(best_refined)
         refined.sort(key=lambda candidate: candidate["score"])
         candidates_raw = refined[:top_n]
 
     candidates: list[MixCandidate] = []
     plot_data: list[dict] = []
     for candidate in candidates_raw:
+        check_stop()
         fractions = candidate["fractions"]
         candidates.append(
             MixCandidate(
@@ -590,6 +639,7 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
                 performance=performance_config if performance_mode else None,
                 densities=densities,
                 component_names=[Path(path).name for path in component_files],
+                check_stop=check_stop,
             )
         )
 
@@ -633,7 +683,7 @@ def run_mix_search(request: MixSearchRequest, *, evaluate_performance=evaluate_m
         f"Model: {MIX_RULE_LABELS[rule_norm]}\n"
         f"Best volume recipe: {recipe}\n"
         f"{result_text}\n"
-        f"Evaluated {len(proposals)} bounded recipe(s); "
+        f"Evaluated {evaluated} bounded recipe sample(s) of up to {sample_budget}; "
         f"{invalid_count} invalid under model; refinement evaluations "
         f"{refine_evals}.\nApplicability: {advisories}"
     )

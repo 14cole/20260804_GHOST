@@ -21,7 +21,7 @@ MAX_IBC_BATCH_FILES = 1000
 # keeps a desktop batch bounded even when the user combines many thicknesses
 # with an extremely fine frequency increment.
 MAX_IBC_BATCH_TOTAL_POINTS = 1_000_000
-THICKNESS_UNITS = ("mil", "in", "mm")
+THICKNESS_UNITS = ("in", "mm")
 _PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
@@ -106,8 +106,6 @@ def _filename_value(value: Decimal) -> str:
 
 
 def _thickness_to_inches(value: Decimal, unit: str) -> float:
-    if unit == "mil":
-        return float(value / Decimal("1000"))
     if unit == "in":
         return float(value)
     if unit == "mm":

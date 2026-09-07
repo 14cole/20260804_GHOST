@@ -6,6 +6,15 @@ Python. The desktop interface is registry-driven: adding a future tool means
 registering its callable and fields in
 `cem_tools/registry.py`; the window builds its form automatically.
 
+All five GUI tools show batch progress and the current file or processing
+stage. The bar counts completed output datasets for concatenation/subtraction,
+and completed input files for conversion or matching files for renaming.
+A conversion that writes several slices counts its input as complete only
+after all slices finish. Discovery displays a busy indicator until the total
+is known; large individual files can take time between count updates. Errors
+retain the completed count. Progress updates are limited to keep large batches
+responsive, and the tool selection and inputs stay fixed while a batch runs.
+
 ## Install and launch
 
 ```bash
@@ -40,6 +49,11 @@ from cem_tools import subtract_datasets
 result = subtract_datasets("/data/OPN", "/data/FRD", "/data/delta")
 print(result.summary())
 ```
+
+Each operation accepts an optional `progress(completed, total, message)` callback.
+It runs on the calling thread; GUI workers forward it through Qt signals.
+A zero total indicates discovery or a rename with no matching files. Existing
+headless/CLI calls can omit the callback.
 
 The CLI avoids importing either Qt binding:
 

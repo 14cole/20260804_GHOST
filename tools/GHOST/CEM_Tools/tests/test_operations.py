@@ -309,6 +309,72 @@ class OperationsTest(unittest.TestCase):
                              frequency, polarization, featured)
         return opn, frd
 
+    def test_progress_counts_only_completed_outputs_for_every_operation(self):
+        opn, frd = self.library()
+        cases = (
+            (concatenate_polarizations, (opn,), {}, 2, '*.grim'),
+            (concatenate_frequencies, (opn,), {}, 2, '*.grim'),
+            (subtract_datasets, (opn, frd), {}, 1, '*.grim'),
+            (convert_files, (opn,), {'extension': '.grim'}, 4, '*.grim'),
+            (rename_files, (opn,), {'keyword': 'SEAL', 'replacement': 'SEAM'}, 4, '*.grim'),
+        )
+        for operation, inputs, kwargs, expected, pattern in cases:
+            with self.subTest(operation=operation.__name__):
+                destination = self.root / operation.__name__
+                events = []
+                def progress(done, total, message):
+                    events.append((done, total, message))
+                    if total:
+                        # Counters must describe committed outputs, including
+                        # when the next dataset is being read or computed.
+                        self.assertEqual(len(list(destination.glob(pattern))), done)
+                result = operation(*inputs, output_dir=destination, progress=progress, **kwargs)
+                self.assertEqual(len(result.written), expected)
+                self.assertEqual(events[-1][:2], (expected, expected))
+                self.assertTrue(all(a[0] <= b[0] for a, b in zip(events, events[1:])))
+                self.assertTrue(all(message for _, _, message in events))
+
+    def test_failed_conversion_does_not_report_unwritten_file_as_complete(self):
+        source = self.root / 'source'
+        source.mkdir()
+        write_source(source / 'a.grim', 3., 'VV', np.ones(3, complex))
+        (source / 'b.grim').write_bytes(b'not a dataset')
+        events = []
+        with self.assertRaises(CemToolError):
+            convert_files(source, self.root / 'converted', '.grim',
+                          progress=lambda *event: events.append(event))
+        self.assertEqual(events[-1][:2], (1, 2))
+        self.assertEqual([path.name for path in (self.root / 'converted').glob('*.grim')], ['a.grim'])
+
+    def test_conversion_progress_counts_inputs_when_one_file_produces_multiple_outputs(self):
+        opn, _ = self.library()
+        joined = self.root / 'joined'
+        concatenate_polarizations(opn, joined)
+        events = []
+        result = convert_files(joined, self.root / 'out', '.out',
+                               progress=lambda *event: events.append(event))
+        self.assertEqual(len(result.written), 4)
+        self.assertEqual(events[-1][:2], (2, 2))
+
+    def test_in_place_rename_reports_staging_and_completed_names(self):
+        source = self.root / 'source'
+        source.mkdir()
+        for name in ('a_OLD.dat', 'b_OLD.dat'):
+            (source / name).write_text(name)
+        events = []
+        def progress(done, total, message):
+            events.append((done, total, message))
+            self.assertEqual(len(list(source.glob('*NEW.dat'))), done)
+        renamed = rename_files(source, None, 'OLD', 'NEW', in_place=True, progress=progress)
+        self.assertEqual(events[-1][:2], (2, 2))
+        self.assertFalse(list(source.glob('.cemtools-rename-*')))
+        self.assertEqual([path.read_text() for path in renamed.written], ['a_OLD.dat', 'b_OLD.dat'])
+        events.clear()
+        no_matches = rename_files(source, None, 'MISSING', 'NEW', in_place=True,
+                                  progress=lambda *event: events.append(event))
+        self.assertFalse(no_matches.written)
+        self.assertEqual(events[-1][:2], (0, 0))
+
     def test_concat_and_coherent_subtract_are_solver_compatible(self) -> 'None':
         opn, frd = self.library()
         pol_out = self.root / "pol"

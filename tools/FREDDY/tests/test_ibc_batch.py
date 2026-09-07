@@ -34,19 +34,19 @@ class IbcBatchPlanningTests(unittest.TestCase):
                 MAX_IBC_BATCH_TOTAL_POINTS // 1000 + 1,
             )
 
-    def test_mil_sweep_has_exact_values_and_canonical_names(self) -> None:
+    def test_inch_sweep_has_exact_values_and_canonical_names(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             plan = plan_ibc_thickness_batch(
-                folder, "coating", "15", "30", "5", "mil"
+                folder, "coating", '0.015', '0.03', '0.005', 'in'
             )
 
         self.assertEqual(
             [item.path.name for item in plan],
             [
-                "coating_15mil.csv",
-                "coating_20mil.csv",
-                "coating_25mil.csv",
-                "coating_30mil.csv",
+                "coating_0p015in.csv",
+                "coating_0p02in.csv",
+                "coating_0p025in.csv",
+                "coating_0p03in.csv",
             ],
         )
         self.assertEqual(
@@ -57,11 +57,11 @@ class IbcBatchPlanningTests(unittest.TestCase):
     def test_decimal_names_are_stable_and_stop_is_not_overshot(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             plan = plan_ibc_thickness_batch(
-                folder, "skin", "15.5", "21", "2.5", "mil"
+                folder, "skin", '0.0155', '0.021', '0.0025', 'in'
             )
         self.assertEqual(
             [item.path.name for item in plan],
-            ["skin_15p5mil.csv", "skin_18mil.csv", "skin_20p5mil.csv"],
+            ["skin_0p0155in.csv", "skin_0p018in.csv", "skin_0p0205in.csv"],
         )
 
     def test_inch_and_millimeter_units_have_exact_names_and_conversion(self) -> None:
@@ -92,15 +92,15 @@ class IbcBatchPlanningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaisesRegex(ValueError, "prefix"):
                 plan_ibc_thickness_batch(
-                    folder, "bad/name.csv", "15", "30", "1", "mil"
+                    folder, "bad/name.csv", '0.015', '0.03', '0.001', 'in'
                 )
             with self.assertRaisesRegex(ValueError, "limit is 1000"):
                 plan_ibc_thickness_batch(
-                    folder, "ibc", "1", "2000", "1", "mil"
+                    folder, "ibc", '0.001', '2', '0.001', 'in'
                 )
             with self.assertRaisesRegex(ValueError, "stop must be >= start"):
                 plan_ibc_thickness_batch(
-                    folder, "ibc", "30", "15", "1", "mil"
+                    folder, "ibc", '0.03', '0.015', '0.001', 'in'
                 )
 
 
@@ -136,7 +136,7 @@ class IbcBatchExportTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             plan = plan_ibc_thickness_batch(
-                folder, "ibc", "15", "30", "15", "mil"
+                folder, "ibc", '0.015', '0.03', '0.015', 'in'
             )
             count = export_pec_ibc_thickness_batch(
                 plan, layers, 1, frequencies
@@ -185,7 +185,7 @@ class IbcBatchExportTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as folder:
             plan = plan_ibc_thickness_batch(
-                folder, "ibc", "15", "20", "5", "mil"
+                folder, "ibc", '0.015', '0.02', '0.005', 'in'
             )
             with mock.patch(
                 "ibc.batch.compute_stack_impedance_many",
@@ -205,7 +205,7 @@ class IbcBatchExportTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as folder:
             plan = plan_ibc_thickness_batch(
-                folder, "ibc", "15", "20", "5", "mil"
+                folder, "ibc", '0.015', '0.02', '0.005', 'in'
             )
             with mock.patch(
                 "ibc.batch.compute_stack_impedance_many"
@@ -231,7 +231,7 @@ class IbcBatchExportTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as folder:
             plan = plan_ibc_thickness_batch(
-                folder, "ibc", "15", "25", "5", "mil"
+                folder, "ibc", '0.015', '0.025', '0.005', 'in'
             )
             from ibc import io as freddy_io
 
@@ -260,8 +260,8 @@ class IbcBatchExportTests(unittest.TestCase):
 
     def test_stage_failure_preserves_every_existing_batch_file(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
-            first = Path(folder) / "ibc_15mil.csv"
-            second = Path(folder) / "ibc_20mil.csv"
+            first = Path(folder) / "ibc_0p015in.csv"
+            second = Path(folder) / "ibc_0p02in.csv"
             first.write_text("old first\n", encoding="utf-8")
             second.write_text("old second\n", encoding="utf-8")
             outputs = [
@@ -292,8 +292,8 @@ class IbcBatchExportTests(unittest.TestCase):
 
     def test_partial_publication_failure_rolls_back_complete_batch(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
-            first = Path(folder) / "ibc_15mil.csv"
-            second = Path(folder) / "ibc_20mil.csv"
+            first = Path(folder) / "ibc_0p015in.csv"
+            second = Path(folder) / "ibc_0p02in.csv"
             first.write_text("old first\n", encoding="utf-8")
             second.write_text("old second\n", encoding="utf-8")
             outputs = [

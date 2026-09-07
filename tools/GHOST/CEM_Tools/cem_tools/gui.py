@@ -1,5 +1,6 @@
 """Generic Qt desktop shell (PySide6, or PySide2 on Python 3.6)."""
 
+import time
 import traceback
 from typing import Any
 
@@ -10,7 +11,7 @@ try:
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
         QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
-        QPushButton, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget,
+        QPushButton, QPlainTextEdit, QProgressBar, QSplitter, QVBoxLayout, QWidget,
     )
 except ImportError:  # PySide6 does not provide Python 3.6 wheels.
     from PySide2.QtCore import (  # type: ignore
@@ -19,7 +20,7 @@ except ImportError:  # PySide6 does not provide Python 3.6 wheels.
     from PySide2.QtWidgets import (  # type: ignore
         QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
         QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
-        QPushButton, QPlainTextEdit, QSplitter, QVBoxLayout, QWidget,
+        QPushButton, QPlainTextEdit, QProgressBar, QSplitter, QVBoxLayout, QWidget,
     )
 
 from .registry import CHECK, CHOICE, DIR, FieldSpec, ToolRegistry, ToolSpec, default_registry
@@ -89,6 +90,7 @@ QSplitter::handle { background: #d9e1ec; width: 1px; }
 
 
 class WorkerSignals(QObject):
+    progress = Signal(int, int, str)
     succeeded = Signal(object)
     failed = Signal(str)
 
@@ -99,12 +101,35 @@ class ToolWorker(QRunnable):
         self.spec = spec
         self.values = values
         self.signals = WorkerSignals()
+        self._last_progress_time = -float("inf")
+        self._last_total = None
+        self._pending_progress = None
+
+    def _report_progress(self, completed: 'int', total: 'int', message: 'str') -> 'None':
+        # Small-file batches can produce thousands of updates per second.
+        # Bound queued GUI work, while always delivering a final count.
+        now = time.monotonic()
+        self._pending_progress = (completed, total, message)
+        if (total != self._last_total or completed == total
+                or now - self._last_progress_time >= 0.05):
+            self._flush_progress()
+            self._last_progress_time = now
+            self._last_total = total
+
+    def _flush_progress(self) -> 'None':
+        if self._pending_progress is not None:
+            self.signals.progress.emit(*self._pending_progress)
+            self._pending_progress = None
 
     def run(self) -> 'None':
         try:
-            self.signals.succeeded.emit(self.spec.function(**self.values))
+            result = self.spec.function(**self.values, progress=self._report_progress)
         except Exception:
+            self._flush_progress()
             self.signals.failed.emit(traceback.format_exc())
+        else:
+            self._flush_progress()
+            self.signals.succeeded.emit(result)
 
 
 class DirectoryField(QWidget):
@@ -139,6 +164,9 @@ class MainWindow(QMainWindow):
         self.active_spec: 'ToolSpec | None' = None
         self.settings = QSettings("CEM Tools", "CEM Tools")
         self.pool = QThreadPool.globalInstance()
+        self._running = False
+        self._completed = 0
+        self._total = 0
         self.setWindowTitle("CEM Tools")
         self.resize(940, 640)
         self.setStyleSheet(STYLE_SHEET)
@@ -158,6 +186,13 @@ class MainWindow(QMainWindow):
         self.run_button = QPushButton("Run tool")
         self.run_button.setObjectName("runButton")
         self.run_button.clicked.connect(self._run)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self.progress_label = QLabel("Ready")
+        self.progress_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.progress_label.setWordWrap(True)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(100)
@@ -175,6 +210,8 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.run_button, 0, Qt.AlignmentFlag.AlignRight)
         right_layout.addSpacing(8)
         right_layout.addWidget(activity_label)
+        right_layout.addWidget(self.progress_bar)
+        right_layout.addWidget(self.progress_label)
         right_layout.addWidget(self.log, 1)
         splitter = QSplitter()
         splitter.addWidget(self.tool_list)
@@ -210,7 +247,7 @@ class MainWindow(QMainWindow):
         return widget
 
     def _select_tool(self, index: 'int') -> 'None':
-        if index < 0:
+        if index < 0 or self._running:
             return
         self.active_spec = self.specs[index]
         self._clear_form()
@@ -224,6 +261,9 @@ class MainWindow(QMainWindow):
             checkbox = self.widgets["in_place"]
             checkbox.toggled.connect(self.widgets["output_dir"].setDisabled)
         self.log.clear()
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Ready")
 
     @staticmethod
     def _widget_value(widget: 'QWidget') -> 'Any':
@@ -236,7 +276,7 @@ class MainWindow(QMainWindow):
         return widget.text().strip()
 
     def _run(self) -> 'None':
-        if self.active_spec is None:
+        if self.active_spec is None or self._running:
             return
         values: 'dict[str, Any]' = {}
         missing = []
@@ -262,22 +302,50 @@ class MainWindow(QMainWindow):
             return
         if self.active_spec.identifier == "rename" and values["in_place"]:
             values["output_dir"] = None
-        self.run_button.setEnabled(False)
+        self._set_running(True)
+        self._update_progress(0, 0, "Preparing batch")
         self.log.appendPlainText(f"Running {self.active_spec.title}...")
         worker = ToolWorker(self.active_spec, values)
+        worker.signals.progress.connect(self._update_progress)
         worker.signals.succeeded.connect(self._succeeded)
         worker.signals.failed.connect(self._failed)
         self.pool.start(worker)
 
+    def _set_running(self, running: 'bool') -> 'None':
+        self._running = running
+        self.run_button.setEnabled(not running)
+        self.tool_list.setEnabled(not running)
+        self.form_host.setEnabled(not running)
+
+    def _update_progress(self, completed: 'int', total: 'int', message: 'str') -> 'None':
+        self._completed, self._total = completed, total
+        if total > 0:
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(int(1000 * completed / total))
+            self.progress_label.setText(f"{completed:,} / {total:,} completed - {message}")
+        else:
+            self.progress_bar.setRange(0, 0)
+            self.progress_label.setText(message)
+
     def _succeeded(self, result: 'Any') -> 'None':
-        self.run_button.setEnabled(True)
+        self._set_running(False)
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(1000)
+        self.progress_label.setText("Complete - " + result.summary())
         self.log.appendPlainText(result.summary())
         for warning in result.warnings:
             self.log.appendPlainText("Warning: " + warning)
 
     def _failed(self, details: 'str') -> 'None':
-        self.run_button.setEnabled(True)
+        self._set_running(False)
         final_line = details.strip().splitlines()[-1]
+        if self._total == 0:
+            self.progress_bar.setRange(0, 1000)
+            self.progress_bar.setValue(0)
+        self.progress_label.setText(
+            f"Failed after {self._completed:,} / {self._total:,} completed - {final_line}"
+            if self._total else f"Failed - {final_line}"
+        )
         self.log.appendPlainText(details)
         QMessageBox.critical(self, "Tool failed", final_line)
 
