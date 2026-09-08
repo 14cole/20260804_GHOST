@@ -15,6 +15,50 @@ import ghost_runtime
 
 
 class HpcRuntimeTests(unittest.TestCase):
+    def test_environment_checker_accepts_the_installed_test_stack(self):
+        result = subprocess.run(
+            [sys.executable, str(BACKEND / 'check_hpc_environment.py')],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('PASS: driver/solver imports and complex LU', result.stdout)
+
+    def test_packed_visibility_preserves_every_bit_and_empty_shapes(self):
+        import numpy as np
+        from occluder import PackedVisibility
+        packed = np.arange(256, dtype=np.uint8).reshape(256, 1)
+        visibility = PackedVisibility(packed, n_points=256, n_directions=8)
+        expected = np.array([[bool(byte & (1 << bit)) for bit in range(8)]
+                             for byte in range(256)])
+        np.testing.assert_array_equal(visibility.to_dense(), expected)
+        for byte in range(256):
+            np.testing.assert_array_equal(visibility.row(byte).to_dense(), expected[byte])
+        partial = PackedVisibility(np.array([[129, 1]], dtype=np.uint8),
+                                   n_points=1, n_directions=9)
+        np.testing.assert_array_equal(partial.to_dense(),
+                                      [[True, False, False, False, False, False, False, True, True]])
+        for points, directions in ((0, 9), (2, 0), (0, 0)):
+            empty = PackedVisibility(np.zeros((points, (directions + 7) // 8), dtype=np.uint8),
+                                     n_points=points, n_directions=directions)
+            self.assertEqual(empty.to_dense().shape, (points, directions))
+            if points:
+                self.assertEqual(empty.row(0).to_dense().shape, (directions,))
+
+    def test_packed_visibility_cannot_be_changed_after_review(self):
+        import numpy as np
+        from occluder import PackedVisibility
+        source = np.array([[129, 1]], dtype=np.uint8)
+        visibility = PackedVisibility(source, n_points=1, n_directions=9)
+        source[:] = 0
+        self.assertTrue(visibility.row(0)[8])
+        for array in (visibility._packed, visibility.row(0)._packed):
+            self.assertFalse(array.flags.writeable)
+            with self.assertRaises(ValueError):
+                array.setflags(write=True)
+            with self.assertRaises(ValueError):
+                array[...] = 0
+
     def test_headless_modules_import_without_gui(self):
         modules = (
             'run_hpc_monostatic', 'run_hpc_bor_monostatic',

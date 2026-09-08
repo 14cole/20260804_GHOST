@@ -32,6 +32,24 @@ from typing import Callable, Optional
 import numpy as np
 
 
+def _immutable_array(values):
+    """Copy numeric values into a buffer that cannot be made writable."""
+    array = np.ascontiguousarray(values)
+    # NumPy 1.14 permits setflags(write=True) on bytes-backed arrays. A
+    # read-only memoryview preserves the buffer protection on that version too.
+    buffer = memoryview(array.tobytes())
+    return np.frombuffer(buffer, dtype=array.dtype).reshape(array.shape)
+
+
+def _unpack_little_endian(packed):
+    """Unpack each byte least-significant-bit first on NumPy 1.14+."""
+    # NumPy's original unpackbits uses big-endian bit order. Reverse bits
+    # within each byte; the bitorder keyword was only added in NumPy 1.17.
+    bits = np.unpackbits(packed, axis=-1).reshape(packed.shape + (8,))
+    shape = packed.shape[:-1] + (packed.shape[-1] * 8,)
+    return bits[..., ::-1].reshape(shape)
+
+
 def visible_query_adapter(occluder):
     """Bind a visibility query across current and historical integrations.
 
@@ -116,9 +134,8 @@ class PackedVisibilityRow:
     def to_dense(self) -> 'np.ndarray':
         """Materialize one row for compatibility/debugging, never implicitly."""
 
-        return np.unpackbits(
-            self._packed, bitorder="little"
-        )[:self._n_directions].astype(bool, copy=False)
+        return _unpack_little_endian(self._packed)[:self._n_directions].astype(
+            bool, copy=False)
 
 
 class PackedVisibility:
@@ -154,10 +171,7 @@ class PackedVisibility:
             raw[:, -1] & np.uint8(0xff ^ ((1 << unused) - 1))
         ):
             raise ValueError("Packed visibility has nonzero unused trailing bits.")
-        immutable = np.frombuffer(
-            np.ascontiguousarray(raw).tobytes(), dtype=np.uint8
-        ).reshape(raw.shape)
-        self._packed = immutable
+        self._packed = _immutable_array(raw)
         self._n_points = point_count
         self._n_directions = direction_count
 
@@ -194,9 +208,8 @@ class PackedVisibility:
 
         if self._n_directions == 0:
             return np.empty((self._n_points, 0), dtype=bool)
-        return np.unpackbits(
-            self._packed, axis=1, bitorder="little"
-        )[:, :self._n_directions].astype(bool, copy=False)
+        return _unpack_little_endian(self._packed)[:, :self._n_directions].astype(
+            bool, copy=False)
 
 
 class Occluder:
@@ -234,9 +247,7 @@ class Occluder:
         # writable memory; a caller holding a reviewed plan could otherwise
         # re-enable writes from a progress callback after the plan hash check.
         scaled = np.ascontiguousarray(tris if scl == 1.0 else tris * scl)
-        self._tris = np.frombuffer(
-            scaled.tobytes(), dtype=scaled.dtype
-        ).reshape(scaled.shape)                                      # (n,3,3)
+        self._tris = _immutable_array(scaled)                        # (n,3,3)
         lo = self._tris.reshape(-1, 3).min(0)
         hi = self._tris.reshape(-1, 3).max(0)
         self.diag = float(np.linalg.norm(hi - lo)) or 1.0
@@ -366,7 +377,7 @@ class Occluder:
                 raise InterruptedError("Body-shadow acceleration build cancelled.")
 
             centres = self.tris.mean(axis=1)
-            order = np.argsort(self._morton_codes(centres), kind="stable")
+            order = np.argsort(self._morton_codes(centres), kind="mergesort")
             del centres
             if self._cancelled(cancel_check):
                 raise InterruptedError("Body-shadow acceleration build cancelled.")
@@ -400,30 +411,16 @@ class Occluder:
                 raise InterruptedError("Body-shadow acceleration build cancelled.")
 
             # Publish together only after every array is complete.
-            immutable_ordered = np.frombuffer(
-                np.ascontiguousarray(ordered).tobytes(),
-                dtype=ordered.dtype,
-            ).reshape(ordered.shape)
-            self._tris = immutable_ordered
-            self._tri_edge1 = np.frombuffer(
-                np.ascontiguousarray(ordered[:, 1] - ordered[:, 0]).tobytes(),
-                dtype=ordered.dtype,
-            ).reshape((n_triangles, 3))
-            self._tri_edge2 = np.frombuffer(
-                np.ascontiguousarray(ordered[:, 2] - ordered[:, 0]).tobytes(),
-                dtype=ordered.dtype,
-            ).reshape((n_triangles, 3))
+            self._tris = _immutable_array(ordered)
+            self._tri_edge1 = _immutable_array(ordered[:, 1] - ordered[:, 0])
+            self._tri_edge2 = _immutable_array(ordered[:, 2] - ordered[:, 0])
             self._bvh_base = base
             # As with triangles, a write=False flag on an owning ndarray can be
             # reversed by outside code. Back the published boxes with immutable
             # bytes so execution snapshots may safely share the acceleration
             # structure with a reviewed plan.
-            self._bvh_lo = np.frombuffer(
-                bvh_lo.tobytes(), dtype=bvh_lo.dtype
-            ).reshape(bvh_lo.shape)
-            self._bvh_hi = np.frombuffer(
-                bvh_hi.tobytes(), dtype=bvh_hi.dtype
-            ).reshape(bvh_hi.shape)
+            self._bvh_lo = _immutable_array(bvh_lo)
+            self._bvh_hi = _immutable_array(bvh_hi)
             self._bvh_ready = True
 
     @property

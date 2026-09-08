@@ -23,10 +23,12 @@ knobs below mean the same thing in each.
 
 ### Python environment and a driver in your own folder
 
-The headless GHOST HPC/local drivers support **Python 3.6.8** with NumPy
-1.19.5 and SciPy 1.5.4. The tested dependency profile, including optional
+The headless GHOST HPC/local drivers support **Python 3.6.8** with **NumPy
+1.14.3 and SciPy 1.0.0**. This tested dependency profile, including optional
 psutil 5.9.8 memory sampling, is in
-[`requirements/hpc-py36.txt`](../../requirements/hpc-py36.txt). The desktop
+[`requirements/hpc-py36.txt`](../../requirements/hpc-py36.txt). If those NumPy
+and SciPy versions are already installed, no upgrade is needed. Python 3.6.8
+with NumPy 1.19.5 and SciPy 1.5.4 has also been tested. The desktop
 application retains its separate Python 3.10+ packaging requirement and
 Windows Python 3.12 release environment; installing the desktop package is
 not required on the cluster.
@@ -34,8 +36,10 @@ not required on the cluster.
 The backend bundles its Python 3.6 dataclasses support. Copy the **complete
 updated Backend**, including `ghost_runtime.py` and `_ghost_dataclasses.py`;
 do not add your own `dataclasses.py`. The compatibility changes also cover
-annotations, nested/threaded solver settings, file cleanup, and bundle CLI
-operations. Numerical assembly and solve algorithms are shared with desktop
+annotations, nested/threaded solver settings, file cleanup, bundle CLI
+operations, and older NumPy sorting, visibility, and read-only buffer behavior.
+The LU solver does not require SciPy's newer public `LinAlgWarning` export.
+Numerical assembly and solve algorithms are shared with desktop
 Python. Python 3.6 solver settings are thread-local; asynchronous task-local
 contexts are available only on Python 3.7+.
 
@@ -46,8 +50,10 @@ you will use to launch the driver:
 python tools/GHOST/Backend/check_hpc_environment.py
 ```
 
-It reports the interpreter, loaded backend, dependency versions, and a complex
-LU check. If dependencies are missing or older than the tested profile, install
+It reports the interpreter, compiler, loaded backend, dependency versions, and
+a complex LU check. A `GCC ...` string identifies the compiler used to build
+Python; it is separate from the Python version. If dependencies are missing
+or older than the tested profile, install
 the pinned headless requirements in your permitted cluster environment:
 
 ```bash
@@ -121,8 +127,8 @@ python tools/GHOST/tests/test_hpc_scheduling.py
 python tools/GHOST/tests/test_local_drivers.py
 ```
 
-Development validation used actual CPython 3.6.8 on Windows with the pinned
-libraries, including copied worker processes, CSV coatings, mixed precision,
+Development validation used actual CPython 3.6.8 on Windows with NumPy 1.14.3
+and SciPy 1.0.0, including copied worker processes, CSV coatings, mixed precision,
 BoR, bundle/recovery contracts, and mesh/file-transaction checks. Those checks
 do not establish your cluster's Linux native libraries, SLURM setup, shared
 filesystem behavior, or large-job resource limits; the acceptance steps above

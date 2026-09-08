@@ -1,7 +1,5 @@
 """Correctness and operational tests for vehicle-mesh body shadowing."""
 
-from __future__ import annotations
-
 import sys
 import unittest
 from pathlib import Path
@@ -69,7 +67,7 @@ def _box_triangles():
 
 class OccluderAccelerationTests(unittest.TestCase):
     def test_bvh_matches_projected_reference_for_random_mesh_and_rays(self):
-        rng = np.random.default_rng(48291)
+        rng = np.random.RandomState(48291)
         triangles = rng.normal(size=(257, 3, 3))
         # Keep random facets comfortably nondegenerate.
         triangles[:, 1] += np.array([0.7, 0.0, 0.0])
@@ -164,6 +162,9 @@ class OccluderAccelerationTests(unittest.TestCase):
 
     def test_execution_snapshot_shares_only_immutable_acceleration(self):
         blocker = Occluder(_box_triangles(), bias=2.5e-7)
+        # Protect the original geometry before the first BVH build as well.
+        with self.assertRaises(ValueError):
+            blocker.tris.setflags(write=True)
         expected = blocker.visible(
             [[-2.0, 0.0, 0.0]], [1.0, 0.0, 0.0]
         )

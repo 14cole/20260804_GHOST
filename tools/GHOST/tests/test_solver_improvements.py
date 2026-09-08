@@ -16,7 +16,7 @@ from test_thin_sheet import sheet_snapshot
 
 class MixedPrecisionTests(unittest.TestCase):
     def test_multiple_rhs_and_adjoint_reach_double_residual_accuracy(self):
-        rng = np.random.default_rng(761)
+        rng = np.random.RandomState(761)
         a = rng.normal(size=(96,96))+1j*rng.normal(size=(96,96))+20*np.eye(96)
         b = rng.normal(size=(96,4))+1j*rng.normal(size=(96,4))
         factor = RefinedLU(a)

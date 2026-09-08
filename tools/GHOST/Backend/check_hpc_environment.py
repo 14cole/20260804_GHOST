@@ -8,6 +8,7 @@ import sys
 
 def main():
     print('Python: {} ({})'.format(platform.python_version(), sys.executable))
+    print('Compiler: {}'.format(platform.python_compiler()))
     print('Backend: {}'.format(Path(__file__).resolve().parent))
     if sys.version_info < (3, 6, 8):
         print('FAIL: the headless backend requires Python 3.6.8 or newer.')
@@ -20,13 +21,13 @@ def main():
         print('NumPy: {}'.format(np.__version__))
         print('SciPy: {}'.format(scipy.__version__))
         for name, version, minimum in (
-            ('NumPy', np.__version__, (1, 19, 5)),
-            ('SciPy', scipy.__version__, (1, 5, 4)),
+            ('NumPy', np.__version__, (1, 14, 3)),
+            ('SciPy', scipy.__version__, (1, 0, 0)),
         ):
             numbers = tuple(int(part) for part in version.split('.')[:3])
             if numbers < minimum:
-                raise RuntimeError('{} is older than the tested HPC minimum {}'.format(
-                    name, '.'.join(str(part) for part in minimum)))
+                raise RuntimeError('{} {} is older than the tested HPC minimum {}'.format(
+                    name, version, '.'.join(str(part) for part in minimum)))
         print('dataclasses: {}'.format(ghost_runtime.dataclass.__module__))
         try:
             import psutil

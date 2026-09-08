@@ -187,7 +187,7 @@ def audit_triangle_topology(
     keys["lo"] = edge_lo
     keys["hi"] = edge_hi
     orientation = np.where(starts == edge_lo, 1, -1).astype(np.int8)
-    order = np.argsort(keys, kind="stable")
+    order = np.argsort(keys, kind="mergesort")
     sorted_keys = keys[order]
     sorted_orientation = orientation[order]
     group_start = np.r_[
