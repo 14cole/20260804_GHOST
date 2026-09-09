@@ -228,9 +228,9 @@ def test_polarization_aliases():
     import run_local_monostatic as local_driver
     check(
         not hasattr(local_driver, "POLARIZATIONS")
-        and not hasattr(local_driver, "SOLVER_METHOD")
+        and local_driver.SOLVER_METHOD == "direct"
         and not hasattr(local_driver, "CFIE_ALPHA"),
-        "2-D production driver exposes no polarization, method, or dead CFIE control",
+        "2-D driver defaults to reference method and exposes no polarization or dead CFIE control",
     )
 
 

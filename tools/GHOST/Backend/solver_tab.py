@@ -450,6 +450,7 @@ class _SolveWorker(QObject):
         solver_kind: 'str' = "2d",
         accuracy_target: 'str' = "standard",
         lu_precision: 'str' = "double",
+        solver_method: 'str' = "direct",
         preflight_setup=None,
         preflight_only=False,
     ):
@@ -465,6 +466,7 @@ class _SolveWorker(QObject):
         self.mesh_certification = bool(mesh_certification)
         self.mesh_policy = accuracy_target_policy(accuracy_target)
         self.lu_precision = lu_precision
+        self.solver_method = solver_method
         self.preflight_setup = preflight_setup
         self.preflight_only = preflight_only
         self.cfie_alpha = float(cfie_alpha)
@@ -516,6 +518,8 @@ class _SolveWorker(QObject):
         """Run the selected 2-D mode with optional mesh certification."""
 
         mesh_policy = self.mesh_policy
+        if self.solver_method == "experimental_cpu" and self.scattering_mode != "monostatic":
+            raise ValueError("Experimental CPU requires 2D monostatic scattering.")
         if self.scattering_mode == "bistatic":
             if not self.observation_angles:
                 raise ValueError(
@@ -550,6 +554,7 @@ class _SolveWorker(QObject):
             else solve_monostatic_rcs_2d_survey
         )
         monostatic_kwargs = dict(
+            solver_method=self.solver_method,
             geometry_snapshot=snapshot,
             frequencies_ghz=self.frequencies,
             elevations_deg=self.elevations,
@@ -1014,6 +1019,12 @@ class SolverTab(RunSetupMixin, QWidget):
         self.cmb_lu_precision.addItem("Mixed precision + refinement (experimental)", "mixed")
         self.cmb_lu_precision.setToolTip("2D CPU only. Factors in single precision and checks double-precision residuals. Falls back to double LU if refinement stalls. Operator assembly still uses quadratic memory.")
         options_form.addRow("2D LU precision", self.cmb_lu_precision)
+        self.cmb_solver_method = QComboBox()
+        self.cmb_solver_method.addItem("Dense LU (reference)", "direct")
+        self.cmb_solver_method.addItem("CPU streaming (experimental)", "experimental_cpu")
+        self.cmb_solver_method.setToolTip("2D monostatic PEC, IBC and dielectric solves. Double precision with every requested angle retained. Largest RAM savings on wide sweeps; dense matrix memory still grows with mesh size. Sheet formulations use the reference CPU path.")
+        self.cmb_solver_method.currentIndexChanged.connect(self._apply_job_state)
+        options_form.addRow("2D solver method", self.cmb_solver_method)
         self.btn_solver_report = QPushButton("Accuracy and performance report...")
         self.btn_solver_report.clicked.connect(self._show_solver_report)
         options_form.addRow(self.btn_solver_report)
@@ -1390,7 +1401,14 @@ class SolverTab(RunSetupMixin, QWidget):
         self.chk_export_after_solve.setEnabled(not busy)
         self.chk_mesh_certification.setEnabled(not busy)
         self.cmb_accuracy_target.setEnabled(not busy)
-        self.cmb_lu_precision.setEnabled(not busy)
+        method_available = not is_bor and self.cmb_scatter_mode.currentData() == "monostatic"
+        if not method_available:
+            self.cmb_solver_method.setCurrentIndex(0)
+        experimental = self.cmb_solver_method.currentData() == "experimental_cpu"
+        if experimental:
+            self.cmb_lu_precision.setCurrentIndex(self.cmb_lu_precision.findData("double"))
+        self.cmb_solver_method.setEnabled(not busy and method_available)
+        self.cmb_lu_precision.setEnabled(not busy and not experimental)
         self.btn_advanced_settings.setEnabled(not busy)
         self.edit_quality_residual_max.setEnabled(enable_2d_quality_thresholds)
         self.edit_quality_condition_max.setEnabled(enable_2d_quality_thresholds)
@@ -1422,6 +1440,8 @@ class SolverTab(RunSetupMixin, QWidget):
         is_bistatic = (self.cmb_scatter_mode.currentData() == "bistatic")
         self.edit_obs_angles.setVisible(is_bistatic)
         self.lbl_obs_angles.setVisible(is_bistatic)
+        if hasattr(self, "cmb_solver_method"):
+            self._apply_job_state()
 
     def _on_solver_kind_changed(self, _index: 'int' = 0) -> 'None':
         is_bor = (self.cmb_solver_kind.currentData() == "bor")
@@ -1875,6 +1895,7 @@ class SolverTab(RunSetupMixin, QWidget):
             solver_kind=solver_kind,
             accuracy_target=str(self.cmb_accuracy_target.currentData()),
             lu_precision=str(self.cmb_lu_precision.currentData()),
+            solver_method=str(self.cmb_solver_method.currentData()),
             preflight_setup=preflight_setup,
         )
         worker.moveToThread(thread)

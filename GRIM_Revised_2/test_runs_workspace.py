@@ -314,6 +314,24 @@ class RunsWorkspaceTests(unittest.TestCase):
         self.app.processEvents()
         self.temporary.cleanup()
 
+    def test_experimental_cpu_request_and_preferences_roundtrip(self) -> None:
+        self._configure_2d_request()
+        self.workspace.run_lu_combo.setCurrentIndex(self.workspace.run_lu_combo.findData('mixed'))
+        combo = self.workspace.run_method_combo
+        combo.setCurrentIndex(combo.findData('experimental_cpu'))
+        self.assertEqual(self.workspace.run_lu_combo.currentData(), 'double')
+        self.assertFalse(self.workspace.run_lu_combo.isEnabled())
+        request = self.workspace._request_snapshot(require_bundle_path=False)
+        self.assertEqual(request['settings']['SOLVER_METHOD'], 'experimental_cpu')
+        self.assertTrue(self.workspace.save_settings())
+        restored = RunsWorkspace(settings=self.settings, bundle_service=self.bundle_service)
+        try:
+            self.assertEqual(restored.run_method_combo.currentData(), 'experimental_cpu')
+            self.assertFalse(restored.run_lu_combo.isEnabled())
+        finally:
+            restored.deleteLater()
+            self.app.processEvents()
+
     def _configure_connection(self) -> None:
         self.workspace.host_edit.setText("login.cluster.example")
         self.workspace.username_edit.setText("analyst")

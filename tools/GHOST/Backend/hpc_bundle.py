@@ -90,6 +90,7 @@ _SETTINGS_BY_SOLVER = {
         "MAX_SOLVE_GB",
         "MAX_PANELS",
         "LU_PRECISION",
+        "SOLVER_METHOD",
         "ASSEMBLY_THREADS",
     },
     "bor": _COMMON_SETTINGS | {
@@ -659,9 +660,12 @@ def _validate_settings(solver: 'str', raw_settings: 'Any') -> 'Dict[str, Any]':
     for name, choices in (
         ("ACCURACY_TARGET", ("standard", "tight")),
         ("LU_PRECISION", ("double", "mixed")),
+        ("SOLVER_METHOD", ("auto", "direct", "experimental_cpu")),
     ):
         if name in settings and settings[name] not in choices:
             raise BundleError(f"{name} must be {' or '.join(choices)}.")
+    if settings.get("SOLVER_METHOD") == "experimental_cpu" and settings.get("LU_PRECISION", "double") != "double":
+        raise BundleError("Experimental CPU requires double LU precision.")
     if "ASSEMBLY" in settings and settings["ASSEMBLY"] not in {
         "auto",
         "tables",

@@ -362,6 +362,7 @@ def predict_2d_resources_many(
     safety: 'float' = 1.35,
     floor_gb: 'float' = 0.6,
     progress: 'Optional[Callable[[float, str], None]]' = None,
+    solver_method: 'str' = 'direct',
 ) -> 'Dict[Tuple[float, str], Dict[str, Any]]':
     """Plan a geometry sweep using the exact solver mesh and formulation.
 
@@ -472,6 +473,7 @@ def predict_2d_resources_many(
                 system_dofs=fine["system_dofs"],
                 operator_matrices=fine["operator_matrices"],
                 n_rhs=max(1, int(n_angles)),
+                solver_method=solver_method, formulation=fine["formulation"],
             )
             planned[(freq_ghz, requested_pol)] = {
                 "nodes": int(base["nodes"]),
@@ -504,6 +506,7 @@ def predict_2d_resources(
     n_angles: 'int' = 1,
     safety: 'float' = 1.35,
     floor_gb: 'float' = 0.6,
+    solver_method: 'str' = 'direct',
 ) -> 'Dict[str, Any]':
     """Backward-compatible one-unit exact resource prediction."""
 
@@ -518,6 +521,7 @@ def predict_2d_resources(
         n_angles=n_angles,
         safety=safety,
         floor_gb=floor_gb,
+        solver_method=solver_method,
     )[key]
 
 

@@ -36,7 +36,7 @@ TEXT_LISTS = {'GEOMETRY_DIRS', 'GEOMETRY_EXTS', 'SLURM_EXTRA_SBATCH', 'JOB_PROLO
 NUMBERS = {'BODY_AXIS_AZ_DEG', 'BODY_AXIS_EL_DEG', 'BODY_ROLL_DEG', 'CFIE_ALPHA',
            'MODE_TOL', 'STREAM_BUDGET_GB', 'MEMORY_HEADROOM', 'MEMORY_SAFETY',
            'CLAIM_STALE_SECONDS', 'MAX_SOLVE_GB'}
-CHOICES = {'GEOMETRY_UNITS': ('inches', 'meters'), 'ACCURACY_TARGET': ('standard', 'tight'),
+CHOICES = {'SOLVER_METHOD': ('auto', 'direct', 'experimental_cpu'), 'GEOMETRY_UNITS': ('inches', 'meters'), 'ACCURACY_TARGET': ('standard', 'tight'),
            'LU_PRECISION': ('double', 'mixed'), 'ASSEMBLY': ('auto', 'tables', 'streaming'),
            'TABLE_PRECISION': ('auto', 'single', 'double')}
 
@@ -91,6 +91,8 @@ def validate_settings(settings, allowed_keys):
         if not valid:
             raise ValueError(f'Invalid driver setting {key}: {value!r}')
         result[key] = value
+    if result.get('SOLVER_METHOD') == 'experimental_cpu' and result.get('LU_PRECISION', 'double') != 'double':
+        raise ValueError('Experimental CPU requires double LU precision.')
     return result
 
 
@@ -104,7 +106,8 @@ def settings_from_run_setup(value, kind):
         raise ValueError('Batch drivers require a monostatic setup with their standard quality thresholds.')
     return dict(FREQUENCIES_GHZ=setup['frequencies_ghz'], AZIMUTHS_DEG=setup['angles_deg'],
                 GEOMETRY_UNITS=setup['units'], MESH_CERTIFICATION=setup['mesh_certification'],
-                ACCURACY_TARGET=setup['accuracy'], LU_PRECISION=setup['lu_precision'])
+                ACCURACY_TARGET=setup['accuracy'], LU_PRECISION=setup['lu_precision'],
+                SOLVER_METHOD=setup.get('solver_method', 'direct'))
 
 
 def configuration_payload(kind, settings, allowed_keys, *, run_setup=None):

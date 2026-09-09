@@ -33,6 +33,8 @@ import numpy as np
 from solver_metrics import active_metrics, profiled_solve, timed_stage
 from thin_sheet import ThinLayerDefinition, layer_for_mesh, solve_thin_layer_fields
 from refined_lu import RefinedLU, requested_precision
+from cpu_execution import (experimental_monostatic, current_state, requested_cpu,
+                           select_formulation, select_solver, EXPERIMENTAL_METHOD)
 from geometry_io import (
     material_filename_from_row,
 )
@@ -269,6 +271,8 @@ def _dense_backend_summary() -> 'Dict[str, Any]':
 
 
 def _requested_dense_backend() -> 'Tuple[str, int]':
+    if requested_cpu():
+        return "cpu", DENSE_GPU_MIN_N_DEFAULT
     backend = os.environ.get(DENSE_GPU_BACKEND_ENV, "cpu").strip().lower()
     if backend not in {"cpu", "auto", "gpu"}:
         raise ValueError(
@@ -758,9 +762,9 @@ def _normalize_public_2d_solver_method(method: 'Any') -> 'str':
             "The FMM solver has been removed. Use solver_method='auto' or "
             "'direct' for dense LU."
         )
-    if normalized not in {"auto", "direct"}:
+    if normalized not in {"auto", "direct", EXPERIMENTAL_METHOD}:
         raise ValueError(
-            f"Unsupported 2-D solver_method {method!r}; expected 'auto' or 'direct'."
+            f"Unsupported 2-D solver_method {method!r}; expected 'auto', 'direct', or 'experimental_cpu'."
         )
     return normalized
 
@@ -1249,6 +1253,8 @@ def _estimate_memory_gb(
     system_dofs: 'Optional[int]' = None,
     operator_matrices: 'Optional[int]' = None,
     n_rhs: 'int' = 1000,
+    solver_method: 'str' = 'direct',
+    formulation: 'Optional[str]' = None,
 ) -> 'float':
     """
     Estimate peak memory for the dense BIE/MoM solve in GB.
@@ -1276,7 +1282,16 @@ def _estimate_memory_gb(
     )
     # RHS + solution
     misc_bytes = 4 * sys_size * bytes_per_complex * max(1, int(n_rhs))
-    total = sys_bytes + region_bytes + misc_bytes
+    extra_bytes = 0
+    if solver_method == EXPERIMENTAL_METHOD:
+        from cpu_execution import BATCH_SIZE, CACHE_BYTES, TABLE_BYTES, STREAMED_FORMULATIONS
+        # Cache/table retention can overlap a later fallback or refined solve.
+        extra_bytes = CACHE_BYTES + TABLE_BYTES
+        if formulation in STREAMED_FORMULATIONS:
+            misc_bytes = 8 * sys_size * bytes_per_complex * min(BATCH_SIZE, max(1, int(n_rhs)))
+            # Compact arrays plus canonical Python result records for both channels.
+            extra_bytes += max(1, int(n_rhs)) * 4096
+    total = sys_bytes + region_bytes + misc_bytes + extra_bytes
     return total / (1024 ** 3)
 
 
@@ -2713,6 +2728,7 @@ def _solve_multi_region_indirect(
     return rcs_lin, amp, max_res, ext_density_global
 
 @profiled_solve
+@experimental_monostatic
 def solve_monostatic_rcs_2d_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -2854,11 +2870,14 @@ def solve_monostatic_rcs_2d_single_polarization(
         "junction_orientation_conflict_nodes": 0,
     }
 
+    progress_floor = [0]
+
     def emit_progress(message: 'str') -> 'None':
         if progress_callback is None:
             return
         try:
-            progress_callback(done_steps, total_steps, message)
+            progress_floor[0] = max(progress_floor[0], done_steps)
+            progress_callback(progress_floor[0], total_steps, message)
         except Exception:
             pass
 
@@ -3035,6 +3054,12 @@ def solve_monostatic_rcs_2d_single_polarization(
         # classifier is shared with the scheduler, including N-DOF sheet and
         # Robin systems and exact interface-side DOFs for multi-region solves.
         resources = _dense_formulation_resources(mesh, coupled_infos, pol)
+        def batch_progress(completed, total):
+            if progress_callback is not None:
+                progress_floor[0] = max(progress_floor[0], done_steps + completed)
+                progress_callback(progress_floor[0], total_steps,
+                    "Experimental CPU: solved {} of {} angles at {} GHz".format(completed, total, freq_ghz))
+        select_formulation(resources, batch_progress)
         est_gb = _estimate_memory_gb(
             resources["nodes"],
             use_cfie=False,
@@ -3042,6 +3067,7 @@ def solve_monostatic_rcs_2d_single_polarization(
             system_dofs=resources["system_dofs"],
             operator_matrices=resources["operator_matrices"],
             n_rhs=max(1, len(elevations)),
+            solver_method=solver_method, formulation=resources["formulation"],
         )
         memory_limit_gb = _solve_memory_limit_gb()
         if est_gb > memory_limit_gb:
@@ -3220,7 +3246,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         if use_te_robin_mfie:
             formulation_label = "2D MFIE TE Robin (SLP representation)"
             condition_diagnostics = {} if compute_condition_number else None
-            rcs_lin_vec, amp_vec, mfie_residual = _solve_te_robin_mfie(
+            rcs_lin_vec, amp_vec, mfie_residual = select_solver(_solve_te_robin_mfie)(
                 mesh=mesh,
                 infos=coupled_infos,
                 pol=pol,
@@ -3266,7 +3292,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         if use_multi_region:
             formulation_label = "2D multi-region indirect SLP formulation (layered coating)"
             condition_diagnostics = {} if compute_condition_number else None
-            rcs_lin_vec, amp_vec, multi_residual, _ = _solve_multi_region_indirect(
+            rcs_lin_vec, amp_vec, multi_residual, _ = select_solver(_solve_multi_region_indirect)(
                 mesh=mesh,
                 infos=coupled_infos,
                 pol=pol,
@@ -3311,7 +3337,7 @@ def solve_monostatic_rcs_2d_single_polarization(
         if use_dielectric_indirect:
             formulation_label = "2D indirect two-density dielectric formulation"
             condition_diagnostics = {} if compute_condition_number else None
-            rcs_lin_vec, amp_vec, diel_residual = _solve_dielectric_indirect(
+            rcs_lin_vec, amp_vec, diel_residual = select_solver(_solve_dielectric_indirect)(
                 mesh=mesh,
                 infos=coupled_infos,
                 pol=pol,
@@ -3366,7 +3392,7 @@ def solve_monostatic_rcs_2d_single_polarization(
                 else "2D Robin-BIE IBC formulation (SLP representation)"
             )
             condition_diagnostics = {} if compute_condition_number else None
-            rcs_lin_vec, amp_vec, robin_residual = _solve_robin_bie(
+            rcs_lin_vec, amp_vec, robin_residual = select_solver(_solve_robin_bie)(
                 mesh=mesh,
                 infos=coupled_infos,
                 pol=pol,
@@ -3928,6 +3954,7 @@ def _frequency_local_co_solve(solve, kwargs):
 
 
 @profiled_solve
+@experimental_monostatic
 def solve_monostatic_rcs_2d(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -3942,6 +3969,7 @@ def solve_monostatic_rcs_2d(
     mesh_reference_ghz: 'Optional[float]' = None,
     rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
+    solver_method: 'str' = "direct",
 ) -> 'Dict[str, Any]':
     """Solve the complete 2-D monostatic co-polarized response.
 
@@ -3978,7 +4006,7 @@ def solve_monostatic_rcs_2d(
             rcs_normalization_mode=rcs_normalization_mode,
             cfie_alpha=0.0,
             abort_event=abort_event,
-            solver_method="direct",
+            solver_method=solver_method,
             _shared_discretization_cache=shared_cache,
         )
     return _merge_co_polarized_2d_results(channel_results)
@@ -4015,6 +4043,8 @@ def solve_bistatic_rcs_2d_single_polarization(
     Returns samples with ``theta_inc_deg != theta_scat_deg`` in general.
     Compatible with ``export_result_to_grim`` which splits by incidence angle.
     """
+    if str(solver_method).strip().lower() == EXPERIMENTAL_METHOD:
+        raise ValueError("Experimental CPU supports 2D monostatic fields only.")
 
     if not frequencies_ghz:
         raise ValueError("At least one frequency is required.")
@@ -4750,6 +4780,7 @@ def _run_certified_2d_pair(
 
 
 @profiled_solve
+@experimental_monostatic
 def solve_monostatic_rcs_2d_certified_single_polarization(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -4812,6 +4843,8 @@ def solve_bistatic_rcs_2d_certified_single_polarization(
     solver_method: 'str' = "auto",
 ) -> 'Dict[str, Any]':
     """Explicit single-polarization bistatic mesh certification."""
+    if str(solver_method).strip().lower() == EXPERIMENTAL_METHOD:
+        raise ValueError("Experimental CPU supports 2D monostatic fields only.")
 
     return _run_certified_2d_pair(
         solve_bistatic_rcs_2d_single_polarization,
@@ -4836,6 +4869,7 @@ def solve_bistatic_rcs_2d_certified_single_polarization(
 
 
 @profiled_solve
+@experimental_monostatic
 def solve_monostatic_rcs_2d_certified(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -4849,6 +4883,7 @@ def solve_monostatic_rcs_2d_certified(
     mesh_reference_ghz: 'Optional[float]' = None,
     rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
+    solver_method: 'str' = "direct",
 ) -> 'Dict[str, Any]':
     """Canonical production monostatic entry; both channels must certify."""
 
@@ -4877,7 +4912,7 @@ def solve_monostatic_rcs_2d_certified(
                 rcs_normalization_mode=rcs_normalization_mode,
                 cfie_alpha=0.0,
                 abort_event=abort_event,
-                solver_method="direct",
+                solver_method=solver_method,
                 _shared_discretization_caches=shared_discretization_caches,
             )
         )
@@ -4907,6 +4942,7 @@ def _mark_co_polarized_survey_result(
 
 
 @profiled_solve
+@experimental_monostatic
 def solve_monostatic_rcs_2d_survey(
     geometry_snapshot: 'Dict[str, Any]',
     frequencies_ghz: 'List[float]',
@@ -4919,6 +4955,7 @@ def solve_monostatic_rcs_2d_survey(
     mesh_reference_ghz: 'Optional[float]' = None,
     rcs_normalization_mode: 'str' = RCS_NORM_MODE_DEFAULT,
     abort_event: 'Optional[threading.Event]' = None,
+    solver_method: 'str' = "direct",
 ) -> 'Dict[str, Any]':
     """Co-polarized single-mesh survey with explicit non-certification."""
 
@@ -4936,6 +4973,7 @@ def solve_monostatic_rcs_2d_survey(
         mesh_reference_ghz=mesh_reference_ghz,
         rcs_normalization_mode=rcs_normalization_mode,
         abort_event=abort_event,
+        solver_method=solver_method,
     )
     return _mark_co_polarized_survey_result(
         result,

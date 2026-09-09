@@ -17,9 +17,14 @@ def validate_setup(value):
         raise ValueError('Choose a supported GRIM 2D run setup (version 1).')
     allowed = {'schema', 'version', 'frequencies_ghz', 'angles_deg', 'units', 'mesh_certification',
                'accuracy', 'lu_precision', 'scattering', 'observation_angles_deg', 'quality'}
-    if set(value) != allowed:
+    if set(value) - {'solver_method'} != allowed:
         raise ValueError('Run setup has missing or unsupported fields. No settings were applied.')
     result = dict(value)
+    result.setdefault('solver_method', 'direct')
+    if result['solver_method'] not in ('auto', 'direct', 'experimental_cpu'):
+        raise ValueError('Unsupported solver method.')
+    if result['solver_method'] == 'experimental_cpu' and (value['scattering'] != 'monostatic' or value['lu_precision'] != 'double'):
+        raise ValueError('Experimental CPU requires monostatic scattering and double LU precision.')
     for key in ('frequencies_ghz', 'angles_deg', 'observation_angles_deg'):
         entries = value[key]
         if not isinstance(entries, list) or (key != 'observation_angles_deg' and not entries):
@@ -100,6 +105,12 @@ class RunSetupMixin:
             self.run_lu_combo.addItem('Mixed precision + refinement', 'mixed')
             form.addRow('Accuracy target', self.run_accuracy_combo)
             form.addRow('2D LU precision', self.run_lu_combo)
+            self.run_method_combo = QComboBox()
+            self.run_method_combo.addItem('Dense LU (reference)', 'direct')
+            self.run_method_combo.addItem('CPU streaming (experimental)', 'experimental_cpu')
+            self.run_method_combo.setToolTip('2D monostatic PEC, IBC and dielectric solves. Batches every requested angle in double precision; largest RAM savings on wide sweeps.')
+            self.run_method_combo.currentIndexChanged.connect(self._sync_run_method)
+            form.addRow('2D solver method', self.run_method_combo)
         row = QWidget()
         buttons = QHBoxLayout(row)
         buttons.setContentsMargins(0,0,0,0)
@@ -144,12 +155,19 @@ class RunSetupMixin:
             mesh_certification=(self.mesh_certification_check if cluster else self.chk_mesh_certification).isChecked(),
             accuracy=(self.run_accuracy_combo if cluster else self.cmb_accuracy_target).currentData(),
             lu_precision=(self.run_lu_combo if cluster else self.cmb_lu_precision).currentData(),
+            solver_method=(self.run_method_combo if cluster else self.cmb_solver_method).currentData(),
             scattering='monostatic' if cluster else self.cmb_scatter_mode.currentData(),
             observation_angles_deg=[] if cluster or self.cmb_scatter_mode.currentData() == 'monostatic' else self._parse_list(self.edit_obs_angles.text(), 'Observation angles'),
             quality=dict(DEFAULT_QUALITY) if cluster else dict(
                 residual_norm_max=float(self.edit_quality_residual_max.text()),
                 condition_est_max=float(self.edit_quality_condition_max.text()),
                 warnings_max=float(self.edit_quality_warnings_max.text()))))
+
+    def _sync_run_method(self, *_):
+        experimental = self.run_method_combo.currentData() == 'experimental_cpu'
+        if experimental:
+            self.run_lu_combo.setCurrentIndex(self.run_lu_combo.findData('double'))
+        self.run_lu_combo.setEnabled(not experimental and not self._setup_busy())
 
     def _apply_saved_run_setup(self, raw):
         value = validate_setup(raw)
@@ -177,6 +195,8 @@ class RunSetupMixin:
         (self.mesh_certification_check if cluster else self.chk_mesh_certification).setChecked(value['mesh_certification'])
         for combo,key in [((self.run_accuracy_combo if cluster else self.cmb_accuracy_target),'accuracy'), ((self.run_lu_combo if cluster else self.cmb_lu_precision),'lu_precision')]:
             combo.setCurrentIndex(combo.findData(value[key]))
+        method = self.run_method_combo if cluster else self.cmb_solver_method
+        method.setCurrentIndex(method.findData('direct' if value['solver_method'] == 'auto' else value['solver_method']))
         self.run_setup_notice.setText('2D setup loaded. Check geometry, dimensions, and output before running.')
 
     def _save_run_setup(self):
@@ -234,7 +254,7 @@ class RunSetupMixin:
                 + geometry_dimensions(snapshot,value['units']) + '\n'
                 + f"{len(value['frequencies_ghz'])} frequencies \u00d7 {len(value['angles_deg'])} incident angles; {count} samples per channel, VV + HH. "
                 + ('Base/fine mesh comparison' if value['mesh_certification'] else 'Survey; no mesh certificate')
-                + f"; {value['accuracy']} target; {value['lu_precision']} LU.\n"
+                + f"; {value['accuracy']} target; {value['solver_method']} method; {value['lu_precision']} LU.\n"
                 + ('Warnings: ' + '; '.join(warnings) if warnings else 'Geometry and material checks passed.')
                 + '\nSolver quality and convergence are evaluated during the run.')
 

@@ -745,7 +745,7 @@ class RunsWorkspace(QWidget):
         self.memory_edit.setText(str(self._setting("memory", "0")))
         mesh_raw = self._setting("mesh_certification", True)
         if hasattr(self, 'run_accuracy_combo'):
-            for combo,key,default in [(self.run_accuracy_combo,'accuracy_target','standard'), (self.run_lu_combo,'lu_precision','double')]:
+            for combo,key,default in [(self.run_accuracy_combo,'accuracy_target','standard'), (self.run_lu_combo,'lu_precision','double'), (self.run_method_combo,'solver_method','direct')]:
                 index = combo.findData(str(self._setting(key,default)))
                 combo.setCurrentIndex(index if index >= 0 else 0)
         self.mesh_certification_check.setChecked(
@@ -849,6 +849,7 @@ class RunsWorkspace(QWidget):
         if hasattr(self, 'run_accuracy_combo'):
             self._settings.setValue(f'{_SETTINGS_PREFIX}/accuracy_target', self.run_accuracy_combo.currentData())
             self._settings.setValue(f'{_SETTINGS_PREFIX}/lu_precision', self.run_lu_combo.currentData())
+            self._settings.setValue(f'{_SETTINGS_PREFIX}/solver_method', self.run_method_combo.currentData())
         registry = {
             "schema": _TRACKED_RUNS_SCHEMA,
             "runs": [run.to_json_value() for run in self._tracked_runs.values()],
@@ -1018,6 +1019,7 @@ class RunsWorkspace(QWidget):
             settings['ACCURACY_TARGET'] = self.run_accuracy_combo.currentData()
             if solver == '2d':
                 settings['LU_PRECISION'] = self.run_lu_combo.currentData()
+                settings['SOLVER_METHOD'] = self.run_method_combo.currentData()
         optional = (
             ("SLURM_ACCOUNT", self.account_edit.text().strip()),
             ("SLURM_QOS", self.qos_edit.text().strip()),
@@ -2090,7 +2092,10 @@ class RunsWorkspace(QWidget):
     def _solver_changed(self) -> None:
         bor = self.solver_combo.currentData() == "bor"
         if hasattr(self, 'run_lu_combo'):
-            self.run_lu_combo.setEnabled(not bor)
+            if bor:
+                self.run_method_combo.setCurrentIndex(0)
+            self.run_method_combo.setEnabled(not bor)
+            self.run_lu_combo.setEnabled(not bor and self.run_method_combo.currentData() != 'experimental_cpu')
             self.save_run_setup_button.setEnabled(not bor)
             self.load_run_setup_button.setEnabled(not bor)
         self.elevation_label.setVisible(bor)

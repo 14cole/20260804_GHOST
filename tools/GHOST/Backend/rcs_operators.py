@@ -19,6 +19,7 @@ from rcs_geometry import (
     PanelCoupledInfo,
 )
 from solver_metrics import timed_stage
+from cpu_execution import current_state, cached_operator
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 from rcs_constants import (
     EPS,
@@ -777,6 +778,13 @@ def _single_layer_block_linear(
     obs_order: 'int' = 8,
     src_order: 'int' = 8,
 ) -> 'np.ndarray':
+    if current_state() is not None and obs_elem.panel_index != src_elem.panel_index:
+        shared = _linear_shared_interval_endpoint_info(obs_elem, (0., 1.), src_elem, (0., 1.))
+        if shared is not None:
+            return _integrate_linear_touching_duffy_sk_vectorized(
+                obs_elem, src_elem, k0, False, (0., 1.), (0., 1.), shared[0], shared[1],
+                order=max(6, max(int(obs_order), int(src_order)) + 1),
+                compute_single_layer=True, compute_double_layer=False)[0]
     if obs_elem.panel_index == src_elem.panel_index:
         exact = _single_layer_self_block_exact(obs_elem, k0)
         if exact is not None:
@@ -1401,6 +1409,7 @@ def _warn_far_quadrature_override(materials: 'MaterialLibrary') -> 'None':
 
 
 @timed_stage("operators")
+@cached_operator("SK")
 def _assemble_linear_operator_matrices_multi(
     mesh: 'LinearMesh',
     k0: 'Union[complex, float]',
@@ -1448,6 +1457,10 @@ def _assemble_linear_operator_matrices_multi(
        requested output. Overlapping weighted/unweighted masks therefore do
        not duplicate singular-kernel evaluation.
     """
+    far_green, far_hankel = _far_green_into, _far_hankel1_into
+    if current_state() is not None:
+        from cpu_kernels import select_far_kernels
+        far_green, far_hankel = select_far_kernels(mesh, k0, far_green, far_hankel)
 
     nnodes = len(mesh.nodes)
     elements = list(mesh.elements)
@@ -1762,9 +1775,9 @@ def _assemble_linear_operator_matrices_multi(
                         _far_kernel_argument(k0, dist, krbuf)
 
                     if want_s:
-                        _far_green_into(k0, real_k, dist, krbuf, work, g_buf)
+                        far_green(k0, real_k, dist, krbuf, work, g_buf)
                     if want_k:
-                        _far_hankel1_into(k0, real_k, dist, krbuf, work, h1_buf)
+                        far_hankel(k0, real_k, dist, krbuf, work, h1_buf)
 
                     w = w_obs_qi * w_src_qj
                     if want_k:
@@ -1993,6 +2006,7 @@ def _assemble_linear_operator_matrices(
     )[0]
 
 @timed_stage("near_and_hypersingular")
+@cached_operator("D")
 def _assemble_linear_hypersingular_matrix(
     mesh: 'LinearMesh',
     k0: 'Union[complex, float]',
@@ -2023,6 +2037,10 @@ def _assemble_linear_hypersingular_matrix(
     Both the S blocks and the Maue combination are symmetric under swapping the
     element pair, so only the upper tiles are evaluated.
     """
+    far_green, far_hankel = _far_green_into, _far_hankel1_into
+    if current_state() is not None:
+        from cpu_kernels import select_far_kernels
+        far_green, far_hankel = select_far_kernels(mesh, k0, far_green, far_hankel)
 
     nnodes = len(mesh.nodes)
     d_mat = np.zeros((nnodes, nnodes), dtype=np.complex128)
@@ -2150,7 +2168,7 @@ def _assemble_linear_hypersingular_matrix(
                     np.maximum(dist, EPS, out=dist)
                     if real_k:
                         _far_kernel_argument(k0, dist, krbuf)
-                    _far_green_into(k0, real_k, dist, krbuf, work, g_buf)
+                    far_green(k0, real_k, dist, krbuf, work, g_buf)
 
                     w = w_obs_qi * float(qw[qj])
                     phi_s = phi_arr[qj]
@@ -2239,6 +2257,9 @@ def _linear_element_incident_load_many(
     elevations_deg: 'np.ndarray',
     order: 'int' = 8,
 ) -> 'np.ndarray':
+    if current_state() is not None:
+        from cpu_kernels import incident
+        return incident(elem, k_air, elevations_deg, order)
     qt, qw = _get_quadrature(max(2, int(order)))
     seg = elem.p1 - elem.p0
     elev = np.asarray(elevations_deg, dtype=float).reshape(-1)
@@ -2266,6 +2287,9 @@ def _linear_element_incident_dn_load_many(
 
     Used by TE sheet and impedance/flux right-hand sides.
     """
+    if current_state() is not None:
+        from cpu_kernels import incident_dn
+        return incident_dn(elem, k_air, elevations_deg, order)
 
     qt, qw = _get_quadrature(max(2, int(order)))
     seg = elem.p1 - elem.p0
@@ -2305,6 +2329,9 @@ def _farfield_linear_density_many(
     ``(density_columns, observation_angles)``. Element tiling bounds the
     temporary phase matrix in either mode.
     """
+    if current_state() is not None:
+        from cpu_kernels import farfield
+        return farfield(mesh, density, k_air, observation_angles_deg, potential, order, element_mask, projection)
 
     obs = np.asarray(observation_angles_deg, dtype=float).reshape(-1)
     rho = np.asarray(density, dtype=np.complex128)

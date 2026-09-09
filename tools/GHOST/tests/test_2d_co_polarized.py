@@ -100,8 +100,12 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
         )
         for solve in canonical:
             parameters = inspect.signature(solve).parameters
-            for removed in ("polarization", "solver_method", "cfie_alpha"):
+            for removed in ("polarization", "cfie_alpha"):
                 self.assertNotIn(removed, parameters)
+            if "monostatic" in solve.__name__:
+                self.assertEqual(parameters["solver_method"].default, "direct")
+            else:
+                self.assertNotIn("solver_method", parameters)
 
     def test_monostatic_co_solve_is_exact_union_of_separate_results(self):
         expected = {

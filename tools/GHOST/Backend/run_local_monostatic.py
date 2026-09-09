@@ -89,6 +89,7 @@ BLAS_THREADS_PER_WORKER = 1
 # prevent downstream viewing, combination, or subtraction.
 MESH_CERTIFICATION      = True
 ACCURACY_TARGET         = "standard"     # "standard" | "tight"; mesh comparison limits
+SOLVER_METHOD           = "direct"       # "direct" | "experimental_cpu"; FP64 streamed CPU
 LU_PRECISION            = "double"       # "double" | "mixed"; CPU LU with refinement
 
 # --- Memory admission ------------------------------------------------------
@@ -143,6 +144,7 @@ _CONFIG_KEYS = (
     'MESH_CERTIFICATION',
     'ACCURACY_TARGET',
     'LU_PRECISION',
+    'SOLVER_METHOD',
     'MEMORY_HEADROOM',
     'MEMORY_SAFETY',
     'MAX_SOLVE_GB',
@@ -314,6 +316,7 @@ def _solve_and_export(
         geometry_units=context["geometry_units"],
         material_base_dir=material_base,
         max_panels=context["max_panels"],
+        solver_method=context.get("solver_method", "direct"),
     )
     # Select precision inside each worker; context variables are process-local.
     from refined_lu import linear_precision
@@ -382,6 +385,7 @@ def _plan(
                     key[0], key[1], polarization, GEOMETRY_UNITS,
                     MAX_PANELS, fine_factor=fine_factor,
                     n_angles=n_angles, safety=float(MEMORY_SAFETY),
+                    solver_method=SOLVER_METHOD,
                 )
                 for polarization in ("TM", "TE")
             ]
@@ -418,6 +422,10 @@ def _unit_assembly_threads(
 def _validate_config() -> 'Tuple[List[float], List[float]]':
     if ACCURACY_TARGET not in ("standard", "tight"):
         sys.exit("ERROR: ACCURACY_TARGET must be 'standard' or 'tight'.")
+    if SOLVER_METHOD not in ("auto", "direct", "experimental_cpu"):
+        sys.exit("ERROR: SOLVER_METHOD must be direct, auto, or experimental_cpu.")
+    if SOLVER_METHOD == "experimental_cpu" and LU_PRECISION != "double":
+        sys.exit("ERROR: experimental_cpu requires LU_PRECISION=double.")
     if LU_PRECISION not in ("double", "mixed"):
         sys.exit("ERROR: LU_PRECISION must be 'double' or 'mixed'.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
@@ -511,6 +519,7 @@ def main() -> 'None':
         "mesh_convergence_policy": mesh_policy,
         "accuracy_target": ACCURACY_TARGET,
         "lu_precision": LU_PRECISION,
+        "solver_method": SOLVER_METHOD,
         "mesh_certification": bool(MESH_CERTIFICATION),
     }
     manifest: 'Dict[str, Any]' = {
@@ -548,6 +557,7 @@ def main() -> 'None':
         "max_panels": int(MAX_PANELS),
         "mesh_convergence_policy": mesh_policy,
         "lu_precision": LU_PRECISION,
+        "solver_method": SOLVER_METHOD,
         "mesh_certification": bool(MESH_CERTIFICATION),
         "azimuths_deg": azimuths,
         "angular_grid_sha256": stable_json_fingerprint(

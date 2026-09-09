@@ -21,6 +21,10 @@ cancelled, or is preempted cannot strand work.
 Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
 knobs below mean the same thing in each.
 
+For the opt-in 2D CPU streaming method, set `SOLVER_METHOD="experimental_cpu"`
+and `LU_PRECISION="double"`. See [CPU streaming (experimental)](EXPERIMENTAL_CPU.md)
+for supported geometries, memory behavior, saved setups and validation.
+
 ### Python environment and a driver in your own folder
 
 The headless GHOST HPC/local drivers support **Python 3.6.8** with **NumPy

@@ -4,6 +4,10 @@ GHOST is bundled inside the GRIM distribution. This folder is a complete
 solver project so its backend, tests, geometry studies, CEM utilities, and
 launchers retain their established relative paths.
 
+The GUI and 2D local/HPC drivers offer an optional
+[CPU streaming (experimental) solver method](EXPERIMENTAL_CPU.md) for lower
+angle-workspace RAM and CPU acceleration of PEC/IBC and dielectric solves.
+
 Local and HPC batch drivers accept `--config path/to/settings.config.json`.
 They also automatically load an adjacent file with the same stem and the
 `.config.json` suffix. For example:
