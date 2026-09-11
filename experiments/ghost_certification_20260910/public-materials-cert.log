@@ -1,0 +1,37 @@
+pec 0 1448 Base mesh: VV: Initializing solver
+pec 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+pec 2.41390980000142 True 
+ibc 0 1448 Base mesh: VV: Initializing solver
+ibc 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+ibc 3.631316200000583 True 
+pec_ibc 0 1448 Base mesh: VV: Initializing solver
+pec_ibc 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+pec_ibc 9.074241600003006 True 
+lossless 0 1448 Base mesh: VV: Initializing solver
+lossless 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+lossless 11.198343000000023 True 
+lossy 0 1448 Base mesh: VV: Initializing solver
+lossy 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+lossy 12.7571683999995 True 
+magnetic 0 1448 Base mesh: VV: Initializing solver
+magnetic 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+magnetic 12.892775100001018 True 
+coated 0 1448 Base mesh: VV: Initializing solver
+coated 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+coated 19.830037400002766 True 
+layered 0 1448 Base mesh: VV: Initializing solver
+layered 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+layered 27.406701000003522 True 
+mixed 0 1448 Base mesh: VV: Initializing solver
+mixed 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 0.6 GHz
+mixed 13.669628999999986 True 
+sheet 0 1448 Base mesh: VV: Initializing solver
+sheet 3.7648680999991484 True 
+mixed_sheet 0 1448 Base mesh: VV: Initializing solver
+mixed_sheet 21.08834790000037 True 
+thin 0 1448 Base mesh: VV: Initializing solver
+thin 7.431580899999972 True 
+thin_magnetic 0 1448 Base mesh: VV: Initializing solver
+thin_magnetic 7.56608640000195 True 
+transparent 0 1448 Base mesh: VV: Initializing solver
+transparent 0.036615300003177254 True 

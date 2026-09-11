@@ -1,0 +1,16 @@
+======================================================================
+ERROR: test_regional_pairing_and_pruning_bounds (__main__.NativeQueryTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\experiments\ghost_certification_20260910\test_native_queries.py", line 22, in test_regional_pairing_and_pruning_bounds
+    mesh,te,k=prepare(kind,'TE',value=value)
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\experiments\ghost_ram_time_20260910\common.py", line 48, in prepare
+    panels = rcs._build_panels(value, .0254 if kind == 'airfoil' else 1., wavelength, max_panels=100000)
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\Backend\rcs_geometry.py", line 1389, in _build_panels
+    f"Segment '{name}' explicit N={n_prop} under-resolves "
+ValueError: Segment 'body' explicit N=1 under-resolves a 0.0187721 m primitive at the controlling wavelength 0.0249824 m: at least N=4 is required for the gross 4-panels-per-wavelength safety floor. Increase N or use N=0 for automatic material-wavelength meshing. Production results still require base/fine mesh convergence.
+
+----------------------------------------------------------------------
+Ran 3 tests in 9.422s
+
+FAILED (errors=1)

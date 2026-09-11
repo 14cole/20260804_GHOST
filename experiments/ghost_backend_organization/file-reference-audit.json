@@ -1,0 +1,765 @@
+{
+  "imports": {
+    "bor_dispatch": [],
+    "bor_solver": [],
+    "build_bor_stream_kernel": [
+      "tools\\GHOST\\tests\\test_backend_safety.py"
+    ],
+    "check_hpc_environment": [],
+    "cpu_checked_lu": [],
+    "cpu_streaming": [
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\cpu.py"
+    ],
+    "create_feature_manifest": [
+      "tools\\GHOST\\tests\\test_feature_manifest_cli.py"
+    ],
+    "feature_family_validation": [
+      "tools\\GHOST\\tests\\test_feature_family_validation.py"
+    ],
+    "feature_sum": [],
+    "feature_workflow": [],
+    "geometry_io": [],
+    "ghost_gui": [],
+    "grim_compat": [],
+    "grim_io": [],
+    "hpc_bundle": [],
+    "import_3d_reference": [],
+    "place_features": [
+      "tools\\GHOST\\tests\\test_feature_manifest_cli.py",
+      "tools\\GHOST\\tests\\test_line_feature_placement.py",
+      "tools\\GHOST\\tests\\test_point_feature_placement.py"
+    ],
+    "rcs_solver": [],
+    "run_hpc_bor_monostatic": [
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_hpc_submission_journal.py"
+    ],
+    "run_hpc_monostatic": [
+      "tools\\GHOST\\tests\\test_hpc_submission_journal.py"
+    ],
+    "run_local_bor": [
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py"
+    ],
+    "run_local_monostatic": [
+      "tools\\GHOST\\tests\\test_local_drivers.py"
+    ],
+    "validate_feature_reconstruction": [
+      "tools\\GHOST\\Backend\\feature_family_validation.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_feature_validation_cases.py"
+    ],
+    "workflow_provenance": [],
+    "_ghost_dataclasses": [
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\runtime.py"
+    ],
+    "ghost_backend.paths": [
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\streaming.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\bundle.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\common.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\io\\viewer_bridge.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py"
+    ],
+    "ghost_backend.__init__": [],
+    "ghost_backend.assembly.components": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\import_3d_reference.py",
+      "tools\\GHOST\\tests\\test_external_feature_case_harness.py",
+      "tools\\GHOST\\tests\\test_feature_capacity.py",
+      "tools\\GHOST\\tests\\test_feature_validation_cases.py",
+      "tools\\GHOST\\tests\\test_non_bor_combined_features.py",
+      "tools\\GHOST\\tests\\test_point_scatter_physics.py",
+      "tools\\GHOST\\tests\\test_sentri_assembly.py",
+      "tools\\GHOST\\tests\\test_triaxial_ellipsoid_features.py"
+    ],
+    "ghost_backend.assembly.contracts": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py"
+    ],
+    "ghost_backend.assembly.fields": [
+      "GRIM_Revised_2\\test_feature_assembly_panel.py",
+      "tools\\GHOST\\Backend\\feature_sum.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\inspector.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\common.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\io\\naming.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\io\\viewer_bridge.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\inputs.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\Backend\\import_3d_reference.py",
+      "tools\\GHOST\\Backend\\place_features.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\Backend\\validate_feature_reconstruction.py",
+      "tools\\GHOST\\tests\\test_assembly_audit_updates.py",
+      "tools\\GHOST\\tests\\test_assembly_inspector.py",
+      "tools\\GHOST\\tests\\test_backend_safety.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_feature_capacity.py",
+      "tools\\GHOST\\tests\\test_feature_job_control.py",
+      "tools\\GHOST\\tests\\test_feature_production_contracts.py",
+      "tools\\GHOST\\tests\\test_feature_reconstruction_physics.py",
+      "tools\\GHOST\\tests\\test_feature_workflow.py",
+      "tools\\GHOST\\tests\\test_hpc_bundle.py",
+      "tools\\GHOST\\tests\\test_line_feature_non_bor_physics.py",
+      "tools\\GHOST\\tests\\test_line_feature_placement.py",
+      "tools\\GHOST\\tests\\test_line_shadow_caching.py",
+      "tools\\GHOST\\tests\\test_local_drivers.py",
+      "tools\\GHOST\\tests\\test_metadata_interoperability.py",
+      "tools\\GHOST\\tests\\test_non_bor_combined_features.py",
+      "tools\\GHOST\\tests\\test_point_scatter_physics.py",
+      "tools\\GHOST\\tests\\test_point_shadow_packing.py",
+      "tools\\GHOST\\tests\\test_sentri_assembly.py",
+      "tools\\GHOST\\tests\\test_triaxial_ellipsoid_features.py"
+    ],
+    "ghost_backend.assembly.inspector": [
+      "tools\\GHOST\\tests\\test_assembly_inspector.py",
+      "tools\\GHOST\\tests\\test_point_scatter_physics.py",
+      "tools\\GHOST\\tests\\test_solver_improvements.py"
+    ],
+    "ghost_backend.assembly.line_expansion": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\tests\\test_assembly_audit_updates.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_feature_job_control.py",
+      "tools\\GHOST\\tests\\test_feature_reconstruction_physics.py",
+      "tools\\GHOST\\tests\\test_line_expand_batching.py",
+      "tools\\GHOST\\tests\\test_line_feature_non_bor_physics.py",
+      "tools\\GHOST\\tests\\test_line_feature_placement.py",
+      "tools\\GHOST\\tests\\test_line_shadow_caching.py",
+      "tools\\GHOST\\tests\\test_non_bor_combined_features.py",
+      "tools\\GHOST\\tests\\test_point_scatter_physics.py",
+      "tools\\GHOST\\tests\\test_triaxial_ellipsoid_features.py",
+      "tools\\GHOST\\tests\\test_wedge_wing_feature_assemblies.py"
+    ],
+    "ghost_backend.assembly.preparation": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py"
+    ],
+    "ghost_backend.assembly.workflow": [
+      "GRIM_Revised_2\\test_assembly_authoring_updates.py",
+      "tools\\GHOST\\Backend\\create_feature_manifest.py",
+      "tools\\GHOST\\Backend\\feature_workflow.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\contracts.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\inspector.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\preparation.py",
+      "tools\\GHOST\\Backend\\place_features.py",
+      "tools\\GHOST\\tests\\test_assembly_audit_updates.py",
+      "tools\\GHOST\\tests\\test_assembly_inspector.py",
+      "tools\\GHOST\\tests\\test_feature_job_control.py",
+      "tools\\GHOST\\tests\\test_feature_manifest_cli.py",
+      "tools\\GHOST\\tests\\test_feature_production_contracts.py",
+      "tools\\GHOST\\tests\\test_feature_workflow.py",
+      "tools\\GHOST\\tests\\test_metadata_interoperability.py",
+      "tools\\GHOST\\tests\\test_point_scatter_physics.py",
+      "tools\\GHOST\\tests\\test_triaxial_ellipsoid_features.py",
+      "tools\\GHOST\\tests\\test_wedge_wing_feature_assemblies.py"
+    ],
+    "ghost_backend.assembly.workload": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\Backend\\place_features.py",
+      "tools\\GHOST\\tests\\test_assembly_workload.py",
+      "tools\\GHOST\\tests\\test_hpc_runtime.py"
+    ],
+    "ghost_backend.assembly.__init__": [],
+    "ghost_backend.bor.dispatch": [
+      "tools\\GHOST\\Backend\\bor_dispatch.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\tests\\test_audit_release_safety.py",
+      "tools\\GHOST\\tests\\test_bor_material_updates.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_pec_stack_ibc.py",
+      "tools\\GHOST\\tests\\test_solver_audit_fixes.py"
+    ],
+    "ghost_backend.bor.kernels": [
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\dispatch.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\streaming.py",
+      "tools\\GHOST\\tests\\test_bor_material_updates.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_solver_audit_fixes.py"
+    ],
+    "ghost_backend.bor.solver": [
+      "tools\\GHOST\\Backend\\bor_solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\dispatch.py",
+      "tools\\GHOST\\tests\\test_audit_release_safety.py",
+      "tools\\GHOST\\tests\\test_bor_capability_acceptance.py",
+      "tools\\GHOST\\tests\\test_bor_material_updates.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_feature_reconstruction_physics.py",
+      "tools\\GHOST\\tests\\test_memory_safety.py",
+      "tools\\GHOST\\tests\\test_solver_audit_fixes.py"
+    ],
+    "ghost_backend.bor.streaming": [
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\dispatch.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\solver.py",
+      "tools\\GHOST\\tests\\test_backend_safety.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_memory_safety.py"
+    ],
+    "ghost_backend.bor.__init__": [],
+    "ghost_backend.compressed.coefficients": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py"
+    ],
+    "ghost_backend.compressed.factor": [
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py"
+    ],
+    "ghost_backend.compressed.inverse": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\factor.py",
+      "tools\\GHOST\\tests\\test_compressed_memory.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py"
+    ],
+    "ghost_backend.compressed.memory": [
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compressed_memory.py"
+    ],
+    "ghost_backend.compressed.operator": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\polarization_cache.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\tests\\test_compressed_memory.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py"
+    ],
+    "ghost_backend.compressed.polarization_cache": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py"
+    ],
+    "ghost_backend.compressed.regional_coefficients": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py"
+    ],
+    "ghost_backend.compressed.runtime": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\factor.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\cpu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\provenance.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\dielectric.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\robin.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\sheet.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py"
+    ],
+    "ghost_backend.compressed.__init__": [],
+    "ghost_backend.execution.cpu": [
+      "tools\\GHOST\\Backend\\cpu_checked_lu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\kernels.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compact_multi_region.py",
+      "tools\\GHOST\\tests\\test_experimental_cpu.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py"
+    ],
+    "ghost_backend.execution.metrics": [
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\dispatch.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\factor.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\dense.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\refined_lu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\sweep.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\kernels.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_hpc_runtime.py"
+    ],
+    "ghost_backend.execution.provenance": [
+      "tools\\GHOST\\Backend\\feature_family_validation.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\inspector.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\common.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\Backend\\workflow_provenance.py",
+      "tools\\GHOST\\tests\\diagnose_provenance.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py",
+      "tools\\GHOST\\tests\\test_driver_config.py",
+      "tools\\GHOST\\tests\\test_experimental_headless.py",
+      "tools\\GHOST\\tests\\test_hpc_bundle.py",
+      "tools\\GHOST\\tests\\test_hpc_scheduling.py",
+      "tools\\GHOST\\tests\\test_local_drivers.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py"
+    ],
+    "ghost_backend.execution.runtime": [
+      "tools\\GHOST\\Backend\\check_hpc_environment.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\line_expansion.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\preparation.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workload.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\kernels.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\cpu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\metrics.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\geometry\\io.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\geometry\\quality.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\bundle.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\refined_lu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\config.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\session.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\geometry.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_hpc_runtime.py",
+      "tools\\GHOST\\tests\\test_solver_matrix_pipeline.py"
+    ],
+    "ghost_backend.execution.__init__": [],
+    "ghost_backend.geometry.frames": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\tests\\test_line_feature_placement.py",
+      "tools\\GHOST\\tests\\test_point_feature_placement.py",
+      "tools\\GHOST\\tests\\test_triaxial_ellipsoid_features.py"
+    ],
+    "ghost_backend.geometry.guidance": [
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\geometry.py",
+      "tools\\GHOST\\tests\\test_solver_improvements.py"
+    ],
+    "ghost_backend.geometry.io": [
+      "tools\\GHOST\\Backend\\geometry_io.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\bundle.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\inputs.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\geometry.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\geometry.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\tests\\benchmark_assembly.py",
+      "tools\\GHOST\\tests\\measure_far_quadrature.py",
+      "tools\\GHOST\\tests\\test_assembly_equivalence.py",
+      "tools\\GHOST\\tests\\test_audit_release_safety.py",
+      "tools\\GHOST\\tests\\test_experimental_cpu.py",
+      "tools\\GHOST\\tests\\test_experimental_headless.py",
+      "tools\\GHOST\\tests\\test_freddy_material_handoff.py",
+      "tools\\GHOST\\tests\\test_geometry_fixtures.py",
+      "tools\\GHOST\\tests\\test_geometry_material_transactions.py",
+      "tools\\GHOST\\tests\\test_material_interoperability.py",
+      "tools\\GHOST\\tests\\test_rotate_geo.py",
+      "tools\\GHOST\\tests\\test_solver_equivalence.py",
+      "tools\\GHOST\\tests\\test_thin_sheet.py"
+    ],
+    "ghost_backend.geometry.materials": [
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\geometry.py",
+      "tools\\GHOST\\tests\\test_thin_sheet.py"
+    ],
+    "ghost_backend.geometry.occlusion": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\line_expansion.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\geometry\\surface.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_feature_capacity.py",
+      "tools\\GHOST\\tests\\test_hpc_runtime.py",
+      "tools\\GHOST\\tests\\test_line_expand_batching.py",
+      "tools\\GHOST\\tests\\test_line_shadow_caching.py",
+      "tools\\GHOST\\tests\\test_occluder_acceleration.py",
+      "tools\\GHOST\\tests\\test_point_shadow_packing.py"
+    ],
+    "ghost_backend.geometry.quality": [
+      "tools\\GHOST\\Backend\\ghost_backend\\geometry\\surface.py",
+      "tools\\GHOST\\tests\\test_mesh_quality.py"
+    ],
+    "ghost_backend.geometry.surface": [
+      "GRIM_Revised_2\\feature_assembly_panel.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\preparation.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py"
+    ],
+    "ghost_backend.geometry.__init__": [],
+    "ghost_backend.hpc.bundle": [
+      "tools\\GHOST\\Backend\\hpc_bundle.py",
+      "tools\\GHOST\\tests\\test_experimental_headless.py",
+      "tools\\GHOST\\tests\\test_hpc_bundle.py",
+      "tools\\GHOST\\tests\\test_hpc_solver_options.py"
+    ],
+    "ghost_backend.hpc.common": [
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\bundle.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\tests\\test_audit_release_safety.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_driver_config.py",
+      "tools\\GHOST\\tests\\test_experimental_headless.py",
+      "tools\\GHOST\\tests\\test_hpc_bundle.py",
+      "tools\\GHOST\\tests\\test_hpc_scheduling.py",
+      "tools\\GHOST\\tests\\test_hpc_solver_options.py"
+    ],
+    "ghost_backend.hpc.scheduler": [
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\tests\\test_audit_release_safety.py",
+      "tools\\GHOST\\tests\\test_compressed_memory.py",
+      "tools\\GHOST\\tests\\test_hpc_scheduling.py",
+      "tools\\GHOST\\tests\\test_local_drivers.py"
+    ],
+    "ghost_backend.hpc.__init__": [],
+    "ghost_backend.io.grim": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\common.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\io\\naming.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\Backend\\grim_io.py",
+      "tools\\GHOST\\Backend\\import_3d_reference.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\tests\\test_2d_capability_acceptance.py",
+      "tools\\GHOST\\tests\\test_2d_co_polarized.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_external_feature_case_harness.py",
+      "tools\\GHOST\\tests\\test_feature_job_control.py",
+      "tools\\GHOST\\tests\\test_feature_production_contracts.py",
+      "tools\\GHOST\\tests\\test_feature_validation_cases.py",
+      "tools\\GHOST\\tests\\test_feature_workflow.py",
+      "tools\\GHOST\\tests\\test_line_feature_non_bor_physics.py",
+      "tools\\GHOST\\tests\\test_material_interoperability.py",
+      "tools\\GHOST\\tests\\test_metadata_interoperability.py",
+      "tools\\GHOST\\tests\\test_non_bor_combined_features.py",
+      "tools\\GHOST\\tests\\test_triaxial_ellipsoid_features.py"
+    ],
+    "ghost_backend.io.naming": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py"
+    ],
+    "ghost_backend.io.viewer_bridge": [
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\grim_compat.py",
+      "tools\\GHOST\\Backend\\import_3d_reference.py",
+      "tools\\GHOST\\tests\\test_audit_release_safety.py"
+    ],
+    "ghost_backend.io.__init__": [],
+    "ghost_backend.linalg.dense": [
+      "tools\\GHOST\\Backend\\cpu_checked_lu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py",
+      "tools\\GHOST\\tests\\test_solver_matrix_pipeline.py"
+    ],
+    "ghost_backend.linalg.hierarchical": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\factor.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\inverse.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\operator.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\provenance.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\dense.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py"
+    ],
+    "ghost_backend.linalg.refined_lu": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\factor.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\cpu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\dense.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\tests\\benchmark_refined_lu.py",
+      "tools\\GHOST\\tests\\test_compact_multi_region.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py",
+      "tools\\GHOST\\tests\\test_experimental_cpu.py",
+      "tools\\GHOST\\tests\\test_hpc_runtime.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py",
+      "tools\\GHOST\\tests\\test_solver_improvements.py",
+      "tools\\GHOST\\tests\\test_solver_matrix_pipeline.py"
+    ],
+    "ghost_backend.linalg.sweep": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\operator.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\provenance.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py"
+    ],
+    "ghost_backend.linalg.workspace": [
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\dense.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\hierarchical.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\refined_lu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\sweep.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compact_multi_region.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py"
+    ],
+    "ghost_backend.linalg.__init__": [],
+    "ghost_backend.runs.config": [
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\common.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\tests\\test_audit_release_safety.py",
+      "tools\\GHOST\\tests\\test_driver_config.py",
+      "tools\\GHOST\\tests\\test_experimental_headless.py",
+      "tools\\GHOST\\tests\\test_hpc_runtime.py"
+    ],
+    "ghost_backend.runs.inputs": [
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py"
+    ],
+    "ghost_backend.runs.quality": [
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\dispatch.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\Backend\\run_hpc_bor_monostatic.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_bor.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\tests\\test_experimental_gui.py",
+      "tools\\GHOST\\tests\\test_hpc_solver_options.py",
+      "tools\\GHOST\\tests\\test_solver_improvements.py",
+      "tools\\GHOST\\tests\\test_solver_quality.py",
+      "tools\\GHOST\\tests\\test_thin_sheet.py"
+    ],
+    "ghost_backend.runs.setup": [
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\config.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\tests\\test_driver_config.py",
+      "tools\\GHOST\\tests\\test_experimental_gui.py",
+      "tools\\GHOST\\tests\\test_experimental_headless.py"
+    ],
+    "ghost_backend.runs.__init__": [],
+    "ghost_backend.twod.constants": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\factor.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\sweep.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\scatter.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\geometry.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\special.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py"
+    ],
+    "ghost_backend.twod.fields": [
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py"
+    ],
+    "ghost_backend.twod.geometry": [
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\geometry.py"
+    ],
+    "ghost_backend.twod.operators": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\mass.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compact_multi_region.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py"
+    ],
+    "ghost_backend.twod.solver": [
+      "tools\\GHOST\\Backend\\cpu_streaming.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\assembly\\line_expansion.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\dispatch.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\bor\\solver.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\factor.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\regional_coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\hpc\\scheduler.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\linalg\\dense.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\quality.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\setup.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\scatter.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\dielectric.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\robin.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\sheet.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\geometry.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\solver.py",
+      "tools\\GHOST\\Backend\\rcs_solver.py",
+      "tools\\GHOST\\Backend\\run_hpc_monostatic.py",
+      "tools\\GHOST\\Backend\\run_local_monostatic.py",
+      "tools\\GHOST\\tests\\benchmark_assembly.py",
+      "tools\\GHOST\\tests\\benchmark_refined_lu.py",
+      "tools\\GHOST\\tests\\measure_far_quadrature.py",
+      "tools\\GHOST\\tests\\test_2d_capability_acceptance.py",
+      "tools\\GHOST\\tests\\test_2d_co_polarized.py",
+      "tools\\GHOST\\tests\\test_assembly_equivalence.py",
+      "tools\\GHOST\\tests\\test_backend_safety.py",
+      "tools\\GHOST\\tests\\test_bor_material_updates.py",
+      "tools\\GHOST\\tests\\test_compact_multi_region.py",
+      "tools\\GHOST\\tests\\test_compressed_memory.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py",
+      "tools\\GHOST\\tests\\test_direct_solver_methods.py",
+      "tools\\GHOST\\tests\\test_experimental_cpu.py",
+      "tools\\GHOST\\tests\\test_experimental_gui.py",
+      "tools\\GHOST\\tests\\test_hpc_scheduling.py",
+      "tools\\GHOST\\tests\\test_material_interoperability.py",
+      "tools\\GHOST\\tests\\test_memory_safety.py",
+      "tools\\GHOST\\tests\\test_pec_stack_ibc.py",
+      "tools\\GHOST\\tests\\test_rcs_physics_regression.py",
+      "tools\\GHOST\\tests\\test_solver_audit_fixes.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py",
+      "tools\\GHOST\\tests\\test_solver_equivalence.py",
+      "tools\\GHOST\\tests\\test_solver_improvements.py",
+      "tools\\GHOST\\tests\\test_solver_matrix_pipeline.py",
+      "tools\\GHOST\\tests\\test_thin_sheet.py"
+    ],
+    "ghost_backend.twod.special": [
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\geometry.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py"
+    ],
+    "ghost_backend.twod.__init__": [],
+    "ghost_backend.ui.app": [
+      "tools\\GHOST\\Backend\\ghost_gui.py",
+      "tools\\GHOST\\tests\\test_experimental_gui.py",
+      "tools\\GHOST\\tests\\test_gui_entrypoint.py"
+    ],
+    "ghost_backend.ui.geometry": [
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\app.py",
+      "tools\\GHOST\\tests\\test_freddy_material_handoff.py",
+      "tools\\GHOST\\tests\\test_thin_sheet.py"
+    ],
+    "ghost_backend.ui.solver": [
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\setup.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\ui\\app.py",
+      "tools\\GHOST\\tests\\test_boundary_density_view.py",
+      "tools\\GHOST\\tests\\test_experimental_gui.py",
+      "tools\\GHOST\\tests\\test_solver_output_safety.py"
+    ],
+    "ghost_backend.ui.__init__": [],
+    "ghost_backend.validation.cylinder": [
+      "tools\\GHOST\\tests\\test_2d_capability_acceptance.py",
+      "tools\\GHOST\\tests\\test_pec_stack_ibc.py",
+      "tools\\GHOST\\tests\\test_rcs_physics_regression.py",
+      "tools\\GHOST\\tests\\test_solver_audit_fixes.py",
+      "tools\\GHOST\\tests\\test_thin_sheet.py"
+    ],
+    "ghost_backend.validation.sphere": [
+      "tools\\GHOST\\tests\\test_bor_material_updates.py",
+      "tools\\GHOST\\tests\\test_bor_physics_regression.py",
+      "tools\\GHOST\\tests\\test_pec_stack_ibc.py",
+      "tools\\GHOST\\tests\\test_solver_audit_fixes.py"
+    ],
+    "ghost_backend.validation.__init__": [],
+    "ghost_backend.twod.assembly.compact": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\operator.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\regional_coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\scatter.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\tests\\test_compact_multi_region.py"
+    ],
+    "ghost_backend.twod.assembly.geometry_plan": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\regional_coefficients.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py"
+    ],
+    "ghost_backend.twod.assembly.kernels": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\cpu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\session.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\dielectric.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\sheet.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_experimental_cpu.py",
+      "tools\\GHOST\\tests\\test_solver_efficiency.py"
+    ],
+    "ghost_backend.twod.assembly.mass": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\dielectric.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\robin.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\sheet.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\thin_layer.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_solver_matrix_pipeline.py"
+    ],
+    "ghost_backend.twod.assembly.scatter": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\regional_coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\robin.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py"
+    ],
+    "ghost_backend.twod.assembly.session": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\execution\\cpu.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\fields.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\dielectric.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\regions.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\formulations\\robin.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\operators.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compressed_memory.py",
+      "tools\\GHOST\\tests\\test_compressed_path.py",
+      "tools\\GHOST\\tests\\test_solver_matrix_pipeline.py"
+    ],
+    "ghost_backend.twod.assembly.__init__": [],
+    "ghost_backend.twod.formulations.dielectric": [
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py"
+    ],
+    "ghost_backend.twod.formulations.regions": [
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\memory.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\regional_coefficients.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\compressed\\runtime.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\assembly\\scatter.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_compact_multi_region.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py",
+      "tools\\GHOST\\tests\\test_solver_matrix_pipeline.py"
+    ],
+    "ghost_backend.twod.formulations.robin": [
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py"
+    ],
+    "ghost_backend.twod.formulations.sheet": [
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py"
+    ],
+    "ghost_backend.twod.formulations.thin_layer": [
+      "tools\\GHOST\\Backend\\ghost_backend\\geometry\\io.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\runs\\setup.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\geometry.py",
+      "tools\\GHOST\\Backend\\ghost_backend\\twod\\solver.py",
+      "tools\\GHOST\\tests\\test_solver_compression.py",
+      "tools\\GHOST\\tests\\test_thin_sheet.py"
+    ],
+    "ghost_backend.twod.formulations.__init__": []
+  },
+  "cache_files": 345,
+  "cache_bytes": 10649756
+}

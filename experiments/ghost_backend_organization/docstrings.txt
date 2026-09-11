@@ -1,0 +1,609 @@
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:158 convention_scale
+``sqrt(rcs_power) / |amp|`` for one of this repo's .grim files, broadcastable
+over the frequency axis.  There are only TWO data types, read off the file's
+own tag -- never measured:
+
+  rcs_linear_quantity == 'sigma_2d'   sigma_2d = |A|^2/(4k)  -> 1/(2 sqrt(k))
+  rcs_linear_quantity == 'sigma_3d'   sigma = 4 pi |F|^2     -> sqrt(4 pi)
+
+LEGACY: deltas written before the 2-D convention was applied to their power
+are marked power_domain='delta_amp_sq' and stored bare |dA|^2 -> 1.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:469 validate_declared_coherent_delta_domain
+Classify metadata accepted under an explicit delta attestation.
+
+A role-free GRIM produced by the GUI's Coherent-minus operation currently
+carries ``rcs_domain='power_phase'`` (or, for some imported complex grids,
+``'complex_amplitude'``).  Those values describe storage, not the derived
+subtraction role, so the explicit mapping may supply the missing role.
+Missing domain metadata remains a deliberate Legacy compatibility path.
+Any other explicit domain is a real contradiction and fails closed.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:547 _optional_scalar_text
+Return stripped scalar metadata or ``None`` when the key is absent.
+
+An explicitly present array-valued value is a contradiction, not legacy
+missing metadata, and therefore remains a hard error.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:603 validate_assembly_base_grid_metadata
+Validate a base field at the Assembly coordinate-system boundary.
+
+The numerical grid must be the exact canonical radar azimuth/elevation
+grid used by :func:`export_radar_grim`. Descriptive metadata is advisory
+by default and assumptions are returned for provenance. Actual coordinate
+units and unconverted angle systems still need explicit conversion.
+
+In particular, CREATE-RF SENTRi historically reports polar ``theta`` and
+GRIM stores it directly in the elevation array.  Numeric values from a
+partial theta sweep can fall inside [-90, 90] and otherwise look plausible,
+so native polar-theta coordinates must be converted before placement.
+Either the converted units or the angular contract can identify that step.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:1766 save_body_grim
+Write a BoR body solve as ONE .grim: aspect x 1 x frequency x [VV, HH].
+
+The 3-D convention, like every BoR export: ``rcs_power`` = sigma = 4 pi |F|^2
+in m^2 (dBsm), ``rcs_amp_real/imag`` = the field amplitude F, phase preserved.
+
+THE AZIMUTH AXIS IS THE BoR ASPECT, not radar azimuth.  A body of revolution
+is axisymmetric, so one polar angle from the axis is its whole angular
+dependence and [0, 180] covers the sphere.  That aspect equals radar azimuth
+ONLY when the body axis is horizontal AND you stay in the elevation-0 cut
+(the waterline); off that cut a whole CONE of (az, el) looks shares one
+aspect, which is what lets export_radar_grim fill a 2-D radar grid from this
+1-D sweep.  The meaning is recorded in ``units["azimuth_meaning"]`` and in
+``history`` so the axis cannot be silently misread as azimuth downstream.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:2058 load_body_grim
+Read a body .grim back into the ``{frequency: {theta_deg, amp_vv, amp_hh}}``
+dict that sum_features and the exporters consume.
+
+Current solver deliverables are radar-frame monostatic grids with the
+compact BoR aspect model embedded inside the same file.  Legacy compact
+body GRIMs remain readable so existing validated datasets do not need a
+lossy conversion.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:2164 corner_amplitude
+PO-level estimate of the wing-body dihedral double-bounce.
+
+The line-expansion sum is SINGLE-bounce: body and wing scatter in isolation
+and their fields add.  The corner where a wing meets the body is a
+DOUBLE-bounce (body -> wing -> radar) that exists in neither isolated solve.
+This adds it as a corner-reflector term, right-angle or canted.
+
+Physics captured:
+  * magnitude: the standard dihedral peak sigma_0 = 8 pi a^2 b^2 / lambda^2
+    (b = fold length, a = ``face_width`` = effective double-bounce height),
+    with a sinc^2 aperture ALONG the fold and a broad cos^2 retroreflective
+    lobe PERPENDICULAR to it (the defining dihedral pattern);
+  * polarization: the EXACT ideal-dihedral Jones matrix diag(1,-1) in the
+    fold-aligned basis -> co-pol (with a V/H sign flip) when the fold lies
+    along the radar V or H, PURE cross-pol when the fold is at 45 deg;
+  * placement phase exp(2jk d.r_center) from the fold midpoint;
+  * NON-RIGHT dihedral (canted / dihedral / anhedral wing root).  With
+    interior angle alpha = 90 + eps the outward normals give
+    eps = asin(n_wing . n_body) and delta = |eps| is the deviation from
+    square.  Two reflections rotate a ray by 2 alpha, so the double bounce
+    leaves the corner deflected 2 delta off the incidence reversal instead of
+    retroreflecting; the lobe centre is therefore rotated by 2 eps about the
+    fold axis.  BOTH bounce senses exist (body->wing and wing->body deflect
+    oppositely, +2 eps and -2 eps about n_wing x n_body), so the lobe is a
+    symmetric PAIR and the perpendicular-plane response is the cos^2
+    envelope of the two -- at eps = 0 the pair collapses back onto the
+    bisector and this is exactly the right-dihedral lobe.  The peak is then
+    rolled off by cos^2(2 eps): unity at eps = 0, monotone, and vanishing at
+    delta = 45 deg, where the corner has opened into a single plane (or shut
+    into a cusp) and no double bounce survives.
+
+ESTIMATE caveats (this is not a rigorous solve): the internal double-bounce
+constant phase is not tracked (``internal_phase_deg``, default 0) so the
+corner's phase relative to the single-bounce terms is rough -- prefer
+``mode="hybrid"`` (power-add to the body) over full coherent.  The body is
+treated as locally flat at the root; a real curved body reduces the return.
+The non-right model is a screening HEURISTIC: the 2 delta deflection is a
+BISTATIC ray-geometry statement (the exit beam misses the radar by 2 delta at
+EVERY look angle in the perpendicular plane), so the rigorous monostatic
+answer is two shifted plate lobes whose aperture mismatch attenuates the
+return roughly like sinc^2(k a sin 2 delta) -- tens of dB within a few
+degrees of square for an electrically large face, far sharper than the
+cos^2(2 eps) used here. The smooth cos^2 rolloff keeps the term monotone but
+is not a guaranteed upper or lower bound; it says "the modeled corner stops
+pointing energy back at you and points it 2 delta away", not "this is the
+exact canted-dihedral pattern". Corners more than ~20 deg off square carry a
+warning.
+
+``fold``       (2,3) endpoints or (n,2,3) segments of the root/fold line.
+``n_wing``     outward wing face normal (3,).
+``n_body``     outward body face normal at the root (3,).
+``face_width`` effective face width a (m): how far the double bounce reaches
+               up the wing / along the body -- e.g. min(wing height, body
+               extent).  The single biggest modelling knob.
+Returns {"F_vv","F_hh","F_vh"} complex over directions (sigma = 4pi|F|^2).
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:2886 _bor_amp_interp
+Return complex BoR amplitude only at explicitly solved aspect nodes.
+
+The historical name is retained for compatibility, but production body
+fields are never interpolated. Complex nulls and phase can move sharply
+between aspects, so every requested radar look must map to an aspect that
+was solved and stored in the body artifact.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:3363 _precompute_line_shadow_visibility
+Return one packed piece/look mask per cacheable line placement.
+
+The bundled :class:`Occluder` supplies its accelerated packed query.
+Occluder-like integrations that expose only the historical ``visible``
+method retain compatibility through a bounded one-look-at-a-time fallback.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:3552 export_signature_grim
+Combine body + features (+ optional wing-body ``corners``) over an
+(aspect x roll x frequency) grid and write one .grim per channel (VV, HH,
+VH), using the same physical field normalization as the radar exporter.
+
+Axes are BODY-FRAME: ``azimuth`` = roll about the body axis, ``elevation``
+= aspect from the canonical +z axis (0 = nose-on).  The legacy ``axis``
+keyword accepts only a positive multiple of +z because the body field,
+surface-normal callable, feature coordinates, and polarization basis all
+share that frame.  This is NOT a radar az/el frame -- no
+earth-vertical rotation is applied, so the VV/HH labels are the body's
+meridian pols and avoid the radar-frame V/H swap trap. Use
+``export_radar_grim`` when a true radar-frame product is needed.
+
+``rcs_power`` always equals 4*pi times the squared magnitude of the stored
+coherent ``rcs_amp_real/imag`` field.  If ``mode`` is hybrid or envelope,
+that separately requested engineering estimate is stored under
+``combination_estimate_power``; it never replaces the physical field pair.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:4509 assembly_response_physics_sha256
+Hash one physical radar response independent of ZIP packaging/history.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:4602 _verify_expected_source_sha256
+Fail closed if a prepared source no longer has its prepared bytes.
+
+tools\GHOST\Backend\ghost_backend\assembly\fields.py:5074 _publish_staged_assembly_outputs
+Publish related already-staged outputs with rollback on partial failure.
+
+Each staging path must reside beside its destination.  Existing artifacts
+are moved to same-volume backups before replacement, so a failure while
+publishing the second member restores the complete previous pair.
+
+tools\GHOST\Backend\ghost_backend\assembly\inspector.py:7 interference_metrics
+Exact algebra within the coherent, independent-feature Assembly model.
+
+Removal change includes interference with every remaining component.
+Sensitivities hold geometry, illumination, and occlusion fixed.
+
+tools\GHOST\Backend\ghost_backend\assembly\line_expansion.py:605 expand_perimeter
+Expand a seam coefficient along a 3D perimeter.
+
+``segments``    (n_seg, 2, 3) vehicle-frame meters, head-to-tail.
+``segment_normals`` optional (n_seg, 2, 3) endpoint outward normals.
+                When supplied these define the local skin frame and
+                ``normal_fn`` must be None.  The endpoint normals are
+                interpolated along each segment before normalization.
+``directions``  (n_dir, 3) unit COMING-FROM look directions.
+``psi_tm_deg``  candidate inter-solver phase for the 2D TM coefficient
+                (== PSI_HH_DEG, since phi-pol/HH is driven by TM). Applied
+                to the COEFFICIENT so cross-pol is consistent too.
+``psi_te_deg``  same for the 2D TE coefficient (== PSI_VV_DEG).
+
+Pass 0/0 when comparing against an independent reference to determine
+whether any phase mapping is required. Do not treat the legacy defaults as
+certified without that comparison.
+
+Returns ``{"F_vv", "F_hh", "F_vh"}`` complex arrays over directions in the
+physical 3-D amplitude normalization (sigma = 4 pi |F|^2).
+
+``_look_batch_size`` is a private diagnostics/test control.  Production
+calls should leave it unset so the implementation selects a bounded batch
+from the solver-piece count.  A value of one forces the scalar reference
+path.
+
+tools\GHOST\Backend\ghost_backend\assembly\workflow.py:1182 _sample_perimeter
+Return evenly sampled segment points for legacy placement callers.
+
+The feature workflow now performs its production surface query directly so
+it can obtain distance and normal in one pass, but ``place_features.py``
+still imports this compatibility helper for the local/HPC script API.
+
+tools\GHOST\Backend\ghost_backend\assembly\workflow.py:1200 _surface_distances_points_and_normals
+Query a production surface once for distance, registration, and normal.
+
+Lightweight service tests historically supplied surface-like doubles with
+only ``distance`` and ``normal`` methods, so retain that compatibility while
+ensuring a real :class:`TriangleSurface` performs one nearest-facet search.
+
+tools\GHOST\Backend\ghost_backend\assembly\workflow.py:2539 validate_feature_library_manifest
+Validate and normalize one reusable point/line response manifest.
+
+The manifest makes the local-model assumptions machine readable instead
+of leaving phase origin, subtraction sign, and validity
+envelope in a filename or tribal knowledge.  It is intentionally strict;
+legacy datasets remain usable only through the separately recorded
+missing-manifest compatibility path.
+
+tools\GHOST\Backend\ghost_backend\assembly\workflow.py:2904 feature_response_physics_sha256
+Hash canonical response axes/complex field and physical conventions.
+
+This identity deliberately ignores packaging and provenance such as ZIP
+order/compression, ``history``, and ``source_path``.  It is used only for
+duplicate physical-component detection; the manifest's separate content
+digest still binds every serialized payload member for integrity.
+
+tools\GHOST\Backend\ghost_backend\assembly\workflow.py:3588 _footprint_candidate_pairs
+Yield broad-phase-overlapping footprint pairs with an x-axis sweep.
+
+The previous all-pairs loop made 10,000 vehicle fasteners perform roughly
+50 million Python comparisons before a build. Expanded AABBs reject remote
+components without changing the exact point/segment clearance decision for
+candidates that may overlap.
+
+tools\GHOST\Backend\ghost_backend\bor\kernels.py:130 n_xi_for_pairs
+Azimuthal FFT grid size that resolves BOTH the modal/oscillation
+content (the original criterion) AND the sharpest pair integrand.
+
+A point pair at meridian distance d has a xi-integrand peak of width
+~ d / sqrt(rho_p rho_q); pairs just outside the near-pair threshold
+were previously sampled by only a few points once meshes got fine (the
+grid was sized from k and m alone), producing a NON-convergent error
+floor under mesh refinement.  Passing the minimum FAR-pair distance
+d_min floors the grid at pts_per_peak points across that peak:
+n_xi >= pts_per_peak * 2 pi rho_max / d_min.
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:376 BorPecSolver
+Single-surface BoR operator factory + PEC/IBC solver.
+
+With medium=(eps_r, mu_r) the EFIE (T) and rotated-PV (P) operators are
+assembled in that homogeneous medium (complex k, medium eta) -- the
+building blocks of the phase-3 PMCHWT systems.  Excitation and far-field
+methods always refer to the EXTERIOR (air) and are only meaningful on an
+instance with medium=None.
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:2056 _validate_solve_bor_generatrix
+Validate the direct single-surface ``solve_bor`` geometry.
+
+EFIE may represent an open shell.  CFIE/MFIE require the supported
+closed-body topology: both ends on the rotation axis and traversal from
+the +z pole to the -z pole.  Every path rejects intersections because a
+self-crossing meridian generates an overlapping/non-manifold surface.
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:2153 estimate_bor_table_gb
+Persistent far-table memory (GB) -- the scale bound of the current
+all-modes-at-once FFT assembly (see the phase-7 streaming notes).
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:2520 _bor_mode_limits
+Return ``(mode_cap, physical_tail_start)`` for a BoR sweep.
+
+A plane wave incident at polar aspect ``theta`` has useful azimuthal
+content through approximately ``k*rho*sin(theta)``.  The historical
+``+12`` cap margin is retained, while the adaptive tail test is now held
+off until that physical bandwidth has actually been accumulated.  The
+small 0.05 floor preserves the established axial-look safety margin.
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:3702 solve_bor_partial_coating
+Monostatic RCS of a PEC body PARTIALLY covered by a homogeneous coating:
+the dielectric interface S_d (points_interface) terminates on the PEC
+surface at junction circles where air, coating, and conductor meet.
+
+points_covered is the coated part of the core, bare_pieces the list of
+uncovered PEC generatrix pieces (0, 1, or 2 -- cap or band coatings).
+All pieces are drawn in the global +z -> -z traversal with left-of-travel
+normals facing away from the surface they bound (exterior/air for S_d
+and the bare pieces, into the coating for the covered core).
+
+Formulation: exterior region bounded by S_d + bare pieces (currents J_d,
+M_d, J_1p in air), layer region bounded by S_d + covered core (currents
+-J_d, -M_d, J_2 in the coating medium).  PMCHWT rows on S_d, EFIE rows
+on each PEC piece; all with the same phase-3 operator blocks.  Junction
+conditions (per junction circle A):
+
+  * through-current continuity ties the chain-end coefficients:
+    J_1p(A) = (+t, +phi) J_d(A)  (air chain runs S_d and the bare piece
+    in the same global traversal), and
+    J_2(A)  = (+t, -phi) J_d(A)  (the layer chain traverses S_d REVERSED:
+    the -J_d current in the flipped frame has +t and -phi components);
+  * M_t(A) = 0 (tangential E along the junction circle vanishes on the
+    conductor), while M_phi(A) stays free with its natural half-triangle
+    end basis (it carries the normal-E wedge behavior).
+
+The constraints enter Galerkin-style: A_red = Q^T A_full Q -- the tied
+row is the sum of the piece rows, exactly the classical BoR junction
+treatment (Putnam / Medgyesi-Mitschang).
+
+bare_zs (optional): per-piece Leontovich surface impedance -- a list
+matching bare_pieces of None / complex scalar / per-element complex
+arrays (tapers).  The eliminated magnetic current M_1 = -Z_s n_hat x J_1
+keeps the piece's own operator on the validated Gauss-point IBC path
+(assemble_ibc_extra) and radiates onto OTHER surfaces through the
+existing cross T/P operators via the nodal column map
+(M_1t, M_1phi) = (+Z_s J_1phi, -Z_s J_1t). At a junction adjoining an
+impedance piece, M_t(A) = 0 remains the convergent one-node junction
+approximation. A pointwise M_d,t(A) = Z_s(A) J_phi(A) tie was tested and
+rejected because the wedge-line field limit is singular; see build_Q.
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:446 enable_streaming
+Phase-7b: build per-mode nodal far blocks instead of the
+[P, P, modes] Gauss-point tables (see bor_streaming).  Must be
+called before any assemble_* call; the near/self machinery is
+unaffected.  With IBC, the source Z_s is baked into the blocks, so
+assemble_ibc_extra must be called with the same zs_pt.  PMCHWT uses
+the same rotated-PV blocks with an exact unit source weight.
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:618 _far_gap
+Conservative minimum distance among FFT-routed element pairs.
+
+Same/nearby and geometrically sharp pairs use direct modal integration.
+The routing threshold is only a lower bound for every pair left in
+the FFT table.  The FFT grid must be sized from the true closest
+remaining pair: using the threshold itself needlessly drives every
+non-empty far table to the azimuthal safety cap.
+
+A midpoint bounding-sphere tree finds every pair that could improve
+the initial local-neighbour bound, then exact segment distance makes
+the result conservative.  The result is used identically by table
+and streaming assembly.
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:976 rhs_mfie_mode
+<W, n_hat x H_inc> for the plane wave (see phase-2 derivation).
+
+tools\GHOST\Backend\ghost_backend\bor\solver.py:1562 linear_error_metrics
+Return residual matrix, RHS-relative residual, and backward error.
+
+The last quantity is the standard normwise infinity-norm backward
+error, evaluated independently for every RHS column:
+
+    ||r||_inf / (||A||_inf ||x||_inf + ||b||_inf).
+
+Unlike ``||r|| / ||b||``, it remains meaningful when a scaled or
+ill-conditioned system produces a large solution whose matrix-vector
+product contains substantial cancellation.
+
+tools\GHOST\Backend\ghost_backend\bor\streaming.py:1074 plan_streaming_mode_block
+Return a budget-safe block, retained peak, and effective workers.
+
+A streaming range cannot be smaller than the number of simultaneously
+solved outer modes: otherwise a worker wave can straddle two ranges and
+force a rebuild while another worker still reads the old range.  Treat
+``stream_budget_gb`` as a hard retained-block limit by reducing that
+outer concurrency when necessary.  Only a budget below the true
+one-mode retained minimum is rejected.
+
+tools\GHOST\Backend\ghost_backend\execution\provenance.py:183 embed_output_attestation
+Bind a result to its run state *inside* the result, before export.
+
+The sidecar form (`write_output_attestation`) doubles the file count in a
+results directory -- for a sweep of thousands of units that is thousands of
+extra files on a shared filesystem, all of them tiny. Carrying the same
+fields in the artifact keeps the binding and leaves one file per unit.
+
+The one field a sidecar can hold and this cannot is a hash of the finished
+bytes, which would be circular here. That costs less than it appears: a
+.grim is an npz, npz is a zip, and zip validates a CRC-32 per member on
+read, so byte-level corruption already surfaces as a BadZipFile rather than
+as wrong numbers. What the attestation is really for -- catching a result
+produced by a different source build, runtime, geometry, or solve spec --
+is fully covered by the embedded fields.
+
+tools\GHOST\Backend\ghost_backend\execution\provenance.py:334 write_artifact_manifest
+Atomically commit an exact multi-file artifact bundle.
+
+The data files must already be in place.  Writing the manifest last makes
+it a commit marker: an interrupted replacement leaves either no manifest
+or hashes that no longer match, so a downstream consumer fails closed.
+
+tools\GHOST\Backend\ghost_backend\execution\provenance.py:416 write_artifact_in_progress
+Atomically invalidate an older completed artifact commit.
+
+Long-running builders call this immediately before changing any output.
+If the process then fails, the old output bytes remain available for
+inspection, but no downstream consumer can mistake the mixed/incomplete
+directory for a completed bundle.
+
+tools\GHOST\Backend\ghost_backend\execution\provenance.py:601 verify_component_output_manifest
+Verify one step-3 component directory and its exact direct GRIM set.
+
+Step 3b predates :func:`write_artifact_manifest` and records its diagnostic
+``../wing_dbsm.csv`` in ``output_sha256`` in addition to the component
+GRIMs.  This verifier deliberately accepts that established schema while
+retaining strict path and byte checks; all other supported step-3 schemas
+require an exact hash map for their component outputs.
+
+tools\GHOST\Backend\ghost_backend\execution\provenance.py:735 manifest_solve_spec_fingerprint
+Hash every immutable field that defines the underlying unit solves.
+
+Completion status and byte inventories are written after individual unit
+attestations, so they are deliberately excluded. Editing a grid, unit,
+solver control, or source/runtime hash changes this fingerprint and
+invalidates every stale per-unit output. Legacy derived-grid configuration
+has a separate attestation because it does not change the underlying VV/HH
+solve.
+
+tools\GHOST\Backend\ghost_backend\geometry\guidance.py:15 geometry_refinement_candidates
+Identify snapshot segments touching open ends, bends, or material junctions.
+
+Coordinates are only used for direction and connectivity; no unit-dependent
+proximity threshold or guessed material wavelength enters this selection.
+
+tools\GHOST\Backend\ghost_backend\geometry\io.py:311 _validate_dielectric_row
+Validate one strict inline, CSV, or legacy dielectric definition.
+
+tools\GHOST\Backend\ghost_backend\geometry\io.py:137 publish
+Publish all staged files, restoring the old set on any failure.
+
+tools\GHOST\Backend\ghost_backend\geometry\materials.py:1 module
+User-facing material meanings, separate from the legacy numeric file codes.
+
+tools\GHOST\Backend\ghost_backend\geometry\occlusion.py:31 visible_query_adapter
+Bind a visibility query across current and historical integrations.
+
+Older third-party occluders expose only ``visible(points, direction)``.
+Inspecting once avoids both per-look signature overhead and the unsafe
+pattern of catching a ``TypeError`` that may have originated inside the
+third-party implementation rather than at its call boundary.
+
+tools\GHOST\Backend\ghost_backend\geometry\occlusion.py:193 Occluder
+Geometric shadow tester built from a triangle mesh (the clean body).
+
+Visibility queries use a lazily-built, direction-independent bounding-volume
+hierarchy (BVH).  The previous implementation projected *every* triangle for
+*every* feature point and look, which made vehicle-scale meshes effectively
+unusable.  The BVH keeps the same exact ray/triangle decision while reducing
+the normal query from ``O(n_triangles)`` to a small tree traversal.  Building
+it lazily also keeps Assembly validation and preview responsive when body
+shadowing has not actually been requested by a solve.  BVH boxes are
+conservatively padded to cover the leaf test's barycentric edge tolerance;
+the leaf ray/triangle decision remains authoritative.
+
+tools\GHOST\Backend\ghost_backend\geometry\occlusion.py:184 to_dense
+Materialize the point-major matrix for tests/legacy adapters only.
+
+tools\GHOST\Backend\ghost_backend\geometry\surface.py:11 _mesh_extent
+Largest Cartesian span, compatible with old NumPy releases.
+
+tools\GHOST\Backend\ghost_backend\hpc\bundle.py:189 _StageLease
+Exclusive, heartbeat-backed lease for one bundle stage operation.
+
+The lease lives in the workspace rather than inside the staged payload, so
+it also serializes first-time creation and never alters the verified file
+inventory.  A kernel-owned acquisition guard closes the stale
+check/replace race without permitting time-based theft from a paused
+process; owner token and generation checks prevent an old process from
+heartbeating or deleting a successor's lease after takeover.
+
+tools\GHOST\Backend\ghost_backend\hpc\common.py:28 _unit_output_contract
+Return ``(name, polarizations)`` for a validated solver unit.
+
+The v2 2-D driver co-solves both channels into one file; legacy 2-D and
+BoR intermediate manifests retain one polarization per unit.
+
+tools\GHOST\Backend\ghost_backend\hpc\common.py:316 require_hpc_run_provenance
+Reject legacy/tampered HPC runs before their fields are collected.
+
+tools\GHOST\Backend\ghost_backend\hpc\common.py:605 read_unit_grims
+Read legacy single-channel and current dual-channel result units.
+
+Legacy ``<POL>_<FREQ>GHz_<stem>.grim`` records expose a one-item
+``polarizations`` list and ``amp[angle, frequency]``. Current
+``<FREQ>GHz_<stem>.grim`` records expose their stored polarization list and
+``amp[angle, frequency, polarization]``. One record is returned per file,
+matching the scheduler's definition of a unit.
+
+``angles_deg`` is the driver's sweep axis, stored in the grim's 'azimuths':
+for the BoR driver that is the ASPECT from the rotation axis (0 = nose-on,
+90 = broadside, 180 = tail-on -- a body of revolution has no second angle);
+for the 2-D driver it is the cut angle (90 = normal to the outer face).
+
+tools\GHOST\Backend\ghost_backend\hpc\scheduler.py:462 predict_2d_resources
+Backward-compatible one-unit exact resource prediction.
+
+tools\GHOST\Backend\ghost_backend\hpc\scheduler.py:964 _acquire_operation
+Serialize one short claim mutation.
+
+The operation file is not the long-lived work claim.  It closes the
+read/replace window between competing stale takers and between takeover
+and an old owner's heartbeat/abandon.  The kernel releases this lock
+on process exit; it is never stolen from a merely paused owner.
+
+tools\GHOST\Backend\ghost_backend\hpc\scheduler.py:1196 run
+Work through ``candidates`` in order and drain the pool.
+
+``prepare(unit)`` claims the unit and returns
+(key, estimated_gb, apply_async_arguments), or None when the unit is
+already finished or held by another task.  It runs only when there is
+room to start something, so claims are taken at the moment work
+actually begins.
+
+When ``resource_request`` is supplied, it returns ``(GB, CPUs)`` before
+a unit is claimed.  The dispatcher scans past a temporarily blocked
+large unit and backfills the first smaller unit that fits both budgets.
+Deferred units keep their original order and are reconsidered whenever
+work completes.  Without the callback the legacy memory-only,
+no-backfill behaviour is retained for callers with fixed-size work.
+
+tools\GHOST\Backend\ghost_backend\io\grim.py:712 _save_grim_npz_batch
+Publish a related GRIM collection as one rollback-safe batch.
+
+Bistatic incidence files are one logical solver result.  Every payload is
+validated and staged beside its destination before any existing output is
+touched.  Publication then uses same-directory backups so a later failure
+restores the complete previous collection instead of leaving a mixture of
+old and new incidences.
+
+tools\GHOST\Backend\ghost_backend\io\naming.py:154 join_grims
+Fold single-(pol, frequency) grims of ONE variation into one .grim with a
+full polarization and frequency axis.
+
+Every input must share the (azimuth, elevation) sweep, the units and the
+domain tags, and the (polarization x frequency) grid must be COMPLETE -- a
+ragged grid cannot be one array, so it raises rather than padding.
+
+tools\GHOST\Backend\ghost_backend\io\viewer_bridge.py:47 amp_scale
+``sqrt(rcs_power) / |rcs_amp|`` for a .grim of this repo, as an array
+broadcastable over the frequency axis (it is frequency-dependent for 2-D
+cuts).  Divide RcsGrid's complex samples by this to get the field amplitude.
+
+There are only TWO conventions, read off the file's own tag -- not measured:
+
+  rcs_linear_quantity == 'sigma_2d'   sigma_2d = |amp|^2/(4k)  -> 1/(2 sqrt(k))
+  rcs_linear_quantity == 'sigma_3d'   sigma = 4 pi |amp|^2     -> sqrt(4 pi)
+
+'delta' is NOT a third convention: a delta is a 2-D quantity, so it is
+sigma_2d like any other 2-D cut.  ``rcs_domain='delta'`` lives on a separate
+axis -- it says the samples are a DIFFERENCE (featured - clean) rather than a
+whole object, which is what the pipeline routes on, and says nothing about
+units.
+
+LEGACY: deltas written before that was true stored bare |dA|^2 and are marked
+power_domain='delta_amp_sq'; those get 1.  Rebuild them (step 03/04, seconds)
+and the special case goes away -- their dBke display is otherwise 10log10(4k)
+high (+24 dB at 3 GHz, +27 at 6) with a 3 dB/octave tilt.
+
+tools\GHOST\Backend\ghost_backend\runs\config.py:126 write_configuration
+Atomically publish a previously validated configuration.
+
+tools\GHOST\Backend\ghost_backend\twod\geometry.py:488 _validate_passive_medium
+Validate constitutive values supported by the passive 2D formulations.
+
+The solver uses e^(+j*omega*t), so passive loss has Im(eps), Im(mu) <= 0.
+Exactly/near-singular ENZ or MNZ media require a dedicated limiting
+formulation; rejecting them is safer than the historical substitution
+of 1+0j (free space).
+
+tools\GHOST\Backend\ghost_backend\twod\geometry.py:1458 _linear_panel_signature_from_info
+Topology signature used to decide when linear nodes may be shared safely.
+
+tools\GHOST\Backend\ghost_backend\twod\solver.py:354 _equilibrated_condition_from_lu
+Estimate cond_1 of a row/column-equilibrated matrix from one LU.
+
+The raw block systems mix trace and flux equations with different scales,
+so their unscaled condition numbers are not comparable.  The inverse
+1-norm estimator needs only a handful of LU solves and avoids the second
+cubic SVD that certification previously performed.
+
+tools\GHOST\Backend\ghost_backend\twod\solver.py:1002 _detect_available_gb
+Memory this process may safely allocate now, in GiB.
+
+``psutil`` is preferred on desktops.  Native Windows/POSIX
+fallbacks keep the GUI safe without the optional dependency.  Scheduler
+and cgroup headroom are additional bounds, so the tightest known limit
+wins instead of a machine-total or historical fixed allowance.
+
+tools\GHOST\Backend\ghost_backend\twod\solver.py:1464 _dense_formulation_resources
+Return the dense system size and retained-operator budget.
+
+This is the single formulation classifier used by both the solver's
+pre-allocation memory gate and the sweep scheduler.  Keeping it beside the
+active dispatch predicates prevents a scheduler estimate from silently
+drifting back to the old generic 2N coupled-system assumption.
+
+tools\GHOST\Backend\ghost_backend\ui\geometry.py:1357 _fill_loops
+Stitch segment chains into closed loops and infer the enclosed material.
+
+Returns dicts: {points, label, color, consistent, depth, rows}.
+Interior side rule: for a CCW loop the interior is on the LEFT of
+travel (= the normal side); a chain traversed backwards contributes
+its opposite side.  All member chains of a loop must imply the same
+interior material, otherwise the loop is flagged inconsistent.
+
+tools\GHOST\Backend\ghost_backend\ui\solver.py:52 _2d_panel_limit
+Allow compressed certificate meshes beyond the legacy dense GUI cap.

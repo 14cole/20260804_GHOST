@@ -1,0 +1,93 @@
+{
+  "seconds": 29.263752500002738,
+  "plans": {
+    "VV": {
+      "nodes": 18732,
+      "panels": 18726,
+      "base_system_dofs": 28406,
+      "base_operator_matrices": 16,
+      "fine_nodes": 28144,
+      "fine_panels": 28138,
+      "fine_system_dofs": 42686,
+      "fine_operator_matrices": 16,
+      "n_regions": 3,
+      "formulation": "multi_region",
+      "system_dofs": 42686,
+      "operator_matrices": 16,
+      "peak_gb": 7.106016117148101,
+      "memory_estimate": {
+        "model": "compressed_phase_v1",
+        "peak_bytes": 7630026707,
+        "phase_bytes": {
+          "assembly": 2775885075,
+          "factorization": 6114514899,
+          "solve": 7630026707
+        },
+        "operator_bytes": 1656729803,
+        "operator_allowance_bytes": 2236585235,
+        "inverse_ceiling_bytes": 2932200128,
+        "process_geometry_bytes": 329584640,
+        "rhs_workspace_bytes": 2131656704,
+        "assembly_workspace_bytes": 209715200,
+        "tile_metadata_bytes": 20971520,
+        "storage_limit_bytes": 8589934592,
+        "temporary_disk_bytes": 2060935602,
+        "temporary_disk_semantics": "one partner estimate; exact payload depends on its material equations",
+        "storage_method": "sampled_spatial_tiles",
+        "sampled": true,
+        "samples": 28,
+        "safety": 1.35,
+        "floor_gb": 0.6,
+        "forecast_is_hard_limit": false,
+        "certification_mesh_peak_bytes": {
+          "base": 4909969298,
+          "fine": 7630026707
+        }
+      }
+    },
+    "HH": {
+      "nodes": 18732,
+      "panels": 18726,
+      "base_system_dofs": 28406,
+      "base_operator_matrices": 16,
+      "fine_nodes": 28144,
+      "fine_panels": 28138,
+      "fine_system_dofs": 42686,
+      "fine_operator_matrices": 16,
+      "n_regions": 3,
+      "formulation": "multi_region",
+      "system_dofs": 42686,
+      "operator_matrices": 16,
+      "peak_gb": 7.076085220091045,
+      "memory_estimate": {
+        "model": "compressed_phase_v1",
+        "peak_bytes": 7597888651,
+        "phase_bytes": {
+          "assembly": 2743747019,
+          "factorization": 6082376843,
+          "solve": 7597888651
+        },
+        "operator_bytes": 1632923836,
+        "operator_allowance_bytes": 2204447179,
+        "inverse_ceiling_bytes": 2932200128,
+        "process_geometry_bytes": 329584640,
+        "rhs_workspace_bytes": 2131656704,
+        "assembly_workspace_bytes": 209715200,
+        "tile_metadata_bytes": 20971520,
+        "storage_limit_bytes": 8589934592,
+        "temporary_disk_bytes": 2022040972,
+        "temporary_disk_semantics": "one partner estimate; exact payload depends on its material equations",
+        "storage_method": "sampled_spatial_tiles",
+        "sampled": true,
+        "samples": 28,
+        "safety": 1.35,
+        "floor_gb": 0.6,
+        "forecast_is_hard_limit": false,
+        "certification_mesh_peak_bytes": {
+          "base": 4900089142,
+          "fine": 7597888651
+        }
+      }
+    }
+  }
+}

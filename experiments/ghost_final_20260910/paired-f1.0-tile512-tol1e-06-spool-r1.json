@@ -1,0 +1,105 @@
+{
+  "frequency": 1.0,
+  "tile": 512,
+  "tolerance": 1e-06,
+  "budget": 536870912,
+  "spooled": true,
+  "channels": {
+    "TE": {
+      "operator": {
+        "unknowns": 2964,
+        "tiles": 64,
+        "compressed_tiles": 56,
+        "retained_bytes": 42717024,
+        "max_query_bytes": 3303384,
+        "geometry_queries": 64,
+        "geometry_coefficients": 8785296,
+        "dropped_routes": 54,
+        "row_error_bound": 7.90628483162815e-18,
+        "storage_budget": 495919888,
+        "compression": "qr"
+      },
+      "load_seconds": 1.0000003385357559e-06,
+      "factor_seconds": 1.2057914000033634,
+      "rhs_solve_projection_seconds": 0.36848230000032345,
+      "solver": {
+        "preconditioner": {
+          "bytes": 26663448,
+          "max_rank": 54,
+          "leaves": 32,
+          "accesses": 47104299,
+          "oracle_calls": 6581,
+          "max_query_entries": 47424,
+          "relative_inf_error_bound": null,
+          "relative_one_error_bound": null,
+          "storage_budget": 451000608,
+          "inverse_only": true
+        },
+        "combined_bytes": 69380472,
+        "refinement_steps": [
+          2
+        ],
+        "gmres_columns": 0,
+        "physical_repairs": 0,
+        "operator_products": 4,
+        "basis_columns": 34,
+        "original_residual_bound": 1.5430502339780338e-14
+      },
+      "operator_released": true,
+      "independent_backward": 1.4894884344885246e-14,
+      "field_error": 7.336620615657761e-13
+    },
+    "TM": {
+      "operator": {
+        "unknowns": 2964,
+        "tiles": 64,
+        "compressed_tiles": 55,
+        "retained_bytes": 43153280,
+        "max_query_bytes": 3303384,
+        "geometry_queries": 64,
+        "geometry_coefficients": 8785296,
+        "dropped_routes": 54,
+        "row_error_bound": 5.362134765611591e-18,
+        "storage_budget": 494153888,
+        "compression": "qr",
+        "spooled_bytes": 43034720
+      },
+      "load_seconds": 0.014114099998550955,
+      "factor_seconds": 0.8551327000022866,
+      "rhs_solve_projection_seconds": 0.36116319999928237,
+      "solver": {
+        "preconditioner": {
+          "bytes": 24322840,
+          "max_rank": 55,
+          "leaves": 32,
+          "accesses": 32626035,
+          "oracle_calls": 5453,
+          "max_query_entries": 47424,
+          "relative_inf_error_bound": null,
+          "relative_one_error_bound": null,
+          "storage_budget": 493717632,
+          "inverse_only": true
+        },
+        "combined_bytes": 67476120,
+        "refinement_steps": [
+          2
+        ],
+        "gmres_columns": 0,
+        "physical_repairs": 0,
+        "operator_products": 4,
+        "basis_columns": 34,
+        "original_residual_bound": 1.540524733683236e-14
+      },
+      "operator_released": true,
+      "independent_backward": 1.3717691101987609e-14,
+      "field_error": 3.0524456330171086e-13
+    }
+  },
+  "preparation_seconds": 0.12559979999787174,
+  "paired_assembly_seconds": 18.626172700001916,
+  "shared_kernel_groups": 117,
+  "operator_bytes": 85870304,
+  "oracle_released": true,
+  "sampled_core_rss_bytes": 230473728,
+  "accepted": true
+}

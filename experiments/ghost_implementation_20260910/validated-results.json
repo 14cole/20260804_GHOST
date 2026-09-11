@@ -1,0 +1,534 @@
+{
+  "materials": {
+    "pec": {
+      "VV": 5.382498908307014e-16,
+      "HH": 2.698875685095563e-15
+    },
+    "ibc": {
+      "VV": 6.386824353697299e-16,
+      "HH": 1.7666211642907733e-15
+    },
+    "pec_ibc": {
+      "VV": 8.332961992182792e-15,
+      "HH": 6.97495714230111e-15
+    },
+    "lossless": {
+      "VV": 8.021886359996956e-15,
+      "HH": 8.099641719933462e-15
+    },
+    "lossy": {
+      "VV": 6.900241255276119e-15,
+      "HH": 8.831425097249595e-15
+    },
+    "magnetic": {
+      "VV": 5.512442294411383e-15,
+      "HH": 1.3503980576922932e-14
+    },
+    "coated": {
+      "VV": 1.0140307449794784e-14,
+      "HH": 5.793541137153518e-15
+    },
+    "layered": {
+      "VV": 1.6422456191757e-14,
+      "HH": 1.3645204582501103e-14
+    },
+    "mixed": {
+      "VV": 3.3642854641418784e-15,
+      "HH": 6.760035138053124e-15
+    },
+    "sheet": {
+      "VV": 3.0698462867051227e-15,
+      "HH": 4.660265434596009e-16
+    },
+    "mixed_sheet": {
+      "VV": 1.8504153439977915e-14,
+      "HH": 7.479343089834678e-15
+    },
+    "thin": {
+      "VV": 5.379593263272233e-15,
+      "HH": 1.0934267322430523e-16
+    },
+    "thin_magnetic": {
+      "VV": 1.396500462493409e-14,
+      "HH": 4.0351393718424206e-15
+    },
+    "transparent": {
+      "VV": 0.0,
+      "HH": 0.0
+    }
+  },
+  "hierarchical_materials": {
+    "pec": {
+      "VV": 7.983881981706673e-16,
+      "HH": 2.4306535183014357e-15
+    },
+    "ibc": {
+      "VV": 7.890288708653515e-16,
+      "HH": 2.357745386621273e-15
+    },
+    "pec_ibc": {
+      "VV": 8.234857929883541e-15,
+      "HH": 7.346620472165852e-15
+    },
+    "lossless": {
+      "VV": 1.0579860597031558e-14,
+      "HH": 3.3894855367719854e-14
+    },
+    "lossy": {
+      "VV": 1.5778250448329986e-14,
+      "HH": 9.698098622717469e-15
+    },
+    "magnetic": {
+      "VV": 8.867493821913098e-13,
+      "HH": 2.407531031424807e-13
+    },
+    "coated": {
+      "VV": 1.0237111583171005e-14,
+      "HH": 6.415088476096792e-15
+    },
+    "layered": {
+      "VV": 1.4049003267984762e-14,
+      "HH": 1.0811332376035832e-14
+    },
+    "mixed": {
+      "VV": 4.182446926601997e-15,
+      "HH": 5.519265748631731e-15
+    },
+    "sheet": {
+      "VV": 4.655551730892645e-15,
+      "HH": 6.97699373274931e-16
+    },
+    "mixed_sheet": {
+      "VV": 1.8414133353279083e-14,
+      "HH": 5.831166483201928e-15
+    },
+    "thin": {
+      "VV": 1.4357832538911072e-11,
+      "HH": 5.494401329925665e-16
+    },
+    "thin_magnetic": {
+      "VV": 2.6895590134828413e-11,
+      "HH": 1.9173826016958103e-12
+    },
+    "transparent": {
+      "VV": 0.0,
+      "HH": 0.0
+    }
+  },
+  "benchmarks": {
+    "airfoil-f2.0-baseline-dense-r1.json": {
+      "seconds": 47.58162740000262,
+      "field_errors": {
+        "VV": 0.0,
+        "HH": 0.0
+      },
+      "peak_mib": 1213.56640625,
+      "systems": [
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 39,
+          "max_backward_error": 1.57453307647006e-14,
+          "max_relative_residual": 1.5731641622316326e-11,
+          "sweep_compression": {
+            "requested": "auto",
+            "input_columns": 361,
+            "solved_columns": 64,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "max_rhs_error": 3.047127290811343e-15,
+            "max_reconstructed_backward_error": 1.57453307647006e-14
+          }
+        },
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 39,
+          "max_backward_error": 3.391503497853307e-14,
+          "max_relative_residual": 6.583313359720464e-13,
+          "sweep_compression": {
+            "requested": "auto",
+            "input_columns": 361,
+            "solved_columns": 64,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "max_rhs_error": 3.138889443510213e-15,
+            "max_reconstructed_backward_error": 3.391503497853307e-14
+          }
+        }
+      ]
+    },
+    "airfoil-f2.0-baseline-dense-r2.json": {
+      "seconds": 47.59902720000173,
+      "field_errors": {
+        "VV": 2.7678373764645686e-13,
+        "HH": 2.521219384718058e-13
+      },
+      "peak_mib": 1212.64453125,
+      "systems": [
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 39,
+          "max_backward_error": 1.6151660916751966e-14,
+          "max_relative_residual": 1.576616312108037e-11,
+          "sweep_compression": {
+            "requested": "auto",
+            "input_columns": 361,
+            "solved_columns": 64,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "max_rhs_error": 3.047127290811343e-15,
+            "max_reconstructed_backward_error": 1.3717597960561032e-14
+          }
+        },
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 39,
+          "max_backward_error": 3.39150654675289e-14,
+          "max_relative_residual": 6.620273219967856e-13,
+          "sweep_compression": {
+            "requested": "auto",
+            "input_columns": 361,
+            "solved_columns": 64,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "max_rhs_error": 3.138889443510213e-15,
+            "max_reconstructed_backward_error": 3.39150654675289e-14
+          }
+        }
+      ]
+    },
+    "airfoil-f2.0-updated-dense-r1.json": {
+      "seconds": 42.020347999998194,
+      "field_errors": {
+        "VV": 3.6497762689064233e-13,
+        "HH": 5.590642652502702e-13
+      },
+      "peak_mib": 1244.92578125,
+      "systems": [
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 2.1062176243235112e-14,
+          "max_relative_residual": 2.2597164921969778e-11,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.6139669540836127e-15,
+            "max_reconstructed_backward_error": 2.1062176243235112e-14,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          }
+        },
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 2.5245307432025477e-14,
+          "max_relative_residual": 1.5759586615534832e-12,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.7220712420478555e-15,
+            "max_reconstructed_backward_error": 2.5245307432025477e-14,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          }
+        }
+      ]
+    },
+    "airfoil-f2.0-updated-dense-r2.json": {
+      "seconds": 42.03324299999804,
+      "field_errors": {
+        "VV": 2.778180698721273e-13,
+        "HH": 5.404565601686312e-13
+      },
+      "peak_mib": 1234.4921875,
+      "systems": [
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 1.7377560783395426e-14,
+          "max_relative_residual": 2.1251306346437395e-11,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.6139669540836127e-15,
+            "max_reconstructed_backward_error": 1.7377560783395426e-14,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          }
+        },
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 2.5245320250192165e-14,
+          "max_relative_residual": 1.6447706455336807e-12,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.7220712420478555e-15,
+            "max_reconstructed_backward_error": 2.5245320250192165e-14,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          }
+        }
+      ]
+    },
+    "airfoil-f2.0-updated-dense-r3.json": {
+      "seconds": 41.990862700000434,
+      "field_errors": {
+        "VV": 4.603314237182922e-13,
+        "HH": 5.736807810195903e-13
+      },
+      "peak_mib": 1244.6171875,
+      "systems": [
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 1.6694032721842788e-14,
+          "max_relative_residual": 2.1210948786552995e-11,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.6139669540836127e-15,
+            "max_reconstructed_backward_error": 1.6694032721842788e-14,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          }
+        },
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 2.5245266390266987e-14,
+          "max_relative_residual": 1.5634614915729533e-12,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.7220712420478555e-15,
+            "max_reconstructed_backward_error": 2.5245266390266987e-14,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          }
+        }
+      ]
+    },
+    "airfoil-f2.0-updated-hierarchical-r1.json": {
+      "seconds": 41.73441100000127,
+      "field_errors": {
+        "VV": 2.0560247099441206e-13,
+        "HH": 5.225097413437546e-13
+      },
+      "peak_mib": 811.0703125,
+      "systems": [
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 3.983958025016769e-15,
+          "max_relative_residual": 5.661451057233435e-13,
+          "hierarchical": {
+            "backend": "hodlr",
+            "leaves": 54,
+            "low_rank_blocks": 106,
+            "max_rank": 100,
+            "max_block_error": 1.9801516007766218e-10,
+            "tolerance": 2e-10,
+            "factor_bytes": 86138512,
+            "refinements": 1
+          },
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.6139669540836127e-15,
+            "max_reconstructed_backward_error": 3.983958025016769e-15,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          },
+          "residual_products_reused": 2
+        },
+        {
+          "unknowns": 5742,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 41,
+          "max_backward_error": 2.524536390038543e-14,
+          "max_relative_residual": 1.7453753135886346e-12,
+          "hierarchical": {
+            "backend": "hodlr",
+            "leaves": 56,
+            "low_rank_blocks": 110,
+            "max_rank": 100,
+            "max_block_error": 1.9889144279459868e-10,
+            "tolerance": 2e-10,
+            "factor_bytes": 80654792,
+            "refinements": 1
+          },
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 51,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.7220712420478555e-15,
+            "max_reconstructed_backward_error": 2.524536390038543e-14,
+            "retained_basis_columns": 51,
+            "reused_basis_batches": 1
+          },
+          "residual_products_reused": 2
+        }
+      ]
+    },
+    "ibc4096-f0.6-baseline-dense-r1.json": {
+      "seconds": 16.410078100001556,
+      "field_errors": {
+        "VV": 0.0,
+        "HH": 0.0
+      },
+      "peak_mib": 866.7578125,
+      "systems": [
+        {
+          "unknowns": 4096,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 25,
+          "max_backward_error": 1.9345543688852283e-14,
+          "max_relative_residual": 1.4128212105216389e-14,
+          "sweep_compression": {
+            "requested": "auto",
+            "input_columns": 361,
+            "solved_columns": 44,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "max_rhs_error": 2.9917581993398878e-15,
+            "max_reconstructed_backward_error": 1.9345543688852283e-14
+          }
+        },
+        {
+          "unknowns": 4096,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 25,
+          "max_backward_error": 1.2696995242617875e-14,
+          "max_relative_residual": 5.9391264978955634e-15,
+          "sweep_compression": {
+            "requested": "auto",
+            "input_columns": 361,
+            "solved_columns": 42,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "max_rhs_error": 1.6715839986283682e-15,
+            "max_reconstructed_backward_error": 1.2696995242617875e-14
+          }
+        }
+      ]
+    },
+    "ibc4096-f0.6-updated-dense-r1.json": {
+      "seconds": 16.04177770000024,
+      "field_errors": {
+        "VV": 5.338064983556627e-15,
+        "HH": 6.7540041635134316e-15
+      },
+      "peak_mib": 700.50390625,
+      "systems": [
+        {
+          "unknowns": 4096,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 26,
+          "max_backward_error": 1.6830236573420806e-14,
+          "max_relative_residual": 5.805318557855374e-15,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 32,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.941317743247706e-15,
+            "max_reconstructed_backward_error": 1.6830236573420806e-14,
+            "retained_basis_columns": 32,
+            "reused_basis_batches": 1
+          }
+        },
+        {
+          "unknowns": 4096,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 25,
+          "max_backward_error": 2.021556060466947e-14,
+          "max_relative_residual": 2.5566878159752436e-15,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 30,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.3643372550888607e-15,
+            "max_reconstructed_backward_error": 2.021556060466947e-14,
+            "retained_basis_columns": 30,
+            "reused_basis_batches": 1
+          }
+        }
+      ]
+    }
+  }
+}

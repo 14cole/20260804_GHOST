@@ -1,0 +1,152 @@
+{
+  "kind": "ibc",
+  "count": 384,
+  "algebra": {
+    "TE": {
+      "n": 384,
+      "matrix_bytes": 2359296,
+      "qr": {
+        "rank": 27,
+        "relative_scaled_rhs_error": 1.4908058736705799e-15,
+        "rhs_error": 1.352597461888743e-14,
+        "field_error": 2.0508342786449486e-15,
+        "original_backward": 4.1496309150737145e-15
+      },
+      "fourier": {
+        "rank": 27,
+        "angular_order": 13,
+        "rhs_error": 1.184709604689216e-15,
+        "field_error": 1.1042953808088184e-15,
+        "original_backward": 8.006082625642174e-16
+      },
+      "fourier_checked": {
+        "fallback_columns": 0,
+        "zero_columns": 0,
+        "field_error": 1.1042953808088184e-15,
+        "original_backward": 8.006082625642174e-16
+      },
+      "coarse_inverse": {
+        "build_seconds": 0.004212499999994179,
+        "bytes": 920448,
+        "condition": 10.01035521920077,
+        "field_error": 2.2173766613788547e-15,
+        "original_backward": 4.152273985833205e-15,
+        "refinements": 2
+      },
+      "compressed_operator": {
+        "build_seconds": 0.015295499999410822,
+        "evidence": {
+          "bytes": 2077632,
+          "max_rank": 28,
+          "leaves": 4,
+          "accesses": 439296,
+          "oracle_calls": 316,
+          "max_query_entries": 9216,
+          "relative_inf_error_bound": 3.2959639488321186e-13,
+          "relative_one_error_bound": 2.0537796944709628e-13
+        },
+        "residual_bound": 2.328651490644741e-13,
+        "field_error": 2.3885426883359443e-14,
+        "original_backward": 3.750356818689067e-14
+      }
+    },
+    "TM": {
+      "n": 384,
+      "matrix_bytes": 2359296,
+      "qr": {
+        "rank": 27,
+        "relative_scaled_rhs_error": 1.4512031879231574e-15,
+        "rhs_error": 2.4372430566806076e-14,
+        "field_error": 3.517619957311493e-15,
+        "original_backward": 7.833086652085279e-15
+      },
+      "fourier": {
+        "rank": 25,
+        "angular_order": 12,
+        "rhs_error": 3.387227370274171e-15,
+        "field_error": 2.7475494739804907e-15,
+        "original_backward": 1.3111390568360966e-15
+      },
+      "fourier_checked": {
+        "fallback_columns": 0,
+        "zero_columns": 0,
+        "field_error": 2.7475494739804907e-15,
+        "original_backward": 1.3111390568360966e-15
+      },
+      "coarse_inverse": {
+        "build_seconds": 0.005310599999575061,
+        "bytes": 978576,
+        "condition": 73.71139896766529,
+        "field_error": 5.029717315135455e-15,
+        "original_backward": 7.790424163105245e-15,
+        "refinements": 1
+      },
+      "compressed_operator": {
+        "build_seconds": 0.015805700000782963,
+        "evidence": {
+          "bytes": 2133856,
+          "max_rank": 29,
+          "leaves": 4,
+          "accesses": 404352,
+          "oracle_calls": 332,
+          "max_query_entries": 9216,
+          "relative_inf_error_bound": 3.81048672055808e-13,
+          "relative_one_error_bound": 4.1918021486611097e-13
+        },
+        "residual_bound": 2.6591416088025763e-13,
+        "field_error": 6.794106532764595e-14,
+        "original_backward": 6.996337251776575e-14
+      }
+    }
+  },
+  "baseline_systems": [
+    {
+      "unknowns": 384,
+      "factorizations": 1,
+      "rhs_batches": 2,
+      "max_rhs_columns": 256,
+      "max_backward_error": 6.463073000698065e-16,
+      "max_relative_residual": 7.164835016623463e-16,
+      "sweep_compression": {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 361,
+        "accepted_batches": 0,
+        "fallback_batches": 0,
+        "max_rhs_error": 0.0,
+        "max_reconstructed_backward_error": 0.0
+      }
+    },
+    {
+      "unknowns": 384,
+      "factorizations": 1,
+      "rhs_batches": 2,
+      "max_rhs_columns": 256,
+      "max_backward_error": 6.04302458208738e-16,
+      "max_relative_residual": 5.631948953334719e-16,
+      "sweep_compression": {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 361,
+        "accepted_batches": 0,
+        "fallback_batches": 0,
+        "max_rhs_error": 0.0,
+        "max_reconstructed_backward_error": 0.0
+      }
+    }
+  ],
+  "assembly": {
+    "table12_paired": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "wpairs": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "partial": {
+      "VV": 0.0,
+      "HH": 0.0
+    }
+  }
+}

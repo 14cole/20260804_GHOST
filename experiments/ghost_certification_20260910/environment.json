@@ -1,0 +1,11 @@
+{
+  "python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+  "numpy": "2.5.2",
+  "scipy": "1.18.1",
+  "os": "Windows-11-10.0.26200-SP0",
+  "processor": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+  "logical_cpus": 16,
+  "ram_bytes": 33396543488,
+  "assembly_threads": 4,
+  "blas_threads": 2
+}

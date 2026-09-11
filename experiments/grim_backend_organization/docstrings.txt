@@ -1,0 +1,638 @@
+GRIM_Revised_2\grim_backend\datasets\arithmetic.py:289 support_referenced_difference
+Return an exact target-plus-support minus support-only field.
+
+This guided wrapper intentionally delegates all numerical work and
+compatibility enforcement to :meth:`coherent_subtract`.  It adds role-
+explicit, content-bound provenance and QA diagnostics so the result
+cannot be mistaken for a generic operand-order subtraction.
+
+The result is a *support-referenced difference*.  It is not guaranteed
+to equal the target's free-space response because target/support
+coupling, shadowing, and multiple-bounce terms are not recoverable from
+two measurements by subtraction.
+
+GRIM_Revised_2\grim_backend\datasets\audit.py:12 _physical_grid_content_sha256
+Bind provenance to axes, conventions, and the complex field actually used.
+
+The authoritative GHOST real/imaginary payload can differ from the modeled
+power/phase pair (for example after float32 underflow), so hash the complex
+response through :meth:`RcsGrid.rcs_slice` in bounded azimuth blocks.  This
+helper deliberately excludes arbitrary descriptive metadata: labels and
+history may change without changing the physical subtraction/calibration.
+
+GRIM_Revised_2\grim_backend\datasets\audit.py:85 _support_reference_qa
+Return bounded-memory diagnostics for an exact complex difference.
+
+These are unweighted sums over the common finite sample support, not a
+physical angular/frequency integral.  The complex coherence is therefore
+an acquisition-similarity diagnostic; it is deliberately not labelled a
+measure of how much support scattering was physically removed.
+
+GRIM_Revised_2\grim_backend\datasets\audit.py:211 audit_dataset
+Return a non-mutating, JSON-serializable dataset health report.
+
+The report always contains ``status``, ``errors``, ``warnings``,
+``info``, and ``metrics``.  Grid samples are scanned in bounded blocks;
+the audit never constructs a second full-size power, phase, or complex
+grid.  This method is deliberately diagnostic: it reports malformed
+public mutations instead of repairing them.
+
+GRIM_Revised_2\grim_backend\datasets\axes.py:14 edit_axis_value
+Return a grid with one safely edited axis value.
+
+Numeric coordinate edits are kept finite and unique, then the edited
+axis is stable-sorted.  Every sample array follows the same permutation,
+including passthrough arrays whose leading four dimensions match the
+RCS grid.  Polarization edits are label-only: surrounding whitespace is
+removed, blank labels and case-insensitive duplicates are rejected, and
+channel order is preserved.
+
+The operation is transactional: validation and all reordered arrays are
+prepared before a new :class:`RcsGrid` is returned, so ``self`` is never
+partially mutated when an edit is invalid.
+
+GRIM_Revised_2\grim_backend\datasets\axes.py:185 _supported_unit
+Return one canonical modeled unit, rejecting explicit unknowns.
+
+Older GRIM files omitted unit metadata and historically used degrees
+and GHz, so a missing/blank value still receives that documented
+default.  A present but unknown unit must not quietly take the same
+conversion path as the default.
+
+GRIM_Revised_2\grim_backend\datasets\axes.py:492 _clean_axis
+Normalize an axis to float64 (numeric) or keep dtype (non-numeric).
+
+For float32 input, round-trips each value through its shortest-decimal
+repr so that user-intended values like 0.1 stay as 0.1 in float64
+instead of inheriting the float32 quantization noise (0.10000000149...).
+That way later ops like `shift_azimuth(180)` produce clean values
+(180.1 instead of 180.10000001).
+
+GRIM_Revised_2\grim_backend\datasets\axes.py:509 _canonical_polarization_axis
+Return stripped uppercase polarization identities without aliases.
+
+Polarization labels are identifiers, not display prose. Treating
+``HH`` and ``hh`` as distinct allowed joins to create an axis that a
+later native save correctly rejected as a case-folded duplicate.
+Canonicalizing at every construction boundary keeps lookup, union, and
+serialization behavior consistent. Distinct input channels that fold
+to one identity are rejected rather than silently merged.
+
+GRIM_Revised_2\grim_backend\datasets\axes.py:1062 wrap_azimuth
+Wrap azimuth axis into the given range and return a new grid.
+
+``mode`` is ``"0_360"`` for [0, 360) or ``"-180_180"`` for [-180, 180).
+Output azimuths are sorted ascending; samples are reordered to match.
+Degree axes use 360/180 and radian axes use 2*pi/pi.  If wrapping
+collapses distinct inputs onto one seam coordinate, complementary or
+equivalent samples are merged; conflicting finite samples are rejected
+instead of silently discarding one.
+
+GRIM_Revised_2\grim_backend\datasets\combine.py:62 stitch_many
+Stitch union-grid samples using one explicit overlap policy.
+
+Policies are ``"priority-first"``, ``"priority-last"``,
+``"power-mean"``, and ``"coherent-mean"``.  Priority policies choose
+an entire power/phase sample atomically in input order. ``power-mean``
+averages finite linear power and makes phase unknown only at cells
+with multiple contributors. ``coherent-mean`` averages complex fields
+and therefore requires finite phase plus compatible coherent metadata.
+
+This is intentionally separate from :meth:`join_many`: strict Join
+continues to reject conflicting finite overlaps.  Stitch resolves
+them only under the caller-selected policy and records a durable
+report.  Processing uses bounded source/target blocks and
+``max_output_bytes`` caps the estimated peak retained/working memory.
+
+When ``return_report`` is true, return ``(grid, report)``; otherwise
+return only the stitched grid.  Report counts are union-grid cell
+counts except ``contributing_count``, which counts all finite input
+contributions.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:60 wedge_to_conic_basis_change
+Return old-basis coordinates of the conic ``(V,H)`` basis.
+
+If ``S_w`` is a monostatic Jones matrix in the range's vertical/horizontal
+basis for the vertical-turntable wedge setup, the normal conic-range
+matrix is ``C.T @ S_w @ C``.  The last two axes of the result are ordered
+old ``(V,H)`` by new ``(V,H)``.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:193 angular_coordinate_system
+Return the physical angular convention used by the two angle axes.
+
+GRIM's native convention is conic azimuth/elevation.  Legacy PTM cuts
+use great-circle aspect/pitch; identical numeric axes from those two
+conventions are not physically interchangeable.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:205 angular_frame_orientation_deg
+Return stored great-circle/PTM roll and tilt scalar metadata.
+
+They remain compatibility fields.  The supplied legacy PTM reference
+does not define their Euler order or enough geometry to apply them as
+rotations, so conversion code must require both to be zero.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:230 set_angular_coordinate_system
+Declare the meaning of existing angles and return an independent copy.
+
+This explicitly overrides import assumptions; it is not a geometric
+conversion. Numeric axes, sample order, polarizations, power, and phase
+are preserved exactly, including nonzero cuts and cross-polar channels.
+Great-circle declarations also specify their convention and frame.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:306 great_circle_coordinate_convention
+Return the declared great-circle chart/basis convention.
+
+A GRIM-created equatorial great-circle grid is tagged ``grim_gc_v1``.
+An imported PTM without GRIM's marker is deliberately reported as
+``legacy_ptm_unspecified`` because its byte header does not establish
+aspect sign/origin or the polarization basis.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:331 convert_wedge_to_conic
+Convert a vertical-turntable/body-wedge acquisition to conic V/H.
+
+This produces the normal-range grid for a pylon/article assembly that
+is tilted together and then rotated.  Direction queries are inverse-
+mapped into the measured ``(turntable phi, body wedge tau)`` grid,
+interpolated as a full complex Jones matrix, and congruence-rotated
+into the conic spherical V/H basis. Unsupported parts of the normal
+conic grid remain NaN; they are never extrapolated.
+
+A single wedge tilt is only a curved one-dimensional cut and cannot
+determine a constant-elevation normal azimuth cut, so at least two
+measured wedge tilts and a complete turntable revolution are required.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:555 convert_equatorial_conic_gc
+Losslessly change the angular tag for the exact zero-plane case.
+
+No direction interpolation or polarization rotation occurs.  Under
+GRIM's declared convention, signed great-circle aspect equals conic
+azimuth at zero pitch and the V/H bases coincide.  General nonzero-cut
+conversion is intentionally unsupported because its path is curved in
+conic coordinates and it requires a full complex scattering-matrix
+basis rotation.
+
+Selecting the conversion for an unmarked legacy PTM records the GRIM
+aspect/basis convention as an operation assumption. Explicitly tagged
+incompatible great-circle conventions remain unsupported.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:752 convert_sentri_elevation_to_grim
+Convert native SENTRi polar theta to GRIM signed elevation.
+
+SENTRi uses a polar angle measured down from the top look: 0 degrees is
+top-down, 90 degrees is waterline, and 180 degrees is bottom-up.  GRIM's
+conic elevation is positive above waterline, so the exact relabel is
+``elevation = 90 - theta``.  The transformed elevation axis is
+stable-sorted and every grid-shaped sample/provenance array follows the
+same permutation.  SENTRi phi is also wrapped into GRIM's canonical
+[0, 360) degree azimuth axis and sorted.  There is no interpolation and
+no phase change.
+
+Explicitly incompatible elevation metadata is rejected. If convention
+metadata is absent, selecting this format-specific operation records
+the native-SENTRi assumption instead of blocking the conversion.
+
+GRIM_Revised_2\grim_backend\datasets\coordinates.py:934 combine_elevation_pair_to_azimuth_360
+Stitch two elevation cuts into one 0-360 azimuth cut.
+
+The lower-elevation cut keeps its original azimuth values. The higher
+cut is shifted by the degree-valued `azimuth_shift_deg` and merged onto
+the same output elevation plane. On radian-native data the shift and
+tolerance are converted internally. Equivalent/complementary overlap
+bins merge; conflicting finite seam samples are rejected. Because this
+is an acquisition-specific relabel rather than a general spherical
+coordinate transform, untagged inputs require explicit attestation and
+the two elevations must be equal and opposite about zero.
+
+GRIM_Revised_2\grim_backend\datasets\grid.py:31 __init__
+Build a grid from axis arrays and power/phase-backed RCS samples.
+
+Use when loading data from files or constructing an in-memory grid.
+
+Args:
+    azimuths: 1D sequence of azimuth values (deg).
+    elevations: 1D sequence of elevation values (deg).
+    frequencies: 1D sequence of frequency values (GHz or Hz).
+    polarizations: 1D sequence of polarization labels.
+    rcs: Optional complex field samples shaped (az, el, f, pol).
+    rcs_power: Optional linear-power samples shaped (az, el, f, pol).
+    rcs_phase: Optional phase samples (radians) shaped (az, el, f, pol).
+        Use NaN where phase is unknown.
+    rcs_domain: Optional domain tag metadata.
+    source_path: Optional source path for provenance.
+    history: Optional history string.
+    units: Optional units dict (e.g., {"azimuth": "deg", "frequency": "GHz"}).
+    extra: Optional passthrough metadata from the source file -- keys this
+        class does not model, carried so save() can write them back.
+        Producers that store the raw complex far-field amplitude
+        (rcs_amp_real / rcs_amp_imag, as GHOST .grim
+        exports do) rely on this: without it a load/save round-trip
+        silently drops the amplitude and those tools can no longer read
+        the file.  Array entries are only re-emitted while their shape
+        still matches the grid. Exact slice/reorder/relabel operations
+        explicitly transform the raw field with the samples; nonexact
+        magnitude/statistical operations drop it rather than writing a
+        stale array. Exact axis-union joins preserve it only when every
+        input carries a complete, compatible raw field.
+
+Raises:
+    ValueError: if shapes do not match the expected grid.
+
+GRIM_Revised_2\grim_backend\datasets\grid.py:275 _authoritative_raw_amplitude_from_pair
+Normalize one previously validated raw real/imaginary pair.
+
+GRIM_Revised_2\grim_backend\datasets\grid.py:314 _bounded_complex_slice_reader
+Return a bounded field reader and its real precision.
+
+The authoritative raw-pair contract is validated once when the reader
+is created, instead of rescanning the entire grid for every azimuth
+block.  Every returned slice is newly allocated and may be used as an
+in-place arithmetic work buffer by internal dense operations.
+
+GRIM_Revised_2\grim_backend\datasets\grid.py:419 audit
+Return a non-mutating, JSON-serializable dataset health report.
+
+The report always contains ``status``, ``errors``, ``warnings``,
+``info``, and ``metrics``.  Grid samples are scanned in bounded blocks;
+the audit never constructs a second full-size power, phase, or complex
+grid.  This method is deliberately diagnostic: it reports malformed
+public mutations instead of repairing them.
+
+GRIM_Revised_2\grim_backend\datasets\memory.py:121 _checked_dense_import_allocation
+Validate one planned dense import before any output array allocation.
+
+``dense_bytes`` is exact for the declared arrays. ``resident_bytes`` lets
+readers add the exact NumPy payloads that remain live while those outputs
+are created. Python row/dict overhead is deliberately not guessed;
+this guard's job is to stop sparse-axis Cartesian-product bombs before
+``np.full`` commits the dense storage.
+
+GRIM_Revised_2\grim_backend\datasets\metadata.py:50 scalar
+Keep legacy eligibility behavior while inspection stays lossless.
+
+GRIM_Revised_2\grim_backend\datasets\metadata.py:265 _assert_acquisition_metadata_compatible
+Compare acquisition declarations by physical meaning, not key name.
+
+Several importers use equivalent aliases (for example
+``calibration_id`` and ``calibration_identifier``).  Treating each key
+independently lets crossed aliases evade comparison and also misses
+contradictions inside one dataset.  This helper consolidates every
+family into canonical semantic dimensions before comparing inputs.
+
+GRIM_Revised_2\grim_backend\datasets\metadata.py:599 _assert_support_reference_metadata_compatible
+Reject explicit acquisition/setup contradictions for support subtraction.
+
+Missing declarations are recorded as assumptions. Explicit declarations
+are compared across their semantic alias families and can never be
+waived by an operation choice.
+
+GRIM_Revised_2\grim_backend\datasets\metadata.py:615 _coherent_attestation_provenance
+Return durable metadata for coherent assumptions or legacy attestation.
+
+Missing declarations never manufacture convention values. The record
+states that the requested coherent operation proceeded with those facts
+unspecified; the legacy ``metadata_attested=True`` API remains accepted
+for saved scripts and records its stronger user statement.
+
+GRIM_Revised_2\grim_backend\datasets\metadata.py:762 _assert_compatible
+Validate another grid for element-wise operations.
+
+Use before coherent/incoherent add/subtract operations.
+
+Args:
+    other: Another RcsGrid instance.
+
+Raises:
+    TypeError: if other is not an RcsGrid.
+    ValueError: if axes or shapes differ.
+
+GRIM_Revised_2\grim_backend\datasets\metadata.py:957 _exact_transform_extra
+Metadata policy for an exact sample-preserving transform.
+
+``array_transform`` is applied only to the authoritative raw solver
+field.  Other grid-shaped producer arrays are deliberately not guessed
+at.  ``preserve_all`` is reserved for representation-only operations
+such as phase wrapping where neither axes nor samples change.
+
+GRIM_Revised_2\grim_backend\datasets\transforms.py:77 _authoritative_response_phase
+Return response phase without constructing a whole complex grid.
+
+Solver-native GRIM files can carry a validated raw real/imaginary pair
+whose phase is authoritative.  ``RcsGrid.rcs`` promotes that pair to a
+full complex128 grid.  Phase-only edits and positive magnitude scaling do
+not need that allocation; ``atan2`` recovers the identical phase directly.
+For ordinary power/phase grids the stored phase is already authoritative
+and can be passed through as a view (the receiving grid owns its copy).
+
+GRIM_Revised_2\grim_backend\datasets\transforms.py:144 crop_dataset
+Select values or crop numeric ranges, then retain every Nth sample.
+
+Ranges and output coordinates use the dataset's native axis units.  The
+helper deliberately delegates both selections to :meth:`RcsGrid.axis_crop`
+so unit metadata, field-convention metadata, history, and source provenance
+follow the same rules as an interactively recorded crop.  A stride is
+sample selection, not an anti-aliasing resample or statistical average.
+
+GRIM_Revised_2\grim_backend\datasets\transforms.py:191 regrid_axis
+Interpolate one numeric axis onto an explicit, replayable target grid.
+
+Supply either ``values`` or all of ``start``, ``stop``, and ``step``.
+Values are expressed in the source dataset's native unit and extrapolation
+remains prohibited by :meth:`RcsGrid.interpolate_axis`.  This is the core
+complex/linear interpolation policy; it does not invent an anti-alias
+filter when the requested grid is coarser than the source.
+
+GRIM_Revised_2\grim_backend\io\batch.py:15 _target_path_key
+Return a platform-independent collision key for an output path.
+
+GRIM release folders are commonly prepared on Windows and then copied to
+another machine.  Always case-fold here rather than relying on the host
+filesystem so names such as ``Body`` and ``body`` cannot silently replace
+one another in a batch on a case-insensitive destination.
+
+GRIM_Revised_2\grim_backend\io\batch.py:47 _GrimBatchRollbackError
+A batch failed and at least one prior artifact could not be restored.
+
+GRIM_Revised_2\grim_backend\io\batch.py:293 _CsvBatchRollbackError
+CSV publication failed and at least one prior target was not restored.
+
+GRIM_Revised_2\grim_backend\io\batch.py:395 DatasetBatchRollbackError
+A batch publication failed and an earlier artifact was not restored.
+
+GRIM_Revised_2\grim_backend\io\cst.py:30 _cst_frequency_unit
+Return an exact supported CST frequency unit, never a substring guess.
+
+GRIM_Revised_2\grim_backend\io\cst.py:115 read_CST
+Read a supported CST RCS table into a physically tagged grid.
+
+Two schemas are recognized:
+
+* CST's wide spherical table (frequency/theta/phi and one magnitude /
+  phase pair per spherical polarization component).
+* The legacy ``.cst_data`` flat table documented by ``Read_CST.m``
+  (elevation/azimuth/frequency/polarity/magnitude/phase/IQ).
+
+Standard CST theta is a colatitude, so the wide form is converted to
+GRIM elevation with ``elevation = 90 - theta``.  Both forms use GRIM's
+canonical azimuth interval ``[-180, 180)``.
+
+GRIM_Revised_2\grim_backend\io\cst.py:202 _read_cst_flat_rows
+Parse the legacy row-per-polarization ``.cst_data`` schema.
+
+GRIM_Revised_2\grim_backend\io\csv.py:75 has_flat_csv_signature
+Return whether *path* has a deliberate GRIM/CEM flat-table header.
+
+GRIM_Revised_2\grim_backend\io\csv.py:328 _write_flat_csv_direct
+Stream *grid* using ``grim.flat-rcs.v1`` and return *path*.
+
+``scale`` mirrors the Plotting export choices: ``linear``, ``db``,
+``dbsm``, ``dbke``, or ``both``.  Linear output is always stored power,
+never field amplitude.  ``both`` writes power plus the only logarithmic
+column compatible with the declared physical quantity.
+
+GRIM_Revised_2\grim_backend\io\csv.py:628 load_flat_csv
+Load versioned and deliberate legacy flat RCS tables into *grid_class*.
+
+GRIM_Revised_2\grim_backend\io\loaders.py:32 load_flat_csv
+Load a versioned or deliberately supported legacy flat RCS table.
+
+GRIM_Revised_2\grim_backend\io\loaders.py:43 read_CST
+Read a supported CST far-field table.
+
+This is the deliberately named public entry point.  ``RcsGrid.read_CST``
+recognizes both CST's wide theta/phi CSV export and the row-oriented
+``.cst_data`` schema used by the team's MATLAB workflow.  Native GRIM flat
+CSV remains a separate format handled by :func:`load_flat_csv`.
+
+GRIM_Revised_2\grim_backend\io\loaders.py:60 load_dataset
+Load any GRIM-supported dataset without importing Qt.
+
+GRIM_Revised_2\grim_backend\io\native.py:21 _extra_to_write
+Passthrough keys to re-emit, minus anything whose shape no longer fits.
+
+A grid-sized array (for example ``rcs_amp_real``) is emitted only while
+its leading dimensions match the current grid. Exact transforms create
+a correspondingly transformed array; nonexact transforms omit it. A
+mismatched four-dimensional shape is always dropped instead of written
+stale.
+Lower-dimensional arrays are independent ancillary models, not partial
+RCS grids: GHOST's BoR profiles, body-model amplitudes, and surface
+triangles must survive an unchanged load/save round-trip.
+
+GRIM_Revised_2\grim_backend\io\native.py:138 _raw_complex_consistency_report
+Check a solver raw-field pair against displayed power and phase.
+
+GHOST stores its unnormalised far-field amplitude alongside physical
+``rcs_power``.  The relationship is quantity dependent: sigma3D is
+``4*pi*|A|^2`` and sigma2D is ``|A|^2/(4*k0)``.  This routine mirrors
+the producer-side tolerances while scanning bounded blocks, so loading
+or auditing a large archive never constructs another grid-sized
+complex or expected-power array.
+
+GRIM_Revised_2\grim_backend\io\native.py:590 load
+Load a grid from a .grim (npz) file.
+
+Args:
+    path: Input path, with or without .grim.
+    mmap_mode: Retained for API compatibility. ``.npz`` members cannot
+        be memory-mapped; a warning is emitted when this is supplied.
+    allow_legacy_pickle: Explicitly opt in to legacy object-array files.
+        Never enable this for an untrusted file.
+    max_output_bytes: Optional reviewed cap for the exact native NPZ
+        payload plus the power/phase sanitation copies. By default one
+        load may use at most half of currently available memory (or
+        the conservative 2 GiB fallback when memory is unknown).
+
+Returns:
+    RcsGrid instance loaded from disk.
+
+GRIM_Revised_2\grim_backend\io\out.py:13 load_out
+Load whitespace-delimited `.out` data into an RcsGrid.
+
+Expected columns per non-comment line:
+    frequency_ghz  azimuth_deg  rcs_dbke  phase_deg
+
+Parsing rules:
+    - Lines starting with `#` (or text after `#`) are ignored.
+    - Values are whitespace-delimited.
+    - Polarization is inferred from filename (`HH` or `VV`);
+      if not present, polarization is `NA`.
+    - The third column is interpreted as absolute dBke and converted to
+      linear 2D scattering width using sigma_2d = (lambda / 2pi) * 10^(dBke/10).
+
+Output mapping:
+    - azimuth axis   <- angle column
+    - elevation axis <- single value [0.0]
+    - frequency axis <- frequency_ghz column
+    - polarization   <- inferred filename polarization
+    - stored power   <- linear 2D scattering width (matches .grim storage)
+
+GRIM_Revised_2\grim_backend\io\pioneer.py:49 _pio_ascii_metadata
+Return readable, single-line ASCII for Pioneer header metadata.
+
+Pioneer headers are byte-level ASCII even though GRIM histories and file
+names are UTF-8. Common engineering symbols are transliterated for human
+readability; any uncommon character is retained as an ASCII ``\u`` or
+``\U`` escape instead of aborting an otherwise valid complex-data export.
+
+GRIM_Revised_2\grim_backend\io\pioneer.py:140 load_pio
+Load a Pioneer (.pio / .cmplx_di) file into an RcsGrid.
+
+File layout:
+    - ASCII header of `key=value` lines, terminated by a line whose
+      key is `Offset` (giving the byte offset of the binary block).
+    - Binary block of interleaved real/imag floats (single or double
+      precision per the `precision` header field) of length
+      xsize*ysize*2.
+    - Optional ASCII footer of `key=value` lines (e.g. polarity, log).
+
+Axis convention (this loader):
+    - X axis (xname=azimuth/position) -> azimuth in degrees, converted
+      exactly from xunits in {deg, rad}
+    - Y axis (yname=frequency)        -> frequency in GHz, converted
+      exactly from yunits in {Hz, kHz, MHz, GHz}
+    - elevation is restored from the optional Elevation field and
+      ElevationUnits (defaulting to the X angular unit for legacy files)
+    - polarization is taken from the `polarity` header/footer field, or
+      inferred from HH/VV/VH/HV in the filename.
+
+A closed full-turn azimuth sweep is stored half-open in GRIM.  Its
+repeated closing row is removed based on one-period equivalence to the
+opening angle, so the seam may occur at any measured angle rather than
+only at 0/360 or -180/+180.  The opening measurement is retained.
+
+GRIM_Revised_2\grim_backend\io\ptm.py:24 _ptm_configuration_with_grim_gc_marker
+Embed GRIM's coordinate convention without discarding legacy text.
+
+GRIM_Revised_2\grim_backend\io\ptm.py:153 _encode_filename
+Match the legacy writer's first-45/last-5 filename truncation.
+
+GRIM_Revised_2\grim_backend\io\ptm.py:468 write_ptm
+Write one uniformly sampled, complex, great-circle PTM cut.
+
+New files are always little-endian.  ``header`` supplies optional legacy
+acquisition metadata; axes, dimensions, polarization, pitch, and output
+filename are authoritative arguments and replace those header fields.
+
+GRIM_Revised_2\grim_backend\io\ptm.py:602 header_to_extra
+Flatten legacy header metadata into pickle-free RcsGrid extras.
+
+GRIM_Revised_2\grim_backend\io\ptm.py:632 header_from_extra
+Rebuild preserved legacy metadata for a subsequent PTM export.
+
+GRIM_Revised_2\grim_backend\io\ptm.py:662 load_ptm
+Load one legacy PTM great-circle RCS cut.
+
+PTM stores a single polarization and pitch/elevation per file, with
+uniformly implied aspect and GHz frequency axes.  Its complex float32
+IQ samples are mapped to GRIM's 3-D RCS power/phase representation.
+The great-circle coordinate convention is retained explicitly in
+``extra`` so it is not silently mistaken for a conic cut.
+
+GRIM_Revised_2\grim_backend\io\ptm.py:713 save_ptm
+Save one (elevation, polarization) slice as little-endian PTM.
+
+PTM is a complex 3-D RCS format.  It cannot represent 2-D scattering
+width, missing phase, nonuniform axes, multiple elevations, or multiple
+polarizations in one file.  Callers must select one slice when the grid
+contains more than one elevation or polarization.
+
+GRIM_Revised_2\grim_backend\io\samples.py:1 module
+Power and phase comparison for duplicate imported samples.
+
+GRIM_Revised_2\grim_backend\io\sentri.py:13 read_SENTRi
+Read either RCS table schema emitted by CREATE-RF SENTRi.
+
+The supplied team ``READ_SENTRi.m`` documents two header families:
+
+* compact ``freq_MHz`` / ``theta_deg`` / ``rcs_pp_dBsm`` columns;
+* descriptive ``Frequency`` / ``Theta`` /
+  ``RCSPhiScat_PhiInc`` columns.
+
+SENTRi's reported polar ``Theta`` is stored unchanged so importing a
+file never silently changes its geometry.  The explicit
+:meth:`convert_sentri_elevation_to_grim` operation maps that native
+top-down convention to GRIM elevation when requested.  Phi sweeps
+contained in [0, 180] retain their positive endpoint; other sweeps
+use the signed [-180, 180) azimuth interval.  Reported
+E-field phase is stored with its original sign, so each sample is
+reconstructed as
+``10**(dBsm/20) * exp(+1j*deg2rad(phase_deg))``.  These format-specific
+rules are deliberately separate from :meth:`read_CST`.
+The far-field phase convention is recorded for coherent Assembly;
+native theta still requires the explicit signed-elevation conversion.
+
+GRIM_Revised_2\grim_backend\io\sentri.py:480 has_SENTRi_signature
+Return whether a delimited file has a recognizable SENTRi family header.
+
+Dispatchers use this before trying legacy/fallback readers.  Once the
+vendor signature is present, malformed SENTRi data must fail as SENTRi
+instead of being silently reinterpreted as an unrelated numeric TXT.
+
+GRIM_Revised_2\grim_backend\io\xpatch.py:143 _hdrb_size
+Header-B length in bytes (it is variable, not fixed).
+
+Per xpheaders.m readheaderb, header-B holds one 256-byte CAD-file name per
+enabled slot, gated by these header-A flags:
+    edge_diff == '1'   (acadedge)
+    iqmatrix  == 1     (acadcurv)
+    ibspsave   > 1     (acadbsp)
+So the block is 0/256/512/768 bytes. Computing it here (instead of assuming
+256) puts header-C at the correct offset, which is what fixes the freq axis.
+
+GRIM_Revised_2\grim_backend\io\xpatch.py:165 _self_check
+Fail loudly at import on the table edits that DO corrupt offsets.
+
+Field offsets come from type*count, never from the name spelling, so a typo
+in a name the reader doesn't query is harmless. But a wrong count/type
+silently shifts every following field, and a typo in a load-bearing name
+breaks a lookup mid-parse. This asserts the two fixed-size headers and that
+every name we look up by name still resolves -- turning both into an
+immediate, explicit error instead of a subtle mis-read.
+
+GRIM_Revised_2\grim_backend\io\xpatch.py:212 _restore_declared_azimuth_seam
+Restore the signed 180-degree seam to the header-C scan interval.
+
+Header-D sometimes stores the physical +180-degree endpoint as -180 even
+when header-C declares a uniform nonnegative scan ending at +180.  Keeping
+that storage representation would sort the endpoint ahead of a 0..179
+sweep and introduce an artificial 179-degree plotting gap.
+
+Only the exactly equivalent +/-180 seam is changed, and only when the
+uniform-scan metadata unambiguously contains one representation but not the
+other.  Discrete scans (steps < 0) and genuinely signed intervals retain
+their recorded coordinates.
+
+GRIM_Revised_2\grim_backend\io\xpatch.py:536 load_ss
+Load an Xpatch ``.ss`` signature file into an RcsGrid.
+
+Delegates the binary parse to :mod:`read_ss` (a pure-Python port of the
+MATLAB ``ssread.m`` / ``xpheaders.m`` readers), then maps its output
+onto the grid:
+
+    - each signal is one (azimuth, elevation) look;
+    - the four polarizations VV/VH/HV/HH become the polarization axis;
+    - complex scattering samples retain relative magnitude and phase;
+    - Xpatch frequencies are retained in their documented GHz unit.
+
+The checked-in reader is a hand-transcribed structural port without a
+trusted Xpatch/MATLAB absolute-normalization fixture.  Consequently its
+samples are deliberately tagged as a dimensionless power ratio, not
+sigma3D/dBsm. This keeps plotting and stored-phase inspection available.
+Missing convention metadata is recorded as an assumption; the unresolved
+dimensional quantity still prevents PTM/PIO export, range calibration,
+and coherent vehicle Assembly until a reviewed conversion establishes
+sigma_3d or sigma_2d units.
+
+GRIM_Revised_2\grim_backend\scripting\plotting.py:115 plot_datasets
+Create a Matplotlib Figure from resolved physical selector values.
+
+The implementation uses :class:`~matplotlib.backends.backend_agg.FigureCanvasAgg`
+directly and never imports pyplot or Qt.  Returned figures support ordinary
+``figure.savefig(...)`` calls in generated scripts.
+
+GRIM_Revised_2\grim_backend\scripting\recorder.py:111 PythonScriptRecorder
+Accumulate a readable, dependency-aware Python script.
+
+Dataset bindings use the immutable ``DATASET_ID_ROLE`` UUID from the GUI,
+never the editable display name.  A row is loaded lazily from its resolved
+path the first time it participates in a recorded operation.

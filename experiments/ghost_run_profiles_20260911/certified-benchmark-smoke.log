@@ -1,0 +1,4 @@
+pec dense 1/1: 0.194s
+pec compressed 1/1: 0.234s
+mixed dense 1/1: 0.833s
+mixed compressed 1/1: 1.018s

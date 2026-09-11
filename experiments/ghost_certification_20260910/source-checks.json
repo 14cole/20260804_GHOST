@@ -1,0 +1,26 @@
+{
+  "python36_syntax": [
+    "compressed_factor.py",
+    "compressed_inverse.py",
+    "compressed_native.py",
+    "compressed_operator.py",
+    "compressed_oracle.py",
+    "compressed_pair.py",
+    "compressed_runtime.py",
+    "rcs_solver.py",
+    "rcs_operators.py",
+    "boundary_fields.py",
+    "multi_region.py",
+    "robin_system.py",
+    "dielectric_system.py",
+    "sheet_system.py",
+    "thin_sheet.py",
+    "assembly_session.py",
+    "cpu_execution.py",
+    "dense_factor.py",
+    "sweep_compression.py",
+    "workflow_provenance.py",
+    "hierarchical_factor.py"
+  ],
+  "new_module_whitespace_issues": []
+}

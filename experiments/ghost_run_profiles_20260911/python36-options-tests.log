@@ -1,0 +1,13 @@
+test_blas_limit_is_applied_and_restored_after_failure (test_execution_options.ExecutionOptionsTests) ... ok
+test_certification_reports_phases_and_spools_in_selected_directory (test_execution_options.ExecutionOptionsTests) ... ok
+test_fresh_interpreter_uses_serialized_profile_with_qt_blocked (test_execution_options.ExecutionOptionsTests) ... ok
+test_invalid_profiles_and_conflicting_driver_values_reject (test_execution_options.ExecutionOptionsTests) ... ok
+test_profiles_preserve_material_fields_and_report_execution (test_execution_options.ExecutionOptionsTests) ... ok
+test_saved_profile_overrides_launch_environment_and_restores_scope (test_execution_options.ExecutionOptionsTests) ... ok
+test_saved_setup_roundtrip_and_legacy_migration_ignore_environment (test_execution_options.ExecutionOptionsTests) ... ok
+test_threads_and_tiled_workers_receive_independent_profiles (test_execution_options.ExecutionOptionsTests) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 5.257s
+
+OK

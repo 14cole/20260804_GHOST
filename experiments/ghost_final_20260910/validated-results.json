@@ -1,0 +1,864 @@
+{
+  "materials": {
+    "dense": {
+      "pec": {
+        "VV": 5.382498908307014e-16,
+        "HH": 2.862589947765843e-15
+      },
+      "ibc": {
+        "VV": 6.386824353697299e-16,
+        "HH": 1.5519791621580102e-15
+      },
+      "pec_ibc": {
+        "VV": 8.331685845857988e-15,
+        "HH": 7.053965488749446e-15
+      },
+      "lossless": {
+        "VV": 8.537727091218496e-15,
+        "HH": 8.270594182982766e-15
+      },
+      "lossy": {
+        "VV": 6.680614175519155e-15,
+        "HH": 8.831425097249595e-15
+      },
+      "magnetic": {
+        "VV": 5.878668316210248e-15,
+        "HH": 1.26214886530631e-14
+      },
+      "coated": {
+        "VV": 1.0434565673798026e-14,
+        "HH": 6.554366815923399e-15
+      },
+      "layered": {
+        "VV": 1.5326972822455858e-14,
+        "HH": 1.2465682854717542e-14
+      },
+      "mixed": {
+        "VV": 4.0119826682807886e-15,
+        "HH": 7.32331079632154e-15
+      },
+      "sheet": {
+        "VV": 3.0698462867051227e-15,
+        "HH": 4.660265434596009e-16
+      },
+      "mixed_sheet": {
+        "VV": 1.8719418443133127e-14,
+        "HH": 6.378721135954163e-15
+      },
+      "thin": {
+        "VV": 5.654854655015503e-15,
+        "HH": 1.0934267322430523e-16
+      },
+      "thin_magnetic": {
+        "VV": 1.396500462493409e-14,
+        "HH": 4.0351393718424206e-15
+      },
+      "transparent": {
+        "VV": 0.0,
+        "HH": 0.0
+      }
+    },
+    "hierarchical": {
+      "pec": {
+        "VV": 1.5290077529337167e-15,
+        "HH": 2.547703068082926e-15
+      },
+      "ibc": {
+        "VV": 1.1217639654582225e-15,
+        "HH": 4.681104899474392e-15
+      },
+      "pec_ibc": {
+        "VV": 8.16320460315651e-15,
+        "HH": 7.144923475415068e-15
+      },
+      "lossless": {
+        "VV": 3.091205530227344e-12,
+        "HH": 3.0987378806566607e-13
+      },
+      "lossy": {
+        "VV": 3.5614617249597455e-12,
+        "HH": 5.62045244257812e-13
+      },
+      "magnetic": {
+        "VV": 1.043592210631235e-12,
+        "HH": 6.048934389259938e-12
+      },
+      "coated": {
+        "VV": 1.0073946229714851e-14,
+        "HH": 1.154657016127928e-14
+      },
+      "layered": {
+        "VV": 2.6671407722015802e-14,
+        "HH": 8.265371141418936e-15
+      },
+      "mixed": {
+        "VV": 3.731390900001705e-15,
+        "HH": 5.4899862721058995e-15
+      },
+      "sheet": {
+        "VV": 4.494887345580337e-15,
+        "HH": 6.97699373274931e-16
+      },
+      "mixed_sheet": {
+        "VV": 1.7365436115206235e-14,
+        "HH": 5.560419270459145e-15
+      },
+      "thin": {
+        "VV": 1.7952452817315445e-14,
+        "HH": 9.873546923148905e-16
+      },
+      "thin_magnetic": {
+        "VV": 2.031032650345143e-14,
+        "HH": 4.181238039491102e-15
+      },
+      "transparent": {
+        "VV": 0.0,
+        "HH": 0.0
+      }
+    }
+  },
+  "production": {
+    "airfoil-f1.0-baseline-hierarchical-r1.json": {
+      "seconds": 14.540379200003372,
+      "errors": {
+        "VV": 1.5110025176995408e-12,
+        "HH": 3.6510216183236474e-13
+      },
+      "peak_mib": 329.125,
+      "sampled_20ms_peak_mib": 332.390625,
+      "stage_seconds": {
+        "operators": 11.602572700001474,
+        "factorization": 1.459232700002758,
+        "excitation": 0.0688665999987279,
+        "rhs_solve": 0.20684809999875142,
+        "linear_solve": 0.2115639999974519,
+        "rhs_compression": 0.7874074999999721,
+        "far_field": 0.12397229999260162
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "leaves": 26,
+            "low_rank_blocks": 50,
+            "max_rank": 88,
+            "max_block_error": 1.9181416270958592e-10,
+            "tolerance": 2e-10,
+            "factor_bytes": 38650232,
+            "refinements": 1
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "leaves": 27,
+            "low_rank_blocks": 52,
+            "max_rank": 87,
+            "max_block_error": 1.9637126271386295e-10,
+            "tolerance": 2e-10,
+            "factor_bytes": 36532992,
+            "refinements": 1
+          }
+        ]
+      }
+    },
+    "airfoil-f1.0-updated-hierarchical-r1.json": {
+      "seconds": 14.484204000000318,
+      "errors": {
+        "VV": 1.5114314877119747e-12,
+        "HH": 3.743198501346092e-13
+      },
+      "peak_mib": 316.640625,
+      "sampled_20ms_peak_mib": 316.640625,
+      "stage_seconds": {
+        "operators": 11.670491799999581,
+        "factorization": 1.151586200001475,
+        "excitation": 0.06959569999526138,
+        "rhs_solve": 0.30267969999840716,
+        "linear_solve": 0.30649580000317656,
+        "rhs_compression": 0.8826326999951561,
+        "far_field": 0.12700790000599227
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 32,
+            "low_rank_blocks": 62,
+            "max_rank": 54,
+            "max_block_error": 9.993981595068782e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 26595440,
+            "refinements": 3,
+            "refinement_tolerance": 3e-15
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 32,
+            "low_rank_blocks": 62,
+            "max_rank": 55,
+            "max_block_error": 9.809177638331854e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 24153952,
+            "refinements": 2,
+            "refinement_tolerance": 3e-15
+          }
+        ]
+      }
+    },
+    "airfoil-f2.0-axpy-trial-updated-dense-r1.json": {
+      "seconds": 42.36553790000107,
+      "errors": {
+        "VV": 2.7009697687149033e-13,
+        "HH": 6.251016954043554e-13
+      },
+      "peak_mib": 1245.12109375,
+      "sampled_20ms_peak_mib": 0.0,
+      "stage_seconds": {
+        "operators": 31.56716310000047,
+        "factorization": 7.087252099998295,
+        "excitation": 0.13817500000004657,
+        "rhs_solve": 0.30326310000236845,
+        "linear_solve": 0.5790031000033196,
+        "rhs_compression": 2.392280899999605,
+        "far_field": 0.2494892000031541
+      },
+      "factors": {
+        "VV": [],
+        "HH": []
+      }
+    },
+    "airfoil-f2.0-baseline-dense-r1.json": {
+      "seconds": 41.94534900000144,
+      "errors": {
+        "VV": 4.2836292230969677e-13,
+        "HH": 7.303428648439241e-13
+      },
+      "peak_mib": 1243.83203125,
+      "sampled_20ms_peak_mib": 0.0,
+      "stage_seconds": {
+        "operators": 31.03661910000301,
+        "factorization": 7.216991600002075,
+        "excitation": 0.1340317999929539,
+        "rhs_solve": 0.2971272999966459,
+        "linear_solve": 0.5778608000036911,
+        "rhs_compression": 2.351588499997888,
+        "far_field": 0.25346039999931236
+      },
+      "factors": {
+        "VV": [],
+        "HH": []
+      }
+    },
+    "airfoil-f2.0-baseline-dense-r2.json": {
+      "seconds": 42.24427569999898,
+      "errors": {
+        "VV": 4.0273226256771555e-13,
+        "HH": 5.867005978012125e-13
+      },
+      "peak_mib": 1244.2421875,
+      "sampled_20ms_peak_mib": 1243.76171875,
+      "stage_seconds": {
+        "operators": 31.38097900000139,
+        "factorization": 7.187281700000312,
+        "excitation": 0.13584699999773875,
+        "rhs_solve": 0.30417189999934635,
+        "linear_solve": 0.5806554999981017,
+        "rhs_compression": 2.3664476000012655,
+        "far_field": 0.2533296000001428
+      },
+      "factors": {
+        "VV": [],
+        "HH": []
+      }
+    },
+    "airfoil-f2.0-baseline-hierarchical-r1.json": {
+      "seconds": 41.594533199997386,
+      "errors": {
+        "VV": 2.6729742226649494e-13,
+        "HH": 6.802821582924091e-13
+      },
+      "peak_mib": 796.10546875,
+      "sampled_20ms_peak_mib": 796.12109375,
+      "stage_seconds": {
+        "operators": 31.236665299999004,
+        "factorization": 6.142198199995619,
+        "excitation": 0.12394740000308957,
+        "rhs_solve": 0.7491432999995595,
+        "linear_solve": 0.7586298999995051,
+        "rhs_compression": 2.5751842000026954,
+        "far_field": 0.2442899000016041
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "leaves": 54,
+            "low_rank_blocks": 106,
+            "max_rank": 100,
+            "max_block_error": 1.9801516007766218e-10,
+            "tolerance": 2e-10,
+            "factor_bytes": 86138512,
+            "refinements": 1
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "leaves": 56,
+            "low_rank_blocks": 110,
+            "max_rank": 100,
+            "max_block_error": 1.9889144279459868e-10,
+            "tolerance": 2e-10,
+            "factor_bytes": 80654792,
+            "refinements": 1
+          }
+        ]
+      }
+    },
+    "airfoil-f2.0-coarse-trial-updated-hierarchical-r1.json": {
+      "seconds": 40.44727270000294,
+      "errors": {
+        "VV": 2.6506478794006665e-12,
+        "HH": 6.348796746524452e-13
+      },
+      "peak_mib": 770.23046875,
+      "sampled_20ms_peak_mib": 778.19140625,
+      "stage_seconds": {
+        "operators": 31.207559900001797,
+        "factorization": 4.563644399997429,
+        "excitation": 0.13253699999768287,
+        "rhs_solve": 1.0111509999987902,
+        "linear_solve": 1.0206505999994988,
+        "rhs_compression": 2.8144423000012466,
+        "far_field": 0.248997300004703
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.992043288460325e-07,
+            "tolerance": 2e-10,
+            "factor_bytes": 57543840,
+            "refinements": 2
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.955322191747367e-07,
+            "tolerance": 2e-10,
+            "factor_bytes": 51681672,
+            "refinements": 2
+          }
+        ]
+      }
+    },
+    "airfoil-f2.0-updated-dense-r128.json": {
+      "seconds": 42.42176109999855,
+      "errors": {
+        "VV": 5.071937129078612e-13,
+        "HH": 6.899942690405365e-13
+      },
+      "peak_mib": 1195.03125,
+      "sampled_20ms_peak_mib": 0.0,
+      "stage_seconds": {
+        "operators": 31.27982489999704,
+        "factorization": 7.261805400001322,
+        "excitation": 0.1325737000006484,
+        "rhs_solve": 0.37945650000256137,
+        "linear_solve": 0.7303850999960559,
+        "rhs_compression": 2.5679608000027656,
+        "far_field": 0.25360200000432087
+      },
+      "factors": {
+        "VV": [],
+        "HH": []
+      }
+    },
+    "airfoil-f2.0-updated-dense-r64.json": {
+      "seconds": 43.11279319999812,
+      "errors": {
+        "VV": 3.933851457316243e-13,
+        "HH": 2.1487261197904464e-12
+      },
+      "peak_mib": 1180.89453125,
+      "sampled_20ms_peak_mib": 0.0,
+      "stage_seconds": {
+        "operators": 31.03387920000023,
+        "factorization": 7.2261330999972415,
+        "excitation": 0.12670580000485643,
+        "rhs_solve": 0.9118914000027871,
+        "linear_solve": 1.7626313000073424,
+        "rhs_compression": 3.537992399997165,
+        "far_field": 0.25226549999206327
+      },
+      "factors": {
+        "VV": [],
+        "HH": []
+      }
+    },
+    "airfoil-f2.0-updated-hierarchical-r2.json": {
+      "seconds": 40.71179339999799,
+      "errors": {
+        "VV": 2.649579586273535e-12,
+        "HH": 6.356142044569606e-13
+      },
+      "peak_mib": 770.08984375,
+      "sampled_20ms_peak_mib": 776.55859375,
+      "stage_seconds": {
+        "operators": 31.30954610000117,
+        "factorization": 4.7010051000033855,
+        "excitation": 0.13215260000288254,
+        "rhs_solve": 1.0243649000040023,
+        "linear_solve": 1.0340543999991496,
+        "rhs_compression": 2.8190733999945223,
+        "far_field": 0.2530793999976595
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.992043288460349e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 57543840,
+            "refinements": 2
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.955322191747367e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 51681672,
+            "refinements": 2
+          }
+        ]
+      }
+    },
+    "airfoil-f2.0-updated-hierarchical-r3.json": {
+      "seconds": 40.36505319999924,
+      "errors": {
+        "VV": 2.650659896861106e-12,
+        "HH": 6.3545584982133e-13
+      },
+      "peak_mib": 769.8359375,
+      "sampled_20ms_peak_mib": 801.9453125,
+      "stage_seconds": {
+        "operators": 31.127373100000113,
+        "factorization": 4.604784300001484,
+        "excitation": 0.13528340000266326,
+        "rhs_solve": 1.003186599999026,
+        "linear_solve": 1.0136586999979045,
+        "rhs_compression": 2.7863058999973873,
+        "far_field": 0.25307940000857343
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.992043288460325e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 57543840,
+            "refinements": 2
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.955322191747367e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 51681672,
+            "refinements": 2
+          }
+        ]
+      }
+    },
+    "airfoil-f2.0-updated-hierarchical-r4.json": {
+      "seconds": 39.9721615999988,
+      "errors": {
+        "VV": 2.6833852198942194e-13,
+        "HH": 6.353950887768768e-13
+      },
+      "peak_mib": 780.37109375,
+      "sampled_20ms_peak_mib": 784.046875,
+      "stage_seconds": {
+        "operators": 30.631248100002267,
+        "factorization": 4.430809699995734,
+        "excitation": 0.12705479999931413,
+        "rhs_solve": 1.1956054999973276,
+        "linear_solve": 1.204667400001199,
+        "rhs_compression": 3.004750399995828,
+        "far_field": 0.24508690000584465
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.992043288460325e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 57543840,
+            "refinements": 3,
+            "refinement_tolerance": 3e-15
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.955322191747367e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 51681672,
+            "refinements": 2,
+            "refinement_tolerance": 3e-15
+          }
+        ]
+      }
+    },
+    "airfoil-f2.0-updated-hierarchical-r5.json": {
+      "seconds": 40.212098899999546,
+      "errors": {
+        "VV": 2.683434357327249e-13,
+        "HH": 6.348641891097194e-13
+      },
+      "peak_mib": 781.19140625,
+      "sampled_20ms_peak_mib": 780.81640625,
+      "stage_seconds": {
+        "operators": 30.860010899999907,
+        "factorization": 4.444576900001266,
+        "excitation": 0.130803999996715,
+        "rhs_solve": 1.1711227999985567,
+        "linear_solve": 1.1803024999935587,
+        "rhs_compression": 3.0022732999968866,
+        "far_field": 0.2471268999943277
+      },
+      "factors": {
+        "VV": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.992043288460325e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 57543840,
+            "refinements": 3,
+            "refinement_tolerance": 3e-15
+          }
+        ],
+        "HH": [
+          {
+            "backend": "hodlr",
+            "builds": 1,
+            "tighter_rebuilds": 0,
+            "leaves": 61,
+            "low_rank_blocks": 120,
+            "max_rank": 63,
+            "max_block_error": 9.955322191747367e-07,
+            "tolerance": 1e-06,
+            "factor_bytes": 51681672,
+            "refinements": 2,
+            "refinement_tolerance": 3e-15
+          }
+        ]
+      }
+    }
+  },
+  "paired": {
+    "paired-f1.0-tile512-tol1e-06-spool-r1.json": {
+      "frequency": 1.0,
+      "tile": 512,
+      "tolerance": 1e-06,
+      "budget": 536870912,
+      "spooled": true,
+      "channels": {
+        "TE": {
+          "operator": {
+            "unknowns": 2964,
+            "tiles": 64,
+            "compressed_tiles": 56,
+            "retained_bytes": 42717024,
+            "max_query_bytes": 3303384,
+            "geometry_queries": 64,
+            "geometry_coefficients": 8785296,
+            "dropped_routes": 54,
+            "row_error_bound": 7.90628483162815e-18,
+            "storage_budget": 495919888,
+            "compression": "qr"
+          },
+          "load_seconds": 1.0000003385357559e-06,
+          "factor_seconds": 1.2057914000033634,
+          "rhs_solve_projection_seconds": 0.36848230000032345,
+          "solver": {
+            "preconditioner": {
+              "bytes": 26663448,
+              "max_rank": 54,
+              "leaves": 32,
+              "accesses": 47104299,
+              "oracle_calls": 6581,
+              "max_query_entries": 47424,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 451000608,
+              "inverse_only": true
+            },
+            "combined_bytes": 69380472,
+            "refinement_steps": [
+              2
+            ],
+            "gmres_columns": 0,
+            "physical_repairs": 0,
+            "operator_products": 4,
+            "basis_columns": 34,
+            "original_residual_bound": 1.5430502339780338e-14
+          },
+          "operator_released": true,
+          "independent_backward": 1.4894884344885246e-14,
+          "field_error": 7.336620615657761e-13
+        },
+        "TM": {
+          "operator": {
+            "unknowns": 2964,
+            "tiles": 64,
+            "compressed_tiles": 55,
+            "retained_bytes": 43153280,
+            "max_query_bytes": 3303384,
+            "geometry_queries": 64,
+            "geometry_coefficients": 8785296,
+            "dropped_routes": 54,
+            "row_error_bound": 5.362134765611591e-18,
+            "storage_budget": 494153888,
+            "compression": "qr",
+            "spooled_bytes": 43034720
+          },
+          "load_seconds": 0.014114099998550955,
+          "factor_seconds": 0.8551327000022866,
+          "rhs_solve_projection_seconds": 0.36116319999928237,
+          "solver": {
+            "preconditioner": {
+              "bytes": 24322840,
+              "max_rank": 55,
+              "leaves": 32,
+              "accesses": 32626035,
+              "oracle_calls": 5453,
+              "max_query_entries": 47424,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 493717632,
+              "inverse_only": true
+            },
+            "combined_bytes": 67476120,
+            "refinement_steps": [
+              2
+            ],
+            "gmres_columns": 0,
+            "physical_repairs": 0,
+            "operator_products": 4,
+            "basis_columns": 34,
+            "original_residual_bound": 1.540524733683236e-14
+          },
+          "operator_released": true,
+          "independent_backward": 1.3717691101987609e-14,
+          "field_error": 3.0524456330171086e-13
+        }
+      },
+      "preparation_seconds": 0.12559979999787174,
+      "paired_assembly_seconds": 18.626172700001916,
+      "shared_kernel_groups": 117,
+      "operator_bytes": 85870304,
+      "oracle_released": true,
+      "sampled_core_rss_bytes": 230473728,
+      "accepted": true,
+      "core_seconds": 21.556457200003933,
+      "core_peak_mib": 219.796875
+    },
+    "paired-f2.0-tile512-tol1e-06-spool-r2.json": {
+      "frequency": 2.0,
+      "tile": 512,
+      "tolerance": 1e-06,
+      "budget": 536870912,
+      "spooled": true,
+      "channels": {
+        "TE": {
+          "operator": {
+            "unknowns": 5742,
+            "tiles": 256,
+            "compressed_tiles": 239,
+            "retained_bytes": 110129600,
+            "max_query_bytes": 3093144,
+            "geometry_queries": 256,
+            "geometry_coefficients": 32970564,
+            "dropped_routes": 540,
+            "row_error_bound": 4.482615482515614e-17,
+            "storage_budget": 433943232,
+            "compression": "qr"
+          },
+          "load_seconds": 1.1000010999850929e-06,
+          "factor_seconds": 5.131967500001338,
+          "rhs_solve_projection_seconds": 1.0284633999981452,
+          "solver": {
+            "preconditioner": {
+              "bytes": 58012936,
+              "max_rank": 63,
+              "leaves": 61,
+              "accesses": 223997555,
+              "oracle_calls": 13662,
+              "max_query_entries": 91872,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 321751536,
+              "inverse_only": true
+            },
+            "combined_bytes": 168142536,
+            "refinement_steps": [
+              3
+            ],
+            "gmres_columns": 0,
+            "physical_repairs": 0,
+            "operator_products": 5,
+            "basis_columns": 44,
+            "original_residual_bound": 3.0578484797212105e-14
+          },
+          "operator_released": true,
+          "independent_backward": 2.465768119193687e-14,
+          "field_error": 1.9215764746627098e-12
+        },
+        "TM": {
+          "operator": {
+            "unknowns": 5742,
+            "tiles": 256,
+            "compressed_tiles": 240,
+            "retained_bytes": 104989776,
+            "max_query_bytes": 3093144,
+            "geometry_queries": 256,
+            "geometry_coefficients": 32970564,
+            "dropped_routes": 540,
+            "row_error_bound": 8.699857341328287e-18,
+            "storage_budget": 426741312,
+            "compression": "qr",
+            "spooled_bytes": 104760096
+          },
+          "load_seconds": 0.034471300001314376,
+          "factor_seconds": 4.291662499999802,
+          "rhs_solve_projection_seconds": 0.9589091000016197,
+          "solver": {
+            "preconditioner": {
+              "bytes": 52241904,
+              "max_rank": 63,
+              "leaves": 61,
+              "accesses": 192994777,
+              "oracle_calls": 11686,
+              "max_query_entries": 91872,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 431881136,
+              "inverse_only": true
+            },
+            "combined_bytes": 157231680,
+            "refinement_steps": [
+              2
+            ],
+            "gmres_columns": 0,
+            "physical_repairs": 0,
+            "operator_products": 4,
+            "basis_columns": 44,
+            "original_residual_bound": 3.40892396314316e-14
+          },
+          "operator_released": true,
+          "independent_backward": 2.860229137108813e-14,
+          "field_error": 7.08683722154173e-13
+        }
+      },
+      "preparation_seconds": 0.23583490000237362,
+      "paired_assembly_seconds": 44.48213080000278,
+      "shared_kernel_groups": 386,
+      "operator_bytes": 215119376,
+      "oracle_released": true,
+      "sampled_core_rss_bytes": 392626176,
+      "accepted": true,
+      "core_seconds": 56.16344060000847,
+      "core_peak_mib": 374.4375
+    }
+  },
+  "native": {
+    "accepted": 26,
+    "transparent": 2,
+    "max_field_error": 8.198215381849765e-11,
+    "max_backward": 2.1681243255245389e-13,
+    "payload_ratios": {
+      "pec-TE": 0.4350619845920139,
+      "pec-TM": 0.4535725911458333,
+      "ibc-TE": 0.4463704427083333,
+      "ibc-TM": 0.4612935384114583,
+      "pec_ibc-TE": 0.3045819600423177,
+      "pec_ibc-TM": 0.30768754747178817,
+      "lossless-TE": 0.647263420952691,
+      "lossless-TM": 0.647186279296875,
+      "lossy-TE": 0.647263420952691,
+      "lossy-TM": 0.6486757066514757,
+      "magnetic-TE": 0.6525141398111979,
+      "magnetic-TM": 0.6487909952799479,
+      "coated-TE": 0.4665821216724537,
+      "coated-TM": 0.45591001157407407,
+      "layered-TE": 0.37151707543267143,
+      "layered-TM": 0.3683804406060113,
+      "mixed-TE": 0.31910969298562886,
+      "mixed-TM": 0.3161317801769869,
+      "sheet-TE": 0.7001467363805026,
+      "sheet-TM": 0.40908247596559283,
+      "mixed_sheet-TE": 0.6393099984611769,
+      "mixed_sheet-TM": 0.29299066052715683,
+      "thin-TE": 0.6603474447630292,
+      "thin-TM": 0.38524877719682915,
+      "thin_magnetic-TE": 0.6607459099342217,
+      "thin_magnetic-TM": 0.6596698431438691
+    }
+  },
+  "changed_backend_files": [
+    "dense_factor.py",
+    "hierarchical_factor.py"
+  ]
+}

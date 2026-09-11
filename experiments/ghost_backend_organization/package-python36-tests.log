@@ -1,0 +1,7 @@
+test_copied_backend_imports_without_checkout_or_unused_lu_adapter (test_package_layout.PackageLayoutTests) ... ok
+test_nested_sources_are_distinct_and_invalidate_the_fingerprint (test_package_layout.PackageLayoutTests) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.983s
+
+OK

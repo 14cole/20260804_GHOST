@@ -1,0 +1,152 @@
+{
+  "kind": "lossy",
+  "count": 384,
+  "algebra": {
+    "TE": {
+      "n": 768,
+      "matrix_bytes": 9437184,
+      "qr": {
+        "rank": 27,
+        "relative_scaled_rhs_error": 1.7891315541013964e-15,
+        "rhs_error": 8.927469063511192e-15,
+        "field_error": 3.260976995695968e-15,
+        "original_backward": 1.262843815335557e-17
+      },
+      "fourier": {
+        "rank": 27,
+        "angular_order": 13,
+        "rhs_error": 1.2006066788125772e-15,
+        "field_error": 1.963846661909257e-15,
+        "original_backward": 1.2710419474244152e-17
+      },
+      "fourier_checked": {
+        "fallback_columns": 0,
+        "zero_columns": 0,
+        "field_error": 1.963846661909257e-15,
+        "original_backward": 1.2710419474244152e-17
+      },
+      "coarse_inverse": {
+        "build_seconds": 0.030588900001021102,
+        "bytes": 2718064,
+        "condition": 9450.989855864686,
+        "field_error": 1.6102969924294698e-12,
+        "original_backward": 4.204988416944927e-16,
+        "refinements": 4
+      },
+      "compressed_operator": {
+        "build_seconds": 0.09007190000011178,
+        "evidence": {
+          "bytes": 7134864,
+          "max_rank": 57,
+          "leaves": 8,
+          "accesses": 4084608,
+          "oracle_calls": 1324,
+          "max_query_entries": 12288,
+          "relative_inf_error_bound": 6.453561943975011e-13,
+          "relative_one_error_bound": 4.1829404106440364e-13
+        },
+        "residual_bound": 6.452340979414563e-13,
+        "field_error": 6.820314359984736e-10,
+        "original_backward": 1.1919509926108321e-13
+      }
+    },
+    "TM": {
+      "n": 768,
+      "matrix_bytes": 9437184,
+      "qr": {
+        "rank": 27,
+        "relative_scaled_rhs_error": 1.7891315541013964e-15,
+        "rhs_error": 8.927469063511192e-15,
+        "field_error": 2.8802210439710137e-15,
+        "original_backward": 4.9385440513501846e-17
+      },
+      "fourier": {
+        "rank": 27,
+        "angular_order": 13,
+        "rhs_error": 1.2006066788125772e-15,
+        "field_error": 2.4366328771346807e-15,
+        "original_backward": 4.346610881998583e-17
+      },
+      "fourier_checked": {
+        "fallback_columns": 0,
+        "zero_columns": 0,
+        "field_error": 2.4366328771346807e-15,
+        "original_backward": 4.346610881998583e-17
+      },
+      "coarse_inverse": {
+        "build_seconds": 0.03740779999861843,
+        "bytes": 2744720,
+        "condition": 7339.502695529229,
+        "field_error": 1.0396503801595604e-11,
+        "original_backward": 6.218215194621773e-15,
+        "refinements": 4
+      },
+      "compressed_operator": {
+        "build_seconds": 0.08560340000076394,
+        "evidence": {
+          "bytes": 7146752,
+          "max_rank": 56,
+          "leaves": 8,
+          "accesses": 4637952,
+          "oracle_calls": 1382,
+          "max_query_entries": 12288,
+          "relative_inf_error_bound": 7.707367045203114e-13,
+          "relative_one_error_bound": 5.680819585998454e-13
+        },
+        "residual_bound": 7.70605327304707e-13,
+        "field_error": 5.097673375252135e-11,
+        "original_backward": 6.98886531133371e-14
+      }
+    }
+  },
+  "baseline_systems": [
+    {
+      "unknowns": 768,
+      "factorizations": 1,
+      "rhs_batches": 2,
+      "max_rhs_columns": 25,
+      "max_backward_error": 1.2795394913475223e-17,
+      "max_relative_residual": 2.0609234081112624e-14,
+      "sweep_compression": {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 43,
+        "accepted_batches": 2,
+        "fallback_batches": 0,
+        "max_rhs_error": 1.899505403646285e-15,
+        "max_reconstructed_backward_error": 1.2795394913475223e-17
+      }
+    },
+    {
+      "unknowns": 768,
+      "factorizations": 1,
+      "rhs_batches": 2,
+      "max_rhs_columns": 25,
+      "max_backward_error": 4.5363403879252655e-17,
+      "max_relative_residual": 3.68012633416626e-14,
+      "sweep_compression": {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 43,
+        "accepted_batches": 2,
+        "fallback_batches": 0,
+        "max_rhs_error": 1.899505403646285e-15,
+        "max_reconstructed_backward_error": 4.5363403879252655e-17
+      }
+    }
+  ],
+  "assembly": {
+    "table12_paired": {
+      "VV": 1.0782489348098694e-15,
+      "HH": 1.6686319502855242e-15
+    },
+    "wpairs": {
+      "VV": 3.777852849806895e-15,
+      "HH": 3.4966406357816837e-15
+    },
+    "partial": {
+      "VV": 0.0,
+      "HH": 0.0
+    }
+  }
+}

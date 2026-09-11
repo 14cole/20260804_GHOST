@@ -1,0 +1,57 @@
+[
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\twod\\geometry.py",
+    "name": "_linear_panel_signature_from_info",
+    "doc": "Topology signature used to decide when linear nodes may be shared safely."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\bor\\streaming.py",
+    "name": "plan_streaming_mode_block",
+    "doc": "Return a budget-safe block, retained peak, and effective workers.\n\nA streaming range cannot be smaller than the number of simultaneously\nsolved outer modes: otherwise a worker wave can straddle two ranges and\nforce a rebuild while another worker still reads the old range.  Treat\n``stream_budget_gb`` as a hard retained-block limit by reducing that\nouter concurrency when necessary.  Only a budget below the true\none-mode retained minimum is rejected."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\geometry\\io.py",
+    "name": "_validate_dielectric_row",
+    "doc": "Validate one strict inline, CSV, or legacy dielectric definition."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\geometry\\surface.py",
+    "name": "nearest",
+    "doc": "Return distance, closest point, wound face normal, and facet index.\n\nA point on a shared mesh edge has two or more equally valid incident\nface normals.  ``normal_hints`` may provide one nonzero vector per\nquery; among faces tied at the exact closest distance, the returned\nface is the one whose wound normal best aligns with that hint.  This\nkeeps a line or point feature's explicitly supplied outward frame from\nbeing rejected merely because triangle storage order owned the tie.\nThe closest-distance result remains unchanged."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+    "name": "export_signature_grim",
+    "doc": "Combine body + features (+ optional wing-body ``corners``) over an\n(aspect x roll x frequency) grid and write one .grim per channel (VV, HH,\nVH), using the same physical field normalization as the radar exporter.\n\nAxes are BODY-FRAME: ``azimuth`` = roll about the body axis, ``elevation``\n= aspect from the canonical +z axis (0 = nose-on).  The legacy ``axis``\nkeyword accepts only a positive multiple of +z because the body field,\nsurface-normal callable, feature coordinates, and polarization basis all\nshare that frame.  This is NOT a radar az/el frame -- no\nearth-vertical rotation is applied, so the VV/HH labels are the body's\nmeridian pols and avoid the radar-frame V/H swap trap. Use\n``export_radar_grim`` when a true radar-frame product is needed.\n\n``rcs_power`` always equals 4*pi times the squared magnitude of the stored\ncoherent ``rcs_amp_real/imag`` field.  If ``mode`` is hybrid or envelope,\nthat separately requested engineering estimate is stored under\n``combination_estimate_power``; it never replaces the physical field pair."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\assembly\\fields.py",
+    "name": "_verify_expected_source_sha256",
+    "doc": "Fail closed if a prepared source no longer has its prepared bytes."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\assembly\\workflow.py",
+    "name": "_line_self_footprint_overlap",
+    "doc": "Return the first nonlocal within-line footprint overlap, if any.\n\nAdjacent segments necessarily meet at one endpoint, so their footprint\ntubes overlap locally.  They are rejected only when a return segment stays\ninside the prior tube beyond two footprint diameters from that joint.  This\ncatches near-retraces without rejecting an ordinary 90-degree corner."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\assembly\\components.py",
+    "name": "validate_component_schema",
+    "doc": "Fail closed unless a step-4 input is a compatible physical 3-D field.\n\nReturns the validated combine role.  The primary linear array must carry\nsigma_3d in dBsm display units, while the complex arrays must be the common\nvehicle-origin radar-frame far-field amplitude ``F``.  Stored power is\nchecked against the *stored* complex samples, including exact nulls; a\ndisplay floor in ``rcs_power`` is therefore rejected."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\execution\\provenance.py",
+    "name": "write_artifact_manifest",
+    "doc": "Atomically commit an exact multi-file artifact bundle.\n\nThe data files must already be in place.  Writing the manifest last makes\nit a commit marker: an interrupted replacement leaves either no manifest\nor hashes that no longer match, so a downstream consumer fails closed."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\execution\\provenance.py",
+    "name": "manifest_solve_spec_fingerprint",
+    "doc": "Hash every immutable field that defines the underlying unit solves.\n\nCompletion status and byte inventories are written after individual unit\nattestations, so they are deliberately excluded. Editing a grid, unit,\nsolver control, or source/runtime hash changes this fingerprint and\ninvalidates every stale per-unit output. Legacy derived-grid configuration\nhas a separate attestation because it does not change the underlying VV/HH\nsolve."
+  },
+  {
+    "path": "tools\\GHOST\\Backend\\ghost_backend\\runs\\config.py",
+    "name": "write_configuration",
+    "doc": "Atomically publish a previously validated configuration."
+  }
+]

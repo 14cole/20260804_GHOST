@@ -1,0 +1,181 @@
+[
+  {
+    "kind": "pec",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      7.96249581277914e-16,
+      6.200752393486966e-16
+    ],
+    "reuse": 0,
+    "gate": true
+  },
+  {
+    "kind": "ibc",
+    "field_error": {
+      "VV": 6.359367135954424e-16,
+      "HH": 1.3949925908315349e-15
+    },
+    "backward": [
+      5.80547533959219e-16,
+      5.627710855040354e-16
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "pec_ibc",
+    "field_error": {
+      "VV": 5.539364891857451e-16,
+      "HH": 2.018602728318294e-15
+    },
+    "backward": [
+      2.9670977977434973e-15,
+      2.7393773242559926e-15
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "lossless",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      1.9167321526636063e-17,
+      4.779302130643635e-17
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "lossy",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      1.2795394913475223e-17,
+      4.5363403879252655e-17
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "magnetic",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      9.737560728556291e-18,
+      4.4568075008223336e-17
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "coated",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      1.099730874947725e-13,
+      3.662231702807586e-14
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "layered",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      3.255943642568901e-15,
+      6.858216011408084e-15
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "mixed",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      2.217797874652051e-15,
+      1.561983587456242e-14
+    ],
+    "reuse": 1,
+    "gate": true
+  },
+  {
+    "kind": "sheet",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      7.308924116269497e-16,
+      5.428697898563077e-16
+    ],
+    "reuse": 0,
+    "gate": true
+  },
+  {
+    "kind": "mixed_sheet",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      1.3302078889492313e-14,
+      1.9868101558876322e-15
+    ],
+    "reuse": 0,
+    "gate": true
+  },
+  {
+    "kind": "thin",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      5.747996272222326e-19,
+      1.2524233322911143e-15
+    ],
+    "reuse": 0,
+    "gate": true
+  },
+  {
+    "kind": "thin_magnetic",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [
+      1.9365948546036715e-19,
+      8.805056872984352e-20
+    ],
+    "reuse": 0,
+    "gate": true
+  },
+  {
+    "kind": "transparent",
+    "field_error": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "backward": [],
+    "reuse": 0,
+    "gate": true
+  }
+]

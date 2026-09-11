@@ -1,0 +1,45 @@
+Release gate: checking strict UTF-8 ...
+Release gate: checking prohibited release terms ...
+Release gate: checking the exact Windows dependency lock ...
+Release gate: running startup diagnostics ...
+test_acceptance_includes_non_unittest_ghost_integration_gates (test_release_builder.ReleaseBuilderTests.test_acceptance_includes_non_unittest_ghost_integration_gates) ... ok
+test_acceptance_uses_staged_tree_and_native_library_is_in_all_manifests (test_release_builder.ReleaseBuilderTests.test_acceptance_uses_staged_tree_and_native_library_is_in_all_manifests) ... ok
+test_archive_and_relative_paths_are_deterministic (test_release_builder.ReleaseBuilderTests.test_archive_and_relative_paths_are_deterministic) ... ok
+test_atomic_file_publication_refuses_existing_destination (test_release_builder.ReleaseBuilderTests.test_atomic_file_publication_refuses_existing_destination) ... ok
+test_complete_release_includes_assets_and_valid_hash_manifests (test_release_builder.ReleaseBuilderTests.test_complete_release_includes_assets_and_valid_hash_manifests) ... ok
+test_dependency_gate_rejects_missing_locked_optional_package (test_release_builder.ReleaseBuilderTests.test_dependency_gate_rejects_missing_locked_optional_package) ... ok
+test_dependency_gate_requires_windows_x64_builder (test_release_builder.ReleaseBuilderTests.test_dependency_gate_requires_windows_x64_builder) ... ok
+test_dependency_lock_must_cover_new_project_dependency (test_release_builder.ReleaseBuilderTests.test_dependency_lock_must_cover_new_project_dependency) ... ok
+test_existing_release_is_not_overwritten (test_release_builder.ReleaseBuilderTests.test_existing_release_is_not_overwritten) ... ok
+test_explicit_inventory_cannot_bypass_git_acceptance (test_release_builder.ReleaseBuilderTests.test_explicit_inventory_cannot_bypass_git_acceptance) ... ok
+test_explicit_inventory_cannot_bypass_parent_git_worktree (test_release_builder.ReleaseBuilderTests.test_explicit_inventory_cannot_bypass_parent_git_worktree) ... ok
+test_explicit_inventory_excludes_unreviewed_file (test_release_builder.ReleaseBuilderTests.test_explicit_inventory_excludes_unreviewed_file) ... ok
+test_explicit_inventory_must_include_present_acceptance_tests (test_release_builder.ReleaseBuilderTests.test_explicit_inventory_must_include_present_acceptance_tests) ... ok
+test_explicit_inventory_must_include_present_runtime_modules (test_release_builder.ReleaseBuilderTests.test_explicit_inventory_must_include_present_runtime_modules) ... ok
+test_external_manifest_is_published_last_as_completion_marker (test_release_builder.ReleaseBuilderTests.test_external_manifest_is_published_last_as_completion_marker) ... ok
+test_forbidden_term_gate_inspects_powerpoint_xml (test_release_builder.ReleaseBuilderTests.test_forbidden_term_gate_inspects_powerpoint_xml) ... ok
+test_forbidden_term_gate_reports_file_and_line (test_release_builder.ReleaseBuilderTests.test_forbidden_term_gate_reports_file_and_line) ... ok
+test_git_dirty_source_is_rejected_before_file_collection (test_release_builder.ReleaseBuilderTests.test_git_dirty_source_is_rejected_before_file_collection) ... ok
+test_git_release_records_matching_version_tag (test_release_builder.ReleaseBuilderTests.test_git_release_records_matching_version_tag) ... ok
+test_git_release_requires_matching_version_tag (test_release_builder.ReleaseBuilderTests.test_git_release_requires_matching_version_tag) ... ok
+test_inventory_rejects_parent_traversal (test_release_builder.ReleaseBuilderTests.test_inventory_rejects_parent_traversal) ... ok
+test_missing_assembly_workload_contract_fails_before_output (test_release_builder.ReleaseBuilderTests.test_missing_assembly_workload_contract_fails_before_output) ... ok
+test_missing_direct_grim_startup_module_fails_before_output (test_release_builder.ReleaseBuilderTests.test_missing_direct_grim_startup_module_fails_before_output) ... ok
+test_missing_feature_workflow_module_fails_before_output (test_release_builder.ReleaseBuilderTests.test_missing_feature_workflow_module_fails_before_output) ... ok
+test_missing_material_explorer_dependency_fails_before_output (test_release_builder.ReleaseBuilderTests.test_missing_material_explorer_dependency_fails_before_output) ... ok
+test_missing_standalone_launcher_module_fails_before_output (test_release_builder.ReleaseBuilderTests.test_missing_standalone_launcher_module_fails_before_output) ... ok
+Release gate: checking strict UTF-8 ...
+Release gate: checking prohibited release terms ...
+Release gate: checking the exact Windows dependency lock ...
+Release gate: running startup diagnostics ...
+test_native_require_policy_blocks_fallback_release (test_release_builder.ReleaseBuilderTests.test_native_require_policy_blocks_fallback_release) ... ok
+test_partial_source_fails_before_creating_output (test_release_builder.ReleaseBuilderTests.test_partial_source_fails_before_creating_output) ... ok
+Release gate warning: native build unavailable; shipping NumPy fallback: compiler unavailable
+test_required_native_compile_failure_does_not_publish (test_release_builder.ReleaseBuilderTests.test_required_native_compile_failure_does_not_publish) ... ok
+test_utf8_gate_rejects_nul_contaminated_text (test_release_builder.ReleaseBuilderTests.test_utf8_gate_rejects_nul_contaminated_text) ... ok
+test_version_override_must_match_project_metadata (test_release_builder.ReleaseBuilderTests.test_version_override_must_match_project_metadata) ... ok
+
+----------------------------------------------------------------------
+Ran 31 tests in 14.394s
+
+OK

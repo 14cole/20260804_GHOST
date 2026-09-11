@@ -1,0 +1,533 @@
+{
+  "source_path": "",
+  "segment_count": 19,
+  "panel_count": 1938,
+  "panel_count_min": 1938,
+  "panel_count_max": 1938,
+  "polarizations": [
+    "VV",
+    "HH"
+  ],
+  "polarization_internal": [
+    "TE",
+    "TM"
+  ],
+  "polarization_mapping": {
+    "VV": "TE",
+    "HH": "TM"
+  },
+  "formulation": "co-polarized 2-D BIE/MoM",
+  "formulations": {
+    "VV": "2D multi-region indirect SLP formulation (layered coating)",
+    "HH": "2D multi-region indirect SLP formulation (layered coating)"
+  },
+  "solver_method": "dense_lu_experimental_cpu",
+  "solver_method_requested": "experimental_cpu",
+  "residual_norm_max": 8.320603603725697e-11,
+  "constraint_residual_norm_max": 0.0,
+  "condition_est_max": 9151.51287439204,
+  "condition_est_computed": true,
+  "warnings": [
+    "Geometry contains 4 high-degree node(s) (>2 connected primitives).",
+    "Detected 18 physical trace/flux junction relation(s). The active multi-region indirect formulation uses interface-specific SLP densities, so that diagnostic trace/flux matrix is not applied to its different unknowns; junction coupling is represented implicitly by the shared regional potentials."
+  ],
+  "warning_count": 2,
+  "preflight": {
+    "segment_count": 19,
+    "primitive_count": 350,
+    "dangling_nodes": 0,
+    "high_degree_nodes": 4,
+    "warning_count": 1,
+    "warnings": [
+      "Geometry contains 4 high-degree node(s) (>2 connected primitives)."
+    ]
+  },
+  "quality_gate": {
+    "passed": true,
+    "channels": {
+      "VV": {
+        "passed": true,
+        "thresholds": {
+          "residual_norm_max": 1e-06,
+          "constraint_residual_norm_max": 1e-08,
+          "condition_est_max": 1000000.0,
+          "warnings_max": 10
+        },
+        "values": {
+          "residual_norm_max": 8.320603603725697e-11,
+          "residual_nonfinite_count": 0,
+          "constraint_residual_norm_max": 0.0,
+          "condition_est_max": 9151.51287439204,
+          "condition_est_computed": true,
+          "warnings_count": 2
+        },
+        "violations": [],
+        "certification_scope": "discrete_linear_system_residual_and_condition",
+        "mesh_convergence_certified": false,
+        "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+      },
+      "HH": {
+        "passed": true,
+        "thresholds": {
+          "residual_norm_max": 1e-06,
+          "constraint_residual_norm_max": 1e-08,
+          "condition_est_max": 1000000.0,
+          "warnings_max": 10
+        },
+        "values": {
+          "residual_norm_max": 4.569540923917186e-13,
+          "residual_nonfinite_count": 0,
+          "constraint_residual_norm_max": 0.0,
+          "condition_est_max": 5438.667928848081,
+          "condition_est_computed": true,
+          "warnings_count": 2
+        },
+        "violations": [],
+        "certification_scope": "discrete_linear_system_residual_and_condition",
+        "mesh_convergence_certified": false,
+        "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+      }
+    },
+    "reason": "Both VV<-TE and HH<-TM discrete linear-system quality gates passed"
+  },
+  "channel_metadata": {
+    "VV": {
+      "source_path": "",
+      "segment_count": 19,
+      "panel_count": 1938,
+      "panel_count_min": 1938,
+      "panel_count_max": 1938,
+      "panel_length_min_m": 0.00033721070994261094,
+      "panel_length_max_m": 0.0006695249208207268,
+      "mesh_reference_ghz": 1.0,
+      "mesh_reference_ghz_min": 1.0,
+      "mesh_reference_ghz_max": 1.0,
+      "mesh_wavelength_m": 0.01342669585570839,
+      "mesh_wavelength_min_m": 0.01342669585570839,
+      "mesh_wavelength_max_m": 0.01342669585570839,
+      "mesh_max_refractive_index": 22.32808884790092,
+      "mesh_material_flags": [
+        1,
+        2
+      ],
+      "polarization_internal": "TE",
+      "polarization_user": "TE",
+      "polarization_aliases": [
+        "TE"
+      ],
+      "polarization_export": "TE",
+      "polarization_export_alias": "VV",
+      "rcs_normalization_mode": "physical",
+      "formulation": "2D multi-region indirect SLP formulation (layered coating)",
+      "solver_method": "dense_lu",
+      "solver_method_requested": "experimental_cpu",
+      "residual_norm_max": 8.320603603725697e-11,
+      "residual_norm_mean": 8.320603603725698e-11,
+      "residual_nonfinite_count": 0,
+      "constraint_residual_norm_max": 0.0,
+      "constraint_residual_norm_mean": 0.0,
+      "constraint_residual_applicable": false,
+      "condition_est_max": 9151.51287439204,
+      "condition_est_mean": 9151.51287439204,
+      "condition_est_computed": true,
+      "condition_estimator": "equilibrated_1norm_lu_onenormest",
+      "thin_layer": [],
+      "warnings": [
+        "Geometry contains 4 high-degree node(s) (>2 connected primitives).",
+        "Detected 18 physical trace/flux junction relation(s). The active multi-region indirect formulation uses interface-specific SLP densities, so that diagnostic trace/flux matrix is not applied to its different unknowns; junction coupling is represented implicitly by the shared regional potentials."
+      ],
+      "warning_count": 2,
+      "math_backend_real_bessel": "scipy-special",
+      "math_backend_complex_hankel": "scipy-special",
+      "reused_matrix_solve_count": 361,
+      "shared_operator_cache_enabled": true,
+      "shared_operator_cache_hits": 0,
+      "shared_operator_cache_stores": 0,
+      "parallel_elevation_solve_count": 0,
+      "max_parallel_workers_used": 1,
+      "mesh_reference_frequency_used": false,
+      "cfie_alpha": 0.0,
+      "junction_nodes": 1936,
+      "junction_constraints": 18,
+      "junction_constraint_candidates": 18,
+      "junction_constraints_applied": false,
+      "junction_constraints_applied_count": 0,
+      "junction_treatment": "implicit_multi_region_indirect",
+      "junction_panels": 1938,
+      "junction_trace_constraints": 8,
+      "junction_flux_constraints": 10,
+      "junction_orientation_conflict_nodes": 0,
+      "linear_node_count": 1944,
+      "linear_element_count": 1938,
+      "shared_node_count": 1936,
+      "split_node_count": 8,
+      "split_boundary_primitive_count": 1938,
+      "multi_signature_node_count": 4,
+      "preflight": {
+        "segment_count": 19,
+        "primitive_count": 350,
+        "dangling_nodes": 0,
+        "high_degree_nodes": 4,
+        "warning_count": 1,
+        "warnings": [
+          "Geometry contains 4 high-degree node(s) (>2 connected primitives)."
+        ]
+      },
+      "cpu_factorization_requested": "dense",
+      "cpu_rhs_compression_requested": "auto",
+      "hierarchical_factors": [],
+      "sweep_compression": [
+        {
+          "requested": "auto",
+          "input_columns": 361,
+          "solved_columns": 52,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "max_rhs_error": 2.278948429019465e-15,
+          "max_reconstructed_backward_error": 6.418364748439142e-14
+        }
+      ],
+      "dense_condition_methods": [
+        "equilibrated_1norm_lu_onenormest"
+      ],
+      "linear_backend": "cpu",
+      "dense_gpu_solve_count": 0,
+      "dense_cpu_solve_count": 2,
+      "dense_factorization_count": 1,
+      "dense_rhs_batch_count": 2,
+      "dense_rhs_column_count": 52,
+      "dense_max_rhs_columns": 31,
+      "dense_mixed_precision_solve_count": 0,
+      "dense_fallback_reasons": [],
+      "dense_gpu_fallback_reasons": [],
+      "dense_gpu_devices": [],
+      "dense_largest_system": 2964,
+      "amplitude_version": 2,
+      "quality_gate": {
+        "passed": true,
+        "thresholds": {
+          "residual_norm_max": 1e-06,
+          "constraint_residual_norm_max": 1e-08,
+          "condition_est_max": 1000000.0,
+          "warnings_max": 10
+        },
+        "values": {
+          "residual_norm_max": 8.320603603725697e-11,
+          "residual_nonfinite_count": 0,
+          "constraint_residual_norm_max": 0.0,
+          "condition_est_max": 9151.51287439204,
+          "condition_est_computed": true,
+          "warnings_count": 2
+        },
+        "violations": [],
+        "certification_scope": "discrete_linear_system_residual_and_condition",
+        "mesh_convergence_certified": false,
+        "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+      }
+    },
+    "HH": {
+      "source_path": "",
+      "segment_count": 19,
+      "panel_count": 1938,
+      "panel_count_min": 1938,
+      "panel_count_max": 1938,
+      "panel_length_min_m": 0.00033721070994261094,
+      "panel_length_max_m": 0.0006695249208207268,
+      "mesh_reference_ghz": 1.0,
+      "mesh_reference_ghz_min": 1.0,
+      "mesh_reference_ghz_max": 1.0,
+      "mesh_wavelength_m": 0.01342669585570839,
+      "mesh_wavelength_min_m": 0.01342669585570839,
+      "mesh_wavelength_max_m": 0.01342669585570839,
+      "mesh_max_refractive_index": 22.32808884790092,
+      "mesh_material_flags": [
+        1,
+        2
+      ],
+      "polarization_internal": "TM",
+      "polarization_user": "TM",
+      "polarization_aliases": [
+        "TM"
+      ],
+      "polarization_export": "TM",
+      "polarization_export_alias": "HH",
+      "rcs_normalization_mode": "physical",
+      "formulation": "2D multi-region indirect SLP formulation (layered coating)",
+      "solver_method": "dense_lu",
+      "solver_method_requested": "experimental_cpu",
+      "residual_norm_max": 4.569540923917186e-13,
+      "residual_norm_mean": 4.569540923917185e-13,
+      "residual_nonfinite_count": 0,
+      "constraint_residual_norm_max": 0.0,
+      "constraint_residual_norm_mean": 0.0,
+      "constraint_residual_applicable": false,
+      "condition_est_max": 5438.667928848081,
+      "condition_est_mean": 5438.667928848081,
+      "condition_est_computed": true,
+      "condition_estimator": "equilibrated_1norm_lu_onenormest",
+      "thin_layer": [],
+      "warnings": [
+        "Geometry contains 4 high-degree node(s) (>2 connected primitives).",
+        "Detected 18 physical trace/flux junction relation(s). The active multi-region indirect formulation uses interface-specific SLP densities, so that diagnostic trace/flux matrix is not applied to its different unknowns; junction coupling is represented implicitly by the shared regional potentials."
+      ],
+      "warning_count": 2,
+      "math_backend_real_bessel": "scipy-special",
+      "math_backend_complex_hankel": "scipy-special",
+      "reused_matrix_solve_count": 361,
+      "shared_operator_cache_enabled": true,
+      "shared_operator_cache_hits": 0,
+      "shared_operator_cache_stores": 0,
+      "parallel_elevation_solve_count": 0,
+      "max_parallel_workers_used": 1,
+      "mesh_reference_frequency_used": false,
+      "cfie_alpha": 0.0,
+      "junction_nodes": 1936,
+      "junction_constraints": 18,
+      "junction_constraint_candidates": 18,
+      "junction_constraints_applied": false,
+      "junction_constraints_applied_count": 0,
+      "junction_treatment": "implicit_multi_region_indirect",
+      "junction_panels": 1938,
+      "junction_trace_constraints": 8,
+      "junction_flux_constraints": 10,
+      "junction_orientation_conflict_nodes": 0,
+      "linear_node_count": 1944,
+      "linear_element_count": 1938,
+      "shared_node_count": 1936,
+      "split_node_count": 8,
+      "split_boundary_primitive_count": 1938,
+      "multi_signature_node_count": 4,
+      "preflight": {
+        "segment_count": 19,
+        "primitive_count": 350,
+        "dangling_nodes": 0,
+        "high_degree_nodes": 4,
+        "warning_count": 1,
+        "warnings": [
+          "Geometry contains 4 high-degree node(s) (>2 connected primitives)."
+        ]
+      },
+      "cpu_factorization_requested": "dense",
+      "cpu_rhs_compression_requested": "auto",
+      "hierarchical_factors": [],
+      "sweep_compression": [
+        {
+          "requested": "auto",
+          "input_columns": 361,
+          "solved_columns": 52,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "max_rhs_error": 2.4356832598623043e-15,
+          "max_reconstructed_backward_error": 2.333917056670799e-14
+        }
+      ],
+      "dense_condition_methods": [
+        "equilibrated_1norm_lu_onenormest"
+      ],
+      "linear_backend": "cpu",
+      "dense_gpu_solve_count": 0,
+      "dense_cpu_solve_count": 2,
+      "dense_factorization_count": 1,
+      "dense_rhs_batch_count": 2,
+      "dense_rhs_column_count": 52,
+      "dense_max_rhs_columns": 31,
+      "dense_mixed_precision_solve_count": 0,
+      "dense_fallback_reasons": [],
+      "dense_gpu_fallback_reasons": [],
+      "dense_gpu_devices": [],
+      "dense_largest_system": 2964,
+      "amplitude_version": 2,
+      "quality_gate": {
+        "passed": true,
+        "thresholds": {
+          "residual_norm_max": 1e-06,
+          "constraint_residual_norm_max": 1e-08,
+          "condition_est_max": 1000000.0,
+          "warnings_max": 10
+        },
+        "values": {
+          "residual_norm_max": 4.569540923917186e-13,
+          "residual_nonfinite_count": 0,
+          "constraint_residual_norm_max": 0.0,
+          "condition_est_max": 5438.667928848081,
+          "condition_est_computed": true,
+          "warnings_count": 2
+        },
+        "violations": [],
+        "certification_scope": "discrete_linear_system_residual_and_condition",
+        "mesh_convergence_certified": false,
+        "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+      }
+    }
+  },
+  "cpu_factorization_requested": "dense",
+  "cpu_rhs_compression_requested": "auto",
+  "hierarchical_factors": {
+    "VV": [],
+    "HH": []
+  },
+  "sweep_compression": {
+    "VV": [
+      {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 52,
+        "accepted_batches": 2,
+        "fallback_batches": 0,
+        "max_rhs_error": 2.278948429019465e-15,
+        "max_reconstructed_backward_error": 6.418364748439142e-14
+      }
+    ],
+    "HH": [
+      {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 52,
+        "accepted_batches": 2,
+        "fallback_batches": 0,
+        "max_rhs_error": 2.4356832598623043e-15,
+        "max_reconstructed_backward_error": 2.333917056670799e-14
+      }
+    ]
+  },
+  "dense_factorization_count": 2,
+  "dense_rhs_batch_count": 4,
+  "dense_rhs_column_count": 104,
+  "dense_max_rhs_columns": 31,
+  "thin_layer": {
+    "VV": [],
+    "HH": []
+  },
+  "amplitude_version": 2,
+  "co_solve_shared_discretization": true,
+  "shared_operator_cache_enabled": true,
+  "shared_operator_cache_hits": 0,
+  "shared_operator_cache_stores": 0,
+  "linear_backend": "cpu",
+  "dense_gpu_solve_count": 0,
+  "dense_cpu_solve_count": 4,
+  "dense_gpu_fallback_reasons": [],
+  "dense_gpu_devices": [],
+  "dense_largest_system": 2964,
+  "mesh_convergence_certified": false,
+  "certified_entry_point": false,
+  "survey_mode": false,
+  "published_mesh": "",
+  "assembled_system_reuses": 1,
+  "experimental_cpu": {
+    "version": 1,
+    "precision": "double",
+    "device": "cpu",
+    "batch_size": 256,
+    "cache": {
+      "hits": 0,
+      "stores": 0,
+      "evictions": 0,
+      "bytes": 0,
+      "peak_bytes": 0,
+      "budget_bytes": 67108864
+    },
+    "kernel_tables": [
+      {
+        "used": true,
+        "k_real": 420.8489816639201,
+        "k_imag": -204.63308092828572,
+        "degree": 16,
+        "intervals": 244,
+        "bytes": 134696,
+        "check_points": 18544,
+        "max_check_relative": 2.5952180449190215e-14,
+        "max_tail_relative": 1.3016962835179218e-14,
+        "tolerance": 2e-13,
+        "build_seconds": 0.02111209999929997
+      },
+      {
+        "used": true,
+        "k_real": 81.7115926677566,
+        "k_imag": -14.520290936613353,
+        "degree": 16,
+        "intervals": 135,
+        "bytes": 74528,
+        "check_points": 10260,
+        "max_check_relative": 5.799607562264671e-15,
+        "max_tail_relative": 1.6874889371328662e-15,
+        "tolerance": 2e-13,
+        "build_seconds": 0.015344600000389619
+      }
+    ],
+    "table_budget_bytes": 33554432,
+    "systems": [
+      {
+        "unknowns": 2964,
+        "factorizations": 1,
+        "rhs_batches": 2,
+        "max_rhs_columns": 31,
+        "max_backward_error": 7.028257562852595e-14,
+        "max_relative_residual": 8.320603603725697e-11,
+        "sweep_compression": {
+          "requested": "auto",
+          "input_columns": 361,
+          "solved_columns": 52,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "max_rhs_error": 2.278948429019465e-15,
+          "max_reconstructed_backward_error": 6.418364748439142e-14
+        }
+      },
+      {
+        "unknowns": 2964,
+        "factorizations": 1,
+        "rhs_batches": 2,
+        "max_rhs_columns": 31,
+        "max_backward_error": 2.333917056670799e-14,
+        "max_relative_residual": 4.569540923917186e-13,
+        "sweep_compression": {
+          "requested": "auto",
+          "input_columns": 361,
+          "solved_columns": 52,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "max_rhs_error": 2.4356832598623043e-15,
+          "max_reconstructed_backward_error": 2.333917056670799e-14
+        }
+      }
+    ],
+    "formulations": [
+      {
+        "formulation": "multi_region",
+        "streamed": true,
+        "reason": ""
+      },
+      {
+        "formulation": "multi_region",
+        "streamed": true,
+        "reason": ""
+      }
+    ]
+  },
+  "runtime_profile": {
+    "wall_seconds": 19.773949500000526,
+    "stage_seconds": {
+      "operators": 17.938923200001227,
+      "factorization": 0.6420970000017405,
+      "excitation": 0.06574499999987893,
+      "rhs_solve": 0.05824229999961972,
+      "linear_solve": 0.11921719999918423,
+      "rhs_compression": 0.6154389999992418,
+      "far_field": 0.12992799999847193
+    },
+    "stage_calls": {
+      "operators": 5,
+      "factorization": 2,
+      "excitation": 4,
+      "rhs_solve": 4,
+      "linear_solve": 4,
+      "rhs_compression": 4,
+      "far_field": 8
+    },
+    "stage_semantics": "inclusive elapsed; parallel/nested stages may overlap",
+    "sampled_peak_process_rss_bytes": 114626560,
+    "initial_process_rss_bytes": 80465920,
+    "memory_semantics": "50 ms process RSS samples, including other jobs; not an exclusive allocation peak"
+  }
+}

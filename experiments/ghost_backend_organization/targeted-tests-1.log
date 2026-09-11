@@ -1,0 +1,266 @@
+test_legacy_body_frame_export_rejects_non_z_axis (test_backend_safety.BodyFrameExportTests.test_legacy_body_frame_export_rejects_non_z_axis) ... ok
+test_legacy_export_accepts_read_only_canonical_axis (test_backend_safety.BodyFrameExportTests.test_legacy_export_accepts_read_only_canonical_axis) ... ok
+test_legacy_export_does_not_mutate_float_axis_array (test_backend_safety.BodyFrameExportTests.test_legacy_export_does_not_mutate_float_axis_array) ... ok
+test_equivalent_meter_and_inch_geometry_returns_same_report (test_backend_safety.GeometryPreflightUnitTests.test_equivalent_meter_and_inch_geometry_returns_same_report) ... ok
+test_equivalent_submicron_crack_has_same_meter_space_diagnosis (test_backend_safety.GeometryPreflightUnitTests.test_equivalent_submicron_crack_has_same_meter_space_diagnosis) ... ok
+test_bor_native_extensions_are_host_specific (test_backend_safety.NativeLoaderTrustTests.test_bor_native_extensions_are_host_specific) ... ok
+test_native_candidates_never_come_from_working_directory (test_backend_safety.NativeLoaderTrustTests.test_native_candidates_never_come_from_working_directory) ... ok
+test_windows_build_exposes_compiler_runtime_to_helper_processes (test_backend_safety.NativeLoaderTrustTests.test_windows_build_exposes_compiler_runtime_to_helper_processes) ... ok
+test_windows_loader_ignores_checked_in_linux_shared_object (test_backend_safety.NativeLoaderTrustTests.test_windows_loader_ignores_checked_in_linux_shared_object) ... ok
+test_dataclasses_defaults_frozen_replace_asdict_and_pickle (test_hpc_runtime.HpcRuntimeTests.test_dataclasses_defaults_frozen_replace_asdict_and_pickle) ... ok
+test_environment_checker_accepts_the_installed_test_stack (test_hpc_runtime.HpcRuntimeTests.test_environment_checker_accepts_the_installed_test_stack) ... ok
+test_failed_profiled_solve_restores_precision_and_metrics (test_hpc_runtime.HpcRuntimeTests.test_failed_profiled_solve_restores_precision_and_metrics) ... ok
+test_file_adapters_preserve_errors_and_lf (test_hpc_runtime.HpcRuntimeTests.test_file_adapters_preserve_errors_and_lf) ... ok
+test_headless_modules_import_without_gui (test_hpc_runtime.HpcRuntimeTests.test_headless_modules_import_without_gui) ... ok
+test_lu_still_rejects_old_scipy_runtime_warning (test_hpc_runtime.HpcRuntimeTests.test_lu_still_rejects_old_scipy_runtime_warning) ... ok
+test_lu_without_new_scipy_warning_export_preserves_double_fallback (test_hpc_runtime.HpcRuntimeTests.test_lu_without_new_scipy_warning_export_preserves_double_fallback) ... ok
+test_packed_visibility_cannot_be_changed_after_review (test_hpc_runtime.HpcRuntimeTests.test_packed_visibility_cannot_be_changed_after_review) ... ok
+test_packed_visibility_preserves_every_bit_and_empty_shapes (test_hpc_runtime.HpcRuntimeTests.test_packed_visibility_preserves_every_bit_and_empty_shapes) ... ok
+test_solver_scope_restores_exceptions_and_isolates_threads (test_hpc_runtime.HpcRuntimeTests.test_solver_scope_restores_exceptions_and_isolates_threads) ... ok
+test_bor_bundle_rejects_pure_efie_cfie_endpoint (test_hpc_bundle.PortableBundleTests.test_bor_bundle_rejects_pure_efie_cfie_endpoint) ... ok
+test_bor_run_status_reads_real_run_bound_body_grim (test_hpc_bundle.PortableBundleTests.test_bor_run_status_reads_real_run_bound_body_grim) ... ok
+test_bor_run_status_requires_verified_publication (test_hpc_bundle.PortableBundleTests.test_bor_run_status_requires_verified_publication) ... ok
+test_bor_stage_derives_only_bor_geometry_root (test_hpc_bundle.PortableBundleTests.test_bor_stage_derives_only_bor_geometry_root) ... ok
+test_cli_emits_one_json_object (test_hpc_bundle.PortableBundleTests.test_cli_emits_one_json_object) ... ok
+test_concurrent_stage_submit_has_one_driver_invocation (test_hpc_bundle.PortableBundleTests.test_concurrent_stage_submit_has_one_driver_invocation) ... ok
+test_create_is_relative_complete_and_self_documenting (test_hpc_bundle.PortableBundleTests.test_create_is_relative_complete_and_self_documenting) ... FAIL
+test_displaced_stage_owner_cannot_remove_successor_lease (test_hpc_bundle.PortableBundleTests.test_displaced_stage_owner_cannot_remove_successor_lease) ... ok
+test_driver_result_is_machine_readable_and_idempotent (test_hpc_bundle.PortableBundleTests.test_driver_result_is_machine_readable_and_idempotent) ... ok
+test_driver_result_recovers_each_persisted_partial_job_id (test_hpc_bundle.PortableBundleTests.test_driver_result_recovers_each_persisted_partial_job_id) ... ok
+test_each_geometry_keeps_its_own_same_named_material (test_hpc_bundle.PortableBundleTests.test_each_geometry_keeps_its_own_same_named_material) ... ok
+test_every_allowlisted_setting_exists_in_its_canonical_driver (test_hpc_bundle.PortableBundleTests.test_every_allowlisted_setting_exists_in_its_canonical_driver) ... ok
+test_interrupted_initial_copy_never_publishes_partial_stage (test_hpc_bundle.PortableBundleTests.test_interrupted_initial_copy_never_publishes_partial_stage) ... ok
+test_interrupted_non_submitting_driver_can_retry (test_hpc_bundle.PortableBundleTests.test_interrupted_non_submitting_driver_can_retry) ... ok
+test_interrupted_submit_without_job_id_fails_closed (test_hpc_bundle.PortableBundleTests.test_interrupted_submit_without_job_id_fails_closed) ... ok
+test_old_looking_live_stage_guard_cannot_be_stolen (test_hpc_bundle.PortableBundleTests.test_old_looking_live_stage_guard_cannot_be_stolen) ... ok
+test_recover_reconstructs_interrupted_stage_without_resubmitting (test_hpc_bundle.PortableBundleTests.test_recover_reconstructs_interrupted_stage_without_resubmitting) ... ok
+test_recovery_running_state_and_journal_override_stale_result (test_hpc_bundle.PortableBundleTests.test_recovery_running_state_and_journal_override_stale_result) ... ok
+test_request_path_traversal_is_rejected_before_read (test_hpc_bundle.PortableBundleTests.test_request_path_traversal_is_rejected_before_read) ... ok
+test_roles_stems_and_settings_are_strict (test_hpc_bundle.PortableBundleTests.test_roles_stems_and_settings_are_strict) ... ok
+test_run_status_requires_exact_attested_unit_inventory (test_hpc_bundle.PortableBundleTests.test_run_status_requires_exact_attested_unit_inventory) ... ok
+test_stage_derives_linux_owned_execution_settings (test_hpc_bundle.PortableBundleTests.test_stage_derives_linux_owned_execution_settings) ... ok
+test_stage_heartbeat_retries_transient_filesystem_error (test_hpc_bundle.PortableBundleTests.test_stage_heartbeat_retries_transient_filesystem_error) ... ok
+test_stage_json_is_synced_before_atomic_replace (test_hpc_bundle.PortableBundleTests.test_stage_json_is_synced_before_atomic_replace) ... ok
+test_stage_lease_heartbeat_prevents_false_stale_takeover (test_hpc_bundle.PortableBundleTests.test_stage_lease_heartbeat_prevents_false_stale_takeover) ... ok
+test_stage_lease_stale_takeover_advances_generation (test_hpc_bundle.PortableBundleTests.test_stage_lease_stale_takeover_advances_generation) ... ok
+test_staged_payload_rejects_extra_files_before_driver_execution (test_hpc_bundle.PortableBundleTests.test_staged_payload_rejects_extra_files_before_driver_execution) ... ok
+test_stale_running_state_with_job_journal_refuses_resubmit (test_hpc_bundle.PortableBundleTests.test_stale_running_state_with_job_journal_refuses_resubmit) ... ok
+test_tampering_and_unexpected_files_fail_closed (test_hpc_bundle.PortableBundleTests.test_tampering_and_unexpected_files_fail_closed) ... ok
+test_terminal_state_without_result_is_recovered_not_resubmitted (test_hpc_bundle.PortableBundleTests.test_terminal_state_without_result_is_recovered_not_resubmitted) ... ok
+test_windows_cannot_create_final_stage_provenance (test_hpc_bundle.PortableBundleTests.test_windows_cannot_create_final_stage_provenance) ... ok
+test_windows_stage_guard_initialization_locks_before_seeding (test_hpc_bundle.PortableBundleTests.test_windows_stage_guard_initialization_locks_before_seeding) ... ok
+test_freddy_and_assembly_apis_need_no_gui (test_hpc_solver_options.HeadlessSolverOptionsTests.test_freddy_and_assembly_apis_need_no_gui) ... ok
+test_freddy_coating_2d_mixed_tight_worker (test_hpc_solver_options.HeadlessSolverOptionsTests.test_freddy_coating_2d_mixed_tight_worker) ... ok
+test_freddy_coating_bor_tight_worker (test_hpc_solver_options.HeadlessSolverOptionsTests.test_freddy_coating_bor_tight_worker) ... ok
+test_invalid_options_fail_before_bundle_creation (test_hpc_solver_options.HeadlessSolverOptionsTests.test_invalid_options_fail_before_bundle_creation) ... ok
+test_thin_dielectric_2d_mixed_survey_worker (test_hpc_solver_options.HeadlessSolverOptionsTests.test_thin_dielectric_2d_mixed_survey_worker) ... ok
+test_configuration_preserves_source_and_worker_fingerprint (test_driver_config.DriverConfigurationTests.test_configuration_preserves_source_and_worker_fingerprint) ... ok
+test_desktop_recipe_maps_without_losing_unsupported_options (test_driver_config.DriverConfigurationTests.test_desktop_recipe_maps_without_losing_unsupported_options) ... ok
+test_explicit_configuration_overrides_adjacent_path_and_rejects_wrong_solver (test_driver_config.DriverConfigurationTests.test_explicit_configuration_overrides_adjacent_path_and_rejects_wrong_solver) ... ok
+test_invalid_settings_fail_before_creating_driver (test_driver_config.DriverConfigurationTests.test_invalid_settings_fail_before_creating_driver) ... ok
+test_cancellation_between_batches_restores_state (test_experimental_cpu.ExperimentalCPU.test_cancellation_between_batches_restores_state) ... ok
+test_certification_and_frequency_dispatch (test_experimental_cpu.ExperimentalCPU.test_certification_and_frequency_dispatch) ... ok
+test_concurrent_reference_and_experimental_are_isolated (test_experimental_cpu.ExperimentalCPU.test_concurrent_reference_and_experimental_are_isolated) ... ok
+test_cpu_only_and_precision_conflict (test_experimental_cpu.ExperimentalCPU.test_cpu_only_and_precision_conflict) ... ok
+test_material_and_pec_fields_all_angles (test_experimental_cpu.ExperimentalCPU.test_material_and_pec_fields_all_angles) ... ok
+test_memory_and_quality_gates_still_reject (test_experimental_cpu.ExperimentalCPU.test_memory_and_quality_gates_still_reject) ... ok
+test_memory_estimate_accounts_for_common_batches (test_experimental_cpu.ExperimentalCPU.test_memory_estimate_accounts_for_common_batches) ... ok
+test_sheet_uses_common_streamed_solver (test_experimental_cpu.ExperimentalCPU.test_sheet_uses_common_streamed_solver) ... ok
+test_table_accuracy_and_forced_rejection (test_experimental_cpu.ExperimentalCPU.test_table_accuracy_and_forced_rejection) ... ok
+test_hpc_bundle_worker_export_and_resume (test_experimental_headless.ExperimentalHeadless.test_hpc_bundle_worker_export_and_resume) ... ok
+test_local_configured_worker_and_export (test_experimental_headless.ExperimentalHeadless.test_local_configured_worker_and_export) ... ok
+test_saved_recipe_and_conflicts (test_experimental_headless.ExperimentalHeadless.test_saved_recipe_and_conflicts) ... ok
+test_compressed_gui_admits_fine_mesh_above_legacy_panel_cap (test_experimental_gui.ExperimentalGUI.test_compressed_gui_admits_fine_mesh_above_legacy_panel_cap) ... ok
+test_selection_and_recipe_roundtrip (test_experimental_gui.ExperimentalGUI.test_selection_and_recipe_roundtrip) ... ok
+test_worker_returns_experimental_both_channel_fields (test_experimental_gui.ExperimentalGUI.test_worker_returns_experimental_both_channel_fields) ... ok
+test_bistatic_and_multiple_frequency_grids (test_compressed_path.CompressedPathTests.test_bistatic_and_multiple_frequency_grids) ... ok
+test_boundary_density_cancellation_reaches_compressed_assembly (test_compressed_path.CompressedPathTests.test_boundary_density_cancellation_reaches_compressed_assembly) ... ok
+test_boundary_density_diagnostics_match_dense_without_dense_factor_or_farfield (test_compressed_path.CompressedPathTests.test_boundary_density_diagnostics_match_dense_without_dense_factor_or_farfield) ... ok
+test_bounded_gmres_repairs_stalled_corrections (test_compressed_path.CompressedPathTests.test_bounded_gmres_repairs_stalled_corrections) ... ok
+test_budget_changes_invalidate_provenance (test_compressed_path.CompressedPathTests.test_budget_changes_invalidate_provenance) ... ok
+test_failed_quality_gate_removes_pending_polarization (test_compressed_path.CompressedPathTests.test_failed_quality_gate_removes_pending_polarization) ... ok
+test_inverse_transposes_conditions_and_physical_sweep (test_compressed_path.CompressedPathTests.test_inverse_transposes_conditions_and_physical_sweep) ... ok
+test_large_inverse_block_checks_respect_query_workspace_cap (test_compressed_path.CompressedPathTests.test_large_inverse_block_checks_respect_query_workspace_cap) ... ok
+test_loss_envelopes_bound_reference_kernels (test_compressed_path.CompressedPathTests.test_loss_envelopes_bound_reference_kernels) ... ok
+test_mixed_precision_is_rejected_before_assembly (test_compressed_path.CompressedPathTests.test_mixed_precision_is_rejected_before_assembly) ... ok
+test_more_than_512_angles_stream_and_match_dense (test_compressed_path.CompressedPathTests.test_more_than_512_angles_stream_and_match_dense) ... ok
+test_operator_adjoint_error_bounds_and_equilibration (test_compressed_path.CompressedPathTests.test_operator_adjoint_error_bounds_and_equilibration) ... ok
+test_pair_failure_and_interrupted_load_remove_owned_spools (test_compressed_path.CompressedPathTests.test_pair_failure_and_interrupted_load_remove_owned_spools) ... ok
+test_public_mesh_certificate_and_no_global_dense_factor (test_compressed_path.CompressedPathTests.test_public_mesh_certificate_and_no_global_dense_factor) ... ok
+test_singular_system_rejects_without_dense_global_fallback (test_compressed_path.CompressedPathTests.test_singular_system_rejects_without_dense_global_fallback) ... ok
+test_spool_close_error_still_removes_file (test_compressed_path.CompressedPathTests.test_spool_close_error_still_removes_file) ... ok
+test_spool_is_removed_and_requires_load (test_compressed_path.CompressedPathTests.test_spool_is_removed_and_requires_load) ... ok
+test_storage_cancellation_and_invalid_rhs_reject (test_compressed_path.CompressedPathTests.test_storage_cancellation_and_invalid_rhs_reject) ... ok
+test_explicit_large_kernel_tiles_are_accounted_for (test_compressed_memory.CompressedMemoryTests.test_explicit_large_kernel_tiles_are_accounted_for) ... ok
+test_invalid_sample_rejects_before_unchecked_lapack (test_compressed_memory.CompressedMemoryTests.test_invalid_sample_rejects_before_unchecked_lapack) ... ok
+test_inverse_ceiling_covers_real_tree_storage (test_compressed_memory.CompressedMemoryTests.test_inverse_ceiling_covers_real_tree_storage) ... ok
+test_safety_multiplier_only_changes_uncertain_operator_storage (test_compressed_memory.CompressedMemoryTests.test_safety_multiplier_only_changes_uncertain_operator_storage) ... ok
+test_samples_match_known_compressed_storage_without_full_matrix_queries (test_compressed_memory.CompressedMemoryTests.test_samples_match_known_compressed_storage_without_full_matrix_queries) ... ok
+test_sampling_cancellation_and_metadata_cache_have_no_retained_operators (test_compressed_memory.CompressedMemoryTests.test_sampling_cancellation_and_metadata_cache_have_no_retained_operators) ... ok
+test_scheduler_exposes_disk_capacity_and_ram_separately (test_compressed_memory.CompressedMemoryTests.test_scheduler_exposes_disk_capacity_and_ram_separately) ... ok
+test_single_angle_uses_one_rhs_column_and_sweep_batch_is_bounded (test_compressed_memory.CompressedMemoryTests.test_single_angle_uses_one_rhs_column_and_sweep_batch_is_bounded) ... ok
+test_solver_admission_does_not_reject_only_because_payload_cap_is_large (test_compressed_memory.CompressedMemoryTests.test_solver_admission_does_not_reject_only_because_payload_cap_is_large) ... ok
+test_thin_strip_tile_metadata_is_not_mistaken_for_disk_payload (test_compressed_memory.CompressedMemoryTests.test_thin_strip_tile_metadata_is_not_mistaken_for_disk_payload) ... ok
+test_unused_capacity_and_spooled_payload_are_not_resident_ram (test_compressed_memory.CompressedMemoryTests.test_unused_capacity_and_spooled_payload_are_not_resident_ram) ... ok
+test_all_zero_first_batch_keeps_factor_diagnostics (test_solver_efficiency.SolverEfficiencyTests.test_all_zero_first_batch_keeps_factor_diagnostics) ... ok
+test_complex_frobenius_norm_handles_layouts (test_solver_efficiency.SolverEfficiencyTests.test_complex_frobenius_norm_handles_layouts) ... ok
+test_hierarchical_geometry_and_rejected_workspace_release_before_lu (test_solver_efficiency.SolverEfficiencyTests.test_hierarchical_geometry_and_rejected_workspace_release_before_lu) ... ok
+test_norm_layouts_match_numpy_with_bounded_blocks (test_solver_efficiency.SolverEfficiencyTests.test_norm_layouts_match_numpy_with_bounded_blocks) ... ok
+test_operator_destinations_preserve_strided_storage_and_accumulation (test_solver_efficiency.SolverEfficiencyTests.test_operator_destinations_preserve_strided_storage_and_accumulation) ... ok
+test_partial_joint_table_uses_exact_out_of_domain_values (test_solver_efficiency.SolverEfficiencyTests.test_partial_joint_table_uses_exact_out_of_domain_values) ... ok
+test_positional_destination_is_never_frozen_by_operator_cache (test_solver_efficiency.SolverEfficiencyTests.test_positional_destination_is_never_frozen_by_operator_cache) ... ok
+test_prepared_geometry_matches_queries_and_rejects_other_mesh (test_solver_efficiency.SolverEfficiencyTests.test_prepared_geometry_matches_queries_and_rejects_other_mesh) ... ok
+test_rejected_kernel_workspace_released_before_degree_retry (test_solver_efficiency.SolverEfficiencyTests.test_rejected_kernel_workspace_released_before_degree_retry) ... ok
+test_residual_evidence_is_exact_and_not_retained (test_solver_efficiency.SolverEfficiencyTests.test_residual_evidence_is_exact_and_not_retained) ... ok
+test_shared_basis_extends_and_repairs_only_failed_columns (test_solver_efficiency.SolverEfficiencyTests.test_shared_basis_extends_and_repairs_only_failed_columns) ... ERROR
+test_sweep_state_cannot_reuse_another_factor_or_retain_it (test_solver_efficiency.SolverEfficiencyTests.test_sweep_state_cannot_reuse_another_factor_or_retain_it) ... ERROR
+test_certification_keeps_both_mesh_checks_and_reports_all_factors (test_solver_matrix_pipeline.MatrixPipelineTests.test_certification_keeps_both_mesh_checks_and_reports_all_factors) ... ok
+test_cpu_sweep_has_one_factor_per_channel_and_bounded_columns (test_solver_matrix_pipeline.MatrixPipelineTests.test_cpu_sweep_has_one_factor_per_channel_and_bounded_columns) ... ok
+test_default_cpu_cancels_between_batches_and_releases_pending_system (test_solver_matrix_pipeline.MatrixPipelineTests.test_default_cpu_cancels_between_batches_and_releases_pending_system) ... ok
+test_density_export_skips_far_field_and_uses_checked_solve (test_solver_matrix_pipeline.MatrixPipelineTests.test_density_export_skips_far_field_and_uses_checked_solve) ... ok
+test_factor_fallback_releases_mixed_lu_before_allocating_double (test_solver_matrix_pipeline.MatrixPipelineTests.test_factor_fallback_releases_mixed_lu_before_allocating_double) ... ok
+test_multifrequency_bistatic_preserves_grid (test_solver_matrix_pipeline.MatrixPipelineTests.test_multifrequency_bistatic_preserves_grid) ... ok
+test_no_dense_mass_and_no_operator_copies_survive_factorization (test_solver_matrix_pipeline.MatrixPipelineTests.test_no_dense_mass_and_no_operator_copies_survive_factorization) ... ok
+test_reuse_is_scoped_to_matching_materials_mesh_and_rules (test_solver_matrix_pipeline.MatrixPipelineTests.test_reuse_is_scoped_to_matching_materials_mesh_and_rules) ... ok
+test_reused_multi_coefficients_match_fresh_assembly (test_solver_matrix_pipeline.MatrixPipelineTests.test_reused_multi_coefficients_match_fresh_assembly) ... ok
+test_sparse_mass_matches_dense_weighted_mass (test_solver_matrix_pipeline.MatrixPipelineTests.test_sparse_mass_matches_dense_weighted_mass) ... ok
+test_coarse_construction_rejection_releases_work_before_retry (test_solver_compression.SolverCompressionTests.test_coarse_construction_rejection_releases_work_before_retry) ... ok
+test_coarse_inverse_rebuild_releases_tree_and_preserves_exact_gate (test_solver_compression.SolverCompressionTests.test_coarse_inverse_rebuild_releases_tree_and_preserves_exact_gate) ... ok
+test_compressed_and_full_complex_fields_all_boundary_families (test_solver_compression.SolverCompressionTests.test_compressed_and_full_complex_fields_all_boundary_families) ... ok
+test_compression_settings_are_part_of_runtime_provenance (test_solver_compression.SolverCompressionTests.test_compression_settings_are_part_of_runtime_provenance) ... ok
+test_direct_scatter_matches_independent_operator_system (test_solver_compression.SolverCompressionTests.test_direct_scatter_matches_independent_operator_system) ... ok
+test_hierarchical_input_validation_does_not_trigger_rebuild (test_solver_compression.SolverCompressionTests.test_hierarchical_input_validation_does_not_trigger_rebuild) ... ok
+test_hierarchical_inverse_and_adjoint_match_dense (test_solver_compression.SolverCompressionTests.test_hierarchical_inverse_and_adjoint_match_dense) ... ok
+test_memory_estimate_preserves_auto_fallback_and_strict_savings (test_solver_compression.SolverCompressionTests.test_memory_estimate_preserves_auto_fallback_and_strict_savings) ... FAIL
+test_rejected_hierarchy_is_freed_before_dense_fallback (test_solver_compression.SolverCompressionTests.test_rejected_hierarchy_is_freed_before_dense_fallback) ... ok
+test_strict_hierarchy_rejects_without_full_lu (test_solver_compression.SolverCompressionTests.test_strict_hierarchy_rejects_without_full_lu) ... ok
+test_sweep_rank_reconstruction_and_qr_failure_fallback (test_solver_compression.SolverCompressionTests.test_sweep_rank_reconstruction_and_qr_failure_fallback) ... ERROR
+test_uncompressible_block_and_cancellation_stop_construction (test_solver_compression.SolverCompressionTests.test_uncompressible_block_and_cancellation_stop_construction) ... ok
+test_zero_contrast_layer_skips_operators_and_factorization (test_solver_compression.SolverCompressionTests.test_zero_contrast_layer_skips_operators_and_factorization) ... ok
+test_2d_subtraction_and_line_loading_accept_external_annotations (test_metadata_interoperability.MetadataInteropTests.test_2d_subtraction_and_line_loading_accept_external_annotations) ... ok
+test_bad_annotation_cannot_mask_inconsistent_numerical_fields (test_metadata_interoperability.MetadataInteropTests.test_bad_annotation_cannot_mask_inconsistent_numerical_fields) ... ok
+test_bor_body_and_point_build_without_certificates_or_convention_tags (test_metadata_interoperability.MetadataInteropTests.test_bor_body_and_point_build_without_certificates_or_convention_tags) ... ok
+test_external_formats_subtract_without_ghost_annotations (test_metadata_interoperability.MetadataInteropTests.test_external_formats_subtract_without_ghost_annotations) ... ok
+test_stale_raw_flag_and_solver_annotation_do_not_block_read_or_save (test_metadata_interoperability.MetadataInteropTests.test_stale_raw_flag_and_solver_annotation_do_not_block_read_or_save) ... ok
+test_bor_binding_checks_facet_interiors_not_only_vertices (test_feature_workflow.ApplicabilityGeometryTests.test_bor_binding_checks_facet_interiors_not_only_vertices) ... ok
+test_line_metrics_use_solver_frame_and_exact_normal_turn_radius (test_feature_workflow.ApplicabilityGeometryTests.test_line_metrics_use_solver_frame_and_exact_normal_turn_radius) ... ok
+test_line_vertex_normal_jump_and_path_turn_are_explicit (test_feature_workflow.ApplicabilityGeometryTests.test_line_vertex_normal_jump_and_path_turn_are_explicit) ... ok
+test_near_retrace_is_nonlocal_but_ordinary_corner_is_not (test_feature_workflow.ApplicabilityGeometryTests.test_near_retrace_is_nonlocal_but_ordinary_corner_is_not) ... ok
+test_one_line_cannot_fold_back_inside_its_own_footprint (test_feature_workflow.ApplicabilityGeometryTests.test_one_line_cannot_fold_back_inside_its_own_footprint) ... ok
+test_point_support_checks_installed_lit_elevation (test_feature_workflow.ApplicabilityGeometryTests.test_point_support_checks_installed_lit_elevation) ... ok
+test_point_support_requires_every_exact_frequency (test_feature_workflow.ApplicabilityGeometryTests.test_point_support_requires_every_exact_frequency) ... ok
+test_zero_illumination_is_recorded_and_warned_for_points_and_lines (test_feature_workflow.ApplicabilityGeometryTests.test_zero_illumination_is_recorded_and_warned_for_points_and_lines) ... ok
+test_source_change_during_execution_preserves_existing_output (test_feature_workflow.AtomicSourceSnapshotTests.test_source_change_during_execution_preserves_existing_output) ... ok
+test_unchanged_prepared_source_snapshot_publishes (test_feature_workflow.AtomicSourceSnapshotTests.test_unchanged_prepared_source_snapshot_publishes) ... ok
+test_csv_error_report_is_bounded_and_counts_omitted_errors (test_feature_workflow.DatasetDiscoveryTests.test_csv_error_report_is_bounded_and_counts_omitted_errors) ... ok
+test_discovers_first_use_order_from_both_strict_csvs (test_feature_workflow.DatasetDiscoveryTests.test_discovers_first_use_order_from_both_strict_csvs) ... ok
+test_discovery_enforces_the_exact_schema (test_feature_workflow.DatasetDiscoveryTests.test_discovery_enforces_the_exact_schema) ... ok
+test_line_csv_aggregates_errors_without_index_cascade (test_feature_workflow.DatasetDiscoveryTests.test_line_csv_aggregates_errors_without_index_cascade) ... ok
+test_point_csv_reports_independent_bad_rows_together (test_feature_workflow.DatasetDiscoveryTests.test_point_csv_reports_independent_bad_rows_together) ... ok
+test_canonical_opn_frd_roles_fail_before_point_or_line_bypass (test_feature_workflow.DeclaredDeltaResponseRoleTests.test_canonical_opn_frd_roles_fail_before_point_or_line_bypass) ... ok
+test_role_free_canonical_and_gui_deltas_are_classified (test_feature_workflow.DeclaredDeltaResponseRoleTests.test_role_free_canonical_and_gui_deltas_are_classified) ... ok
+test_unknown_explicit_domain_cannot_be_overridden (test_feature_workflow.DeclaredDeltaResponseRoleTests.test_unknown_explicit_domain_cannot_be_overridden) ... ok
+test_high_tolerance_cannot_admit_non_outward_normals (test_feature_workflow.PlacementSafetyTests.test_high_tolerance_cannot_admit_non_outward_normals) ... ok
+test_triangle_surface_reuses_one_nearest_query_per_point_set (test_feature_workflow.PlacementSafetyTests.test_triangle_surface_reuses_one_nearest_query_per_point_set) ... ok
+test_4500_mm_surface_preview_is_interpreted_as_4_5_m (test_feature_workflow.RequestPlanTests.test_4500_mm_surface_preview_is_interpreted_as_4_5_m) ... ok
+test_all_disabled_request_prepares_without_response_loading (test_feature_workflow.RequestPlanTests.test_all_disabled_request_prepares_without_response_loading) ... ok
+test_capacity_rejection_precedes_execution_snapshot (test_feature_workflow.RequestPlanTests.test_capacity_rejection_precedes_execution_snapshot) ... ok
+test_changed_active_line_response_after_prepare_cannot_publish_output (test_feature_workflow.RequestPlanTests.test_changed_active_line_response_after_prepare_cannot_publish_output) ... ok
+test_changed_base_after_prepare_cannot_publish_output (test_feature_workflow.RequestPlanTests.test_changed_base_after_prepare_cannot_publish_output) ... ok
+test_changed_prepared_geometry_requires_revalidation (test_feature_workflow.RequestPlanTests.test_changed_prepared_geometry_requires_revalidation) ... ok
+test_changed_spatial_csv_after_prepare_cannot_publish_output (test_feature_workflow.RequestPlanTests.test_changed_spatial_csv_after_prepare_cannot_publish_output) ... ok
+test_disabled_dataset_mapping_is_not_loaded_or_hashed (test_feature_workflow.RequestPlanTests.test_disabled_dataset_mapping_is_not_loaded_or_hashed) ... ok
+test_disabled_line_mapping_is_not_loaded_or_hashed (test_feature_workflow.RequestPlanTests.test_disabled_line_mapping_is_not_loaded_or_hashed) ... ok
+test_disabled_physically_invalid_rows_do_not_block_trade_study (test_feature_workflow.RequestPlanTests.test_disabled_physically_invalid_rows_do_not_block_trade_study) ... ok
+test_embedded_body_without_external_mesh_has_no_shadow_off_warning (test_feature_workflow.RequestPlanTests.test_embedded_body_without_external_mesh_has_no_shadow_off_warning) ... ok
+test_enabled_snapshot_filters_preview_after_strict_parsing (test_feature_workflow.RequestPlanTests.test_enabled_snapshot_filters_preview_after_strict_parsing) ... ok
+test_execute_rechecks_output_alias_created_after_prepare (test_feature_workflow.RequestPlanTests.test_execute_rechecks_output_alias_created_after_prepare) ... ok
+test_external_body_certificate_error_identifies_optional_profile_and_cause (test_feature_workflow.RequestPlanTests.test_external_body_certificate_error_identifies_optional_profile_and_cause) ... ok
+test_feature_only_sibling_must_not_overwrite_clean_base (test_feature_workflow.RequestPlanTests.test_feature_only_sibling_must_not_overwrite_clean_base) ... ok
+test_feature_plan_preserves_original_positional_field_layout (test_feature_workflow.RequestPlanTests.test_feature_plan_preserves_original_positional_field_layout) ... ok
+test_input_preview_captures_invalid_vectors_without_validating_them (test_feature_workflow.RequestPlanTests.test_input_preview_captures_invalid_vectors_without_validating_them) ... ok
+test_input_preview_needs_no_output_or_response_mapping (test_feature_workflow.RequestPlanTests.test_input_preview_needs_no_output_or_response_mapping) ... FAIL
+test_input_preview_uses_embedded_bor_profile_without_mesh (test_feature_workflow.RequestPlanTests.test_input_preview_uses_embedded_bor_profile_without_mesh) ... ok
+test_large_workload_warning_requires_exact_sealed_plan_acknowledgement (test_feature_workflow.RequestPlanTests.test_large_workload_warning_requires_exact_sealed_plan_acknowledgement) ... ok
+test_line_csv_mutated_after_parse_fails_prepare_snapshot (test_feature_workflow.RequestPlanTests.test_line_csv_mutated_after_parse_fails_prepare_snapshot) ... ok
+test_mapping_must_resolve_every_csv_dataset_id (test_feature_workflow.RequestPlanTests.test_mapping_must_resolve_every_csv_dataset_id) ... ok
+test_output_must_not_overwrite_a_mapped_response (test_feature_workflow.RequestPlanTests.test_output_must_not_overwrite_a_mapped_response) ... ok
+test_output_must_not_overwrite_clean_base (test_feature_workflow.RequestPlanTests.test_output_must_not_overwrite_clean_base) ... ok
+test_physical_units_are_unset_and_required_only_for_selected_inputs (test_feature_workflow.RequestPlanTests.test_physical_units_are_unset_and_required_only_for_selected_inputs) ... ok
+test_plan_carries_full_cad_preview_geometry_in_meters (test_feature_workflow.RequestPlanTests.test_plan_carries_full_cad_preview_geometry_in_meters) ... ERROR
+test_prepare_and_execute_reuse_the_physics_entry_point (test_feature_workflow.RequestPlanTests.test_prepare_and_execute_reuse_the_physics_entry_point) ... ok
+test_prepared_large_workload_warning_is_part_of_sealed_plan (test_feature_workflow.RequestPlanTests.test_prepared_large_workload_warning_is_part_of_sealed_plan) ... ok
+test_progress_callback_cannot_mutate_private_execution_snapshot (test_feature_workflow.RequestPlanTests.test_progress_callback_cannot_mutate_private_execution_snapshot) ... ok
+test_requested_body_certificate_failure_stops_before_physics (test_feature_workflow.RequestPlanTests.test_requested_body_certificate_failure_stops_before_physics) ... ok
+test_requested_body_certificate_is_authoritative_and_recorded (test_feature_workflow.RequestPlanTests.test_requested_body_certificate_is_authoritative_and_recorded) ... ok
+test_selected_mesh_with_shadow_off_requires_release_warning_waiver (test_feature_workflow.RequestPlanTests.test_selected_mesh_with_shadow_off_requires_release_warning_waiver) ... ok
+test_surface_mutated_while_reading_fails_prepare_snapshot (test_feature_workflow.RequestPlanTests.test_surface_mutated_while_reading_fails_prepare_snapshot) ... ok
+
+======================================================================
+ERROR: test_shared_basis_extends_and_repairs_only_failed_columns (test_solver_efficiency.SolverEfficiencyTests.test_shared_basis_extends_and_repairs_only_failed_columns)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\tests\test_solver_efficiency.py", line 141, in test_shared_basis_extends_and_repairs_only_failed_columns
+    initial = factor.event['ghost_backend.linalg.sweep']['solved_columns']
+              ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyError: 'ghost_backend.linalg.sweep'
+
+======================================================================
+ERROR: test_sweep_state_cannot_reuse_another_factor_or_retain_it (test_solver_efficiency.SolverEfficiencyTests.test_sweep_state_cannot_reuse_another_factor_or_retain_it)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\tests\test_solver_efficiency.py", line 60, in test_sweep_state_cannot_reuse_another_factor_or_retain_it
+    self.assertEqual(second.event['ghost_backend.linalg.sweep']['fallback_columns'], 0)
+                     ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyError: 'ghost_backend.linalg.sweep'
+
+======================================================================
+ERROR: test_sweep_rank_reconstruction_and_qr_failure_fallback (test_solver_compression.SolverCompressionTests.test_sweep_rank_reconstruction_and_qr_failure_fallback)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\tests\test_solver_compression.py", line 133, in test_sweep_rank_reconstruction_and_qr_failure_fallback
+    event = factor.event['ghost_backend.linalg.sweep']
+            ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyError: 'ghost_backend.linalg.sweep'
+
+======================================================================
+ERROR: test_plan_carries_full_cad_preview_geometry_in_meters (test_feature_workflow.RequestPlanTests.test_plan_carries_full_cad_preview_geometry_in_meters)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\tests\test_feature_workflow.py", line 1488, in test_plan_carries_full_cad_preview_geometry_in_meters
+    input_sources[role],
+    ~~~~~~~~~~~~~^^^^^^
+KeyError: 'ghost_backend.geometry.surface'
+
+======================================================================
+FAIL: test_create_is_relative_complete_and_self_documenting (test_hpc_bundle.PortableBundleTests.test_create_is_relative_complete_and_self_documenting)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\tests\test_hpc_bundle.py", line 304, in test_create_is_relative_complete_and_self_documenting
+    self.assertIn("ghost_backend/hpc/bundle.py stage", readme)
+AssertionError: 'ghost_backend/hpc/bundle.py stage' not found in 'GRIM / GHOST portable HPC request\n=================================\n\nThis folder is a declarative request, not a completed HPC run. It has\nno Windows paths or Windows solver/runtime provenance. Keep the whole\nfolder together when uploading it to the Linux login node.\n\nFrom the Linux login node, with the matching GHOST checkout available,\nthe one-command submit form is:\n\n  python3 /path/to/GHOST/Backend/hpc_bundle.py stage /path/to/THIS_FOLDER --workspace-root /scratch/$USER/grim --run-driver --submit\n\nReplace both example paths for your cluster. Omit --submit to build the\nrun folder and SLURM scripts without calling sbatch. Omit --run-driver\nas well to verify and stage inputs only. The command prints one JSON\nobject containing the stage path, run path, log path, and any detected\nSLURM job IDs. Compute jobs continue after the SSH session closes.\n\nDo not edit request.json or payload files after export; the Linux\nstager verifies their exact sizes and SHA-256 hashes.\n'
+
+======================================================================
+FAIL: test_memory_estimate_preserves_auto_fallback_and_strict_savings (test_solver_compression.SolverCompressionTests.test_memory_estimate_preserves_auto_fallback_and_strict_savings)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\tests\test_solver_compression.py", line 182, in test_memory_estimate_preserves_auto_fallback_and_strict_savings
+    self.assertLess(rcs._estimate_memory_gb(**args), dense)
+AssertionError: 10.040332794189453 not less than 10.040332794189453
+
+======================================================================
+FAIL: test_input_preview_needs_no_output_or_response_mapping (test_feature_workflow.RequestPlanTests.test_input_preview_needs_no_output_or_response_mapping)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\tests\test_feature_workflow.py", line 914, in test_input_preview_needs_no_output_or_response_mapping
+    self.assertEqual(preview.body_source, "ghost_backend.geometry.surface")
+AssertionError: 'surface_mesh' != 'ghost_backend.geometry.surface'
+- surface_mesh
++ ghost_backend.geometry.surface
+
+
+----------------------------------------------------------------------
+Ran 197 tests in 95.904s
+
+FAILED (failures=3, errors=4)
+ResourceWarning: gc: 1 uncollectable objects at shutdown; use gc.set_debug(gc.DEBUG_UNCOLLECTABLE) to list them

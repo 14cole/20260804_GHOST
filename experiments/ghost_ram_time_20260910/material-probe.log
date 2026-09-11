@@ -1,0 +1,46 @@
+TE 384 captured
+TM 384 captured
+pec complete
+TE 384 captured
+TM 384 captured
+ibc complete
+TE 768 captured
+TM 768 captured
+pec_ibc complete
+TE 768 captured
+TM 768 captured
+lossless complete
+TE 768 captured
+TM 768 captured
+lossy complete
+TE 768 captured
+TM 768 captured
+magnetic complete
+TE 1152 captured
+TM 1152 captured
+coated complete
+TE 1536 captured
+TM 1536 captured
+layered complete
+TE 1152 captured
+TM 1152 captured
+mixed complete
+TE 385 captured
+TM 385 captured
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\experiments\ghost_ram_time_20260910\material_probe.py:27: RuntimeWarning: invalid value encountered in divide
+  original_backward=float(np.max(np.max(abs(a@got-b),axis=0)/den)))
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\experiments\ghost_ram_time_20260910\material_probe.py:27: RuntimeWarning: invalid value encountered in divide
+  original_backward=float(np.max(np.max(abs(a@got-b),axis=0)/den)))
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\experiments\ghost_ram_time_20260910\material_probe.py:52: RuntimeWarning: invalid value encountered in divide
+  bound=(np.max(abs(compressed.apply(got)-b),axis=0)+compressed.row_error.max()*np.max(abs(got),axis=0))/den
+sheet complete
+TE 769 captured
+TM 769 captured
+mixed_sheet complete
+TE 770 captured
+TM 385 captured
+thin complete
+TE 770 captured
+TM 770 captured
+thin_magnetic complete
+transparent complete

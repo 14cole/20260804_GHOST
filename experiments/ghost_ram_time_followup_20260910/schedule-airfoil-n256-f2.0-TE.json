@@ -1,0 +1,96 @@
+{
+  "folder": "airfoil-n256-f2.0",
+  "pol": "TE",
+  "n": 5742,
+  "a_bytes": 527529024,
+  "methods": [
+    {
+      "name": "periodic",
+      "tolerance": 1e-12,
+      "evidence": {
+        "bytes": 155885824,
+        "max_rank": 120,
+        "leaves": 53,
+        "accesses": 403564726,
+        "oracle_calls": 23357,
+        "max_query_entries": 91872,
+        "relative_inf_error_bound": 5.950565133912341e-13,
+        "relative_one_error_bound": 1.9181036962797845e-12
+      },
+      "field_error": 2.3151165146317768e-11,
+      "backward": 6.9826521932566e-14,
+      "bound": 5.976359443229262e-13,
+      "build_runs": [
+        5.574972500000513,
+        5.506002699999954
+      ],
+      "build_median": 5.540487600000233
+    },
+    {
+      "name": "deferred",
+      "tolerance": 1e-12,
+      "evidence": {
+        "bytes": 155541720,
+        "max_rank": 120,
+        "leaves": 54,
+        "accesses": 227741760,
+        "oracle_calls": 18661,
+        "max_query_entries": 91872,
+        "relative_inf_error_bound": 5.129136019574429e-13,
+        "relative_one_error_bound": 1.0794646372547587e-12
+      },
+      "field_error": 2.1470242156221284e-11,
+      "backward": 7.42820206178572e-14,
+      "bound": 5.155404892860387e-13,
+      "build_runs": [
+        3.5869425000000774,
+        3.608792999999423
+      ],
+      "build_median": 3.5978677499997502
+    },
+    {
+      "name": "periodic",
+      "tolerance": 1e-13,
+      "evidence": {
+        "bytes": 165328560,
+        "max_rank": 129,
+        "leaves": 52,
+        "accesses": 369942509,
+        "oracle_calls": 23540,
+        "max_query_entries": 91872,
+        "relative_inf_error_bound": 8.90498315142291e-14,
+        "relative_one_error_bound": 1.7449637403032707e-13
+      },
+      "field_error": 1.7275922062203951e-12,
+      "backward": 1.5584107060998563e-14,
+      "bound": 9.193352615395444e-14,
+      "build_runs": [
+        5.165395999998509,
+        5.100782499999696
+      ],
+      "build_median": 5.133089249999102
+    },
+    {
+      "name": "deferred",
+      "tolerance": 1e-13,
+      "evidence": {
+        "bytes": 165234152,
+        "max_rank": 128,
+        "leaves": 52,
+        "accesses": 187985710,
+        "oracle_calls": 18696,
+        "max_query_entries": 91872,
+        "relative_inf_error_bound": 8.090837397030323e-14,
+        "relative_one_error_bound": 1.9517801047633693e-13
+      },
+      "field_error": 1.6645718030013282e-12,
+      "backward": 1.2053790952730969e-14,
+      "bound": 8.395161558117972e-14,
+      "build_runs": [
+        3.0467547999996896,
+        3.1176293000007718
+      ],
+      "build_median": 3.0821920500002307
+    }
+  ]
+}

@@ -1,0 +1,200 @@
+[
+  {
+    "frequency_ghz": 1,
+    "k": [
+      420.85,
+      -204.63
+    ],
+    "original_table": {
+      "k_real": 420.85,
+      "k_imag": -204.63,
+      "degree": 16,
+      "intervals": 247,
+      "bytes": 136352,
+      "check_points": 18772,
+      "max_check_relative": 3.862390785335116e-14,
+      "max_tail_relative": 2.026502323629177e-14,
+      "tolerance": 2e-13,
+      "build_seconds": 0.015084599999681814
+    },
+    "partial_table": {
+      "k_real": 420.85,
+      "k_imag": -204.63,
+      "degree": 16,
+      "intervals": 247,
+      "bytes": 136352,
+      "check_points": 18772,
+      "max_check_relative": 3.862390785335116e-14,
+      "max_tail_relative": 2.026502323629177e-14,
+      "tolerance": 2e-13,
+      "build_seconds": 0.014445400000113295,
+      "requested_upper": 0.31,
+      "table_upper": 0.31
+    },
+    "full_timing": {
+      "median": 0.09220780000032391,
+      "runs": [
+        0.09272749999945518,
+        0.09220780000032391,
+        0.09052929999961634,
+        0.09260940000058326,
+        0.09194790000037756
+      ]
+    },
+    "partial_timing": {
+      "median": 0.029864599999200436,
+      "runs": [
+        0.030234899999413756,
+        0.029945000000225264,
+        0.02933090000078664,
+        0.029261600000609178,
+        0.029864599999200436
+      ]
+    },
+    "relative_error": 3.959981794593088e-14,
+    "exact_fraction": 0.0
+  },
+  {
+    "frequency_ghz": 2,
+    "k": [
+      841.7,
+      -409.26
+    ],
+    "original_table": {
+      "k_real": 841.7,
+      "k_imag": -409.26,
+      "degree": 16,
+      "intervals": 389,
+      "bytes": 214736,
+      "check_points": 29564,
+      "max_check_relative": 7.786924422639106e-14,
+      "max_tail_relative": 3.105473166503236e-14,
+      "tolerance": 2e-13,
+      "build_seconds": 0.02108059999955003
+    },
+    "partial_table": {
+      "k_real": 841.7,
+      "k_imag": -409.26,
+      "degree": 16,
+      "intervals": 389,
+      "bytes": 214736,
+      "check_points": 29564,
+      "max_check_relative": 7.786924422639106e-14,
+      "max_tail_relative": 3.105473166503236e-14,
+      "tolerance": 2e-13,
+      "build_seconds": 0.021116500000061933,
+      "requested_upper": 0.31,
+      "table_upper": 0.31
+    },
+    "full_timing": {
+      "median": 0.08725090000007185,
+      "runs": [
+        0.08701469999869005,
+        0.08678210000107356,
+        0.08855580000090413,
+        0.08850540000094043,
+        0.08725090000007185
+      ]
+    },
+    "partial_timing": {
+      "median": 0.030963799999881303,
+      "runs": [
+        0.030740000000150758,
+        0.030911899999409798,
+        0.031137399999352056,
+        0.030963799999881303,
+        0.031026599999677273
+      ]
+    },
+    "relative_error": 8.249840290181627e-14,
+    "exact_fraction": 0.0
+  },
+  {
+    "frequency_ghz": 5,
+    "k": [
+      2104.25,
+      -1023.15
+    ],
+    "original_rejection": "Attenuation exceeds screened range",
+    "partial_table": {
+      "k_real": 2104.25,
+      "k_imag": -1023.15,
+      "degree": 16,
+      "intervals": 388,
+      "bytes": 214184,
+      "check_points": 29488,
+      "max_check_relative": 7.436037226060223e-14,
+      "max_tail_relative": 2.9822600676319066e-14,
+      "tolerance": 2e-13,
+      "build_seconds": 0.021026899999924353,
+      "requested_upper": 0.31,
+      "table_upper": 0.12510384596588967
+    },
+    "full_timing": {
+      "median": 0.08319049999954586,
+      "runs": [
+        0.08319049999954586,
+        0.082902500000273,
+        0.08374510000066948,
+        0.0845575999992434,
+        0.08280869999907736
+      ]
+    },
+    "partial_timing": {
+      "median": 0.06412079999972775,
+      "runs": [
+        0.06508730000132346,
+        0.06364480000047479,
+        0.06307340000057593,
+        0.06412079999972775,
+        0.06518119999964256
+      ]
+    },
+    "relative_error": 7.743426663454167e-14,
+    "exact_fraction": 0.5695619047619047
+  },
+  {
+    "frequency_ghz": 10,
+    "k": [
+      4208.5,
+      -2046.3
+    ],
+    "original_rejection": "Attenuation exceeds screened range",
+    "partial_table": {
+      "k_real": 4208.5,
+      "k_imag": -2046.3,
+      "degree": 16,
+      "intervals": 385,
+      "bytes": 212528,
+      "check_points": 29260,
+      "max_check_relative": 7.072920984000176e-14,
+      "max_tail_relative": 3.04017156748487e-14,
+      "tolerance": 2e-13,
+      "build_seconds": 0.02121639999859326,
+      "requested_upper": 0.31,
+      "table_upper": 0.06255192298294483
+    },
+    "full_timing": {
+      "median": 0.07998140000017884,
+      "runs": [
+        0.08052110000062385,
+        0.08019940000122006,
+        0.07968169999912789,
+        0.07980880000104662,
+        0.07998140000017884
+      ]
+    },
+    "partial_timing": {
+      "median": 0.0724577999990288,
+      "runs": [
+        0.07260820000010426,
+        0.07118629999968107,
+        0.07253769999988435,
+        0.0724577999990288,
+        0.07165309999982128
+      ]
+    },
+    "relative_error": 7.214971284992551e-14,
+    "exact_fraction": 0.7611761904761905
+  }
+]

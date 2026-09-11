@@ -1,0 +1,121 @@
+         8433659 function calls (8433426 primitive calls) in 19.788 seconds
+
+   Ordered by: cumulative time
+   List reduced from 1011 to 65 due to restriction <65>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000   19.790   19.790 common.py:54(public_solve)
+      3/1    0.000    0.000   19.789   19.789 solver_metrics.py:108(measured)
+      3/1    0.000    0.000   19.774   19.774 cpu_execution.py:108(call)
+        1    0.002    0.002   19.774   19.774 assembly_session.py:37(call)
+        1    0.000    0.000   19.771   19.771 rcs_solver.py:2974(solve_monostatic_rcs_2d)
+        2    0.012    0.006   19.770    9.885 rcs_solver.py:1736(solve_monostatic_rcs_2d_single_polarization)
+        2    0.008    0.004   19.558    9.779 rcs_solver.py:1721(_solve_multi_region_indirect)
+    31/19    0.003    0.000   19.328    1.017 solver_metrics.py:96(measured)
+        2    0.000    0.000   17.970    8.985 multi_region.py:346(assemble_system)
+        5    0.002    0.000   17.939    3.588 cpu_execution.py:137(call)
+        5    0.203    0.041   17.936    3.587 rcs_operators.py:1413(_assemble_linear_operator_matrices_multi)
+        1    0.003    0.003   15.793   15.793 system_scatter.py:75(assemble_multi)
+        5    0.011    0.002   11.444    2.289 rcs_operators.py:1339(_run_tiled_obs_blocks)
+       16    1.129    0.071   11.433    0.715 rcs_operators.py:1660(_far_pass)
+     3014    0.297    0.000    8.486    0.003 cpu_kernels.py:219(evaluate)
+     3018    0.005    0.000    8.177    0.003 _interpolate.py:1508(__call__)
+     3018    0.009    0.000    8.158    0.003 _interpolate.py:753(__call__)
+     3018    8.129    0.003    8.130    0.003 _interpolate.py:781(_evaluate)
+    15271    2.497    0.000    2.562    0.000 rcs_operators.py:697(_stable_hankel2_array)
+        8    0.193    0.024    2.468    0.309 rcs_operators.py:209(_integrate_linear_pairs_box_sk_batched)
+        1    0.009    0.009    2.167    2.167 multi_region.py:261(_reuse_te_system)
+    66002    0.045    0.000    2.008    0.000 compact_operators.py:70(scatter_operator_add)
+    66002    0.648    0.000    1.956    0.000 system_scatter.py:17(scatter_add)
+    11784    0.023    0.000    1.643    0.000 rcs_operators.py:803(_sk_blocks_near_linear)
+        2    0.002    0.001    1.577    0.789 boundary_fields.py:7(solve_fields)
+     8556    0.006    0.000    1.379    0.000 rcs_operators.py:734(_hankel2_0_array)
+     6715    0.004    0.000    1.193    0.000 rcs_operators.py:737(_hankel2_1_array)
+     7748    0.204    0.000    1.138    0.000 rcs_operators.py:471(_integrate_linear_touching_duffy_sk_vectorized)
+        2    0.000    0.000    0.818    0.409 dense_factor.py:9(__init__)
+   257277    0.488    0.000    0.775    0.000 _stride_tricks_impl.py:447(_broadcast_to)
+       22    0.000    0.000    0.750    0.034 _util.py:1102(wrapper)
+    19724    0.738    0.000    0.738    0.000 rcs_operators.py:1267(_axpy_into)
+    39792    0.159    0.000    0.661    0.000 rcs_operators.py:62(_linear_shared_interval_endpoint_info)
+        2    0.000    0.000    0.642    0.321 dense_factor.py:54(_factor_double)
+        2    0.642    0.321    0.642    0.321 _decomp_lu.py:19(lu_factor)
+        4    0.291    0.073    0.615    0.154 sweep_compression.py:15(solve)
+    66002    0.079    0.000    0.555    0.000 _stride_tricks_impl.py:588(broadcast_arrays)
+   181671    0.192    0.000    0.394    0.000 _linalg.py:2598(norm)
+   125273    0.028    0.000    0.387    0.000 _stride_tricks_impl.py:474(broadcast_to)
+    54950    0.314    0.000    0.314    0.000 {method 'at' of 'numpy.ufunc' objects}
+     5908    0.068    0.000    0.304    0.000 rcs_operators.py:746(_dgreen_dn_obs_array)
+     7748    0.037    0.000    0.303    0.000 rcs_operators.py:740(_green_2d_array)
+    15273    0.004    0.000    0.280    0.000 einsumfunc.py:1242(einsum)
+      360    0.278    0.001    0.278    0.001 rcs_operators.py:1289(_far_green_into)
+    15273    0.276    0.000    0.276    0.000 {built-in method numpy._core._multiarray_umath.c_einsum}
+      360    0.267    0.001    0.267    0.001 rcs_operators.py:1313(_far_hankel1_into)
+   159168    0.045    0.000    0.245    0.000 rcs_operators.py:44(_linear_interval_point)
+   159168    0.200    0.000    0.200    0.000 rcs_operators.py:41(_linear_param_to_point)
+     3876    0.002    0.000    0.189    0.000 rcs_operators.py:776(_single_layer_block_linear)
+     3876    0.049    0.000    0.187    0.000 rcs_operators.py:297(_single_layer_self_block_exact)
+        4    0.000    0.000    0.175    0.044 _decomp_svd.py:37(svd)
+        4    0.175    0.044    0.175    0.044 {built-in method scipy.linalg._batched_linalg._svd}
+   134469    0.172    0.000    0.172    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+      160    0.000    0.000    0.154    0.001 rcs_operators.py:903(_integrate_linear_pair_adaptive_sk)
+      160    0.001    0.000    0.153    0.001 rcs_operators.py:966(recurse)
+      800    0.001    0.000    0.144    0.000 rcs_operators.py:933(evaluate)
+      800    0.028    0.000    0.143    0.000 rcs_operators.py:115(_integrate_linear_pair_box_sk_vectorized)
+   110418    0.073    0.000    0.141    0.000 fromnumeric.py:86(_wrapreduction_any_all)
+   257476    0.080    0.000    0.131    0.000 {built-in method builtins.any}
+    75078    0.026    0.000    0.124    0.000 fromnumeric.py:2474(any)
+        4    0.000    0.000    0.119    0.030 dense_factor.py:129(solve)
+        2    0.000    0.000    0.113    0.056 dense_factor.py:63(_condition)
+        2    0.000    0.000    0.113    0.056 rcs_solver.py:537(_equilibrated_condition_from_lu)
+       20    0.000    0.000    0.108    0.005 _decomp_lu.py:134(lu_solve)
+       20    0.107    0.005    0.107    0.005 _decomp_lu.py:193(_lu_solve)
+
+
+         8433659 function calls (8433426 primitive calls) in 19.788 seconds
+
+   Ordered by: internal time
+   List reduced from 1011 to 40 due to restriction <40>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     3018    8.129    0.003    8.130    0.003 _interpolate.py:781(_evaluate)
+    15271    2.497    0.000    2.562    0.000 rcs_operators.py:697(_stable_hankel2_array)
+       16    1.129    0.071   11.433    0.715 rcs_operators.py:1660(_far_pass)
+    19724    0.738    0.000    0.738    0.000 rcs_operators.py:1267(_axpy_into)
+    66002    0.648    0.000    1.956    0.000 system_scatter.py:17(scatter_add)
+        2    0.642    0.321    0.642    0.321 _decomp_lu.py:19(lu_factor)
+   257277    0.488    0.000    0.775    0.000 _stride_tricks_impl.py:447(_broadcast_to)
+    54950    0.314    0.000    0.314    0.000 {method 'at' of 'numpy.ufunc' objects}
+     3014    0.297    0.000    8.486    0.003 cpu_kernels.py:219(evaluate)
+        4    0.291    0.073    0.615    0.154 sweep_compression.py:15(solve)
+      360    0.278    0.001    0.278    0.001 rcs_operators.py:1289(_far_green_into)
+    15273    0.276    0.000    0.276    0.000 {built-in method numpy._core._multiarray_umath.c_einsum}
+      360    0.267    0.001    0.267    0.001 rcs_operators.py:1313(_far_hankel1_into)
+     7748    0.204    0.000    1.138    0.000 rcs_operators.py:471(_integrate_linear_touching_duffy_sk_vectorized)
+        5    0.203    0.041   17.936    3.587 rcs_operators.py:1413(_assemble_linear_operator_matrices_multi)
+   159168    0.200    0.000    0.200    0.000 rcs_operators.py:41(_linear_param_to_point)
+        8    0.193    0.024    2.468    0.309 rcs_operators.py:209(_integrate_linear_pairs_box_sk_batched)
+   181671    0.192    0.000    0.394    0.000 _linalg.py:2598(norm)
+        4    0.175    0.044    0.175    0.044 {built-in method scipy.linalg._batched_linalg._svd}
+   134469    0.172    0.000    0.172    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+    39792    0.159    0.000    0.661    0.000 rcs_operators.py:62(_linear_shared_interval_endpoint_info)
+       20    0.107    0.005    0.107    0.005 _decomp_lu.py:193(_lu_solve)
+   257476    0.080    0.000    0.131    0.000 {built-in method builtins.any}
+    66002    0.079    0.000    0.555    0.000 _stride_tricks_impl.py:588(broadcast_arrays)
+   165731    0.078    0.000    0.078    0.000 {method 'dot' of 'numpy.ndarray' objects}
+   110418    0.073    0.000    0.141    0.000 fromnumeric.py:86(_wrapreduction_any_all)
+   382216    0.072    0.000    0.072    0.000 {built-in method numpy.asarray}
+     5908    0.068    0.000    0.304    0.000 rcs_operators.py:746(_dgreen_dn_obs_array)
+   443346    0.064    0.000    0.066    0.000 {built-in method numpy.array}
+        4    0.057    0.014    0.058    0.014 dense_factor.py:142(metrics)
+   102705    0.054    0.000    0.104    0.000 {built-in method builtins.sum}
+        2    0.052    0.026    0.060    0.030 rcs_solver.py:489(_equilibrated_scaling_and_norm_1)
+     3876    0.049    0.000    0.187    0.000 rcs_operators.py:297(_single_layer_self_block_exact)
+   771831    0.049    0.000    0.049    0.000 _stride_tricks_impl.py:452(<genexpr>)
+   159168    0.045    0.000    0.245    0.000 rcs_operators.py:44(_linear_interval_point)
+    66002    0.045    0.000    2.008    0.000 compact_operators.py:70(scatter_operator_add)
+   257277    0.043    0.000    0.043    0.000 _stride_tricks_impl.py:25(_maybe_view_as_subclass)
+    66002    0.041    0.000    0.047    0.000 _stride_tricks_impl.py:520(_broadcast_shape)
+    30992    0.041    0.000    0.041    0.000 rcs_operators.py:506(map_many)
+   257277    0.038    0.000    0.058    0.000 _function_base_impl.py:374(iterable)
+
+

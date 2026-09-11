@@ -1,0 +1,351 @@
+GRIM_Revised_2\test_assembly_workspace.py:111:            patch(
+GRIM_Revised_2\test_assembly_workspace.py:114:            patch(
+GRIM_Revised_2\test_assembly_workspace.py:532:            to_hex(canvas._feedback_artist.get_bbox_patch().get_facecolor()),
+GRIM_Revised_2\test_assembly_workspace.py:560:        with patch.object(canvas, "draw_idle") as draw_idle:
+GRIM_Revised_2\test_assembly_workspace.py:579:        with patch.object(workspace.scene_canvas, "draw_idle") as draw_idle:
+GRIM_Revised_2\test_assembly_workspace.py:583:        with patch.object(workspace.scene_canvas, "draw_idle") as draw_idle:
+GRIM_Revised_2\test_assembly_workspace.py:1145:            with patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1176:            with patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1182:                with patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1184:                ), patch.object(QMessageBox, "critical") as critical:
+GRIM_Revised_2\test_assembly_workspace.py:1210:                    with patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1214:                    ), patch.object(QMessageBox, "critical") as critical:
+GRIM_Revised_2\test_assembly_workspace.py:1252:            with patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1256:            ), patch.object(QMessageBox, "critical") as critical:
+GRIM_Revised_2\test_assembly_workspace.py:1275:            with patch(
+GRIM_Revised_2\test_assembly_workspace.py:1278:            ), patch.object(QMessageBox, "critical") as critical:
+GRIM_Revised_2\test_assembly_workspace.py:1303:            with patch("assembly_tree._grid_to_b64", side_effect=encode), patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1339:            with patch(
+GRIM_Revised_2\test_assembly_workspace.py:1342:            ), patch.object(QMessageBox, "warning") as warning, patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1361:        with patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1369:            with patch("assembly_tree.os.replace", side_effect=OSError("disk full")), patch.object(
+GRIM_Revised_2\test_assembly_workspace.py:1377:            with patch.object(panel, "_notify"):
+GRIM_Revised_2\test_assembly_workspace.py:1391:        with patch.object(panel, "_notify") as notify:
+GRIM_Revised_2\test_assembly_interference.py:47:        with mock.patch.object(load_ghost_module("assembly_inspector").ContributionInspector,
+GRIM_Revised_2\test_assembly_authoring_updates.py:82:            with patch.object(tree_module, "build_assembly_grid", side_effect=checked):
+GRIM_Revised_2\test_assembly_authoring_updates.py:143:            with patch("assembly_placement_editor.QFileDialog.getSaveFileName", return_value=(str(path), "")):
+GRIM_Revised_2\test_dataset_core_repairs.py:94:            with mock.patch.object(grim_dataset.np, "load", side_effect=tracked_load):
+GRIM_Revised_2\test_dataset_core_repairs.py:109:                mock.patch.object(grim_dataset.np, "load") as numpy_load,
+GRIM_Revised_2\test_dataset_core_repairs.py:135:                mock.patch.object(grim_dataset.np, "load") as numpy_load,
+GRIM_Revised_2\test_dataset_core_repairs.py:433:        with mock.patch(
+GRIM_Revised_2\test_dataset_core_repairs.py:434:            "grim_dataset._available_import_memory_bytes", return_value=1000
+GRIM_Revised_2\test_dataset_core_repairs.py:993:            with mock.patch("grim_dataset._PIO_WRITE_BLOCK_CELLS", 4):
+GRIM_Revised_2\test_csv_export.py:271:        with mock.patch(
+GRIM_Revised_2\test_isar_performance.py:68:        with mock.patch.object(
+GRIM_Revised_2\test_isar_performance.py:70:        ) as slice_method, mock.patch.object(
+GRIM_Revised_2\test_isar_performance.py:148:        with mock.patch.object(
+GRIM_Revised_2\test_isar_performance.py:150:        ), mock.patch.object(isar_mode, "_compute_band", side_effect=fake_band):
+GRIM_Revised_2\test_dataset_plot_style.py:42:            patch = mock.patch.object(grim_cut_gui, name, replacement)
+GRIM_Revised_2\test_dataset_plot_style.py:45:        patch = mock.patch.object(grim_cut_gui, "load_ghost_module", return_value=_FakeFeatureWorkflow())
+GRIM_Revised_2\test_dataset_plot_style.py:112:        self.assertTrue(all(text.get_bbox_patch() is not None for text in legend.get_texts()[:2]))
+GRIM_Revised_2\test_dataset_plot_style.py:113:        self.assertTrue(all(text.get_bbox_patch() is None for text in legend.get_texts()[2:]))
+GRIM_Revised_2\test_dataset_plot_style.py:119:        self.assertTrue(all(text.get_bbox_patch() is None for text in legend.get_texts()))
+GRIM_Revised_2\test_dataset_plot_style.py:126:            with mock.patch.object(self.window, "_show_dataset_plot_style_menu") as show:
+GRIM_Revised_2\test_dataset_plot_style.py:138:        with mock.patch.object(dataset_plot_style.QInputDialog, "getDouble", return_value=(3.5, True)):
+GRIM_Revised_2\test_dataset_plot_style.py:140:        with mock.patch.object(dataset_plot_style.QInputDialog, "getDouble", return_value=(9.0, True)):
+GRIM_Revised_2\test_dataset_plot_style.py:142:        with mock.patch.object(dataset_plot_style.QColorDialog, "getColor", return_value=QColor("#aa33cc")):
+GRIM_Revised_2\test_dataset_plot_style.py:177:        self.assertTrue(all(text.get_bbox_patch() is not None for text in window.plot_ax.get_legend().get_texts()[:2]))
+GRIM_Revised_2\test_dataset_extended_operations.py:439:        with mock.patch.object(grim_dataset, "_JOIN_MERGE_BLOCK_CELLS", 1):
+GRIM_Revised_2\test_dataset_correctness.py:116:        with mock.patch.object(
+GRIM_Revised_2\test_dataset_correctness.py:556:        with mock.patch.object(grim_dataset, "_JOIN_MERGE_BLOCK_CELLS", 2):
+GRIM_Revised_2\test_dataset_correctness.py:825:            with mock.patch.object(
+GRIM_Revised_2\test_dataset_correctness.py:826:                grim_dataset.os, "replace", side_effect=OSError("disk failure")
+GRIM_Revised_2\test_ghost_integration.py:24:        with mock.patch.dict(
+GRIM_Revised_2\test_ghost_integration.py:35:            with mock.patch.dict(
+GRIM_Revised_2\test_ghost_integration.py:70:        with mock.patch.dict(
+GRIM_Revised_2\test_ghost_integration.py:137:        with mock.patch.object(
+GRIM_Revised_2\test_flat_csv_schema.py:186:        with mock.patch.dict(
+GRIM_Revised_2\test_flat_csv_schema.py:194:        with mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:345:        self.ghost_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:348:        self.feature_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:353:        self.freddy_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:356:        self.runs_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:459:            mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:463:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:485:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:503:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:525:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:535:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:549:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:563:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:633:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:658:        with mock.patch("grim_cut_dataset_mixin.StitchDialog") as dialog_type:
+GRIM_Revised_2\test_gui_dataset_workflows.py:699:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:743:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:816:                with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:845:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:885:        with mock.patch("grim_cut_dataset_mixin.WrapDialog") as dialog_type:
+GRIM_Revised_2\test_gui_dataset_workflows.py:919:        with mock.patch("grim_cut_dataset_mixin.WrapDialog") as dialog_type:
+GRIM_Revised_2\test_gui_dataset_workflows.py:970:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:976:            mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1004:            mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1007:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1060:        with mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1113:        with mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1155:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1158:            mock.patch("grim_cut_dataset_mixin.AlignDialog") as dialog_type,
+GRIM_Revised_2\test_gui_dataset_workflows.py:1194:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1197:            mock.patch(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1246:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1249:            mock.patch.object(self.window, "_clear_plot") as clear_plot,
+GRIM_Revised_2\test_gui_dataset_workflows.py:1322:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1325:            mock.patch.object(self.window, "_clear_plot") as clear_plot,
+GRIM_Revised_2\test_gui_dataset_workflows.py:1370:            mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1373:            mock.patch.object(self.window, "_clear_plot") as clear_plot,
+GRIM_Revised_2\test_gui_dataset_workflows.py:1422:        with mock.patch.object(
+GRIM_Revised_2\test_gui_dataset_workflows.py:1470:        with mock.patch.object(
+GRIM_Revised_2\test_hpc_remote.py:201:        with mock.patch.object(
+GRIM_Revised_2\test_grim_diagnostics.py:20:        module_patch = mock.patch.dict(sys.modules)
+GRIM_Revised_2\test_grim_diagnostics.py:151:            os.unlink(grim / "grim_python.py")
+GRIM_Revised_2\test_grim_diagnostics.py:156:        self.assertIn("grim_python.py", " ".join(source.details))
+GRIM_Revised_2\test_grim_diagnostics.py:284:        with mock.patch.object(
+GRIM_Revised_2\test_grim_diagnostics.py:286:        ), mock.patch.object(
+GRIM_Revised_2\test_grim_diagnostics.py:293:        ), mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1524:        with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1533:        with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1798:                    mock.patch.object(panel, "_pull_values"),
+GRIM_Revised_2\test_feature_assembly_panel.py:1799:                    mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1804:                    mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1809:                    mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1814:                    mock.patch.object(panel, "_start_operation") as start,
+GRIM_Revised_2\test_feature_assembly_panel.py:1883:                with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1887:                ), mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1909:                with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1913:                ), mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1917:                ) as overwrite_prompt, mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:1932:                with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2186:            with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2194:            with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2198:            ), mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2202:            ), mock.patch.object(panel, "load_recipe_path") as load_mock:
+GRIM_Revised_2\test_feature_assembly_panel.py:2207:            with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2217:            with mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2357:                    mock.patch.object(panel, "_pull_values"),
+GRIM_Revised_2\test_feature_assembly_panel.py:2358:                    mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2363:                    mock.patch.object(
+GRIM_Revised_2\test_feature_assembly_panel.py:2368:                    mock.patch.object(panel, "_start_operation") as start,
+GRIM_Revised_2\test_feature_assembly_panel.py:2394:            dispatch = FeatureBuildDispatch(
+GRIM_Revised_2\test_feature_assembly_panel.py:2403:                    mock.patch.object(panel, "_show_validation_qa"),
+GRIM_Revised_2\test_feature_assembly_panel.py:2404:                    mock.patch.object(panel, "_remember_surface_dimensions"),
+GRIM_Revised_2\test_feature_assembly_panel.py:2405:                    mock.patch.object(panel, "_update_workflow_readiness"),
+GRIM_Revised_2\test_feature_assembly_panel.py:2424:            dispatch = FeatureBuildDispatch(
+GRIM_Revised_2\test_feature_assembly_panel.py:2433:                    mock.patch.object(panel, "_show_validation_qa"),
+GRIM_Revised_2\test_feature_assembly_panel.py:2434:                    mock.patch.object(panel, "_remember_surface_dimensions"),
+GRIM_Revised_2\test_feature_assembly_panel.py:2435:                    mock.patch.object(panel, "_update_workflow_readiness"),
+GRIM_Revised_2\test_feature_assembly_panel.py:2493:            with mock.patch.object(panel, "_start_operation") as start:
+GRIM_Revised_2\test_feature_assembly_panel.py:2547:            with mock.patch.object(panel, "refresh_dataset_ids") as refresh:
+GRIM_Revised_2\test_isar_artifact.py:280:                mock.patch.object(
+GRIM_Revised_2\test_isar_artifact.py:285:                mock.patch.object(
+GRIM_Revised_2\test_isar_artifact.py:298:            with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:354:        self.ghost_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:357:        self.feature_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:362:        self.freddy_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:365:        self.runs_patch = mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:518:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:758:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:764:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:786:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:791:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:796:                mock.patch.object(grim_cut_gui.QMessageBox, "critical"),
+GRIM_Revised_2\test_gui_shell.py:973:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:978:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1012:        with mock.patch.object(grim_cut_dataset_mixin, "CoordinateSystemDialog") as dialog:
+GRIM_Revised_2\test_gui_shell.py:1042:        with mock.patch.object(grim_cut_dataset_mixin, "CoordinateSystemDialog") as dialog:
+GRIM_Revised_2\test_gui_shell.py:1147:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1152:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1177:        with mock.patch.dict(
+GRIM_Revised_2\test_gui_shell.py:1192:        with mock.patch.dict(
+GRIM_Revised_2\test_gui_shell.py:1245:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1259:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1429:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1463:            mock.patch.object(os.path, "getsize", return_value=1024**2),
+GRIM_Revised_2\test_gui_shell.py:1464:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1469:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1474:            mock.patch.object(grim_cut_dataset_mixin.os, "cpu_count", return_value=8),
+GRIM_Revised_2\test_gui_shell.py:1499:            mock.patch.object(os.path, "getsize", return_value=1024**2),
+GRIM_Revised_2\test_gui_shell.py:1500:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1505:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1583:            with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1605:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1614:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1643:            with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1676:            with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1721:            with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1762:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1767:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1772:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1788:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1793:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1798:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1803:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1825:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1830:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1835:                mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:1855:            with mock.patch.object(RcsGrid, "save_ptm", autospec=True) as writer:
+GRIM_Revised_2\test_gui_shell.py:1868:            with mock.patch.object(RcsGrid, "save_pio", autospec=True) as writer:
+GRIM_Revised_2\test_gui_shell.py:1897:                mock.patch.object(RcsGrid, "save_ptm", autospec=True, side_effect=write_stage),
+GRIM_Revised_2\test_gui_shell.py:1898:                mock.patch.object(grim_cut_dataset_mixin.os, "replace", side_effect=fail_second),
+GRIM_Revised_2\test_gui_shell.py:1927:                mock.patch.object(RcsGrid, "save_pio", autospec=True, side_effect=write_stage),
+GRIM_Revised_2\test_gui_shell.py:1928:                mock.patch.object(grim_cut_dataset_mixin.os, "replace", side_effect=fail_second),
+GRIM_Revised_2\test_gui_shell.py:1952:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2120:        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+GRIM_Revised_2\test_gui_shell.py:2146:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2168:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2189:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2192:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2197:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2200:            mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning,
+GRIM_Revised_2\test_gui_shell.py:2215:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2218:            mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning,
+GRIM_Revised_2\test_gui_shell.py:2237:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2240:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2245:            mock.patch.object(self.window.ppt_workspace, "dispose") as dispose,
+GRIM_Revised_2\test_gui_shell.py:2263:        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+GRIM_Revised_2\test_gui_shell.py:2276:        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+GRIM_Revised_2\test_gui_shell.py:2294:        with mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2311:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2314:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2319:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2322:            mock.patch.object(self.window.ppt_workspace, "dispose") as dispose,
+GRIM_Revised_2\test_gui_shell.py:2337:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2342:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2347:            mock.patch.object(
+GRIM_Revised_2\test_gui_shell.py:2351:            mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning,
+GRIM_Revised_2\test_gui_shell.py:2366:        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+GRIM_Revised_2\test_gui_shell.py:2379:        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+GRIM_Revised_2\test_gui_shell.py:2394:        with mock.patch.object(grim_cut_gui.QMessageBox, "warning") as warning:
+GRIM_Revised_2\test_format_dispatch.py:31:        with mock.patch.object(
+GRIM_Revised_2\test_format_dispatch.py:39:        with mock.patch.object(
+GRIM_Revised_2\test_plot_settings_ui.py:190:        with mock.patch.object(self.window, "_move_shared_right_panel"):
+GRIM_Revised_2\test_physics_io.py:118:            with mock.patch.object(
+GRIM_Revised_2\test_physics_io.py:119:                grim_dataset.np,
+GRIM_Revised_2\test_plot_examples.py:74:        with mock.patch.object(
+GRIM_Revised_2\test_plot_examples.py:108:        with mock.patch.object(
+GRIM_Revised_2\test_isar_repeats.py:315:        with mock.patch.object(
+GRIM_Revised_2\test_isar_repeats.py:328:        with mock.patch.object(
+GRIM_Revised_2\test_plot_renderer_correctness.py:518:        with mock.patch.object(
+GRIM_Revised_2\test_plot_renderer_correctness.py:817:        with mock.patch.object(
+GRIM_Revised_2\test_plot_renderer_correctness.py:911:        with mock.patch.object(isar_mode, "display_results") as display:
+GRIM_Revised_2\test_plot_renderer_correctness.py:1298:            mock.patch.object(common, "MAX_IMAGE_SIDE", 3),
+GRIM_Revised_2\test_plot_renderer_correctness.py:1299:            mock.patch.object(common, "MAX_IMAGE_CELLS", 8),
+GRIM_Revised_2\test_freddy_integration.py:109:        with mock.patch.object(
+GRIM_Revised_2\test_freddy_integration.py:145:        with mock.patch.object(
+GRIM_Revised_2\test_freddy_integration.py:205:        with mock.patch.object(
+GRIM_Revised_2\test_ppt_workspace.py:108:            with mock.patch.object(
+GRIM_Revised_2\test_ppt_workspace.py:137:            with mock.patch.object(
+GRIM_Revised_2\test_ppt_workspace.py:324:        with mock.patch.object(
+GRIM_Revised_2\test_ppt_workspace.py:342:        with mock.patch.object(catalog, "_drop_insertion_row") as insertion:
+GRIM_Revised_2\test_ppt_workspace.py:355:        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+GRIM_Revised_2\test_ppt_workspace.py:373:        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+GRIM_Revised_2\test_ppt_workspace.py:393:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:426:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:464:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:476:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:560:        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+GRIM_Revised_2\test_ppt_workspace.py:620:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:637:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:671:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:707:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:729:            with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:800:        with mock.patch.object(widget.preview_canvas, "render_slide") as render:
+GRIM_Revised_2\test_ppt_workspace.py:813:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:833:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:857:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:878:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:901:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:918:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:940:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:946:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:986:            with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:1026:        with mock.patch.object(widget.preview_canvas, "render_slide"):
+GRIM_Revised_2\test_ppt_workspace.py:1032:            with mock.patch(
+GRIM_Revised_2\test_ptm.py:48:    if len(header) != ptm_io.PTM_HEADER_SIZE:
+GRIM_Revised_2\test_ptm.py:138:            derived_header = ptm_io.read_ptm(derived_path).header
+GRIM_Revised_2\test_ptm.py:146:            parsed = ptm_io.read_ptm(big_path)
+GRIM_Revised_2\test_ptm.py:153:            legacy = ptm_io.read_ptm(legacy_path)
+GRIM_Revised_2\test_ptm.py:164:                ptm_io.read_ptm(path)
+GRIM_Revised_2\test_ptm.py:171:                ptm_io.read_ptm(path)
+GRIM_Revised_2\test_ptm.py:181:                ptm_io.read_ptm(path)
+GRIM_Revised_2\test_ptm.py:191:                ptm_io.read_ptm(zero_bandwidth)
+GRIM_Revised_2\test_ptm.py:201:                ptm_io.read_ptm(nonpositive_start)
+GRIM_Revised_2\test_ptm.py:246:                "GRIM_GC_V1", ptm_io.read_ptm(path).header.configuration
+GRIM_Revised_2\test_ptm.py:270:            parsed = ptm_io.read_ptm(output)
+GRIM_Revised_2\test_ptm.py:291:            stored = ptm_io.read_ptm(output).header.filename
+GRIM_Revised_2\test_ptm.py:402:            self.assertAlmostEqual(ptm_io.read_ptm(output).header.pitch, 7.5)
+GRIM_Revised_2\test_ptm.py:414:            wide_header = ptm_io.read_ptm(wide_output).header
+GRIM_Revised_2\test_ptm.py:448:            self.assertEqual(ptm_io.read_ptm(gc_cross_path).header.polarity, "VH")
+GRIM_Revised_2\test_ppt_report.py:1441:            mock.patch.object(ppt_report.sys, "platform", "win32"),
+GRIM_Revised_2\test_ppt_report.py:1442:            mock.patch.object(ppt_report, "pythoncom", pythoncom_fake),
+GRIM_Revised_2\test_ppt_report.py:1443:            mock.patch.object(ppt_report, "win32com", win32com_fake),
+GRIM_Revised_2\test_ppt_report.py:1467:            mock.patch.object(ppt_report.sys, "platform", "win32"),
+GRIM_Revised_2\test_ppt_report.py:1468:            mock.patch.object(ppt_report, "pythoncom", pythoncom_fake),
+GRIM_Revised_2\test_ppt_report.py:1469:            mock.patch.object(ppt_report, "win32com", win32com_fake),
+GRIM_Revised_2\test_python_dataset_helpers.py:300:        with mock.patch.object(
+GRIM_Revised_2\test_python_recorder.py:312:        with mock.patch(
+GRIM_Revised_2\test_python_recorder.py:337:        with mock.patch(
+GRIM_Revised_2\test_python_recorder.py:445:            with mock.patch("grim_python._replace_file", side_effect=fail_second_stage):
+GRIM_Revised_2\test_python_recorder.py:461:        with mock.patch.dict(sys.modules, {"psutil": fake_psutil}):
+GRIM_Revised_2\test_python_recorder.py:462:            with mock.patch.object(
+GRIM_Revised_2\test_workflow_updates.py:136:        with mock.patch('PySide6.QtGui.QDesktopServices.openUrl',return_value=True) as opened:
+GRIM_Revised_2\test_workflow_updates.py:238:        with mock.patch('solver_tab._SolveWorker._run_2d') as solve:
+GRIM_Revised_2\test_workflow_updates.py:257:        with mock.patch.object(bridge,'_open_presentation',return_value=presentation), mock.patch.object(bridge,'_find_custom_layout',side_effect=ValueError('missing master')):
+GRIM_Revised_2\test_verification.py:35:        with mock.patch.object(Path, 'is_file', lambda p: False if p.name == 'inverse_workflow.py' else original(p)):
+GRIM_Revised_2\test_verification.py:40:        with mock.patch.object(verify_project.subprocess, 'run', return_value=
+GRIM_Revised_2\test_support_reference_difference.py:103:            mock.patch.object(
+GRIM_Revised_2\test_support_reference_difference.py:108:            mock.patch.object(
+GRIM_Revised_2\test_support_reference_difference.py:128:        with mock.patch.object(
+GRIM_Revised_2\test_sentri_io.py:91:    def test_descriptive_schema_and_tab_delimited_dispatch(self) -> None:
+GRIM_Revised_2\test_runs_workspace.py:752:        with mock.patch.object(
+GRIM_Revised_2\test_runs_workspace.py:776:        with mock.patch.object(
+GRIM_Revised_2\test_runs_workspace.py:826:        with mock.patch.object(
+GRIM_Revised_2\test_runs_workspace.py:862:        with mock.patch.object(
+GRIM_Revised_2\test_runs_workspace.py:885:        with mock.patch.object(QFileDialog, "getExistingDirectory") as chooser:
+GRIM_Revised_2\test_runs_workspace.py:892:        with mock.patch.object(QFileDialog, "getExistingDirectory") as chooser:
+GRIM_Revised_2\test_runs_workspace.py:901:        with mock.patch.object(
+GRIM_Revised_2\test_runs_workspace.py:946:        with mock.patch.object(
+GRIM_Revised_2\test_runs_workspace.py:958:        with mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:223:        missing = self.source / "GRIM_Revised_2" / "grim_python.py"
+GRIM_Revised_2\test_release_builder.py:228:            build_release.ReleaseBuildError, "grim_python.py"
+GRIM_Revised_2\test_release_builder.py:350:        with mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:376:        with mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:389:        with mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:460:            mock.patch.object(build_release, "_validate_utf8_payload"),
+GRIM_Revised_2\test_release_builder.py:461:            mock.patch.object(build_release, "_validate_forbidden_terms"),
+GRIM_Revised_2\test_release_builder.py:462:            mock.patch.object(build_release, "_validate_dependency_lock"),
+GRIM_Revised_2\test_release_builder.py:463:            mock.patch.object(build_release, "_payload_diagnostics", return_value=[diagnostic]),
+GRIM_Revised_2\test_release_builder.py:464:            mock.patch.object(build_release, "startup_exit_code", return_value=0),
+GRIM_Revised_2\test_release_builder.py:484:            mock.patch.object(build_release, "_validate_utf8_payload"),
+GRIM_Revised_2\test_release_builder.py:485:            mock.patch.object(build_release, "_validate_forbidden_terms"),
+GRIM_Revised_2\test_release_builder.py:486:            mock.patch.object(build_release, "_validate_dependency_lock"),
+GRIM_Revised_2\test_release_builder.py:487:            mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:492:            mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:495:            mock.patch.object(build_release, "_run_test_suite") as run_suite,
+GRIM_Revised_2\test_release_builder.py:525:        with mock.patch.object(build_release, '_prepare_release_native', side_effect=compile_native), \
+GRIM_Revised_2\test_release_builder.py:526:             mock.patch.object(build_release, 'run_acceptance_gates', side_effect=gates):
+GRIM_Revised_2\test_release_builder.py:543:        with mock.patch.object(build_release.subprocess, 'run', return_value=failed):
+GRIM_Revised_2\test_release_builder.py:562:        with mock.patch.object(build_release.sys, "platform", "linux"):
+GRIM_Revised_2\test_release_builder.py:569:            mock.patch.object(build_release.sys, "platform", "win32"),
+GRIM_Revised_2\test_release_builder.py:570:            mock.patch.object(build_release.platform, "machine", return_value="ARM64"),
+GRIM_Revised_2\test_release_builder.py:578:            mock.patch.object(build_release.sys, "platform", "win32"),
+GRIM_Revised_2\test_release_builder.py:579:            mock.patch.object(build_release.platform, "machine", return_value="AMD64"),
+GRIM_Revised_2\test_release_builder.py:580:            mock.patch.object(build_release.struct, "calcsize", return_value=4),
+GRIM_Revised_2\test_release_builder.py:596:        with mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:628:            mock.patch.object(
+GRIM_Revised_2\test_release_builder.py:633:            mock.patch.object(
+GRIM_Revised_2\test_release_readiness.py:32:        with mock.patch('psutil.virtual_memory', side_effect=RuntimeError('probe unavailable')):
+GRIM_Revised_2\test_python_workflow_helpers.py:179:            restored = grim_headless.load_flat_csv(path)
+GRIM_Revised_2\test_python_workflow_helpers.py:194:        with mock.patch.object(
+GRIM_Revised_2\test_python_workflow_helpers.py:218:        with mock.patch.object(
+GRIM_Revised_2\test_python_workflow_helpers.py:244:        with mock.patch.object(
+GRIM_Revised_2\test_python_workflow_helpers.py:297:                return_code = grim_headless.main(
+GRIM_Revised_2\test_python_workflow_helpers.py:337:        with mock.patch.object(grim_headless, "load_dataset", return_value=source), mock.patch.object(
+GRIM_Revised_2\test_python_workflow_helpers.py:339:        ), mock.patch.object(source, "save") as save, contextlib.redirect_stdout(stream):
+GRIM_Revised_2\test_python_workflow_helpers.py:340:            return_code = grim_headless.main(["input.grim", "--audit"])
+GRIM_Revised_2\test_python_workflow_helpers.py:350:        with mock.patch.object(
+GRIM_Revised_2\test_python_workflow_helpers.py:352:        ), mock.patch.object(grim_headless, "audit_dataset", return_value=report):
+GRIM_Revised_2\test_python_workflow_helpers.py:354:                grim_headless.main(
+GRIM_Revised_2\test_python_workflow_helpers.py:360:            with mock.patch.object(
+GRIM_Revised_2\test_python_workflow_helpers.py:362:            ), mock.patch.object(
+GRIM_Revised_2\test_python_workflow_helpers.py:365:                return_code = grim_headless.main(
+GRIM_Revised_2\test_python_workflow_helpers.py:387:                self.assertIn(name, grim_python.__all__)
+GRIM_Revised_2\test_python_workflow_helpers.py:391:        help_text = grim_headless._parser().format_help()

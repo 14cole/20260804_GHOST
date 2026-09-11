@@ -1,0 +1,152 @@
+{
+  "kind": "coated",
+  "count": 384,
+  "algebra": {
+    "TE": {
+      "n": 1152,
+      "matrix_bytes": 21233664,
+      "qr": {
+        "rank": 27,
+        "relative_scaled_rhs_error": 1.4864891957400959e-15,
+        "rhs_error": 2.6782944577543078e-12,
+        "field_error": 6.2075996835304746e-15,
+        "original_backward": 2.168322644456177e-13
+      },
+      "fourier": {
+        "rank": 27,
+        "angular_order": 13,
+        "rhs_error": 1.2006066788125772e-15,
+        "field_error": 3.000722597269746e-15,
+        "original_backward": 4.24580866815396e-16
+      },
+      "fourier_checked": {
+        "fallback_columns": 0,
+        "zero_columns": 0,
+        "field_error": 3.000722597269746e-15,
+        "original_backward": 4.24580866815396e-16
+      },
+      "coarse_inverse": {
+        "build_seconds": 0.10786890000053972,
+        "bytes": 6752056,
+        "condition": 1666.624528169805,
+        "field_error": 6.0783446755715345e-15,
+        "original_backward": 2.1663204822820705e-13,
+        "refinements": 2
+      },
+      "compressed_operator": {
+        "build_seconds": 0.218433099998947,
+        "evidence": {
+          "bytes": 16581768,
+          "max_rank": 88,
+          "leaves": 13,
+          "accesses": 11426400,
+          "oracle_calls": 3686,
+          "max_query_entries": 20736,
+          "relative_inf_error_bound": 9.714811798065845e-13,
+          "relative_one_error_bound": 1.3140820034024527e-12
+        },
+        "residual_bound": 1.109642804982185e-12,
+        "field_error": 1.0618522029203433e-13,
+        "original_backward": 2.1899813705501536e-13
+      }
+    },
+    "TM": {
+      "n": 1152,
+      "matrix_bytes": 21233664,
+      "qr": {
+        "rank": 27,
+        "relative_scaled_rhs_error": 1.4864891957400959e-15,
+        "rhs_error": 2.6782944577543078e-12,
+        "field_error": 4.209034757703334e-15,
+        "original_backward": 7.211094106778004e-14
+      },
+      "fourier": {
+        "rank": 27,
+        "angular_order": 13,
+        "rhs_error": 1.2006066788125772e-15,
+        "field_error": 2.893833824919266e-15,
+        "original_backward": 4.75268987643438e-16
+      },
+      "fourier_checked": {
+        "fallback_columns": 0,
+        "zero_columns": 0,
+        "field_error": 2.893833824919266e-15,
+        "original_backward": 4.75268987643438e-16
+      },
+      "coarse_inverse": {
+        "build_seconds": 0.09601449999900069,
+        "bytes": 6357912,
+        "condition": 1779.6659708633686,
+        "field_error": 4.139735255595581e-14,
+        "original_backward": 7.218475966073837e-14,
+        "refinements": 2
+      },
+      "compressed_operator": {
+        "build_seconds": 0.21237939999991795,
+        "evidence": {
+          "bytes": 16139016,
+          "max_rank": 87,
+          "leaves": 16,
+          "accesses": 10909728,
+          "oracle_calls": 3534,
+          "max_query_entries": 18432,
+          "relative_inf_error_bound": 6.675297783468996e-13,
+          "relative_one_error_bound": 8.188606628423983e-13
+        },
+        "residual_bound": 7.216540738189806e-13,
+        "field_error": 3.2426779475488503e-12,
+        "original_backward": 8.256285832188085e-14
+      }
+    }
+  },
+  "baseline_systems": [
+    {
+      "unknowns": 1152,
+      "factorizations": 1,
+      "rhs_batches": 2,
+      "max_rhs_columns": 25,
+      "max_backward_error": 1.099730874947725e-13,
+      "max_relative_residual": 1.6432432857363757e-13,
+      "sweep_compression": {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 43,
+        "accepted_batches": 2,
+        "fallback_batches": 0,
+        "max_rhs_error": 2.5824185591395497e-15,
+        "max_reconstructed_backward_error": 1.099730874947725e-13
+      }
+    },
+    {
+      "unknowns": 1152,
+      "factorizations": 1,
+      "rhs_batches": 2,
+      "max_rhs_columns": 25,
+      "max_backward_error": 3.662231702807586e-14,
+      "max_relative_residual": 1.6436584859748954e-13,
+      "sweep_compression": {
+        "requested": "auto",
+        "input_columns": 361,
+        "solved_columns": 43,
+        "accepted_batches": 2,
+        "fallback_batches": 0,
+        "max_rhs_error": 2.5824185591395497e-15,
+        "max_reconstructed_backward_error": 3.662231702807586e-14
+      }
+    }
+  ],
+  "assembly": {
+    "table12_paired": {
+      "VV": 3.3079959011512183e-15,
+      "HH": 3.332073758422424e-15
+    },
+    "wpairs": {
+      "VV": 0.0,
+      "HH": 0.0
+    },
+    "partial": {
+      "VV": 0.0,
+      "HH": 0.0
+    }
+  }
+}

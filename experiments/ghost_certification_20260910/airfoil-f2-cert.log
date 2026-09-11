@@ -1,0 +1,8 @@
+airfoil 0 1448 Base mesh: VV: Initializing solver
+airfoil elapsed 30.0 RSS MiB 185
+airfoil elapsed 60.0 RSS MiB 142
+airfoil elapsed 90.0 RSS MiB 221
+airfoil elapsed 120.0 RSS MiB 275
+airfoil elapsed 150.1 RSS MiB 331
+airfoil 1448 1448 Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 2.0 GHz
+airfoil 178.87826649999988 True 

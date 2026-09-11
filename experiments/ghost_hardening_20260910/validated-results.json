@@ -1,0 +1,441 @@
+{
+  "materials": {
+    "dense": {
+      "pec": {
+        "VV": 5.382498908307014e-16,
+        "HH": 2.810519059310663e-15
+      },
+      "ibc": {
+        "VV": 6.386824353697299e-16,
+        "HH": 1.7666211642907731e-15
+      },
+      "pec_ibc": {
+        "VV": 8.331685845857988e-15,
+        "HH": 7.121170327591295e-15
+      },
+      "lossless": {
+        "VV": 8.004613214197743e-15,
+        "HH": 8.474460879282364e-15
+      },
+      "lossy": {
+        "VV": 7.213827442062193e-15,
+        "HH": 8.95847599598772e-15
+      },
+      "magnetic": {
+        "VV": 5.872836395872865e-15,
+        "HH": 1.2953939981918096e-14
+      },
+      "coated": {
+        "VV": 1.0013438602821011e-14,
+        "HH": 5.8448440214938e-15
+      },
+      "layered": {
+        "VV": 1.2793642689536269e-14,
+        "HH": 1.6075308175412577e-14
+      },
+      "mixed": {
+        "VV": 4.156558395610669e-15,
+        "HH": 6.3114016041333295e-15
+      },
+      "sheet": {
+        "VV": 3.0698462867051227e-15,
+        "HH": 5.263959225398043e-16
+      },
+      "mixed_sheet": {
+        "VV": 1.8719418443133127e-14,
+        "HH": 6.365816108696771e-15
+      },
+      "thin": {
+        "VV": 5.7152328954105365e-15,
+        "HH": 1.0934267322430523e-16
+      },
+      "thin_magnetic": {
+        "VV": 1.5011365061497414e-14,
+        "HH": 4.363917250621555e-15
+      },
+      "transparent": {
+        "VV": 0.0,
+        "HH": 0.0
+      }
+    },
+    "hierarchical": {
+      "pec": {
+        "VV": 7.983881981706673e-16,
+        "HH": 2.4306535183014357e-15
+      },
+      "ibc": {
+        "VV": 7.949208919943029e-16,
+        "HH": 2.142342841418385e-15
+      },
+      "pec_ibc": {
+        "VV": 8.208483406552914e-15,
+        "HH": 6.895828916606658e-15
+      },
+      "lossless": {
+        "VV": 1.0667062432401042e-14,
+        "HH": 3.370473231260693e-14
+      },
+      "lossy": {
+        "VV": 1.606005642236538e-14,
+        "HH": 9.556469473861591e-15
+      },
+      "magnetic": {
+        "VV": 8.867493821913098e-13,
+        "HH": 2.407531031424807e-13
+      },
+      "coated": {
+        "VV": 9.806718993207963e-15,
+        "HH": 6.108509759078027e-15
+      },
+      "layered": {
+        "VV": 1.3913502720198068e-14,
+        "HH": 1.114893290310168e-14
+      },
+      "mixed": {
+        "VV": 4.2483053661734904e-15,
+        "HH": 5.5784663946177e-15
+      },
+      "sheet": {
+        "VV": 4.655551730892645e-15,
+        "HH": 6.97699373274931e-16
+      },
+      "mixed_sheet": {
+        "VV": 1.8414133353279083e-14,
+        "HH": 5.2658714593869054e-15
+      },
+      "thin": {
+        "VV": 1.435982904320688e-11,
+        "HH": 5.494401329925665e-16
+      },
+      "thin_magnetic": {
+        "VV": 2.6894327832209797e-11,
+        "HH": 1.9173826016958103e-12
+      },
+      "transparent": {
+        "VV": 0.0,
+        "HH": 0.0
+      }
+    }
+  },
+  "production": {
+    "airfoil-f2.0-baseline-dense-r1.json": {
+      "seconds": 42.1998534000013,
+      "errors": {
+        "VV": 0.0,
+        "HH": 0.0
+      },
+      "peak_mib": 1230.44140625,
+      "sweep_sha256": "c56f581e6a76dd34b9f422c30cdad3498e6c3d5a6da53b4728c4cdd6b869f34b"
+    },
+    "airfoil-f2.0-baseline-dense-r2.json": {
+      "seconds": 41.906084700000065,
+      "errors": {
+        "VV": 5.358957434778824e-13,
+        "HH": 3.8580982873752815e-13
+      },
+      "peak_mib": 1229.99609375,
+      "sweep_sha256": "c56f581e6a76dd34b9f422c30cdad3498e6c3d5a6da53b4728c4cdd6b869f34b"
+    },
+    "airfoil-f2.0-updated-dense-r1.json": {
+      "seconds": 42.141182300001674,
+      "errors": {
+        "VV": 2.495348445777822e-13,
+        "HH": 2.795530512259753e-13
+      },
+      "peak_mib": 1253.5,
+      "sweep_sha256": "9f56f22c303a88e94518e39ea44be4d2269f1a24fee079b85b081032dab8e7fb"
+    },
+    "airfoil-f2.0-updated-dense-r2.json": {
+      "seconds": 41.94886110000152,
+      "errors": {
+        "VV": 3.97843503240123e-13,
+        "HH": 4.4518132724777156e-13
+      },
+      "peak_mib": 1256.82421875,
+      "sweep_sha256": "9f56f22c303a88e94518e39ea44be4d2269f1a24fee079b85b081032dab8e7fb"
+    },
+    "airfoil-f2.0-updated-dense-r3.json": {
+      "seconds": 41.4772739,
+      "errors": {
+        "VV": 3.7473827021372213e-13,
+        "HH": 4.3288834616030963e-13
+      },
+      "peak_mib": 1246.109375,
+      "sweep_sha256": "920dc83d434242d27a8681b708a75461bb363cd4b86822303902ac929f6933cb"
+    },
+    "airfoil-f2.0-updated-hierarchical-r1.json": {
+      "seconds": 41.89064679999865,
+      "errors": {
+        "VV": 2.7890157517410915e-13,
+        "HH": 2.354384041855908e-13
+      },
+      "peak_mib": 805.3125,
+      "sweep_sha256": "9f56f22c303a88e94518e39ea44be4d2269f1a24fee079b85b081032dab8e7fb"
+    }
+  },
+  "streamed": {
+    "streamed-f1.0-TE-tile256-cut32.0-qr.json": {
+      "frequency": 1.0,
+      "pol": "TE",
+      "tile": 256,
+      "cut": 32.0,
+      "compression": "qr",
+      "combined_payload_budget": 536870912,
+      "assembly_seconds": 15.892132500001026,
+      "operator": {
+        "unknowns": 2964,
+        "tiles": 256,
+        "compressed_tiles": 238,
+        "retained_bytes": 49370880,
+        "max_query_bytes": 830304,
+        "geometry_queries": 256,
+        "geometry_coefficients": 8785296,
+        "dropped_routes": 228,
+        "row_error_bound": 5.126263106540602e-18,
+        "storage_budget": 536870912,
+        "compression": "qr"
+      },
+      "inverse_seconds": 1.9692331999976886,
+      "compressed_system": {
+        "bytes": 72382728,
+        "max_rank": 98,
+        "leaves": 23,
+        "accesses": 53464083,
+        "oracle_calls": 8546,
+        "max_query_entries": 137641,
+        "relative_inf_error_bound": 6.370434854641581e-15,
+        "relative_one_error_bound": 1.4152776563894804e-14,
+        "storage_budget": 487500032,
+        "last_original_residual_bound": 8.530706977247781e-15,
+        "last_refinements": 0
+      },
+      "combined_retained_bytes": 121753608,
+      "construction_inputs_released": true,
+      "construction_sampled_rss_bytes": 225587200,
+      "solve_and_bound_seconds": 0.12086709999857703,
+      "original_residual_bound": 8.530706977247781e-15,
+      "assembly_inverse_rhs_and_check_sampled_rss_bytes": 257204224,
+      "independent_backward": 2.053784444959283e-15,
+      "field_error": 6.877961253409342e-13,
+      "accepted": true
+    },
+    "streamed-f1.0-TM-tile256-cut32.0-qr.json": {
+      "frequency": 1.0,
+      "pol": "TM",
+      "tile": 256,
+      "cut": 32.0,
+      "compression": "qr",
+      "combined_payload_budget": 536870912,
+      "assembly_seconds": 16.022778800001106,
+      "operator": {
+        "unknowns": 2964,
+        "tiles": 256,
+        "compressed_tiles": 238,
+        "retained_bytes": 46709504,
+        "max_query_bytes": 830304,
+        "geometry_queries": 256,
+        "geometry_coefficients": 8785296,
+        "dropped_routes": 228,
+        "row_error_bound": 3.937588055284321e-18,
+        "storage_budget": 536870912,
+        "compression": "qr"
+      },
+      "inverse_seconds": 1.6339841000008164,
+      "compressed_system": {
+        "bytes": 69407424,
+        "max_rank": 94,
+        "leaves": 23,
+        "accesses": 38680211,
+        "oracle_calls": 7895,
+        "max_query_entries": 137641,
+        "relative_inf_error_bound": 3.705052190234734e-14,
+        "relative_one_error_bound": 4.317399977269218e-14,
+        "storage_budget": 490161408,
+        "last_original_residual_bound": 5.0836781059731115e-14,
+        "last_refinements": 0
+      },
+      "combined_retained_bytes": 116116928,
+      "construction_inputs_released": true,
+      "construction_sampled_rss_bytes": 214589440,
+      "solve_and_bound_seconds": 0.11757460000080755,
+      "original_residual_bound": 5.0836781059731115e-14,
+      "assembly_inverse_rhs_and_check_sampled_rss_bytes": 250540032,
+      "independent_backward": 1.3708235552090798e-14,
+      "field_error": 3.4098414276513404e-13,
+      "accepted": true
+    },
+    "streamed-f2.0-TE-tile512-cut32.0-qr.json": {
+      "frequency": 2.0,
+      "pol": "TE",
+      "tile": 512,
+      "cut": 32.0,
+      "compression": "qr",
+      "combined_payload_budget": 536870912,
+      "assembly_seconds": 37.4602401000011,
+      "operator": {
+        "unknowns": 5742,
+        "tiles": 256,
+        "compressed_tiles": 239,
+        "retained_bytes": 110129600,
+        "max_query_bytes": 3093144,
+        "geometry_queries": 256,
+        "geometry_coefficients": 32970564,
+        "dropped_routes": 540,
+        "row_error_bound": 4.482615482515614e-17,
+        "storage_budget": 536870912,
+        "compression": "qr"
+      },
+      "inverse_seconds": 6.784125700000004,
+      "compressed_system": {
+        "bytes": 165852024,
+        "max_rank": 128,
+        "leaves": 52,
+        "accesses": 216980703,
+        "oracle_calls": 18967,
+        "max_query_entries": 91872,
+        "relative_inf_error_bound": 7.687754897335829e-14,
+        "relative_one_error_bound": 3.321333971096192e-13,
+        "storage_budget": 426741312,
+        "last_original_residual_bound": 8.027285205687277e-14,
+        "last_refinements": 0
+      },
+      "combined_retained_bytes": 275981624,
+      "construction_inputs_released": true,
+      "construction_sampled_rss_bytes": 389332992,
+      "solve_and_bound_seconds": 0.27561770000102115,
+      "original_residual_bound": 8.027285205687277e-14,
+      "assembly_inverse_rhs_and_check_sampled_rss_bytes": 435351552,
+      "independent_backward": 1.2528751023613758e-14,
+      "field_error": 2.9451886542802028e-12,
+      "accepted": true,
+      "baseline": {
+        "frequency": 2.0,
+        "pol": "TE",
+        "tile": 512,
+        "cut": 32.0,
+        "assembly_seconds": 46.329470100001345,
+        "operator": {
+          "unknowns": 5742,
+          "tiles": 256,
+          "compressed_tiles": 240,
+          "retained_bytes": 106138192,
+          "max_query_bytes": 3093144,
+          "geometry_queries": 256,
+          "geometry_coefficients": 32970564,
+          "dropped_routes": 540,
+          "row_error_bound": 5.70292773716928e-17,
+          "storage_budget": 536870912
+        },
+        "inverse_seconds": 5.76916269999856,
+        "compressed_system": {
+          "bytes": 164636416,
+          "max_rank": 126,
+          "leaves": 52,
+          "accesses": 183846448,
+          "oracle_calls": 18337,
+          "max_query_entries": 91872,
+          "relative_inf_error_bound": 8.174080759758839e-14,
+          "relative_one_error_bound": 9.570829671350812e-14
+        },
+        "construction_inputs_released": true,
+        "construction_sampled_rss_bytes": 391499776,
+        "solve_and_bound_seconds": 0.26614770000014687,
+        "original_residual_bound": 8.552694634928971e-14,
+        "independent_backward": 1.2001038979244906e-14,
+        "field_error": 1.0797554752063733e-12,
+        "accepted": true
+      }
+    },
+    "streamed-f2.0-TM-tile512-cut32.0-qr.json": {
+      "frequency": 2.0,
+      "pol": "TM",
+      "tile": 512,
+      "cut": 32.0,
+      "compression": "qr",
+      "combined_payload_budget": 536870912,
+      "assembly_seconds": 37.95559929999945,
+      "operator": {
+        "unknowns": 5742,
+        "tiles": 256,
+        "compressed_tiles": 240,
+        "retained_bytes": 104989776,
+        "max_query_bytes": 3093144,
+        "geometry_queries": 256,
+        "geometry_coefficients": 32970564,
+        "dropped_routes": 540,
+        "row_error_bound": 8.699857341328287e-18,
+        "storage_budget": 536870912,
+        "compression": "qr"
+      },
+      "inverse_seconds": 6.121297500001674,
+      "compressed_system": {
+        "bytes": 157974856,
+        "max_rank": 129,
+        "leaves": 54,
+        "accesses": 193099928,
+        "oracle_calls": 17642,
+        "max_query_entries": 91872,
+        "relative_inf_error_bound": 5.984785671204337e-14,
+        "relative_one_error_bound": 1.1014298119410815e-13,
+        "storage_budget": 431881136,
+        "last_original_residual_bound": 8.826070857913386e-14,
+        "last_refinements": 0
+      },
+      "combined_retained_bytes": 262964632,
+      "construction_inputs_released": true,
+      "construction_sampled_rss_bytes": 384491520,
+      "solve_and_bound_seconds": 0.2654517000009946,
+      "original_residual_bound": 8.826070857913386e-14,
+      "assembly_inverse_rhs_and_check_sampled_rss_bytes": 429694976,
+      "independent_backward": 2.859843584842657e-14,
+      "field_error": 8.067759514605747e-13,
+      "accepted": true,
+      "baseline": {
+        "frequency": 2.0,
+        "pol": "TM",
+        "tile": 512,
+        "cut": 32.0,
+        "assembly_seconds": 46.58597590000136,
+        "operator": {
+          "unknowns": 5742,
+          "tiles": 256,
+          "compressed_tiles": 240,
+          "retained_bytes": 102566512,
+          "max_query_bytes": 3093144,
+          "geometry_queries": 256,
+          "geometry_coefficients": 32970564,
+          "dropped_routes": 540,
+          "row_error_bound": 1.738673953071088e-17,
+          "storage_budget": 536870912
+        },
+        "inverse_seconds": 6.4528600000012375,
+        "compressed_system": {
+          "bytes": 157088784,
+          "max_rank": 127,
+          "leaves": 54,
+          "accesses": 217419677,
+          "oracle_calls": 17665,
+          "max_query_entries": 91872,
+          "relative_inf_error_bound": 6.401375854015047e-14,
+          "relative_one_error_bound": 8.884420089295393e-14
+        },
+        "construction_inputs_released": true,
+        "construction_sampled_rss_bytes": 393703424,
+        "solve_and_bound_seconds": 0.2576558999971894,
+        "original_residual_bound": 9.449625133905497e-14,
+        "independent_backward": 2.859799935598637e-14,
+        "field_error": 7.839030389783302e-13,
+        "accepted": true
+      }
+    }
+  },
+  "native_matrix_accepted": 22,
+  "changed_backend_files": [
+    "assembly_geometry.py",
+    "cpu_execution.py",
+    "cpu_kernels.py",
+    "hierarchical_factor.py",
+    "rcs_operators.py",
+    "sweep_compression.py"
+  ]
+}

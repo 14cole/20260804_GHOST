@@ -1,0 +1,37 @@
+{
+  "frequency": 1.0,
+  "pol": "TM",
+  "tile": 256,
+  "cut": 32.0,
+  "assembly_seconds": 18.67179539999779,
+  "operator": {
+    "unknowns": 2964,
+    "tiles": 256,
+    "compressed_tiles": 238,
+    "retained_bytes": 45749120,
+    "max_query_bytes": 830304,
+    "geometry_queries": 256,
+    "geometry_coefficients": 8785296,
+    "dropped_routes": 228,
+    "row_error_bound": 5.503536240772661e-18,
+    "storage_budget": 536870912
+  },
+  "inverse_seconds": 1.5805107999985921,
+  "compressed_system": {
+    "bytes": 68938264,
+    "max_rank": 94,
+    "leaves": 23,
+    "accesses": 39973350,
+    "oracle_calls": 7751,
+    "max_query_entries": 137641,
+    "relative_inf_error_bound": 2.5011852747676263e-14,
+    "relative_one_error_bound": 4.302455882667062e-14
+  },
+  "construction_inputs_released": true,
+  "construction_sampled_rss_bytes": 212770816,
+  "solve_and_bound_seconds": 0.11421929999778513,
+  "original_residual_bound": 3.929098712303249e-14,
+  "independent_backward": 1.3713049621020899e-14,
+  "field_error": 3.2511187193448484e-13,
+  "accepted": true
+}

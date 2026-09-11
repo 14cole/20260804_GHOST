@@ -1,0 +1,9 @@
+production-tests 0 53.442
+experimental-tests 0 5.968
+production-dense 0 42.536
+production-hierarchical 0 42.298
+materials-dense 0 25.443
+materials-hierarchical 0 26.467
+streamed-baseline 0 109.268
+streamed-final-f1 0 37.952
+streamed-final-f2 0 92.931

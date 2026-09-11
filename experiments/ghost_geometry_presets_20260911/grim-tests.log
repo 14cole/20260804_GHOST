@@ -1,0 +1,39 @@
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\grim_cut_plot_mixin.py:1353: UserWarning: Attempting to set identical low and high xlims makes transformation singular; automatically expanding.
+  ax.set_xlim(xmin, xmax)
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\test_plot_renderer_correctness.py:159: UserWarning: Phase overlay metadata note: phase reference is unspecified for 3-D, 2-D; a common convention is assumed only for display
+  common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\test_plot_renderer_correctness.py:159: UserWarning: Phase overlay metadata note: time convention is unspecified for 3-D, 2-D; a common convention is assumed only for display
+  common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\test_plot_renderer_correctness.py:159: UserWarning: Phase overlay metadata note: polarization basis is unspecified for 3-D, 2-D; a common convention is assumed only for display
+  common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\grim_cut_plot_mixin.py:748: UserWarning: Phase overlay metadata note: phase reference is unspecified for left, right; a common convention is assumed only for display
+  plot_common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\grim_cut_plot_mixin.py:748: UserWarning: Phase overlay metadata note: time convention is unspecified for left, right; a common convention is assumed only for display
+  plot_common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\grim_cut_plot_mixin.py:748: UserWarning: Phase overlay metadata note: polarization basis is unspecified for left, right; a common convention is assumed only for display
+  plot_common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\grim_cut_plot_mixin.py:748: UserWarning: Phase overlay metadata note: phase reference is unspecified for reference, converted; a common convention is assumed only for display
+  plot_common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\grim_cut_plot_mixin.py:748: UserWarning: Phase overlay metadata note: time convention is unspecified for reference, converted; a common convention is assumed only for display
+  plot_common.validate_plot_datasets(
+C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\GRIM_Revised_2\grim_cut_plot_mixin.py:748: UserWarning: Phase overlay metadata note: polarization basis is unspecified for reference, converted; a common convention is assumed only for display
+  plot_common.validate_plot_datasets(
+Assembly tree loaded: C:\Users\14col\AppData\Local\Temp\tmpoaeaofno\loaded.asy
+Release gate: checking strict UTF-8 ...
+Release gate: checking prohibited release terms ...
+Release gate: checking the exact Windows dependency lock ...
+Release gate: running startup diagnostics ...
+Release gate: checking strict UTF-8 ...
+Release gate: checking prohibited release terms ...
+Release gate: checking the exact Windows dependency lock ...
+Release gate: running startup diagnostics ...
+Release gate warning: native build unavailable; shipping NumPy fallback: compiler unavailable
+[PASS] bistatic/discrete/hdrb=768  (hdrbsize=768, src=observation, freq=[8.00..12.00], imono=2)
+[PASS] bistatic/uniform/hdrb=512  (hdrbsize=512, src=observation, freq=[9.00..10.00], imono=2)
+[PASS] monostatic/uniform/hdrb=0  (hdrbsize=0, src=incident, freq=[2.00..18.00], imono=1)
+[PASS] monostatic/uniform/hdrb=256  (hdrbsize=256, src=incident, freq=[8.00..12.00], imono=1)
+Checking example ...
+----------------------------------------------------------------------
+Ran 1057 tests in 71.196s
+
+OK (skipped=1)

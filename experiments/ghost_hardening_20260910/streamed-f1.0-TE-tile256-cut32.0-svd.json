@@ -1,0 +1,9 @@
+{
+  "frequency": 1.0,
+  "pol": "TE",
+  "tile": 256,
+  "cut": 32.0,
+  "compression": "svd",
+  "combined_payload_budget": 1048,
+  "rejected": "MemoryError('Compressed operator exceeded its retained-storage cap.')"
+}

@@ -1,0 +1,10 @@
+test_freddy_and_assembly_apis_need_no_gui (test_hpc_solver_options.HeadlessSolverOptionsTests.test_freddy_and_assembly_apis_need_no_gui) ... ok
+test_freddy_coating_2d_mixed_tight_worker (test_hpc_solver_options.HeadlessSolverOptionsTests.test_freddy_coating_2d_mixed_tight_worker) ... ok
+test_freddy_coating_bor_tight_worker (test_hpc_solver_options.HeadlessSolverOptionsTests.test_freddy_coating_bor_tight_worker) ... ok
+test_invalid_options_fail_before_bundle_creation (test_hpc_solver_options.HeadlessSolverOptionsTests.test_invalid_options_fail_before_bundle_creation) ... ok
+test_thin_dielectric_2d_mixed_survey_worker (test_hpc_solver_options.HeadlessSolverOptionsTests.test_thin_dielectric_2d_mixed_survey_worker) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 37.678s
+
+OK

@@ -1,0 +1,254 @@
+[
+  {
+    "frequency": 1,
+    "n": 2964,
+    "ka": 3.1599712772067687,
+    "rhs_load": {
+      "median": 0.036414700000023004,
+      "runs": [
+        0.036414700000023004
+      ]
+    },
+    "rhs_bytes": 17120064,
+    "fourier": [
+      {
+        "rank": 41,
+        "angular_order": 20,
+        "padding": 28,
+        "sampling_columns": 65,
+        "sample_load": {
+          "median": 0.006146400000943686,
+          "runs": [
+            0.006146400000943686
+          ]
+        },
+        "basis_time": {
+          "median": 0.005150299999513663,
+          "runs": [
+            0.005150299999513663
+          ]
+        },
+        "relative_error": 4.88804898819615e-15,
+        "scaled_relative_error": 7.537802378945913e-16
+      },
+      {
+        "rank": 41,
+        "angular_order": 20,
+        "padding": 40,
+        "sampling_columns": 89,
+        "sample_load": {
+          "median": 0.009147099999609054,
+          "runs": [
+            0.009147099999609054
+          ]
+        },
+        "basis_time": {
+          "median": 0.010468599999512662,
+          "runs": [
+            0.010468599999512662
+          ]
+        },
+        "relative_error": 4.557128974190802e-15,
+        "scaled_relative_error": 7.365703348744444e-16
+      },
+      {
+        "rank": 41,
+        "angular_order": 20,
+        "padding": 52,
+        "sampling_columns": 113,
+        "sample_load": {
+          "median": 0.010591000000204076,
+          "runs": [
+            0.010591000000204076
+          ]
+        },
+        "basis_time": {
+          "median": 0.01083469999866793,
+          "runs": [
+            0.01083469999866793
+          ]
+        },
+        "relative_error": 4.9765866037556876e-15,
+        "scaled_relative_error": 6.775129015675735e-16
+      }
+    ],
+    "qr": {
+      "rank": 34,
+      "relative_scaled_rhs_error": 2.1129942583325576e-15,
+      "time": {
+        "median": 0.0611668000001373,
+        "runs": [
+          0.0611668000001373
+        ]
+      }
+    }
+  },
+  {
+    "frequency": 2,
+    "n": 5742,
+    "ka": 6.3199425544135375,
+    "rhs_load": {
+      "median": 0.07041039999967325,
+      "runs": [
+        0.07041039999967325
+      ]
+    },
+    "rhs_bytes": 33165792,
+    "fourier": [
+      {
+        "rank": 53,
+        "angular_order": 26,
+        "padding": 28,
+        "sampling_columns": 71,
+        "sample_load": {
+          "median": 0.012619400000403402,
+          "runs": [
+            0.012619400000403402
+          ]
+        },
+        "basis_time": {
+          "median": 0.017556599999807077,
+          "runs": [
+            0.017556599999807077
+          ]
+        },
+        "relative_error": 1.7938040294337973e-14,
+        "scaled_relative_error": 2.1298914612580215e-15
+      },
+      {
+        "rank": 53,
+        "angular_order": 26,
+        "padding": 40,
+        "sampling_columns": 95,
+        "sample_load": {
+          "median": 0.015936799998598872,
+          "runs": [
+            0.015936799998598872
+          ]
+        },
+        "basis_time": {
+          "median": 0.013638299999001902,
+          "runs": [
+            0.013638299999001902
+          ]
+        },
+        "relative_error": 1.7986878246827343e-14,
+        "scaled_relative_error": 2.0848916580523367e-15
+      },
+      {
+        "rank": 55,
+        "angular_order": 27,
+        "padding": 52,
+        "sampling_columns": 119,
+        "sample_load": {
+          "median": 0.024326100001417217,
+          "runs": [
+            0.024326100001417217
+          ]
+        },
+        "basis_time": {
+          "median": 0.018682699999772012,
+          "runs": [
+            0.018682699999772012
+          ]
+        },
+        "relative_error": 4.275395443297855e-15,
+        "scaled_relative_error": 9.288828670730291e-16
+      }
+    ],
+    "qr": {
+      "rank": 44,
+      "relative_scaled_rhs_error": 1.372045392061813e-15,
+      "time": {
+        "median": 0.11143009999977949,
+        "runs": [
+          0.11143009999977949
+        ]
+      }
+    }
+  },
+  {
+    "frequency": 10,
+    "n": 28406,
+    "ka": 31.59971277206769,
+    "rhs_load": {
+      "median": 0.3567750000001979,
+      "runs": [
+        0.3567750000001979
+      ]
+    },
+    "rhs_bytes": 164073056,
+    "fourier": [
+      {
+        "rank": 121,
+        "angular_order": 60,
+        "padding": 28,
+        "sampling_columns": 121,
+        "sample_load": {
+          "median": 0.09374380000008387,
+          "runs": [
+            0.09374380000008387
+          ]
+        },
+        "basis_time": {
+          "median": 0.09501769999951648,
+          "runs": [
+            0.09501769999951648
+          ]
+        },
+        "relative_error": 3.1262222454347717e-12,
+        "scaled_relative_error": 1.9206798923976526e-13
+      },
+      {
+        "rank": 129,
+        "angular_order": 64,
+        "padding": 40,
+        "sampling_columns": 145,
+        "sample_load": {
+          "median": 0.13968519999980344,
+          "runs": [
+            0.13968519999980344
+          ]
+        },
+        "basis_time": {
+          "median": 0.12585589999980584,
+          "runs": [
+            0.12585589999980584
+          ]
+        },
+        "relative_error": 2.7766295128973286e-14,
+        "scaled_relative_error": 5.240102546657461e-15
+      },
+      {
+        "rank": 153,
+        "angular_order": 76,
+        "padding": 52,
+        "sampling_columns": 169,
+        "sample_load": {
+          "median": 0.1496127999998862,
+          "runs": [
+            0.1496127999998862
+          ]
+        },
+        "basis_time": {
+          "median": 0.14189160000023548,
+          "runs": [
+            0.14189160000023548
+          ]
+        },
+        "relative_error": 2.8943495517425975e-14,
+        "scaled_relative_error": 5.323682725500674e-15
+      }
+    ],
+    "qr": {
+      "rank": 99,
+      "relative_scaled_rhs_error": 2.449975915820254e-15,
+      "time": {
+        "median": 0.7710136999994575,
+        "runs": [
+          0.7710136999994575
+        ]
+      }
+    }
+  }
+]

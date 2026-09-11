@@ -1,0 +1,13 @@
+{
+  "matched_functions": 334,
+  "changed_functions": [
+    [
+      "grim_legacy_io",
+      "load_ss",
+      [
+        "GRIM_Revised_2\\grim_backend\\io\\xpatch.py"
+      ]
+    ]
+  ],
+  "missing_functions": []
+}

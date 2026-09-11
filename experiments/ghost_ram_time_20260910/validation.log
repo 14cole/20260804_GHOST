@@ -1,0 +1,14 @@
+test_airfoil_compressed_operator_limits (__main__.EvidenceChecks.test_airfoil_compressed_operator_limits) ... ok
+test_complete_airfoil_two_channel_assembly (__main__.EvidenceChecks.test_complete_airfoil_two_channel_assembly) ... ok
+test_geometry_oracle_and_mesh_certification (__main__.EvidenceChecks.test_geometry_oracle_and_mesh_certification) ... ok
+test_known_fourier_failure_and_checked_fallback (__main__.EvidenceChecks.test_known_fourier_failure_and_checked_fallback) ... ok
+test_material_coverage_and_checked_sweeps (__main__.EvidenceChecks.test_material_coverage_and_checked_sweeps) ... ok
+test_material_tolerance_limitations (__main__.EvidenceChecks.test_material_tolerance_limitations) ... ok
+test_production_unchanged (__main__.EvidenceChecks.test_production_unchanged) ... ok
+test_projection (__main__.EvidenceChecks.test_projection) ... ok
+test_screened_table_holdouts (__main__.EvidenceChecks.test_screened_table_holdouts) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.037s
+
+OK

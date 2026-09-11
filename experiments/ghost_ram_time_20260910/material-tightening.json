@@ -1,0 +1,610 @@
+[
+  {
+    "kind": "coated",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 8207568,
+      "field_error": 6.692318128638089e-15,
+      "original_backward": 2.168565463155775e-13
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 17466120,
+      "field_error": 7.093494530172759e-15,
+      "original_backward": 2.1677577930508977e-13,
+      "residual_bound": 2.898297436481015e-13
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 16181312,
+      "field_error": 1.004112554826726e-12,
+      "original_backward": 1.0275688794419665e-12,
+      "residual_bound": 9.211314145357167e-12
+    }
+  },
+  {
+    "kind": "coated",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 7876768,
+      "field_error": 3.2058943878645663e-14,
+      "original_backward": 7.204833422708124e-14
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 17053416,
+      "field_error": 1.3769037290990186e-13,
+      "original_backward": 7.160276941101476e-14,
+      "residual_bound": 1.6154508063627842e-13
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 16338560,
+      "field_error": 4.2382622971519143e-13,
+      "original_backward": 4.679229860966143e-13,
+      "residual_bound": 3.5042298545088087e-12
+    }
+  },
+  {
+    "kind": "ibc",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 1061296,
+      "field_error": 2.215710021249151e-15,
+      "original_backward": 4.178381561998758e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 2156080,
+      "field_error": 2.3899749221866486e-15,
+      "original_backward": 4.038280756497436e-15,
+      "residual_bound": 2.742465344235112e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 2083776,
+      "field_error": 2.367832318802917e-14,
+      "original_backward": 3.7583788070945835e-14,
+      "residual_bound": 2.32880131342936e-13
+    }
+  },
+  {
+    "kind": "ibc",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 1061296,
+      "field_error": 3.2844288774542033e-15,
+      "original_backward": 7.753488165056775e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 2189936,
+      "field_error": 5.837245435966444e-15,
+      "original_backward": 8.095633566105012e-15,
+      "residual_bound": 4.291173400102182e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 2140000,
+      "field_error": 6.803886593706663e-14,
+      "original_backward": 7.012737782246879e-14,
+      "residual_bound": 2.6551253870450886e-13
+    }
+  },
+  {
+    "kind": "layered",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 12547064,
+      "field_error": 8.381588998320065e-15,
+      "original_backward": 1.170591846040195e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 28194424,
+      "field_error": 8.014232905212379e-14,
+      "original_backward": 4.425419341361001e-15,
+      "residual_bound": 9.000209295040183e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 26079120,
+      "field_error": 4.567110454804789e-12,
+      "original_backward": 7.42295984654204e-13,
+      "residual_bound": 3.810689970293912e-11
+    }
+  },
+  {
+    "kind": "layered",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 12358728,
+      "field_error": 2.3385797696541995e-14,
+      "original_backward": 2.7356061913496363e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 27715136,
+      "field_error": 8.712867376487977e-14,
+      "original_backward": 6.11784971460554e-15,
+      "residual_bound": 1.0097024030241075e-13
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 25932536,
+      "field_error": 1.3732798509780877e-12,
+      "original_backward": 1.4292499013895392e-12,
+      "residual_bound": 3.01512491462993e-11
+    }
+  },
+  {
+    "kind": "lossless",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3317952,
+      "field_error": 9.524500077012172e-14,
+      "original_backward": 1.719253371492086e-17
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 15001720,
+      "field_error": 9.397640193082275e-12,
+      "original_backward": 4.468577382116553e-15,
+      "residual_bound": 5.649051764900543e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 7442304,
+      "field_error": 3.425088899984322e-11,
+      "original_backward": 4.6759259653327586e-14,
+      "residual_bound": 5.5531825434417365e-11
+    }
+  },
+  {
+    "kind": "lossless",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3394832,
+      "field_error": 8.531374107217757e-15,
+      "original_backward": 4.8285342106404506e-17
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 14382096,
+      "field_error": 1.5665191220197906e-12,
+      "original_backward": 1.5818438719650562e-15,
+      "residual_bound": 6.76100181370447e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 7301072,
+      "field_error": 5.923821592826475e-11,
+      "original_backward": 3.1185973453684643e-13,
+      "residual_bound": 4.014284162261e-11
+    }
+  },
+  {
+    "kind": "lossy",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3347216,
+      "field_error": 2.2405660734557236e-14,
+      "original_backward": 1.3631959514356783e-17
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 14816512,
+      "field_error": 1.3946911948973501e-11,
+      "original_backward": 2.6541770819598293e-15,
+      "residual_bound": 6.775055711651296e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 7465072,
+      "field_error": 7.655736790139521e-12,
+      "original_backward": 9.090129853482932e-15,
+      "residual_bound": 1.2926681270133579e-11
+    }
+  },
+  {
+    "kind": "lossy",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3380848,
+      "field_error": 2.3319445370287003e-14,
+      "original_backward": 5.548164284355377e-17
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 14849248,
+      "field_error": 3.757832402414954e-12,
+      "original_backward": 2.113751758429993e-15,
+      "residual_bound": 7.63784788950481e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 7365216,
+      "field_error": 1.2600928392340921e-10,
+      "original_backward": 3.973409662861482e-13,
+      "residual_bound": 4.808814178491672e-11
+    }
+  },
+  {
+    "kind": "magnetic",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3466144,
+      "field_error": 1.5329071314212335e-14,
+      "original_backward": 8.466163487708195e-18
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 15328024,
+      "field_error": 9.217026189428594e-11,
+      "original_backward": 6.956655586369292e-15,
+      "residual_bound": 6.12532678760707e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 7627232,
+      "field_error": 2.272407708339535e-11,
+      "original_backward": 1.6546680717485478e-14,
+      "residual_bound": 1.885327531529387e-11
+    }
+  },
+  {
+    "kind": "magnetic",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3406976,
+      "field_error": 2.527917512054773e-13,
+      "original_backward": 3.194612212099769e-17
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 15414520,
+      "field_error": 6.155630647989759e-11,
+      "original_backward": 6.241597363355474e-15,
+      "residual_bound": 7.323928631565012e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 7674912,
+      "field_error": 2.0801424154281152e-11,
+      "original_backward": 3.168249947708202e-14,
+      "residual_bound": 9.919454217685427e-12
+    }
+  },
+  {
+    "kind": "mixed",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 5676496,
+      "field_error": 2.6931650570056347e-15,
+      "original_backward": 9.695355098072694e-16
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 12570608,
+      "field_error": 1.2990190343279597e-14,
+      "original_backward": 2.8078832019022217e-15,
+      "residual_bound": 6.627309386196512e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 11662592,
+      "field_error": 6.783546085183589e-13,
+      "original_backward": 2.074051901663829e-12,
+      "residual_bound": 2.0596869795058208e-11
+    }
+  },
+  {
+    "kind": "mixed",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 5574368,
+      "field_error": 7.484447475408832e-15,
+      "original_backward": 1.1342806987461782e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 12352384,
+      "field_error": 5.436485607855919e-14,
+      "original_backward": 8.092650664218502e-15,
+      "residual_bound": 4.237143612114282e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 11579216,
+      "field_error": 4.603577644069175e-13,
+      "original_backward": 1.4016480242258347e-12,
+      "residual_bound": 1.748410130844067e-11
+    }
+  },
+  {
+    "kind": "mixed_sheet",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 2965400,
+      "field_error": 1.8613370409275336e-14,
+      "original_backward": 3.481995476378667e-14
+    },
+    "compressed_operator": {
+      "rejected": "Off-diagonal rank exceeds 192 (relative error 3.3e-13)."
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 11748936,
+      "field_error": 1.3584613235831004e-12,
+      "original_backward": 1.0624217964278262e-13,
+      "residual_bound": 5.517873292804491e-13
+    }
+  },
+  {
+    "kind": "mixed_sheet",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 2637184,
+      "field_error": 4.950067208495041e-15,
+      "original_backward": 6.0649901489430265e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 5657352,
+      "field_error": 4.955993069206458e-15,
+      "original_backward": 6.2966027539017724e-15,
+      "residual_bound": 8.269454337746311e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 5517656,
+      "field_error": 1.9376727434103313e-14,
+      "original_backward": 5.108171842631198e-14,
+      "residual_bound": 9.039077242054335e-13
+    }
+  },
+  {
+    "kind": "pec",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 1008384,
+      "field_error": 1.629646595327678e-15,
+      "original_backward": 2.67074736317377e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 2099728,
+      "field_error": 3.2576404157005816e-15,
+      "original_backward": 6.829657653966902e-15,
+      "residual_bound": 2.718239461920001e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 2028720,
+      "field_error": 8.060996119064546e-15,
+      "original_backward": 3.5057882428051784e-13,
+      "residual_bound": 1.5975861141204154e-12
+    }
+  },
+  {
+    "kind": "pec",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 1054224,
+      "field_error": 3.3133821249967967e-15,
+      "original_backward": 7.9716614608389e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 2201504,
+      "field_error": 3.9260164452698375e-15,
+      "original_backward": 8.033618561284212e-15,
+      "residual_bound": 2.455585473121559e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 2128560,
+      "field_error": 7.16821528737571e-14,
+      "original_backward": 2.2357459015771379e-13,
+      "residual_bound": 8.300749112495906e-13
+    }
+  },
+  {
+    "kind": "pec_ibc",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 2625592,
+      "field_error": 1.7743184112813043e-15,
+      "original_backward": 5.160142274813275e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 5560280,
+      "field_error": 3.8853825526212156e-15,
+      "original_backward": 7.118339925728632e-15,
+      "residual_bound": 4.745087625051321e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 5358192,
+      "field_error": 4.354928185697037e-14,
+      "original_backward": 8.761377317341739e-14,
+      "residual_bound": 4.096271181938451e-13
+    }
+  },
+  {
+    "kind": "pec_ibc",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 2602512,
+      "field_error": 3.547524077807275e-15,
+      "original_backward": 7.107584215522527e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 5596224,
+      "field_error": 3.2516767754811064e-15,
+      "original_backward": 7.128085196186897e-15,
+      "residual_bound": 4.9355054273914996e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 5423656,
+      "field_error": 1.8358784771891382e-14,
+      "original_backward": 5.5843656640527763e-14,
+      "residual_bound": 3.2549301139412514e-13
+    }
+  },
+  {
+    "kind": "sheet",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 989472,
+      "field_error": 6.545748000328689e-15,
+      "original_backward": 4.9670022229862835e-14
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 4746280,
+      "field_error": 6.469282387572222e-15,
+      "original_backward": 4.967002222987887e-14,
+      "residual_bound": 4.967002222987887e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 2061328,
+      "field_error": 2.0165049598901016e-12,
+      "original_backward": 7.330646518269038e-14,
+      "residual_bound": 4.542535840620109e-13
+    }
+  },
+  {
+    "kind": "sheet",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 933168,
+      "field_error": 1.0946408366001016e-15,
+      "original_backward": 2.3368846420739155e-15
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 1892392,
+      "field_error": 1.7740486100378696e-15,
+      "original_backward": 8.25584230395714e-15,
+      "residual_bound": 3.623605838102383e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 1877688,
+      "field_error": 2.4476913215850668e-15,
+      "original_backward": 8.423270933764525e-15,
+      "residual_bound": 6.140580596781632e-14
+    }
+  },
+  {
+    "kind": "thin",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3472280,
+      "field_error": 1.3583126497937073e-14,
+      "original_backward": 3.503341353070291e-16
+    },
+    "compressed_operator": {
+      "rejected": "Off-diagonal rank exceeds 192 (relative error 1.63e-13)."
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 6978632,
+      "field_error": 5.297208087578035e-13,
+      "original_backward": 3.503342518110845e-16,
+      "residual_bound": 1.3980763214391715e-15
+    }
+  },
+  {
+    "kind": "thin",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 860968,
+      "field_error": 3.0618694149944207e-15,
+      "original_backward": 1.3020406056827868e-14
+    },
+    "compressed_operator": {
+      "tolerance": 1e-13,
+      "bytes": 1849888,
+      "field_error": 3.0618694149944207e-15,
+      "original_backward": 1.3757101533882107e-14,
+      "residual_bound": 1.871942989964566e-14
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 1781392,
+      "field_error": 4.790083530344069e-15,
+      "original_backward": 1.8141355590270853e-14,
+      "residual_bound": 1.000038380189033e-13
+    }
+  },
+  {
+    "kind": "thin_magnetic",
+    "pol": "TE",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3464368,
+      "field_error": 3.70760504031827e-14,
+      "original_backward": 1.6234932489294835e-15
+    },
+    "compressed_operator": {
+      "rejected": "Off-diagonal rank exceeds 192 (relative error 1.89e-13)."
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 6964008,
+      "field_error": 3.4451426837119975e-13,
+      "original_backward": 1.6384838700193632e-15,
+      "residual_bound": 2.752137441038277e-15
+    }
+  },
+  {
+    "kind": "thin_magnetic",
+    "pol": "TM",
+    "coarse_inverse": {
+      "tolerance": 1e-08,
+      "bytes": 3417248,
+      "field_error": 2.9456683130818633e-14,
+      "original_backward": 1.4748811708385926e-16
+    },
+    "compressed_operator": {
+      "rejected": "Off-diagonal rank exceeds 192 (relative error 1.14e-13)."
+    },
+    "equilibrated_operator": {
+      "tolerance": 1e-12,
+      "bytes": 6844120,
+      "field_error": 4.245231462874353e-13,
+      "original_backward": 1.4711665336639496e-16,
+      "residual_bound": 8.323903889622183e-16
+    }
+  }
+]

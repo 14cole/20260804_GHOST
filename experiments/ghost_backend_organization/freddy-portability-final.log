@@ -1,0 +1,15 @@
+test_failed_impedance_publish_preserves_existing_file (test_project_portability.AtomicFreddyWriterTests.test_failed_impedance_publish_preserves_existing_file) ... ok
+test_failed_material_publish_preserves_existing_file (test_project_portability.AtomicFreddyWriterTests.test_failed_material_publish_preserves_existing_file) ... ok
+test_failed_project_serialization_preserves_existing_file (test_project_portability.AtomicFreddyWriterTests.test_failed_project_serialization_preserves_existing_file) ... ok
+test_failed_second_impedance_stage_preserves_nominal_and_uncertainty (test_project_portability.AtomicFreddyWriterTests.test_failed_second_impedance_stage_preserves_nominal_and_uncertainty) ... ok
+test_distant_absolute_path_is_preserved_and_reported (test_project_portability.ProjectPathPortabilityTests.test_distant_absolute_path_is_preserved_and_reported) ... ok
+test_legacy_schema_one_relative_paths_keep_working_directory_semantics (test_project_portability.ProjectPathPortabilityTests.test_legacy_schema_one_relative_paths_keep_working_directory_semantics) ... ok
+test_neighboring_material_directory_uses_one_parent_hop (test_project_portability.ProjectPathPortabilityTests.test_neighboring_material_directory_uses_one_parent_hop) ... ok
+test_relative_live_path_is_resolved_from_runtime_not_project_folder (test_project_portability.ProjectPathPortabilityTests.test_relative_live_path_is_resolved_from_runtime_not_project_folder) ... ok
+test_relative_paths_follow_a_moved_project_tree (test_project_portability.ProjectPathPortabilityTests.test_relative_paths_follow_a_moved_project_tree) ... ok
+test_transitional_schema_one_portable_paths_are_migrated_safely (test_project_portability.ProjectPathPortabilityTests.test_transitional_schema_one_portable_paths_are_migrated_safely) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.049s
+
+OK

@@ -1,0 +1,110 @@
+[
+  {
+    "name": "none",
+    "setup_seconds": 5.999991117278114e-07,
+    "preconditioner_bytes": 0,
+    "solves": [
+      {
+        "info": 3,
+        "iterations": 120,
+        "seconds": 0.23914530000001832,
+        "original_backward": 0.001984413528725304,
+        "density_error": 0.16412308968345618
+      },
+      {
+        "info": 3,
+        "iterations": 120,
+        "seconds": 0.22571919999973034,
+        "original_backward": 0.003302864563344937,
+        "density_error": 0.4988437494859917
+      },
+      {
+        "info": 3,
+        "iterations": 120,
+        "seconds": 0.22686160000012023,
+        "original_backward": 0.0018423991854495628,
+        "density_error": 0.48338892185721044
+      },
+      {
+        "info": 3,
+        "iterations": 120,
+        "seconds": 0.22710880000158795,
+        "original_backward": 0.0005294655884381215,
+        "density_error": 0.4354546606168063
+      }
+    ],
+    "field_peak_error": 0.00022371173619447618
+  },
+  {
+    "name": "local_blocks",
+    "setup_seconds": 0.0058470999993005535,
+    "preconditioner_bytes": 4404624,
+    "solves": [
+      {
+        "info": 0,
+        "iterations": 68,
+        "seconds": 0.1621768000004522,
+        "original_backward": 2.3821800233948543e-12,
+        "density_error": 4.3892884543736697e-10
+      },
+      {
+        "info": 0,
+        "iterations": 69,
+        "seconds": 0.16017250000004424,
+        "original_backward": 1.7832155973935858e-12,
+        "density_error": 4.676016067225875e-10
+      },
+      {
+        "info": 0,
+        "iterations": 71,
+        "seconds": 0.1609042000000045,
+        "original_backward": 7.844472416284124e-13,
+        "density_error": 1.7900730371439563e-10
+      },
+      {
+        "info": 0,
+        "iterations": 68,
+        "seconds": 0.15728019999914977,
+        "original_backward": 4.561794093331726e-13,
+        "density_error": 9.189253196904616e-11
+      }
+    ],
+    "field_peak_error": 7.275920929867284e-13
+  },
+  {
+    "name": "coarse_hodlr",
+    "setup_seconds": 0.4063639999985753,
+    "preconditioner_bytes": 13881576,
+    "solves": [
+      {
+        "info": 0,
+        "iterations": 11,
+        "seconds": 0.0426727000012761,
+        "original_backward": 3.8967045878222067e-16,
+        "density_error": 5.799267293343384e-11
+      },
+      {
+        "info": 0,
+        "iterations": 11,
+        "seconds": 0.046324300001288066,
+        "original_backward": 6.673994952489171e-16,
+        "density_error": 9.454513249539097e-11
+      },
+      {
+        "info": 0,
+        "iterations": 11,
+        "seconds": 0.04113390000020445,
+        "original_backward": 4.321099675032617e-16,
+        "density_error": 1.9506559176909796e-11
+      },
+      {
+        "info": 0,
+        "iterations": 11,
+        "seconds": 0.040742700000919285,
+        "original_backward": 7.621327500633019e-17,
+        "density_error": 3.3545322449923107e-12
+      }
+    ],
+    "field_peak_error": 6.290336257523027e-14
+  }
+]

@@ -1,0 +1,7551 @@
+{
+  "geometry_sha256": "b167517986a9d549b024b16f37c692e0ece3382bdcaaf35fe1a036a3c5a82d70",
+  "gui_max_panels": 100000,
+  "source_hashes": {
+    "assembly_geometry.py": "69695eafc26da463738cbb976c2a16bc03a83a78dba239979ee2e25d4f368127",
+    "assembly_inspector.py": "ee4d9c6ea859d230c66d3fddacec23db3b94da60dbf565c0c553c314e4504fbf",
+    "assembly_session.py": "842a9df38fe5547158403e4c46734826773c58988499a401740ee1fa26407236",
+    "assembly_workload.py": "4dc984b3c3edcec122bef89add152a6b7051a139a937e8e5e712ad2dd7f628af",
+    "bor_dispatch.py": "b52c2d29925ad8163b2f96b9961ee37a08245fa070bd1e839a24e9d71ee49763",
+    "bor_kernels.py": "968476f536fcfa6522326260be948652977c23b7e82cae2b17828d1d6273f550",
+    "bor_solver.py": "bb7ec686f23b6f9c9a07db2efd2f9a4dfe62ab26e5d7b1adcd0c051ccc94a4e6",
+    "bor_streaming.py": "4738b875b695607bc737c3d5463f9cdecc15dbb8cf6b4a970fb286328c81f54a",
+    "boundary_fields.py": "8302c6e51ec37f00b41a0031f4de977da6a5de65efd4fbdbd2a59bda87df002c",
+    "build_bor_stream_kernel.py": "499419a63b8e686bbbdb844019df4cd0bebf16bd588120361cde9a643bc55f9d",
+    "check_hpc_environment.py": "db7f9d0cbd44ebbd72ae23dae2b6638174430ae02adc219b1f297e7a8eb094e6",
+    "compact_operators.py": "ad019a3bdb515aa8cac898fd5833a04d5a7116604ec2c13e5483efb3a1b0782b",
+    "components.py": "7cecf61d08603eba395a5fa1386c7ced9af82e0c97d5bb7fdb762f24a8c51b6f",
+    "compressed_factor.py": "01c0839d499af1fa3189a732a30a0587106914b5d4b88075fd28f414685b81ee",
+    "compressed_inverse.py": "825d97b18079a3a4f704eb7d5aefc5a34c44e9f3b0368f517773aaa737ff746a",
+    "compressed_native.py": "162d79d1bf6aaaaed27bf161e37772bd5311653448d387d0c1b7eebc5ccabec0",
+    "compressed_operator.py": "9343282475843804bae6856deb5bafd5b1ab4bd1180fc753946fd00f7efd8ae7",
+    "compressed_oracle.py": "6b52d345c4e6ba33d902da1a3987d49bbda12508ba923d99c7b9bcd7a2de0434",
+    "compressed_pair.py": "2c7403c529cb6de7fb488d288d74c8140a33c5a68f139d1e04564283cdbed3c6",
+    "compressed_runtime.py": "588e00a24e39ed287dfc57c2b076f50cced3494aaba37aaab50acfbea0eef5b4",
+    "cpu_checked_lu.py": "61c6e13a049027de0565e20cc6856988065586a1339cc0988c36d3a9163f9f51",
+    "cpu_execution.py": "554f936b06a4cabc7570eb505c013bfbcaff29190dbd68832d603ffb55cadcb1",
+    "cpu_kernels.py": "7d61faf9125dab36708c674a7caf4251c61f5398dd30b216409f5e44da72a4e6",
+    "cpu_streaming.py": "be37876f1505d92da3868a95c8eb05dd3ab5e909ca00c8f1048ea39c1468792c",
+    "create_feature_manifest.py": "8538237af24aec1ec40447eabac818dc21c32a9b3de88cb6fce1c464478d9ecd",
+    "dense_factor.py": "e67c53746b72a76d6f756d25b3b73a59270125873fd09759f912e0380a2ddf5d",
+    "dense_workspace.py": "b42fcbdf35f85db31e323d1d2b2d1b34e71d211900f33d2f8f492b05aa7a6030",
+    "dielectric_system.py": "b4c6280f4799b6e7d674ec8a83fa0e683cf355962e44fff77dc1285fc1f82134",
+    "driver_config.py": "9d4c2c3ac46b995750960256d678c5dc4b0577d1ed8870642d196b5d62ac1120",
+    "driver_io.py": "744b1e7336a2176ad97e8543fc29a631f0ebf38d04a5ca29cee2f150fa73bf5d",
+    "feature_family_validation.py": "359f3ed04137d90530c898f94ac56302ceeb00b3d8f8f8e8877bdb392854ae9a",
+    "feature_library_contracts.py": "167426e83ca6295e2ccd2ae3b010cba8e5e280099a9f23bcbb4a5c27ca4922fc",
+    "feature_preparation.py": "2a65080141ddb595829c882a1cca28576a800a2d281dd8f2be692ca00a01a026",
+    "feature_sum.py": "d8ac4377aa503e10094dfd67934f2fd03e3cf98e359f0591a76271c56aba478f",
+    "feature_workflow.py": "7b6f7a7742b9979ced1667d7c67ac1350e94914b928f1a5695156d5da224793f",
+    "frame.py": "3c845172aab6914d55e1fb970f485de55220332f05faa893f437edeacfa65d23",
+    "geometry_io.py": "26e9f4486d59f56f123fbd6486e6dc050b7ce88791245ab07e0dcddc8f232b5c",
+    "geometry_tab.py": "ea45096a93488b42961314289d246a7059ad579171ce9eb400b8f3af9d2c4bc8",
+    "ghost_gui.py": "c8d210ef97d0e3d694e311040a30b9ff1b75626a577260d56c0f7af3d6c4416a",
+    "ghost_runtime.py": "51bc8549805273910f040ee58a85356476f85672fcd66b5e398c40afbb6b59fa",
+    "grim_compat.py": "144578bce6125207dadba85e734681f6a87a8a4ebf3fa27b6f5565a8d8fde2f0",
+    "grim_io.py": "3bc90bff4a7d71ff7e3c6fb9d0de099d21b089ad62c112e0a8058af6fa9ce315",
+    "grim_naming.py": "89aab7912b710326ac02996945ab256d7bb40fa3aa9951d708eb63475521fae1",
+    "hierarchical_factor.py": "56d7df8a9ccf7c1fa5b131a48e480b997e08cd37b6520b73e0adf0602b200ba6",
+    "hpc_bundle.py": "4decc3c63f9945185528b15cab1f411282c683ea2e9e5d07b0c4004f55d9aeab",
+    "hpc_common.py": "219bee157a67ed8f0c2a570181bb3626593bfc025813d87c9b3849d4329f0f04",
+    "hpc_scheduler.py": "90675104837b77df19ad7ceb4c7829a59812ff280c57d5eabe2e1ada430dc6e0",
+    "import_3d_reference.py": "5027bdd7d3585c703e7692e3d9f8bd35db4ee7f416b5446b314d8fe64160d980",
+    "line_expand.py": "a0f38e589d3f2d35616f6effe06189e41a52d1f3c8afb8f543844a5cb636b124",
+    "local_mass.py": "f110a5fb62779f9dc84357024bb3e81e2c1a74a9041f8cddd78af19d2ad91b08",
+    "material_models.py": "6bf1b1a421ef09ae05c70cd46b8b1fdfa52a185c8561f33a0cec173b2e802a51",
+    "mesh_guidance.py": "33c9bd3fd77b211d5b0914ca318d44bbd0d845b6b4468d1e7e0a4a602860df09",
+    "mesh_quality.py": "0ffa49c9110ea52f1caa32e00ac1aff1c0622e82491acd51ca58efeac4331e80",
+    "mie_reference.py": "155d1baac6433dad00201425a51caeef6414210059c73722a556139860530e95",
+    "mie_sphere.py": "fd3656fec380540e35b590d10a96e1a3dd5bc3491794b315f669dae51bb7d880",
+    "multi_region.py": "0b895829775c29d9422a8e3ab7dcd226083edb30dbdad855170f7c3cd789db21",
+    "occluder.py": "b5719af1f8f8af7b8f8050a71c796d046c66fd1ee50c135df956cd8e46725090",
+    "place_features.py": "80eb2aa8edd13edf9263e041220e03570e767422822731e4ee85fc9a43097d1c",
+    "rcs_constants.py": "87063b8fd91b6288dfc18a10cec0a62028a46face0ce8c54aa3a0e809bb58fa9",
+    "rcs_geometry.py": "e82906ce1b7709db672d53ba781887849961611cd636e48ef57905e0e8870330",
+    "rcs_operators.py": "8655f9a6da8998a6b11694b8f0c741363aeff20852ec56696efd8db8ce5604f2",
+    "rcs_solver.py": "4bbc44d47cda23a7adac8600ddb20a695f6a1e74bebf28d440d9228fd52702f0",
+    "rcs_special.py": "44847daf5a9e43cdc4d2e5d916a92b9b7e1d3b9f706344c999dcaa61972726e3",
+    "refined_lu.py": "1b1602fd5217fe2262c9b0f0b37b8ae83948e530990b842492e0dff6298f899e",
+    "robin_system.py": "98a4968bf3ca336af0c4fc3972b577b41499456369e323d4d55512bff0fd9068",
+    "run_hpc_bor_monostatic.py": "3292e02e49c0942c378f8e0c5591814289aac1d9265ead9c089816fe81281d5d",
+    "run_hpc_monostatic.py": "b2e1fe54cd15d49c3e680efcbb7f44b57c69b739f9d9db3741cf146e832dfcf5",
+    "run_local_bor.py": "838967497dc4e67e2dab6054b316d57bed9723b227d0d4c0d43a492d649bcbc2",
+    "run_local_monostatic.py": "5f46f77cb788842be0a1f1288463514454e48133ea3694ef870f49b3189e30c4",
+    "run_setup.py": "d8b3993f207b705217953a09534c407b329d029a119cffe432282385eecb8d30",
+    "sheet_system.py": "b8823fa6f7315f1a7f43c00438dd3a2b318f2ca33830141eaf9dcb21b29086f5",
+    "solver_metrics.py": "f3567a345a7a34a82f184edc0a97c6fd73a9c2f8da613596195653449734b1af",
+    "solver_quality.py": "3e594ebf03b480a8c6bea94884026921cfe108af5fafe8eaa0573973decc6e8c",
+    "solver_tab.py": "e02dc13031902a1adcd07f83432217a9faa054365b77d380129432a76dc270bd",
+    "surface_mesh.py": "6cf3ae71ad4d08db30d9695cb5173be8df191249669a7d549174a08f73e1e79e",
+    "sweep_compression.py": "e5c049ca3076d60831d16e25222699e0c36d17ceebbc4ea133fde9ff891cac9b",
+    "system_scatter.py": "60e5be4aa3e585f6cbc8507ef50078ff70ef05813b3cd75cee82bce5fe9f9f64",
+    "thin_sheet.py": "29f68fdd61b221b22b44786c0c5e7782e871118041324bf6212fbebae08f7106",
+    "validate_feature_reconstruction.py": "4fbfb1faf01236724acfe004e16c55914bdcdf6cd9ac37626612b2b6b8c8214e",
+    "workflow_provenance.py": "ff0b7406c00b6245be929fb0bff5a3f1209e53ce209197c86ac1468f18d9825f",
+    "_ghost_dataclasses.py": "4c1b7676ee2a931c57759e68956173c07a629b6721e23ee42898b6552feaa19c"
+  },
+  "scheduler_forecasts": {
+    "1": {
+      "VV": {
+        "nodes": 18732,
+        "panels": 18726,
+        "base_system_dofs": 28406,
+        "base_operator_matrices": 16,
+        "fine_nodes": 28144,
+        "fine_panels": 28138,
+        "fine_system_dofs": 42686,
+        "fine_operator_matrices": 16,
+        "n_regions": 3,
+        "formulation": "multi_region",
+        "system_dofs": 42686,
+        "operator_matrices": 16,
+        "peak_gb": 16.007465171813966
+      },
+      "HH": {
+        "nodes": 18732,
+        "panels": 18726,
+        "base_system_dofs": 28406,
+        "base_operator_matrices": 16,
+        "fine_nodes": 28144,
+        "fine_panels": 28138,
+        "fine_system_dofs": 42686,
+        "fine_operator_matrices": 16,
+        "n_regions": 3,
+        "formulation": "multi_region",
+        "system_dofs": 42686,
+        "operator_matrices": 16,
+        "peak_gb": 16.007465171813966
+      }
+    },
+    "361": {
+      "VV": {
+        "nodes": 18732,
+        "panels": 18726,
+        "base_system_dofs": 28406,
+        "base_operator_matrices": 16,
+        "fine_nodes": 28144,
+        "fine_panels": 28138,
+        "fine_system_dofs": 42686,
+        "fine_operator_matrices": 16,
+        "n_regions": 3,
+        "formulation": "multi_region",
+        "system_dofs": 42686,
+        "operator_matrices": 16,
+        "peak_gb": 16.00931911468506
+      },
+      "HH": {
+        "nodes": 18732,
+        "panels": 18726,
+        "base_system_dofs": 28406,
+        "base_operator_matrices": 16,
+        "fine_nodes": 28144,
+        "fine_panels": 28138,
+        "fine_system_dofs": 42686,
+        "fine_operator_matrices": 16,
+        "n_regions": 3,
+        "formulation": "multi_region",
+        "system_dofs": 42686,
+        "operator_matrices": 16,
+        "peak_gb": 16.00931911468506
+      }
+    }
+  },
+  "seconds": 69.46306540000296,
+  "errors": [],
+  "preflight": [
+    "19 segments; 350 primitives. X span 11.8717 in \u00d7 Y span 0.9992 in\n1 frequencies \u00d7 361 incident angles; 361 samples per channel, VV + HH. Base/fine mesh comparison; standard target; experimental_cpu method; double LU.\nWarnings: Geometry contains 4 high-degree node(s) (>2 connected primitives).\nSolver quality and convergence are evaluated during the run."
+  ],
+  "passed": true,
+  "metadata": {
+    "source_path": "",
+    "segment_count": 19,
+    "panel_count": 3028,
+    "panel_count_min": 3028,
+    "panel_count_max": 3028,
+    "polarizations": [
+      "VV",
+      "HH"
+    ],
+    "polarization_internal": [
+      "TE",
+      "TM"
+    ],
+    "polarization_mapping": {
+      "VV": "TE",
+      "HH": "TM"
+    },
+    "formulation": "co-polarized 2-D BIE/MoM",
+    "formulations": {
+      "VV": "2D multi-region indirect SLP formulation (layered coating)",
+      "HH": "2D multi-region indirect SLP formulation (layered coating)"
+    },
+    "solver_method": "compressed_experimental_cpu",
+    "solver_method_requested": "experimental_cpu",
+    "residual_norm_max": 5.220999172679875e-12,
+    "constraint_residual_norm_max": 0.0,
+    "condition_est_max": 11495.394090542324,
+    "condition_est_computed": true,
+    "warnings": [
+      "Geometry contains 4 high-degree node(s) (>2 connected primitives).",
+      "Detected 18 physical trace/flux junction relation(s). The active multi-region indirect formulation uses interface-specific SLP densities, so that diagnostic trace/flux matrix is not applied to its different unknowns; junction coupling is represented implicitly by the shared regional potentials."
+    ],
+    "warning_count": 2,
+    "preflight": {
+      "segment_count": 19,
+      "primitive_count": 350,
+      "dangling_nodes": 0,
+      "high_degree_nodes": 4,
+      "warning_count": 1,
+      "warnings": [
+        "Geometry contains 4 high-degree node(s) (>2 connected primitives)."
+      ]
+    },
+    "quality_gate": {
+      "passed": true,
+      "channels": {
+        "VV": {
+          "passed": true,
+          "thresholds": {
+            "residual_norm_max": 1e-06,
+            "constraint_residual_norm_max": 1e-08,
+            "condition_est_max": 1000000.0,
+            "warnings_max": 10
+          },
+          "values": {
+            "residual_norm_max": 5.220999172679875e-12,
+            "residual_nonfinite_count": 0,
+            "constraint_residual_norm_max": 0.0,
+            "condition_est_max": 11495.394090542324,
+            "condition_est_computed": true,
+            "warnings_count": 2
+          },
+          "violations": [],
+          "certification_scope": "discrete_linear_system_and_mesh_convergence",
+          "mesh_convergence_certified": true,
+          "reason": "discrete linear-system quality thresholds and production mesh-convergence certification satisfied"
+        },
+        "HH": {
+          "passed": true,
+          "thresholds": {
+            "residual_norm_max": 1e-06,
+            "constraint_residual_norm_max": 1e-08,
+            "condition_est_max": 1000000.0,
+            "warnings_max": 10
+          },
+          "values": {
+            "residual_norm_max": 2.4812299558220355e-12,
+            "residual_nonfinite_count": 0,
+            "constraint_residual_norm_max": 0.0,
+            "condition_est_max": 7142.96037890415,
+            "condition_est_computed": true,
+            "warnings_count": 2
+          },
+          "violations": [],
+          "certification_scope": "discrete_linear_system_and_mesh_convergence",
+          "mesh_convergence_certified": true,
+          "reason": "discrete linear-system quality thresholds and production mesh-convergence certification satisfied"
+        }
+      },
+      "reason": "Both VV<-TE and HH<-TM discrete linear-system quality gates passed"
+    },
+    "channel_metadata": {
+      "VV": {
+        "source_path": "",
+        "segment_count": 19,
+        "panel_count": 3028,
+        "panel_count_min": 3028,
+        "panel_count_max": 3028,
+        "panel_length_min_m": 0.00019050000000000002,
+        "panel_length_max_m": 0.0004353826406992154,
+        "mesh_reference_ghz": 1.0,
+        "mesh_reference_ghz_min": 1.0,
+        "mesh_reference_ghz_max": 1.0,
+        "mesh_wavelength_m": 0.01342669585570839,
+        "mesh_wavelength_min_m": 0.01342669585570839,
+        "mesh_wavelength_max_m": 0.01342669585570839,
+        "mesh_max_refractive_index": 22.32808884790092,
+        "mesh_material_flags": [
+          1,
+          2
+        ],
+        "polarization_internal": "TE",
+        "polarization_user": "TE",
+        "polarization_aliases": [
+          "TE"
+        ],
+        "polarization_export": "TE",
+        "polarization_export_alias": "VV",
+        "rcs_normalization_mode": "physical",
+        "formulation": "2D multi-region indirect SLP formulation (layered coating)",
+        "solver_method": "compressed_cpu",
+        "solver_method_requested": "experimental_cpu",
+        "residual_norm_max": 5.220999172679875e-12,
+        "residual_norm_mean": 5.220999172679875e-12,
+        "residual_nonfinite_count": 0,
+        "constraint_residual_norm_max": 0.0,
+        "constraint_residual_norm_mean": 0.0,
+        "constraint_residual_applicable": false,
+        "condition_est_max": 11495.394090542324,
+        "condition_est_mean": 11495.394090542324,
+        "condition_est_computed": true,
+        "condition_estimator": "equilibrated_1norm_compressed_refined_inverse",
+        "thin_layer": [],
+        "warnings": [
+          "Geometry contains 4 high-degree node(s) (>2 connected primitives).",
+          "Detected 18 physical trace/flux junction relation(s). The active multi-region indirect formulation uses interface-specific SLP densities, so that diagnostic trace/flux matrix is not applied to its different unknowns; junction coupling is represented implicitly by the shared regional potentials."
+        ],
+        "warning_count": 2,
+        "math_backend_real_bessel": "scipy-special",
+        "math_backend_complex_hankel": "scipy-special",
+        "reused_matrix_solve_count": 361,
+        "shared_operator_cache_enabled": true,
+        "shared_operator_cache_hits": 0,
+        "shared_operator_cache_stores": 0,
+        "parallel_elevation_solve_count": 0,
+        "max_parallel_workers_used": 1,
+        "mesh_reference_frequency_used": false,
+        "cfie_alpha": 0.0,
+        "junction_nodes": 3026,
+        "junction_constraints": 18,
+        "junction_constraint_candidates": 18,
+        "junction_constraints_applied": false,
+        "junction_constraints_applied_count": 0,
+        "junction_treatment": "implicit_multi_region_indirect",
+        "junction_panels": 3028,
+        "junction_trace_constraints": 8,
+        "junction_flux_constraints": 10,
+        "junction_orientation_conflict_nodes": 0,
+        "linear_node_count": 3034,
+        "linear_element_count": 3028,
+        "shared_node_count": 3026,
+        "split_node_count": 8,
+        "split_boundary_primitive_count": 3028,
+        "multi_signature_node_count": 4,
+        "preflight": {
+          "segment_count": 19,
+          "primitive_count": 350,
+          "dangling_nodes": 0,
+          "high_degree_nodes": 4,
+          "warning_count": 1,
+          "warnings": [
+            "Geometry contains 4 high-degree node(s) (>2 connected primitives)."
+          ]
+        },
+        "cpu_factorization_requested": "compressed",
+        "cpu_rhs_compression_requested": "auto",
+        "hierarchical_factors": [],
+        "compressed_factors": [
+          {
+            "unknowns": 4622,
+            "factorizations": 1,
+            "rhs_batches": 2,
+            "max_rhs_columns": 32,
+            "max_backward_error": 1.5358254769789892e-14,
+            "max_relative_residual": 5.220999172679875e-12,
+            "compressed": {
+              "unknowns": 4622,
+              "tiles": 256,
+              "compressed_tiles": 239,
+              "retained_bytes": 89203328,
+              "max_query_bytes": 2004504,
+              "geometry_queries": 256,
+              "geometry_coefficients": 21362884,
+              "dropped_routes": 228,
+              "row_error_bound": 3.316866999033324e-17,
+              "storage_budget": 8507170672,
+              "compression": "qr"
+            },
+            "preconditioners": [
+              {
+                "bytes": 46613488,
+                "max_rank": 64,
+                "leaves": 62,
+                "accesses": 125849364,
+                "oracle_calls": 11930,
+                "max_query_entries": 73952,
+                "relative_inf_error_bound": null,
+                "relative_one_error_bound": null,
+                "storage_budget": 8416631008,
+                "inverse_only": true
+              }
+            ],
+            "gmres_columns": 0,
+            "max_refinements": 3,
+            "sweep_compression": {
+              "requested": "auto",
+              "method": "incremental_pivoted_qr",
+              "input_columns": 361,
+              "solved_columns": 39,
+              "accepted_batches": 2,
+              "fallback_batches": 0,
+              "fallback_columns": 0,
+              "max_rhs_error": 1.8288959344738678e-15,
+              "max_reconstructed_backward_error": 7.188175604716728e-15,
+              "retained_basis_columns": 39,
+              "reused_basis_batches": 1
+            }
+          }
+        ],
+        "sweep_compression": [
+          {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 39,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.8288959344738678e-15,
+            "max_reconstructed_backward_error": 7.188175604716728e-15,
+            "retained_basis_columns": 39,
+            "reused_basis_batches": 1
+          }
+        ],
+        "dense_condition_methods": [
+          "equilibrated_1norm_compressed_refined_inverse"
+        ],
+        "linear_backend": "cpu_compressed",
+        "dense_gpu_solve_count": 0,
+        "dense_cpu_solve_count": 2,
+        "dense_factorization_count": 1,
+        "dense_rhs_batch_count": 2,
+        "dense_rhs_column_count": 39,
+        "dense_max_rhs_columns": 32,
+        "dense_mixed_precision_solve_count": 0,
+        "dense_fallback_reasons": [],
+        "dense_gpu_fallback_reasons": [],
+        "dense_gpu_devices": [],
+        "dense_largest_system": 4622,
+        "amplitude_version": 2,
+        "quality_gate": {
+          "passed": true,
+          "thresholds": {
+            "residual_norm_max": 1e-06,
+            "constraint_residual_norm_max": 1e-08,
+            "condition_est_max": 1000000.0,
+            "warnings_max": 10
+          },
+          "values": {
+            "residual_norm_max": 5.220999172679875e-12,
+            "residual_nonfinite_count": 0,
+            "constraint_residual_norm_max": 0.0,
+            "condition_est_max": 11495.394090542324,
+            "condition_est_computed": true,
+            "warnings_count": 2
+          },
+          "violations": [],
+          "certification_scope": "discrete_linear_system_and_mesh_convergence",
+          "mesh_convergence_certified": true,
+          "reason": "discrete linear-system quality thresholds and production mesh-convergence certification satisfied"
+        },
+        "mesh_convergence": {
+          "passed": true,
+          "sample_count": 361,
+          "rms_db": 0.0012902540809562992,
+          "max_abs_db": 0.0068959931974106325,
+          "mean_db": 0.0003357332426648734,
+          "median_abs_db": 0.00021498988150048248,
+          "complex_rms_normalized": 3.4638770268944876e-05,
+          "complex_max_normalized": 7.578250371045053e-05,
+          "complex_reference_peak_amplitude": 11.085750214123893,
+          "complex_reference_peak_amplitude_by_frequency": {
+            "1.0": 11.085750214123893
+          },
+          "phase_sample_count": 361,
+          "phase_rms_deg": 0.010750799863176107,
+          "phase_max_deg": 0.03203361475715486,
+          "limits": {
+            "rms_db": 1.0,
+            "max_abs_db": 3.0,
+            "complex_rms_normalized": 0.02,
+            "complex_max_normalized": 0.05,
+            "phase_rms_deg": 5.0,
+            "phase_max_deg": 15.0,
+            "phase_floor_relative": 1e-06
+          },
+          "violations": [],
+          "reason": "mesh convergence passed",
+          "schema": "ghost.solver.mesh-convergence.v1",
+          "fine_factor": 1.5,
+          "published_mesh": "fine",
+          "geometry_model": "piecewise_linear_input",
+          "geometry_approximation_certified": false,
+          "base_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.583079427787476e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 9151.512874298754,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "fine_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 5.220999172679875e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 11495.394090542324,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "base_panel_count": 1938,
+          "fine_panel_count": 3028,
+          "panel_refinement_ratio": 1.5624355005159958
+        },
+        "mesh_convergence_certified": true,
+        "certified_entry_point": true,
+        "published_mesh": "fine"
+      },
+      "HH": {
+        "source_path": "",
+        "segment_count": 19,
+        "panel_count": 3028,
+        "panel_count_min": 3028,
+        "panel_count_max": 3028,
+        "panel_length_min_m": 0.00019050000000000002,
+        "panel_length_max_m": 0.0004353826406992154,
+        "mesh_reference_ghz": 1.0,
+        "mesh_reference_ghz_min": 1.0,
+        "mesh_reference_ghz_max": 1.0,
+        "mesh_wavelength_m": 0.01342669585570839,
+        "mesh_wavelength_min_m": 0.01342669585570839,
+        "mesh_wavelength_max_m": 0.01342669585570839,
+        "mesh_max_refractive_index": 22.32808884790092,
+        "mesh_material_flags": [
+          1,
+          2
+        ],
+        "polarization_internal": "TM",
+        "polarization_user": "TM",
+        "polarization_aliases": [
+          "TM"
+        ],
+        "polarization_export": "TM",
+        "polarization_export_alias": "HH",
+        "rcs_normalization_mode": "physical",
+        "formulation": "2D multi-region indirect SLP formulation (layered coating)",
+        "solver_method": "compressed_cpu",
+        "solver_method_requested": "experimental_cpu",
+        "residual_norm_max": 2.4812299558220355e-12,
+        "residual_norm_mean": 2.4812299558220347e-12,
+        "residual_nonfinite_count": 0,
+        "constraint_residual_norm_max": 0.0,
+        "constraint_residual_norm_mean": 0.0,
+        "constraint_residual_applicable": false,
+        "condition_est_max": 7142.96037890415,
+        "condition_est_mean": 7142.96037890415,
+        "condition_est_computed": true,
+        "condition_estimator": "equilibrated_1norm_compressed_refined_inverse",
+        "thin_layer": [],
+        "warnings": [
+          "Geometry contains 4 high-degree node(s) (>2 connected primitives).",
+          "Detected 18 physical trace/flux junction relation(s). The active multi-region indirect formulation uses interface-specific SLP densities, so that diagnostic trace/flux matrix is not applied to its different unknowns; junction coupling is represented implicitly by the shared regional potentials."
+        ],
+        "warning_count": 2,
+        "math_backend_real_bessel": "scipy-special",
+        "math_backend_complex_hankel": "scipy-special",
+        "reused_matrix_solve_count": 361,
+        "shared_operator_cache_enabled": true,
+        "shared_operator_cache_hits": 0,
+        "shared_operator_cache_stores": 0,
+        "parallel_elevation_solve_count": 0,
+        "max_parallel_workers_used": 1,
+        "mesh_reference_frequency_used": false,
+        "cfie_alpha": 0.0,
+        "junction_nodes": 3026,
+        "junction_constraints": 18,
+        "junction_constraint_candidates": 18,
+        "junction_constraints_applied": false,
+        "junction_constraints_applied_count": 0,
+        "junction_treatment": "implicit_multi_region_indirect",
+        "junction_panels": 3028,
+        "junction_trace_constraints": 8,
+        "junction_flux_constraints": 10,
+        "junction_orientation_conflict_nodes": 0,
+        "linear_node_count": 3034,
+        "linear_element_count": 3028,
+        "shared_node_count": 3026,
+        "split_node_count": 8,
+        "split_boundary_primitive_count": 3028,
+        "multi_signature_node_count": 4,
+        "preflight": {
+          "segment_count": 19,
+          "primitive_count": 350,
+          "dangling_nodes": 0,
+          "high_degree_nodes": 4,
+          "warning_count": 1,
+          "warnings": [
+            "Geometry contains 4 high-degree node(s) (>2 connected primitives)."
+          ]
+        },
+        "cpu_factorization_requested": "compressed",
+        "cpu_rhs_compression_requested": "auto",
+        "hierarchical_factors": [],
+        "compressed_factors": [
+          {
+            "unknowns": 4622,
+            "factorizations": 1,
+            "rhs_batches": 2,
+            "max_rhs_columns": 32,
+            "max_backward_error": 3.3898417919612247e-14,
+            "max_relative_residual": 9.651526343538012e-09,
+            "compressed": {
+              "unknowns": 4622,
+              "tiles": 256,
+              "compressed_tiles": 239,
+              "retained_bytes": 84100256,
+              "max_query_bytes": 2004504,
+              "geometry_queries": 256,
+              "geometry_coefficients": 21362884,
+              "dropped_routes": 228,
+              "row_error_bound": 6.516788526374072e-18,
+              "storage_budget": 8500731264,
+              "compression": "qr",
+              "spooled_bytes": 83730496
+            },
+            "preconditioners": [
+              {
+                "bytes": 42675088,
+                "max_rank": 64,
+                "leaves": 62,
+                "accesses": 130198172,
+                "oracle_calls": 10990,
+                "max_query_entries": 73952,
+                "relative_inf_error_bound": null,
+                "relative_one_error_bound": null,
+                "storage_budget": 8505834336,
+                "inverse_only": true
+              }
+            ],
+            "gmres_columns": 0,
+            "max_refinements": 2,
+            "sweep_compression": {
+              "requested": "auto",
+              "method": "incremental_pivoted_qr",
+              "input_columns": 361,
+              "solved_columns": 40,
+              "accepted_batches": 2,
+              "fallback_batches": 0,
+              "fallback_columns": 0,
+              "max_rhs_error": 1.7888330484886768e-15,
+              "max_reconstructed_backward_error": 3.3898417919612247e-14,
+              "retained_basis_columns": 40,
+              "reused_basis_batches": 1
+            }
+          }
+        ],
+        "sweep_compression": [
+          {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 40,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.7888330484886768e-15,
+            "max_reconstructed_backward_error": 3.3898417919612247e-14,
+            "retained_basis_columns": 40,
+            "reused_basis_batches": 1
+          }
+        ],
+        "dense_condition_methods": [
+          "equilibrated_1norm_compressed_refined_inverse"
+        ],
+        "linear_backend": "cpu_compressed",
+        "dense_gpu_solve_count": 0,
+        "dense_cpu_solve_count": 2,
+        "dense_factorization_count": 1,
+        "dense_rhs_batch_count": 2,
+        "dense_rhs_column_count": 40,
+        "dense_max_rhs_columns": 32,
+        "dense_mixed_precision_solve_count": 0,
+        "dense_fallback_reasons": [],
+        "dense_gpu_fallback_reasons": [],
+        "dense_gpu_devices": [],
+        "dense_largest_system": 4622,
+        "amplitude_version": 2,
+        "quality_gate": {
+          "passed": true,
+          "thresholds": {
+            "residual_norm_max": 1e-06,
+            "constraint_residual_norm_max": 1e-08,
+            "condition_est_max": 1000000.0,
+            "warnings_max": 10
+          },
+          "values": {
+            "residual_norm_max": 2.4812299558220355e-12,
+            "residual_nonfinite_count": 0,
+            "constraint_residual_norm_max": 0.0,
+            "condition_est_max": 7142.96037890415,
+            "condition_est_computed": true,
+            "warnings_count": 2
+          },
+          "violations": [],
+          "certification_scope": "discrete_linear_system_and_mesh_convergence",
+          "mesh_convergence_certified": true,
+          "reason": "discrete linear-system quality thresholds and production mesh-convergence certification satisfied"
+        },
+        "mesh_convergence": {
+          "passed": true,
+          "sample_count": 361,
+          "rms_db": 0.0011463224722916144,
+          "max_abs_db": 0.0023723992007838035,
+          "mean_db": -0.0007234457360160386,
+          "median_abs_db": 0.0004706935727729622,
+          "complex_rms_normalized": 5.256466221324874e-05,
+          "complex_max_normalized": 8.520793022768468e-05,
+          "complex_reference_peak_amplitude": 10.929239007905593,
+          "complex_reference_peak_amplitude_by_frequency": {
+            "1.0": 10.929239007905593
+          },
+          "phase_sample_count": 361,
+          "phase_rms_deg": 0.011704408212367488,
+          "phase_max_deg": 0.02315944192990505,
+          "limits": {
+            "rms_db": 1.0,
+            "max_abs_db": 3.0,
+            "complex_rms_normalized": 0.02,
+            "complex_max_normalized": 0.05,
+            "phase_rms_deg": 5.0,
+            "phase_max_deg": 15.0,
+            "phase_floor_relative": 1e-06
+          },
+          "violations": [],
+          "reason": "mesh convergence passed",
+          "schema": "ghost.solver.mesh-convergence.v1",
+          "fine_factor": 1.5,
+          "published_mesh": "fine",
+          "geometry_model": "piecewise_linear_input",
+          "geometry_approximation_certified": false,
+          "base_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.3568066167610634e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 5438.667928848134,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "fine_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 2.4812299558220355e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 7142.96037890415,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "base_panel_count": 1938,
+          "fine_panel_count": 3028,
+          "panel_refinement_ratio": 1.5624355005159958
+        },
+        "mesh_convergence_certified": true,
+        "certified_entry_point": true,
+        "published_mesh": "fine"
+      }
+    },
+    "cpu_factorization_requested": "compressed",
+    "compressed_factors": [
+      {
+        "unknowns": 4622,
+        "factorizations": 1,
+        "rhs_batches": 2,
+        "max_rhs_columns": 32,
+        "max_backward_error": 1.5358254769789892e-14,
+        "max_relative_residual": 5.220999172679875e-12,
+        "compressed": {
+          "unknowns": 4622,
+          "tiles": 256,
+          "compressed_tiles": 239,
+          "retained_bytes": 89203328,
+          "max_query_bytes": 2004504,
+          "geometry_queries": 256,
+          "geometry_coefficients": 21362884,
+          "dropped_routes": 228,
+          "row_error_bound": 3.316866999033324e-17,
+          "storage_budget": 8507170672,
+          "compression": "qr"
+        },
+        "preconditioners": [
+          {
+            "bytes": 46613488,
+            "max_rank": 64,
+            "leaves": 62,
+            "accesses": 125849364,
+            "oracle_calls": 11930,
+            "max_query_entries": 73952,
+            "relative_inf_error_bound": null,
+            "relative_one_error_bound": null,
+            "storage_budget": 8416631008,
+            "inverse_only": true
+          }
+        ],
+        "gmres_columns": 0,
+        "max_refinements": 3,
+        "sweep_compression": {
+          "requested": "auto",
+          "method": "incremental_pivoted_qr",
+          "input_columns": 361,
+          "solved_columns": 39,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "fallback_columns": 0,
+          "max_rhs_error": 1.8288959344738678e-15,
+          "max_reconstructed_backward_error": 7.188175604716728e-15,
+          "retained_basis_columns": 39,
+          "reused_basis_batches": 1
+        }
+      },
+      {
+        "unknowns": 4622,
+        "factorizations": 1,
+        "rhs_batches": 2,
+        "max_rhs_columns": 32,
+        "max_backward_error": 3.3898417919612247e-14,
+        "max_relative_residual": 9.651526343538012e-09,
+        "compressed": {
+          "unknowns": 4622,
+          "tiles": 256,
+          "compressed_tiles": 239,
+          "retained_bytes": 84100256,
+          "max_query_bytes": 2004504,
+          "geometry_queries": 256,
+          "geometry_coefficients": 21362884,
+          "dropped_routes": 228,
+          "row_error_bound": 6.516788526374072e-18,
+          "storage_budget": 8500731264,
+          "compression": "qr",
+          "spooled_bytes": 83730496
+        },
+        "preconditioners": [
+          {
+            "bytes": 42675088,
+            "max_rank": 64,
+            "leaves": 62,
+            "accesses": 130198172,
+            "oracle_calls": 10990,
+            "max_query_entries": 73952,
+            "relative_inf_error_bound": null,
+            "relative_one_error_bound": null,
+            "storage_budget": 8505834336,
+            "inverse_only": true
+          }
+        ],
+        "gmres_columns": 0,
+        "max_refinements": 2,
+        "sweep_compression": {
+          "requested": "auto",
+          "method": "incremental_pivoted_qr",
+          "input_columns": 361,
+          "solved_columns": 40,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "fallback_columns": 0,
+          "max_rhs_error": 1.7888330484886768e-15,
+          "max_reconstructed_backward_error": 3.3898417919612247e-14,
+          "retained_basis_columns": 40,
+          "reused_basis_batches": 1
+        }
+      }
+    ],
+    "cpu_rhs_compression_requested": "auto",
+    "hierarchical_factors": {
+      "VV": [],
+      "HH": []
+    },
+    "sweep_compression": {
+      "VV": [
+        {
+          "requested": "auto",
+          "method": "incremental_pivoted_qr",
+          "input_columns": 361,
+          "solved_columns": 39,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "fallback_columns": 0,
+          "max_rhs_error": 1.8288959344738678e-15,
+          "max_reconstructed_backward_error": 7.188175604716728e-15,
+          "retained_basis_columns": 39,
+          "reused_basis_batches": 1
+        }
+      ],
+      "HH": [
+        {
+          "requested": "auto",
+          "method": "incremental_pivoted_qr",
+          "input_columns": 361,
+          "solved_columns": 40,
+          "accepted_batches": 2,
+          "fallback_batches": 0,
+          "fallback_columns": 0,
+          "max_rhs_error": 1.7888330484886768e-15,
+          "max_reconstructed_backward_error": 3.3898417919612247e-14,
+          "retained_basis_columns": 40,
+          "reused_basis_batches": 1
+        }
+      ]
+    },
+    "dense_factorization_count": 4,
+    "dense_rhs_batch_count": 8,
+    "dense_rhs_column_count": 159,
+    "dense_max_rhs_columns": 32,
+    "thin_layer": {
+      "VV": [],
+      "HH": []
+    },
+    "amplitude_version": 2,
+    "co_solve_shared_discretization": true,
+    "shared_operator_cache_enabled": true,
+    "shared_operator_cache_hits": 0,
+    "shared_operator_cache_stores": 0,
+    "linear_backend": "cpu_compressed",
+    "dense_gpu_solve_count": 0,
+    "dense_cpu_solve_count": 4,
+    "dense_gpu_fallback_reasons": [],
+    "dense_gpu_devices": [],
+    "dense_largest_system": 4622,
+    "mesh_convergence_certified": true,
+    "certified_entry_point": true,
+    "survey_mode": false,
+    "published_mesh": "fine",
+    "mesh_convergence": {
+      "schema": "ghost.solver.mesh-convergence.co-polarized.v1",
+      "passed": true,
+      "published_mesh": "fine",
+      "channels": {
+        "VV": {
+          "passed": true,
+          "sample_count": 361,
+          "rms_db": 0.0012902540809562992,
+          "max_abs_db": 0.0068959931974106325,
+          "mean_db": 0.0003357332426648734,
+          "median_abs_db": 0.00021498988150048248,
+          "complex_rms_normalized": 3.4638770268944876e-05,
+          "complex_max_normalized": 7.578250371045053e-05,
+          "complex_reference_peak_amplitude": 11.085750214123893,
+          "complex_reference_peak_amplitude_by_frequency": {
+            "1.0": 11.085750214123893
+          },
+          "phase_sample_count": 361,
+          "phase_rms_deg": 0.010750799863176107,
+          "phase_max_deg": 0.03203361475715486,
+          "limits": {
+            "rms_db": 1.0,
+            "max_abs_db": 3.0,
+            "complex_rms_normalized": 0.02,
+            "complex_max_normalized": 0.05,
+            "phase_rms_deg": 5.0,
+            "phase_max_deg": 15.0,
+            "phase_floor_relative": 1e-06
+          },
+          "violations": [],
+          "reason": "mesh convergence passed",
+          "schema": "ghost.solver.mesh-convergence.v1",
+          "fine_factor": 1.5,
+          "published_mesh": "fine",
+          "geometry_model": "piecewise_linear_input",
+          "geometry_approximation_certified": false,
+          "base_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.583079427787476e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 9151.512874298754,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "fine_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 5.220999172679875e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 11495.394090542324,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "base_panel_count": 1938,
+          "fine_panel_count": 3028,
+          "panel_refinement_ratio": 1.5624355005159958
+        },
+        "HH": {
+          "passed": true,
+          "sample_count": 361,
+          "rms_db": 0.0011463224722916144,
+          "max_abs_db": 0.0023723992007838035,
+          "mean_db": -0.0007234457360160386,
+          "median_abs_db": 0.0004706935727729622,
+          "complex_rms_normalized": 5.256466221324874e-05,
+          "complex_max_normalized": 8.520793022768468e-05,
+          "complex_reference_peak_amplitude": 10.929239007905593,
+          "complex_reference_peak_amplitude_by_frequency": {
+            "1.0": 10.929239007905593
+          },
+          "phase_sample_count": 361,
+          "phase_rms_deg": 0.011704408212367488,
+          "phase_max_deg": 0.02315944192990505,
+          "limits": {
+            "rms_db": 1.0,
+            "max_abs_db": 3.0,
+            "complex_rms_normalized": 0.02,
+            "complex_max_normalized": 0.05,
+            "phase_rms_deg": 5.0,
+            "phase_max_deg": 15.0,
+            "phase_floor_relative": 1e-06
+          },
+          "violations": [],
+          "reason": "mesh convergence passed",
+          "schema": "ghost.solver.mesh-convergence.v1",
+          "fine_factor": 1.5,
+          "published_mesh": "fine",
+          "geometry_model": "piecewise_linear_input",
+          "geometry_approximation_certified": false,
+          "base_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.3568066167610634e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 5438.667928848134,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "fine_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 2.4812299558220355e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 7142.96037890415,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "base_panel_count": 1938,
+          "fine_panel_count": 3028,
+          "panel_refinement_ratio": 1.5624355005159958
+        }
+      },
+      "polarizations": {
+        "VV": {
+          "passed": true,
+          "sample_count": 361,
+          "rms_db": 0.0012902540809562992,
+          "max_abs_db": 0.0068959931974106325,
+          "mean_db": 0.0003357332426648734,
+          "median_abs_db": 0.00021498988150048248,
+          "complex_rms_normalized": 3.4638770268944876e-05,
+          "complex_max_normalized": 7.578250371045053e-05,
+          "complex_reference_peak_amplitude": 11.085750214123893,
+          "complex_reference_peak_amplitude_by_frequency": {
+            "1.0": 11.085750214123893
+          },
+          "phase_sample_count": 361,
+          "phase_rms_deg": 0.010750799863176107,
+          "phase_max_deg": 0.03203361475715486,
+          "limits": {
+            "rms_db": 1.0,
+            "max_abs_db": 3.0,
+            "complex_rms_normalized": 0.02,
+            "complex_max_normalized": 0.05,
+            "phase_rms_deg": 5.0,
+            "phase_max_deg": 15.0,
+            "phase_floor_relative": 1e-06
+          },
+          "violations": [],
+          "reason": "mesh convergence passed",
+          "schema": "ghost.solver.mesh-convergence.v1",
+          "fine_factor": 1.5,
+          "published_mesh": "fine",
+          "geometry_model": "piecewise_linear_input",
+          "geometry_approximation_certified": false,
+          "base_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.583079427787476e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 9151.512874298754,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "fine_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 5.220999172679875e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 11495.394090542324,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "base_panel_count": 1938,
+          "fine_panel_count": 3028,
+          "panel_refinement_ratio": 1.5624355005159958
+        },
+        "HH": {
+          "passed": true,
+          "sample_count": 361,
+          "rms_db": 0.0011463224722916144,
+          "max_abs_db": 0.0023723992007838035,
+          "mean_db": -0.0007234457360160386,
+          "median_abs_db": 0.0004706935727729622,
+          "complex_rms_normalized": 5.256466221324874e-05,
+          "complex_max_normalized": 8.520793022768468e-05,
+          "complex_reference_peak_amplitude": 10.929239007905593,
+          "complex_reference_peak_amplitude_by_frequency": {
+            "1.0": 10.929239007905593
+          },
+          "phase_sample_count": 361,
+          "phase_rms_deg": 0.011704408212367488,
+          "phase_max_deg": 0.02315944192990505,
+          "limits": {
+            "rms_db": 1.0,
+            "max_abs_db": 3.0,
+            "complex_rms_normalized": 0.02,
+            "complex_max_normalized": 0.05,
+            "phase_rms_deg": 5.0,
+            "phase_max_deg": 15.0,
+            "phase_floor_relative": 1e-06
+          },
+          "violations": [],
+          "reason": "mesh convergence passed",
+          "schema": "ghost.solver.mesh-convergence.v1",
+          "fine_factor": 1.5,
+          "published_mesh": "fine",
+          "geometry_model": "piecewise_linear_input",
+          "geometry_approximation_certified": false,
+          "base_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.3568066167610634e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 5438.667928848134,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "fine_quality_gate": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 2.4812299558220355e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 7142.96037890415,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "base_panel_count": 1938,
+          "fine_panel_count": 3028,
+          "panel_refinement_ratio": 1.5624355005159958
+        }
+      },
+      "base_quality_gate": {
+        "passed": true,
+        "channels": {
+          "VV": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.583079427787476e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 9151.512874298754,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "HH": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 1.3568066167610634e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 5438.667928848134,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          }
+        }
+      },
+      "fine_quality_gate": {
+        "passed": true,
+        "channels": {
+          "VV": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 5.220999172679875e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 11495.394090542324,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          },
+          "HH": {
+            "passed": true,
+            "thresholds": {
+              "residual_norm_max": 1e-06,
+              "constraint_residual_norm_max": 1e-08,
+              "condition_est_max": 1000000.0,
+              "warnings_max": 10
+            },
+            "values": {
+              "residual_norm_max": 2.4812299558220355e-12,
+              "residual_nonfinite_count": 0,
+              "constraint_residual_norm_max": 0.0,
+              "condition_est_max": 7142.96037890415,
+              "condition_est_computed": true,
+              "warnings_count": 2
+            },
+            "violations": [],
+            "certification_scope": "discrete_linear_system_residual_and_condition",
+            "mesh_convergence_certified": false,
+            "reason": "discrete linear-system quality thresholds satisfied; mesh convergence is separately certified by the production workflow"
+          }
+        }
+      },
+      "reason": "VV<-TE and HH<-TM mesh-convergence gates passed",
+      "rms_db": 0.0012902540809562992,
+      "max_abs_db": 0.0068959931974106325,
+      "phase_rms_deg": 0.011704408212367488,
+      "phase_max_deg": 0.03203361475715486,
+      "base_panel_count": 1938.0,
+      "fine_panel_count": 3028.0,
+      "panel_refinement_ratio": 1.5624355005159958,
+      "fine_factor": 1.5
+    },
+    "assembled_system_reuses": 2,
+    "certification_phase_counters": {
+      "base": {
+        "dense_factorization_count": 2,
+        "dense_rhs_batch_count": 4,
+        "dense_rhs_column_count": 80
+      },
+      "fine": {
+        "dense_factorization_count": 2,
+        "dense_rhs_batch_count": 4,
+        "dense_rhs_column_count": 79
+      }
+    },
+    "certification_solve_order": [
+      "base_TE",
+      "base_TM",
+      "fine_TE",
+      "fine_TM"
+    ],
+    "experimental_cpu": {
+      "version": 1,
+      "precision": "double",
+      "device": "cpu",
+      "batch_size": 256,
+      "cache": {
+        "hits": 0,
+        "stores": 0,
+        "evictions": 0,
+        "bytes": 0,
+        "peak_bytes": 0,
+        "budget_bytes": 67108864
+      },
+      "kernel_tables": [
+        {
+          "used": true,
+          "k_real": 420.8489816639201,
+          "k_imag": -204.63308092828572,
+          "degree": 12,
+          "intervals": 359,
+          "bytes": 301568,
+          "check_points": 24412,
+          "max_check_relative": 3.13565032473299e-14,
+          "max_tail_relative": 1.4561503663560649e-13,
+          "tolerance": 2e-13,
+          "build_seconds": 0.016381699999328703,
+          "domain_upper": 0.30260735515430415,
+          "table_upper": 0.30260735515430415,
+          "partial_domain": false
+        },
+        {
+          "used": true,
+          "k_real": 81.7115926677566,
+          "k_imag": -14.520290936613353,
+          "degree": 12,
+          "intervals": 175,
+          "bytes": 147008,
+          "check_points": 11900,
+          "max_check_relative": 7.709940066703632e-15,
+          "max_tail_relative": 8.86242848510626e-14,
+          "tolerance": 2e-13,
+          "build_seconds": 0.008411200000409735,
+          "domain_upper": 0.30260735515430415,
+          "table_upper": 0.30260735515430415,
+          "partial_domain": false
+        }
+      ],
+      "table_budget_bytes": 33554432,
+      "systems": [
+        {
+          "unknowns": 2964,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 32,
+          "max_backward_error": 3.0013637020804318e-15,
+          "max_relative_residual": 1.583079427787476e-12,
+          "compressed": {
+            "unknowns": 2964,
+            "tiles": 64,
+            "compressed_tiles": 56,
+            "retained_bytes": 42835584,
+            "max_query_bytes": 3303384,
+            "geometry_queries": 64,
+            "geometry_coefficients": 8785296,
+            "dropped_routes": 54,
+            "row_error_bound": 7.891736918085158e-18,
+            "storage_budget": 8548865008,
+            "compression": "qr"
+          },
+          "preconditioners": [
+            {
+              "bytes": 26663448,
+              "max_rank": 54,
+              "leaves": 32,
+              "accesses": 47104299,
+              "oracle_calls": 6581,
+              "max_query_entries": 47424,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 8503827168,
+              "inverse_only": true
+            }
+          ],
+          "gmres_columns": 0,
+          "max_refinements": 3,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 40,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.6069995683872468e-15,
+            "max_reconstructed_backward_error": 2.4682658165493095e-15,
+            "retained_basis_columns": 40,
+            "reused_basis_batches": 1
+          }
+        },
+        {
+          "unknowns": 2964,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 32,
+          "max_backward_error": 1.6417886208357038e-14,
+          "max_relative_residual": 4.783033888191968e-09,
+          "compressed": {
+            "unknowns": 2964,
+            "tiles": 64,
+            "compressed_tiles": 55,
+            "retained_bytes": 43271840,
+            "max_query_bytes": 3303384,
+            "geometry_queries": 64,
+            "geometry_coefficients": 8785296,
+            "dropped_routes": 54,
+            "row_error_bound": 5.362134765611591e-18,
+            "storage_budget": 8547099008,
+            "compression": "qr",
+            "spooled_bytes": 43034720
+          },
+          "preconditioners": [
+            {
+              "bytes": 24322840,
+              "max_rank": 55,
+              "leaves": 32,
+              "accesses": 32626035,
+              "oracle_calls": 5453,
+              "max_query_entries": 47424,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 8546662752,
+              "inverse_only": true
+            }
+          ],
+          "gmres_columns": 0,
+          "max_refinements": 2,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 40,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.6391191266302247e-15,
+            "max_reconstructed_backward_error": 1.6417886208357038e-14,
+            "retained_basis_columns": 40,
+            "reused_basis_batches": 1
+          }
+        },
+        {
+          "unknowns": 4622,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 32,
+          "max_backward_error": 1.5358254769789892e-14,
+          "max_relative_residual": 5.220999172679875e-12,
+          "compressed": {
+            "unknowns": 4622,
+            "tiles": 256,
+            "compressed_tiles": 239,
+            "retained_bytes": 89203328,
+            "max_query_bytes": 2004504,
+            "geometry_queries": 256,
+            "geometry_coefficients": 21362884,
+            "dropped_routes": 228,
+            "row_error_bound": 3.316866999033324e-17,
+            "storage_budget": 8507170672,
+            "compression": "qr"
+          },
+          "preconditioners": [
+            {
+              "bytes": 46613488,
+              "max_rank": 64,
+              "leaves": 62,
+              "accesses": 125849364,
+              "oracle_calls": 11930,
+              "max_query_entries": 73952,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 8416631008,
+              "inverse_only": true
+            }
+          ],
+          "gmres_columns": 0,
+          "max_refinements": 3,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 39,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.8288959344738678e-15,
+            "max_reconstructed_backward_error": 7.188175604716728e-15,
+            "retained_basis_columns": 39,
+            "reused_basis_batches": 1
+          }
+        },
+        {
+          "unknowns": 4622,
+          "factorizations": 1,
+          "rhs_batches": 2,
+          "max_rhs_columns": 32,
+          "max_backward_error": 3.3898417919612247e-14,
+          "max_relative_residual": 9.651526343538012e-09,
+          "compressed": {
+            "unknowns": 4622,
+            "tiles": 256,
+            "compressed_tiles": 239,
+            "retained_bytes": 84100256,
+            "max_query_bytes": 2004504,
+            "geometry_queries": 256,
+            "geometry_coefficients": 21362884,
+            "dropped_routes": 228,
+            "row_error_bound": 6.516788526374072e-18,
+            "storage_budget": 8500731264,
+            "compression": "qr",
+            "spooled_bytes": 83730496
+          },
+          "preconditioners": [
+            {
+              "bytes": 42675088,
+              "max_rank": 64,
+              "leaves": 62,
+              "accesses": 130198172,
+              "oracle_calls": 10990,
+              "max_query_entries": 73952,
+              "relative_inf_error_bound": null,
+              "relative_one_error_bound": null,
+              "storage_budget": 8505834336,
+              "inverse_only": true
+            }
+          ],
+          "gmres_columns": 0,
+          "max_refinements": 2,
+          "sweep_compression": {
+            "requested": "auto",
+            "method": "incremental_pivoted_qr",
+            "input_columns": 361,
+            "solved_columns": 40,
+            "accepted_batches": 2,
+            "fallback_batches": 0,
+            "fallback_columns": 0,
+            "max_rhs_error": 1.7888330484886768e-15,
+            "max_reconstructed_backward_error": 3.3898417919612247e-14,
+            "retained_basis_columns": 40,
+            "reused_basis_batches": 1
+          }
+        }
+      ],
+      "formulations": [
+        {
+          "formulation": "multi_region",
+          "streamed": true,
+          "reason": ""
+        },
+        {
+          "formulation": "multi_region",
+          "streamed": true,
+          "reason": ""
+        },
+        {
+          "formulation": "multi_region",
+          "streamed": true,
+          "reason": ""
+        },
+        {
+          "formulation": "multi_region",
+          "streamed": true,
+          "reason": ""
+        }
+      ]
+    },
+    "runtime_profile": {
+      "wall_seconds": 69.45159899999999,
+      "stage_seconds": {
+        "operators": 48.01680279996435,
+        "compressed_assembly": 55.96524379999755,
+        "factorization": 8.875429599997005,
+        "excitation": 0.15835840000363532,
+        "linear_solve": 0.780292700001155,
+        "rhs_compression": 2.230672500001674,
+        "far_field": 0.33368189998873277
+      },
+      "stage_calls": {
+        "operators": 579,
+        "compressed_assembly": 4,
+        "factorization": 4,
+        "excitation": 8,
+        "linear_solve": 8,
+        "rhs_compression": 8,
+        "far_field": 16
+      },
+      "stage_semantics": "inclusive elapsed; parallel/nested stages may overlap",
+      "sampled_peak_process_rss_bytes": 422354944,
+      "initial_process_rss_bytes": 178176000,
+      "memory_semantics": "50 ms process RSS samples, including other jobs; not an exclusive allocation peak"
+    },
+    "geometry_units_in": "inches"
+  },
+  "progress": [
+    [
+      0,
+      "Checking geometry, dimensions, and material coverage\u2026"
+    ],
+    [
+      0,
+      "Base mesh: VV: Initializing solver"
+    ],
+    [
+      0,
+      "Base mesh: VV: Assembled linear/Galerkin coupled operators at 1 GHz"
+    ],
+    [
+      18,
+      "Base mesh: VV: Experimental CPU: solved 256 of 361 angles at 1.0 GHz"
+    ],
+    [
+      25,
+      "Base mesh: VV: Experimental CPU: solved 361 of 361 angles at 1.0 GHz"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 0 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 1 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 2 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 3 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 4 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 5 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 6 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 7 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 8 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 9 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 10 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 11 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 12 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 13 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 14 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 15 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 16 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 17 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 18 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 19 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 20 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 21 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 22 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 23 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 24 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 25 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 26 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 27 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 28 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 29 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 30 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 31 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 32 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 33 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 34 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 35 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 36 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 37 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 38 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 39 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 40 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 41 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 42 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 43 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 44 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 45 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 46 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 47 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 48 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 49 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 50 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 51 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 52 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 53 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 54 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 55 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 56 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 57 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 58 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 59 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 60 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 61 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 62 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 63 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 64 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 65 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 66 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 67 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 68 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 69 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 70 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 71 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 72 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 73 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 74 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 75 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 76 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 77 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 78 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 79 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 80 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 81 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 82 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 83 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 84 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 85 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 86 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 87 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 88 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 89 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 90 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 91 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 92 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 93 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 94 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 95 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 96 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 97 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 98 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 99 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 100 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 101 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 102 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 103 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 104 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 105 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 106 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 107 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 108 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 109 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 110 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 111 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 112 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 113 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 114 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 115 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 116 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 117 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 118 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 119 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 120 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 121 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 122 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 123 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 124 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 125 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 126 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 127 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 128 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 129 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 130 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 131 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 132 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 133 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 134 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 135 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 136 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 137 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 138 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 139 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 140 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 141 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 142 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 143 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 144 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 145 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 146 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 147 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 148 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 149 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 150 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 151 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 152 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 153 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 154 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 155 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 156 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 157 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 158 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 159 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 160 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 161 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 162 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 163 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 164 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 165 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 166 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 167 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 168 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 169 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 170 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 171 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 172 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 173 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 174 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 175 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 176 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 177 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 178 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 179 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 180 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 181 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 182 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 183 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 184 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 185 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 186 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 187 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 188 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 189 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 190 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 191 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 192 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 193 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 194 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 195 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 196 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 197 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 198 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 199 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 200 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 201 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 202 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 203 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 204 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 205 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 206 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 207 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 208 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 209 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 210 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 211 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 212 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 213 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 214 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 215 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 216 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 217 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 218 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 219 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 220 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 221 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 222 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 223 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 224 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 225 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 226 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 227 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 228 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 229 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 230 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 231 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 232 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 233 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 234 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 235 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 236 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 237 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 238 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 239 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 240 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 241 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 242 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 243 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 244 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 245 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 246 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 247 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 248 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 249 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 250 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 251 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 252 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 253 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 254 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 255 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 256 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 257 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 258 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 259 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 260 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 261 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 262 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 263 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 264 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 265 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 266 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 267 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 268 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 269 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 270 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 271 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 272 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 273 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 274 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 275 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 276 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 277 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 278 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 279 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 280 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 281 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 282 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 283 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 284 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 285 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 286 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 287 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 288 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 289 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 290 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 291 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 292 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 293 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 294 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 295 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 296 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 297 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 298 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 299 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 300 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 301 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 302 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 303 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 304 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 305 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 306 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 307 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 308 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 309 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 310 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 311 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 312 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 313 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 314 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 315 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 316 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 317 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 318 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 319 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 320 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 321 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 322 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 323 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 324 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 325 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 326 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 327 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 328 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 329 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 330 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 331 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 332 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 333 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 334 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 335 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 336 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 337 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 338 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 339 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 340 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 341 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 342 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 343 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 344 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 345 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 346 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 347 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 348 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 349 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 350 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 351 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 352 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 353 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 354 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 355 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 356 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 357 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 358 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 359 deg"
+    ],
+    [
+      25,
+      "Base mesh: VV: Multi-region solved 1 GHz at 360 deg"
+    ],
+    [
+      25,
+      "Base mesh: HH: Initializing solver"
+    ],
+    [
+      25,
+      "Base mesh: HH: Assembled linear/Galerkin coupled operators at 1 GHz"
+    ],
+    [
+      43,
+      "Base mesh: HH: Experimental CPU: solved 256 of 361 angles at 1.0 GHz"
+    ],
+    [
+      50,
+      "Base mesh: HH: Experimental CPU: solved 361 of 361 angles at 1.0 GHz"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 0 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 1 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 2 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 3 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 4 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 5 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 6 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 7 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 8 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 9 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 10 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 11 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 12 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 13 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 14 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 15 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 16 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 17 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 18 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 19 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 20 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 21 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 22 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 23 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 24 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 25 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 26 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 27 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 28 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 29 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 30 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 31 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 32 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 33 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 34 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 35 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 36 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 37 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 38 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 39 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 40 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 41 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 42 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 43 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 44 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 45 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 46 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 47 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 48 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 49 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 50 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 51 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 52 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 53 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 54 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 55 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 56 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 57 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 58 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 59 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 60 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 61 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 62 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 63 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 64 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 65 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 66 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 67 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 68 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 69 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 70 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 71 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 72 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 73 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 74 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 75 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 76 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 77 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 78 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 79 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 80 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 81 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 82 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 83 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 84 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 85 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 86 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 87 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 88 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 89 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 90 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 91 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 92 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 93 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 94 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 95 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 96 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 97 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 98 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 99 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 100 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 101 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 102 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 103 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 104 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 105 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 106 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 107 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 108 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 109 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 110 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 111 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 112 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 113 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 114 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 115 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 116 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 117 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 118 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 119 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 120 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 121 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 122 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 123 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 124 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 125 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 126 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 127 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 128 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 129 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 130 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 131 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 132 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 133 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 134 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 135 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 136 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 137 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 138 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 139 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 140 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 141 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 142 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 143 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 144 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 145 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 146 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 147 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 148 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 149 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 150 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 151 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 152 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 153 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 154 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 155 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 156 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 157 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 158 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 159 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 160 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 161 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 162 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 163 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 164 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 165 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 166 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 167 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 168 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 169 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 170 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 171 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 172 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 173 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 174 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 175 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 176 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 177 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 178 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 179 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 180 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 181 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 182 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 183 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 184 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 185 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 186 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 187 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 188 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 189 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 190 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 191 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 192 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 193 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 194 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 195 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 196 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 197 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 198 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 199 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 200 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 201 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 202 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 203 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 204 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 205 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 206 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 207 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 208 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 209 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 210 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 211 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 212 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 213 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 214 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 215 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 216 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 217 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 218 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 219 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 220 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 221 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 222 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 223 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 224 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 225 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 226 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 227 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 228 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 229 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 230 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 231 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 232 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 233 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 234 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 235 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 236 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 237 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 238 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 239 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 240 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 241 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 242 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 243 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 244 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 245 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 246 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 247 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 248 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 249 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 250 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 251 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 252 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 253 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 254 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 255 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 256 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 257 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 258 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 259 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 260 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 261 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 262 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 263 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 264 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 265 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 266 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 267 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 268 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 269 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 270 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 271 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 272 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 273 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 274 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 275 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 276 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 277 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 278 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 279 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 280 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 281 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 282 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 283 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 284 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 285 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 286 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 287 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 288 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 289 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 290 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 291 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 292 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 293 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 294 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 295 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 296 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 297 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 298 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 299 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 300 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 301 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 302 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 303 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 304 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 305 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 306 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 307 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 308 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 309 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 310 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 311 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 312 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 313 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 314 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 315 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 316 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 317 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 318 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 319 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 320 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 321 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 322 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 323 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 324 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 325 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 326 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 327 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 328 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 329 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 330 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 331 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 332 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 333 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 334 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 335 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 336 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 337 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 338 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 339 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 340 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 341 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 342 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 343 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 344 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 345 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 346 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 347 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 348 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 349 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 350 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 351 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 352 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 353 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 354 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 355 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 356 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 357 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 358 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 359 deg"
+    ],
+    [
+      50,
+      "Base mesh: HH: Multi-region solved 1 GHz at 360 deg"
+    ],
+    [
+      50,
+      "Fine mesh: VV: Initializing solver"
+    ],
+    [
+      50,
+      "Fine mesh: VV: Assembled linear/Galerkin coupled operators at 1 GHz"
+    ],
+    [
+      68,
+      "Fine mesh: VV: Experimental CPU: solved 256 of 361 angles at 1.0 GHz"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Experimental CPU: solved 361 of 361 angles at 1.0 GHz"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 0 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 1 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 2 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 3 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 4 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 5 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 6 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 7 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 8 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 9 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 10 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 11 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 12 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 13 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 14 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 15 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 16 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 17 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 18 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 19 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 20 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 21 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 22 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 23 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 24 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 25 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 26 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 27 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 28 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 29 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 30 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 31 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 32 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 33 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 34 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 35 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 36 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 37 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 38 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 39 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 40 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 41 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 42 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 43 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 44 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 45 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 46 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 47 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 48 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 49 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 50 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 51 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 52 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 53 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 54 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 55 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 56 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 57 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 58 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 59 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 60 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 61 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 62 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 63 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 64 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 65 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 66 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 67 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 68 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 69 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 70 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 71 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 72 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 73 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 74 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 75 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 76 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 77 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 78 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 79 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 80 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 81 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 82 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 83 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 84 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 85 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 86 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 87 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 88 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 89 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 90 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 91 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 92 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 93 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 94 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 95 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 96 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 97 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 98 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 99 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 100 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 101 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 102 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 103 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 104 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 105 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 106 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 107 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 108 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 109 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 110 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 111 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 112 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 113 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 114 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 115 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 116 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 117 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 118 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 119 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 120 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 121 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 122 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 123 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 124 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 125 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 126 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 127 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 128 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 129 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 130 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 131 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 132 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 133 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 134 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 135 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 136 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 137 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 138 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 139 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 140 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 141 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 142 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 143 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 144 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 145 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 146 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 147 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 148 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 149 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 150 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 151 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 152 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 153 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 154 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 155 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 156 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 157 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 158 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 159 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 160 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 161 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 162 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 163 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 164 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 165 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 166 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 167 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 168 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 169 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 170 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 171 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 172 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 173 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 174 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 175 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 176 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 177 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 178 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 179 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 180 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 181 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 182 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 183 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 184 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 185 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 186 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 187 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 188 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 189 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 190 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 191 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 192 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 193 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 194 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 195 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 196 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 197 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 198 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 199 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 200 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 201 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 202 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 203 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 204 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 205 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 206 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 207 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 208 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 209 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 210 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 211 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 212 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 213 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 214 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 215 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 216 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 217 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 218 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 219 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 220 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 221 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 222 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 223 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 224 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 225 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 226 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 227 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 228 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 229 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 230 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 231 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 232 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 233 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 234 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 235 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 236 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 237 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 238 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 239 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 240 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 241 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 242 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 243 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 244 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 245 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 246 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 247 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 248 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 249 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 250 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 251 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 252 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 253 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 254 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 255 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 256 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 257 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 258 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 259 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 260 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 261 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 262 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 263 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 264 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 265 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 266 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 267 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 268 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 269 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 270 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 271 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 272 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 273 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 274 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 275 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 276 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 277 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 278 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 279 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 280 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 281 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 282 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 283 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 284 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 285 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 286 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 287 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 288 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 289 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 290 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 291 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 292 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 293 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 294 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 295 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 296 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 297 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 298 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 299 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 300 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 301 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 302 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 303 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 304 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 305 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 306 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 307 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 308 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 309 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 310 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 311 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 312 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 313 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 314 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 315 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 316 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 317 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 318 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 319 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 320 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 321 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 322 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 323 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 324 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 325 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 326 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 327 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 328 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 329 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 330 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 331 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 332 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 333 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 334 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 335 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 336 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 337 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 338 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 339 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 340 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 341 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 342 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 343 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 344 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 345 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 346 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 347 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 348 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 349 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 350 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 351 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 352 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 353 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 354 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 355 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 356 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 357 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 358 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 359 deg"
+    ],
+    [
+      75,
+      "Fine mesh: VV: Multi-region solved 1 GHz at 360 deg"
+    ],
+    [
+      75,
+      "Fine mesh: HH: Initializing solver"
+    ],
+    [
+      75,
+      "Fine mesh: HH: Assembled linear/Galerkin coupled operators at 1 GHz"
+    ],
+    [
+      93,
+      "Fine mesh: HH: Experimental CPU: solved 256 of 361 angles at 1.0 GHz"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Experimental CPU: solved 361 of 361 angles at 1.0 GHz"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 0 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 1 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 2 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 3 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 4 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 5 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 6 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 7 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 8 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 9 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 10 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 11 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 12 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 13 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 14 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 15 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 16 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 17 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 18 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 19 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 20 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 21 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 22 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 23 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 24 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 25 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 26 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 27 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 28 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 29 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 30 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 31 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 32 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 33 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 34 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 35 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 36 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 37 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 38 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 39 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 40 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 41 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 42 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 43 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 44 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 45 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 46 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 47 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 48 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 49 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 50 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 51 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 52 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 53 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 54 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 55 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 56 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 57 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 58 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 59 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 60 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 61 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 62 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 63 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 64 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 65 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 66 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 67 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 68 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 69 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 70 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 71 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 72 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 73 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 74 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 75 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 76 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 77 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 78 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 79 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 80 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 81 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 82 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 83 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 84 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 85 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 86 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 87 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 88 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 89 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 90 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 91 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 92 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 93 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 94 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 95 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 96 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 97 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 98 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 99 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 100 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 101 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 102 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 103 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 104 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 105 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 106 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 107 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 108 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 109 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 110 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 111 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 112 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 113 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 114 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 115 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 116 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 117 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 118 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 119 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 120 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 121 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 122 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 123 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 124 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 125 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 126 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 127 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 128 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 129 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 130 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 131 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 132 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 133 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 134 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 135 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 136 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 137 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 138 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 139 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 140 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 141 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 142 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 143 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 144 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 145 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 146 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 147 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 148 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 149 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 150 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 151 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 152 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 153 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 154 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 155 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 156 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 157 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 158 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 159 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 160 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 161 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 162 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 163 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 164 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 165 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 166 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 167 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 168 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 169 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 170 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 171 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 172 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 173 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 174 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 175 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 176 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 177 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 178 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 179 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 180 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 181 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 182 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 183 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 184 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 185 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 186 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 187 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 188 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 189 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 190 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 191 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 192 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 193 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 194 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 195 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 196 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 197 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 198 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 199 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 200 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 201 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 202 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 203 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 204 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 205 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 206 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 207 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 208 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 209 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 210 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 211 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 212 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 213 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 214 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 215 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 216 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 217 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 218 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 219 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 220 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 221 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 222 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 223 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 224 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 225 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 226 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 227 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 228 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 229 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 230 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 231 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 232 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 233 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 234 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 235 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 236 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 237 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 238 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 239 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 240 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 241 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 242 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 243 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 244 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 245 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 246 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 247 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 248 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 249 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 250 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 251 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 252 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 253 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 254 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 255 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 256 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 257 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 258 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 259 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 260 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 261 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 262 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 263 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 264 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 265 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 266 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 267 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 268 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 269 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 270 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 271 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 272 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 273 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 274 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 275 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 276 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 277 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 278 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 279 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 280 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 281 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 282 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 283 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 284 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 285 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 286 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 287 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 288 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 289 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 290 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 291 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 292 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 293 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 294 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 295 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 296 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 297 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 298 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 299 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 300 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 301 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 302 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 303 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 304 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 305 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 306 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 307 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 308 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 309 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 310 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 311 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 312 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 313 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 314 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 315 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 316 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 317 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 318 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 319 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 320 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 321 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 322 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 323 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 324 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 325 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 326 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 327 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 328 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 329 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 330 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 331 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 332 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 333 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 334 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 335 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 336 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 337 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 338 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 339 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 340 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 341 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 342 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 343 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 344 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 345 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 346 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 347 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 348 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 349 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 350 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 351 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 352 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 353 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 354 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 355 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 356 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 357 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 358 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 359 deg"
+    ],
+    [
+      100,
+      "Fine mesh: HH: Multi-region solved 1 GHz at 360 deg"
+    ]
+  ]
+}
