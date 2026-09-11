@@ -6,10 +6,33 @@ import tempfile
 import unittest
 
 import numpy as np
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 
 
 class ModuleBoundaryTests(unittest.TestCase):
+    def test_public_modules_share_the_backend_model_and_operations(self):
+        import grim_dataset
+        import grim_headless
+        import grim_python
+        from grim_backend.datasets import transforms
+        from grim_backend.io import batch, loaders
+        from grim_backend.scripting import plotting, recorder
+
+        self.assertIs(grim_dataset.RcsGrid, RcsGrid)
+        self.assertIs(grim_headless.load_dataset, loaders.load_dataset)
+        self.assertIs(grim_headless.load_folder, loaders.load_folder)
+        self.assertIs(grim_python.save_dataset_batch, batch.save_dataset_batch)
+        self.assertIs(grim_python.plot_datasets, plotting.plot_datasets)
+        self.assertIs(grim_python.PythonScriptRecorder, recorder.PythonScriptRecorder)
+        for name in (
+            'coherent_divide', 'convert_extrusion', 'crop_dataset', 'decimate_axis',
+            'duplicate_dataset', 'join_datasets', 'medianize_azimuth', 'offset_db',
+            'regrid_axis', 'shift_dataset', 'stitch_datasets', 'wedge_to_conic',
+            'wrap_phase',
+        ):
+            with self.subTest(name=name):
+                self.assertIs(getattr(grim_python, name), getattr(transforms, name))
+
     def test_numerical_and_form_services_import_without_qt(self):
         root = Path(__file__).resolve().parents[1]
         script = """
@@ -29,16 +52,20 @@ class RejectQt(importlib.abc.MetaPathFinder):
 guard = RejectQt()
 sys.meta_path.insert(0, guard)
 import grim_dataset
-import grim_dataset_audit
+import grim_backend.datasets.audit
+import grim_backend
+import pkgutil
+for module in pkgutil.walk_packages(grim_backend.__path__, grim_backend.__name__ + '.'):
+    importlib.import_module(module.name)
 import feature_assembly_model
 import feature_assembly_recipe
 import ibc.design_search
 import ibc.mix_analysis
 import ibc.search_checkpoint
-import rcs_solver
-import driver_config
-import feature_preparation
-import feature_library_contracts
+import ghost_backend.twod.solver as rcs_solver
+import ghost_backend.runs.config as driver_config
+import ghost_backend.assembly.preparation as feature_preparation
+import ghost_backend.assembly.contracts as feature_library_contracts
 from plot_modes import isar_mode
 assert not guard.attempts, guard.attempts
 assert 'ibc.ui' not in sys.modules

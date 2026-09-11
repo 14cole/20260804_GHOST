@@ -1055,7 +1055,7 @@ class AssemblyGuiTests(unittest.TestCase):
             _item_to_dict,
             build_assembly_grid,
         )
-        from grim_dataset import RcsGrid
+        from grim_backend.datasets.grid import RcsGrid
 
         tree = AssemblyTree()
         response_root = tree._make_node("Response", _TYPE_ROOT, edit=False)

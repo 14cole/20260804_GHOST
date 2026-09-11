@@ -10,10 +10,10 @@ from unittest import mock
 
 import numpy as np
 
-import grim_csv_schema as flat_schema
-from grim_csv_schema import FLAT_CSV_SCHEMA, write_flat_csv
-from grim_dataset import RcsGrid
-from grim_headless import load_dataset, load_flat_csv
+import grim_backend.io.csv as flat_schema
+from grim_backend.io.csv import FLAT_CSV_SCHEMA, write_flat_csv
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import load_dataset, load_flat_csv
 
 
 V1_HEADER = [

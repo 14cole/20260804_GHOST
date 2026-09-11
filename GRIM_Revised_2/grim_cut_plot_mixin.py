@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QToolButton,
 )
 
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 from dataset_plot_style import DatasetPlotStyleMixin
 from isar_artifact import build_isar_manifest
 from plot_modes import (

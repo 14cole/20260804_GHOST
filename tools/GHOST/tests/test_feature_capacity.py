@@ -16,9 +16,9 @@ BACKEND = Path(__file__).resolve().parents[1] / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-import components  # noqa: E402
-import feature_sum  # noqa: E402
-from occluder import Occluder  # noqa: E402
+import ghost_backend.assembly.components as components
+import ghost_backend.assembly.fields as feature_sum
+from ghost_backend.geometry.occlusion import Occluder
 
 
 SMALL_GRID = {

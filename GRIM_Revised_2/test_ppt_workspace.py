@@ -19,7 +19,7 @@ try:
     from PySide6.QtCore import QCoreApplication, Qt
     from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
-    from grim_dataset import RcsGrid
+    from grim_backend.datasets.grid import RcsGrid
     from ppt_report import (
         DEFAULT_AZIMUTH_TEMPLATE_LAYOUT,
         DEFAULT_FREQUENCY_TEMPLATE_LAYOUT,

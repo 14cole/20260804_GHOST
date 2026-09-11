@@ -24,9 +24,9 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-from bor_solver import BOR_LINEAR_BACKWARD_ERROR_MAX, solve_bor  # noqa: E402
-from feature_sum import directions_from_aspect_roll, sum_features  # noqa: E402
-from line_expand import seam_coefficients_from_2d  # noqa: E402
+from ghost_backend.bor.solver import BOR_LINEAR_BACKWARD_ERROR_MAX, solve_bor
+from ghost_backend.assembly.fields import directions_from_aspect_roll, sum_features
+from ghost_backend.assembly.line_expansion import seam_coefficients_from_2d
 
 
 FREQUENCY_GHZ = 1.0

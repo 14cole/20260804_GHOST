@@ -17,7 +17,7 @@ from examples import join_folder as join_example
 from examples import query_dataset as query_example
 from examples.join_folder import discover_dataset_files, join_folder
 from examples.query_dataset import query_sample
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 
 
 class JoinFolderExampleTests(unittest.TestCase):

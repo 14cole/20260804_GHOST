@@ -31,8 +31,8 @@ from grim_cut_dataset_mixin import (
     StitchDialog,
     WrapDialog,
 )
-from grim_dataset import RcsGrid
-from grim_python import DatasetReference, PythonScriptRecorder
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.scripting.recorder import DatasetReference, PythonScriptRecorder
 from test_gui_shell import (
     _FakeFeatureWorkflow,
     _FakeFreddyIntegration,

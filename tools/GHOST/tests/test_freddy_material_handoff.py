@@ -16,7 +16,7 @@ BACKEND = ROOT / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from geometry_io import parse_geometry  # noqa: E402
+from ghost_backend.geometry.io import parse_geometry
 
 try:  # noqa: E402
     try:
@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - dependency gate exercised by CI images
     GUI_DEPENDENCIES_AVAILABLE = False
 
 if GUI_DEPENDENCIES_AVAILABLE:  # noqa: E402
-    from geometry_tab import GeometryTab
+    from ghost_backend.ui.geometry import GeometryTab
 else:
     GeometryTab = None  # type: ignore[assignment]
 
@@ -73,9 +73,9 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
         self.tab.loaded_path = str(geometry)
         return geometry
 
-    @mock.patch("geometry_tab.QMessageBox.warning")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.warning")
     def test_apply_ibc_targets_selected_conductors_and_rejects_mixed_selection(self, warning):
-        from geometry_io import Segment
+        from ghost_backend.geometry.io import Segment
         from PySide6.QtCore import QItemSelectionModel
         from PySide6.QtWidgets import QTableWidgetItem
         self.tab.segments = [Segment(str(i), '2', ['2','4','0','0','0'], [0.,1.], [i,i]) for i in range(3)]
@@ -99,7 +99,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
         self.assertEqual(self.tab.segments[0].properties[2],'0')
         warning.assert_called_once()
 
-    @mock.patch("geometry_tab.QMessageBox.information")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.information")
     def test_actual_freddy_exports_attach_to_geometry(self, _information):
         freddy = Path(__file__).resolve().parents[2]/"FREDDY"
         if str(freddy) not in sys.path:
@@ -115,8 +115,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             self.assertTrue(self.tab.attach_material_artifact("ibc", str(ibc)))
             self.assertTrue(self.tab.attach_material_artifact("material", str(medium)))
 
-    @mock.patch("geometry_tab.QMessageBox.warning")
-    @mock.patch("geometry_tab.QFileDialog.getOpenFileName")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.warning")
+    @mock.patch("ghost_backend.ui.geometry.QFileDialog.getOpenFileName")
     def test_manual_picker_validates_schema_before_adding_a_row(self, dialog, warning):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -136,7 +136,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                     callback()
                     self.assertEqual(self.tab._read_small_table(table), [["1", path.name]])
 
-    @mock.patch("geometry_tab.QMessageBox.information")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.information")
     def test_nominal_ibc_is_copied_and_added_to_ibc_table(
         self, _information: mock.Mock
     ) -> None:
@@ -166,7 +166,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 self.tab._read_small_table(self.tab.table_diel), []
             )
 
-    @mock.patch("geometry_tab.QMessageBox.information")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.information")
     def test_nominal_material_is_added_to_dielectric_table(
         self, _information: mock.Mock
     ) -> None:
@@ -192,7 +192,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 self.tab._read_small_table(self.tab.table_ibc), []
             )
 
-    @mock.patch("geometry_tab.QMessageBox.warning")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.warning")
     def test_active_saved_geo_is_required(self, warning: mock.Mock) -> None:
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "nominal.csv"
@@ -203,7 +203,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             )
             self.assertIn("No Active Saved Geometry", warning.call_args.args)
 
-    @mock.patch("geometry_tab.QMessageBox.critical")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.critical")
     def test_analysis_csv_is_rejected_by_production_schema(
         self, critical: mock.Mock
     ) -> None:
@@ -228,7 +228,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             self.assertEqual(self.tab.table_ibc.rowCount(), 0)
             self.assertIn("Invalid FREDDY Artifact", critical.call_args.args)
 
-    @mock.patch("geometry_tab.QMessageBox.critical")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.critical")
     def test_whitespace_filename_is_rejected_before_copy(
         self, critical: mock.Mock
     ) -> None:
@@ -252,8 +252,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 "Invalid FREDDY Artifact Filename", critical.call_args.args
             )
 
-    @mock.patch("geometry_tab.QMessageBox.warning")
-    @mock.patch("geometry_tab.QFileDialog.getOpenFileName")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.warning")
+    @mock.patch("ghost_backend.ui.geometry.QFileDialog.getOpenFileName")
     def test_manual_csv_picker_rejects_whitespace_filename(
         self, open_dialog: mock.Mock, warning: mock.Mock
     ) -> None:
@@ -269,8 +269,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 "Unsupported Material Filename", warning.call_args.args
             )
 
-    @mock.patch("geometry_tab.QMessageBox.information")
-    @mock.patch("geometry_tab.QMessageBox.question")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.information")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.question")
     def test_existing_sidecar_requires_explicit_replace_confirmation(
         self, question: mock.Mock, _information: mock.Mock
     ) -> None:
@@ -305,8 +305,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             )
             self.assertEqual(self.tab.table_ibc.rowCount(), 1)
 
-    @mock.patch("geometry_tab.QMessageBox.information")
-    @mock.patch("geometry_tab.QMessageBox.question")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.information")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.question")
     def test_casefold_match_updates_row_to_exact_attached_filename(
         self, question: mock.Mock, _information: mock.Mock
     ) -> None:
@@ -337,8 +337,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 [["7", "foo.csv"]],
             )
 
-    @mock.patch("geometry_tab.QMessageBox.critical")
-    @mock.patch("geometry_tab.QMessageBox.question")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.critical")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.question")
     def test_attachment_ui_failure_restores_file_and_table(
         self, question: mock.Mock, critical: mock.Mock
     ) -> None:
@@ -375,8 +375,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 "FREDDY Artifact Attachment Failed", critical.call_args.args
             )
 
-    @mock.patch("geometry_tab.QMessageBox.information")
-    @mock.patch("geometry_tab.QFileDialog.getSaveFileName")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.information")
+    @mock.patch("ghost_backend.ui.geometry.QFileDialog.getSaveFileName")
     def test_save_as_copies_referenced_sidecars_to_new_directory(
         self, save_dialog: mock.Mock, _information: mock.Mock
     ) -> None:
@@ -412,8 +412,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             self.assertEqual(ibcs, rows)
             self.assertEqual(self.tab.loaded_path, str(target.resolve()))
 
-    @mock.patch("geometry_tab.QMessageBox.critical")
-    @mock.patch("geometry_tab.QFileDialog.getSaveFileName")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.critical")
+    @mock.patch("ghost_backend.ui.geometry.QFileDialog.getSaveFileName")
     def test_save_as_missing_sidecar_is_blocked(
         self, save_dialog: mock.Mock, critical: mock.Mock
     ) -> None:
@@ -441,10 +441,10 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             self.assertEqual(self.tab.loaded_path, str((old_dir / "body.geo").resolve()))
             self.assertIn("Geometry Save Blocked", critical.call_args.args)
 
-    @mock.patch("geometry_tab.QMessageBox.information")
-    @mock.patch("geometry_tab.QMessageBox.critical")
-    @mock.patch("geometry_tab.QMessageBox.question")
-    @mock.patch("geometry_tab.QFileDialog.getSaveFileName")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.information")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.critical")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.question")
+    @mock.patch("ghost_backend.ui.geometry.QFileDialog.getSaveFileName")
     def test_save_as_publish_failure_restores_geometry_and_sidecar(
         self,
         save_dialog: mock.Mock,
@@ -490,7 +490,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
                 real_replace(source, destination)
 
             with mock.patch(
-                "geometry_tab.os.replace", side_effect=fail_geometry_publish
+                "ghost_backend.ui.geometry.os.replace", side_effect=fail_geometry_publish
             ):
                 self.tab.save_geo()
 
@@ -505,8 +505,8 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             self.assertEqual(self.tab.loaded_path, str(geometry.resolve()))
             critical.assert_called_once()
 
-    @mock.patch("geometry_tab.QMessageBox.critical")
-    @mock.patch("geometry_tab.QFileDialog.getSaveFileName")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.critical")
+    @mock.patch("ghost_backend.ui.geometry.QFileDialog.getSaveFileName")
     def test_failed_atomic_geometry_save_preserves_existing_file(
         self, save_dialog: mock.Mock, critical: mock.Mock
     ) -> None:
@@ -516,11 +516,11 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             save_dialog.return_value = (str(target), "Geometry Files (*.geo)")
             with (
                 mock.patch(
-                    "geometry_tab.build_geometry_text",
+                    "ghost_backend.ui.geometry.build_geometry_text",
                     return_value="replacement geometry\n",
                 ),
                 mock.patch(
-                    "geometry_tab.os.replace",
+                    "ghost_backend.ui.geometry.os.replace",
                     side_effect=OSError("simulated publish failure"),
                 ),
             ):
@@ -532,7 +532,7 @@ class FreddyMaterialHandoffTest(unittest.TestCase):
             self.assertEqual(set(Path(folder).iterdir()), {target})
             critical.assert_called_once()
 
-    @mock.patch("geometry_tab.QMessageBox.warning")
+    @mock.patch("ghost_backend.ui.geometry.QMessageBox.warning")
     def test_same_filename_cannot_be_reused_for_opposite_schema(
         self, warning: mock.Mock
     ) -> None:

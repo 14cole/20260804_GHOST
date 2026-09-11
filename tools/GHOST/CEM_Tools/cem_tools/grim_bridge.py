@@ -31,7 +31,7 @@ def grim_project_path() -> 'Path':
 
 
 def _load_grim_module(filename: str, module_name: str):
-    """Load one selected flat GRIM tree and roll back interrupted imports."""
+    """Load a module from the selected GRIM tree and roll back failed imports."""
     project = grim_project_path().resolve()
     module_path = project / filename
     if not module_path.is_file():
@@ -47,12 +47,15 @@ def _load_grim_module(filename: str, module_name: str):
         if spec is None or spec.loader is None:
             raise CemToolError(f"cannot import {module_path}")
         existing = importlib.util.module_from_spec(spec)
-        # GRIM is a flat module tree, including lazily imported operations.
-        # Keep its selected source directory available without an editable install.
         for name in (p.stem for p in project.glob('grim_*.py')):
             loaded = sys.modules.get(name)
             if loaded is not None and Path(getattr(loaded, '__file__', '')).resolve().parent != project:
                 raise CemToolError(f"Conflicting GRIM module {name}; restart with one GRIM source tree.")
+        for name, loaded in tuple(sys.modules.items()):
+            if name == 'grim_backend' or name.startswith('grim_backend.'):
+                origin = getattr(loaded, '__file__', None)
+                if origin and project not in Path(origin).resolve().parents:
+                    raise CemToolError(f"Conflicting GRIM module {name}; restart with one GRIM source tree.")
         source_path = str(project)
         if source_path not in sys.path:
             sys.path.insert(0, source_path)
@@ -64,7 +67,7 @@ def _load_grim_module(filename: str, module_name: str):
             for name in set(sys.modules) - before:
                 module = sys.modules.get(name)
                 origin = getattr(module, '__file__', None)
-                if name == module_name or (origin and Path(origin).resolve().parent == project):
+                if name == module_name or (origin and project in Path(origin).resolve().parents):
                     sys.modules.pop(name, None)
             raise
     return existing
@@ -75,7 +78,7 @@ def _rcs_grid_class() -> 'type':
 
 
 def _flat_csv_schema_module() -> 'Any':
-    return _load_grim_module('grim_csv_schema.py', '_cem_tools_external_grim_csv_schema')
+    return _load_grim_module('grim_backend/io/csv.py', '_cem_tools_external_grim_csv_schema')
 
 
 def load_dataset(path: 'str | os.PathLike[str]') -> 'Any':

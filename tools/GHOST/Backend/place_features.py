@@ -114,8 +114,8 @@ NORMAL_TOL_DEG = 15.0
 
 # =============================================================================
 
-from feature_sum import prepare_point_pattern  # noqa: E402
-from feature_workflow import (  # noqa: E402
+from ghost_backend.assembly.fields import prepare_point_pattern
+from ghost_backend.assembly.workflow import (
     LINE_CSV_COLUMNS,
     LINE_PLACEMENT_SCHEMA,
     POINT_CSV_COLUMNS,
@@ -167,13 +167,13 @@ def _normal_tolerance():
 
 
 def _placement_rows(path):
-    """Read the strict point CSV relative to the legacy project root."""
+    """Read the strict point CSV relative to PROJECT_ROOT."""
 
     return read_point_placement_csv(path, base_dir=PROJECT_ROOT)
 
 
 def _line_rows(path):
-    """Read the strict line CSV relative to the legacy project root."""
+    """Read the strict line CSV relative to PROJECT_ROOT."""
 
     return read_line_placement_csv(path, base_dir=PROJECT_ROOT)
 
@@ -183,7 +183,7 @@ def _sample_perimeter(perimeter, samples_per_segment=33):
 
 
 def _line_placements(profile, surface, scale, limit, wavelength):
-    """Legacy private API backed by the reusable request-independent core."""
+    """Prepare line placements using the configured datasets and locations."""
 
     return prepare_line_placements(
         profile,
@@ -199,7 +199,7 @@ def _line_placements(profile, surface, scale, limit, wavelength):
 
 
 def _compact_points(profile, surface, scale, limit, wavelength):
-    """Legacy private API backed by the reusable request-independent core."""
+    """Prepare point placements using the configured datasets and locations."""
 
     return prepare_point_placements(
         profile,
@@ -288,7 +288,7 @@ def main():
         )
         for index, warning in enumerate(plan.validation_warnings, start=1):
             print(f"  {index}. {warning}")
-    from assembly_workload import warnings_require_workload_acknowledgement
+    from ghost_backend.assembly.workload import warnings_require_workload_acknowledgement
     review_required = bool(plan.validation_warnings) and (
         require_manifests or require_body_certification
         or warnings_require_workload_acknowledgement(plan.validation_warnings)

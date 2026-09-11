@@ -31,14 +31,14 @@ ATTEST_GLOBAL_ORIGIN_EXP_PLUS_JWT_RADAR_VH = False
 
 # =============================================================================
 
-from components import (  # noqa: E402
+from ghost_backend.assembly.components import (
     COMPONENT_AMPLITUDE_CONVENTION,
     COMPONENT_COMPLEX_FIELD_DOMAIN,
     COMPONENT_PHASE_REFERENCE,
 )
-from feature_sum import validate_radar_grid  # noqa: E402
-from grim_compat import load_pattern_any  # noqa: E402
-from grim_io import _save_grim_npz  # noqa: E402
+from ghost_backend.assembly.fields import validate_radar_grid
+from ghost_backend.io.viewer_bridge import load_pattern_any
+from ghost_backend.io.grim import _save_grim_npz
 
 
 def main():

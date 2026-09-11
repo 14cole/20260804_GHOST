@@ -217,9 +217,9 @@ imports blocked. They do not establish that a particular cluster's SLURM,
 modules, compiler, or filesystem is configured correctly.
 
 Edit the CONFIG block at the top of a driver and run it with no arguments to
-submit. `hpc_common.configure_driver` still works the same way: it rewrites
-those top-level constants in a copy of the driver, and submitting that copy is
-what carries the settings to the compute nodes.
+submit. `ghost_backend.hpc.common.configure_driver` copies the driver source
+and writes an adjacent validated JSON configuration. Submission copies both
+files into the run directory for the compute nodes.
 
 ### Portable requests from GRIM on Windows
 
@@ -615,7 +615,7 @@ is a zip, and numpy validates a CRC-32 per member on read, so a corrupted
 result raises `BadZipFile` on open rather than verifying and returning wrong
 numbers. What the attestation is for -- catching a result produced by a
 different source build, runtime, or input -- is fully covered by the embedded
-fields, and `hpc_common.require_hpc_output_attestations` still checks the exact
+fields, and `ghost_backend.hpc.common.require_hpc_output_attestations` checks the exact
 expected file set.
 
 ### What the manifest holds
@@ -1014,3 +1014,11 @@ to compare against; keep one outside the tree.
 - **A run that got interrupted:** resubmit the same driver copy against the same
   run directory. Finished units are verified and skipped; unclaimed ones are
   picked up.
+## Saved 2D resources
+
+GHOST and GRIM Runs export validated factorization/resource profiles into 2D
+requests and manifests. Workers apply the captured settings independently of
+their launch environment. See [run profiles](RUN_PROFILES.md) for JSON examples,
+temporary directory portability, CPU reservations, and performance checks.
+Install the updated HPC requirements, including `threadpoolctl==2.2.0` for the
+Python 3.6 stack, and run `Backend/check_hpc_environment.py` before submitting.

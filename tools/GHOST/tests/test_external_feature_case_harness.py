@@ -16,12 +16,12 @@ CASE_ROOT = GHOST_ROOT / "geometry_tests" / "non_bor_feature_validation"
 sys.path.insert(0, str(CASE_ROOT))
 sys.path.insert(0, str(GHOST_ROOT / "Backend"))
 
-from components import (  # noqa: E402
+from ghost_backend.assembly.components import (
     COMPONENT_AMPLITUDE_CONVENTION,
     COMPONENT_COMPLEX_FIELD_DOMAIN,
     COMPONENT_PHASE_REFERENCE,
 )
-from grim_io import _save_grim_npz  # noqa: E402
+from ghost_backend.io.grim import _save_grim_npz
 import prepare_external_cases as harness  # noqa: E402
 
 

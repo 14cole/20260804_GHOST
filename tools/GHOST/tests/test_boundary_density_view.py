@@ -12,7 +12,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Backend"))
-import solver_tab
+import ghost_backend.ui.solver as solver_tab
 from PySide6.QtWidgets import QApplication
 
 

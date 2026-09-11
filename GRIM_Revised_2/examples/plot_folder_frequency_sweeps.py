@@ -28,7 +28,7 @@ _GRIM_MODULE_DIR = Path(__file__).resolve().parents[1]
 if str(_GRIM_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(_GRIM_MODULE_DIR))
 
-from grim_headless import is_supported_path, load_dataset
+from grim_backend.io.loaders import is_supported_path, load_dataset
 from ppt_plot_data import build_frequency_specs, get_plot_availability
 from ppt_report import render_plot_png
 

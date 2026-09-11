@@ -22,7 +22,7 @@ GHOST_BACKEND = (
     Path(__file__).resolve().parents[1] / "tools" / "GHOST" / "Backend"
 )
 
-import feature_assembly_panel as feature_panel_module  # noqa: E402
+import feature_assembly_panel as feature_panel_module
 from feature_assembly_panel import (  # noqa: E402
     ASSEMBLY_REVIEW_POINT_FIELD_CELLS,
     AssemblyWorkEstimate,
@@ -101,10 +101,10 @@ def _isolated_ghost_backend():
     backend_root = GHOST_BACKEND.resolve()
     sys.path.insert(0, str(backend_root))
     try:
-        workflow = importlib.import_module("feature_workflow")
-        physics = importlib.import_module("feature_sum")
-        line_model = importlib.import_module("line_expand")
-        workload = importlib.import_module("assembly_workload")
+        workflow = importlib.import_module("ghost_backend.assembly.workflow")
+        physics = importlib.import_module("ghost_backend.assembly.fields")
+        line_model = importlib.import_module("ghost_backend.assembly.line_expansion")
+        workload = importlib.import_module("ghost_backend.assembly.workload")
         yield SimpleNamespace(
             feature_workflow=workflow,
             feature_sum=physics,
@@ -175,7 +175,7 @@ def _write_isotropic_line_delta(
     psi_vv_deg: float,
 ) -> None:
     """Write one strict two-channel line response shared by both instances."""
-    import feature_sum as contracts
+    import ghost_backend.assembly.fields as contracts
 
     angles = np.asarray([0.0, 90.0, 180.0])
     wave_number = 2.0 * math.pi * frequency_ghz * 1.0e9 / c0

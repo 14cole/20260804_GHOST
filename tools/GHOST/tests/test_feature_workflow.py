@@ -15,9 +15,9 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-import feature_workflow  # noqa: E402
-import feature_sum  # noqa: E402
-import grim_io  # noqa: E402
+import ghost_backend.assembly.workflow as feature_workflow
+import ghost_backend.assembly.fields as feature_sum
+import ghost_backend.io.grim as grim_io
 
 
 POINT_HEADER = (

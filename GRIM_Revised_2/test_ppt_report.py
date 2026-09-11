@@ -440,7 +440,7 @@ class LayoutPlanningTests(unittest.TestCase):
 class RenderingTests(unittest.TestCase):
     def test_real_renderer_creates_an_opaque_png(self):
         try:
-            import matplotlib  # noqa: F401
+            import matplotlib
         except ImportError:
             self.skipTest("Matplotlib is not installed in this headless test runtime.")
         with tempfile.TemporaryDirectory() as directory:
@@ -512,7 +512,7 @@ class RenderingTests(unittest.TestCase):
 
     def test_real_master_legend_renderer_creates_png(self):
         try:
-            import matplotlib  # noqa: F401
+            import matplotlib
         except ImportError:
             self.skipTest("Matplotlib is not installed in this headless test runtime.")
         plot = make_plot("legend")
@@ -530,7 +530,7 @@ class RenderingTests(unittest.TestCase):
 
     def test_master_legend_fails_clearly_instead_of_clipping_long_names(self):
         try:
-            import matplotlib  # noqa: F401
+            import matplotlib
         except ImportError:
             self.skipTest("Matplotlib is not installed in this headless test runtime.")
         plot = PlotSpec(

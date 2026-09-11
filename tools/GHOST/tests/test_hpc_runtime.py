@@ -11,7 +11,7 @@ from unittest import mock
 
 BACKEND = Path(__file__).resolve().parents[1] / 'Backend'
 sys.path.insert(0, str(BACKEND))
-import ghost_runtime
+import ghost_backend.execution.runtime as ghost_runtime
 
 
 class HpcRuntimeTests(unittest.TestCase):
@@ -26,7 +26,7 @@ class HpcRuntimeTests(unittest.TestCase):
 
     def test_packed_visibility_preserves_every_bit_and_empty_shapes(self):
         import numpy as np
-        from occluder import PackedVisibility
+        from ghost_backend.geometry.occlusion import PackedVisibility
         packed = np.arange(256, dtype=np.uint8).reshape(256, 1)
         visibility = PackedVisibility(packed, n_points=256, n_directions=8)
         expected = np.array([[bool(byte & (1 << bit)) for bit in range(8)]
@@ -47,7 +47,7 @@ class HpcRuntimeTests(unittest.TestCase):
 
     def test_packed_visibility_cannot_be_changed_after_review(self):
         import numpy as np
-        from occluder import PackedVisibility
+        from ghost_backend.geometry.occlusion import PackedVisibility
         source = np.array([[129, 1]], dtype=np.uint8)
         visibility = PackedVisibility(source, n_points=1, n_directions=9)
         source[:] = 0
@@ -62,10 +62,12 @@ class HpcRuntimeTests(unittest.TestCase):
     def test_headless_modules_import_without_gui(self):
         modules = (
             'run_hpc_monostatic', 'run_hpc_bor_monostatic',
-            'run_local_monostatic', 'run_local_bor', 'hpc_bundle',
-            'rcs_solver', 'bor_solver', 'bor_dispatch', 'bor_streaming',
-            'thin_sheet', 'feature_workflow', 'feature_preparation',
-            'feature_library_contracts', 'assembly_workload', 'mesh_quality',
+            'run_local_monostatic', 'run_local_bor', 'ghost_backend.hpc.bundle',
+            'ghost_backend.twod.solver', 'ghost_backend.bor.solver', 'ghost_backend.bor.dispatch', 'ghost_backend.bor.streaming',
+            'ghost_backend.twod.formulations.thin_layer', 'ghost_backend.assembly.workflow', 'ghost_backend.assembly.preparation',
+            'ghost_backend.linalg.dense', 'ghost_backend.twod.fields', 'ghost_backend.twod.assembly.session', 'ghost_backend.twod.assembly.mass',
+            'ghost_backend.twod.formulations.dielectric', 'ghost_backend.twod.formulations.robin', 'ghost_backend.twod.formulations.sheet', 'ghost_backend.twod.formulations.regions',
+            'ghost_backend.assembly.contracts', 'ghost_backend.assembly.workload', 'ghost_backend.geometry.quality',
             'create_feature_manifest', 'build_bor_stream_kernel',
         )
         script = (
@@ -86,8 +88,8 @@ class HpcRuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_dataclasses_defaults_frozen_replace_asdict_and_pickle(self):
-        from driver_config import LoadedConfiguration
-        from assembly_workload import AssemblyWorkload
+        from ghost_backend.runs.config import LoadedConfiguration
+        from ghost_backend.assembly.workload import AssemblyWorkload
         if sys.version_info < (3, 7):
             self.assertEqual(ghost_runtime.dataclass.__module__, '_ghost_dataclasses')
         record = LoadedConfiguration(Path('config.json'), 'abc')
@@ -107,8 +109,8 @@ import numpy as np
 import scipy.linalg as linalg
 if hasattr(linalg, 'LinAlgWarning'):
     del linalg.LinAlgWarning
-from refined_lu import RefinedLU, linear_precision
-import rcs_solver as rcs
+from ghost_backend.linalg.refined_lu import RefinedLU, linear_precision
+import ghost_backend.twod.solver as rcs
 a = np.array([[3+1j, 1-2j], [2+0j, 5-1j]])
 b = np.array([1+2j, -3+1j])
 np.testing.assert_allclose(RefinedLU(a).solve(b), np.linalg.solve(a, b),
@@ -133,9 +135,11 @@ assert any('fell back' in reason for reason in
 
     def test_lu_still_rejects_old_scipy_runtime_warning(self):
         import numpy as np
-        import refined_lu
+        import ghost_backend.linalg.refined_lu as refined_lu
         import warnings
-        def old_factor(_matrix):
+        def old_factor(_matrix, overwrite_a=False, check_finite=True):
+            self.assertTrue(overwrite_a)
+            self.assertFalse(check_finite)
             warnings.warn('Singular matrix.', RuntimeWarning)
             self.fail('A singular single-precision factorization was accepted')
         with mock.patch.object(refined_lu, 'lu_factor', side_effect=old_factor):
@@ -170,8 +174,8 @@ assert any('fell back' in reason for reason in
                 self.assertEqual(values, ['default', 'thread', 'default'])
 
     def test_failed_profiled_solve_restores_precision_and_metrics(self):
-        from refined_lu import linear_precision, requested_precision
-        from solver_metrics import active_metrics, profiled_solve
+        from ghost_backend.linalg.refined_lu import linear_precision, requested_precision
+        from ghost_backend.execution.metrics import active_metrics, profiled_solve
         @profiled_solve
         def failed_solve():
             self.assertIsNotNone(active_metrics())

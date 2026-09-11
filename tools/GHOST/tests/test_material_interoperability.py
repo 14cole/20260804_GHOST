@@ -17,9 +17,9 @@ from ibc.compute import MaterialTable
 from ibc.io import (write_output, write_material_table, read_material_table,
                     write_impedance_batch, write_impedance_bundle,
                     MATERIAL_HEADER, IMPEDANCE_HEADER)
-from rcs_solver import MaterialLibrary, _load_impedance_csv, _load_dielectric_csv
-from geometry_io import parse_geometry
-from grim_io import export_result_to_dbke_csv
+from ghost_backend.twod.solver import MaterialLibrary, _load_impedance_csv, _load_dielectric_csv
+from ghost_backend.geometry.io import parse_geometry
+from ghost_backend.io.grim import export_result_to_dbke_csv
 
 
 class FreddyGhostMaterialTests(unittest.TestCase):

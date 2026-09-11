@@ -11,7 +11,7 @@ from unittest import mock
 import numpy as np
 
 import grim_dataset
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 from plot_modes.az_vs_range_mode import _range_display_values
 
 

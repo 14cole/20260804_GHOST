@@ -10,9 +10,9 @@ import zipfile
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Backend"))
-import feature_sum as fs
-import feature_workflow as fw
-from assembly_inspector import ContributionInspector, _stored_complex_sample
+import ghost_backend.assembly.fields as fs
+import ghost_backend.assembly.workflow as fw
+from ghost_backend.assembly.inspector import ContributionInspector, _stored_complex_sample
 from test_point_scatter_physics import _write_point_grim
 
 

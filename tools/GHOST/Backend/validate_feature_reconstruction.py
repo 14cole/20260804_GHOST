@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from feature_sum import _load_grim
+from ghost_backend.assembly.fields import _load_grim
 
 # =============================================================================
 # USER SETTINGS

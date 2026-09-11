@@ -24,10 +24,10 @@ import numpy as np
 BACKEND = Path(__file__).resolve().parent.parent / "Backend"
 sys.path.insert(0, str(BACKEND))
 
-import hpc_bundle  # noqa: E402
-import hpc_common  # noqa: E402
-import feature_sum  # noqa: E402
-import workflow_provenance  # noqa: E402
+import ghost_backend.hpc.bundle as hpc_bundle
+import ghost_backend.hpc.common as hpc_common
+import ghost_backend.assembly.fields as feature_sum
+import ghost_backend.execution.provenance as workflow_provenance
 
 
 def _write_geometry(root: 'Path', name: 'str' = "body.geo", *, sidecar: 'bool' = True) -> 'Path':

@@ -22,11 +22,8 @@ Workflow:
 
 Scheduling notes -- what makes a big sweep finish sooner:
 
-- COST-AWARE PLANNING.  Assembly is O(N^2) in boundary nodes and N grows with
-  frequency, so a 2-18 GHz sweep spans roughly 80x in unit cost.  Handing units
-  out round-robin over their index (what this used to do) can put every
-  high-frequency unit on one slot.  Units are costed at submit time from the
-  real mesh and packed longest-first instead.
+- COST-AWARE PLANNING. Units are costed at submit time from the realized mesh
+  and assigned longest-first.
 - WORK STEALING.  Array tasks are interchangeable and coordinate only through
   atomic claim files, so an early-finishing node picks up someone else's
   backlog, a preempted or requeued task loses only its in-flight units, and a
@@ -47,6 +44,9 @@ verifies, so cancelling and resubmitting is always safe.
 Internal worker invocation (called by SLURM, not by the user):
     python run_hpc_monostatic.py --worker <run_dir> <submission_index> <task_index>
 """
+from ghost_backend.paths import backend_root as _backend_root
+from ghost_backend.execution.options import current_options, efficient_defaults
+from ghost_backend.runs.execution import driver_execution, unit_execution
 
 import argparse
 import json
@@ -63,11 +63,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import hpc_scheduler
-import workflow_provenance as _workflow_provenance
-from geometry_io import material_sidecar_paths
-from solver_quality import accuracy_target_policy
-from workflow_provenance import (
+import ghost_backend.hpc.scheduler as hpc_scheduler
+import ghost_backend.execution.provenance as _workflow_provenance
+from ghost_backend.geometry.io import material_sidecar_paths
+from ghost_backend.runs.quality import accuracy_target_policy
+from ghost_backend.execution.provenance import (
     backend_source_fingerprint,
     backend_source_inventory,
     describe_source_mismatch,
@@ -80,7 +80,9 @@ from workflow_provenance import (
 )
 
 # Compatibility imports retain the established module entrypoints.
-from driver_io import publish_submission_journal as _durably_publish_submitted_jobs
+from ghost_backend.runs.inputs import (
+    publish_submission_journal as _durably_publish_submitted_jobs,
+)
 
 
 # ===============================================================================
@@ -141,14 +143,14 @@ MEMORY_HEADROOM = 0.85            # Fraction of the node's memory allocation the
                                   # scheduler may reserve for solves. The rest
                                   # covers the parent process, page cache, and
                                   # the gap between estimate and reality.
-MEMORY_SAFETY   = 1.35            # Multiplier on the solver's own dense-storage
-                                  # estimate, covering allocator slack and the
-                                  # transient copies a factorization makes.
+MEMORY_SAFETY   = 1.35            # Dense: whole-estimate margin. Compressed:
+                                  # sampled operator margin only; inverse and
+                                  # phase workspaces are already accounted for.
 MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
                                   # footprint, exported to the job as
                                   # GHOST_MAX_SOLVE_GB. None = derive it from
-                                  # what the node reports (0.9 x detected,
-                                  # floored at 32 GB).
+                                  # current available RAM (0.9 x available,
+                                  # with no minimum floor).
                                   #
                                   # Set it when you intend to run something
                                   # very large. Detection needs a number it
@@ -166,8 +168,7 @@ SLURM_EXTRA_SBATCH = []  # type: List[str]  # raw extra lines, e.g. "--constrain
 JOB_PROLOGUE = []  # type: List[str]
 
 # --- Solver knobs ----------------------------------------------------------
-# Production 2-D runs always use condition-reporting dense LU and co-solve
-# VV/TE plus HH/TM. There is no user-selectable polarization or method.
+# Solver settings for both physical channels (VV/TE and HH/TM).
 GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
 MAX_PANELS              = 50_000
 
@@ -184,16 +185,16 @@ MAX_PANELS              = 50_000
 # downstream feature workflow.
 MESH_CERTIFICATION      = True
 ACCURACY_TARGET         = "standard"     # "standard" | "tight"; mesh comparison limits
-SOLVER_METHOD           = "direct"       # "direct" | "experimental_cpu"; FP64 streamed CPU
+SOLVER_METHOD           = "experimental_cpu"       # "direct" | "experimental_cpu"; FP64 streamed CPU
 LU_PRECISION            = "double"       # "double" | "mixed"; CPU LU with refinement
-BLAS_THREADS_PER_WORKER = 1              # keeps N workers x BLAS threads sane
+BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']              # keeps N workers x BLAS threads sane
 
 # Threads each solve may use inside the boundary-operator assembly.
 # "auto" gives every concurrent solve an equal share of the node's cores. That
 # only matters when a node holds fewer units than it has cores -- a couple of
 # geometries at one frequency, or the tail of a sweep; with at least one unit
 # per core "auto" resolves to 1 and the process pool owns the parallelism.
-ASSEMBLY_THREADS        = "auto"         # "auto", or an integer >= 1
+ASSEMBLY_THREADS        = efficient_defaults()['assembly_threads']         # "auto", or an integer >= 1
 
 # Pool worker lifetime. Each worker is replaced after this many units so
 # allocator growth from a big solve cannot accumulate across a long sweep. The
@@ -212,10 +213,16 @@ SUBMIT        = True                     # False -> write .slurm files but don't
 
 # ===============================================================================
 
-from driver_config import (load_driver_configuration, configuration_source_records,
-                           copy_configuration)
+from ghost_backend.runs.config import (
+    load_driver_configuration,
+    configuration_source_records,
+    copy_configuration,
+)
 _CONFIG_KIND = '2d'
+EXECUTION_OPTIONS = None
+
 _CONFIG_KEYS = (
+    'EXECUTION_OPTIONS',
     'FRD_DIR',
     'OPN_DIR',
     'FREQUENCIES_GHZ',
@@ -276,7 +283,7 @@ def _solver_source_records():
     execs out of the run directory) hash the same bytes under the same name.
     """
 
-    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
+    backend_dir = str(_backend_root())
     return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
@@ -353,7 +360,7 @@ def _unit_attestation_fields(context, unit):
 
 def _verify_unit_input(unit, context):
     # type: (Dict[str, Any], Dict[str, Any]) -> None
-    from feature_sum import geometry_input_fingerprint
+    from ghost_backend.assembly.fields import geometry_input_fingerprint
     current = geometry_input_fingerprint(
         str(unit["geometry"]), str(context["geometry_units"])
     )
@@ -423,7 +430,7 @@ def _load_snapshot(geometry_path):
     cached = _SNAPSHOT_CACHE.get(geometry_path)
     if cached is not None:
         return cached
-    from geometry_io import parse_geometry, build_geometry_snapshot
+    from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
 
     path = Path(geometry_path)
     title, segments, ibcs, dielectrics = parse_geometry(path.read_text())
@@ -438,11 +445,12 @@ def _pool_initializer(blas_threads):
     # type: (int) -> None
     hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
-    import rcs_solver
+    import ghost_backend.twod.solver as rcs_solver
 
     rcs_solver.set_assembly_threads(1)
 
 
+@unit_execution
 def _solve_and_export(unit, context, run_dir_str):
     # type: (Dict[str, Any], Dict[str, Any], str) -> Tuple[str, str]
     """Pool-worker entry point: solve one unit, export .grim. Idempotent."""
@@ -469,16 +477,16 @@ def _solve_and_export(unit, context, run_dir_str):
         solver_method=context.get("solver_method", "direct"),
     )
     # Select precision inside each worker; context variables are process-local.
-    from refined_lu import linear_precision
+    from ghost_backend.linalg.refined_lu import linear_precision
     with linear_precision(context.get("lu_precision", "double")):
         if context["mesh_certification"]:
-            from rcs_solver import solve_monostatic_rcs_2d_certified
+            from ghost_backend.twod.solver import solve_monostatic_rcs_2d_certified
             result = solve_monostatic_rcs_2d_certified(
                 mesh_convergence_policy=context["mesh_convergence_policy"],
                 **solve_kwargs
             )
         else:
-            from rcs_solver import solve_monostatic_rcs_2d_survey
+            from ghost_backend.twod.solver import solve_monostatic_rcs_2d_survey
             result = solve_monostatic_rcs_2d_survey(**solve_kwargs)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
@@ -487,7 +495,7 @@ def _solve_and_export(unit, context, run_dir_str):
     # results/ holds one file per unit instead of a .grim and a sidecar.
     embed_output_attestation(result, attestation)
 
-    from grim_io import export_result_to_grim
+    from ghost_backend.io.grim import export_result_to_grim
     written = export_result_to_grim(
         result, str(out_path),
         source_path=str(snapshot.get("source_path", "") or ""),
@@ -510,8 +518,9 @@ def _solve_and_export_star(args):
 
     unit, context, run_dir_str, assembly_threads = args
     try:
-        import rcs_solver
+        import ghost_backend.twod.solver as rcs_solver
         rcs_solver.set_assembly_threads(assembly_threads)
+        context = dict(context, execution_assembly_threads=assembly_threads)
         status, path = _solve_and_export(unit, context, run_dir_str)
         return ("ok", status, path)
     except Exception:
@@ -703,6 +712,7 @@ def _validate_config():
     return frequencies, azimuths
 
 
+@driver_execution
 def submit():
     # type: () -> None
     geometries = _discover_geometries()
@@ -740,7 +750,7 @@ def submit():
         frozen_geometries.append((geom, frozen))
 
     units = []  # type: List[Dict[str, Any]]
-    from feature_sum import geometry_input_fingerprint
+    from ghost_backend.assembly.fields import geometry_input_fingerprint
     for original, geom in frozen_geometries:
         input_fingerprint = geometry_input_fingerprint(str(geom), GEOMETRY_UNITS)
         for f in frequencies:
@@ -788,6 +798,7 @@ def submit():
             "accuracy_target":         ACCURACY_TARGET,
             "lu_precision":            LU_PRECISION,
             "solver_method": SOLVER_METHOD,
+            "execution_options": current_options(),
             "mesh_certification": bool(MESH_CERTIFICATION),
         },
         "units": units,
@@ -833,7 +844,7 @@ def submit():
             prologue=[
                 *JOB_PROLOGUE,
                 ("export PYTHONPATH="
-                 f"{shlex.quote(str(Path(_workflow_provenance.__file__).resolve().parent))}"
+                 f"{shlex.quote(str(_backend_root()))}"
                  ":${PYTHONPATH:-}"),
             ],
             python_exe=PYTHON_EXE,
@@ -871,7 +882,7 @@ def submit():
     if peaks:
         print(f"  Unit peak RAM : {min(peaks):.2f}-{max(peaks):.2f} GB "
               f"estimated (incl. {MEMORY_SAFETY:g}x safety)")
-        import rcs_solver as _solver
+        import ghost_backend.twod.solver as _solver
         ceiling = (
             float(MAX_SOLVE_GB) if MAX_SOLVE_GB
             else _solver._solve_memory_limit_gb()
@@ -988,15 +999,8 @@ def _ordered_candidates(units, costs, slots, slot, n_slots):
     # type: (List[Dict[str, Any]], Dict[str, float], Dict[str, int], int, int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]
     """(this slot's planned units, everyone else's), each dearest first.
 
-    Returned as two lists, not one, and that separation matters. They used to
-    be concatenated, and the dispatcher fills its pool from the head of
-    whatever it is given -- so a task whose pool was wider than its own share
-    reached straight past it into other tasks' work on the very first fill.
-    With a 96-core node and a 40-unit sweep that meant the first task to start
-    claimed the entire run and the other nine exited having written nothing.
-
-    Stealing is for when a task has finished its own share, not for the moment
-    it starts.
+    Return separate planned and peer lists. Dispatch the peer list only after
+    the task finishes its planned share.
     """
 
     def _key(unit):
@@ -1018,6 +1022,7 @@ def _unit_assembly_threads(cores, pool_size, budget_gb, peak_gb):
     )
 
 
+@driver_execution
 def worker(run_dir_str, submission_index, task_index):
     # type: (str, int, int) -> None
     hpc_scheduler.pin_blas_threads(BLAS_THREADS_PER_WORKER)
@@ -1026,10 +1031,7 @@ def worker(run_dir_str, submission_index, task_index):
     run_dir  = Path(run_dir_str).resolve()
     manifest = json.loads((run_dir / "manifest.json").read_text())
     solver_config = manifest["solver_config"]
-    # Everything a unit needs from the manifest, resolved once. Workers used to
-    # re-read and re-parse the whole manifest -- which carries every unit's
-    # record -- inside every unit, making a node's parsing cost quadratic in
-    # the size of the sweep.
+    # Resolve shared manifest fields once for the worker context.
     context = {
         "run_id": manifest["run_id"],
         "solver_source_sha256": manifest["solver_source_sha256"],
@@ -1042,6 +1044,7 @@ def worker(run_dir_str, submission_index, task_index):
         "mesh_convergence_policy": solver_config["mesh_convergence_policy"],
         "lu_precision": solver_config.get("lu_precision", "double"),
         "solver_method": solver_config.get("solver_method", "direct"),
+        "execution_options": solver_config.get("execution_options", current_options()),
         "azimuths_deg": list(manifest["azimuths_deg"]),
         "angular_grid_sha256": stable_json_fingerprint(
             [float(value) for value in manifest["azimuths_deg"]]
@@ -1066,6 +1069,8 @@ def worker(run_dir_str, submission_index, task_index):
     planned = len(planned_units)
 
     cores = hpc_scheduler.detect_cores()
+    if int(BLAS_THREADS_PER_WORKER) > cores:
+        raise ValueError("BLAS threads per solve exceed the available CPU allocation ({}).".format(cores))
     memory_gb = hpc_scheduler.detect_memory_gb()
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = cores if MAX_WORKERS_PER_NODE is None else max(1, int(MAX_WORKERS_PER_NODE))
@@ -1120,12 +1125,9 @@ def worker(run_dir_str, submission_index, task_index):
         if not path.is_file():
             sys.exit(f"Geometry missing on compute node: {path}")
         _load_snapshot(str(path))
-    # Import the solver in the parent for the same reason: a forked worker
-    # inherits it, so replacing a worker costs a fork rather than a re-import
-    # of numpy, SciPy, and an 8 000-line module. Importing it only inside the
-    # child (as this used to) meant paying that on every single unit.
-    import rcs_solver  # noqa: F401
-    import grim_io     # noqa: F401
+    # Forked workers inherit the loaded solver and dataset modules.
+    import ghost_backend.twod.solver as rcs_solver
+    import ghost_backend.io.grim as grim_io
 
     broker = hpc_scheduler.ClaimBroker(
         run_dir / "claims", stale_seconds=float(CLAIM_STALE_SECONDS)
@@ -1210,9 +1212,9 @@ def worker(run_dir_str, submission_index, task_index):
             peak_gb = peaks.get(_unit_name(unit), 0.0)
             return (
                 peak_gb,
-                _unit_assembly_threads(
+                max(int(BLAS_THREADS_PER_WORKER), _unit_assembly_threads(
                     cores, pool_size, budget_gb, peak_gb
-                ),
+                )),
             )
         try:
             # Own share first. Only when it is finished does this task reach
@@ -1259,7 +1261,7 @@ def worker(run_dir_str, submission_index, task_index):
         raise SystemExit(
             f"ERROR: worker stopped with {len(remaining)} expected output(s) missing."
         )
-    from hpc_common import run_status
+    from ghost_backend.hpc.common import run_status
     completion = run_status(run_dir)
     if not completion["complete"]:
         integrity = (

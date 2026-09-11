@@ -28,12 +28,9 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-import feature_sum  # noqa: E402
-from grim_io import _save_grim_npz  # noqa: E402
-from line_expand import (  # noqa: E402
-    C0,
-    SeamCoefficients,
-)
+import ghost_backend.assembly.fields as feature_sum
+from ghost_backend.io.grim import _save_grim_npz
+from ghost_backend.assembly.line_expansion import C0, SeamCoefficients
 
 
 FREQUENCY_GHZ = 2.0

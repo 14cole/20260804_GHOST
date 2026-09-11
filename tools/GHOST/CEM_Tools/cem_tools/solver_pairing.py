@@ -1,6 +1,6 @@
 """Load the solver's canonical filename and OPN/FRD pairing implementation."""
 
-import importlib.util
+import importlib
 import os
 from pathlib import Path
 import sys
@@ -17,19 +17,26 @@ def solver_backend_path() -> 'Path':
 
 
 def pairing_module() -> 'ModuleType':
-    module_path = solver_backend_path() / "grim_naming.py"
+    """Load filename operations from one complete, consistent backend tree."""
+    backend = solver_backend_path().resolve()
+    module_path = backend / "ghost_backend" / "io" / "naming.py"
     if not module_path.is_file():
         raise CemToolError(
             f"solver pairing library not found at {module_path}; set "
             "CEM_SOLVER_BACKEND_PATH to the project's Backend folder"
         )
-    module_name = "_cem_tools_solver_grim_naming"
-    module = sys.modules.get(module_name)
-    if module is None:
-        spec = importlib.util.spec_from_file_location(module_name, module_path)
-        if spec is None or spec.loader is None:
-            raise CemToolError(f"cannot import solver pairing library {module_path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+    for name, loaded in tuple(sys.modules.items()):
+        if name == 'ghost_backend' or name.startswith('ghost_backend.'):
+            origin = getattr(loaded, '__file__', None)
+            if not origin or backend not in Path(origin).resolve().parents:
+                raise CemToolError(
+                    f"Conflicting GHOST module {name}; restart CEM Tools "
+                    "with one solver backend directory."
+                )
+    backend_text = str(backend)
+    sys.path[:] = [entry for entry in sys.path if entry != backend_text]
+    sys.path.insert(0, backend_text)
+    module = importlib.import_module('ghost_backend.io.naming')
+    if Path(module.__file__).resolve() != module_path:
+        raise CemToolError(f"cannot import solver pairing library {module_path}")
     return module

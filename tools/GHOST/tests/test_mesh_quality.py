@@ -12,7 +12,7 @@ BACKEND = Path(__file__).resolve().parents[1] / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from mesh_quality import audit_triangle_topology  # noqa: E402
+from ghost_backend.geometry.quality import audit_triangle_topology
 
 
 def _tetrahedron():

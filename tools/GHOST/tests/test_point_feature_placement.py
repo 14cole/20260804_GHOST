@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
 import place_features  # noqa: E402
-from frame import to_axis_frame  # noqa: E402
+from ghost_backend.geometry.frames import to_axis_frame
 
 
 HEADER = (

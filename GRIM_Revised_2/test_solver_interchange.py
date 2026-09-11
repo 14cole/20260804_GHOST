@@ -14,7 +14,8 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from grim_dataset import C0, RcsGrid  # noqa: E402
+from grim_backend.datasets.constants import C0
+from grim_backend.datasets.grid import RcsGrid
 
 
 class SolverInterchangeAcceptanceTests(unittest.TestCase):

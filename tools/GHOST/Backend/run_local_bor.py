@@ -28,6 +28,7 @@ Edit the CONFIG block and run:
 
     python run_local_bor.py
 """
+from ghost_backend.paths import backend_root as _backend_root
 
 import json
 import math
@@ -40,10 +41,10 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import hpc_scheduler
-from solver_quality import accuracy_target_policy, validate_mesh_convergence_policy
-import workflow_provenance as _workflow_provenance
-from workflow_provenance import (
+import ghost_backend.hpc.scheduler as hpc_scheduler
+from ghost_backend.runs.quality import accuracy_target_policy, validate_mesh_convergence_policy
+import ghost_backend.execution.provenance as _workflow_provenance
+from ghost_backend.execution.provenance import (
     backend_source_fingerprint,
     backend_source_inventory,
     describe_source_mismatch,
@@ -56,8 +57,8 @@ from workflow_provenance import (
 )
 
 # Compatibility imports retain the established module entrypoints.
-from driver_io import verify_local_unit_input as _verify_unit_input
-from driver_io import load_geometry_snapshot
+from ghost_backend.runs.inputs import verify_local_unit_input as _verify_unit_input
+from ghost_backend.runs.inputs import load_geometry_snapshot
 
 
 # ===============================================================================
@@ -116,8 +117,11 @@ TASKS_PER_CHILD = 2
 
 # ===============================================================================
 
-from driver_config import (load_driver_configuration, configuration_source_records,
-                           copy_configuration)
+from ghost_backend.runs.config import (
+    load_driver_configuration,
+    configuration_source_records,
+    copy_configuration,
+)
 _CONFIG_KIND = 'bor'
 _CONFIG_KEYS = (
     'GEOMETRY_DIRS',
@@ -155,7 +159,7 @@ _SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
 
 
 def _solver_source_records() -> 'Tuple[str, Dict[str, str]]':
-    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
+    backend_dir = str(_backend_root())
     return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
@@ -314,7 +318,7 @@ def _load_snapshot(geometry_path: 'str') -> 'Tuple[Dict[str, Any], str]':
 def _pool_initializer(blas_threads: 'int') -> 'None':
     hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
-    import bor_dispatch  # noqa: F401
+    import ghost_backend.bor.dispatch as bor_dispatch
 
 
 def _solve_and_export(
@@ -345,7 +349,7 @@ def _solve_and_export(
 
     snapshot, material_base = _load_snapshot(str(pair["geometry"]))
 
-    from bor_dispatch import (
+    from ghost_backend.bor.dispatch import (
         solve_monostatic_rcs_bor_certified,
         solve_monostatic_rcs_bor_survey,
     )
@@ -377,7 +381,7 @@ def _solve_and_export(
     for unit in channel_units:
         _verify_unit_input(unit, context)
 
-    from grim_io import export_result_to_grim
+    from ghost_backend.io.grim import export_result_to_grim
     actual_paths = []
     for unit in missing:
         out_path = _unit_output_path(results_dir, unit)
@@ -422,7 +426,7 @@ def _plan(
 
     extents: 'Dict[str, Tuple[float, float]]' = {}
     costs: 'Dict[str, float]' = {}
-    from bor_dispatch import estimate_bor_resources
+    from ghost_backend.bor.dispatch import estimate_bor_resources
     for unit in units:
         path = str(unit["geometry"])
         if path not in extents:
@@ -457,7 +461,7 @@ def _validate_config() -> 'List[float]':
         sys.exit("ERROR: ACCURACY_TARGET must be 'standard' or 'tight'.")
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     try:
-        from feature_sum import radar_grid_aspects, validate_radar_grid
+        from ghost_backend.assembly.fields import radar_grid_aspects, validate_radar_grid
         validate_radar_grid(AZIMUTHS_DEG, ELEVATIONS_DEG)
         aspects = radar_grid_aspects(
             AZIMUTHS_DEG,
@@ -523,7 +527,7 @@ def main() -> 'None':
         )
 
     units: 'List[Dict[str, Any]]' = []
-    from feature_sum import geometry_input_fingerprint
+    from ghost_backend.assembly.fields import geometry_input_fingerprint
     for geom in geometries:
         input_fingerprint = geometry_input_fingerprint(
             str(geom), GEOMETRY_UNITS
@@ -669,8 +673,8 @@ def main() -> 'None':
     # forks: workers then inherit both instead of repeating the work per unit.
     for unit in ordered:
         _load_snapshot(str(unit["geometry"]))
-    import bor_dispatch  # noqa: F401
-    import grim_io       # noqa: F401
+    import ghost_backend.bor.dispatch as bor_dispatch
+    import ghost_backend.io.grim as grim_io
 
     counters = {"written": 0, "skipped": 0, "failed": 0}
     started = time.time()
@@ -722,12 +726,12 @@ def main() -> 'None':
     _write_json_atomic(manifest_path, manifest)
     if counters["failed"]:
         raise SystemExit(1)
-    from hpc_common import (
+    from ghost_backend.hpc.common import (
         bodies_from_units,
         bor_solver_diagnostics_from_units,
         read_unit_grims,
     )
-    from feature_sum import outer_generatrix, save_monostatic_grim
+    from ghost_backend.assembly.fields import outer_generatrix, save_monostatic_grim
 
     records = read_unit_grims(unit_dir)
     for stem in sorted({str(unit["geometry_stem"]) for unit in units}):

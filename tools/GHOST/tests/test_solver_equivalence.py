@@ -52,7 +52,7 @@ ANGLES = list(np.linspace(0.0, 180.0, 19))
 
 
 def solve(module, geo, freqs, pol, units):
-    from geometry_io import parse_geometry, build_geometry_snapshot
+    from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
 
     title, segments, ibcs, dielectrics = parse_geometry(Path(geo).read_text())
     snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
@@ -84,7 +84,7 @@ def main():
     if not ref_path or not Path(ref_path).is_file():
         raise SystemExit("usage: test_solver_equivalence.py <reference rcs_solver.py>")
 
-    import rcs_solver as new
+    import ghost_backend.twod.solver as new
 
     ref = load_reference(ref_path)
     print(f"reference: {ref_path}\n")

@@ -14,12 +14,12 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-from components import (  # noqa: E402
+from ghost_backend.assembly.components import (
     COMPONENT_AMPLITUDE_CONVENTION,
     COMPONENT_COMPLEX_FIELD_DOMAIN,
     COMPONENT_PHASE_REFERENCE,
 )
-from grim_io import _save_grim_npz  # noqa: E402
+from ghost_backend.io.grim import _save_grim_npz
 import validate_feature_reconstruction as validation  # noqa: E402
 
 

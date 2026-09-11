@@ -50,14 +50,14 @@ from assembly_workspace import AssemblyWorkspace
 from feature_assembly_panel import FeatureAssemblyPanel
 from freddy_integration import FreddyIntegrationWidget
 from ghost_integration import GhostIntegrationWidget, load_ghost_module
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 from dataset_sidebar import DatasetSidebar, DatasetTable
 from grim_widgets import (
     ClickableLabel, CollapsibleSection, PlotSettingsPopup, initial_window_size,
 )
 from grim_theme import build_qss
-from grim_headless import is_supported_path
-from grim_python import PythonScriptRecorder
+from grim_backend.io.loaders import is_supported_path
+from grim_backend.scripting.recorder import PythonScriptRecorder
 from grim_cut_dataset_mixin import (
     DATASET_DIRTY_ROLE,
     DATASET_ID_ROLE,

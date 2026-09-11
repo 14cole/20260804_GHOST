@@ -4,9 +4,26 @@ GHOST is bundled inside the GRIM distribution. This folder is a complete
 solver project so its backend, tests, geometry studies, CEM utilities, and
 launchers retain their established relative paths.
 
-The GUI and 2D local/HPC drivers offer an optional
+Use the [backend source guide](Backend/README.md) to find solvers, data I/O,
+geometry operations, feature assembly, and run management. The
+[file-removal audit](Backend/DEAD_FILES.md) identifies cleanup candidates.
+
+New 2D monostatic GUI and local/HPC runs default to the
 [CPU streaming (experimental) solver method](EXPERIMENTAL_CPU.md) for lower
 angle-workspace RAM and CPU acceleration of PEC/IBC and dielectric solves.
+The default [compressed CPU assembly path](COMPRESSED_CPU.md) avoids the
+global dense matrix and LU for supported 2D formulations. The saved resource
+preset uses 8192 MiB compressed storage, four assembly/two BLAS threads, automatic
+basis reuse, and 256-angle batches. Dense LU remains selectable for smaller runs.
+
+The visible **Geometry preset** selector offers **Small Geometry (No RAM
+Optimization)**, **Large Geometry (RAM Optimization)**, and **Balanced**. Large
+Geometry is the default. Detailed numerical and resource controls are under
+**Advanced Settings**, which starts collapsed in GHOST and GRIM Runs.
+[Saved execution profiles](RUN_PROFILES.md) document the preset combinations,
+factorization, RAM admission, compressed storage, temporary disk, CPU threads,
+and sweep batching. Profiles transfer through local/HPC manifests and exports.
+The guide also describes stage/RAM progress and the repeatable benchmark.
 
 Local and HPC batch drivers accept `--config path/to/settings.config.json`.
 They also automatically load an adjacent file with the same stem and the
@@ -35,7 +52,7 @@ An optional `run_setup` object can embed an exported desktop 2-D run recipe.
 Batch drivers accept its monostatic/default-quality subset and reject
 unsupported options or conflicting explicit settings.
 
-`hpc_common.configure_driver` now stages unchanged Python source and writes
+`ghost_backend.hpc.common.configure_driver` stages Python source and writes
 validated JSON instead of rewriting assignments. Submission copies both into
 the run directory. Configuration content joins source/runtime provenance, so
 workers reject changes to the settings that produced an existing run.
@@ -45,12 +62,11 @@ The recommended desktop workflow is the top-level GRIM application. Its
 **GHOST** tab embeds the same `Backend/ghost_gui.py` workspace and the same
 2-D/BoR numerical implementation found here; no solver is duplicated.
 
-The 2-D solver uses direct dense LU. The diagnostic API accepts `auto` and
-`direct`, both of which use the same direct solver and memory checks. FMM and
-its native near-field extension have been removed; older scripts requesting
-`solver_method="fmm"` must select `auto` or `direct`. NumPy and SciPy remain
-required for the direct numerical methods and condition-number checks. BoR's
-optional native streaming kernel remains supported.
+The 2-D diagnostic API accepts `auto` and `direct` for reference kernels and
+`experimental_cpu` for CPU streaming. Explicit execution profiles select dense,
+hierarchical, or compressed factorization within the supported combinations.
+NumPy and SciPy are required for numerical methods and condition-number checks.
+BoR supports an optional native streaming kernel.
 
 The September 2026 [solver audit updates](SOLVER_AUDIT_UPDATES.md) correct
 2-D complex phase, bound BoR near storage, and add quadrature convergence

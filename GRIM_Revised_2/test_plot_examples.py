@@ -13,7 +13,7 @@ import numpy as np
 
 from examples import plot_folder_azimuth_sweeps as azimuth_example
 from examples import plot_folder_frequency_sweeps as frequency_example
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 
 
 def _grid(*, db_offset: float = 0.0) -> RcsGrid:

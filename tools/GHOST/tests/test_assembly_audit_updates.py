@@ -11,9 +11,9 @@ from unittest.mock import patch
 import numpy as np
 REPO = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(REPO/"GRIM_Revised_2"), str(REPO/"tools/GHOST/Backend")]
-import feature_sum as fs
-import feature_workflow as fw
-import line_expand as le
+import ghost_backend.assembly.fields as fs
+import ghost_backend.assembly.workflow as fw
+import ghost_backend.assembly.line_expansion as le
 from test_point_scatter_physics import _pattern_dict, _local_spherical_basis, _write_point_grim
 
 

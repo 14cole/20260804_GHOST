@@ -38,8 +38,8 @@ REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "Backend"
 sys.path.insert(0, str(BACKEND))
 
-import hpc_common  # noqa: E402
-import hpc_scheduler  # noqa: E402
+import ghost_backend.hpc.common as hpc_common
+import ghost_backend.hpc.scheduler as hpc_scheduler
 
 FAILURES = []
 
@@ -687,7 +687,7 @@ Dielectrics:
 
 def test_batched_exact_resource_plan():
     print("\nbatched exact resource planning")
-    import rcs_solver
+    import ghost_backend.twod.solver as rcs_solver
 
     with tempfile.TemporaryDirectory() as tmp:
         closed = Path(tmp) / "closed_pec.geo"
@@ -1049,7 +1049,7 @@ def test_end_to_end():
         slurm_text = (run_dir / "submit_job0.slurm").read_text()
         check("--array=0-1" in slurm_text, "array size matches N_NODES")
         check("--requeue" in slurm_text, "array tasks are requeueable")
-        check("OMP_NUM_THREADS=1" in slurm_text,
+        check("OMP_NUM_THREADS={}".format(manifest['solver_config']['blas_threads_per_worker']) in slurm_text,
               "BLAS threads are pinned before the interpreter starts")
         exports = [shlex.split(line)[1].split("=", 1)[1]
                    for line in slurm_text.splitlines()
@@ -1140,7 +1140,7 @@ def test_end_to_end():
               "units do not repeat the shared angular grid")
         check(isinstance(manifest.get("azimuths_deg"), list),
               "the angular grid is recorded once at manifest level")
-        from workflow_provenance import read_embedded_attestation
+        from ghost_backend.execution.provenance import read_embedded_attestation
         sample = result_paths[0]
         embedded = read_embedded_attestation(str(sample))
         check(embedded.get("run_id") == manifest["run_id"],

@@ -27,10 +27,10 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "Backend"))
 sys.path.insert(0, str(TESTS))
 
-import components  # noqa: E402
-import feature_sum  # noqa: E402
-from grim_io import _save_grim_npz  # noqa: E402
-from line_expand import C0, SeamCoefficients  # noqa: E402
+import ghost_backend.assembly.components as components
+import ghost_backend.assembly.fields as feature_sum
+from ghost_backend.io.grim import _save_grim_npz
+from ghost_backend.assembly.line_expansion import C0, SeamCoefficients
 import test_line_feature_non_bor_physics as line_oracle  # noqa: E402
 import test_point_scatter_physics as point_oracle  # noqa: E402
 

@@ -29,10 +29,10 @@ REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "Backend"
 sys.path.insert(0, str(BACKEND))
 
-import components  # noqa: E402
-import feature_sum  # noqa: E402
-import feature_workflow  # noqa: E402
-from line_expand import C0  # noqa: E402
+import ghost_backend.assembly.components as components
+import ghost_backend.assembly.fields as feature_sum
+import ghost_backend.assembly.workflow as feature_workflow
+from ghost_backend.assembly.line_expansion import C0
 
 
 POLARIZATIONS = np.asarray(["VV", "HH", "VH"])
@@ -556,7 +556,7 @@ class NonBorFastenerAssemblyRegression(unittest.TestCase):
             )
             saved = feature_workflow.execute_feature_assembly(plan)
             self.assertEqual(Path(saved), output.resolve())
-            from assembly_inspector import ContributionInspector
+            from ghost_backend.assembly.inspector import ContributionInspector
             inspector = ContributionInspector()
             sample = inspector.evaluate(plan, float(frequencies[0]), float(azimuths[0]), float(elevations[0]))
             np.testing.assert_allclose(sample["body"] + sample["fields"].sum(axis=0), expected_total[0,0,0], rtol=3e-11, atol=3e-13)

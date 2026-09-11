@@ -11,9 +11,9 @@ REPO = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(REPO/"GRIM_Revised_2"), str(REPO/"tools/GHOST/Backend")]
 
 from grim_dataset import RcsGrid
-import feature_sum as fs
-import feature_workflow as fw
-from grim_io import _save_grim_npz
+import ghost_backend.assembly.fields as fs
+import ghost_backend.assembly.workflow as fw
+from ghost_backend.io.grim import _save_grim_npz
 from test_point_scatter_physics import _write_point_grim
 from test_ptm import _independent_fixture
 

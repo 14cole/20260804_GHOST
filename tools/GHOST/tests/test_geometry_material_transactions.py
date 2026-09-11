@@ -14,11 +14,7 @@ from unittest import mock
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-from geometry_io import (  # noqa: E402
-    AtomicFileTransaction,
-    build_geometry_text,
-    parse_geometry,
-)
+from ghost_backend.geometry.io import AtomicFileTransaction, build_geometry_text, parse_geometry
 
 
 class MaterialFilenameGrammarTests(unittest.TestCase):
@@ -124,7 +120,7 @@ class AtomicFileTransactionTests(unittest.TestCase):
                 real_replace(source_path, target_path)
 
             with mock.patch(
-                "geometry_io.os.replace", side_effect=fail_second_publish
+                "ghost_backend.geometry.io.os.replace", side_effect=fail_second_publish
             ):
                 with self.assertRaisesRegex(OSError, "simulated"):
                     transaction.publish()

@@ -6,9 +6,9 @@ from unittest import mock
 
 import numpy as np
 import dataset_jobs
-from grim_dataset import RcsGrid
-from grim_csv_schema import write_flat_csv
-from grim_headless import load_flat_csv
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.csv import write_flat_csv
+from grim_backend.io.loaders import load_flat_csv
 
 
 class ReleaseReadinessTests(unittest.TestCase):

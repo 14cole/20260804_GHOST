@@ -41,8 +41,8 @@ ANGLES = list(np.linspace(0.0, 180.0, 19))
 
 
 def solve(geo, freq, pol, order):
-    import rcs_solver
-    from geometry_io import parse_geometry, build_geometry_snapshot
+    import ghost_backend.twod.solver as rcs_solver
+    from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
 
     rcs_solver.set_far_quadrature_order(0 if order == 8 else order)
     title, segments, ibcs, dielectrics = parse_geometry(Path(geo).read_text())

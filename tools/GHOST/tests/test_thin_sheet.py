@@ -5,10 +5,13 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Backend"))
-import rcs_solver as rcs
-from thin_sheet import solve_thin_layer_fields, validate_thin_layer
-from mie_reference import two_layer_dielectric_cylinder_amplitude
-from geometry_io import build_geometry_text, parse_geometry
+import ghost_backend.twod.solver as rcs
+from ghost_backend.twod.formulations.thin_layer import (
+    solve_thin_layer_fields,
+    validate_thin_layer,
+)
+from ghost_backend.validation.cylinder import two_layer_dielectric_cylinder_amplitude
+from ghost_backend.geometry.io import build_geometry_text, parse_geometry
 from unittest import mock
 
 
@@ -102,7 +105,7 @@ class ThinSheetPhysicsTests(unittest.TestCase):
                         np.testing.assert_allclose(fields[pol], expected[pol], rtol=1e-10, atol=1e-12)
 
     def test_oriented_mesh_joins_curved_components_without_mutating_source(self):
-        from thin_sheet import _continuous_oriented_mesh
+        from ghost_backend.twod.formulations.thin_layer import _continuous_oriented_mesh
         from dataclasses import replace
         angle = np.linspace(0, 2*np.pi, 41)
         points = np.column_stack((.08*np.cos(angle), .08*np.sin(angle)))
@@ -139,7 +142,7 @@ class ThinSheetPhysicsTests(unittest.TestCase):
             assembly.assert_not_called()
 
     def test_tight_certification_agrees_across_authored_segment_boundaries(self):
-        from solver_quality import accuracy_target_policy
+        from ghost_backend.runs.quality import accuracy_target_policy
         fields = []
         for groups in (1, 24):
             # Exercise meshing/refinement of distinct authored primitives,
@@ -181,7 +184,7 @@ class ThinSheetPhysicsTests(unittest.TestCase):
         text = build_geometry_text("film", [], ibcs, dielectrics)
         self.assertEqual(parse_geometry(text)[2:], (ibcs, dielectrics))
         from PySide6.QtWidgets import QApplication
-        from geometry_tab import GeometryTab
+        from ghost_backend.ui.geometry import GeometryTab
         app = QApplication.instance() or QApplication([])
         tab = GeometryTab()
         try:
@@ -203,7 +206,7 @@ class ThinSheetPhysicsTests(unittest.TestCase):
 
     def test_thin_layer_dialog_accepts_inches_and_returns_meters(self):
         from PySide6.QtWidgets import QApplication, QDialog, QDoubleSpinBox
-        from material_models import choose_thin_layer
+        from ghost_backend.geometry.materials import choose_thin_layer
         app = QApplication.instance() or QApplication([])
 
         def accept(dialog):

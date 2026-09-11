@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -426,7 +427,7 @@ class RunsWorkspace(QWidget):
         self.port_spin.setValue(22)
         self.identity_edit = QLineEdit(connection_group)
         self.identity_edit.setPlaceholderText("Optional private-key path")
-        self.btn_identity = QPushButton("Choose…", connection_group)
+        self.btn_identity = QPushButton("Chooseâ€¦", connection_group)
         identity_row = QWidget(connection_group)
         identity_layout = QHBoxLayout(identity_row)
         identity_layout.setContentsMargins(0, 0, 0, 0)
@@ -453,6 +454,16 @@ class RunsWorkspace(QWidget):
         request_group = QGroupBox("2  Portable run request", self.controls_content)
         request_layout = QVBoxLayout(request_group)
         request_form = QFormLayout()
+        self.btn_advanced_settings = QToolButton(request_group)
+        self.btn_advanced_settings.setText('Advanced Settings')
+        self.btn_advanced_settings.setCheckable(True)
+        self.btn_advanced_settings.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.btn_advanced_settings.setArrowType(Qt.ArrowType.RightArrow)
+        self.advanced_settings_widget = QWidget(request_group)
+        advanced_form = QFormLayout(self.advanced_settings_widget)
+        advanced_form.setContentsMargins(0, 0, 0, 0)
+        self.advanced_settings_widget.hide()
+        self.btn_advanced_settings.toggled.connect(self._toggle_advanced_settings)
         self.solver_combo = QComboBox(request_group)
         self.solver_combo.addItem("2-D arbitrary geometry", "2d")
         self.solver_combo.addItem("Body of revolution (BoR)", "bor")
@@ -465,15 +476,15 @@ class RunsWorkspace(QWidget):
         self.body_axis_az_spin = QDoubleSpinBox(request_group)
         self.body_axis_az_spin.setRange(-360.0, 360.0)
         self.body_axis_az_spin.setDecimals(3)
-        self.body_axis_az_spin.setSuffix("°")
+        self.body_axis_az_spin.setSuffix("Â°")
         self.body_axis_el_spin = QDoubleSpinBox(request_group)
         self.body_axis_el_spin.setRange(-180.0, 180.0)
         self.body_axis_el_spin.setDecimals(3)
-        self.body_axis_el_spin.setSuffix("°")
+        self.body_axis_el_spin.setSuffix("Â°")
         self.body_roll_spin = QDoubleSpinBox(request_group)
         self.body_roll_spin.setRange(-360.0, 360.0)
         self.body_roll_spin.setDecimals(3)
-        self.body_roll_spin.setSuffix("°")
+        self.body_roll_spin.setSuffix("Â°")
         self.body_axis_az_label = QLabel("Body-axis azimuth", request_group)
         self.body_axis_el_label = QLabel("Body-axis elevation", request_group)
         self.body_roll_label = QLabel("Body roll", request_group)
@@ -481,13 +492,13 @@ class RunsWorkspace(QWidget):
         self.units_combo.addItem("inches", "inches")
         self.units_combo.addItem("meters", "meters")
         request_form.addRow("Solver", self.solver_combo)
+        request_form.addRow("Solver units", self.units_combo)
         request_form.addRow("Frequencies (GHz)", self.frequency_edit)
         request_form.addRow("Azimuths (deg)", self.azimuth_edit)
         request_form.addRow(self.elevation_label, self.elevation_edit)
-        request_form.addRow(self.body_axis_az_label, self.body_axis_az_spin)
-        request_form.addRow(self.body_axis_el_label, self.body_axis_el_spin)
-        request_form.addRow(self.body_roll_label, self.body_roll_spin)
-        request_form.addRow("Geometry units", self.units_combo)
+        advanced_form.addRow(self.body_axis_az_label, self.body_axis_az_spin)
+        advanced_form.addRow(self.body_axis_el_label, self.body_axis_el_spin)
+        advanced_form.addRow(self.body_roll_label, self.body_roll_spin)
         request_layout.addLayout(request_form)
 
         geometry_help = QLabel(
@@ -502,17 +513,21 @@ class RunsWorkspace(QWidget):
         self.geometry_list.setMinimumHeight(100)
         request_layout.addWidget(self.geometry_list)
         geometry_buttons = QHBoxLayout()
-        self.btn_add_frd = QPushButton("Add FRD…", request_group)
-        self.btn_add_opn = QPushButton("Add OPN…", request_group)
-        self.btn_add_bor = QPushButton("Add BoR…", request_group)
+        self.btn_add_frd = QPushButton("Add FRDâ€¦", request_group)
+        self.btn_add_opn = QPushButton("Add OPNâ€¦", request_group)
+        self.btn_add_bor = QPushButton("Add BoRâ€¦", request_group)
         self.btn_remove_geometry = QPushButton("Remove", request_group)
         geometry_buttons.addWidget(self.btn_add_frd)
         geometry_buttons.addWidget(self.btn_add_opn)
         geometry_buttons.addWidget(self.btn_add_bor)
         geometry_buttons.addWidget(self.btn_remove_geometry)
         request_layout.addLayout(geometry_buttons)
+        request_layout.addWidget(self.btn_advanced_settings)
+        request_layout.addWidget(self.advanced_settings_widget)
 
-        schedule_form = QFormLayout()
+        allocation_group = QGroupBox('Cluster allocation')
+        schedule_form = QFormLayout(allocation_group)
+        advanced_form.addRow(allocation_group)
         self.nodes_spin = QSpinBox(request_group)
         self.nodes_spin.setRange(1, 10_000)
         self.nodes_spin.setValue(1)
@@ -541,7 +556,7 @@ class RunsWorkspace(QWidget):
         schedule_form.addRow("Walltime", self.walltime_edit)
         schedule_form.addRow("Cores per node", self.cores_spin)
         schedule_form.addRow("Memory per node", self.memory_edit)
-        schedule_form.addRow(self.mesh_certification_check)
+        advanced_form.addRow(self.mesh_certification_check)
         # Keep the viewer usable when the optional GHOST backend is absent.
         try:
             from ghost_integration import load_ghost_module
@@ -550,17 +565,16 @@ class RunsWorkspace(QWidget):
             for name, method in vars(setup_module.RunSetupMixin).items():
                 if callable(method):
                     setattr(self, name, MethodType(method, self))
-            self._build_run_setup_controls(schedule_form, cluster=True)
+            self._build_run_setup_controls(request_form, cluster=True, advanced_form=advanced_form)
         except (ImportError, RuntimeError, FileNotFoundError) as exc:
             notice = QLabel(f'Shared run setups unavailable: {exc}')
             notice.setWordWrap(True)
-            schedule_form.addRow(notice)
-        request_layout.addLayout(schedule_form)
+            advanced_form.addRow(notice)
 
         bundle_form = QFormLayout()
         self.bundle_path_edit = QLineEdit(request_group)
         self.bundle_path_edit.setPlaceholderText("New or existing portable bundle folder")
-        self.btn_bundle_path = QPushButton("Choose…", request_group)
+        self.btn_bundle_path = QPushButton("Chooseâ€¦", request_group)
         bundle_row = QWidget(request_group)
         bundle_row_layout = QHBoxLayout(bundle_row)
         bundle_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -631,7 +645,7 @@ class RunsWorkspace(QWidget):
         jobs_header.addStretch(1)
         self.btn_refresh = QPushButton("Refresh", right)
         self.btn_cancel = QPushButton("Cancel Job", right)
-        self.btn_download = QPushButton("Download Results…", right)
+        self.btn_download = QPushButton("Download Resultsâ€¦", right)
         jobs_header.addWidget(self.btn_refresh)
         jobs_header.addWidget(self.btn_cancel)
         jobs_header.addWidget(self.btn_download)
@@ -744,10 +758,29 @@ class RunsWorkspace(QWidget):
         self.walltime_edit.setText(str(self._setting("walltime", "")))
         self.memory_edit.setText(str(self._setting("memory", "0")))
         mesh_raw = self._setting("mesh_certification", True)
-        if hasattr(self, 'run_accuracy_combo'):
-            for combo,key,default in [(self.run_accuracy_combo,'accuracy_target','standard'), (self.run_lu_combo,'lu_precision','double'), (self.run_method_combo,'solver_method','direct')]:
-                index = combo.findData(str(self._setting(key,default)))
-                combo.setCurrentIndex(index if index >= 0 else 0)
+        from PySide6.QtCore import QSignalBlocker
+        blocked = (self.run_accuracy_combo, self.run_lu_combo, self.run_method_combo,
+                   self.execution_options_widget)
+        blockers = [QSignalBlocker(widget) for widget in blocked]
+        initial_method = ('experimental_cpu' if self.execution_options_widget.value()['factorization'] == 'compressed'
+                          else 'direct')
+        for combo,key,default in [(self.run_accuracy_combo,'accuracy_target','standard'),
+                                  (self.run_lu_combo,'lu_precision','double'),
+                                  (self.run_method_combo,'solver_method',initial_method)]:
+            index = combo.findData(str(self._setting(key,default)))
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        saved_execution = self._setting('execution_options', '')
+        if saved_execution:
+            try:
+                self.execution_options_widget.set_value(json.loads(saved_execution))
+            except (ValueError, TypeError):
+                self.execution_options_widget.notice.setText('Saved execution settings could not be loaded. Review the displayed values.')
+        elif self.run_lu_combo.currentData() == 'mixed':
+            from ghost_backend.execution.options import DEFAULTS
+            self.execution_options_widget.set_value(DEFAULTS)
+            self.run_method_combo.setCurrentIndex(self.run_method_combo.findData('direct'))
+        del blockers
+        self._sync_execution_options()
         self.mesh_certification_check.setChecked(
             mesh_raw
             if isinstance(mesh_raw, bool)
@@ -850,6 +883,7 @@ class RunsWorkspace(QWidget):
             self._settings.setValue(f'{_SETTINGS_PREFIX}/accuracy_target', self.run_accuracy_combo.currentData())
             self._settings.setValue(f'{_SETTINGS_PREFIX}/lu_precision', self.run_lu_combo.currentData())
             self._settings.setValue(f'{_SETTINGS_PREFIX}/solver_method', self.run_method_combo.currentData())
+            self._settings.setValue(f'{_SETTINGS_PREFIX}/execution_options', json.dumps(self.execution_options_widget.value()))
         registry = {
             "schema": _TRACKED_RUNS_SCHEMA,
             "runs": [run.to_json_value() for run in self._tracked_runs.values()],
@@ -956,7 +990,7 @@ class RunsWorkspace(QWidget):
             value = self.geometry_list.item(index).data(Qt.ItemDataRole.UserRole)
             if isinstance(value, Mapping) and Path(str(value.get("path"))).resolve() == source:
                 return False
-        item = QListWidgetItem(f"[{normalized_role}]  {source.name}   —   {source.parent}")
+        item = QListWidgetItem(f"[{normalized_role}]  {source.name}   â€”   {source.parent}")
         item.setData(
             Qt.ItemDataRole.UserRole,
             {"role": normalized_role, "path": str(source)},
@@ -1020,6 +1054,7 @@ class RunsWorkspace(QWidget):
             if solver == '2d':
                 settings['LU_PRECISION'] = self.run_lu_combo.currentData()
                 settings['SOLVER_METHOD'] = self.run_method_combo.currentData()
+                settings['EXECUTION_OPTIONS'] = self.execution_options_widget.value()
         optional = (
             ("SLURM_ACCOUNT", self.account_edit.text().strip()),
             ("SLURM_QOS", self.qos_edit.text().strip()),
@@ -1525,13 +1560,13 @@ class RunsWorkspace(QWidget):
         self._set_busy(True)
         self._set_status(
             {
-                "export": "Building and verifying the portable HPC bundle…",
-                "verify": "Verifying the portable HPC bundle…",
-                "test": "Testing the credential-safe HPC connection…",
-                "submit": "Verifying, uploading, staging, and submitting the HPC run…",
-                "refresh": "Refreshing SLURM state and the remote log…",
-                "cancel": "Sending the SLURM cancellation request…",
-                "download": "Downloading the selected HPC results…",
+                "export": "Building and verifying the portable HPC bundleâ€¦",
+                "verify": "Verifying the portable HPC bundleâ€¦",
+                "test": "Testing the credential-safe HPC connectionâ€¦",
+                "submit": "Verifying, uploading, staging, and submitting the HPC runâ€¦",
+                "refresh": "Refreshing SLURM state and the remote logâ€¦",
+                "cancel": "Sending the SLURM cancellation requestâ€¦",
+                "download": "Downloading the selected HPC resultsâ€¦",
             }[kind]
         )
         thread.start()
@@ -2094,10 +2129,14 @@ class RunsWorkspace(QWidget):
         if hasattr(self, 'run_lu_combo'):
             if bor:
                 self.run_method_combo.setCurrentIndex(0)
-            self.run_method_combo.setEnabled(not bor)
-            self.run_lu_combo.setEnabled(not bor and self.run_method_combo.currentData() != 'experimental_cpu')
+            self._sync_execution_options()
+            self.execution_options_widget.setEnabled(not bor and not self.job_is_running())
+            factor = self.execution_options_widget.factor_combo.currentData()
+            self.run_method_combo.setEnabled(not bor and factor != 'compressed')
+            self.run_lu_combo.setEnabled(not bor and factor == 'dense' and self.run_method_combo.currentData() != 'experimental_cpu')
             self.save_run_setup_button.setEnabled(not bor)
             self.load_run_setup_button.setEnabled(not bor)
+            self._sync_geometry_preset()
         self.elevation_label.setVisible(bor)
         self.elevation_edit.setVisible(bor)
         self.body_axis_az_label.setVisible(bor)
@@ -2109,6 +2148,10 @@ class RunsWorkspace(QWidget):
         self.btn_add_frd.setVisible(not bor)
         self.btn_add_opn.setVisible(not bor)
         self.btn_add_bor.setVisible(bor)
+
+    def _toggle_advanced_settings(self, checked: bool) -> None:
+        self.advanced_settings_widget.setVisible(checked)
+        self.btn_advanced_settings.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
 
     def _choose_identity(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

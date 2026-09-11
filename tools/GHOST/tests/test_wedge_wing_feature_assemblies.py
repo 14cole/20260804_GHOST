@@ -33,8 +33,8 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "Backend"))
 sys.path.insert(0, str(TESTS))
 
-import feature_workflow  # noqa: E402
-from line_expand import C0  # noqa: E402
+import ghost_backend.assembly.workflow as feature_workflow
+from ghost_backend.assembly.line_expansion import C0
 import test_point_scatter_physics as point_oracle  # noqa: E402
 import test_triaxial_ellipsoid_features as curved_oracle  # noqa: E402
 

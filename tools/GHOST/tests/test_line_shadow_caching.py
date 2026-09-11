@@ -15,13 +15,13 @@ BACKEND = Path(__file__).resolve().parents[1] / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-import feature_sum  # noqa: E402
-from line_expand import (  # noqa: E402
+import ghost_backend.assembly.fields as feature_sum
+from ghost_backend.assembly.line_expansion import (
     SeamCoefficients,
     expand_perimeter,
     prepare_perimeter_frame,
 )
-from occluder import Occluder, PackedVisibility  # noqa: E402
+from ghost_backend.geometry.occlusion import Occluder, PackedVisibility
 
 
 def _box_triangles() -> np.ndarray:

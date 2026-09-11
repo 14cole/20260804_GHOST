@@ -11,8 +11,9 @@ import numpy as np
 
 from assembly_tree import _b64_to_grid, _combine_children, _grid_to_b64
 import grim_dataset
-from grim_dataset import C0, RcsGrid
-from grim_headless import load_dataset, load_folder
+from grim_backend.datasets.constants import C0
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import load_dataset, load_folder
 
 
 class TestPhysicsAndIo(unittest.TestCase):

@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 
 
 class TestCstIo(unittest.TestCase):

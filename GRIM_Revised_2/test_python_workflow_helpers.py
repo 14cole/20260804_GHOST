@@ -12,13 +12,15 @@ from unittest import mock
 
 import numpy as np
 
+import grim_backend.cli as grim_cli
 import grim_headless
 import grim_python
-from grim_csv_schema import write_flat_csv
-from grim_dataset import RcsGrid
-from grim_headless import audit_dataset, combine_datasets
-from grim_python import (
-    PythonScriptRecorder,
+from grim_backend.io.csv import write_flat_csv
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.cli import audit_dataset
+from grim_backend.datasets.combine import combine_datasets
+from grim_backend.scripting.recorder import PythonScriptRecorder
+from grim_backend.datasets.transforms import (
     crop_dataset,
     regrid_axis,
     stitch_datasets,
@@ -334,8 +336,8 @@ class PythonWorkflowHelperTests(unittest.TestCase):
             "flags": {"complete", "phase-ready"},
         }
         stream = io.StringIO()
-        with mock.patch.object(grim_headless, "load_dataset", return_value=source), mock.patch.object(
-            grim_headless, "audit_dataset", return_value=report
+        with mock.patch.object(grim_cli, "load_dataset", return_value=source), mock.patch.object(
+            grim_cli, "audit_dataset", return_value=report
         ), mock.patch.object(source, "save") as save, contextlib.redirect_stdout(stream):
             return_code = grim_headless.main(["input.grim", "--audit"])
 
@@ -348,8 +350,8 @@ class PythonWorkflowHelperTests(unittest.TestCase):
         self.assertEqual(payload["datasets"][0]["report"]["shape"], [4, 3, 4, 2])
 
         with mock.patch.object(
-            grim_headless, "load_dataset", return_value=source
-        ), mock.patch.object(grim_headless, "audit_dataset", return_value=report):
+            grim_cli, "load_dataset", return_value=source
+        ), mock.patch.object(grim_cli, "audit_dataset", return_value=report):
             with self.assertRaisesRegex(SystemExit, "must not overwrite"):
                 grim_headless.main(
                     ["input.grim", "--audit", "--output", "input.grim"]
@@ -358,9 +360,9 @@ class PythonWorkflowHelperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root_text:
             report_path = Path(root_text) / "audit.json"
             with mock.patch.object(
-                grim_headless, "load_dataset", return_value=source
+                grim_cli, "load_dataset", return_value=source
             ), mock.patch.object(
-                grim_headless, "audit_dataset", return_value=report
+                grim_cli, "audit_dataset", return_value=report
             ), contextlib.redirect_stdout(io.StringIO()):
                 return_code = grim_headless.main(
                     [

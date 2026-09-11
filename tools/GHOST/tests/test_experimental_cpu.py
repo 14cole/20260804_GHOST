@@ -12,10 +12,10 @@ for name in ('OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'OMP_NUM_THREADS'):
     os.environ.setdefault(name, '2')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Backend'))
 import numpy as np
-import rcs_solver as rcs
-import cpu_execution as execution
-import cpu_kernels as kernels
-from refined_lu import linear_precision
+import ghost_backend.twod.solver as rcs
+import ghost_backend.execution.cpu as execution
+import ghost_backend.twod.assembly.kernels as kernels
+from ghost_backend.linalg.refined_lu import linear_precision
 from test_2d_capability_acceptance import _circle
 
 
@@ -148,24 +148,27 @@ class ExperimentalCPU(unittest.TestCase):
         self.assertTrue(result['metadata']['experimental_cpu']['kernel_tables'])
         self.assertTrue(all(not t['used'] for t in result['metadata']['experimental_cpu']['kernel_tables']))
 
-    def test_memory_estimate_accounts_for_batches_and_fallback(self):
+    def test_memory_estimate_accounts_for_common_batches(self):
         args = dict(nnodes=512, use_cfie=False, system_dofs=1024, operator_matrices=5, n_rhs=18001)
         normal = rcs._estimate_memory_gb(**args)
         experimental = rcs._estimate_memory_gb(solver_method='experimental_cpu', formulation='single_dielectric', **args)
         fallback = rcs._estimate_memory_gb(solver_method='experimental_cpu', formulation='sheet', **args)
-        self.assertLess(experimental, normal)
-        self.assertGreater(fallback, normal)
+        self.assertGreater(experimental, 2*1024**2*16/1024**3)
+        self.assertGreater(fallback, 2*1024**2*16/1024**3)
+        short = rcs._estimate_memory_gb(solver_method='experimental_cpu', formulation='single_dielectric',
+                                      **dict(args, n_rhs=256))
+        self.assertAlmostEqual(experimental-short, (18001-256)*4096/1024**3)
 
-    def test_sheet_reference_fallback_is_explicit(self):
-        from geometry_io import parse_geometry, build_geometry_snapshot
+    def test_sheet_uses_common_streamed_solver(self):
+        from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
         path = Path(__file__).resolve().parents[1]/'geometry_tests/thin_dielectric_sheet/thin_strip.geo'
         snapshot = build_geometry_snapshot(*parse_geometry(path.read_text()))
         reference = solve(snapshot, angles=[0., 90., 180.], material_base_dir=str(path.parent))
         result = solve(snapshot, 'experimental_cpu', [0., 90., 180.], material_base_dir=str(path.parent))
         self.assert_fields(result, reference)
         evidence = result['metadata']['experimental_cpu']
-        self.assertEqual(evidence['systems'], [])
-        self.assertTrue(all(not f['streamed'] and f['reason'] for f in evidence['formulations']))
+        self.assertEqual(len(evidence['systems']), 2)
+        self.assertTrue(all(f['streamed'] for f in evidence['formulations']))
 
 
 if __name__ == '__main__':

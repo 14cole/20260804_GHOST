@@ -39,7 +39,7 @@ from assembly_tree import (
     _set_node_mode,
     build_assembly_grid,
 )
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 
 
 _HASH_A = "a" * 64

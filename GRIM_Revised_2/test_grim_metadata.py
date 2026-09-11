@@ -2,7 +2,7 @@
 
 import unittest
 
-from grim_metadata import inspect_scalar_metadata
+from grim_backend.datasets.metadata import inspect_scalar_metadata
 
 
 class ScalarMetadataTests(unittest.TestCase):

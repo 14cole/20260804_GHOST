@@ -32,12 +32,12 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO / "Backend"))
 sys.path.insert(0, str(TESTS))
 
-import components  # noqa: E402
-import feature_sum  # noqa: E402
-import feature_workflow  # noqa: E402
-from frame import to_axis_frame  # noqa: E402
-from grim_io import _save_grim_npz  # noqa: E402
-from line_expand import C0, PSI_HH_DEG, PSI_VV_DEG  # noqa: E402
+import ghost_backend.assembly.components as components
+import ghost_backend.assembly.fields as feature_sum
+import ghost_backend.assembly.workflow as feature_workflow
+from ghost_backend.geometry.frames import to_axis_frame
+from ghost_backend.io.grim import _save_grim_npz
+from ghost_backend.assembly.line_expansion import C0, PSI_HH_DEG, PSI_VV_DEG
 import test_point_scatter_physics as point_oracle  # noqa: E402
 
 
@@ -293,7 +293,7 @@ def _write_anisotropic_point_delta(path):
 
 def _write_isotropic_line_delta(path, installed_coefficient):
     """Write raw TM/TE values that become equal after legacy phase mapping."""
-    import feature_sum as contracts
+    import ghost_backend.assembly.fields as contracts
 
     angles = np.asarray([0.0, 90.0, 180.0])
     raw_te = complex(installed_coefficient) * np.exp(

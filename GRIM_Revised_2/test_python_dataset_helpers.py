@@ -4,9 +4,9 @@ from unittest import mock
 
 import numpy as np
 
-from grim_dataset import RcsGrid
-from grim_headless import combine_datasets
-from grim_python import (
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.datasets.combine import combine_datasets
+from grim_backend.datasets.transforms import (
     coherent_divide,
     convert_extrusion,
     decimate_axis,

@@ -7,13 +7,13 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import (
-    CONIC_VH_BASIS_CONVENTION,
-    RcsGrid,
+from grim_backend.datasets.constants import CONIC_VH_BASIS_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.datasets.coordinates import (
     rotate_wedge_jones_to_conic,
     wedge_to_conic_geometry_deg,
 )
-from grim_python import wedge_to_conic as scripted_wedge_to_conic
+from grim_backend.datasets.transforms import wedge_to_conic as scripted_wedge_to_conic
 
 
 def _rotation_y(angle):

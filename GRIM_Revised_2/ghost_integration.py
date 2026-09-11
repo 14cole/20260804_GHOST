@@ -18,7 +18,7 @@ import sys
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
-from grim_diagnostics import GHOST_SENTINELS
+from grim_diagnostics import GHOST_SENTINELS, ghost_module_paths
 
 
 GHOST_BACKEND_ENV = "GHOST_BACKEND_PATH"
@@ -27,7 +27,7 @@ _GHOST_WORKSPACE_FILES = GHOST_SENTINELS
 
 
 def ghost_backend_candidates(explicit: str | os.PathLike[str] | None = None):
-    """Return the one authoritative candidate for flat GHOST modules.
+    """Return the configured or bundled GHOST Backend directory.
 
     A caller argument or ``GHOST_BACKEND_PATH`` is an explicit override, not
     a hint.  If it is stale or incomplete, discovery must report that problem
@@ -83,25 +83,22 @@ def _module_origin(module) -> Path | None:
 
 
 def _backend_module_names(backend: Path) -> set[str]:
-    """Names owned by the selected flat-module backend."""
-
-    return {
-        path.stem
-        for path in backend.glob("*.py")
-        if path.stem != "__init__"
-    }
+    """Names owned by the selected backend and its packages."""
+    return set(ghost_module_paths(backend))
 
 
 def _assert_loaded_module_origins(backend: Path) -> None:
     """Reject a process containing GHOST modules from another checkout."""
 
     conflicts = []
-    for name in sorted(_backend_module_names(backend)):
+    paths = ghost_module_paths(backend)
+    for name in sorted(paths):
         module = sys.modules.get(name)
         if module is None:
             continue
         origin = _module_origin(module)
-        if origin is None or origin.parent != backend:
+        expected = backend / paths[name]
+        if origin is None or origin != expected.resolve():
             shown = str(origin) if origin is not None else "unknown origin"
             conflicts.append(f"{name} ({shown})")
     if conflicts:
@@ -117,18 +114,14 @@ def load_ghost_module(
     module_name: str,
     backend_path: str | os.PathLike[str] | None = None,
 ):
-    """Import one authoritative GHOST backend module.
+    """Import a public or package module from the selected GHOST backend.
 
-    This is the shared bridge for the embedded solver workspace and the
-    Assembly feature controller.  Keeping path discovery here prevents the
-    GRIM widgets from duplicating GHOST's current flat-module packaging
-    workaround.  The imported module still owns all solver and feature
-    physics.
+    Reject missing sources and loaded modules from another backend directory.
     """
 
     name = str(module_name).strip()
-    if not name or "." in name or not name.isidentifier():
-        raise ValueError("GHOST module_name must be one top-level Python identifier")
+    if not name or any(not part.isidentifier() for part in name.split('.')):
+        raise ValueError("GHOST module_name must contain Python identifiers")
     backend = discover_ghost_backend(backend_path)
     if backend is None:
         attempted = next(ghost_backend_candidates(backend_path), None)
@@ -140,7 +133,8 @@ def load_ghost_module(
             "Backend folder."
         )
 
-    expected_module = backend / f"{name}.py"
+    relative = ghost_module_paths(backend).get(name, name.replace('.', '/') + '.py')
+    expected_module = backend / relative
     if not expected_module.is_file():
         raise ImportError(
             f"The selected GHOST backend does not contain {name}.py: {backend}"
@@ -148,13 +142,13 @@ def load_ghost_module(
 
     _assert_loaded_module_origins(backend)
     backend_text = str(backend)
-    # GHOST currently uses flat imports, including lazy imports during
-    # solve/export.  Put the selected backend first even if it was already
-    # present later in sys.path; origin validation prevents a mixed process.
     sys.path[:] = [entry for entry in sys.path if entry != backend_text]
     sys.path.insert(0, backend_text)
 
-    module = importlib.import_module(name)
+    implementation_name = relative[:-3].replace('/', '.')
+    if implementation_name.endswith('.__init__'):
+        implementation_name = implementation_name[:-9]
+    module = importlib.import_module(implementation_name)
     origin = _module_origin(module)
     if origin is None or origin != expected_module.resolve():
         shown = str(origin) if origin is not None else "unknown origin"
@@ -168,7 +162,7 @@ def load_ghost_module(
 
 
 def _load_workspace_class(backend: Path | None):
-    """Import ``GhostWorkspace`` while preserving flat-backend compatibility."""
+    """Return the selected backend's reusable ``GhostWorkspace`` widget."""
 
     module = load_ghost_module("ghost_gui", backend)
     workspace = getattr(module, "GhostWorkspace", None)

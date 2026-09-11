@@ -27,12 +27,8 @@ BACKEND_DIR = THIS_DIR.parents[1] / "Backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from components import (  # noqa: E402
-    COMPONENT_AMPLITUDE_CONVENTION,
-    COMPONENT_COMPLEX_FIELD_DOMAIN,
-    COMPONENT_PHASE_REFERENCE,
-)
-from feature_sum import _load_grim  # noqa: E402
+from ghost_backend.assembly.components import COMPONENT_AMPLITUDE_CONVENTION, COMPONENT_COMPLEX_FIELD_DOMAIN, COMPONENT_PHASE_REFERENCE
+from ghost_backend.assembly.fields import _load_grim
 from validate_feature_reconstruction import (  # noqa: E402
     CASE_MANIFEST_SCHEMA,
     CASE_REQUIRED_PATHS,

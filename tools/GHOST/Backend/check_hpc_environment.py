@@ -16,10 +16,12 @@ def main():
     try:
         import numpy as np
         import scipy
+        import threadpoolctl
         from scipy.linalg import lu_factor, lu_solve
-        import ghost_runtime
+        import ghost_backend.execution.runtime as ghost_runtime
         print('NumPy: {}'.format(np.__version__))
         print('SciPy: {}'.format(scipy.__version__))
+        print('threadpoolctl: {}'.format(threadpoolctl.__version__))
         for name, version, minimum in (
             ('NumPy', np.__version__, (1, 14, 3)),
             ('SciPy', scipy.__version__, (1, 0, 0)),
@@ -36,11 +38,16 @@ def main():
         except ImportError:
             print('psutil: absent (optional memory sampling unavailable)')
         for name in ('run_hpc_monostatic', 'run_hpc_bor_monostatic',
-                     'rcs_solver', 'bor_dispatch', 'hpc_bundle'):
+                     'ghost_backend.twod.solver', 'ghost_backend.bor.dispatch', 'ghost_backend.hpc.bundle'):
             importlib.import_module(name)
         matrix = np.array([[3+1j, 1-2j], [2+0j, 5-1j]], dtype=np.complex128)
         rhs = np.array([1+2j, -3+1j], dtype=np.complex128)
-        result = lu_solve(lu_factor(matrix), rhs)
+        from ghost_backend.execution.options import execution_scope
+        with execution_scope({'blas_threads': 1}, limit_blas=True):
+            result = lu_solve(lu_factor(matrix), rhs)
+            if any(row['num_threads'] != 1 for row in threadpoolctl.threadpool_info()
+                   if row['user_api'] == 'blas'):
+                raise RuntimeError('BLAS thread limit was not applied.')
         residual = float(np.max(np.abs(matrix @ result - rhs)))
         if not np.isfinite(residual) or residual > 1e-12:
             raise RuntimeError('Complex LU check failed: residual {}'.format(residual))

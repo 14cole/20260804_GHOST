@@ -27,7 +27,7 @@ from assembly_tree import (
     _item_to_dict,
     build_assembly_grid,
 )
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 
 
 def _grid(amplitude: float) -> RcsGrid:

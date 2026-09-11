@@ -3523,7 +3523,7 @@ if GUI_AVAILABLE:
                     if adapter.preview_inputs is None:
                         raise ValueError("Surface helper requires the current GHOST preview service.")
                     preview = adapter.preview_inputs(**preview_arguments)
-                    from surface_mesh import TriangleSurface
+                    from ghost_backend.geometry.surface import TriangleSurface
                     triangles = preview.surface_triangles_cad_m
                     surface = None if triangles is None else TriangleSurface(triangles, flip_normals=flip)
                     return surface, preview.body_profile_rho_z_m, scale

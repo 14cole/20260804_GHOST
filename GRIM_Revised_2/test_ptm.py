@@ -5,12 +5,9 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import (
-    GRIM_GC_CONVENTION,
-    LEGACY_PTM_GC_CONVENTION,
-    RcsGrid,
-)
-import ptm_io
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
+import grim_backend.io.ptm as ptm_io
 
 
 def _fixed_ascii(value, width):

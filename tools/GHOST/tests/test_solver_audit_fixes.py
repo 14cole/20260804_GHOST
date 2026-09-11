@@ -11,12 +11,12 @@ import numpy as np
 from scipy import integrate, special
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'Backend'))
-import rcs_solver as rcs
-import bor_solver as bor
-import bor_kernels as kernels
-import bor_dispatch
-from mie_reference import pec_cylinder_backscatter_amplitude
-from mie_sphere import sigma_coated_pec_sphere
+import ghost_backend.twod.solver as rcs
+import ghost_backend.bor.solver as bor
+import ghost_backend.bor.kernels as kernels
+import ghost_backend.bor.dispatch as bor_dispatch
+from ghost_backend.validation.cylinder import pec_cylinder_backscatter_amplitude
+from ghost_backend.validation.sphere import sigma_coated_pec_sphere
 from test_rcs_physics_regression import _circle_segment
 
 

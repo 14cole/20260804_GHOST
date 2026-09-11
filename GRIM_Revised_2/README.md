@@ -1,5 +1,8 @@
 # GRIM application
 
+Backend module locations and Python entry points are listed in the
+[backend guide](grim_backend/README.md).
+
 GRIM is the host application for this distribution. Its desktop tabs are
 **Plotting | ISAR | FREDDY | GHOST | Assembly | PPT | Runs | Python**. GHOST and FREDDY remain
 self-contained tools under `tools/`; GRIM embeds their authoritative user

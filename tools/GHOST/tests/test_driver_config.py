@@ -8,9 +8,9 @@ from unittest import mock
 
 BACKEND = Path(__file__).resolve().parents[1] / 'Backend'
 sys.path.insert(0, str(BACKEND))
-import driver_config as config
-import hpc_common
-import workflow_provenance
+import ghost_backend.runs.config as config
+import ghost_backend.hpc.common as hpc_common
+import ghost_backend.execution.provenance as workflow_provenance
 
 
 class DriverConfigurationTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class DriverConfigurationTests(unittest.TestCase):
                     config.load_driver_configuration(namespace, root / 'driver.py', 'bor', ['OUTPUT_DIR'])
 
     def test_desktop_recipe_maps_without_losing_unsupported_options(self):
-        from run_setup import DEFAULT_QUALITY
+        from ghost_backend.runs.setup import DEFAULT_QUALITY
         recipe = dict(schema='grim.2d-run-setup', version=1, frequencies_ghz=[1., 2.],
                       angles_deg=[0., 90.], units='meters', mesh_certification=False,
                       accuracy='tight', lu_precision='mixed', scattering='monostatic',

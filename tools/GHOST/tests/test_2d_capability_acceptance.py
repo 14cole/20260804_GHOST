@@ -31,11 +31,11 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-import grim_io  # noqa: E402
-import rcs_solver as rcs  # noqa: E402
+import ghost_backend.io.grim as grim_io
+import ghost_backend.twod.solver as rcs
 
 try:
-    from mie_reference import (  # noqa: E402
+    from ghost_backend.validation.cylinder import (
         pec_cylinder_backscatter_amplitude,
         sigma_coated_impedance_cylinder,
         sigma_dielectric_cylinder,

@@ -9,11 +9,8 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import (
-    GRIM_GC_CONVENTION,
-    LEGACY_PTM_GC_CONVENTION,
-    RcsGrid,
-)
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
 
 
 class EquatorialConicGcTests(unittest.TestCase):

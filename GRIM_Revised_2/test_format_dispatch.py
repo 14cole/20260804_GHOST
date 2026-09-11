@@ -8,8 +8,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
-from grim_headless import (
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import (
     SUPPORTED_EXTENSIONS,
     is_supported_path,
     load_dataset,

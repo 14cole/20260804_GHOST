@@ -316,6 +316,8 @@ class RunsWorkspaceTests(unittest.TestCase):
 
     def test_experimental_cpu_request_and_preferences_roundtrip(self) -> None:
         self._configure_2d_request()
+        self.workspace.execution_options_widget.set_value(dict(factorization='dense'))
+        self.workspace.run_method_combo.setCurrentIndex(self.workspace.run_method_combo.findData('direct'))
         self.workspace.run_lu_combo.setCurrentIndex(self.workspace.run_lu_combo.findData('mixed'))
         combo = self.workspace.run_method_combo
         combo.setCurrentIndex(combo.findData('experimental_cpu'))
@@ -436,7 +438,7 @@ class RunsWorkspaceTests(unittest.TestCase):
         }
         path_before = list(sys.path)
         try:
-            service = load_ghost_module("hpc_bundle")
+            service = load_ghost_module("ghost_backend.hpc.bundle")
             created = service.create_portable_bundle(
                 request["bundle_path"],
                 solver=request["solver"],

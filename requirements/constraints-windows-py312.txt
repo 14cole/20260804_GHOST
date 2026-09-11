@@ -27,3 +27,4 @@ pywin32==311; sys_platform == "win32"
 # the team wheelhouse so pip never needs to resolve build requirements online.
 setuptools==80.9.0
 wheel==0.45.1
+threadpoolctl==3.6.0

@@ -11,7 +11,7 @@ BACKEND = Path(__file__).resolve().parents[1] / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from assembly_workload import (  # noqa: E402
+from ghost_backend.assembly.workload import (
     ASSEMBLY_REVIEW_POINT_FIELD_CELLS,
     ASSEMBLY_REVIEW_SHADOW_RAYS,
     estimate_assembly_workload,

@@ -16,8 +16,8 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-import grim_io  # noqa: E402
-import rcs_solver as rcs  # noqa: E402
+import ghost_backend.io.grim as grim_io
+import ghost_backend.twod.solver as rcs
 
 
 def _samples(internal_polarization, *, bistatic=False):
@@ -306,11 +306,15 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
         )
 
     def test_certified_result_requires_both_channel_certificates(self):
+        calls = []
         def fake_certified(**kwargs):
-            return _single_result(kwargs["polarization"], certified=True)
+            calls.append(kwargs['polarization'])
+            result = _single_result(kwargs["polarization"])
+            result['metadata']['panel_count'] = 48 if len(calls) <= 2 else 96
+            return result
 
         with mock.patch.object(
-            rcs, "solve_monostatic_rcs_2d_certified_single_polarization",
+            rcs, "solve_monostatic_rcs_2d_single_polarization",
             side_effect=fake_certified,
         ):
             result = rcs.solve_monostatic_rcs_2d_certified(
@@ -319,6 +323,7 @@ class CoPolarizedSolverContractTests(unittest.TestCase):
                 elevations_deg=[0.0, 30.0],
             )
         mesh = result["metadata"]["mesh_convergence"]
+        self.assertEqual(calls, ['TE', 'TM', 'TE', 'TM'])
         self.assertTrue(result["metadata"]["mesh_convergence_certified"])
         self.assertTrue(mesh["passed"])
         self.assertEqual(set(mesh["channels"]), {"VV", "HH"})

@@ -1,0 +1,712 @@
+"""Modal quadrature and boundary kernels for body-of-revolution geometry."""
+
+import math
+from ghost_backend.execution.runtime import dataclass, field
+from functools import lru_cache
+from typing import List, Tuple
+
+import numpy as np
+from scipy.special import roots_legendre
+
+NEAR_KERNEL_WORK_BYTES = 64_000_000
+NEAR_ANGULAR_MAX_ORDER = 4096
+NEAR_ANGULAR_RTOL = 2.0e-8
+
+C0 = 299_792_458.0
+ETA0 = 376.730313668
+AXIS_TOL = 1e-12
+
+
+@lru_cache(maxsize=64)
+def cached_leggauss(order: 'int') -> 'Tuple[np.ndarray, np.ndarray]':
+    """Immutable Gauss-Legendre rule shared by every BoR kernel build.
+
+    Near-pair preparation requests the same small set of orders hundreds of
+    times.  ``leggauss`` constructs those rules through an eigensolve, so
+    rebuilding them for every element pair is pure overhead.  The returned
+    arrays are read-only to keep the process-wide cache safe.
+    """
+
+    x, w = roots_legendre(int(order))
+    x.setflags(write=False)
+    w.setflags(write=False)
+    return x, w
+
+
+@dataclass
+class Generatrix:
+    """Polyline generatrix in the (rho, z) half-plane, rho >= 0.
+
+    Convention (BOR_CONVENTIONS.md): traversed so the left-of-travel normal
+    (-z', rho') points into the exterior (air).  For a closed body that
+    means from the +z axis end to the -z axis end (sphere: north pole ->
+    south pole).
+    """
+
+    nodes: 'np.ndarray'
+    elem_n0: 'np.ndarray' = field(init=False)
+    elem_n1: 'np.ndarray' = field(init=False)
+    lengths: 'np.ndarray' = field(init=False)
+    trho: 'np.ndarray' = field(init=False)
+    tz: 'np.ndarray' = field(init=False)
+
+    def __post_init__(self):
+        pts = np.asarray(self.nodes, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] != 2 or pts.shape[0] < 2:
+            raise ValueError("Generatrix needs an (Nn, 2) array of (rho, z) nodes.")
+        if np.any(pts[:, 0] < -1e-12):
+            raise ValueError("Generatrix rho coordinates must be >= 0.")
+        pts[:, 0] = np.maximum(pts[:, 0], 0.0)
+        self.nodes = pts
+        d = pts[1:] - pts[:-1]
+        self.lengths = np.hypot(d[:, 0], d[:, 1])
+        if np.any(self.lengths <= 0):
+            raise ValueError("Generatrix has a zero-length element.")
+        self.trho = d[:, 0] / self.lengths
+        self.tz = d[:, 1] / self.lengths
+        self.elem_n0 = np.arange(len(self.lengths))
+        self.elem_n1 = self.elem_n0 + 1
+
+    @property
+    def n_elems(self) -> 'int':
+        return len(self.lengths)
+
+    @property
+    def n_nodes(self) -> 'int':
+        return len(self.nodes)
+
+    def node_on_axis(self, i: 'int') -> 'bool':
+        return self.nodes[i, 0] <= AXIS_TOL * max(1.0, float(np.max(self.nodes[:, 0])))
+
+
+@dataclass
+class GaussData:
+    """Per-Gauss-point geometry over the whole generatrix."""
+
+    elem: 'np.ndarray'
+    s: 'np.ndarray'
+    w: 'np.ndarray'
+    rho: 'np.ndarray'
+    z: 'np.ndarray'
+    trho: 'np.ndarray'
+    tz: 'np.ndarray'
+
+
+    T0: 'np.ndarray'
+    T1: 'np.ndarray'
+    dRT0: 'np.ndarray'
+    dRT1: 'np.ndarray'
+
+
+def gauss_on_generatrix(gen: 'Generatrix', order: 'int' = 4) -> 'GaussData':
+    xg, wg = cached_leggauss(order)
+    s = 0.5 * (xg + 1.0)
+    w = 0.5 * wg
+    ne = gen.n_elems
+    E = np.repeat(np.arange(ne), order)
+    S = np.tile(s, ne)
+    W = np.tile(w, ne) * np.repeat(gen.lengths, order)
+    r0 = gen.nodes[gen.elem_n0]
+    r1 = gen.nodes[gen.elem_n1]
+    RHO = np.repeat(r0[:, 0], order) + S * np.repeat(r1[:, 0] - r0[:, 0], order)
+    Z = np.repeat(r0[:, 1], order) + S * np.repeat(r1[:, 1] - r0[:, 1], order)
+    TR = np.repeat(gen.trho, order)
+    TZ = np.repeat(gen.tz, order)
+    L = np.repeat(gen.lengths, order)
+    T0 = 1.0 - S
+    T1 = S
+
+
+    drho_ds = np.repeat(r1[:, 0] - r0[:, 0], order)
+    dRT0 = (drho_ds * (1.0 - S) - RHO) / L
+    dRT1 = (drho_ds * S + RHO) / L
+    return GaussData(E, S, W, RHO, Z, TR, TZ, T0, T1, dRT0, dRT1)
+
+
+FFT_BUILD_BUDGET = 256e6
+N_XI_SAFETY_CAP = 8192
+
+
+def n_xi_for_pairs(k, rho_max: 'float', m_max: 'int', d_min: 'float' = 0.0,
+                   bracket: 'bool' = False, pts_per_peak: 'float' = 8.0,
+                   cap: 'int' = N_XI_SAFETY_CAP) -> 'int':
+    """Return the FFT grid size for modal bandwidth and far-pair peak resolution.
+
+    The minimum far-pair distance d_min imposes n_xi >= pts_per_peak *
+    2*pi*rho_max/d_min.
+    """
+
+    osc = 2.0 * abs(k) * rho_max
+    if bracket:
+        base = max(128, 6 * (m_max + 2), 8 * (osc + 4))
+    else:
+        base = max(64, 4 * (m_max + 2), 6 * (osc + 4))
+    if d_min > 0.0:
+        base = max(base, pts_per_peak * 2.0 * math.pi * rho_max / d_min)
+    if cap < 1:
+        raise ValueError("Azimuthal FFT sample cap must be positive.")
+    required = int(2 ** math.ceil(math.log2(base)))
+    if required > int(cap):
+        gap_note = (
+            f", closest far-pair meridian gap {d_min:.6g} m"
+            if d_min > 0.0 else ""
+        )
+        raise ValueError(
+            "Azimuthal far-kernel quadrature requires "
+            f"{required} samples but the safety cap is {int(cap)}"
+            f"{gap_note} (rho_max {rho_max:.6g} m, |k| {abs(k):.6g} 1/m, "
+            f"m_max {int(m_max)}). The previous capped result would be "
+            "under-resolved. Reduce frequency/mode count, route the closest "
+            "pair through direct near integration or revise a close-fold "
+            "geometry, or raise the internal cap only after checking memory. "
+            "Do not refine solely to address this error: refinement usually "
+            "shrinks the far-pair gap and increases the sample requirement."
+        )
+    return required
+
+
+def modal_kernels_fft(rho_p, z_p, rho_q, z_q, k, m_max: 'int', n_xi: 'int' = 0):
+    """
+    G_m for m = 0..m_max+1 at point pairs via uniform xi sampling + FFT.
+
+    Inputs are broadcastable arrays of pair coordinates.  Returns complex
+    array [..., m_max+2] (extra order for the Gc/Gs neighbor relations;
+    negative m follow from G_{-m} = G_m).
+
+    Accuracy: the integrand is periodic and smooth when the pair is not
+    near-singular; trapezoid/FFT is then spectrally accurate.  Callers must
+    route near pairs to modal_kernels_near.
+
+    Memory: the [pairs, n_xi] sampling grid is processed in bounded chunks
+    (the gap-aware n_xi floor can push n_xi into the thousands on fine
+    meshes; an all-pairs-at-once build then OOM-kills the process).
+    """
+
+    rho_p = np.asarray(rho_p, dtype=float)
+    rho_q = np.asarray(rho_q, dtype=float)
+    z_p = np.asarray(z_p, dtype=float)
+    z_q = np.asarray(z_q, dtype=float)
+    if n_xi <= 0:
+
+        osc = float(np.max(2.0 * abs(k) * np.sqrt(np.maximum(rho_p * rho_q, 0.0)))) if rho_p.size else 0.0
+        n_xi = int(2 ** math.ceil(math.log2(max(64, 4 * (m_max + 2), 6 * (osc + 4)))))
+    xi = 2.0 * np.pi * np.arange(n_xi) / n_xi - np.pi
+    sin2 = np.sin(0.5 * xi) ** 2
+    shape = np.broadcast(rho_p, rho_q, z_p, z_q).shape
+    d2f = np.broadcast_to((rho_p - rho_q) ** 2 + (z_p - z_q) ** 2, shape).ravel()
+    rr4f = np.broadcast_to(4.0 * rho_p * rho_q, shape).ravel()
+    m = np.arange(m_max + 2)
+    phase = np.exp(1j * np.pi * m) * (2.0 * np.pi / n_xi)
+    out = np.empty((d2f.size, m_max + 2), dtype=np.complex128)
+    chunk = max(1, int(FFT_BUILD_BUDGET / (16.0 * n_xi * 4.0)))
+    for i0 in range(0, d2f.size, chunk):
+        i1 = min(i0 + chunk, d2f.size)
+        R = np.sqrt(d2f[i0:i1, None] + rr4f[i0:i1, None] * sin2)
+
+
+        R = np.maximum(R, 1e-300)
+        g = np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R)
+
+
+        out[i0:i1] = np.fft.fft(g, axis=-1)[:, : m_max + 2] * phase
+    return out.reshape(shape + (m_max + 2,))
+
+
+def _modal_kernels_near_rule(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 48,
+                       tail_order: 'int' = 0):
+    """
+    G_m for m = 0..m_max+1 at near-singular point pairs.
+
+    Substitution xi = 2 asin(s), then s = s_scale * sinh(v): concentrates
+    quadrature at xi = 0 where R -> d.  Handles d down to ~1e-12 * rho.
+    Inputs are 1-D arrays of pair coordinates (n_pairs,).
+    Returns [n_pairs, m_max+2].
+    """
+
+    rho_p = np.atleast_1d(np.asarray(rho_p, dtype=float))
+    rho_q = np.atleast_1d(np.asarray(rho_q, dtype=float))
+    z_p = np.atleast_1d(np.asarray(z_p, dtype=float))
+    z_q = np.atleast_1d(np.asarray(z_q, dtype=float))
+    n = rho_p.size
+    d2 = (rho_p - rho_q) ** 2 + (z_p - z_q) ** 2
+    rr4 = 4.0 * rho_p * rho_q
+
+    out = np.zeros((n, m_max + 2), dtype=np.complex128)
+    m = np.arange(m_max + 2)
+
+
+    on_axis = rr4 <= 1e-30
+    if np.any(on_axis):
+        R0 = np.sqrt(d2[on_axis])
+        g0 = np.exp(-1j * complex(k) * R0) / (4.0 * np.pi * np.maximum(R0, 1e-300))
+
+        out[on_axis, 0] = 2.0 * np.pi * g0
+
+    idx = np.flatnonzero(~on_axis)
+    if idx.size == 0:
+        return out
+
+    d = np.sqrt(np.maximum(d2[idx], 1e-300))
+    a = np.sqrt(rr4[idx])
+
+
+    s0 = np.minimum(0.25, 20.0 * d / a)
+    xg, wg = cached_leggauss(order)
+    u01 = 0.5 * (xg + 1.0)
+    w01 = 0.5 * wg
+
+
+    vmax = np.arcsinh((a / d) * s0)
+    v = u01[None, :] * vmax[:, None]
+    wv = w01[None, :] * vmax[:, None]
+    s = (d / a)[:, None] * np.sinh(v)
+    s = np.minimum(s, 1.0)
+    xi = 2.0 * np.arcsin(s)
+    R = np.sqrt(d[:, None] ** 2 + (a[:, None] * s) ** 2)
+    ds_dv = (d / a)[:, None] * np.cosh(v)
+    dxi_dv = 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
+    g = np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R)
+    w_all = wv * dxi_dv
+    gw = g * w_all
+    acc = np.empty((len(idx), len(m)), complex)
+    for m0 in range(0, len(m), 32):
+        cosmx = np.cos(xi[:, :, None] * m[None, None, m0:m0 + 32])
+        acc[:, m0:m0 + 32] = 2.0 * np.matmul(gw[:, None, :], cosmx).squeeze(1)
+
+
+    osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
+    required_tail = int(max(64, math.ceil(4.0 * osc)))
+    n_tail = int(tail_order) if tail_order > 0 else required_tail
+    xt, wt = cached_leggauss(n_tail)
+    u01t = 0.5 * (xt + 1.0)
+    w01t = 0.5 * wt
+    xi0 = 2.0 * np.arcsin(s0)
+    span = np.pi - xi0
+    xi_t = xi0[:, None] + u01t[None, :] * span[:, None]
+    w_t = w01t[None, :] * span[:, None]
+    st = np.sin(0.5 * xi_t)
+    Rt = np.sqrt(d[:, None] ** 2 + (a[:, None] * st) ** 2)
+    gt = np.exp(-1j * complex(k) * Rt) / (4.0 * np.pi * Rt)
+    gtw = gt * w_t
+    for m0 in range(0, len(m), 32):
+        cosmt = np.cos(xi_t[:, :, None] * m[None, None, m0:m0 + 32])
+        acc[:, m0:m0 + 32] += 2.0 * np.matmul(gtw[:, None, :], cosmt).squeeze(1)
+
+    out[idx, :] = acc
+    return out
+
+
+def _mfie_brackets(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, xi):
+    """The four MFIE bracket functions at azimuth offsets xi.
+
+    Point arrays have shape S; xi has shape X; returns four arrays S+X.
+    Test point at phi = 0; source at phi' = -xi.  n_hat = (-tz, 0, tr)
+    (outward per the generatrix convention)."""
+
+    cx, sx = np.cos(xi), np.sin(xi)
+    Rx = rho_p[..., None] - rho_q[..., None] * cx
+    Ry = rho_q[..., None] * sx
+    Rz = (z_p - z_q)[..., None] + 0.0 * cx
+    R = np.sqrt(Rx ** 2 + Ry ** 2 + Rz ** 2)
+    R = np.maximum(R, 1e-300)
+
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        p = (1.0 + 1j * complex(k) * R) * np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R ** 3)
+
+        WtR = tr_p[..., None] * Rx + tz_p[..., None] * Rz
+        WfR = Ry
+        nR = -tz_p[..., None] * Rx + tr_p[..., None] * Rz
+        n_tq = -(tz_p * tr_q)[..., None] * cx + (tr_p * tz_q)[..., None]
+        n_fq = -tz_p[..., None] * sx
+        Wt_tq = (tr_p * tr_q)[..., None] * cx + (tz_p * tz_q)[..., None]
+        Wt_fq = tr_p[..., None] * sx
+        Wf_tq = -tr_q[..., None] * sx
+        Wf_fq = cx + 0.0 * Rx
+
+        Ftt = -p * (WtR * n_tq - Wt_tq * nR)
+        Ftf = -p * (WtR * n_fq - Wt_fq * nR)
+        Fft = -p * (WfR * n_tq - Wf_tq * nR)
+        Fff = -p * (WfR * n_fq - Wf_fq * nR)
+    return Ftt, Ftf, Fft, Fff
+
+
+def mfie_kernels_fft(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                     m_max: 'int', n_xi: 'int' = 0):
+    """Modal MFIE kernels K_uv[..., m + m_max] for m = -m_max..m_max
+    (far point pairs; FFT over uniform xi)."""
+
+    rho_p = np.asarray(rho_p, dtype=float)
+    if n_xi <= 0:
+
+
+        osc = float(np.max(2.0 * abs(k) * np.sqrt(np.maximum(rho_p * rho_q, 0.0)))) if rho_p.size else 0.0
+        n_xi = int(2 ** math.ceil(math.log2(max(128, 6 * (m_max + 2), 8 * (osc + 4)))))
+    xi = 2.0 * np.pi * np.arange(n_xi) / n_xi - np.pi
+    m = np.arange(-m_max, m_max + 1)
+
+
+    bins = np.where(m >= 0, m, n_xi + m)
+    phase = np.exp(1j * np.pi * m) * (2.0 * np.pi / n_xi)
+    shape = np.broadcast(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q).shape
+    flats = [np.broadcast_to(np.asarray(a, dtype=float), shape).ravel()
+             for a in (rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q)]
+    n_pairs = flats[0].size
+    out = [np.empty((n_pairs, 2 * m_max + 1), dtype=np.complex128)
+           for _ in range(4)]
+
+    chunk = max(1, int(FFT_BUILD_BUDGET / (16.0 * n_xi * 16.0)))
+    for i0 in range(0, n_pairs, chunk):
+        i1 = min(i0 + chunk, n_pairs)
+        Fs = _mfie_brackets(*(a[i0:i1] for a in flats), k, xi)
+        for o, F in zip(out, Fs):
+            o[i0:i1] = np.fft.fft(F, axis=-1)[:, bins] * phase
+
+        del Fs, F
+    return tuple(o.reshape(shape + (2 * m_max + 1,)) for o in out)
+
+
+def _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m) -> 'List[np.ndarray]':
+    """Project half-range +-xi bracket samples onto modes:
+
+        proj_m = int_0^pi [F(+xi) e^{-jm xi} + F(-xi) e^{+jm xi}] dxi
+               = int_0^pi [S cos(m xi) - j D sin(m xi)] dxi,
+        S = F(+xi) + F(-xi),   D = F(+xi) - F(-xi)   (weights folded in).
+
+    Splitting into real cos/sin einsums costs ~4x fewer flops than the
+    complex-exponential form and shares the trig tables across brackets.
+    Returns one [n_pairs, len(m)] array per bracket."""
+
+
+    S = np.stack(
+        [(Fpos + Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)], axis=1
+    )
+    D = np.stack(
+        [(Fpos - Fneg) * w_pos for Fpos, Fneg in zip(Fp, Fm)], axis=1
+    )
+    projected = np.empty((len(xi_pos), len(Fp), len(m)), complex)
+    for m0 in range(0, len(m), 32):
+        arg = xi_pos[:, :, None] * m[None, None, m0:m0 + 32]
+        projected[:, :, m0:m0 + 32] = np.matmul(S, np.cos(arg)) - 1j * np.matmul(D, np.sin(arg))
+    return [projected[:, i, :] for i in range(projected.shape[1])]
+
+
+def _mfie_kernels_near_rule(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                      m_max: 'int', order: 'int' = 48,
+                      tail_order: 'int' = 0):
+    """Modal MFIE kernels for near point pairs (1-D pair lists) via the
+    same capped sinh core + oscillation tail as modal_kernels_near, mirrored
+    to negative xi (the brackets have mixed parity).  Returns four arrays
+    [n_pairs, 2*m_max+1]."""
+
+    rho_p = np.atleast_1d(np.asarray(rho_p, dtype=float))
+    rho_q = np.atleast_1d(np.asarray(rho_q, dtype=float))
+    z_p = np.atleast_1d(np.asarray(z_p, dtype=float))
+    z_q = np.atleast_1d(np.asarray(z_q, dtype=float))
+    tr_p = np.broadcast_to(np.asarray(tr_p, dtype=float), rho_p.shape)
+    tz_p = np.broadcast_to(np.asarray(tz_p, dtype=float), rho_p.shape)
+    tr_q = np.broadcast_to(np.asarray(tr_q, dtype=float), rho_q.shape)
+    tz_q = np.broadcast_to(np.asarray(tz_q, dtype=float), rho_q.shape)
+
+    d2 = (rho_p - rho_q) ** 2 + (z_p - z_q) ** 2
+    rr4 = 4.0 * rho_p * rho_q
+    d = np.sqrt(np.maximum(d2, 1e-300))
+    a = np.sqrt(np.maximum(rr4, 1e-300))
+    s0 = np.minimum(0.25, 20.0 * d / np.maximum(a, 1e-300))
+    s0 = np.where(rr4 <= 1e-30, 1.0, s0)
+
+    xg, wg = cached_leggauss(order)
+    u01 = 0.5 * (xg + 1.0)
+    w01 = 0.5 * wg
+
+    vmax = np.arcsinh((a / d) * s0)
+    v = u01[None, :] * vmax[:, None]
+    wv = w01[None, :] * vmax[:, None]
+    s = np.minimum((d / a)[:, None] * np.sinh(v), 1.0)
+    xi_c = 2.0 * np.arcsin(s)
+    ds_dv = (d / a)[:, None] * np.cosh(v)
+    w_c = wv * 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
+    axis = rr4 <= 1e-30
+    xi_c[axis] = np.pi * u01
+    w_c[axis] = np.pi * w01
+
+    osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
+    required_tail = int(max(64, math.ceil(4.0 * osc)))
+    n_tail = int(tail_order) if tail_order > 0 else required_tail
+    xt, wt = cached_leggauss(n_tail)
+    xi0 = 2.0 * np.arcsin(np.minimum(s0, 1.0))
+    span = np.pi - xi0
+    xi_t = xi0[:, None] + 0.5 * (xt + 1.0)[None, :] * span[:, None]
+    w_t = 0.5 * wt[None, :] * span[:, None]
+
+    xi_pos = np.concatenate([xi_c, xi_t], axis=1)
+    w_pos = np.concatenate([w_c, w_t], axis=1)
+    m = np.arange(-m_max, m_max + 1)
+    outs = []
+
+
+    def brackets_grid(xi):
+        cx, sx = np.cos(xi), np.sin(xi)
+        Rx = rho_p[:, None] - rho_q[:, None] * cx
+        Ry = rho_q[:, None] * sx
+        Rz = (z_p - z_q)[:, None] * np.ones_like(cx)
+        R = np.maximum(np.sqrt(Rx ** 2 + Ry ** 2 + Rz ** 2), 1e-300)
+        p = (1.0 + 1j * complex(k) * R) * np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R ** 3)
+        WtR = tr_p[:, None] * Rx + tz_p[:, None] * Rz
+        WfR = Ry
+        nR = -tz_p[:, None] * Rx + tr_p[:, None] * Rz
+        n_tq = -(tz_p * tr_q)[:, None] * cx + (tr_p * tz_q)[:, None] * np.ones_like(cx)
+        n_fq = -tz_p[:, None] * sx
+        Wt_tq = (tr_p * tr_q)[:, None] * cx + (tz_p * tz_q)[:, None] * np.ones_like(cx)
+        Wt_fq = tr_p[:, None] * sx
+        Wf_tq = -tr_q[:, None] * sx
+        Wf_fq = cx * np.ones_like(Rx)
+        return (-p * (WtR * n_tq - Wt_tq * nR), -p * (WtR * n_fq - Wt_fq * nR),
+                -p * (WfR * n_tq - Wf_tq * nR), -p * (WfR * n_fq - Wf_fq * nR))
+
+    Fp = brackets_grid(xi_pos)
+    Fm = brackets_grid(-xi_pos)
+    outs = _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m)
+    return tuple(outs)
+
+
+def mfie_for_mode(K: 'np.ndarray', m: 'int', m_max: 'int') -> 'np.ndarray':
+    """Extract mode m (centered table, index m + m_max)."""
+    return K[..., m + m_max]
+
+
+def _ibc_brackets_grid(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, xi):
+    """Four IBC bracket functions on per-pair xi grids ([n_pairs, n_xi])."""
+
+    cx, sx = np.cos(xi), np.sin(xi)
+    Rx = rho_p[:, None] - rho_q[:, None] * cx
+    Ry = rho_q[:, None] * sx
+    Rz = (z_p - z_q)[:, None] * np.ones_like(cx)
+    R = np.maximum(np.sqrt(Rx ** 2 + Ry ** 2 + Rz ** 2), 1e-300)
+
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        p = (1.0 + 1j * complex(k) * R) * np.exp(-1j * complex(k) * R) / (4.0 * np.pi * R ** 3)
+
+
+        Wt_nq = -(tr_p * tz_q)[:, None] * cx + (tz_p * tr_q)[:, None] * np.ones_like(cx)
+        Wf_nq = tz_q[:, None] * sx
+        R_tq = tr_q[:, None] * (rho_p[:, None] * cx - rho_q[:, None]) + tz_q[:, None] * Rz
+        R_fq = rho_p[:, None] * sx
+        R_nq = -tz_q[:, None] * (rho_p[:, None] * cx - rho_q[:, None]) + tr_q[:, None] * Rz
+        Wt_tq = (tr_p * tr_q)[:, None] * cx + (tz_p * tz_q)[:, None] * np.ones_like(cx)
+        Wt_fq = tr_p[:, None] * sx
+        Wf_tq = -tr_q[:, None] * sx
+        Wf_fq = cx * np.ones_like(Rx)
+
+        Btt = p * (Wt_nq * R_tq - Wt_tq * R_nq)
+        Btf = p * (Wt_nq * R_fq - Wt_fq * R_nq)
+        Bft = p * (Wf_nq * R_tq - Wf_tq * R_nq)
+        Bff = p * (Wf_nq * R_fq - Wf_fq * R_nq)
+    return Btt, Btf, Bft, Bff
+
+
+def ibc_kernels_fft(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                    m_max: 'int', n_xi: 'int' = 0):
+    """Modal IBC kernels [Pp, Pq, 2*m_max+1] via FFT (far point pairs).
+    Test/source point arrays are [Pp]/[Pq] vectors; all pair combinations
+    are formed here."""
+
+    Pp = len(np.atleast_1d(rho_p))
+    Pq = len(np.atleast_1d(rho_q))
+    if n_xi <= 0:
+        osc = float(np.max(2.0 * abs(k) * np.sqrt(np.maximum(
+            np.outer(rho_p, rho_q), 0.0))))
+        n_xi = int(2 ** math.ceil(math.log2(max(128, 6 * (m_max + 2), 8 * (osc + 4)))))
+    xi = 2.0 * np.pi * np.arange(n_xi) / n_xi - np.pi
+    pair_shape = (Pp, Pq)
+    pr = np.broadcast_to(np.asarray(rho_p)[:, None], pair_shape).ravel()
+    pz = np.broadcast_to(np.asarray(z_p)[:, None], pair_shape).ravel()
+    ptr = np.broadcast_to(np.asarray(tr_p)[:, None], pair_shape).ravel()
+    ptz = np.broadcast_to(np.asarray(tz_p)[:, None], pair_shape).ravel()
+    qr = np.broadcast_to(np.asarray(rho_q)[None, :], pair_shape).ravel()
+    qz = np.broadcast_to(np.asarray(z_q)[None, :], pair_shape).ravel()
+    qtr = np.broadcast_to(np.asarray(tr_q)[None, :], pair_shape).ravel()
+    qtz = np.broadcast_to(np.asarray(tz_q)[None, :], pair_shape).ravel()
+    m = np.arange(-m_max, m_max + 1)
+    bins = np.where(m >= 0, m, n_xi + m)
+    phase = np.exp(1j * np.pi * m) * (2.0 * np.pi / n_xi)
+    n_pairs = Pp * Pq
+    out = [np.empty((n_pairs, 2 * m_max + 1), dtype=np.complex128)
+           for _ in range(4)]
+
+    chunk = max(1, int(FFT_BUILD_BUDGET / (16.0 * n_xi * 18.0)))
+    flats = (pr, pz, ptr, ptz, qr, qz, qtr, qtz)
+    for i0 in range(0, n_pairs, chunk):
+        i1 = min(i0 + chunk, n_pairs)
+        Fs = _ibc_brackets_grid(*(a[i0:i1] for a in flats), k,
+                                np.broadcast_to(xi, (i1 - i0, n_xi)))
+        for o, F in zip(out, Fs):
+            o[i0:i1] = np.fft.fft(F, axis=-1)[:, bins] * phase
+        del Fs, F
+    return tuple(o.reshape(Pp, Pq, -1) for o in out)
+
+
+def _ibc_kernels_near_rule(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                     m_max: 'int', order: 'int' = 48,
+                     tail_order: 'int' = 0):
+    """Modal IBC kernels for near point-pair lists [n_pairs, 2*m_max+1],
+    same two-piece grid as mfie_kernels_near."""
+
+    rho_p = np.atleast_1d(np.asarray(rho_p, dtype=float))
+    rho_q = np.atleast_1d(np.asarray(rho_q, dtype=float))
+    z_p = np.atleast_1d(np.asarray(z_p, dtype=float))
+    z_q = np.atleast_1d(np.asarray(z_q, dtype=float))
+    tr_p = np.broadcast_to(np.asarray(tr_p, dtype=float), rho_p.shape)
+    tz_p = np.broadcast_to(np.asarray(tz_p, dtype=float), rho_p.shape)
+    tr_q = np.broadcast_to(np.asarray(tr_q, dtype=float), rho_q.shape)
+    tz_q = np.broadcast_to(np.asarray(tz_q, dtype=float), rho_q.shape)
+
+    d2 = (rho_p - rho_q) ** 2 + (z_p - z_q) ** 2
+    rr4 = 4.0 * rho_p * rho_q
+    d = np.sqrt(np.maximum(d2, 1e-300))
+    a = np.sqrt(np.maximum(rr4, 1e-300))
+    s0 = np.minimum(0.25, 20.0 * d / np.maximum(a, 1e-300))
+    s0 = np.where(rr4 <= 1e-30, 1.0, s0)
+
+    xg, wg = cached_leggauss(order)
+    u01 = 0.5 * (xg + 1.0)
+    w01 = 0.5 * wg
+    vmax = np.arcsinh((a / d) * s0)
+    v = u01[None, :] * vmax[:, None]
+    wv = w01[None, :] * vmax[:, None]
+    s = np.minimum((d / a)[:, None] * np.sinh(v), 1.0)
+    xi_c = 2.0 * np.arcsin(s)
+    ds_dv = (d / a)[:, None] * np.cosh(v)
+    w_c = wv * 2.0 * ds_dv / np.sqrt(np.maximum(1.0 - s ** 2, 1e-15))
+    axis = rr4 <= 1e-30
+    xi_c[axis] = np.pi * u01
+    w_c[axis] = np.pi * w01
+    osc = float(np.max(abs(complex(k)) * a)) / math.pi + (m_max + 2)
+    required_tail = int(max(64, math.ceil(4.0 * osc)))
+    n_tail = int(tail_order) if tail_order > 0 else required_tail
+    xt, wt = cached_leggauss(n_tail)
+    xi0 = 2.0 * np.arcsin(np.minimum(s0, 1.0))
+    span = np.pi - xi0
+    xi_t = xi0[:, None] + 0.5 * (xt + 1.0)[None, :] * span[:, None]
+    w_t = 0.5 * wt[None, :] * span[:, None]
+    xi_pos = np.concatenate([xi_c, xi_t], axis=1)
+    w_pos = np.concatenate([w_c, w_t], axis=1)
+    m = np.arange(-m_max, m_max + 1)
+
+    Fp = _ibc_brackets_grid(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, xi_pos)
+    Fm = _ibc_brackets_grid(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k, -xi_pos)
+    outs = _project_pm_brackets(Fp, Fm, w_pos, xi_pos, m)
+    return tuple(outs)
+
+
+def _checked_near_kernels(rule, args, k, m_max, order, tail_order, bracket):
+    """Resolve core and tail oscillation, check refinement, and bound scratch.
+
+    The limit applies to temporary point/angular/mode arrays. The returned
+    point-by-mode arrays are owned by the caller and must be budgeted there.
+    """
+    args = tuple(np.ravel(a) for a in np.broadcast_arrays(
+        *[np.atleast_1d(np.asarray(a, dtype=float)) for a in args]))
+    q = 4 if bracket else 2
+    rp, zp, rq, zq = args[0], args[1], args[q], args[q + 1]
+    n = len(rp)
+    nm = 2 * m_max + 1 if bracket else m_max + 2
+    outputs = tuple(np.empty((n, nm), complex) for _ in range(4 if bracket else 1))
+    if n == 0:
+        return outputs if bracket else outputs[0]
+    a = np.sqrt(np.maximum(4 * rp * rq, 0.0))
+    d = np.hypot(rp - rq, zp - zq)
+    s0 = np.minimum(0.25, 20 * d / np.maximum(a, 1e-150))
+    xi0 = 2 * np.arcsin(s0)
+    core_phase = abs(complex(k)) * a * s0 + (m_max + 2) * xi0
+    if bracket:
+        core_phase = np.where(a <= 1e-15, (m_max + 2) * np.pi, core_phase)
+    core = max(int(order), 48, int(math.ceil(24 + 2 * np.max(core_phase))))
+    tail = max(int(tail_order), 64, int(math.ceil(
+        4 * (abs(complex(k)) * float(np.max(a)) / math.pi + m_max + 2))))
+    if max(core, tail) > NEAR_ANGULAR_MAX_ORDER:
+        raise ValueError("BoR near angular quadrature exceeds its accuracy limit; refine the mesh or reduce modal bandwidth.")
+
+
+    point_chunk = max(1, int(NEAR_KERNEL_WORK_BYTES /
+                            (128 * (core + tail) * max(min(nm, 32), 16))))
+    for start in range(0, n, point_chunk):
+        stop = min(n, start + point_chunk)
+        part = tuple(a[start:stop] for a in args)
+
+
+        c, t = max(16, core // 2), max(16, tail // 2)
+        coarse = rule(*part, k, m_max, order=c, tail_order=t)
+        coarse = coarse if bracket else (coarse,)
+        while True:
+            cf = min(NEAR_ANGULAR_MAX_ORDER, max(core, c + 16, int(math.ceil(1.5 * c))))
+            tf = min(NEAR_ANGULAR_MAX_ORDER, max(tail, t + 16, int(math.ceil(1.5 * t))))
+            if cf == c and tf == t:
+                worst = int(np.argmax(error / np.maximum(scale, 1e-280)))
+                coordinates = tuple(float(a[worst]) for a in part)
+                raise ValueError(f"BoR near angular quadrature did not converge at the maximum order: {rule.__name__}, point={coordinates}, relative change={float(error[worst] / max(scale[worst], 1e-280)):.3g}.")
+
+
+            fine_chunk = max(1, int(NEAR_KERNEL_WORK_BYTES /
+                                   (128 * (cf + tf) * max(min(nm, 32), 16))))
+            fine = tuple(np.empty_like(x) for x in coarse)
+            for i in range(0, stop - start, fine_chunk):
+                val = rule(*(a[i:i + fine_chunk] for a in part), k, m_max,
+                           order=cf, tail_order=tf)
+                val = val if bracket else (val,)
+                for out, x in zip(fine, val):
+                    out[i:i + fine_chunk] = x
+            scale = np.maximum.reduce([np.max(np.abs(x), axis=1) for x in fine])
+            error = np.maximum.reduce([np.max(np.abs(x - y), axis=1)
+                                       for x, y in zip(fine, coarse)])
+            if np.all(np.isfinite(error)) and np.all(error <= NEAR_ANGULAR_RTOL * np.maximum(scale, 1e-280)):
+                for out, x in zip(outputs, fine):
+                    out[start:stop] = x
+                break
+            coarse, c, t = fine, cf, tf
+    return outputs if bracket else outputs[0]
+
+
+def modal_kernels_near(rho_p, z_p, rho_q, z_q, k, m_max: 'int', order: 'int' = 48,
+                       tail_order: 'int' = 0):
+    return _checked_near_kernels(_modal_kernels_near_rule,
+        (rho_p, z_p, rho_q, z_q), k, m_max, order, tail_order, False)
+
+
+def mfie_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                      m_max: 'int', order: 'int' = 48, tail_order: 'int' = 0):
+    return _checked_near_kernels(_mfie_kernels_near_rule,
+        (rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q),
+        k, m_max, order, tail_order, True)
+
+
+def ibc_kernels_near(rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q, k,
+                     m_max: 'int', order: 'int' = 48, tail_order: 'int' = 0):
+    return _checked_near_kernels(_ibc_kernels_near_rule,
+        (rho_p, z_p, tr_p, tz_p, rho_q, z_q, tr_q, tz_q),
+        k, m_max, order, tail_order, True)
+
+
+def gc_gs_from_g(G: 'np.ndarray', m: 'int') -> 'Tuple[np.ndarray, np.ndarray]':
+    """
+    Gc_m and Gs_m from the table G[..., 0..m_max+1] (m >= 0 entries;
+    negative orders via G_{-n} = G_n).
+
+    Gc_m = (G_{m-1} + G_{m+1})/2       Gs_m = (G_{m-1} - G_{m+1})/(2j)
+    """
+
+    gm_m1 = G[..., abs(m - 1)]
+    gm_p1 = G[..., m + 1]
+    return 0.5 * (gm_m1 + gm_p1), (gm_m1 - gm_p1) / 2j
+
+
+def kernels_for_mode(G: 'np.ndarray', m: 'int') -> 'Tuple[np.ndarray, np.ndarray, np.ndarray]':
+    """(G_m, Gc_m, Gs_m) for any integer m (negative handled by symmetry:
+    G_{-m} = G_m, Gc_{-m} = Gc_m, Gs_{-m} = -Gs_m)."""
+
+    am = abs(m)
+    gc, gs = gc_gs_from_g(G, am)
+    if m < 0:
+        gs = -gs
+    return G[..., am], gc, gs

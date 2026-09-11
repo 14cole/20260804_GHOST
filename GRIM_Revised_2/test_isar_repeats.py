@@ -7,7 +7,7 @@ from unittest import mock
 
 import numpy as np
 
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 from isar_repeats import IsarSweep, RepeatAcquisitionStack
 
 

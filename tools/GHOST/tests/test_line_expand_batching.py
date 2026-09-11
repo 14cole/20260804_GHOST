@@ -13,12 +13,12 @@ BACKEND = Path(__file__).resolve().parents[1] / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from line_expand import (  # noqa: E402
+from ghost_backend.assembly.line_expansion import (
     SeamCoefficients,
     expand_perimeter,
     prepare_perimeter_frame,
 )
-from occluder import PackedVisibility  # noqa: E402
+from ghost_backend.geometry.occlusion import PackedVisibility
 
 
 def _fixture():

@@ -132,7 +132,7 @@ def test_run_local_monostatic(workspace):
           "no unit repeats the shared angular grid")
 
     sys.path.insert(0, str(BACKEND))
-    from workflow_provenance import (  # noqa: E402
+    from ghost_backend.execution.provenance import (
         manifest_solve_spec_fingerprint,
         read_embedded_attestation,
     )
@@ -167,6 +167,7 @@ def test_resume_same_run_dir(workspace):
 
     sys.path.insert(0, str(BACKEND))
     import run_local_monostatic as driver  # noqa: E402
+    from ghost_backend.execution import provenance
 
     driver.GEOMETRY_UNITS = manifest["solver_config"]["geometry_units"]
     context = {
@@ -175,11 +176,11 @@ def test_resume_same_run_dir(workspace):
         "solver_source_inventory": manifest["solver_source_inventory"],
         "runtime_environment_sha256": manifest["runtime_environment_sha256"],
         "run_solve_spec_sha256":
-            __import__("workflow_provenance").manifest_solve_spec_fingerprint(
+            provenance.manifest_solve_spec_fingerprint(
                 manifest
             ),
         "solver_config_sha256":
-            __import__("workflow_provenance").stable_json_fingerprint(
+            provenance.stable_json_fingerprint(
                 manifest["solver_config"]
             ),
         "geometry_units": manifest["solver_config"]["geometry_units"],
@@ -190,7 +191,7 @@ def test_resume_same_run_dir(workspace):
             manifest["solver_config"]["mesh_certification"],
         "azimuths_deg": manifest["azimuths_deg"],
         "angular_grid_sha256":
-            __import__("workflow_provenance").stable_json_fingerprint(
+            provenance.stable_json_fingerprint(
                 [float(a) for a in manifest["azimuths_deg"]]
             ),
     }
@@ -205,7 +206,7 @@ def test_resume_same_run_dir(workspace):
 def test_polarization_aliases():
     print("\npolarization aliases")
     sys.path.insert(0, str(BACKEND))
-    import hpc_scheduler
+    import ghost_backend.hpc.scheduler as hpc_scheduler
     canonical = hpc_scheduler.canonical_polarization
     check(canonical("VV") == "TE" and canonical("HH") == "TM",
           "VV maps to TE and HH maps to TM")
@@ -228,9 +229,9 @@ def test_polarization_aliases():
     import run_local_monostatic as local_driver
     check(
         not hasattr(local_driver, "POLARIZATIONS")
-        and local_driver.SOLVER_METHOD == "direct"
+        and local_driver.SOLVER_METHOD == "experimental_cpu"
         and not hasattr(local_driver, "CFIE_ALPHA"),
-        "2-D driver defaults to reference method and exposes no polarization or dead CFIE control",
+        "2-D driver defaults to CPU streaming and exposes no polarization or dead CFIE control",
     )
 
 
@@ -266,7 +267,7 @@ def test_bor_driver_loads():
         driver.CFIE_ALPHA = 0.5
         # The knobs the worker forwards must all exist on the solver entry point.
         import inspect
-        from bor_dispatch import solve_monostatic_rcs_bor
+        from ghost_backend.bor.dispatch import solve_monostatic_rcs_bor
         params = set(inspect.signature(solve_monostatic_rcs_bor).parameters)
         forwarded = {{
             "geometry_snapshot", "frequencies_ghz", "elevations_deg",
@@ -335,7 +336,7 @@ def test_local_bor_downstream_collection(workspace):
     if not body_paths:
         return
     sys.path.insert(0, str(BACKEND))
-    from feature_sum import (  # noqa: E402
+    from ghost_backend.assembly.fields import (
         load_body_grim,
         load_body_requested_radar_grid,
         load_body_solver_diagnostics,

@@ -45,7 +45,7 @@ def rel_err(new, ref):
 
 
 def build_mesh(module, geo_path, freq_ghz, pol, units):
-    from geometry_io import parse_geometry, build_geometry_snapshot
+    from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
 
     title, segments, ibcs, dielectrics = parse_geometry(Path(geo_path).read_text())
     snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
@@ -99,7 +99,7 @@ def main():
     if not ref_path or not Path(ref_path).is_file():
         raise SystemExit("usage: test_assembly_equivalence.py <reference rcs_solver.py>")
 
-    import rcs_solver as new
+    import ghost_backend.twod.solver as new
 
     ref = load_reference(ref_path)
     print(f"reference: {ref_path}")

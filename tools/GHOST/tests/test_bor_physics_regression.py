@@ -20,23 +20,18 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-import bor_dispatch  # noqa: E402
-import bor_streaming  # noqa: E402
-import feature_sum  # noqa: E402
-import grim_io  # noqa: E402
-import hpc_common  # noqa: E402
-import occluder  # noqa: E402
+import ghost_backend.bor.dispatch as bor_dispatch
+import ghost_backend.bor.streaming as bor_streaming
+import ghost_backend.assembly.fields as feature_sum
+import ghost_backend.io.grim as grim_io
+import ghost_backend.hpc.common as hpc_common
+import ghost_backend.geometry.occlusion as occluder
 import run_hpc_bor_monostatic  # noqa: E402
 import run_local_bor  # noqa: E402
-import surface_mesh  # noqa: E402
+import ghost_backend.geometry.surface as surface_mesh
 import validate_feature_reconstruction  # noqa: E402
-from bor_kernels import (  # noqa: E402
-    C0,
-    ETA0,
-    N_XI_SAFETY_CAP,
-    n_xi_for_pairs,
-)
-from bor_solver import (  # noqa: E402
+from ghost_backend.bor.kernels import C0, ETA0, N_XI_SAFETY_CAP, n_xi_for_pairs
+from ghost_backend.bor.solver import (
     BOR_LINEAR_BACKWARD_ERROR_MAX,
     BOR_LINEAR_RESIDUAL_MAX,
     BorCrossOperators,
@@ -52,13 +47,13 @@ from bor_solver import (  # noqa: E402
     solve_bor_dielectric,
     solve_bor_partial_coating,
 )
-from mie_sphere import (  # noqa: E402
+from ghost_backend.validation.sphere import (
     sigma_coated_pec_sphere,
     sigma_dielectric_sphere,
     sigma_impedance_sphere,
     sigma_pec_sphere,
 )
-from line_expand import SeamCoefficients, expand_perimeter  # noqa: E402
+from ghost_backend.assembly.line_expansion import SeamCoefficients, expand_perimeter
 
 
 FREQUENCY_HZ = 1.0e9

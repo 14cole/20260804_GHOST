@@ -16,8 +16,8 @@ import struct
 import tempfile
 import unittest
 import numpy as np
-import read_ss as R
-from grim_dataset import RcsGrid
+import grim_backend.io.xpatch as R
+from grim_backend.datasets.grid import RcsGrid
 
 
 def _be_i4(v):

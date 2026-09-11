@@ -9,8 +9,8 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import RcsGrid
-from grim_headless import load_dataset, read_SENTRi
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import load_dataset, read_SENTRi
 
 
 COMPACT_HEADER = (

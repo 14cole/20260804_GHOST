@@ -13,6 +13,7 @@ dependencies = [
   "matplotlib>=3.8",
   "PySide6>=6.6",
   "scipy>=1.11",
+  "threadpoolctl>=3.6",
 ]
 
 [project.optional-dependencies]
@@ -22,20 +23,13 @@ powerpoint = ["pywin32>=306; sys_platform == 'win32'"]
 [project.scripts]
 grim = "grim_cut_gui:main"
 grim-diagnose = "grim_diagnostics:main"
-grim-headless = "grim_headless:main"
+grim-headless = "grim_backend.cli:main"
 ppt-image-imprinter = "ppt_image_imprinter:main"
 
 [tool.setuptools]
 package-dir = {"" = "GRIM_Revised_2"}
 py-modules = [
-  "grim_dataset_audit",
-  "grim_format_io",
-  "grim_cst_io",
-  "grim_sentri_io",
-  "grim_legacy_io",
-  "grim_pio_io",
   "dataset_dialogs",
-  "dataset_publication",
   "dataset_jobs",
   "feature_assembly_model",
   "feature_assembly_values",
@@ -52,14 +46,12 @@ py-modules = [
   "grim_cut_dataset_mixin",
   "grim_cut_gui",
   "grim_cut_plot_mixin",
-  "grim_csv_schema",
   "grim_dataset",
   "grim_diagnostics",
   "grim_headless",
   "grim_palette",
   "grim_theme",
   "grim_widgets",
-  "grim_metadata",
   "grim_python",
   "ghost_integration",
   "hpc_remote",
@@ -73,11 +65,12 @@ py-modules = [
   "ppt_workflow",
   "assembly_workflow",
   "plot_models",
-  "ptm_io",
-  "read_ss",
   "runs_workspace",
 ]
 
 [tool.setuptools.packages.find]
 where = ["GRIM_Revised_2"]
-include = ["plot_modes*"]
+include = ["plot_modes*", "grim_backend*"]
+
+[tool.setuptools.package-data]
+grim_backend = ["README.md"]

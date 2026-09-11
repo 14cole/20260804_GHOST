@@ -39,7 +39,7 @@ def load_reference(path):
 
 
 def build_mesh(module, freq, pol="TM"):
-    from geometry_io import parse_geometry, build_geometry_snapshot
+    from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
 
     title, segments, ibcs, dielectrics = parse_geometry(GEOMETRY.read_text())
     snapshot = build_geometry_snapshot(title, segments, ibcs, dielectrics)
@@ -67,7 +67,7 @@ def timed(fn):
 
 
 def main():
-    import rcs_solver as new
+    import ghost_backend.twod.solver as new
 
     ref_path = sys.argv[1] if len(sys.argv) > 1 else None
     ref = load_reference(ref_path) if ref_path and Path(ref_path).is_file() else None

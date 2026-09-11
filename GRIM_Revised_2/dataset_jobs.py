@@ -1,6 +1,6 @@
 """Background dataset workers and bounded parallel loading.
 
-Publication transactions live in dataset_publication; catalog/UI ownership
+Publication transactions live in grim_backend.io.batch; catalog/UI ownership
 remains with DatasetOpsMixin."""
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import os
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PySide6.QtCore import QObject, QThread, Signal
-from grim_dataset import RcsGrid
-from grim_headless import is_supported_path, load_dataset as load_dataset_headless
-from dataset_publication import _stage_and_publish_csv_batch
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import is_supported_path, load_dataset as load_dataset_headless
+from grim_backend.io.batch import _stage_and_publish_csv_batch
 
 
 def _is_supported_dataset_path(path: str) -> bool:

@@ -8,8 +8,8 @@ from unittest import mock
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'Backend'))
-import rcs_solver as rcs
-from refined_lu import RefinedLU
+import ghost_backend.twod.solver as rcs
+from ghost_backend.linalg.refined_lu import RefinedLU
 from test_thin_sheet import sheet_snapshot
 
 

@@ -20,9 +20,9 @@ except ImportError:
 
 BACKEND = Path(__file__).resolve().parents[1] / "Backend"
 sys.path.insert(0, str(BACKEND))
-import hpc_bundle
-import hpc_common
-from solver_quality import accuracy_target_policy
+import ghost_backend.hpc.bundle as hpc_bundle
+import ghost_backend.hpc.common as hpc_common
+from ghost_backend.runs.quality import accuracy_target_policy
 
 
 class HeadlessSolverOptionsTests(unittest.TestCase):
@@ -38,8 +38,8 @@ from pathlib import Path
 from ibc.compute import LoadedLayer, MaterialTable, compute_stack_impedance_many
 from ibc.io import write_output
 from ibc.ghost_coating import assess_scalar_coating
-from assembly_inspector import interference_metrics, ContributionInspector
-from feature_workflow import prepare_feature_assembly, execute_feature_assembly
+from ghost_backend.assembly.inspector import interference_metrics, ContributionInspector
+from ghost_backend.assembly.workflow import prepare_feature_assembly, execute_feature_assembly
 from feature_family_validation import study_template
 layer = LoadedLayer(.000762, False, 0., MaterialTable([1.,18.], [4-.1j]*2, [1.]*2), None)
 frequencies = [1., 9.5, 18.]
@@ -90,7 +90,8 @@ assert study_template()['cases']
                 with self.assertRaises(hpc_bundle.BundleError):
                     hpc_bundle._validate_settings(solver, settings)
 
-    def _run_material_case(self, solver, geometry, *, units="inches", certified=True):
+    def _run_material_case(self, solver, geometry, *, units="inches", certified=True, execution=None,
+                           environment_profile=False):
         if psutil is None:
             self.skipTest("psutil is required to clean up timed-out worker trees")
         with tempfile.TemporaryDirectory(prefix="ghost-headless-") as temporary:
@@ -121,6 +122,12 @@ assert study_template()['cases']
                 settings["LU_PRECISION"] = "mixed"
             else:
                 settings.update(WORKERS_PER_UNIT=1, ELEVATIONS_DEG=[0.0], ASSEMBLY="streaming")
+            if execution is not None:
+                settings.update(EXECUTION_OPTIONS=execution, LU_PRECISION='double',
+                                SOLVER_METHOD='experimental_cpu')
+                if environment_profile:
+                    settings.pop('EXECUTION_OPTIONS')
+                    settings['ASSEMBLY_THREADS'] = execution['assembly_threads']
             bundle = root / "request"
             hpc_bundle.create_portable_bundle(
                 bundle, solver=solver, settings=settings,
@@ -154,6 +161,11 @@ assert study_template()['cases']
             )
             env = {**os.environ, "PYTHONPATH": os.pathsep.join((str(root), str(BACKEND))),
                    "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+            if environment_profile:
+                env.update(GHOST_CPU_FACTORIZATION=execution['factorization'],
+                           GHOST_COMPRESSED_STORAGE_MIB=str(execution['compressed_storage_mib']),
+                           GHOST_CPU_RHS_COMPRESSION=execution['rhs_compression'],
+                           GHOST_CPU_ANGLE_BATCH_SIZE=str(execution['angle_batch_size']))
             self._driver_process(driver, [], env, root / "prepare.log")
             run_dir = hpc_common.latest_run_dir(root / "runs")
             manifest = json.loads((run_dir / "manifest.json").read_text())
@@ -161,7 +173,11 @@ assert study_template()['cases']
             self.assertEqual(config["accuracy_target"], "tight")
             self.assertEqual(config["mesh_convergence_policy"], accuracy_target_policy("tight"))
             if solver == "2d":
-                self.assertEqual(config["lu_precision"], "mixed")
+                self.assertEqual(config["lu_precision"], "double" if execution else "mixed")
+            if execution is not None:
+                self.assertEqual(config['execution_options'], execution)
+                env['GHOST_CPU_FACTORIZATION'] = 'invalid-host-setting'
+                env['GHOST_COMPRESSED_STORAGE_MIB'] = 'not-a-number'
             self.assertTrue(list(run_dir.glob("submit_job*.slurm")))
             frozen = Path(manifest["units"][0]["geometry"])
             self.assertEqual(frozen.read_bytes(), staged_geometry.read_bytes())
@@ -181,8 +197,11 @@ assert study_template()['cases']
                 audit = json.loads(str(archive["solver_metadata_json"].reshape(()).item()))
             metadata_text = json.dumps(audit)
             self.assertIn('"runtime_profile"', metadata_text)
-            if solver == "2d":
+            if solver == "2d" and execution is None:
                 self.assertIn('"mixed_factorization"', metadata_text)
+            if execution is not None:
+                self.assertIn('"compressed_experimental_cpu"', metadata_text)
+                self.assertIn(json.dumps(execution, sort_keys=True), json.dumps(audit, sort_keys=True))
             if certified:
                 metadata = audit["metadata"]
                 if solver == "2d":
@@ -196,6 +215,21 @@ assert study_template()['cases']
     def test_freddy_coating_2d_mixed_tight_worker(self):
         self._run_material_case("2d", BACKEND.parent / "geometry_tests" /
                                 "pec_backed_ibc/example/2d_outer_envelope.geo")
+
+    def test_compressed_profile_reaches_fresh_worker_despite_host_environment(self):
+        from ghost_backend.execution.options import validate_options
+        self._run_material_case('2d', BACKEND.parent / 'geometry_tests' /
+            'pec_backed_ibc/example/2d_outer_envelope.geo', certified=False,
+            execution=validate_options(dict(factorization='compressed', compressed_storage_mib=64,
+                ram_budget_gib=2, assembly_threads='auto', blas_threads=1,
+                rhs_compression='on', angle_batch_size=17)))
+
+    def test_manifest_preserves_environment_selection_without_explicit_driver_profile(self):
+        from ghost_backend.execution.options import validate_options
+        self._run_material_case('2d', BACKEND.parent / 'geometry_tests' /
+            'pec_backed_ibc/example/2d_outer_envelope.geo', certified=False, environment_profile=True,
+            execution=validate_options(dict(factorization='compressed', compressed_storage_mib=64,
+                assembly_threads='auto', blas_threads=1, rhs_compression='on', angle_batch_size=17)))
 
     def test_freddy_coating_bor_tight_worker(self):
         self._run_material_case("bor", BACKEND.parent / "geometry_tests" /

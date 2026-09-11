@@ -45,23 +45,21 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from grim_dataset import (
-    C0,
-    GRIM_GC_CONVENTION,
-    LEGACY_PTM_GC_CONVENTION,
-    RcsGrid,
+from grim_backend.datasets.constants import C0, GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.datasets.coordinates import (
     canonical_angular_coordinate_system,
     wedge_to_conic_geometry_deg,
 )
-from grim_headless import (
+from grim_backend.io.loaders import (
     SUPPORTED_EXTENSIONS,
     is_supported_path,
     load_flat_csv as load_flat_csv_headless,
     load_dataset as load_dataset_headless,
 )
-from grim_csv_schema import write_flat_csv
-from grim_python import (
-    DatasetReference,
+from grim_backend.io.csv import write_flat_csv
+from grim_backend.scripting.recorder import DatasetReference
+from grim_backend.datasets.transforms import (
     _derived_response_extra,
     coherent_divide,
     convert_extrusion,
@@ -104,7 +102,7 @@ from dataset_dialogs import (
     _missing_coherent_metadata_keys,
 )
 from dataset_dialogs import _FREQUENCY_TO_HZ
-from dataset_publication import (
+from grim_backend.io.batch import (
     _CsvBatchRollbackError,
     _GRIM_COMPRESSION_SAMPLE_BYTES,
     _GRIM_LARGE_MINIMUM_SAVINGS,

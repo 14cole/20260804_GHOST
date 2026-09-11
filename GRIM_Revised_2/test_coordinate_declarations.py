@@ -7,9 +7,10 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION, RcsGrid
-from grim_headless import load_dataset
-from grim_python import plot_datasets
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import load_dataset
+from grim_backend.scripting.plotting import plot_datasets
 from plot_modes.common import validate_plot_datasets
 from test_ptm import _independent_fixture
 

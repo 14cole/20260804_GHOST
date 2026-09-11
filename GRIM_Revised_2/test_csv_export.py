@@ -9,7 +9,8 @@ from unittest import mock
 import numpy as np
 
 from grim_cut_dataset_mixin import _load_dataset_csv, _write_dataset_csv
-from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
 
 
 class TestCsvExport(unittest.TestCase):
@@ -269,7 +270,7 @@ class TestCsvExport(unittest.TestCase):
             raise OSError("simulated CSV failure")
 
         with mock.patch(
-            "dataset_publication.write_flat_csv",
+            "grim_backend.io.batch.write_flat_csv",
             side_effect=fail_after_partial,
         ):
             with self.assertRaisesRegex(OSError, "simulated CSV failure"):

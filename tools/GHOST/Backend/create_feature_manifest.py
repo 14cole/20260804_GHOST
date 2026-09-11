@@ -18,7 +18,7 @@ import uuid
 
 import numpy as np
 
-from feature_workflow import (
+from ghost_backend.assembly.workflow import (
     FEATURE_LIBRARY_MANIFEST_KEY,
     FEATURE_LIBRARY_MANIFEST_SCHEMA,
     FEATURE_VALIDATION_ARTIFACT_ROLES,

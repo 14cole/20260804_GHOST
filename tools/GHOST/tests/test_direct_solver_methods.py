@@ -8,7 +8,7 @@ from unittest import mock
 BACKEND = Path(__file__).resolve().parents[1] / "Backend"
 sys.path.insert(0, str(BACKEND))
 
-import rcs_solver as rcs
+import ghost_backend.twod.solver as rcs
 from test_2d_capability_acceptance import _circle
 
 

@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "Backend"))
 sys.path.insert(0, str(ROOT.parent.parent / "GRIM_Revised_2"))
 
-import feature_sum
-from components import (
+import ghost_backend.assembly.fields as feature_sum
+from ghost_backend.assembly.components import (
     COMPONENT_AMPLITUDE_CONVENTION,
     COMPONENT_COMPLEX_FIELD_DOMAIN,
     COMPONENT_PHASE_REFERENCE,

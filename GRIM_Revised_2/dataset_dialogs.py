@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtWidgets import QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QPlainTextEdit, QRadioButton, QSpinBox, QVBoxLayout
-from grim_dataset import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION, RcsGrid, canonical_angular_coordinate_system
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION, LEGACY_PTM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.datasets.coordinates import canonical_angular_coordinate_system
 
 
 _FREQUENCY_TO_HZ = {

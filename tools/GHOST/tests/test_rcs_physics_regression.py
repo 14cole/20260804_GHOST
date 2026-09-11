@@ -18,8 +18,8 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-import rcs_solver as rcs  # noqa: E402
-from mie_reference import (  # noqa: E402
+import ghost_backend.twod.solver as rcs
+from ghost_backend.validation.cylinder import (
     pec_cylinder_backscatter_amplitude,
     sigma_coated_pec_cylinder,
     sigma_dielectric_cylinder,

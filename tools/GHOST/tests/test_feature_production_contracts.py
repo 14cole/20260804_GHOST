@@ -16,8 +16,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 sys.path.append(str(REPO.parent.parent / "GRIM_Revised_2"))
 
-import feature_sum  # noqa: E402
-import feature_workflow  # noqa: E402
+import ghost_backend.assembly.fields as feature_sum
+import ghost_backend.assembly.workflow as feature_workflow
 from grim_dataset import RcsGrid  # noqa: E402
 
 
@@ -587,7 +587,7 @@ class FeatureManifestTests(unittest.TestCase):
             payload[feature_workflow.FEATURE_LIBRARY_MANIFEST_KEY] = np.asarray(
                 marker
             )
-            import grim_io
+            import ghost_backend.io.grim as grim_io
             grim_io._save_grim_npz(payload, str(output))
             with np.load(output, allow_pickle=False) as stored:
                 self.assertEqual(

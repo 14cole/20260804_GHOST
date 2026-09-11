@@ -44,7 +44,7 @@ class InterferencePreviewTests(unittest.TestCase):
     def test_toggle_reuses_fields_and_removes_the_interfering_contribution(self):
         self.widget._show(self.result)
         self.assertLess(float(self.widget.table.item(0, 7).text()), 0.)
-        with mock.patch.object(load_ghost_module("assembly_inspector").ContributionInspector,
+        with mock.patch.object(load_ghost_module("ghost_backend.assembly.inspector").ContributionInspector,
                                "evaluate", side_effect=AssertionError("No new solve during preview")):
             self.widget.table.item(0, 0).setCheckState(Qt.Unchecked)
         self.assertEqual(float(self.widget.table.item(0, 7).text()), 0.)

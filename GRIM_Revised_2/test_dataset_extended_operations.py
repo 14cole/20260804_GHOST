@@ -12,10 +12,11 @@ from unittest import mock
 import numpy as np
 
 import grim_dataset
-from grim_csv_schema import write_flat_csv
-from grim_dataset import RcsGrid
-from grim_headless import load_flat_csv
-from grim_python import _display_values, crop_dataset, regrid_axis
+from grim_backend.io.csv import write_flat_csv
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import load_flat_csv
+from grim_backend.scripting.plotting import _display_values
+from grim_backend.datasets.transforms import crop_dataset, regrid_axis
 
 
 _UNITS = {

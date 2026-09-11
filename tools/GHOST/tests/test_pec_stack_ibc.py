@@ -12,10 +12,10 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'Backend'))
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'FREDDY'))
 from ibc.compute import LoadedLayer, MaterialTable, compute_stack_impedance_many
 from ibc.io import write_output
-import rcs_solver as rcs
-import bor_dispatch
-from mie_reference import sigma_impedance_cylinder
-from mie_sphere import sigma_impedance_sphere
+import ghost_backend.twod.solver as rcs
+import ghost_backend.bor.dispatch as bor_dispatch
+from ghost_backend.validation.cylinder import sigma_impedance_cylinder
+from ghost_backend.validation.sphere import sigma_impedance_sphere
 from test_rcs_physics_regression import _circle_segment
 
 

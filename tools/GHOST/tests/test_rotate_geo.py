@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "Backend"))
 
-from geometry_io import parse_geometry  # noqa: E402
+from ghost_backend.geometry.io import parse_geometry
 from rotate_geo import rotate_geometry_file  # noqa: E402
 
 

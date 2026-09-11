@@ -18,7 +18,7 @@ BACKEND = ROOT / "Backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from ghost_gui import GhostMainWindow, GhostWorkspace, main  # noqa: E402
+from ghost_backend.ui.app import GhostMainWindow, GhostWorkspace, main
 
 try:  # noqa: E402
     from PySide6.QtGui import QCloseEvent
@@ -136,10 +136,10 @@ class TestGuiEntrypoint(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "geometry_tab.QFileDialog.getOpenFileName",
+                    "ghost_backend.ui.geometry.QFileDialog.getOpenFileName",
                     return_value=(str(fixture), "Geometry Files (*.geo)"),
                 ),
-                mock.patch("geometry_tab.QMessageBox.information"),
+                mock.patch("ghost_backend.ui.geometry.QMessageBox.information"),
             ):
                 self.assertTrue(geometry.load_geo())
 
@@ -203,12 +203,12 @@ class TestGuiEntrypoint(unittest.TestCase):
                         solver, "_collect_elevation_values", return_value=[15.0]
                     ),
                     mock.patch(
-                        "solver_tab.QFileDialog.getSaveFileName",
+                        "ghost_backend.ui.solver.QFileDialog.getSaveFileName",
                         return_value=(output, "JSON Files (*.json)"),
                     ) as save_dialog,
-                    mock.patch("solver_tab.QThread.start") as start,
+                    mock.patch("ghost_backend.ui.solver.QThread.start") as start,
                     mock.patch(
-                        "solver_tab.compute_boundary_densities"
+                        "ghost_backend.ui.solver.compute_boundary_densities"
                     ) as compute,
                 ):
                     solver._compute_currents()
@@ -236,7 +236,7 @@ class TestGuiEntrypoint(unittest.TestCase):
             solver = workspace.solver_tab
             solver._pending_solve_context = {"uses_geometry_tab": True}
             solver._is_solving = True
-            with mock.patch("solver_tab.QMessageBox.critical") as critical:
+            with mock.patch("ghost_backend.ui.solver.QMessageBox.critical") as critical:
                 solver._on_solver_canceled("Solve cancelled by user.")
 
             critical.assert_not_called()
@@ -260,7 +260,7 @@ class TestGuiEntrypoint(unittest.TestCase):
             with (
                 mock.patch.object(solver, "_populate_results_table") as table,
                 mock.patch.object(solver, "_plot_results") as plot,
-                mock.patch("solver_tab.QMessageBox.critical") as critical,
+                mock.patch("ghost_backend.ui.solver.QMessageBox.critical") as critical,
             ):
                 solver._on_solver_finished(
                     {"samples": [{"new": True}], "metadata": {}}, "body.geo"
@@ -284,7 +284,7 @@ class TestGuiEntrypoint(unittest.TestCase):
             solver._is_solving = True
             solver._abort_event = threading.Event()
             solver._abort_event.set()
-            with mock.patch("solver_tab.QMessageBox.critical") as critical:
+            with mock.patch("ghost_backend.ui.solver.QMessageBox.critical") as critical:
                 solver._on_solver_error("linear solve failed during shutdown")
 
             critical.assert_not_called()
@@ -306,7 +306,7 @@ class TestGuiEntrypoint(unittest.TestCase):
             }
             workspace.geometry_tab.geometry_changed.emit()
             self.assertTrue(solver._pending_density_context["geometry_stale"])
-            with mock.patch("solver_tab.QMessageBox.warning") as warning, \
+            with mock.patch("ghost_backend.ui.solver.QMessageBox.warning") as warning, \
                  mock.patch.object(solver, "_plot_boundary_densities") as plot:
                 solver._on_density_finished(3, {"channels": {}})
             warning.assert_called_once()
@@ -326,7 +326,7 @@ class TestGuiEntrypoint(unittest.TestCase):
             solver._is_computing_density = True
             solver._density_abort_event = threading.Event()
             solver._density_abort_event.set()
-            with mock.patch("solver_tab.QMessageBox.critical") as critical:
+            with mock.patch("ghost_backend.ui.solver.QMessageBox.critical") as critical:
                 solver._on_density_error(8, "calculation failed during shutdown")
 
             critical.assert_not_called()
@@ -386,7 +386,7 @@ class TestGuiEntrypoint(unittest.TestCase):
                         mock.patch.object(
                             solver, "_load_geometry_for_solver"
                         ) as load_geometry,
-                        mock.patch("solver_tab.QMessageBox.information"),
+                        mock.patch("ghost_backend.ui.solver.QMessageBox.information"),
                     ):
                         solver._run_solver()
                         solver._compute_currents()
@@ -437,7 +437,7 @@ class TestGuiEntrypoint(unittest.TestCase):
                     solver, "_resolve_output_path", return_value="result.grim"
                 ),
                 mock.patch(
-                    "solver_tab._planned_export_paths",
+                    "ghost_backend.ui.solver._planned_export_paths",
                     return_value=["result.grim"],
                 ),
                 mock.patch.object(
@@ -481,7 +481,7 @@ class TestGuiEntrypoint(unittest.TestCase):
                     solver, "_resolve_output_path", return_value="result.grim"
                 ),
                 mock.patch(
-                    "solver_tab._planned_export_paths",
+                    "ghost_backend.ui.solver._planned_export_paths",
                     return_value=["result.grim"],
                 ),
                 mock.patch.object(
@@ -492,7 +492,7 @@ class TestGuiEntrypoint(unittest.TestCase):
                 mock.patch.object(
                     solver, "_export_result_files", return_value=["result.grim"]
                 ) as export,
-                mock.patch("solver_tab.QMessageBox.warning") as warning,
+                mock.patch("ghost_backend.ui.solver.QMessageBox.warning") as warning,
             ):
                 solver._export_last_result()
 

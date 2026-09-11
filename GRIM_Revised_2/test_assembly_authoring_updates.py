@@ -15,7 +15,7 @@ from PySide6.QtCore import QThread
 from assembly_placement_editor import PlacementEditor, point_array, point_path, project_to_surface
 from assembly_response_comparison import read_response_cut, ResponseComparison
 from feature_assembly_panel import POINT_PLACEMENT_COLUMNS
-import feature_workflow as fw
+import ghost_backend.assembly.workflow as fw
 
 COMPARISON_UNITS = json.dumps({"azimuth": "deg", "elevation": "deg", "frequency": "GHz", "rcs_linear_quantity": "sigma_3d", "rcs_log_unit": "dBsm"})
 
@@ -59,7 +59,7 @@ class AuthoringUpdatesTests(unittest.TestCase):
 
     def test_tree_worker_uses_snapshot_preserves_version_and_honors_cancel(self):
         import assembly_tree as tree_module
-        from grim_dataset import RcsGrid
+        from grim_backend.datasets.grid import RcsGrid
         tree = tree_module.AssemblyTree()
         root = tree._make_node("Parts", tree_module._TYPE_ROOT, edit=False)
         for index in range(2):

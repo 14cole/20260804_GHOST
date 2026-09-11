@@ -9,7 +9,7 @@ import argparse
 import json
 import math
 from validate_feature_reconstruction import compare_feature_case, compare_grims, CASE_REQUIRED_PATHS
-from workflow_provenance import sha256_file
+from ghost_backend.execution.provenance import sha256_file
 
 FAMILIES = {
     "corner": ("included_angle_deg", (30., 60., 90.), "Two intersecting PEC groove runs, with a resolved sharp corner; compare to independent straight-run expansion."),

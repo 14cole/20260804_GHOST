@@ -20,10 +20,10 @@ REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "Backend"
 sys.path.insert(0, str(BACKEND))
 
-import feature_sum  # noqa: E402
-import bor_streaming  # noqa: E402
+import ghost_backend.assembly.fields as feature_sum
+import ghost_backend.bor.streaming as bor_streaming
 import build_bor_stream_kernel  # noqa: E402
-import rcs_solver  # noqa: E402
+import ghost_backend.twod.solver as rcs_solver
 
 
 class NativeLoaderTrustTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class NativeLoaderTrustTests(unittest.TestCase):
             root = Path(directory)
             (root / "bor_stream_kernel.so").write_bytes(b"foreign")
             with (
-                mock.patch.object(bor_streaming, "__file__", str(root / "bor_streaming.py")),
+                mock.patch.object(bor_streaming, "backend_root", return_value=root),
                 mock.patch.object(platform, "system", return_value="Windows"),
                 mock.patch.object(platform, "machine", return_value="AMD64"),
                 mock.patch.object(
@@ -81,7 +81,7 @@ class NativeLoaderTrustTests(unittest.TestCase):
             os.chdir(untrusted)
             try:
                 with (
-                    mock.patch.object(bor_streaming, "__file__", str(trusted / "bor_streaming.py")),
+                    mock.patch.object(bor_streaming, "backend_root", return_value=trusted),
                     mock.patch.object(platform, "system", return_value="Linux"),
                     mock.patch.object(platform, "machine", return_value="x86_64"),
                     mock.patch.object(

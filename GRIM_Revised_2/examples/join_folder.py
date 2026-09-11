@@ -21,8 +21,8 @@ from typing import Iterable, Sequence
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from grim_dataset import RcsGrid
-from grim_headless import is_supported_path, load_dataset
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import is_supported_path, load_dataset
 
 
 # =============================================================================

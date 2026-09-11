@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from grim_headless import is_supported_path
+from grim_backend.io.loaders import is_supported_path
 
 # MIME sent FROM the Datasets table TO the tree (single loaded dataset)
 MIME_DATASET = "application/x-grim-dataset"
@@ -1119,7 +1119,7 @@ def _grid_to_b64(grid) -> str:
 
 def _b64_to_grid(b64: str):
     """Reconstruct an RcsGrid from a base-64 string."""
-    from grim_dataset import RcsGrid
+    from grim_backend.datasets.grid import RcsGrid
     # Every member used below is materialized eagerly.  Close both the
     # in-memory stream and NumPy's ZipFile wrapper before returning so repeated
     # assembly loads do not retain duplicate encoded archives until GC runs.
@@ -2081,7 +2081,7 @@ class AssemblyTree(QTreeWidget):
 
         # ── dataset files dropped from the file explorer ─────────────────────
         if mime.hasUrls() and event.source() is not self:
-            from grim_dataset import RcsGrid
+            from grim_backend.datasets.grid import RcsGrid
             supported_paths = [
                 u.toLocalFile() for u in mime.urls()
                 if u.isLocalFile() and is_supported_path(u.toLocalFile())
@@ -2825,7 +2825,7 @@ class AssemblyTreePanel(QWidget):
             return
         try:
             snapshot = _BuildNode(item)
-            from grim_dataset import _coherent_working_set_limit_bytes
+            from grim_backend.datasets.memory import _coherent_working_set_limit_bytes
             required = snapshot.working_bytes()+16*1024**2
             limit = _coherent_working_set_limit_bytes(None)
             if required > limit:
@@ -2989,7 +2989,7 @@ def _intersect_numeric_axes(arrays, tol: float = 1e-6) -> np.ndarray:
     tolerance for floating-point matches. Preserves the first array's
     ordering.
     """
-    from grim_dataset import RcsGrid
+    from grim_backend.datasets.grid import RcsGrid
 
     return RcsGrid._axis_intersection(arrays, tol=tol)
 
@@ -3034,7 +3034,7 @@ def _axes_only_grid(az, el, f, pol, reference=None):
     """Construct a stub RcsGrid carrying only axis arrays — used as the target
     passed to RcsGrid.align_to() so we can align every part to the same set
     of axes without inventing a synthetic data array each time."""
-    from grim_dataset import RcsGrid
+    from grim_backend.datasets.grid import RcsGrid
 
     shape = (len(az), len(el), len(f), len(pol))
     zero = np.zeros(shape, dtype=np.float32)
@@ -3054,7 +3054,7 @@ def _axes_only_grid(az, el, f, pol, reference=None):
 def _coherent_target_indices(grid, target) -> tuple[list[int], ...]:
     """Map one target grid to source indices using GRIM's physical tolerances."""
 
-    from grim_dataset import _ANGLE_UNITS, _FREQUENCY_UNITS
+    from grim_backend.datasets.constants import _ANGLE_UNITS, _FREQUENCY_UNITS
 
     az_unit = grid._supported_unit(
         "azimuth", _ANGLE_UNITS, "deg"
@@ -3104,7 +3104,7 @@ def _coherent_target_indices(grid, target) -> tuple[list[int], ...]:
 def _align_coherent_grid(grid, target, *, mode: str):
     """Align authoritative complex field samples without float32 round-trip."""
 
-    from grim_dataset import RcsGrid
+    from grim_backend.datasets.grid import RcsGrid
 
     if mode == "intersect":
         indices = _coherent_target_indices(grid, target)
@@ -3589,7 +3589,8 @@ def _combine_children(
     output power   = |C_coh|² + P_incoh
     output phase   = arg(C_coh)   (NaN if there are no coherent contributors)
     """
-    from grim_dataset import C0, RcsGrid
+    from grim_backend.datasets.constants import C0
+    from grim_backend.datasets.grid import RcsGrid
 
     if not isinstance(coherent_metadata_attested, (bool, np.bool_)):
         raise TypeError("coherent_metadata_attested must be True or False")

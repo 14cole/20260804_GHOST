@@ -4,10 +4,14 @@ import sys
 import unittest
 import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'Backend'))
-from bor_solver import solve_bor
-from bor_kernels import C0
-from mie_sphere import sigma_electric_sheet_sphere, sigma_impedance_sphere, sigma_pec_sphere
-import bor_dispatch
+from ghost_backend.bor.solver import solve_bor
+from ghost_backend.bor.kernels import C0
+from ghost_backend.validation.sphere import (
+    sigma_electric_sheet_sphere,
+    sigma_impedance_sphere,
+    sigma_pec_sphere,
+)
+import ghost_backend.bor.dispatch as bor_dispatch
 
 
 def sphere(ka,n):
@@ -48,7 +52,7 @@ class BorMaterialUpdateTests(unittest.TestCase):
             solve_bor(points, 1e9, [0.], formulation='cfie', zs=np.linspace(100, 120, 12)*1j)
         with self.assertRaisesRegex(ValueError, 'cannot be combined'):
             solve_bor(points, 1e9, [0.], sheet_zs=100, zs=100j)
-        from rcs_solver import MaterialLibrary
+        from ghost_backend.twod.solver import MaterialLibrary
         library = MaterialLibrary.from_entries([['1','thin_dielectric','.001','2']],
                                                [['2','3','0','1','0']], '.')
         with self.assertRaisesRegex(ValueError, 'thin'):

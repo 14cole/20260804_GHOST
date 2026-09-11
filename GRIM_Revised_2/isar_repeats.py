@@ -17,7 +17,7 @@ from typing import Iterable
 
 import numpy as np
 
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 
 
 _REQUIRED_UNIT_KEYS = (

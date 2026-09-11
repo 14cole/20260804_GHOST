@@ -11,7 +11,7 @@ sys.path.insert(0,str(ROOT/'tools/GHOST/Backend'))
 from ibc.compute import LoadedLayer, MaterialTable, compute_stack_impedance_many
 from ibc.io import write_output, write_material_table
 from ibc.ghost_coating import assess_scalar_coating
-from geometry_io import snapshot_to_geometry_text
+from ghost_backend.geometry.io import snapshot_to_geometry_text
 
 
 def generate(folder):

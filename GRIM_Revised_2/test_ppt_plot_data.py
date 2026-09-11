@@ -6,7 +6,8 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import C0, GRIM_GC_CONVENTION, RcsGrid
+from grim_backend.datasets.constants import C0, GRIM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
 from ppt_plot_data import (
     DUAL_COPOLARIZATION,
     NamedGrid,

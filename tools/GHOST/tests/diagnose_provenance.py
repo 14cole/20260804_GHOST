@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "Backend"
 sys.path.insert(0, str(BACKEND))
 
-import workflow_provenance as wp  # noqa: E402
+import ghost_backend.execution.provenance as wp
 
 
 def main():

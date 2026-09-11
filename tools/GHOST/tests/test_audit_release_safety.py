@@ -18,19 +18,19 @@ for entry in (str(BACKEND), str(GRIM)):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 
-import bor_dispatch  # noqa: E402
-import bor_solver  # noqa: E402
-import grim_compat  # noqa: E402
-import hpc_scheduler  # noqa: E402
-from geometry_io import Segment, build_geometry_text  # noqa: E402
+import ghost_backend.bor.dispatch as bor_dispatch
+import ghost_backend.bor.solver as bor_solver
+import ghost_backend.io.viewer_bridge as grim_compat
+import ghost_backend.hpc.scheduler as hpc_scheduler
+from ghost_backend.geometry.io import Segment, build_geometry_text
 from grim_dataset import RcsGrid  # noqa: E402
 
 
 class AuditReleaseSafetyTests(unittest.TestCase):
     def test_staging_rejects_values_rejected_by_drivers(self):
         import importlib
-        import driver_config
-        import hpc_common
+        import ghost_backend.runs.config as driver_config
+        import ghost_backend.hpc.common as hpc_common
         for name, settings in (
             ('run_local_bor', {'CFIE_ALPHA': 0}),
             ('run_local_bor', {'CFIE_ALPHA': 1}),

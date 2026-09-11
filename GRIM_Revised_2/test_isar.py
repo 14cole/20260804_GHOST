@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 from grim_headless import form_isar
 from plot_modes import isar_mode
 

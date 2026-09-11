@@ -16,7 +16,7 @@ from generate_gap_geometry_study import (  # noqa: E402
     INCHES_PER_METER,
     _minimum_feature_clearance,
 )
-from geometry_io import parse_geometry  # noqa: E402
+from ghost_backend.geometry.io import parse_geometry
 
 
 def _require(condition, message):

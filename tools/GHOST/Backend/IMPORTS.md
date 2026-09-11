@@ -1,0 +1,75 @@
+# GHOST import locations
+
+Use package imports when adding or updating code. The root entry modules
+marked **yes** remain callable under their established names.
+
+| Former module | Package import | Root entry retained |
+| --- | --- | --- |
+| `assembly_geometry` | `ghost_backend.twod.assembly.geometry_plan` |  |
+| `assembly_inspector` | `ghost_backend.assembly.inspector` |  |
+| `assembly_session` | `ghost_backend.twod.assembly.session` |  |
+| `assembly_workload` | `ghost_backend.assembly.workload` |  |
+| `bor_dispatch` | `ghost_backend.bor.dispatch` | yes |
+| `bor_kernels` | `ghost_backend.bor.kernels` |  |
+| `bor_solver` | `ghost_backend.bor.solver` | yes |
+| `bor_streaming` | `ghost_backend.bor.streaming` |  |
+| `boundary_fields` | `ghost_backend.twod.fields` |  |
+| `compact_operators` | `ghost_backend.twod.assembly.compact` |  |
+| `components` | `ghost_backend.assembly.components` |  |
+| `compressed_factor` | `ghost_backend.compressed.factor` |  |
+| `compressed_inverse` | `ghost_backend.compressed.inverse` |  |
+| `compressed_memory` | `ghost_backend.compressed.memory` |  |
+| `compressed_native` | `ghost_backend.compressed.coefficients` |  |
+| `compressed_operator` | `ghost_backend.compressed.operator` |  |
+| `compressed_oracle` | `ghost_backend.compressed.regional_coefficients` |  |
+| `compressed_pair` | `ghost_backend.compressed.polarization_cache` |  |
+| `compressed_runtime` | `ghost_backend.compressed.runtime` |  |
+| `cpu_execution` | `ghost_backend.execution.cpu` |  |
+| `cpu_kernels` | `ghost_backend.twod.assembly.kernels` |  |
+| `dense_factor` | `ghost_backend.linalg.dense` |  |
+| `dense_workspace` | `ghost_backend.linalg.workspace` |  |
+| `dielectric_system` | `ghost_backend.twod.formulations.dielectric` |  |
+| `driver_config` | `ghost_backend.runs.config` |  |
+| `driver_io` | `ghost_backend.runs.inputs` |  |
+| `feature_library_contracts` | `ghost_backend.assembly.contracts` |  |
+| `feature_preparation` | `ghost_backend.assembly.preparation` |  |
+| `feature_sum` | `ghost_backend.assembly.fields` | yes |
+| `feature_workflow` | `ghost_backend.assembly.workflow` | yes |
+| `frame` | `ghost_backend.geometry.frames` |  |
+| `geometry_io` | `ghost_backend.geometry.io` | yes |
+| `geometry_tab` | `ghost_backend.ui.geometry` |  |
+| `ghost_gui` | `ghost_backend.ui.app` | yes |
+| `ghost_runtime` | `ghost_backend.execution.runtime` |  |
+| `grim_compat` | `ghost_backend.io.viewer_bridge` | yes |
+| `grim_io` | `ghost_backend.io.grim` | yes |
+| `grim_naming` | `ghost_backend.io.naming` |  |
+| `hierarchical_factor` | `ghost_backend.linalg.hierarchical` |  |
+| `hpc_bundle` | `ghost_backend.hpc.bundle` | yes |
+| `hpc_common` | `ghost_backend.hpc.common` |  |
+| `hpc_scheduler` | `ghost_backend.hpc.scheduler` |  |
+| `line_expand` | `ghost_backend.assembly.line_expansion` |  |
+| `local_mass` | `ghost_backend.twod.assembly.mass` |  |
+| `material_models` | `ghost_backend.geometry.materials` |  |
+| `mesh_guidance` | `ghost_backend.geometry.guidance` |  |
+| `mesh_quality` | `ghost_backend.geometry.quality` |  |
+| `mie_reference` | `ghost_backend.validation.cylinder` |  |
+| `mie_sphere` | `ghost_backend.validation.sphere` |  |
+| `multi_region` | `ghost_backend.twod.formulations.regions` |  |
+| `occluder` | `ghost_backend.geometry.occlusion` |  |
+| `rcs_constants` | `ghost_backend.twod.constants` |  |
+| `rcs_geometry` | `ghost_backend.twod.geometry` |  |
+| `rcs_operators` | `ghost_backend.twod.operators` |  |
+| `rcs_solver` | `ghost_backend.twod.solver` | yes |
+| `rcs_special` | `ghost_backend.twod.special` |  |
+| `refined_lu` | `ghost_backend.linalg.refined_lu` |  |
+| `robin_system` | `ghost_backend.twod.formulations.robin` |  |
+| `run_setup` | `ghost_backend.runs.setup` |  |
+| `sheet_system` | `ghost_backend.twod.formulations.sheet` |  |
+| `solver_metrics` | `ghost_backend.execution.metrics` |  |
+| `solver_quality` | `ghost_backend.runs.quality` |  |
+| `solver_tab` | `ghost_backend.ui.solver` |  |
+| `surface_mesh` | `ghost_backend.geometry.surface` |  |
+| `sweep_compression` | `ghost_backend.linalg.sweep` |  |
+| `system_scatter` | `ghost_backend.twod.assembly.scatter` |  |
+| `thin_sheet` | `ghost_backend.twod.formulations.thin_layer` |  |
+| `workflow_provenance` | `ghost_backend.execution.provenance` | yes |

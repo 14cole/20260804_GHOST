@@ -15,9 +15,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
 import place_features  # noqa: E402
-import feature_sum  # noqa: E402
-from frame import to_axis_frame  # noqa: E402
-from line_expand import SeamCoefficients, expand_perimeter  # noqa: E402
+import ghost_backend.assembly.fields as feature_sum
+from ghost_backend.geometry.frames import to_axis_frame
+from ghost_backend.assembly.line_expansion import SeamCoefficients, expand_perimeter
 
 
 HEADER = (

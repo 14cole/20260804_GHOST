@@ -11,12 +11,12 @@ import unittest
 BACKEND = Path(__file__).resolve().parents[1] / 'Backend'
 sys.path.insert(0, str(BACKEND))
 import numpy as np
-import driver_config
-import geometry_io
-import hpc_bundle
-import hpc_common
-import workflow_provenance as provenance
-from run_setup import DEFAULT_QUALITY, validate_setup
+import ghost_backend.runs.config as driver_config
+import ghost_backend.geometry.io as geometry_io
+import ghost_backend.hpc.bundle as hpc_bundle
+import ghost_backend.hpc.common as hpc_common
+import ghost_backend.execution.provenance as provenance
+from ghost_backend.runs.setup import DEFAULT_QUALITY, validate_setup
 from test_experimental_cpu import fixture
 
 
@@ -95,6 +95,9 @@ class ExperimentalHeadless(unittest.TestCase):
                 self.assertTrue(metadata['mesh_convergence_certified'])
                 self.assertEqual(len(metadata['experimental_cpu']['systems']), 4)
                 self.assertTrue(all(s['rhs_batches'] == 3 for s in metadata['experimental_cpu']['systems']))
+                if os.environ.get('GHOST_CPU_FACTORIZATION') == 'compressed':
+                    self.assertEqual(metadata['solver_method'], 'compressed_experimental_cpu')
+                    self.assertTrue(all('compressed' in s for s in metadata['experimental_cpu']['systems']))
                 attestation = provenance.read_embedded_attestation(str(path))
                 self.assertEqual(attestation['solver_config_sha256'], provenance.stable_json_fingerprint(manifest['solver_config']))
             changed = copy.deepcopy(manifest)

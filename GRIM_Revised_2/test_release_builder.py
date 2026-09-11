@@ -249,13 +249,13 @@ class ReleaseBuilderTests(unittest.TestCase):
             / "tools"
             / "GHOST"
             / "Backend"
-            / "feature_workflow.py"
+            / "ghost_backend/assembly/workflow.py"
         )
         missing.unlink()
         output = self.root / "must-not-exist"
 
         with self.assertRaisesRegex(
-            build_release.ReleaseBuildError, "feature_workflow.py"
+            build_release.ReleaseBuildError, "ghost_backend/assembly/workflow.py"
         ):
             self.build(output)
 
@@ -267,13 +267,13 @@ class ReleaseBuilderTests(unittest.TestCase):
             / "tools"
             / "GHOST"
             / "Backend"
-            / "assembly_workload.py"
+            / "ghost_backend/assembly/workload.py"
         )
         missing.unlink()
         output = self.root / "must-not-exist"
 
         with self.assertRaisesRegex(
-            build_release.ReleaseBuildError, "assembly_workload.py"
+            build_release.ReleaseBuildError, "ghost_backend/assembly/workload.py"
         ):
             self.build(output)
 

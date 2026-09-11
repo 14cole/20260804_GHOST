@@ -45,7 +45,7 @@ class GhostBackendDiscoveryTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ImportError, "No complete GHOST backend was found"
                 ):
-                    ghost_integration.load_ghost_module("ghost_gui")
+                    ghost_integration.load_ghost_module("ghost_backend.ui.app")
 
     def test_missing_backend_never_imports_same_named_sys_path_module(self):
         module_name = "ghost_untrusted_probe"
@@ -74,16 +74,16 @@ class GhostBackendDiscoveryTests(unittest.TestCase):
         self.assertIsNotNone(backend)
         assert backend is not None
 
-        module_name = "geometry_io"
+        module_name = "ghost_backend.geometry.io"
         original = sys.modules.get(module_name)
         stale = ModuleType(module_name)
-        stale.__file__ = str(backend.parent / "old_backend" / "geometry_io.py")
+        stale.__file__ = str(backend.parent / "old_backend" / "ghost_backend/geometry/io.py")
         sys.modules[module_name] = stale
         try:
             with self.assertRaisesRegex(
                 ImportError, "cannot mix backend modules from different checkouts"
             ):
-                ghost_integration.load_ghost_module("feature_workflow", backend)
+                ghost_integration.load_ghost_module("ghost_backend.assembly.workflow", backend)
         finally:
             if original is None:
                 sys.modules.pop(module_name, None)

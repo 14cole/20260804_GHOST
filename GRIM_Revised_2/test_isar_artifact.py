@@ -10,7 +10,7 @@ import zipfile
 import numpy as np
 
 import isar_artifact
-from grim_dataset import RcsGrid
+from grim_backend.datasets.grid import RcsGrid
 from isar_artifact import (
     ISAR_ARTIFACT_SCHEMA,
     build_isar_manifest,

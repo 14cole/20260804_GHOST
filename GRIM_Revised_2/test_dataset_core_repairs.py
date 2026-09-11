@@ -13,9 +13,9 @@ from unittest import mock
 import numpy as np
 
 import grim_dataset
-from grim_dataset import (
-    C0,
-    RcsGrid,
+from grim_backend.datasets.constants import C0
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.datasets.memory import (
     _checked_dense_import_allocation,
     _preflight_native_archive_allocation,
 )
@@ -431,7 +431,7 @@ class CoreOperationTests(unittest.TestCase):
                 max_output_bytes=2**127,
             )
         with mock.patch(
-            "grim_dataset._available_import_memory_bytes", return_value=1000
+            "grim_backend.datasets.memory._available_import_memory_bytes", return_value=1000
         ):
             dynamic = _checked_dense_import_allocation(
                 (100,), (np.float32,), source="unit test"
@@ -990,7 +990,7 @@ class PioStreamingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             # Three azimuths and a four-cell scratch target force one
             # frequency per tile, exercising every block boundary.
-            with mock.patch("grim_dataset._PIO_WRITE_BLOCK_CELLS", 4):
+            with mock.patch("grim_backend.datasets.constants._PIO_WRITE_BLOCK_CELLS", 4):
                 path = grid.save_pio(
                     os.path.join(directory, "streamed"), precision="double"
                 )

@@ -9,12 +9,13 @@ from unittest import mock
 import numpy as np
 from matplotlib.figure import Figure
 
-from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
 from grim_cut_plot_mixin import (
     PlotOpsMixin,
     _selected_polarization_axis_availability,
 )
-from grim_python import plot_datasets
+from grim_backend.scripting.plotting import plot_datasets
 from plot_modes import (
     azimuth_polar_mode,
     azimuth_rect_mode,

@@ -6,11 +6,11 @@ import unittest
 from unittest import mock
 import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"Backend"))
-import rcs_solver as rcs
-from refined_lu import RefinedLU, linear_precision, requested_precision
-from assembly_inspector import interference_metrics, _stored_complex_sample
-from mesh_guidance import refined_density, geometry_refinement_candidates
-from solver_quality import accuracy_target_policy
+import ghost_backend.twod.solver as rcs
+from ghost_backend.linalg.refined_lu import RefinedLU, linear_precision, requested_precision
+from ghost_backend.assembly.inspector import interference_metrics, _stored_complex_sample
+from ghost_backend.geometry.guidance import refined_density, geometry_refinement_candidates
+from ghost_backend.runs.quality import accuracy_target_policy
 from test_thin_sheet import sheet_snapshot
 
 

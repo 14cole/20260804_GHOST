@@ -20,6 +20,9 @@ class GrimDiagnosticsTests(unittest.TestCase):
         module_patch = mock.patch.dict(sys.modules)
         module_patch.start()
         self.addCleanup(module_patch.stop)
+        for name in tuple(sys.modules):
+            if name == "ghost_backend" or name.startswith("ghost_backend."):
+                sys.modules.pop(name, None)
         for relative in diagnostics.GHOST_SENTINELS:
             sys.modules.pop(Path(relative).stem, None)
 
@@ -35,6 +38,7 @@ class GrimDiagnosticsTests(unittest.TestCase):
             path.write_text("# sentinel\n", encoding="utf-8")
         (grim / "grim_diagnostics.py").write_text("# sentinel\n", encoding="utf-8")
         for relative in diagnostics.GHOST_SENTINELS:
+            (ghost / relative).parent.mkdir(parents=True, exist_ok=True)
             (ghost / relative).write_text("# sentinel\n", encoding="utf-8")
         for relative in diagnostics.FREDDY_SENTINELS:
             (freddy / relative).write_text("# sentinel\n", encoding="utf-8")
@@ -47,6 +51,7 @@ class GrimDiagnosticsTests(unittest.TestCase):
             "PySide6.QtWidgets": "6.8.0",
             "matplotlib.backends.backend_qtagg": "3.10.0",
             "scipy": "1.15.0",
+            "threadpoolctl": "3.6.0",
         }
         return diagnostics.DependencyProbe(True, versions[module_name])
 
@@ -118,13 +123,13 @@ class GrimDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             grim, ghost, _freddy = self._make_tree(root)
-            os.unlink(ghost / "rcs_solver.py")
+            os.unlink(ghost / "ghost_backend/twod/solver.py")
             results = self._collect(root, grim)
 
         self.assertEqual(diagnostics.startup_exit_code(results), 1)
         workspace = next(result for result in results if result.key == "ghost_workspace")
         self.assertTrue(workspace.blocks_startup)
-        self.assertIn("rcs_solver.py", " ".join(workspace.details))
+        self.assertIn("ghost_backend/twod/solver.py", " ".join(workspace.details))
         self.assertEqual(
             next(result for result in results if result.key == "native_bor").status,
             "SKIP",
@@ -181,22 +186,22 @@ class GrimDiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             grim, ghost, _freddy = self._make_tree(root)
-            (ghost / "frame.py").write_text("# backend module\n", encoding="utf-8")
-            stale = ModuleType("frame")
-            stale.__file__ = str(root / "old-backend" / "frame.py")
-            previous = sys.modules.get("frame")
-            sys.modules["frame"] = stale
+            (ghost / "ghost_backend/geometry/frames.py").write_text("# backend module\n", encoding="utf-8")
+            stale = ModuleType("ghost_backend.geometry.frames")
+            stale.__file__ = str(root / "old-backend" / "ghost_backend/geometry/frames.py")
+            previous = sys.modules.get("ghost_backend.geometry.frames")
+            sys.modules["ghost_backend.geometry.frames"] = stale
             try:
                 results = self._collect(root, grim)
             finally:
                 if previous is None:
-                    sys.modules.pop("frame", None)
+                    sys.modules.pop("ghost_backend.geometry.frames", None)
                 else:
-                    sys.modules["frame"] = previous
+                    sys.modules["ghost_backend.geometry.frames"] = previous
 
         origin = next(result for result in results if result.key == "ghost_origin")
         self.assertEqual(origin.status, "FAIL")
-        self.assertIn("frame", " ".join(origin.details))
+        self.assertIn("ghost_backend.geometry.frames", " ".join(origin.details))
         self.assertEqual(diagnostics.startup_exit_code(results), 1)
 
     def test_incomplete_freddy_override_falls_back_with_nonblocking_warning(self) -> None:

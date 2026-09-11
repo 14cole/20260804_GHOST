@@ -1,22 +1,17 @@
 """
-ss_diag.py - READ-ONLY diagnostic dump for an Xpatch .ss file.
+Read-only diagnostic dump for an Xpatch SS file.
 
-Does NOT modify anything. Reuses the tables/helpers in read_ss.py and adds:
-  * the FULL header-D parse (read_ss only reads the minimal 408-byte form),
-    so we can see azinc/elinc vs azobs/elobs vs azstart/elstart/azstop/elstop;
-  * per-field variation across ALL signals -> reveals which field actually sweeps;
-  * header-C location candidates + the nfreq-vs-maxfreq-vs-framing comparison;
-  * a raw dump of the float region just before header-D (the ifreq==2 freq block).
+Parse header-D fields, report variation across signals, compare header-C
+frequency counts with record framing, and dump the pre-header-D frequency block.
 
 usage:  python ss_diag.py FILE.ss
 """
 
 import sys
 import numpy as np
-import read_ss as R
+import grim_backend.io.xpatch as R
 
-# Full header-D ('D' case) from xpheaders.m, lines 226-263.  Total = 408 bytes,
-# so it occupies exactly the same span as the minimal 'd' form read_ss uses.
+# Header-D occupies 408 bytes.
 HDRD_FULL = [
     ("int", "simDate", 3), ("float", "stime", 1), ("float", "run_time_used", 1),
     ("int", "node_number_used", 1), ("char", "modelTitle", 256),

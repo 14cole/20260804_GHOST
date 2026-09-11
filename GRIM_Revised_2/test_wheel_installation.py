@@ -46,12 +46,35 @@ from PySide6.QtWidgets import QApplication
 assert Path(editor_module.__file__).resolve().parent == installed
 # Exercise extracted modules from the wheel, with checkout imports disabled.
 import importlib
-for name in ('grim_dataset_audit', 'grim_format_io', 'grim_cst_io', 'grim_sentri_io', 'grim_pio_io',
-             'grim_legacy_io', 'dataset_jobs', 'dataset_dialogs',
-             'dataset_publication', 'feature_assembly_model',
+for name in ('grim_backend.datasets.audit', 'grim_backend.io.native', 'grim_backend.io.cst', 'grim_backend.io.sentri', 'grim_backend.io.pioneer',
+             'grim_backend.io.out', 'grim_backend.io.ptm', 'grim_backend.io.xpatch', 'dataset_jobs', 'dataset_dialogs',
+             'grim_backend.io.batch', 'feature_assembly_model',
              'feature_assembly_recipe', 'feature_assembly_values', 'plot_modes.isar_render'):
     module = importlib.import_module(name)
     assert Path(module.__file__).resolve().is_relative_to(installed), name
+
+import pkgutil
+import grim_backend
+assert (Path(grim_backend.__file__).parent / 'README.md').is_file()
+import grim_dataset
+import grim_headless
+import grim_python
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.io.loaders import load_dataset
+for item in pkgutil.walk_packages(grim_backend.__path__, 'grim_backend.'):
+    module = importlib.import_module(item.name)
+    assert Path(module.__file__).resolve().is_relative_to(installed), item.name
+assert grim_dataset.RcsGrid is RcsGrid
+assert grim_headless.load_dataset is load_dataset
+import numpy as np
+grid = RcsGrid([0.0], [0.0], [1.0], ['VV'],
+               rcs_power=np.ones((1, 1, 1, 1)), rcs_phase=np.zeros((1, 1, 1, 1)))
+import tempfile
+with tempfile.TemporaryDirectory() as temp:
+    path = Path(temp) / 'roundtrip.grim'
+    grim_python.save_dataset_batch([(grid, path)])
+    loaded = load_dataset(path)
+    np.testing.assert_array_equal(loaded.rcs, grid.rcs)
 
 app = QApplication([])
 editor = editor_module.PlacementEditor('point', columns=POINT_PLACEMENT_COLUMNS, units='meters')

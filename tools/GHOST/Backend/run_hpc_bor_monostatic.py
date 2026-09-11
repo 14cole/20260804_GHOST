@@ -35,6 +35,7 @@ published or used downstream.
 Internal worker invocation (called by SLURM, not by the user):
     python run_hpc_bor_monostatic.py --worker <run_dir> <job_index> <node_index>
 """
+from ghost_backend.paths import backend_root as _backend_root
 
 import argparse
 import json
@@ -51,11 +52,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import hpc_scheduler
-import workflow_provenance as _workflow_provenance
-from geometry_io import material_sidecar_paths
-from solver_quality import accuracy_target_policy, validate_mesh_convergence_policy
-from workflow_provenance import (
+import ghost_backend.hpc.scheduler as hpc_scheduler
+import ghost_backend.execution.provenance as _workflow_provenance
+from ghost_backend.geometry.io import material_sidecar_paths
+from ghost_backend.runs.quality import accuracy_target_policy, validate_mesh_convergence_policy
+from ghost_backend.execution.provenance import (
     backend_source_fingerprint,
     backend_source_inventory,
     describe_source_mismatch,
@@ -68,7 +69,9 @@ from workflow_provenance import (
 )
 
 # Compatibility imports retain the established module entrypoints.
-from driver_io import publish_submission_journal as _durably_publish_submitted_jobs
+from ghost_backend.runs.inputs import (
+    publish_submission_journal as _durably_publish_submitted_jobs,
+)
 
 
 # ===============================================================================
@@ -130,12 +133,8 @@ WORKERS_PER_UNIT        = 4              # threads inside one BoR solve (modes
 BLAS_THREADS_PER_WORKER = 1
 
 # --- Scheduling ------------------------------------------------------------
-# Units are costed at submit time and dealt out longest-processing-time-first,
-# then claimed at run time through atomic files in <run_dir>/claims/.  A BoR
-# unit's cost grows roughly as the fourth power of frequency (elements^3 x
-# modes), so a frequency sweep is even more lopsided than the 2-D one and an
-# index-modulo split -- what this used to do -- strands the expensive units on
-# whichever slot happens to draw them.
+# Units are costed at submit time and assigned longest-first, then claimed
+# at run time through atomic files in <run_dir>/claims/.
 MEMORY_HEADROOM     = 0.85   # fraction of node memory the scheduler may reserve
 CLAIM_STALE_SECONDS = 7200   # a quiet claim older than this is stealable
 TASKS_PER_CHILD     = 2      # pool worker lifetime, in units
@@ -146,8 +145,11 @@ SUBMIT        = True
 
 # ===============================================================================
 
-from driver_config import (load_driver_configuration, configuration_source_records,
-                           copy_configuration)
+from ghost_backend.runs.config import (
+    load_driver_configuration,
+    configuration_source_records,
+    copy_configuration,
+)
 _CONFIG_KIND = 'bor'
 _CONFIG_KEYS = (
     'GEOMETRY_DIRS',
@@ -200,7 +202,7 @@ _SBATCH = shutil.which("sbatch") or "sbatch"
 
 def _solver_source_records():
     # type: () -> Tuple[str, Dict[str, str]]
-    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
+    backend_dir = str(_backend_root())
     return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
@@ -275,7 +277,7 @@ def _unit_attestation_fields(manifest, unit):
 
 def _verify_unit_input(unit, manifest):
     # type: (Dict[str, Any], Dict[str, Any]) -> None
-    from feature_sum import geometry_input_fingerprint
+    from ghost_backend.assembly.fields import geometry_input_fingerprint
     current = geometry_input_fingerprint(
         str(unit["geometry"]),
         str(manifest["solver_config"]["geometry_units"]),
@@ -344,7 +346,7 @@ def publish_monostatic(run_dir_str, require_complete=True):
                 f"unit(s) remain; first missing: {missing[0]}."
             )
 
-    from hpc_common import (
+    from ghost_backend.hpc.common import (
         bodies_from_units,
         bor_solver_diagnostics_from_units,
         read_unit_grims,
@@ -366,11 +368,8 @@ def publish_monostatic(run_dir_str, require_complete=True):
                 )
     records = read_unit_grims(run_dir / str(manifest["unit_output_dir"]))
 
-    from feature_sum import (
-        outer_generatrix,
-        save_monostatic_grim,
-    )
-    from geometry_io import build_geometry_snapshot, parse_geometry
+    from ghost_backend.assembly.fields import outer_generatrix, save_monostatic_grim
+    from ghost_backend.geometry.io import build_geometry_snapshot, parse_geometry
 
     grid = dict(manifest["radar_grid"])
     out_dir = run_dir / "results"
@@ -437,7 +436,7 @@ def _publish_monostatic_coordinated(
     exact Slurm requeue successor.
     """
 
-    from hpc_common import _expected_unit_output_paths, run_status
+    from ghost_backend.hpc.common import _expected_unit_output_paths, run_status
 
     run_dir = Path(run_dir).resolve()
     manifest = _manifest_for(run_dir)
@@ -586,7 +585,7 @@ def _solve_and_export(pair, snapshot, material_base, run_dir_str):
     if not missing:
         return ("skipped", ", ".join(str(path) for path in paths))
 
-    from bor_dispatch import (
+    from ghost_backend.bor.dispatch import (
         solve_monostatic_rcs_bor_certified,
         solve_monostatic_rcs_bor_survey,
     )
@@ -630,7 +629,7 @@ def _solve_and_export(pair, snapshot, material_base, run_dir_str):
     for unit in channel_units:
         _verify_unit_input(unit, manifest)
 
-    from grim_io import export_result_to_grim
+    from ghost_backend.io.grim import export_result_to_grim
     actual_paths = []
     for unit in missing:
         out_path = _unit_output_path(run_dir, unit)
@@ -709,7 +708,7 @@ def _build_slurm(script_path, run_dir, job_index):
         # GHOST checkout on PYTHONPATH.  Without this, a new driver can import
         # an old grim_io on compute nodes and fail only during derived export.
         ("export PYTHONPATH="
-         f"{shlex.quote(str(Path(_workflow_provenance.__file__).resolve().parent))}"
+         f"{shlex.quote(str(_backend_root()))}"
          ":${PYTHONPATH:-}"),
         (f"exec {shlex.quote(PYTHON_EXE)} {shlex.quote(str(script_path))} "
          f"--worker {shlex.quote(str(run_dir))} {job_index} "
@@ -733,7 +732,7 @@ def submit():
     pols = ["VV", "HH"]
     if not FREQUENCIES_GHZ: sys.exit("ERROR: FREQUENCIES_GHZ is empty.")
     try:
-        from feature_sum import radar_grid_aspects, validate_radar_grid
+        from ghost_backend.assembly.fields import radar_grid_aspects, validate_radar_grid
         validate_radar_grid(AZIMUTHS_DEG, ELEVATIONS_DEG)
         aspects = [float(value) for value in radar_grid_aspects(
             AZIMUTHS_DEG,
@@ -827,8 +826,8 @@ def submit():
             shutil.copy2(str(table), str(inp / table.name))
         frozen_geometries.append((geom, frozen))
 
-    from bor_dispatch import estimate_bor_resources
-    from geometry_io import build_geometry_snapshot, parse_geometry
+    from ghost_backend.bor.dispatch import estimate_bor_resources
+    from ghost_backend.geometry.io import build_geometry_snapshot, parse_geometry
 
     resource_estimates = {}  # type: Dict[Tuple[str, float], Dict[str, Any]]
     for _original, geom in frozen_geometries:
@@ -856,7 +855,7 @@ def submit():
             )
 
     units = []  # type: List[Dict[str, Any]]
-    from feature_sum import geometry_input_fingerprint
+    from ghost_backend.assembly.fields import geometry_input_fingerprint
     for original, geom in frozen_geometries:
         input_fingerprint = geometry_input_fingerprint(
             str(geom), GEOMETRY_UNITS
@@ -1042,7 +1041,7 @@ def _plan_units(units, n_slots, manifest_aspects, geometry_units):
 def worker(run_dir_str, job_index, node_index):
     # type: (str, int, int) -> None
     hpc_scheduler.install_fingerprint_cache()
-    from geometry_io import parse_geometry, build_geometry_snapshot
+    from ghost_backend.geometry.io import parse_geometry, build_geometry_snapshot
 
     run_dir  = Path(run_dir_str).resolve()
     manifest = json.loads((run_dir / "manifest.json").read_text())
@@ -1107,7 +1106,7 @@ def worker(run_dir_str, job_index, node_index):
         return
 
     snapshots = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
-    from feature_sum import geometry_input_fingerprint
+    from ghost_backend.assembly.fields import geometry_input_fingerprint
     for u in candidates:
         gpath = u["geometry"]
         if gpath in snapshots:
@@ -1133,7 +1132,7 @@ def worker(run_dir_str, job_index, node_index):
         unit for unit in candidates if "estimated_peak_gb" not in unit
     ]
     if unplanned:
-        from bor_dispatch import estimate_bor_resources
+        from ghost_backend.bor.dispatch import estimate_bor_resources
     for unit in unplanned:
         snapshot, material_base = snapshots[unit["geometry"]]
         resource_estimate = estimate_bor_resources(

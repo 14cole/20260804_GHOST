@@ -9,7 +9,8 @@ import unittest
 
 import numpy as np
 
-from grim_dataset import C0, RcsGrid
+from grim_backend.datasets.constants import C0
+from grim_backend.datasets.grid import RcsGrid
 
 
 def _grid(

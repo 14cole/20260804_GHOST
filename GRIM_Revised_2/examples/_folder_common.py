@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import numpy as np
-from grim_headless import is_supported_path
+from grim_backend.io.loaders import is_supported_path
 
 
 def discover_dataset_paths(

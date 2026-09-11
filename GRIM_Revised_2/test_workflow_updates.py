@@ -174,8 +174,8 @@ class WorkflowUpdatesTests(unittest.TestCase):
         self.assertTrue(ui.advanced_section.header.isChecked())
 
     def test_shared_2d_setup_roundtrip_and_incompatible_hpc_rejected_atomically(self):
-        module=load_ghost_module('run_setup')
-        SolverTab=load_ghost_module('solver_tab').SolverTab
+        module=load_ghost_module('ghost_backend.runs.setup')
+        SolverTab=load_ghost_module('ghost_backend.ui.solver').SolverTab
         from runs_workspace import RunsWorkspace
         local=SolverTab()
         cluster=RunsWorkspace(settings=QSettings(str(self.root/'settings.ini'),QSettings.IniFormat))
@@ -194,6 +194,8 @@ class WorkflowUpdatesTests(unittest.TestCase):
         other=copy.deepcopy(value)
         other['scattering']='bistatic'
         other['observation_angles_deg']=[0.,90.]
+        other['solver_method']='direct'
+        other['execution_options']['factorization']='dense'
         with self.assertRaisesRegex(ValueError,'monostatic'): cluster._apply_saved_run_setup(other)
         self.assertEqual(cluster._capture_run_setup(),value)
         local._apply_saved_run_setup(other)
@@ -203,8 +205,8 @@ class WorkflowUpdatesTests(unittest.TestCase):
         self.assertEqual(local._capture_run_setup(),other)
 
     def test_physical_dimensions_and_preflight_material_errors(self):
-        module=load_ghost_module('run_setup')
-        SolverTab=load_ghost_module('solver_tab').SolverTab
+        module=load_ghost_module('ghost_backend.runs.setup')
+        SolverTab=load_ghost_module('ghost_backend.ui.solver').SolverTab
         ui=SolverTab(); self.widgets.append(ui)
         geo=Path(__file__).resolve().parents[1]/'tools/GHOST/geometry_tests/material_examples/01_pec.geo'
         if not geo.is_file():
@@ -227,7 +229,7 @@ class WorkflowUpdatesTests(unittest.TestCase):
                 self.assertIn('VV + HH',summary)
 
     def test_background_preflight_finishes_without_solving_or_publishing(self):
-        SolverTab=load_ghost_module('solver_tab').SolverTab
+        SolverTab=load_ghost_module('ghost_backend.ui.solver').SolverTab
         ui=SolverTab(); self.widgets.append(ui)
         geo=Path(__file__).resolve().parents[1]/'tools/GHOST/geometry_tests/material_examples/type1_thin_dielectric.geo'
         ui.edit_geo_path.setText(str(geo))
@@ -235,7 +237,7 @@ class WorkflowUpdatesTests(unittest.TestCase):
         ui.cmb_units.setCurrentText('meters')
         published=[]
         ui.files_exported.connect(lambda *args:published.append(args))
-        with mock.patch('solver_tab._SolveWorker._run_2d') as solve:
+        with mock.patch('ghost_backend.ui.solver._SolveWorker._run_2d') as solve:
             ui._check_run_setup()
             self.assertTrue(ui.job_is_running())
             deadline=time.monotonic()+5

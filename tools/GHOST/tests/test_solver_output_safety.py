@@ -17,7 +17,7 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 try:
-    import solver_tab
+    import ghost_backend.ui.solver as solver_tab
 except (ImportError, RuntimeError) as exc:  # GUI dependency is optional in lean CI.
     solver_tab = None
     _IMPORT_ERROR = exc

@@ -19,7 +19,7 @@ GHOST = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(GHOST / "Backend"))
 
 import create_feature_manifest  # noqa: E402
-import feature_workflow  # noqa: E402
+import ghost_backend.assembly.workflow as feature_workflow
 import place_features  # noqa: E402
 
 

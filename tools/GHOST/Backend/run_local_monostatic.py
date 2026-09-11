@@ -19,6 +19,9 @@ Edit the CONFIG block and run:
 
     python run_local_monostatic.py
 """
+from ghost_backend.paths import backend_root as _backend_root
+from ghost_backend.execution.options import current_options, efficient_defaults
+from ghost_backend.runs.execution import driver_execution, unit_execution
 
 import json
 import math
@@ -31,10 +34,10 @@ from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import hpc_scheduler
-import workflow_provenance as _workflow_provenance
-from solver_quality import accuracy_target_policy
-from workflow_provenance import (
+import ghost_backend.hpc.scheduler as hpc_scheduler
+import ghost_backend.execution.provenance as _workflow_provenance
+from ghost_backend.runs.quality import accuracy_target_policy
+from ghost_backend.execution.provenance import (
     backend_source_fingerprint,
     backend_source_inventory,
     describe_source_mismatch,
@@ -46,9 +49,8 @@ from workflow_provenance import (
     verify_embedded_attestation,
 )
 
-# Compatibility imports retain the established module entrypoints.
-from driver_io import verify_local_unit_input as _verify_unit_input
-from driver_io import load_geometry_snapshot
+from ghost_backend.runs.inputs import verify_local_unit_input as _verify_unit_input
+from ghost_backend.runs.inputs import load_geometry_snapshot
 
 
 # ===============================================================================
@@ -71,11 +73,10 @@ OUTPUT_DIR = "rcs_runs"
 # setting.
 WORKERS = None
 
-# Solver knobs. Production 2-D runs always use condition-reporting dense LU
-# and co-solve both physical channels (VV/TE and HH/TM).
+# Solver settings for both physical channels (VV/TE and HH/TM).
 GEOMETRY_UNITS          = "inches"       # "inches" or "meters"
 MAX_PANELS              = 50_000
-BLAS_THREADS_PER_WORKER = 1
+BLAS_THREADS_PER_WORKER = efficient_defaults()['blas_threads']
 
 # Mesh-convergence certification. True solves every unit twice -- the requested
 # mesh and one refined by the policy's fine_factor -- and publishes the fine
@@ -89,7 +90,7 @@ BLAS_THREADS_PER_WORKER = 1
 # prevent downstream viewing, combination, or subtraction.
 MESH_CERTIFICATION      = True
 ACCURACY_TARGET         = "standard"     # "standard" | "tight"; mesh comparison limits
-SOLVER_METHOD           = "direct"       # "direct" | "experimental_cpu"; FP64 streamed CPU
+SOLVER_METHOD           = "experimental_cpu"       # "direct" | "experimental_cpu"; FP64 streamed CPU
 LU_PRECISION            = "double"       # "double" | "mixed"; CPU LU with refinement
 
 # --- Memory admission ------------------------------------------------------
@@ -103,13 +104,13 @@ MEMORY_HEADROOM = 0.75            # fraction of detected RAM the scheduler may
                                   # default of 0.85: a workstation has a
                                   # desktop, a browser, and a page cache to
                                   # leave room for.
-MEMORY_SAFETY   = 1.35            # multiplier on the solver's own dense-storage
-                                  # estimate, covering allocator slack and the
-                                  # transient copies a factorization makes.
+MEMORY_SAFETY   = 1.35            # Dense: whole-estimate margin. Compressed:
+                                  # sampled operator margin only; inverse and
+                                  # phase workspaces are already accounted for.
 MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
                                   # footprint (GHOST_MAX_SOLVE_GB). None =
-                                  # derive it from detected RAM (0.9 x detected,
-                                  # floored at 32 GB). Set it to run something
+                                  # derive it from available RAM (0.9 x available,
+                                  # with no minimum floor). Set it to run something
                                   # deliberately larger than this machine's RAM
                                   # against swap, or to refuse earlier.
 
@@ -117,7 +118,7 @@ MAX_SOLVE_GB    = None            # Hard ceiling on ONE solve's estimated
 # gives every concurrent solve an equal share of the cores -- which is what a
 # local run usually wants, since it typically has fewer units in flight than
 # the machine has cores.
-ASSEMBLY_THREADS        = "auto"         # "auto", or an integer >= 1
+ASSEMBLY_THREADS        = efficient_defaults()['assembly_threads']         # "auto", or an integer >= 1
 
 # Pool worker lifetime, in units, so allocator growth from a big solve cannot
 # accumulate across a long sweep. The solver is imported in the parent, so a
@@ -128,10 +129,16 @@ GEOMETRY_EXTS = (".geo",)
 
 # ===============================================================================
 
-from driver_config import (load_driver_configuration, configuration_source_records,
-                           copy_configuration)
+from ghost_backend.runs.config import (
+    load_driver_configuration,
+    configuration_source_records,
+    copy_configuration,
+)
 _CONFIG_KIND = '2d'
+EXECUTION_OPTIONS = None
+
 _CONFIG_KEYS = (
+    'EXECUTION_OPTIONS',
     'FRD_DIR',
     'OPN_DIR',
     'FREQUENCIES_GHZ',
@@ -164,7 +171,7 @@ _SNAPSHOT_CACHE = {}  # type: Dict[str, Tuple[Dict[str, Any], str]]
 
 
 def _solver_source_records() -> 'Tuple[str, Dict[str, str]]':
-    backend_dir = str(Path(_workflow_provenance.__file__).resolve().parent)
+    backend_dir = str(_backend_root())
     return backend_dir, configuration_source_records(__file__, _ACTIVE_CONFIG_PATH)
 
 
@@ -285,11 +292,12 @@ def _load_snapshot(geometry_path: 'str') -> 'Tuple[Dict[str, Any], str]':
 def _pool_initializer(blas_threads: 'int') -> 'None':
     hpc_scheduler.pin_blas_threads(blas_threads)
     hpc_scheduler.install_fingerprint_cache()
-    import rcs_solver
+    import ghost_backend.twod.solver as rcs_solver
 
     rcs_solver.set_assembly_threads(1)
 
 
+@unit_execution
 def _solve_and_export(
     unit: 'Dict[str, Any]',
     context: 'Dict[str, Any]',
@@ -319,16 +327,16 @@ def _solve_and_export(
         solver_method=context.get("solver_method", "direct"),
     )
     # Select precision inside each worker; context variables are process-local.
-    from refined_lu import linear_precision
+    from ghost_backend.linalg.refined_lu import linear_precision
     with linear_precision(context.get("lu_precision", "double")):
         if context["mesh_certification"]:
-            from rcs_solver import solve_monostatic_rcs_2d_certified
+            from ghost_backend.twod.solver import solve_monostatic_rcs_2d_certified
             result = solve_monostatic_rcs_2d_certified(
                 mesh_convergence_policy=context["mesh_convergence_policy"],
                 **solve_kwargs
             )
         else:
-            from rcs_solver import solve_monostatic_rcs_2d_survey
+            from ghost_backend.twod.solver import solve_monostatic_rcs_2d_survey
             result = solve_monostatic_rcs_2d_survey(**solve_kwargs)
     _verify_run_provenance(context)
     _verify_unit_input(unit, context)
@@ -337,7 +345,7 @@ def _solve_and_export(
     # results/ holds one file per unit instead of a .grim and a sidecar.
     embed_output_attestation(result, attestation)
 
-    from grim_io import export_result_to_grim
+    from ghost_backend.io.grim import export_result_to_grim
     written = export_result_to_grim(
         result, str(out_path),
         source_path=str(snapshot.get("source_path", "") or ""),
@@ -359,8 +367,9 @@ def _solve_and_export_star(args: 'tuple') -> 'tuple':
 
     unit, context, results_dir_str, assembly_threads = args
     try:
-        import rcs_solver
+        import ghost_backend.twod.solver as rcs_solver
         rcs_solver.set_assembly_threads(assembly_threads)
+        context = dict(context, execution_assembly_threads=assembly_threads)
         status, path = _solve_and_export(unit, context, results_dir_str)
         return ("ok", status, path)
     except Exception:
@@ -465,6 +474,7 @@ def _validate_config() -> 'Tuple[List[float], List[float]]':
     return frequencies, azimuths
 
 
+@driver_execution
 def main() -> 'None':
     frequencies, azimuths = _validate_config()
     if MAX_SOLVE_GB:
@@ -485,7 +495,7 @@ def main() -> 'None':
         )
 
     units: 'List[Dict[str, Any]]' = []
-    from feature_sum import geometry_input_fingerprint
+    from ghost_backend.assembly.fields import geometry_input_fingerprint
     for geom in geometries:
         input_fingerprint = geometry_input_fingerprint(
             str(geom), GEOMETRY_UNITS
@@ -520,6 +530,7 @@ def main() -> 'None':
         "accuracy_target": ACCURACY_TARGET,
         "lu_precision": LU_PRECISION,
         "solver_method": SOLVER_METHOD,
+        "execution_options": current_options(),
         "mesh_certification": bool(MESH_CERTIFICATION),
     }
     manifest: 'Dict[str, Any]' = {
@@ -542,10 +553,7 @@ def main() -> 'None':
     manifest_path = run_dir / "manifest.json"
     _write_json_atomic(manifest_path, manifest)
 
-    # Everything a unit needs from the manifest, resolved once in the parent.
-    # Workers used to re-read and re-parse the whole manifest -- which carries
-    # every unit's record -- inside every unit, making the parsing cost
-    # quadratic in the size of the sweep.
+    # Resolve shared manifest fields once in the parent process.
     context = {
         "run_id": run_id,
         "solver_source_sha256": manifest["solver_source_sha256"],
@@ -558,6 +566,7 @@ def main() -> 'None':
         "mesh_convergence_policy": mesh_policy,
         "lu_precision": LU_PRECISION,
         "solver_method": SOLVER_METHOD,
+        "execution_options": current_options(),
         "mesh_certification": bool(MESH_CERTIFICATION),
         "azimuths_deg": azimuths,
         "angular_grid_sha256": stable_json_fingerprint(
@@ -582,6 +591,8 @@ def main() -> 'None':
     )
 
     cores = hpc_scheduler.detect_cores()
+    if int(BLAS_THREADS_PER_WORKER) > cores:
+        raise ValueError("BLAS threads per solve exceed the available CPU allocation ({}).".format(cores))
     memory_gb = hpc_scheduler.detect_memory_gb()
     budget_gb = max(1.0, memory_gb * float(MEMORY_HEADROOM))
     worker_cap = max(1, cores - 1) if WORKERS is None else int(WORKERS)
@@ -634,8 +645,8 @@ def main() -> 'None':
     # rather than a re-import of numpy, SciPy, and the solver module.
     for unit in ordered:
         _load_snapshot(str(unit["geometry"]))
-    import rcs_solver  # noqa: F401
-    import grim_io     # noqa: F401
+    import ghost_backend.twod.solver as rcs_solver
+    import ghost_backend.io.grim as grim_io
 
     counters = {"written": 0, "skipped": 0, "failed": 0}
     started = time.time()
@@ -687,9 +698,9 @@ def main() -> 'None':
             peak_gb = peaks.get(_unit_name(unit), 0.0)
             return (
                 peak_gb,
-                _unit_assembly_threads(
+                max(int(BLAS_THREADS_PER_WORKER), _unit_assembly_threads(
                     cores, pool_size, budget_gb, peak_gb
-                ),
+                )),
             )
 
         dispatcher.run(

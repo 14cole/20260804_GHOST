@@ -12,11 +12,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "Backend"))
 
-from bor_solver import (  # noqa: E402
-    BOR_LINEAR_BACKWARD_ERROR_MAX,
-    BorPecSolver,
-    solve_bor,
-)
+from ghost_backend.bor.solver import BOR_LINEAR_BACKWARD_ERROR_MAX, BorPecSolver, solve_bor
 
 
 FREQUENCY_HZ = 1.0e9

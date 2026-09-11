@@ -51,7 +51,8 @@ from assembly_tree import (
     _attach,
     _branch_drop_would_create_cycle,
 )
-from grim_dataset import GRIM_GC_CONVENTION, RcsGrid
+from grim_backend.datasets.constants import GRIM_GC_CONVENTION
+from grim_backend.datasets.grid import RcsGrid
 
 
 class _FakeGhostIntegration(QWidget):
@@ -1295,7 +1296,7 @@ class UnifiedGuiShellTest(unittest.TestCase):
         )
 
     def test_sentri_positive_half_sweep_is_displayed_in_source_range(self) -> None:
-        from grim_headless import load_dataset
+        from grim_backend.io.loaders import load_dataset
         from test_sentri_io import COMPACT_HEADER, COMPACT_UNITS
 
         with tempfile.TemporaryDirectory() as folder:

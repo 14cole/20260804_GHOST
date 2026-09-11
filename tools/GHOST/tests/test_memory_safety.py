@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "Backend"
 sys.path.insert(0, str(BACKEND))
 
-import bor_solver  # noqa: E402
-import bor_streaming  # noqa: E402
-import rcs_solver as rcs  # noqa: E402
+import ghost_backend.bor.solver as bor_solver
+import ghost_backend.bor.streaming as bor_streaming
+import ghost_backend.twod.solver as rcs
 
 
 GIB = 1024 ** 3

@@ -11,14 +11,11 @@ from unittest import mock
 
 import numpy as np
 
-from grim_dataset import RcsGrid
-from grim_python import (
-    DatasetReference,
-    PythonScriptRecorder,
-    join_datasets,
-    plot_datasets,
-    save_dataset_batch,
-)
+from grim_backend.datasets.grid import RcsGrid
+from grim_backend.scripting.recorder import DatasetReference, PythonScriptRecorder
+from grim_backend.datasets.transforms import join_datasets
+from grim_backend.scripting.plotting import plot_datasets
+from grim_backend.io.batch import save_dataset_batch
 
 
 class PythonRecorderTests(unittest.TestCase):
@@ -442,7 +439,7 @@ class PythonRecorderTests(unittest.TestCase):
                     raise OSError("injected second publication failure")
                 real_replace(source, destination)
 
-            with mock.patch("grim_python._replace_file", side_effect=fail_second_stage):
+            with mock.patch("grim_backend.io.batch._replace_file", side_effect=fail_second_stage):
                 with self.assertRaisesRegex(OSError, "injected second publication"):
                     save_dataset_batch(
                         [(self._grid(), first), (self._grid(), second)]
