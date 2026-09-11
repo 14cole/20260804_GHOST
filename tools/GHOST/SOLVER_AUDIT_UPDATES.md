@@ -79,7 +79,7 @@ tests. The vector reference integration also passed a focused rerun that treats
 integration warnings as errors. Python compilation and diff whitespace checks
 passed.
 
-The new `tests/test_solver_audit_fixes.py` checks absolute cylindrical complex
+The new `ghost_backend/tests/test_solver_audit_fixes.py` checks absolute cylindrical complex
 amplitudes, certified phase, the lossless optical theorem, incidence-count
 planning, frequency-local cache behavior, mesh counts, scalar and vector
 angular kernels against independent adaptive integration, axis pairs, FFT

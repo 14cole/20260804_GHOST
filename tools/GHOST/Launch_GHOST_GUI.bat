@@ -1,9 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+set "GHOST_GUI=%~dp0ghost_backend\run_gui.py"
 
-if not exist "Backend\ghost_gui.py" (
-    echo ERROR: Backend\ghost_gui.py was not found.
+if not exist "%GHOST_GUI%" (
+    echo ERROR: %GHOST_GUI% was not found.
     pause
     exit /b 1
 )
@@ -25,7 +26,7 @@ if defined VIRTUAL_ENV if exist "%VIRTUAL_ENV%\Scripts\python.exe" (
 where py.exe >nul 2>&1
 if not errorlevel 1 (
     echo --- py.exe -3 --- >>"%GHOST_LAUNCH_LOG%"
-    py.exe -3 "Backend\ghost_gui.py" --check >>"%GHOST_LAUNCH_LOG%" 2>&1
+    py.exe -3 "%GHOST_GUI%" --check >>"%GHOST_LAUNCH_LOG%" 2>&1
     if not errorlevel 1 goto launch_py
 )
 
@@ -40,24 +41,24 @@ goto missing_dependencies
 :try_python
 set "GHOST_PYTHON=%~1"
 echo --- %GHOST_PYTHON% --- >>"%GHOST_LAUNCH_LOG%"
-"%GHOST_PYTHON%" "Backend\ghost_gui.py" --check >>"%GHOST_LAUNCH_LOG%" 2>&1
+"%GHOST_PYTHON%" "%GHOST_GUI%" --check >>"%GHOST_LAUNCH_LOG%" 2>&1
 exit /b %ERRORLEVEL%
 
 :launch_python
 for %%I in ("%GHOST_PYTHON%") do set "GHOST_PYTHONW=%%~dpIpythonw.exe"
 if exist "%GHOST_PYTHONW%" (
-    start "" "%GHOST_PYTHONW%" "%~dp0Backend\ghost_gui.py"
+    start "" "%GHOST_PYTHONW%" "%GHOST_GUI%"
 ) else (
-    start "" "%GHOST_PYTHON%" "%~dp0Backend\ghost_gui.py"
+    start "" "%GHOST_PYTHON%" "%GHOST_GUI%"
 )
 exit /b 0
 
 :launch_py
 where pyw.exe >nul 2>&1
 if errorlevel 1 (
-    start "" py.exe -3 "%~dp0Backend\ghost_gui.py"
+    start "" py.exe -3 "%GHOST_GUI%"
 ) else (
-    start "" pyw.exe -3 "%~dp0Backend\ghost_gui.py"
+    start "" pyw.exe -3 "%GHOST_GUI%"
 )
 exit /b 0
 

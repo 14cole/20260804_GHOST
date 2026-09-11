@@ -1,0 +1,4546 @@
+"""Qt presentation and compatibility exports for coherent feature assembly.
+
+The physics and placement validation deliberately do not live here.
+``FeatureWorkflowAdapter`` accepts the authoritative GHOST
+``feature_workflow`` module (or a compatible injected service), while
+``FeatureAssemblyFormModel`` keeps request construction testable without Qt or
+GHOST on the import path.  The fixed CSV headers are mirrored here only so the
+GUI can explain the contract and write blank templates before a backend is
+connected; GHOST remains the authoritative parser.
+
+Preview visibility is intentionally absent from the request model.  Hiding a
+point or line group in the Assembly 3-D view must never remove that response
+from the coherent physical assembly.
+"""
+
+from __future__ import annotations
+
+import ast
+from dataclasses import dataclass, field
+from functools import lru_cache
+import hashlib
+import inspect
+import io
+import json
+import math
+import os
+from pathlib import Path
+import struct
+import tempfile
+import threading
+from typing import Any, Callable, Iterable, Mapping, Protocol, runtime_checkable
+import zipfile
+
+
+from GRIM_Backend.assembly.model import (
+    ASSEMBLY_REVIEW_LARGE_MESH_SHADOW_RAYS,
+    ASSEMBLY_REVIEW_LARGE_MESH_TRIANGLES,
+    ASSEMBLY_REVIEW_LINE_FIELD_CELLS,
+    ASSEMBLY_REVIEW_POINT_FIELD_CELLS,
+    ASSEMBLY_REVIEW_RADAR_GRID_CELLS,
+    ASSEMBLY_REVIEW_SHADOW_RAYS,
+    AssemblyWorkEstimate,
+    BaseGrimPreflight,
+    DEFAULT_NORMAL_TOL_DEG,
+    DEFAULT_SKIN_PHASE_TOL_DEG,
+    DEFAULT_SKIN_TOL_MM,
+    FEATURE_RECIPE_HASH_LIMIT_BYTES,
+    FEATURE_RECIPE_SCHEMA,
+    FEATURE_RECIPE_SUFFIX,
+    FEATURE_RECIPE_VERSION,
+    FEATURE_SELECTION_DISPLAY_ID_LIMIT,
+    FeatureAssemblyFormModel,
+    FeatureAssemblyValues,
+    FeatureBuildDispatch,
+    FeatureWorkflowAdapter,
+    LINE_PLACEMENT_COLUMNS,
+    LINE_PLACEMENT_EXAMPLE,
+    LoadedDatasetEntry,
+    LoadedFeatureAssemblyRecipe,
+    POINT_PLACEMENT_COLUMNS,
+    POINT_PLACEMENT_EXAMPLE,
+    SurfaceBindingReadiness,
+    UNIT_ABBREVIATIONS,
+    UNIT_CHOICES,
+    UNIT_SCALE_M,
+    VALIDATION_PROFILES,
+    WORKLOAD_REVIEW_WARNING_PREFIX,
+    _BASE_GRIM_REQUIRED_KEYS,
+    _DatasetDiscovery,
+    _FeatureWorkflowModule,
+    _FileFingerprint,
+    _PREVALIDATION_LINE_PIECES_PER_SEGMENT,
+    _PreparedPlanCache,
+    _VerifiedInputPreview,
+    _axis_size,
+    _callable_accepts_keyword,
+    _callable_accepts_runtime_hooks,
+    _callable_key,
+    _clean_path,
+    _coerce_loaded_dataset_catalog,
+    _coerce_loaded_dataset_entry,
+    _entry_value,
+    _features_only_grim_output_path,
+    _fingerprint_file,
+    _format_binary_bytes,
+    _normalized_grim_output_path,
+    _npy_member_vector_count,
+    _path_key,
+    _paths_alias,
+    _preflight_base_grim_zip,
+    _publication_snapshot,
+    _published_during_execution,
+    _recipe_absolute_path,
+    _recipe_id_set,
+    _recipe_relative_path,
+    _recipe_source_items,
+    _recipe_string_mapping,
+    _recipe_target_path,
+    _require_finite_nonnegative,
+    _requirements_count,
+    _requirements_ids,
+    _requirements_line_instances,
+    _requirements_point_instances,
+    _resolved_user_path,
+    _response_summary_cached,
+    _surface_binding_identity_key,
+    _surface_binding_sidecar_path,
+    _surface_dimensions_summary,
+    _surface_mesh_triangle_hint_cached,
+    _surface_preview_identity_key,
+    assembly_build_confirmation_required,
+    assess_surface_binding_readiness,
+    coerce_feature_workflow,
+    estimate_assembly_workload,
+    estimate_validated_assembly_plan_workload,
+    feature_assembly_recipe_payload,
+    format_assembly_work_estimate,
+    parse_study_samples,
+    placement_csv_template_text,
+    preflight_base_grim,
+    read_feature_assembly_recipe,
+    response_summary,
+    surface_mesh_triangle_hint,
+    write_feature_assembly_recipe,
+    write_placement_csv_template,
+)
+
+
+_GUI_IMPORT_ERROR: Exception | None = None
+try:  # Keep the model importable on headless/minimal installations.
+    from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+    from PySide6.QtWidgets import (
+        QAbstractItemView,
+        QApplication,
+        QCheckBox,
+        QComboBox,
+        QDoubleSpinBox,
+        QDialog,
+        QDialogButtonBox,
+        QFileDialog,
+        QFormLayout,
+        QFrame,
+        QGroupBox,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
+        QMenu,
+        QMessageBox,
+        QProgressBar,
+        QPushButton,
+        QScrollArea,
+        QSizePolicy,
+        QTabWidget,
+        QTableWidget,
+        QTableWidgetItem,
+        QToolButton,
+        QTreeWidget,
+        QTreeWidgetItem,
+        QVBoxLayout,
+        QWidget,
+    )
+except (ImportError, RuntimeError) as exc:  # pragma: no cover - environment-specific
+    _GUI_IMPORT_ERROR = exc
+
+
+GUI_AVAILABLE = _GUI_IMPORT_ERROR is None
+
+
+if GUI_AVAILABLE:
+
+    class _OperationWorker(QObject):
+        succeeded = Signal(object)
+        failed = Signal(str)
+        cancelled = Signal(str)
+        progress = Signal(int, str)
+
+        def __init__(
+            self,
+            operation: Callable[..., Any],
+            *,
+            cooperative: bool = False,
+        ) -> None:
+            super().__init__()
+            self._operation = operation
+            self._cooperative = bool(cooperative)
+            self._cancel_event = threading.Event()
+            self._last_percent = -1
+
+        def request_cancel(self) -> None:
+            """Thread-safe direct call from the GUI thread."""
+
+            self._cancel_event.set()
+
+        def is_cancelled(self) -> bool:
+            return self._cancel_event.is_set()
+
+        def report_progress(self, done: int, total: int, message: str) -> None:
+            count = max(1, int(total))
+            percent = max(0, min(100, int(round(100.0 * int(done) / count))))
+            # Avoid flooding the Qt event queue on dense direction grids.
+            if percent != self._last_percent or percent in (0, 100):
+                self._last_percent = percent
+                self.progress.emit(percent, str(message))
+
+        @Slot()
+        def run(self) -> None:
+            try:
+                result = (
+                    self._operation(self.is_cancelled, self.report_progress)
+                    if self._cooperative
+                    else self._operation()
+                )
+            except InterruptedError as exc:
+                self.cancelled.emit(
+                    str(exc) or "Feature assembly cancelled; existing output kept."
+                )
+            except Exception as exc:  # The UI reports authoritative validation errors.
+                self.failed.emit(str(exc) or type(exc).__name__)
+            else:
+                self.succeeded.emit(result)
+
+
+    class _DisclosureSection(QWidget):
+        """Small local disclosure; avoids importing the shell and a Qt cycle."""
+
+        def __init__(
+            self,
+            title: str,
+            parent: QWidget | None = None,
+            *,
+            expanded: bool = False,
+        ) -> None:
+            super().__init__(parent)
+            self._title = str(title)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+            self.header = QToolButton(self)
+            self.header.setObjectName("sectionHeader")
+            self.header.setCheckable(True)
+            self.header.setChecked(bool(expanded))
+            self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.header.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            self.body = QWidget(self)
+            self.body.setObjectName("sectionBody")
+            self.body_layout = QVBoxLayout(self.body)
+            self.body_layout.setContentsMargins(8, 8, 8, 8)
+            self.body_layout.setSpacing(6)
+            layout.addWidget(self.header)
+            layout.addWidget(self.body)
+            self.header.toggled.connect(self._sync)
+            self._sync(bool(expanded))
+
+        def _sync(self, expanded: bool) -> None:
+            self.header.setText(("−  " if expanded else "+  ") + self._title)
+            self.body.setVisible(bool(expanded))
+
+        def addWidget(self, widget: QWidget, stretch: int = 0) -> None:
+            self.body_layout.addWidget(widget, stretch)
+
+        def addLayout(self, layout: Any, stretch: int = 0) -> None:
+            self.body_layout.addLayout(layout, stretch)
+
+
+    class _LoadedDatasetButton(QPushButton):
+        """Menu button that exposes only backend-usable loaded artifacts."""
+
+        path_selected = Signal(str)
+        notice = Signal(str)
+
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__("Use loaded…", parent)
+            self.setAutoDefault(False)
+            self._catalog: tuple[LoadedDatasetEntry, ...] = ()
+            self._menu = QMenu(self)
+            self.setMenu(self._menu)
+            self._menu.aboutToShow.connect(self._announce_constraints)
+            self.set_catalog(())
+
+        def catalog_menu(self) -> QMenu:
+            """Return the owned menu for focused UI tests and shell tooling."""
+
+            return self._menu
+
+        def set_catalog(
+            self, entries: tuple[LoadedDatasetEntry, ...]
+        ) -> None:
+            self._catalog = tuple(entries)
+            self._menu.clear()
+            usable = [entry for entry in self._catalog if entry.usable_path]
+            unavailable = [entry for entry in self._catalog if not entry.usable_path]
+
+            if usable:
+                for entry in usable:
+                    file_name = Path(entry.usable_path).name
+                    action = self._menu.addAction(f"{entry.name} — {file_name}")
+                    action.setData(entry.dataset_id)
+                    action.setToolTip(entry.usable_path)
+                    action.setStatusTip(entry.usable_path)
+                    action.triggered.connect(
+                        lambda _checked=False, path=entry.usable_path: (
+                            self.path_selected.emit(path)
+                        )
+                    )
+            else:
+                action = self._menu.addAction("No saved .grim datasets available")
+                action.setEnabled(False)
+
+            if unavailable:
+                self._menu.addSeparator()
+                heading = self._menu.addAction(
+                    "Save unsaved derived datasets first"
+                )
+                heading.setEnabled(False)
+                for entry in unavailable:
+                    reason = entry.unavailable_reason
+                    action = self._menu.addAction(f"{entry.name} — {reason}")
+                    action.setData(entry.dataset_id)
+                    action.setToolTip(_clean_path(entry.path) or reason)
+                    action.setEnabled(False)
+
+            usable_count = len(usable)
+            unavailable_count = len(unavailable)
+            if usable_count:
+                tooltip = (
+                    f"Choose one of {usable_count} loaded, saved .grim "
+                    "dataset(s)."
+                )
+                if unavailable_count:
+                    tooltip += (
+                        f" {unavailable_count} unsaved or unavailable "
+                        "dataset(s) are disabled; save unsaved derived "
+                        "datasets first."
+                    )
+            else:
+                tooltip = (
+                    "No usable saved .grim dataset is loaded. Save unsaved "
+                    "derived datasets first, or use Browse…."
+                )
+            self.setToolTip(tooltip)
+
+        def _announce_constraints(self) -> None:
+            usable_count = sum(bool(entry.usable_path) for entry in self._catalog)
+            unavailable_count = len(self._catalog) - usable_count
+            if unavailable_count:
+                self.notice.emit(
+                    "Assembly requires an existing .grim file. Save unsaved "
+                    "derived datasets first; unavailable entries are disabled."
+                )
+            elif not usable_count:
+                self.notice.emit(
+                    "No saved .grim dataset is currently loaded. Save the "
+                    "required dataset first, or use Browse…."
+                )
+
+
+    class _PathPicker(QWidget):
+        editing_finished = Signal()
+        catalog_notice = Signal(str)
+
+        def __init__(
+            self,
+            *,
+            caption: str,
+            file_filter: str,
+            save: bool = False,
+            allow_loaded_dataset: bool = False,
+            parent: QWidget | None = None,
+        ) -> None:
+            super().__init__(parent)
+            self.caption = caption
+            self.file_filter = file_filter
+            self.save = bool(save)
+            self.edit = QLineEdit(self)
+            self.loaded_button: _LoadedDatasetButton | None = None
+            self.button = QPushButton("Browse…", self)
+            self.button.setAutoDefault(False)
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.edit, 1)
+            if allow_loaded_dataset:
+                self.loaded_button = _LoadedDatasetButton(self)
+                self.loaded_button.path_selected.connect(self._use_loaded_path)
+                self.loaded_button.notice.connect(self.catalog_notice.emit)
+                layout.addWidget(self.loaded_button)
+            layout.addWidget(self.button)
+            self.button.clicked.connect(self._browse)
+            self.edit.editingFinished.connect(self.editing_finished.emit)
+
+        def path(self) -> str:
+            return self.edit.text().strip()
+
+        def set_path(self, path: str) -> None:
+            self.edit.setText(_clean_path(path))
+
+        def set_loaded_dataset_catalog(
+            self, entries: tuple[LoadedDatasetEntry, ...]
+        ) -> None:
+            if self.loaded_button is not None:
+                self.loaded_button.set_catalog(entries)
+
+        @Slot(str)
+        def _use_loaded_path(self, path: str) -> None:
+            self.set_path(path)
+            self.editing_finished.emit()
+
+        def _browse(self) -> None:
+            start = self.path()
+            if self.save:
+                path, _ = QFileDialog.getSaveFileName(
+                    self, self.caption, start, self.file_filter
+                )
+            else:
+                path, _ = QFileDialog.getOpenFileName(
+                    self, self.caption, start, self.file_filter
+                )
+            if not path:
+                return
+            if self.save and Path(path).suffix == "":
+                path += ".grim"
+            self.set_path(path)
+            self.editing_finished.emit()
+
+
+    class _SurfaceBindingDialog(QDialog):
+        """Small attestation form for one exact external body/mesh pair."""
+
+        def __init__(
+            self,
+            parent: QWidget,
+            *,
+            geometry_id: str = "",
+            attestation_case_id: str = "",
+        ) -> None:
+            super().__init__(parent)
+            self.setWindowTitle("Bind clean-body solve to surface mesh")
+            self.setModal(True)
+            layout = QVBoxLayout(self)
+            explanation = QLabel(
+                "Create the canonical reviewed registration record for the exact "
+                "clean-body GRIM, selected mesh bytes, and selected mesh units.",
+                self,
+            )
+            explanation.setWordWrap(True)
+            layout.addWidget(explanation)
+            form = QFormLayout()
+            self.geometry_id_edit = QLineEdit(self)
+            self.geometry_id_edit.setPlaceholderText("Example: vehicle-door-mesh-r7")
+            self.geometry_id_edit.setText(str(geometry_id))
+            self.case_id_edit = QLineEdit(self)
+            self.case_id_edit.setPlaceholderText("Example: solver-registration-042")
+            self.case_id_edit.setText(str(attestation_case_id))
+            form.addRow("Team geometry revision ID:", self.geometry_id_edit)
+            form.addRow("Reviewed registration / case ID:", self.case_id_edit)
+            layout.addLayout(form)
+            attestation_text = QLabel(
+                "Required review: a responsible team member confirmed that this "
+                "exact mesh, selected units, CAD axes, and origin match the exact "
+                "clean-body solve.",
+                self,
+            )
+            attestation_text.setWordWrap(True)
+            layout.addWidget(attestation_text)
+            self.attestation = QCheckBox(
+                "I attest that the required registration review is complete.", self
+            )
+            layout.addWidget(self.attestation)
+            limitation = QLabel(
+                "This records the review and exact file identities; it does not "
+                "independently prove electromagnetic or solve-to-CAD correctness.",
+                self,
+            )
+            limitation.setObjectName("featureHint")
+            limitation.setWordWrap(True)
+            layout.addWidget(limitation)
+            self.buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok
+                | QDialogButtonBox.StandardButton.Cancel,
+                parent=self,
+            )
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+                "Create reviewed binding"
+            )
+            self.buttons.accepted.connect(self.accept)
+            self.buttons.rejected.connect(self.reject)
+            layout.addWidget(self.buttons)
+            self.geometry_id_edit.textChanged.connect(self._update_accept_enabled)
+            self.case_id_edit.textChanged.connect(self._update_accept_enabled)
+            self.attestation.toggled.connect(self._update_accept_enabled)
+            self._update_accept_enabled()
+
+        def _update_accept_enabled(self, *_args: Any) -> None:
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+                bool(
+                    self.geometry_id_edit.text().strip()
+                    and self.case_id_edit.text().strip()
+                    and self.attestation.isChecked()
+                )
+            )
+
+        def binding_values(self) -> tuple[str, str]:
+            return (
+                self.geometry_id_edit.text().strip(),
+                self.case_id_edit.text().strip(),
+            )
+
+
+    from GRIM_Backend.assembly.workflow import MappingWorkflowMixin, AssemblyWorkflowMixin
+
+    class _DatasetMappingEditor(MappingWorkflowMixin, QWidget):
+        mapping_changed = Signal()
+        catalog_notice = Signal(str)
+
+        def __init__(self, empty_text: str, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self._empty_text = empty_text
+            self._ids: tuple[str, ...] = ()
+            self._required_ids: tuple[str, ...] = ()
+            self._catalog: tuple[LoadedDatasetEntry, ...] = ()
+            self._loaded_buttons: dict[str, _LoadedDatasetButton] = {}
+            self.table = QTableWidget(0, 4, self)
+            self.table.setHorizontalHeaderLabels(
+                [
+                    "Dataset ID",
+                    "Response (.grim)",
+                    "",
+                    "",
+                ]
+            )
+            self.table.horizontalHeaderItem(0).setToolTip("dataset_id from the placement CSV")
+            self.table.horizontalHeaderItem(1).setToolTip(
+                "Coherent OPN − FRD feature response (.grim)"
+            )
+            self.table.setToolTip(
+                "Every dataset_id used by the placement CSV must map to the "
+                "matching coherent OPN-FRD .grim response."
+            )
+            self.table.verticalHeader().setVisible(False)
+            self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.table.setAlternatingRowColors(True)
+            header = self.table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+            self.empty_label = QLabel(empty_text, self)
+            self.empty_label.setWordWrap(True)
+            self.completeness_label = QLabel(self)
+            self.completeness_label.setWordWrap(True)
+            self.completeness_label.setObjectName("featureMappingStatus")
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(self.empty_label)
+            layout.addWidget(self.table)
+            layout.addWidget(self.completeness_label)
+            self.suggest_folder_button = QPushButton('Suggest files from library folder…', self)
+            self.suggest_folder_button.clicked.connect(self._suggest_library_folder)
+            layout.addWidget(self.suggest_folder_button)
+            self.response_summary_label = QLabel(self)
+            self.response_summary_label.setWordWrap(True)
+            self.response_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            layout.addWidget(self.response_summary_label)
+            self.table.itemSelectionChanged.connect(self._show_selected_response_summary)
+            self.table.cellChanged.connect(self._table_changed)
+            self.set_dataset_ids(())
+
+        def _show_selected_response_summary(self):
+            row = self.table.currentRow()
+            item = self.table.item(row, 1) if row >= 0 else None
+            self.response_summary_label.setText(response_summary(item.text()) if item is not None and item.text().strip() else "Select a response row to inspect its grid and field convention.")
+
+        @property
+        def dataset_ids(self) -> tuple[str, ...]:
+            return self._ids
+
+        def mapping(self) -> dict[str, str]:
+            result: dict[str, str] = {}
+            for row, dataset_id in enumerate(self._ids):
+                item = self.table.item(row, 1)
+                result[dataset_id] = "" if item is None else item.text().strip()
+            return result
+
+        def missing_ids(self) -> tuple[str, ...]:
+            current = self.mapping()
+            return tuple(
+                dataset_id
+                for dataset_id in self._required_ids
+                if not _clean_path(current.get(dataset_id))
+            )
+
+        def _update_completeness(self) -> None:
+            missing = self.missing_ids()
+            if not self._ids:
+                self.completeness_label.setText("")
+                self.completeness_label.setVisible(False)
+            elif missing:
+                self.completeness_label.setText(
+                    f"○ {len(missing)} response file(s) still required: "
+                    + ", ".join(missing)
+                )
+                self.completeness_label.setVisible(True)
+            else:
+                self.completeness_label.setText(
+                    f"✓ All {len(self._required_ids)} enabled response(s) mapped."
+                )
+                self.completeness_label.setVisible(True)
+
+        def _table_changed(self, *_args: Any) -> None:
+            self._update_completeness()
+            self.mapping_changed.emit()
+
+        def set_dataset_ids(
+            self,
+            dataset_ids: tuple[str, ...] | list[str],
+            mapping: Mapping[str, str] | None = None,
+        ) -> None:
+            existing = self.mapping() if self._ids else {}
+            if mapping is not None:
+                existing.update({str(key): _clean_path(value) for key, value in mapping.items()})
+            self._ids = tuple(str(value) for value in dataset_ids)
+            self._required_ids = self._ids
+            self._loaded_buttons = {}
+            self.table.blockSignals(True)
+            self.table.setRowCount(len(self._ids))
+            for row, dataset_id in enumerate(self._ids):
+                id_item = QTableWidgetItem(dataset_id)
+                id_item.setFlags(
+                    id_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                )
+                self.table.setItem(row, 0, id_item)
+                self.table.setItem(
+                    row, 1, QTableWidgetItem(existing.get(dataset_id, ""))
+                )
+                loaded_button = _LoadedDatasetButton(self.table)
+                loaded_button.set_catalog(self._catalog)
+                loaded_button.path_selected.connect(
+                    lambda path, key=dataset_id: self.set_path(key, path)
+                )
+                loaded_button.notice.connect(self.catalog_notice.emit)
+                self._loaded_buttons[dataset_id] = loaded_button
+                self.table.setCellWidget(row, 2, loaded_button)
+                button = QPushButton("Browse…", self.table)
+                button.clicked.connect(
+                    lambda _checked=False, key=dataset_id: self._browse(key)
+                )
+                self.table.setCellWidget(row, 3, button)
+            self.table.blockSignals(False)
+            has_rows = bool(self._ids)
+            self.suggest_folder_button.setEnabled(has_rows)
+            self.empty_label.setVisible(not has_rows)
+            self.table.setVisible(has_rows)
+            self.table.setMinimumHeight(112 if has_rows else 0)
+            self._update_completeness()
+
+        def set_required_dataset_ids(self, dataset_ids: Iterable[str]) -> None:
+            required = tuple(dict.fromkeys(str(value) for value in dataset_ids))
+            unknown = sorted(set(required) - set(self._ids))
+            if unknown:
+                raise ValueError(
+                    f"Enabled spatial features reference unknown dataset IDs {unknown}."
+                )
+            self._required_ids = required
+            self._update_completeness()
+
+        def set_loaded_dataset_catalog(
+            self, entries: tuple[LoadedDatasetEntry, ...]
+        ) -> None:
+            self._catalog = tuple(entries)
+            for button in self._loaded_buttons.values():
+                button.set_catalog(self._catalog)
+
+        def loaded_dataset_button(
+            self, dataset_id: str
+        ) -> _LoadedDatasetButton:
+            """Return the row's chooser without exposing table-column details."""
+
+            try:
+                return self._loaded_buttons[str(dataset_id)]
+            except KeyError as exc:
+                raise KeyError(f"Unknown dataset_id {dataset_id!r}.") from exc
+
+        def set_path(self, dataset_id: str, path: str) -> None:
+            try:
+                row = self._ids.index(str(dataset_id))
+            except ValueError as exc:
+                raise KeyError(f"Unknown dataset_id {dataset_id!r}.") from exc
+            self.table.item(row, 1).setText(_clean_path(path))
+
+        def _browse(self, dataset_id: str) -> None:
+            current = self.mapping().get(dataset_id, "")
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                f"Choose OPN-FRD response for {dataset_id}",
+                current,
+                "GRIM response (*.grim);;All files (*)",
+            )
+            if path:
+                self.set_path(dataset_id, path)
+
+
+    class _SpatialFeatureTree(QTreeWidget):
+        """Checkable spatial definition tree, separate from response math."""
+
+        selection_changed = Signal()
+        _ROLE_KIND = Qt.ItemDataRole.UserRole
+        _ROLE_INSTANCE_ID = Qt.ItemDataRole.UserRole + 1
+        _USE_COLUMN = 2
+
+        def __init__(self, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setColumnCount(3)
+            self.setHeaderLabels(["Body / spatial features", "Response", "Use"])
+            self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            self.header().setSectionResizeMode(
+                1, QHeaderView.ResizeMode.ResizeToContents
+            )
+            self.header().setSectionResizeMode(
+                2, QHeaderView.ResizeMode.ResizeToContents
+            )
+            self.headerItem().setToolTip(
+                self._USE_COLUMN,
+                "Include this spatial feature in preview, physical validation, "
+                "response loading, and assembly.",
+            )
+            self.setAlternatingRowColors(True)
+            self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.setMinimumHeight(190)
+            self._syncing = False
+            self._filter_text = ""
+            self._instance_items: dict[tuple[str, str], QTreeWidgetItem] = {}
+            self.itemChanged.connect(self._on_item_changed)
+
+        @staticmethod
+        def _search_text(item: QTreeWidgetItem) -> str:
+            return " ".join(item.text(column) for column in (0, 1)).casefold()
+
+        def _set_default_expansion(self) -> None:
+            """Expand structural roots while leaving response groups compact."""
+
+            for top_index in range(self.topLevelItemCount()):
+                body = self.topLevelItem(top_index)
+                body.setExpanded(True)
+                for kind_index in range(body.childCount()):
+                    kind_root = body.child(kind_index)
+                    kind_root.setExpanded(True)
+                    for dataset_index in range(kind_root.childCount()):
+                        kind_root.child(dataset_index).setExpanded(False)
+
+        def set_filter_text(self, text: str) -> None:
+            """Filter by instance, dataset ID, or mapped response text.
+
+            Filtering is display-only. Hidden leaves remain part of recursive
+            ``Use`` operations and :meth:`excluded_ids`, so searching can never
+            silently change assembly membership.
+            """
+
+            query = str(text or "").strip().casefold()
+            self._filter_text = query
+
+            def visit(item: QTreeWidgetItem, ancestor_matches: bool = False) -> bool:
+                own_match = bool(query) and query in self._search_text(item)
+                reveal_subtree = ancestor_matches or own_match
+                child_visible = False
+                for index in range(item.childCount()):
+                    child_visible = (
+                        visit(item.child(index), reveal_subtree) or child_visible
+                    )
+                visible = not query or reveal_subtree or child_visible
+                item.setHidden(not visible)
+                if query and visible and item.childCount():
+                    item.setExpanded(True)
+                return visible
+
+            for top_index in range(self.topLevelItemCount()):
+                visit(self.topLevelItem(top_index))
+            if not query:
+                self._set_default_expansion()
+
+        @staticmethod
+        def _checkable_flags(item: QTreeWidgetItem) -> None:
+            item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsUserCheckable
+            )
+
+        def _set_checked(self, item: QTreeWidgetItem, enabled: bool) -> None:
+            item.setCheckState(
+                self._USE_COLUMN,
+                Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked,
+            )
+
+        def _set_subtree(self, item: QTreeWidgetItem, enabled: bool) -> None:
+            if item.data(0, self._ROLE_KIND) != "body":
+                self._set_checked(item, enabled)
+            for index in range(item.childCount()):
+                self._set_subtree(item.child(index), enabled)
+
+        def _sync_ancestors(self, item: QTreeWidgetItem | None) -> None:
+            current = item
+            while current is not None:
+                # The body is the required host response, not a switchable
+                # feature group. Keep its Use cell labelled ``Required`` while
+                # its point/line children summarize their own selections.
+                if current.data(0, self._ROLE_KIND) == "body":
+                    break
+                states = [
+                    current.child(index).checkState(self._USE_COLUMN)
+                    for index in range(current.childCount())
+                ]
+                if states:
+                    if all(state == Qt.CheckState.Checked for state in states):
+                        state = Qt.CheckState.Checked
+                    elif all(state == Qt.CheckState.Unchecked for state in states):
+                        state = Qt.CheckState.Unchecked
+                    else:
+                        state = Qt.CheckState.PartiallyChecked
+                    current.setCheckState(self._USE_COLUMN, state)
+                current = current.parent()
+
+        @Slot(QTreeWidgetItem, int)
+        def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+            if self._syncing or column != self._USE_COLUMN:
+                return
+            if item.data(0, self._ROLE_KIND) == "body":
+                return
+            state = item.checkState(self._USE_COLUMN)
+            self._syncing = True
+            try:
+                if state in (Qt.CheckState.Checked, Qt.CheckState.Unchecked):
+                    enabled = state == Qt.CheckState.Checked
+                    for index in range(item.childCount()):
+                        self._set_subtree(item.child(index), enabled)
+                self._sync_ancestors(item.parent())
+            finally:
+                self._syncing = False
+            self.selection_changed.emit()
+
+        def set_configuration(self, model: FeatureAssemblyFormModel) -> None:
+            """Rebuild from parsed descriptors while honoring model exclusions."""
+            self._syncing = True
+            self.setUpdatesEnabled(False)
+            try:
+                self.clear()
+                self._instance_items.clear()
+                body_name = Path(_clean_path(model.values.base_grim)).name
+                body = QTreeWidgetItem(
+                    ["Body", body_name or "clean-body response not selected", "Required"]
+                )
+                body.setData(0, self._ROLE_KIND, "body")
+                body.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                body.setToolTip(
+                    0,
+                    "The clean-body response is always required. Feature checkboxes "
+                    "control installed-minus-clean deltas added to it.\n"
+                    f"Response: {_clean_path(model.values.base_grim) or 'not selected'}\n"
+                    f"Surface: {_clean_path(model.values.surface_mesh) or 'embedded/not selected'}\n"
+                    f"Surface units: {model.values.surface_units}; "
+                    f"flip normals: {bool(model.values.flip_surface_normals)}",
+                )
+                self.addTopLevelItem(body)
+
+                self._add_kind(
+                    model,
+                    parent=body,
+                    kind="point",
+                    label="Point features",
+                    descriptors=model.point_instances,
+                    mappings=model.values.point_datasets,
+                    excluded=model.values.excluded_point_placement_ids,
+                )
+                self._add_kind(
+                    model,
+                    parent=body,
+                    kind="line",
+                    label="Line features",
+                    descriptors=model.line_instances,
+                    mappings=model.values.line_datasets,
+                    excluded=model.values.excluded_line_ids,
+                )
+                self.set_filter_text(self._filter_text)
+            finally:
+                self._syncing = False
+                self.setUpdatesEnabled(True)
+
+        def _add_kind(
+            self,
+            model: FeatureAssemblyFormModel,
+            *,
+            parent: QTreeWidgetItem,
+            kind: str,
+            label: str,
+            descriptors: tuple,
+            mappings: Mapping[str, str],
+            excluded: set[str],
+        ) -> None:
+            root = QTreeWidgetItem([f"{label} ({len(descriptors)})", "", ""])
+            root.setData(0, self._ROLE_KIND, f"{kind}_root")
+            self._checkable_flags(root)
+            parent.addChild(root)
+            by_dataset: dict[str, list[tuple]] = {}
+            for descriptor in descriptors:
+                by_dataset.setdefault(str(descriptor[1]), []).append(descriptor)
+            for dataset_id, instances in by_dataset.items():
+                mapped_path = _clean_path(mappings.get(dataset_id))
+                mapped = Path(mapped_path).name or "not mapped"
+                group = QTreeWidgetItem(
+                    [f"dataset_id: {dataset_id} ({len(instances)})", mapped, ""]
+                )
+                group.setData(0, self._ROLE_KIND, f"{kind}_dataset")
+                group.setToolTip(
+                    1,
+                    mapped_path or "No OPN-FRD response is mapped for this dataset ID.",
+                )
+                self._checkable_flags(group)
+                root.addChild(group)
+                for descriptor in instances:
+                    instance_id = str(descriptor[0])
+                    suffix = (
+                        ""
+                        if kind == "point"
+                        else f" ({int(descriptor[2])} segment(s))"
+                    )
+                    leaf = QTreeWidgetItem([instance_id + suffix, "", ""])
+                    leaf.setData(0, self._ROLE_KIND, kind)
+                    leaf.setData(0, self._ROLE_INSTANCE_ID, instance_id)
+                    self._instance_items[(kind, instance_id)] = leaf
+                    self._checkable_flags(leaf)
+                    self._set_checked(leaf, instance_id not in excluded)
+                    group.addChild(leaf)
+                self._sync_ancestors(group)
+            self._sync_ancestors(root)
+
+        def excluded_ids(self) -> tuple[set[str], set[str]]:
+            point_ids: set[str] = set()
+            line_ids: set[str] = set()
+            iterator = self.invisibleRootItem()
+            pending = [iterator.child(index) for index in range(iterator.childCount())]
+            while pending:
+                item = pending.pop()
+                pending.extend(
+                    item.child(index) for index in range(item.childCount())
+                )
+                kind = item.data(0, self._ROLE_KIND)
+                instance_id = item.data(0, self._ROLE_INSTANCE_ID)
+                if (
+                    kind in {"point", "line"}
+                    and instance_id
+                    and item.checkState(self._USE_COLUMN) == Qt.CheckState.Unchecked
+                ):
+                    (point_ids if kind == "point" else line_ids).add(
+                        str(instance_id)
+                    )
+            return point_ids, line_ids
+
+        def select_instance(self, kind: str, instance_id: str) -> bool:
+            """Reveal and select one QA-linked spatial feature leaf."""
+
+            normalized = str(kind).strip().lower()
+            target = str(instance_id).strip()
+            if normalized not in {"point", "line"} or not target:
+                return False
+            item = self._instance_items.get((normalized, target))
+            if item is None:
+                return False
+            self.setCurrentItem(item)
+            current = item.parent()
+            while current is not None:
+                current.setExpanded(True)
+                current = current.parent()
+            self.scrollToItem(
+                item, QAbstractItemView.ScrollHint.PositionAtCenter
+            )
+            return True
+
+
+    class FeatureAssemblyPanel(AssemblyWorkflowMixin, QWidget):
+        """New-user-facing feature assembly form with background execution."""
+
+        preview_ready = Signal(object)
+        preview_stale = Signal(str)
+        feature_built = Signal(str)
+        build_failed = Signal(str)
+        status_changed = Signal(str)
+        feature_instance_selected = Signal(str, str)
+        comparison_ready = Signal(str, str, str)
+
+        def __init__(
+            self,
+            parent: QWidget | None = None,
+            *,
+            service: Any = None,
+        ) -> None:
+            super().__init__(parent)
+            self.model = FeatureAssemblyFormModel()
+            self._service: Any = service
+            self._thread: QThread | None = None
+            self._worker: _OperationWorker | None = None
+            self._active_kind = ""
+            self._discovery_paths: tuple[str, str] | None = None
+            self._preview_is_current = False
+            self._validated_plan_current = False
+            self._validation_warning_count = 0
+            self._loaded_dataset_catalog: tuple[LoadedDatasetEntry, ...] = ()
+            self._recipe_path: Path | None = None
+            self._recipe_dirty = False
+            self._recipe_source_warnings: tuple[str, ...] = ()
+            self._loading_recipe = False
+            self._surface_binding_checked_key: tuple[Any, ...] | None = None
+            self._surface_binding_checked: Mapping[str, Any] | None = None
+            self._surface_binding_error_key: tuple[Any, ...] | None = None
+            self._surface_binding_error = ""
+            self._surface_dimensions_key: tuple[Any, ...] | None = None
+            self._surface_dimensions_text = ""
+            self._current_work_estimate = AssemblyWorkEstimate(available=False)
+            self._placement_editors = {}
+            self._build_ui()
+
+        def _build_ui(self) -> None:
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(6, 6, 6, 6)
+            outer.setSpacing(6)
+
+            intro = QLabel(
+                "Choose a body, add point or line features, then review and assemble. "
+                "Use feature responses only within their reference-validated geometry, "
+                "material and radar range; a placement preview does not establish RCS accuracy.",
+                self,
+            )
+            intro.setWordWrap(True)
+            intro.setObjectName("featurePanelIntro")
+            outer.addWidget(intro)
+
+            self.workflow_steps_label = QLabel(
+                "Choose the body, map feature responses, then validate and run.",
+                self,
+            )
+            self.workflow_steps_label.setWordWrap(True)
+            self.workflow_steps_label.setObjectName("featureWorkflowSteps")
+            self.workflow_steps_label.setVisible(False)
+            self.next_step_label = QLabel(self)
+            self.next_step_label.setObjectName("featureNextStep")
+            self.next_step_label.setWordWrap(True)
+            outer.addWidget(self.next_step_label)
+
+            recipe_group = QGroupBox("Reusable assembly recipe", self)
+            recipe_group.setObjectName("featureRecipeBar")
+            recipe_layout = QVBoxLayout(recipe_group)
+            recipe_layout.setContentsMargins(8, 6, 8, 6)
+            recipe_layout.setSpacing(5)
+            recipe_fields = QHBoxLayout()
+            recipe_fields.addWidget(QLabel("Assembly:"))
+            self.recipe_name_edit = QLineEdit(recipe_group)
+            self.recipe_name_edit.setPlaceholderText("Vehicle feature assembly")
+            self.recipe_name_edit.setText("Vehicle feature assembly")
+            self.recipe_name_edit.setToolTip(
+                "A human-readable name stored in the portable recipe."
+            )
+            recipe_fields.addWidget(self.recipe_name_edit, 2)
+            recipe_fields.addWidget(QLabel("Variant:"))
+            self.recipe_variant_edit = QLineEdit(recipe_group)
+            self.recipe_variant_edit.setPlaceholderText("Baseline / Option A")
+            self.recipe_variant_edit.setText("Baseline")
+            self.recipe_variant_edit.setToolTip(
+                "Name this exact feature membership for repeatable trade studies."
+            )
+            recipe_fields.addWidget(self.recipe_variant_edit, 2)
+            recipe_layout.addLayout(recipe_fields)
+            recipe_actions = QHBoxLayout()
+            self.recipe_status_label = QLabel(recipe_group)
+            self.recipe_status_label.setObjectName("featureRecipeStatus")
+            self.recipe_status_label.setWordWrap(True)
+            recipe_actions.addWidget(self.recipe_status_label, 1)
+            self.load_recipe_button = QPushButton("Load…", recipe_group)
+            self.load_recipe_button.setToolTip(
+                "Restore body, placements, response mappings, tolerances, and exact "
+                "enabled/disabled feature membership from a versioned recipe."
+            )
+            recipe_actions.addWidget(self.load_recipe_button)
+            self.save_recipe_button = QPushButton("Save", recipe_group)
+            self.save_recipe_button.setToolTip(
+                "Save changes to the current recipe. Source identities are recorded "
+                "so moved, missing, or modified inputs can be reported on load."
+            )
+            recipe_actions.addWidget(self.save_recipe_button)
+            self.save_recipe_as_button = QPushButton("Save as…", recipe_group)
+            self.save_recipe_as_button.setToolTip(
+                "Save this named variant as a separate portable .assembly.json file."
+            )
+            recipe_actions.addWidget(self.save_recipe_as_button)
+            recipe_layout.addLayout(recipe_actions)
+            self.create_variant_button = QPushButton('Create variant…', recipe_group)
+            self.create_variant_button.clicked.connect(self._create_variant)
+            recipe_layout.addWidget(self.create_variant_button)
+            self.recipe_section = _DisclosureSection(
+                "Reusable recipe (optional)", self, expanded=False
+            )
+            self.recipe_section.addWidget(recipe_group)
+            outer.addWidget(self.recipe_section)
+
+            placement_units_bar = QWidget(self)
+            placement_units_bar.setObjectName("featurePlacementUnitsBar")
+            placement_units_layout = QHBoxLayout(placement_units_bar)
+            placement_units_layout.setContentsMargins(8, 5, 8, 5)
+            placement_units_layout.setSpacing(7)
+            placement_units_label = QLabel("Placement coordinate units:", placement_units_bar)
+            self.coordinate_units = QComboBox(placement_units_bar)
+            self.coordinate_units.addItem("Choose coordinate units...", "")
+            for label, value in UNIT_CHOICES:
+                self.coordinate_units.addItem(label, value)
+            self.coordinate_units.setToolTip(
+                "One shared unit system for every x/y/z coordinate in both the "
+                "point and line placement CSVs."
+            )
+            placement_units_label.setBuddy(self.coordinate_units)
+            placement_units_layout.addWidget(placement_units_label)
+            placement_units_layout.addWidget(self.coordinate_units, 1)
+            placement_units_layout.addWidget(
+                QLabel("Both feature tabs", placement_units_bar)
+            )
+            outer.addWidget(placement_units_bar)
+
+            self.workflow_tabs = QTabWidget(self)
+            self.workflow_tabs.setObjectName("featureWorkflowTabs")
+            self.body_step_page = QWidget(self.workflow_tabs)
+            self.point_step_page = QWidget(self.workflow_tabs)
+            self.line_step_page = QWidget(self.workflow_tabs)
+            self.review_step_page = QWidget(self.workflow_tabs)
+
+            def _step_scroll(page: QWidget, object_name: str):
+                page_layout = QVBoxLayout(page)
+                page_layout.setContentsMargins(0, 0, 0, 0)
+                scroll = QScrollArea(page)
+                scroll.setObjectName(object_name)
+                scroll.setFrameShape(QFrame.Shape.NoFrame)
+                scroll.setAutoFillBackground(False)
+                scroll.viewport().setAutoFillBackground(False)
+                scroll.setWidgetResizable(True)
+                scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                content = QWidget(scroll)
+                content.setObjectName("featureAssemblyContent")
+                content.setAutoFillBackground(False)
+                content_layout = QVBoxLayout(content)
+                content_layout.setContentsMargins(0, 0, 0, 0)
+                content_layout.setSpacing(7)
+                scroll.setWidget(content)
+                page_layout.addWidget(scroll, 1)
+                return content, content_layout, page_layout
+
+            body_content, body_content_layout, self.body_page_layout = _step_scroll(
+                self.body_step_page, "featureBodyScroll"
+            )
+            point_page, point_layout, self.point_page_layout = _step_scroll(
+                self.point_step_page, "featurePointScroll"
+            )
+            line_page, line_layout, self.line_page_layout = _step_scroll(
+                self.line_step_page, "featureLineScroll"
+            )
+            review_content, review_content_layout, self.review_page_layout = _step_scroll(
+                self.review_step_page, "featureReviewScroll"
+            )
+            self.form_content = self.workflow_tabs
+            self.workflow_tabs.addTab(self.body_step_page, "Body")
+            self.workflow_tabs.addTab(self.point_step_page, "Point Features")
+            self.workflow_tabs.addTab(self.line_step_page, "Line Features")
+            self.workflow_tabs.addTab(self.review_step_page, "Review")
+            outer.addWidget(self.workflow_tabs, 1)
+
+            body_group = QGroupBox("Body response", body_content)
+            body_group.setObjectName("featureStepCard")
+            body_form = QFormLayout(body_group)
+            body_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            self.base_picker = _PathPicker(
+                caption="Choose clean-body/base GRIM",
+                file_filter="GRIM response (*.grim);;All files (*)",
+                allow_loaded_dataset=True,
+            )
+            self.surface_picker = _PathPicker(
+                caption="Choose body surface mesh",
+                file_filter="Surface mesh (*.stl *.facet);;All files (*)",
+            )
+            self.output_picker = _PathPicker(
+                caption="Save assembled GRIM",
+                file_filter="GRIM response (*.grim);;All files (*)",
+                save=True,
+            )
+            self.surface_units = QComboBox(body_group)
+            self.surface_units.addItem("Choose mesh units...", "")
+            for label, value in UNIT_CHOICES:
+                self.surface_units.addItem(label, value)
+            self.flip_normals = QCheckBox("Flip mesh normals", body_group)
+            self.shadow = QCheckBox(
+                "Apply geometric body shadowing", body_group
+            )
+            mesh_options = QWidget(body_group)
+            mesh_layout = QVBoxLayout(mesh_options)
+            mesh_layout.setContentsMargins(0, 0, 0, 0)
+            mesh_layout.addWidget(self.flip_normals)
+            mesh_layout.addWidget(self.shadow)
+            self.base_picker.setToolTip(
+                "Clean-body response to which the point and/or line feature "
+                "responses will be coherently added."
+            )
+            self.surface_picker.setToolTip(
+                "Choose the matching STL/facet surface for a 3-D body. Leave "
+                "blank when the base GRIM contains an embedded BoR profile."
+            )
+            self.surface_units.setToolTip(
+                "Units of the selected STL/facet surface, independent of the CSV units."
+            )
+            body_form.addRow("Body dataset:", self.base_picker)
+            self.body_response_summary = QLabel(body_group)
+            self.body_response_summary.setWordWrap(True)
+            self.body_response_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            body_form.addRow(self.body_response_summary)
+            self.host_material = QLineEdit(body_group)
+            self.host_material.setPlaceholderText("Match library host.material, e.g. PEC outer skin")
+            self.host_stack = QLineEdit(body_group)
+            self.host_stack.setPlaceholderText("Characterized coating / layer-stack ID, if applicable")
+            self.host_radius = QLineEdit(body_group)
+            self.host_radius.setPlaceholderText("Minimum principal radius in inches; blank = unknown")
+            self.host_radius.setToolTip("Conservative minimum radius over every feature footprint, in both surface directions. A flat mesh facet does not prove a flat host. Enter a finite lower bound for a planar surface.")
+            body_form.addRow("Host material:", self.host_material)
+            body_form.addRow("Host stack ID:", self.host_stack)
+            body_form.addRow("Host curvature bound (in):", self.host_radius)
+            for control in (self.host_material, self.host_stack, self.host_radius):
+                control.editingFinished.connect(self._host_changed)
+            body_geometry = QWidget(body_content)
+            geometry_form = QFormLayout(body_geometry)
+            geometry_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            body_content_layout.addWidget(body_group)
+            self.body_geometry_section = _DisclosureSection(
+                "Body geometry and shadowing (optional)", body_content, expanded=False
+            )
+            self.body_geometry_section.addWidget(body_geometry)
+            body_content_layout.addWidget(self.body_geometry_section)
+            body_form = geometry_form
+            body_form.addRow("Surface mesh (optional):", self.surface_picker)
+            body_form.addRow("Surface mesh units:", self.surface_units)
+            self.surface_dimensions_label = QLabel(body_group)
+            self.surface_dimensions_label.setObjectName("featureSummary")
+            self.surface_dimensions_label.setWordWrap(True)
+            self.surface_dimensions_label.setText(
+                "No external mesh selected; physical mesh dimensions are not "
+                "available yet."
+            )
+            body_form.addRow("Interpreted mesh size:", self.surface_dimensions_label)
+            body_form.addRow("Mesh orientation and visibility:", mesh_options)
+            binding_box = QWidget(body_group)
+            binding_layout = QVBoxLayout(binding_box)
+            binding_layout.setContentsMargins(0, 0, 0, 0)
+            binding_layout.setSpacing(4)
+            self.surface_binding_status = QLabel(binding_box)
+            self.surface_binding_status.setObjectName("featureSurfaceBindingStatus")
+            self.surface_binding_status.setWordWrap(True)
+            binding_layout.addWidget(self.surface_binding_status)
+            binding_actions = QHBoxLayout()
+            binding_actions.setContentsMargins(0, 0, 0, 0)
+            self.check_surface_binding_button = QPushButton(
+                "Check binding integrity", binding_box
+            )
+            self.check_surface_binding_button.setToolTip(
+                "Hash-check the exact clean-body response, mesh, units, frame "
+                "declaration, and reviewer attestations recorded by the binding. "
+                "This does not independently prove solve-to-CAD registration."
+            )
+            self.bind_surface_button = QPushButton(
+                "Bind / refresh…", binding_box
+            )
+            self.bind_surface_button.setToolTip(
+                "Create the canonical <surface>.assembly.json after a responsible "
+                "team member reviews solve-to-CAD registration."
+            )
+            binding_actions.addWidget(self.check_surface_binding_button)
+            binding_actions.addWidget(self.bind_surface_button)
+            binding_actions.addStretch(1)
+            binding_layout.addLayout(binding_actions)
+            body_form.addRow("Solve ↔ mesh registration:", binding_box)
+            self.body_preview_help = QLabel(
+                "Body preview: selected mesh, or the base file's embedded BoR. "
+                "A 3-D base without embedded geometry needs its matching mesh.",
+                body_group,
+            )
+            self.body_preview_help.setWordWrap(True)
+            self.body_preview_help.setObjectName("featureHint")
+            body_form.addRow("", self.body_preview_help)
+            body_content_layout.addStretch(1)
+
+            self.shared_units_label = QLabel(
+                "Placement units are shared across both CSVs and selected above the tabs.",
+                point_page,
+            )
+            self.shared_units_label.setObjectName("featureHint")
+            self.shared_units_label.setWordWrap(True)
+            point_layout.addWidget(self.shared_units_label)
+            # Backward-compatible attribute for recipes/tests and third-party
+            # controllers. There is intentionally only one physical control.
+            self.line_coordinate_units = self.coordinate_units
+            line_units_note = QLabel(
+                "Placement units are shared across both CSVs and selected above the tabs.",
+                line_page,
+            )
+            line_units_note.setObjectName("featureHint")
+            line_units_note.setWordWrap(True)
+            line_layout.addWidget(line_units_note)
+
+            feature_group = QWidget(review_content)
+            feature_layout = QVBoxLayout(feature_group)
+            self.feature_summary_label = QLabel(feature_group)
+            self.feature_summary_label.setObjectName("featureSummary")
+            self.feature_summary_label.setWordWrap(True)
+            feature_layout.addWidget(self.feature_summary_label)
+            self.point_csv_picker = _PathPicker(
+                caption="Choose point placement CSV",
+                file_filter="CSV placement file (*.csv);;All files (*)",
+            )
+            self.point_csv_picker.setToolTip(
+                "Strict GHOST point-placement CSV. This is the same file used "
+                "by local scripts and the HPC workflow."
+            )
+            point_layout.addWidget(QLabel("Point location/orientation CSV:"))
+            point_layout.addWidget(self.point_csv_picker)
+            self.point_csv_summary = QLabel("No point CSV selected.", point_page)
+            self.point_csv_summary.setObjectName("featureCsvSummary")
+            self.point_csv_summary.setWordWrap(True)
+            point_layout.addWidget(self.point_csv_summary)
+            self.point_help_label = QLabel(
+                "This is the same strict GHOST CSV used locally and on HPC. The "
+                "header is followed directly by data rows—no units row or comments. "
+                "Normal is local +z; projected roll is local +x / azimuth zero. "
+                "placement_id values must be unique.",
+                point_page,
+            )
+            self.point_help_label.setWordWrap(True)
+            self.point_help_label.setVisible(False)
+            point_layout.addWidget(self.point_help_label)
+            point_format_row = QHBoxLayout()
+            self.point_edit_button = QPushButton("Create / edit…", point_page)
+            self.point_edit_button.clicked.connect(lambda: self._edit_placements("point"))
+            point_format_row.addWidget(self.point_edit_button)
+            self.point_format_button = QPushButton(
+                "CSV guide", point_page
+            )
+            self.point_format_button.setCheckable(True)
+            point_format_row.addWidget(self.point_format_button)
+            self.point_schema_label = QLabel(
+                "Exact header (column order is fixed):\n"
+                + ",".join(POINT_PLACEMENT_COLUMNS)
+                + "\nExample row:\n"
+                + POINT_PLACEMENT_EXAMPLE,
+                point_page,
+            )
+            self.point_schema_label.setWordWrap(True)
+            self.point_schema_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.point_schema_label.setObjectName("featureCsvSchema")
+            self.point_template_button = QPushButton(
+                "Save template…", point_page
+            )
+            self.point_template_button.setToolTip(
+                "Write the exact required point header to a new .csv file."
+            )
+            point_format_row.addWidget(self.point_template_button)
+            self.point_clear_button = QPushButton("Remove", point_page)
+            self.point_clear_button.setToolTip(
+                "Remove the point CSV and its response mappings from this build."
+            )
+            point_format_row.addWidget(self.point_clear_button)
+            point_format_row.addStretch(1)
+            point_layout.addLayout(point_format_row)
+            self.point_schema_label.setVisible(False)
+            point_layout.addWidget(self.point_schema_label)
+            point_response_help = QLabel(
+                "Response contract: each dataset_id maps to a coherent OPN − FRD "
+                "delta (installed/featured minus clean skin), with VV, HH, and "
+                "reciprocal cross-polar response.",
+                point_page,
+            )
+            point_response_help.setWordWrap(True)
+            point_response_help.setObjectName("featureContract")
+            point_layout.addWidget(point_response_help)
+            point_response_help.setVisible(True)
+            self.point_mapping = _DatasetMappingEditor(
+                "Choose a point CSV; one response row will appear per dataset_id.",
+                point_page,
+            )
+            point_layout.addWidget(self.point_mapping)
+            point_layout.addStretch(1)
+            self.line_csv_picker = _PathPicker(
+                caption="Choose line placement CSV",
+                file_filter="CSV placement file (*.csv);;All files (*)",
+            )
+            self.line_csv_picker.setToolTip(
+                "Strict GHOST ordered-segment line-placement CSV. This is the "
+                "same file used by local scripts and the HPC workflow."
+            )
+            line_layout.addWidget(QLabel("Line path/orientation CSV:"))
+            line_layout.addWidget(self.line_csv_picker)
+            self.line_csv_summary = QLabel("No line CSV selected.", line_page)
+            self.line_csv_summary.setObjectName("featureCsvSummary")
+            self.line_csv_summary.setWordWrap(True)
+            line_layout.addWidget(self.line_csv_summary)
+            self.line_help_label = QLabel(
+                "This is the same strict GHOST CSV used locally and on HPC. The "
+                "header is followed directly by data rows—no units row or comments. "
+                "Rows for each line_id stay together, segment_index starts at 1, "
+                "segments meet head-to-tail, and endpoint normals point outward.",
+                line_page,
+            )
+            self.line_help_label.setWordWrap(True)
+            self.line_help_label.setVisible(False)
+            line_layout.addWidget(self.line_help_label)
+            line_format_row = QHBoxLayout()
+            self.line_edit_button = QPushButton("Create / edit…", line_page)
+            self.line_edit_button.clicked.connect(lambda: self._edit_placements("line"))
+            line_format_row.addWidget(self.line_edit_button)
+            self.line_format_button = QPushButton(
+                "CSV guide", line_page
+            )
+            self.line_format_button.setCheckable(True)
+            line_format_row.addWidget(self.line_format_button)
+            self.line_schema_label = QLabel(
+                "Exact header (column order is fixed):\n"
+                + ",".join(LINE_PLACEMENT_COLUMNS)
+                + "\nExample row:\n"
+                + LINE_PLACEMENT_EXAMPLE,
+                line_page,
+            )
+            self.line_schema_label.setWordWrap(True)
+            self.line_schema_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.line_schema_label.setObjectName("featureCsvSchema")
+            self.line_template_button = QPushButton(
+                "Save template…", line_page
+            )
+            self.line_template_button.setToolTip(
+                "Write the exact required line header to a new .csv file."
+            )
+            line_format_row.addWidget(self.line_template_button)
+            self.line_clear_button = QPushButton("Remove", line_page)
+            self.line_clear_button.setToolTip(
+                "Remove the line CSV and its response mappings from this build."
+            )
+            line_format_row.addWidget(self.line_clear_button)
+            line_format_row.addStretch(1)
+            line_layout.addLayout(line_format_row)
+            self.line_schema_label.setVisible(False)
+            line_layout.addWidget(self.line_schema_label)
+            line_response_help = QLabel(
+                "Response contract: each dataset_id maps to a coherent OPN − FRD "
+                "delta (installed/featured minus clean skin) containing TE and TM.",
+                line_page,
+            )
+            line_response_help.setWordWrap(True)
+            line_response_help.setObjectName("featureContract")
+            line_layout.addWidget(line_response_help)
+            line_response_help.setVisible(True)
+            self.line_mapping = _DatasetMappingEditor(
+                "Choose a line CSV; one response row will appear per dataset_id.",
+                line_page,
+            )
+            line_layout.addWidget(self.line_mapping)
+            line_layout.addStretch(1)
+            scan_row = QHBoxLayout()
+            self.scan_button = QPushButton("Refresh selected CSVs", feature_group)
+            self.scan_button.setToolTip(
+                "Parse the selected CSVs with the authoritative GHOST parser "
+                "and list every response dataset that must be supplied."
+            )
+            scan_row.addWidget(self.scan_button)
+            scan_hint = QLabel(
+                "CSV files are read automatically after Browse.", feature_group
+            )
+            scan_hint.setObjectName("featureHint")
+            scan_hint.setWordWrap(True)
+            scan_row.addWidget(scan_hint, 1)
+            feature_layout.addLayout(scan_row)
+            hierarchy_help = QLabel(
+                "Spatial configuration — separate from whole-response dataset "
+                "arithmetic. Uncheck a dataset family or individual placement "
+                "to omit it from preview, physical validation, response loading, "
+                "and assembly. The CSV itself is never rewritten.",
+                feature_group,
+            )
+            hierarchy_help.setWordWrap(True)
+            hierarchy_help.setObjectName("featureHint")
+            feature_layout.addWidget(hierarchy_help)
+            filter_row = QHBoxLayout()
+            filter_label = QLabel("Find feature:", feature_group)
+            self.spatial_feature_filter = QLineEdit(feature_group)
+            self.spatial_feature_filter.setPlaceholderText(
+                "Instance ID, dataset ID, or response file"
+            )
+            self.spatial_feature_filter.setClearButtonEnabled(True)
+            self.spatial_feature_filter.setToolTip(
+                "Filters the displayed hierarchy only. A parent Use checkbox still "
+                "applies recursively to its complete subtree, including hidden items."
+            )
+            filter_row.addWidget(filter_label)
+            filter_row.addWidget(self.spatial_feature_filter, 1)
+            feature_layout.addLayout(filter_row)
+            self.spatial_feature_tree = _SpatialFeatureTree(feature_group)
+            feature_layout.addWidget(self.spatial_feature_tree)
+            self.spatial_feature_filter.textChanged.connect(
+                self.spatial_feature_tree.set_filter_text
+            )
+            self.spatial_selection_summary = QLabel(feature_group)
+            self.spatial_selection_summary.setWordWrap(True)
+            self.spatial_selection_summary.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.spatial_selection_summary.setToolTip(
+                "Large disabled-ID lists are shortened here. Use Copy full selection "
+                "to record exact trade-study membership."
+            )
+            self.spatial_selection_summary.setObjectName("featureSummary")
+            summary_row = QHBoxLayout()
+            summary_row.addWidget(self.spatial_selection_summary, 1)
+            self.copy_spatial_selection_button = QPushButton(
+                "Copy full selection", feature_group
+            )
+            self.copy_spatial_selection_button.setToolTip(
+                "Copy the complete unshortened enabled/disabled membership summary."
+            )
+            self.copy_spatial_selection_button.clicked.connect(
+                self._copy_full_spatial_selection_summary
+            )
+            summary_row.addWidget(self.copy_spatial_selection_button)
+            feature_layout.addLayout(summary_row)
+            self.feature_selection_section = _DisclosureSection(
+                "Feature selection (all included by default)", review_content,
+                expanded=False,
+            )
+            self.feature_selection_section.addWidget(feature_group)
+
+            advanced = QWidget(review_content)
+            advanced_form = QFormLayout(advanced)
+            advanced_form.setContentsMargins(8, 8, 8, 8)
+            advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            self.skin_tol = QDoubleSpinBox(advanced)
+            self.skin_tol.setDecimals(12)
+            # Round down at the displayed precision to stay within the 0.1 m
+            # physical limit when the maximum is converted back to SI.
+            self.skin_tol.setRange(0.0, 3.937007874015)
+            self.skin_tol.setSingleStep(0.001)
+            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM / 25.4)
+            self.skin_tol.setSuffix(" in")
+            self.skin_tol.setToolTip(
+                "Maximum accepted distance from a feature to the host skin. This "
+                "control is displayed in inches."
+            )
+            self.phase_tol = QDoubleSpinBox(advanced)
+            self.phase_tol.setDecimals(1)
+            self.phase_tol.setRange(0.1, 90.0)
+            self.phase_tol.setSingleStep(1.0)
+            self.phase_tol.setValue(DEFAULT_SKIN_PHASE_TOL_DEG)
+            self.phase_tol.setSuffix("°")
+            self.phase_tol.setToolTip(
+                "Maximum two-way phase error used to derive a frequency-aware "
+                "skin-distance limit. Values above 90° are intentionally blocked."
+            )
+            self.normal_tol = QDoubleSpinBox(advanced)
+            self.normal_tol.setDecimals(1)
+            self.normal_tol.setRange(0.1, 89.9)
+            self.normal_tol.setSingleStep(1.0)
+            self.normal_tol.setValue(DEFAULT_NORMAL_TOL_DEG)
+            self.normal_tol.setSuffix("°")
+            self.shadow_bias = QLineEdit(advanced)
+            self.shadow_bias.setPlaceholderText("Auto (recommended)")
+            self.validation_profile = QComboBox(advanced)
+            for (
+                label,
+                key,
+                allow_legacy,
+                require_manifests,
+                require_body_certification,
+            ) in VALIDATION_PROFILES:
+                self.validation_profile.addItem(
+                    label,
+                    (
+                        key,
+                        allow_legacy,
+                        require_manifests,
+                        require_body_certification,
+                    ),
+                )
+            self.validation_profile.setCurrentIndex(1)
+            self.validation_profile.setToolTip(
+                "General body accepts compatible 3-D responses from any solver, "
+                "with advisory metadata and no required source certificates or "
+                "feature manifests. Numerical units, samples and placement "
+                "geometry remain checked. Strict library and certified GHOST "
+                "BoR checks are optional."
+            )
+            self.reset_qa_defaults_button = QPushButton(
+                "Reset placement-check defaults", advanced
+            )
+            self.reset_qa_defaults_button.setToolTip(
+                "Restore 0.03937007874 in skin distance, 15° phase, and 15° normal limits."
+            )
+            advanced_form.addRow("Maximum skin distance:", self.skin_tol)
+            advanced_form.addRow("Maximum two-way phase error:", self.phase_tol)
+            advanced_form.addRow("Maximum normal mismatch:", self.normal_tol)
+            advanced_form.addRow("Shadow ray bias (in):", self.shadow_bias)
+            advanced_form.addRow("Validation profile:", self.validation_profile)
+            advanced_form.addRow("", self.reset_qa_defaults_button)
+            self.advanced_section = _DisclosureSection(
+                "Advanced placement checks · defaults active",
+                review_content,
+                expanded=False,
+            )
+            self.advanced_section.addWidget(advanced)
+            self.advanced_section.header.setToolTip(
+                "The displayed defaults remain active while this section is collapsed."
+            )
+
+            self.preview_help_label = QLabel(
+                "Preview Geometry is visual QA only. Validate Placements additionally "
+                "checks skin distance, outward normals, frame validity, and response "
+                "mappings. Magenta arrows are normals; lavender arrows are point-roll "
+                "references. Cyan line +t follows increasing segment_index; blue +b "
+                "is the signed across-line axis (+t × +n). Preview Layers → Show "
+                "changes only the display. Spatial "
+                "Feature Configuration → Use controls which parsed instances enter "
+                "preview, validation, response loading, and build.",
+                review_content,
+            )
+            self.preview_help_label.setWordWrap(True)
+            self.preview_guide = _DisclosureSection(
+                "How to read the 3-D preview", review_content, expanded=False
+            )
+            self.preview_guide.addWidget(self.preview_help_label)
+
+            review_group = QGroupBox("Readiness and output", review_content)
+            review_group.setObjectName("featureStepCard")
+            review_form = QFormLayout(review_group)
+            review_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            review_form.addRow("Output response:", self.output_picker)
+            self.study_fields = {}
+            study_group = QWidget(review_content)
+            study_form = QFormLayout(study_group)
+            study_note = QLabel("Optional exact subset: enter comma-separated stored body samples in increasing order. Blank keeps the full axis; no frequency or angle interpolation is introduced.")
+            study_note.setWordWrap(True)
+            study_form.addRow(study_note)
+            for key, label in (("study_frequencies_ghz", "Frequency (GHz):"), ("study_azimuths_deg", "Azimuth (deg):"), ("study_elevations_deg", "Elevation (deg):")):
+                control = QLineEdit(study_group)
+                control.setPlaceholderText("All stored samples")
+                control.editingFinished.connect(self._study_changed)
+                self.study_fields[key] = control
+                study_form.addRow(label, control)
+            self.study_section = _DisclosureSection("Study scope (all samples by default)", review_content, expanded=False)
+            self.study_section.addWidget(study_group)
+            review_content_layout.addWidget(self.study_section)
+            self.readiness_checklist = QTreeWidget(review_group)
+            self.readiness_checklist.setObjectName("featureReadinessChecklist")
+            self.readiness_checklist.setHeaderLabels(["Requirement", "Status"])
+            self.readiness_checklist.setRootIsDecorated(True)
+            self.readiness_checklist.setAlternatingRowColors(True)
+            self.readiness_checklist.setSelectionMode(
+                QAbstractItemView.SelectionMode.NoSelection
+            )
+            self.readiness_checklist.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.readiness_checklist.header().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.Stretch
+            )
+            self.readiness_checklist.header().setSectionResizeMode(
+                1, QHeaderView.ResizeMode.ResizeToContents
+            )
+            self.readiness_checklist.setMinimumHeight(245)
+            self.readiness_checklist.setToolTip(
+                "Updates immediately when an Assembly input, mapping, option, or "
+                "validation result changes. Every required row must be ready before "
+                "the final run is enabled."
+            )
+            self.readiness_section = _DisclosureSection(
+                "Input checklist", review_content, expanded=False
+            )
+            self.readiness_section.addWidget(self.readiness_checklist)
+            self.readiness_checklist.itemDoubleClicked.connect(self._go_to_requirement)
+            self.fix_next_button = QPushButton('Go to next required step', self)
+            self.fix_next_button.clicked.connect(self._fix_next_requirement)
+            self.readiness_section.addWidget(self.fix_next_button)
+            self.readiness_label = QLabel(review_group)
+            self.readiness_label.setObjectName("featureReadiness")
+            self.readiness_label.setWordWrap(True)
+            self.readiness_label.setVisible(False)
+            self.build_summary_label = QLabel(review_group)
+            self.build_summary_label.setObjectName("featureBuildSummary")
+            self.build_summary_label.setWordWrap(True)
+            review_form.addRow(self.build_summary_label)
+            self.effective_physics_label = QLabel(review_group)
+            self.effective_physics_label.setObjectName("featureEffectivePhysics")
+            self.effective_physics_label.setWordWrap(True)
+            self.effective_physics_label.setToolTip(
+                "The settings that will actually be sent to validation and assembly."
+            )
+            review_form.addRow(self.effective_physics_label)
+            self.work_estimate_label = QLabel(review_group)
+            self.work_estimate_label.setObjectName("featureWorkEstimate")
+            self.work_estimate_label.setWordWrap(True)
+            self.work_estimate_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.work_estimate_label.setToolTip(
+                "A broad static workload model, not a runtime benchmark. It "
+                "uses radar looks/frequencies, enabled features, solver line "
+                "pieces, mesh triangles, and optional body-shadow rays."
+            )
+            self.model_scope_label = QLabel(
+                "Model boundary: Assembly coherently superposes reviewed local "
+                "feature deltas. It does not solve body–feature mutual coupling, "
+                "feature–feature multiple scattering, diffraction, or creeping "
+                "waves. Production validation checks the inputs and declared "
+                "applicability envelope—not full-vehicle Maxwell accuracy.",
+                review_group,
+            )
+            self.model_scope_label.setWordWrap(True)
+            self.model_scope_label.setObjectName("featureModelBoundary")
+            review_form.addRow(self.model_scope_label)
+            self.model_scope_section = _DisclosureSection(
+                "Workload estimate", review_content, expanded=False
+            )
+            self.model_scope_section.addWidget(self.work_estimate_label)
+            self.validation_qa_label = QLabel(
+                "Run Validate placements to see a row for every enabled point "
+                "and line path.",
+                review_group,
+            )
+            self.validation_qa_label.setWordWrap(True)
+            self.validation_qa_label.setObjectName("featureValidationSummary")
+            review_form.addRow(self.validation_qa_label)
+            self.validation_warning_label = QLabel(review_group)
+            self.validation_warning_label.setWordWrap(True)
+            self.validation_warning_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self.validation_warning_label.setObjectName("featureValidationWarning")
+            self.validation_warning_label.setVisible(False)
+            review_form.addRow(self.validation_warning_label)
+            self.validation_warning_ack = QCheckBox(
+                "I reviewed and accept these warnings for this output.",
+                review_group,
+            )
+            self.validation_warning_ack.setToolTip(
+                "This acknowledgment applies only to the current successful "
+                "validation. Any input change or re-validation clears it."
+            )
+            self.validation_warning_ack.setVisible(False)
+            review_form.addRow(self.validation_warning_ack)
+            self.validation_qa_table = QTableWidget(0, 6, review_group)
+            self.validation_qa_table.setHorizontalHeaderLabels(
+                ["Type", "Instance", "Response ID", "Skin offset", "Normal error", "Result"]
+            )
+            self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.ResizeToContents
+            )
+            self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                1, QHeaderView.ResizeMode.Stretch
+            )
+            self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                2, QHeaderView.ResizeMode.Stretch
+            )
+            for column in (3, 4, 5):
+                self.validation_qa_table.horizontalHeader().setSectionResizeMode(
+                    column, QHeaderView.ResizeMode.ResizeToContents
+                )
+            self.validation_qa_table.verticalHeader().setVisible(False)
+            self.validation_qa_table.setEditTriggers(
+                QAbstractItemView.EditTrigger.NoEditTriggers
+            )
+            self.validation_qa_table.setSelectionBehavior(
+                QAbstractItemView.SelectionBehavior.SelectRows
+            )
+            self.validation_qa_table.setSelectionMode(
+                QAbstractItemView.SelectionMode.SingleSelection
+            )
+            self.validation_qa_table.setAlternatingRowColors(True)
+            self.validation_qa_table.setMinimumHeight(135)
+            self.validation_qa_table.setToolTip(
+                "Authoritative placement records. WARN means the placement "
+                "passed physical checks but is not illuminated by any requested "
+                "look and therefore contributes zero. Click a row to reveal the "
+                "same instance in Spatial Feature Configuration."
+            )
+            self.validation_qa_table.setVisible(False)
+            review_form.addRow(self.validation_qa_table)
+            review_content_layout.addWidget(review_group)
+            review_content_layout.addWidget(self.readiness_section)
+            review_content_layout.addWidget(self.feature_selection_section)
+            review_content_layout.addWidget(self.advanced_section)
+            review_content_layout.addWidget(self.model_scope_section)
+            review_content_layout.addWidget(self.preview_guide)
+
+            self.status_label = QLabel(
+                "No Assembly operation is running.",
+                self,
+            )
+            self.status_label.setObjectName("featureAssemblyStatus")
+            self.status_label.setWordWrap(True)
+            self.status_label.setFrameShape(QFrame.Shape.StyledPanel)
+            self.status_label.setMargin(6)
+            outer.addWidget(self.status_label)
+
+            operation_row = QHBoxLayout()
+            self.operation_progress = QProgressBar(self)
+            self.operation_progress.setRange(0, 100)
+            self.operation_progress.setValue(0)
+            self.operation_progress.setTextVisible(True)
+            self.operation_progress.setFormat("Preparing…")
+            self.operation_progress.setToolTip(
+                "Live progress for the current Assembly operation. Cancellation "
+                "is cooperative and never publishes a partial response."
+            )
+            self.operation_progress.setVisible(False)
+            operation_row.addWidget(self.operation_progress, 1)
+            self.cancel_operation_button = QPushButton("Cancel operation", self)
+            self.cancel_operation_button.setToolTip(
+                "Cooperatively stop validation or assembly after the current safe "
+                "physics step. Cancellation never publishes a partial output or "
+                "retains a partially validated plan."
+            )
+            self.cancel_operation_button.setVisible(False)
+            self.cancel_operation_button.setEnabled(False)
+            operation_row.addWidget(self.cancel_operation_button)
+            outer.addLayout(operation_row)
+
+            action_row = QHBoxLayout()
+            self.input_preview_button = QPushButton("Preview geometry", self)
+            self.input_preview_button.setObjectName("featureWorkflowAction")
+            self.input_preview_button.setToolTip(
+                "Show available body geometry and enabled CSV locations without "
+                "requiring response mappings or an output path. This is visual QA only."
+            )
+            self.preview_button = QPushButton("Validate placements", self)
+            self.preview_button.setObjectName("featureWorkflowAction")
+            self.preview_button.setToolTip(
+                "Validate body skin, normals, and response mapping completeness, then "
+                "show the prepared body and features in the 3-D Assembly view."
+            )
+            self.build_button = QPushButton("Assemble && save", self)
+            self.build_button.setObjectName("featureWorkflowAction")
+            self.build_button.setToolTip(
+                "Publish the exact current validation: coherently add every enabled "
+                "mapped feature and atomically save the selected output .grim file."
+            )
+            self.build_button.setDefault(True)
+            action_row.addWidget(self.input_preview_button)
+            action_row.addWidget(self.preview_button)
+            action_row.addWidget(self.build_button)
+            outer.addLayout(action_row)
+            review_content_layout.addStretch(1)
+            self._busy_form_widgets = (
+                body_group,
+                self.body_geometry_section,
+                point_page,
+                line_page,
+                feature_group,
+                self.advanced_section,
+                review_group,
+            )
+
+            self.status_changed.connect(self.status_label.setText)
+            self.recipe_name_edit.textEdited.connect(self._recipe_metadata_changed)
+            self.recipe_variant_edit.textEdited.connect(self._recipe_metadata_changed)
+            self.load_recipe_button.clicked.connect(self._load_recipe_dialog)
+            self.save_recipe_button.clicked.connect(self._save_recipe)
+            self.save_recipe_as_button.clicked.connect(self._save_recipe_as)
+            self.base_picker.editing_finished.connect(self._base_path_changed)
+            self.surface_picker.editing_finished.connect(self._surface_path_changed)
+            self.output_picker.editing_finished.connect(self._output_path_changed)
+            self.point_csv_picker.editing_finished.connect(
+                lambda: self._placement_csv_changed("point")
+            )
+            self.line_csv_picker.editing_finished.connect(
+                lambda: self._placement_csv_changed("line")
+            )
+            self.coordinate_units.currentIndexChanged.connect(
+                self._mark_preview_stale
+            )
+            self.surface_units.currentIndexChanged.connect(self._mark_preview_stale)
+            self.check_surface_binding_button.clicked.connect(
+                self.check_selected_surface_binding
+            )
+            self.bind_surface_button.clicked.connect(
+                self.bind_selected_surface
+            )
+            self.flip_normals.toggled.connect(self._mark_preview_stale)
+            self.shadow.toggled.connect(self._mark_preview_stale)
+            self.skin_tol.valueChanged.connect(self._mark_preview_stale)
+            self.phase_tol.valueChanged.connect(self._mark_preview_stale)
+            self.normal_tol.valueChanged.connect(self._mark_preview_stale)
+            self.shadow_bias.editingFinished.connect(self._mark_preview_stale)
+            self.validation_profile.currentIndexChanged.connect(
+                self._validation_profile_changed
+            )
+            self.reset_qa_defaults_button.clicked.connect(
+                self._reset_qa_defaults
+            )
+            self.validation_warning_ack.toggled.connect(
+                self._update_workflow_readiness
+            )
+            self.point_mapping.mapping_changed.connect(self._mapping_changed)
+            self.line_mapping.mapping_changed.connect(self._mapping_changed)
+            self.spatial_feature_tree.selection_changed.connect(
+                self._spatial_selection_changed
+            )
+            self.validation_qa_table.cellClicked.connect(self._qa_row_clicked)
+            self.base_picker.catalog_notice.connect(
+                self._loaded_dataset_notice
+            )
+            self.point_mapping.catalog_notice.connect(
+                self._loaded_dataset_notice
+            )
+            self.line_mapping.catalog_notice.connect(
+                self._loaded_dataset_notice
+            )
+            self.point_format_button.toggled.connect(
+                lambda checked: self._toggle_schema_help("point", checked)
+            )
+            self.line_format_button.toggled.connect(
+                lambda checked: self._toggle_schema_help("line", checked)
+            )
+            self.point_template_button.clicked.connect(
+                lambda _checked=False: self._save_template("point")
+            )
+            self.line_template_button.clicked.connect(
+                lambda _checked=False: self._save_template("line")
+            )
+            self.point_clear_button.clicked.connect(
+                lambda _checked=False: self._clear_placement_csv("point")
+            )
+            self.line_clear_button.clicked.connect(
+                lambda _checked=False: self._clear_placement_csv("line")
+            )
+            self.scan_button.clicked.connect(self.refresh_dataset_ids)
+            self.input_preview_button.clicked.connect(self.preview_inputs)
+            self.preview_button.clicked.connect(self.validate_and_preview)
+            self.build_button.clicked.connect(self.assemble_and_save)
+            self.cancel_operation_button.clicked.connect(
+                self.request_cancel
+            )
+            self._refresh_spatial_feature_tree()
+            self._update_recipe_status()
+            self._update_workflow_readiness()
+
+        def _validation_profile_flags(self) -> tuple[bool, bool, bool]:
+            data = self.validation_profile.currentData()
+            if not isinstance(data, (tuple, list)) or len(data) != 4:
+                return False, True, True
+            return bool(data[1]), bool(data[2]), bool(data[3])
+
+        def _set_validation_profile_from_values(
+            self, values: FeatureAssemblyValues
+        ) -> None:
+            target = (
+                bool(values.allow_legacy_base_metadata),
+                bool(values.require_feature_manifests),
+                bool(values.require_body_mesh_certification),
+            )
+            index = 0
+            for candidate in range(self.validation_profile.count()):
+                data = self.validation_profile.itemData(candidate)
+                if (
+                    isinstance(data, (tuple, list))
+                    and len(data) == 4
+                    and (
+                        bool(data[1]),
+                        bool(data[2]),
+                        bool(data[3]),
+                    ) == target
+                ):
+                    index = candidate
+                    break
+            self.validation_profile.setCurrentIndex(index)
+
+        @Slot()
+        def _validation_profile_changed(self, *_args: Any) -> None:
+            (
+                allow_legacy,
+                require_manifests,
+                require_body_certification,
+            ) = self._validation_profile_flags()
+            self.model.values.allow_legacy_base_metadata = allow_legacy
+            self.model.values.require_feature_manifests = require_manifests
+            self.model.values.require_body_mesh_certification = (
+                require_body_certification
+            )
+            self._mark_preview_stale()
+
+        @Slot()
+        def _reset_qa_defaults(self) -> None:
+            self.skin_tol.setValue(DEFAULT_SKIN_TOL_MM / 25.4)
+            self.phase_tol.setValue(DEFAULT_SKIN_PHASE_TOL_DEG)
+            self.normal_tol.setValue(DEFAULT_NORMAL_TOL_DEG)
+            self.shadow_bias.clear()
+            self.status_changed.emit(
+                "Restored the conservative placement-check defaults. Validate "
+                "again before assembly."
+            )
+
+        def set_service(self, service: Any) -> None:
+            coerce_feature_workflow(service)  # Fail early with an actionable API error.
+            self._service = service
+            self._update_workflow_readiness()
+
+        def service(self) -> Any:
+            return self._service
+
+        def _update_recipe_status(self) -> None:
+            name = self.recipe_name_edit.text().strip() or "Unnamed assembly"
+            variant = self.recipe_variant_edit.text().strip() or "Unnamed variant"
+            state = "modified — save to keep changes" if self._recipe_dirty else "saved"
+            if self._recipe_path is None:
+                text = f"{name} · {variant} · not saved yet"
+            else:
+                text = (
+                    f"{name} · {variant} · {state} · "
+                    f"{self._recipe_path.name}"
+                )
+            if self._recipe_source_warnings:
+                count = len(self._recipe_source_warnings)
+                text += f" · ⚠ {count} source warning(s)"
+                self.recipe_status_label.setToolTip(
+                    "\n".join(self._recipe_source_warnings)
+                )
+            else:
+                self.recipe_status_label.setToolTip(
+                    "Recipes preserve all effective paths, units, mappings, "
+                    "tolerances, and feature membership."
+                )
+            self.recipe_status_label.setText(text)
+            self.save_recipe_button.setEnabled(
+                not self.job_is_running() and self._recipe_path is not None
+            )
+
+        @Slot(str)
+        def _recipe_metadata_changed(self, _text: str) -> None:
+            self._set_recipe_dirty()
+
+        def _set_recipe_dirty(self) -> None:
+            if self._loading_recipe:
+                return
+            self._recipe_dirty = True
+            # Once edited, the saved source warning snapshot no longer exactly
+            # describes the live configuration. The next save records a new one.
+            self._recipe_source_warnings = ()
+            self._update_recipe_status()
+
+        def _recipe_default_path(self) -> str:
+            anchor = self.output_picker.path() or self.base_picker.path()
+            parent = Path(anchor).expanduser().parent if anchor else Path.cwd()
+            raw_name = self.recipe_variant_edit.text().strip() or "baseline"
+            safe_name = "_".join(raw_name.split())
+            safe_name = "".join(
+                character
+                for character in safe_name
+                if character.isalnum() or character in {"-", "_"}
+            ) or "baseline"
+            return str(parent / f"{safe_name}{FEATURE_RECIPE_SUFFIX}")
+
+        def save_recipe_path(self, path: str | Path) -> Path:
+            """Save the live form to ``path``; exposed for integration tests."""
+
+            if self.job_is_running():
+                raise RuntimeError(
+                    "Wait for the current feature operation before saving its recipe."
+                )
+            self._pull_values()
+            saved = write_feature_assembly_recipe(
+                self.model.values,
+                path,
+                name=self.recipe_name_edit.text(),
+                variant=self.recipe_variant_edit.text(),
+            )
+            self._recipe_path = saved
+            self._recipe_dirty = False
+            self._recipe_source_warnings = ()
+            self._update_recipe_status()
+            self.status_changed.emit(
+                f"Saved Assembly recipe {saved.name}. This named variant can be "
+                "reloaded locally or after copying its referenced files."
+            )
+            return saved
+
+        @Slot()
+        def _save_recipe(self) -> None:
+            if self._recipe_path is None:
+                self._save_recipe_as()
+                return
+            try:
+                self.save_recipe_path(self._recipe_path)
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        @Slot()
+        def _save_recipe_as(self) -> None:
+            if self.job_is_running():
+                self.status_changed.emit(
+                    "Wait for the current feature operation before saving a recipe."
+                )
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Assembly recipe",
+                self._recipe_default_path(),
+                "GRIM Assembly recipe (*.assembly.json);;JSON file (*.json);;All files (*)",
+            )
+            if not path:
+                return
+            try:
+                self.save_recipe_path(path)
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        @Slot()
+        def _load_recipe_dialog(self) -> None:
+            if self.job_is_running():
+                self.status_changed.emit(
+                    "Wait for the current feature operation before loading a recipe."
+                )
+                return
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load Assembly recipe",
+                str(self._recipe_path or Path.cwd()),
+                "GRIM Assembly recipe (*.assembly.json *.json);;All files (*)",
+            )
+            if not path:
+                return
+            if not self._confirm_dirty_recipe("load another recipe"):
+                return
+            try:
+                self.load_recipe_path(path)
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        def _confirm_dirty_recipe(self, action: str) -> bool:
+            """Offer Save/Discard/Cancel before losing edited recipe state."""
+
+            if not self._recipe_dirty:
+                return True
+            answer = QMessageBox.warning(
+                self,
+                "Unsaved Assembly recipe",
+                "This Assembly recipe has unsaved changes. Save them before you "
+                f"{action}?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return False
+            if answer == QMessageBox.StandardButton.Discard:
+                self._recipe_dirty = False
+                self._recipe_source_warnings = ()
+                self._update_recipe_status()
+                return True
+            if answer != QMessageBox.StandardButton.Save:
+                return False
+            if self._recipe_path is not None:
+                try:
+                    self.save_recipe_path(self._recipe_path)
+                except Exception as exc:
+                    self._show_error(str(exc))
+                    return False
+            else:
+                self._save_recipe_as()
+            return not self._recipe_dirty
+
+        def request_close(self, parent: QWidget | None = None) -> bool:
+            """Return True only when active work and unsaved recipes are resolved."""
+            for editor in tuple(self._placement_editors.values()):
+                editor.reject()
+                if editor.isVisible() or editor._thread is not None:
+                    return False
+            if self.is_busy():
+                if self._active_kind in {"preview", "build"}:
+                    self.request_cancel()
+                else:
+                    self.status_changed.emit(
+                        "Feature validation is still running; wait before closing."
+                    )
+                return False
+            return self._confirm_dirty_recipe("close GRIM")
+
+        def load_recipe_path(
+            self,
+            path: str | Path,
+            *,
+            refresh: bool = True,
+        ) -> LoadedFeatureAssemblyRecipe:
+            """Restore one recipe and optionally parse its placement CSVs."""
+
+            if self.job_is_running():
+                raise RuntimeError(
+                    "Wait for the current feature operation before loading a recipe."
+                )
+            loaded = read_feature_assembly_recipe(path)
+            previous_preview = self._preview_is_current
+            self._loading_recipe = True
+            try:
+                self.model = FeatureAssemblyFormModel(loaded.values)
+                values = self.model.values
+                self.base_picker.set_path(values.base_grim)
+                self.surface_picker.set_path(values.surface_mesh)
+                self.output_picker.set_path(values.output_grim)
+                self.point_csv_picker.set_path(values.point_locations_csv)
+                self.line_csv_picker.set_path(values.line_locations_csv)
+                coordinate_index = self.coordinate_units.findData(
+                    values.coordinate_units
+                )
+                surface_index = self.surface_units.findData(values.surface_units)
+                if coordinate_index < 0 or surface_index < 0:
+                    raise ValueError("Recipe units are unavailable in this GRIM build.")
+                self.coordinate_units.setCurrentIndex(coordinate_index)
+                self.surface_units.setCurrentIndex(surface_index)
+                self.flip_normals.setChecked(values.flip_surface_normals)
+                self.shadow.setChecked(values.shadow)
+                self.host_material.setText(values.host_material)
+                self.host_stack.setText(values.host_stack_id)
+                self.host_radius.setText("" if values.host_minimum_radius_m is None else format(values.host_minimum_radius_m / UNIT_SCALE_M["inches"], ".17g"))
+                for key, control in self.study_fields.items():
+                    selected = getattr(values, key)
+                    control.setText("" if selected is None else ", ".join(map(str, selected)))
+                self.skin_tol.setValue(values.skin_tol_m / UNIT_SCALE_M["inches"])
+                self.phase_tol.setValue(values.skin_phase_tol_deg)
+                self.normal_tol.setValue(values.normal_tol_deg)
+                self._set_validation_profile_from_values(values)
+                self.shadow_bias.setText(
+                    "" if values.shadow_bias_m is None else format(values.shadow_bias_m / UNIT_SCALE_M["inches"], ".17g")
+                )
+                # Display saved mappings immediately, while readiness still
+                # requires the authoritative CSV re-scan before validation.
+                self.point_mapping.set_dataset_ids(
+                    tuple(values.point_datasets),
+                    values.point_datasets,
+                )
+                self.line_mapping.set_dataset_ids(
+                    tuple(values.line_datasets),
+                    values.line_datasets,
+                )
+                self.spatial_feature_filter.clear()
+                self.recipe_name_edit.setText(loaded.name)
+                self.recipe_variant_edit.setText(loaded.variant)
+                self._recipe_path = loaded.path
+                self._recipe_dirty = False
+                self._recipe_source_warnings = loaded.source_warnings
+                self._preview_is_current = False
+                self._validated_plan_current = False
+                self._validation_warning_count = 0
+                self._refresh_spatial_feature_tree()
+                self._clear_validation_qa(
+                    "Recipe loaded. Run Validate placements to refresh per-instance QA."
+                )
+                self._update_recipe_status()
+                self._update_workflow_readiness()
+            finally:
+                self._loading_recipe = False
+
+            if previous_preview:
+                message = (
+                    "Assembly recipe loaded — the previous 3-D preview is out of "
+                    "date until this recipe is previewed or validated."
+                )
+                self.preview_stale.emit(message)
+
+            warning_text = ""
+            if loaded.source_warnings:
+                warning_text = (
+                    f" {len(loaded.source_warnings)} referenced source warning(s) "
+                    "are listed on the recipe status tooltip."
+                )
+            self.status_changed.emit(
+                f"Loaded Assembly recipe {loaded.name} · {loaded.variant}."
+                + warning_text
+            )
+
+            placement_paths = tuple(
+                value
+                for value in (
+                    loaded.values.point_locations_csv,
+                    loaded.values.line_locations_csv,
+                )
+                if value
+            )
+            can_refresh = bool(
+                refresh
+                and placement_paths
+                and all(Path(value).is_file() for value in placement_paths)
+            )
+            if can_refresh:
+                try:
+                    coerce_feature_workflow(self._service)
+                except (RuntimeError, TypeError):
+                    can_refresh = False
+            if can_refresh:
+                self.refresh_dataset_ids()
+            return loaded
+
+        def set_loaded_dataset_catalog(self, entries: Iterable[Any]) -> None:
+            """Offer saved, file-backed GRIM rows without replacing Browse.
+
+            The combined shell may pass its existing stable dataset catalog.
+            Entries can be :class:`LoadedDatasetEntry` instances, mappings,
+            ``(dataset_id, name, path[, dirty])`` tuples, or objects exposing
+            equivalent attributes. Dirty/in-memory/missing entries remain
+            visible as disabled explanations so users know to save first.
+            """
+
+            catalog = _coerce_loaded_dataset_catalog(entries)
+            self._loaded_dataset_catalog = catalog
+            self.base_picker.set_loaded_dataset_catalog(catalog)
+            self.point_mapping.set_loaded_dataset_catalog(catalog)
+            self.line_mapping.set_loaded_dataset_catalog(catalog)
+
+        def loaded_dataset_catalog(self) -> tuple[LoadedDatasetEntry, ...]:
+            """Return the last normalized catalog snapshot."""
+
+            return self._loaded_dataset_catalog
+
+        def set_base_grim(self, path: str) -> None:
+            self.base_picker.set_path(path)
+            self._base_path_changed()
+
+        def set_surface_mesh(self, path: str) -> None:
+            self.surface_picker.set_path(path)
+            self._surface_path_changed()
+
+        def set_point_csv(self, path: str, *, discover: bool = True) -> None:
+            self.point_csv_picker.set_path(path)
+            if discover:
+                self._placement_csv_changed("point")
+            else:
+                if self.model.feature_selection_source_changed("point", path):
+                    self.model.clear_feature_selection("point")
+                self.model.values.point_locations_csv = _clean_path(path)
+                self.model.invalidate_dataset_requirements("point")
+                self.point_mapping.set_dataset_ids(())
+                self._refresh_spatial_feature_tree()
+                self._mark_preview_stale()
+
+        def set_line_csv(self, path: str, *, discover: bool = True) -> None:
+            self.line_csv_picker.set_path(path)
+            if discover:
+                self._placement_csv_changed("line")
+            else:
+                if self.model.feature_selection_source_changed("line", path):
+                    self.model.clear_feature_selection("line")
+                self.model.values.line_locations_csv = _clean_path(path)
+                self.model.invalidate_dataset_requirements("line")
+                self.line_mapping.set_dataset_ids(())
+                self._refresh_spatial_feature_tree()
+                self._mark_preview_stale()
+
+        def set_output_grim(self, path: str) -> None:
+            self.output_picker.set_path(path)
+            self._output_path_changed()
+
+        @Slot(str)
+        def _loaded_dataset_notice(self, message: str) -> None:
+            self.status_changed.emit(message)
+
+        def _surface_binding_inputs(
+            self,
+        ) -> tuple[FeatureWorkflowAdapter, Path, Path, str]:
+            """Return validated absolute inputs for an explicit binding action."""
+
+            self._pull_values()
+            values = self.model.values
+            preflight = preflight_base_grim(
+                values.base_grim, base_dir=values.base_dir
+            )
+            if not preflight.valid:
+                raise ValueError(preflight.summary)
+            if preflight.embedded_bor:
+                raise ValueError(
+                    "This clean-body GRIM embeds its BoR geometry; an external "
+                    "solve-to-mesh binding is not required."
+                )
+            base = _resolved_user_path(values.base_grim, base_dir=values.base_dir)
+            surface = _resolved_user_path(
+                values.surface_mesh, base_dir=values.base_dir
+            )
+            if not surface.is_file() or surface.suffix.casefold() not in {
+                ".stl", ".facet"
+            }:
+                raise ValueError(
+                    "Choose the matching STL or .facet body surface first."
+                )
+            if values.surface_units not in UNIT_SCALE_M:
+                raise ValueError(
+                    "Choose the physical units of the selected surface mesh "
+                    "before checking or creating its binding."
+                )
+            adapter = coerce_feature_workflow(self._service)
+            return adapter, base, surface, str(values.surface_units)
+
+        def _prompt_surface_binding_details(
+            self,
+            sidecar: Path,
+        ) -> tuple[str, str] | None:
+            """Collect reviewed IDs and a deliberate attestation in one dialog."""
+
+            geometry_id = ""
+            case_id = ""
+            if isinstance(self._surface_binding_checked, Mapping):
+                geometry_id = str(
+                    self._surface_binding_checked.get("geometry_id", "")
+                ).strip()
+                case_id = str(
+                    self._surface_binding_checked.get("attestation_case_id", "")
+                ).strip()
+            elif sidecar.is_file():
+                # Prefill human IDs only. This is convenience, never validation;
+                # the backend hashes and validates again after the dialog.
+                try:
+                    if sidecar.stat().st_size <= 1024 * 1024:
+                        raw = json.loads(sidecar.read_text(encoding="utf-8-sig"))
+                        if isinstance(raw, Mapping):
+                            geometry_id = str(raw.get("geometry_id", "")).strip()
+                            case_id = str(
+                                raw.get("attestation_case_id", "")
+                            ).strip()
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pass
+            dialog = _SurfaceBindingDialog(
+                self,
+                geometry_id=geometry_id,
+                attestation_case_id=case_id,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return dialog.binding_values()
+
+        @Slot()
+        def check_selected_surface_binding(self) -> None:
+            """Integrity-check the current reviewed external-body binding."""
+
+            if self.job_is_running():
+                self.status_changed.emit("An Assembly operation is already running.")
+                return
+            try:
+                adapter, base, surface, units = self._surface_binding_inputs()
+                if not callable(adapter.check_surface_binding):
+                    raise RuntimeError(
+                        "The connected GHOST backend cannot check external-body "
+                        "surface bindings."
+                    )
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+
+            def operation() -> Mapping[str, Any]:
+                binding, sidecar = adapter.check_surface_binding(
+                    base,
+                    surface,
+                    surface_units=units,
+                )
+                return {
+                    "binding": dict(binding),
+                    "sidecar": str(sidecar),
+                    "base": str(base),
+                    "surface": str(surface),
+                    "surface_units": units,
+                    "identity_key": _surface_binding_identity_key(
+                        base, surface, units
+                    ),
+                }
+
+            self._start_operation("binding_check", operation)
+
+        @Slot()
+        def bind_selected_surface(self) -> None:
+            """Create or refresh one explicitly reviewed exact-file binding."""
+
+            if self.job_is_running():
+                self.status_changed.emit("An Assembly operation is already running.")
+                return
+            try:
+                adapter, base, surface, units = self._surface_binding_inputs()
+                if not callable(adapter.write_surface_binding):
+                    raise RuntimeError(
+                        "The connected GHOST backend cannot create external-body "
+                        "surface bindings."
+                    )
+                sidecar = _surface_binding_sidecar_path(surface)
+                if sidecar is None:  # Defensive; surface is validated above.
+                    raise RuntimeError("Could not resolve the canonical binding path.")
+                details = self._prompt_surface_binding_details(sidecar)
+                if details is None:
+                    self.status_changed.emit("Surface binding was not changed.")
+                    return
+                geometry_id, case_id = details
+                overwrite = sidecar.exists()
+                if overwrite:
+                    answer = QMessageBox.warning(
+                        self,
+                        "Replace reviewed surface binding?",
+                        f"{sidecar.name} already exists. Replace it with a new "
+                        "binding for the exact current body, mesh, units, and "
+                        "reviewed IDs?",
+                        QMessageBox.StandardButton.Yes
+                        | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer != QMessageBox.StandardButton.Yes:
+                        self.status_changed.emit(
+                            "Surface binding refresh cancelled; existing sidecar kept."
+                        )
+                        return
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+
+            def operation() -> Mapping[str, Any]:
+                binding, written = adapter.write_surface_binding(
+                    base,
+                    surface,
+                    surface_units=units,
+                    geometry_id=geometry_id,
+                    attestation_case_id=case_id,
+                    attest_reviewed_registration=True,
+                    overwrite=overwrite,
+                )
+                return {
+                    "binding": dict(binding),
+                    "sidecar": str(written),
+                    "base": str(base),
+                    "surface": str(surface),
+                    "surface_units": units,
+                    "identity_key": _surface_binding_identity_key(
+                        base, surface, units
+                    ),
+                }
+
+            self._start_operation("binding_write", operation)
+
+        def _refresh_work_estimate(
+            self,
+            base_preflight: BaseGrimPreflight,
+            *,
+            validation_current: bool,
+        ) -> AssemblyWorkEstimate:
+            """Refresh the displayed estimate from current or reviewed inputs."""
+
+            estimate = AssemblyWorkEstimate(available=False)
+            plan = self.model.prepared_plan if validation_current else None
+            if plan is not None:
+                estimate = estimate_validated_assembly_plan_workload(plan)
+            if not estimate.available:
+                enabled_points = self.model.enabled_point_placement_ids
+                enabled_lines = self.model.enabled_line_ids
+                point_count = (
+                    len(enabled_points)
+                    if enabled_points is not None
+                    else self.model.point_placement_count
+                )
+                line_count = (
+                    len(enabled_lines)
+                    if enabled_lines is not None
+                    else self.model.line_path_count
+                )
+                segment_count = self.model.enabled_line_segment_count
+                line_piece_count = max(
+                    line_count,
+                    segment_count * _PREVALIDATION_LINE_PIECES_PER_SEGMENT,
+                )
+                triangle_count, triangle_exact = surface_mesh_triangle_hint(
+                    self.model.values.surface_mesh,
+                    base_dir=self.model.values.base_dir,
+                )
+                values = self.model.values
+                azimuth_count = len(values.study_azimuths_deg) if values.study_azimuths_deg else int(base_preflight.azimuth_count)
+                elevation_count = len(values.study_elevations_deg) if values.study_elevations_deg else int(base_preflight.elevation_count)
+                frequency_count = len(values.study_frequencies_ghz) if values.study_frequencies_ghz else int(base_preflight.frequency_count)
+                estimate = estimate_assembly_workload(
+                    look_count=azimuth_count * elevation_count,
+                    frequency_count=frequency_count,
+                    point_count=point_count,
+                    line_path_count=line_count,
+                    line_segment_count=segment_count,
+                    line_piece_count=line_piece_count,
+                    mesh_triangle_count=triangle_count,
+                    shadow_enabled=bool(self.model.values.shadow),
+                    quantities_validated=False,
+                    line_piece_count_exact=False,
+                    mesh_triangle_count_exact=triangle_exact,
+                )
+            self._current_work_estimate = estimate
+            self.work_estimate_label.setText(
+                format_assembly_work_estimate(estimate)
+            )
+            return estimate
+
+        def _set_readiness_checklist(self, groups) -> None:
+            """Render the live, grouped run gate shown on the Review step."""
+
+            tree = self.readiness_checklist
+            tree.setUpdatesEnabled(False)
+            try:
+                tree.clear()
+                for group_label, requirements in groups:
+                    required_rows = [row for row in requirements if row[2]]
+                    group_ready = bool(required_rows) and all(
+                        bool(row[1]) for row in required_rows
+                    )
+                    group = QTreeWidgetItem(
+                        [
+                            str(group_label),
+                            "✓ Ready" if group_ready else "○ Action needed",
+                        ]
+                    )
+                    group.setData(0, Qt.ItemDataRole.UserRole, bool(group_ready))
+                    tree.addTopLevelItem(group)
+                    for label, ready, required in requirements:
+                        if not required:
+                            status = "— Not required"
+                        else:
+                            status = "✓ Ready" if ready else "○ Needed"
+                        child = QTreeWidgetItem([str(label), status])
+                        child.setData(0, Qt.ItemDataRole.UserRole, bool(ready))
+                        child.setData(1, Qt.ItemDataRole.UserRole, bool(required))
+                        group.addChild(child)
+                    group.setExpanded(True)
+            finally:
+                tree.setUpdatesEnabled(True)
+
+        def _update_workflow_readiness(self) -> None:
+            """Keep the compact step summary and actions honest and actionable."""
+
+            values = self.model.values
+            values.base_grim = self.base_picker.path()
+            values.output_grim = self.output_picker.path()
+            values.surface_mesh = self.surface_picker.path()
+            values.point_locations_csv = self.point_csv_picker.path()
+            values.line_locations_csv = self.line_csv_picker.path()
+            values.point_datasets = self.point_mapping.mapping()
+            values.line_datasets = self.line_mapping.mapping()
+            values.coordinate_units = str(self.coordinate_units.currentData())
+            values.surface_units = str(self.surface_units.currentData())
+            values.flip_surface_normals = self.flip_normals.isChecked()
+            values.shadow = self.shadow.isChecked()
+            values.skin_tol_m = self.skin_tol.value() * UNIT_SCALE_M["inches"]
+            values.skin_phase_tol_deg = self.phase_tol.value()
+            values.normal_tol_deg = self.normal_tol.value()
+            (
+                values.allow_legacy_base_metadata,
+                values.require_feature_manifests,
+                values.require_body_mesh_certification,
+            ) = self._validation_profile_flags()
+
+            point_selected = bool(values.point_locations_csv)
+            line_selected = bool(values.line_locations_csv)
+            placement_units_ready = bool(
+                not (point_selected or line_selected)
+                or values.coordinate_units in UNIT_SCALE_M
+            )
+            try:
+                point_current = (
+                    point_selected and self.model.requirements_look_current("point")
+                )
+                line_current = (
+                    line_selected and self.model.requirements_look_current("line")
+                )
+            except Exception:
+                point_current = False
+                line_current = False
+
+            point_ids = len(self.model.point_dataset_ids)
+            line_ids = len(self.model.line_dataset_ids)
+            point_count = self.model.point_placement_count
+            line_count = self.model.line_path_count
+            segment_count = self.model.line_segment_count
+            missing_mappings = self.model.missing_dataset_mappings()
+            point_missing = tuple(
+                value.split(":", 1)[1]
+                for value in missing_mappings
+                if value.startswith("point:")
+            )
+            line_missing = tuple(
+                value.split(":", 1)[1]
+                for value in missing_mappings
+                if value.startswith("line:")
+            )
+            active_point_ids = self.model.active_point_dataset_ids()
+            active_line_ids = self.model.active_line_dataset_ids()
+            enabled_point_count = len(
+                self.model.enabled_point_placement_ids or ()
+            )
+            enabled_line_count = len(self.model.enabled_line_ids or ())
+            try:
+                adapter = coerce_feature_workflow(self._service)
+                service_ready = True
+            except (RuntimeError, TypeError):
+                adapter = None
+                service_ready = False
+
+            def existing_file(path: str) -> bool:
+                if not _clean_path(path):
+                    return False
+                try:
+                    return _resolved_user_path(
+                        path, base_dir=values.base_dir
+                    ).is_file()
+                except OSError:
+                    return False
+
+            def existing_grim_file(path: str) -> bool:
+                if not _clean_path(path):
+                    return False
+                try:
+                    resolved = _resolved_user_path(path, base_dir=values.base_dir)
+                    return (
+                        resolved.is_file()
+                        and resolved.suffix.casefold() == ".grim"
+                    )
+                except OSError:
+                    return False
+
+            def existing_surface_file(path: str) -> bool:
+                if not _clean_path(path):
+                    return False
+                try:
+                    resolved = _resolved_user_path(path, base_dir=values.base_dir)
+                    return (
+                        resolved.is_file()
+                        and resolved.suffix.casefold() in {".stl", ".facet"}
+                    )
+                except OSError:
+                    return False
+
+            point_unusable = tuple(
+                dataset_id
+                for dataset_id in active_point_ids
+                if _clean_path(values.point_datasets.get(dataset_id))
+                and not existing_grim_file(values.point_datasets.get(dataset_id, ""))
+            )
+            line_unusable = tuple(
+                dataset_id
+                for dataset_id in active_line_ids
+                if _clean_path(values.line_datasets.get(dataset_id))
+                and not existing_grim_file(values.line_datasets.get(dataset_id, ""))
+            )
+
+            if not point_selected:
+                point_text = "No point CSV selected."
+            elif not point_current:
+                point_text = "Point CSV needs refresh."
+            else:
+                count_label = (
+                    f"{point_count} placement(s)"
+                    if point_count
+                    else f"{point_ids} response type(s)"
+                )
+                mapping_label = (
+                    f"{len(point_missing)} response(s) missing"
+                    if point_missing
+                    else (
+                        f"{len(point_unusable)} response file(s) not found"
+                        if point_unusable
+                        else "response files ready"
+                    )
+                )
+                point_text = f"Point CSV ready — {count_label}; {mapping_label}."
+
+            if not line_selected:
+                line_text = "No line CSV selected."
+            elif not line_current:
+                line_text = "Line CSV needs refresh."
+            else:
+                count_label = (
+                    f"{line_count} path(s), {segment_count} segment(s)"
+                    if line_count or segment_count
+                    else f"{line_ids} response type(s)"
+                )
+                mapping_label = (
+                    f"{len(line_missing)} response(s) missing"
+                    if line_missing
+                    else (
+                        f"{len(line_unusable)} response file(s) not found"
+                        if line_unusable
+                        else "response files ready"
+                    )
+                )
+                line_text = f"Line CSV ready — {count_label}; {mapping_label}."
+
+            self.point_csv_summary.setText(point_text)
+            self.line_csv_summary.setText(line_text)
+            self.workflow_tabs.setTabToolTip(1, point_text)
+            self.workflow_tabs.setTabToolTip(2, line_text)
+            self.shared_units_label.setText(
+                "Placement units are shared across both CSVs and selected above the tabs."
+            )
+
+            selected_parts = []
+            if point_selected:
+                selected_parts.append(
+                    f"{enabled_point_count}/{point_count or '?'} point placement(s) enabled"
+                )
+            if line_selected:
+                selected_parts.append(
+                    f"{enabled_line_count}/{line_count or '?'} line path(s) enabled / "
+                    f"{segment_count or '?'} parsed segment(s)"
+                )
+            self.feature_summary_label.setText(
+                "Selected: " + ("; ".join(selected_parts) if selected_parts else "none yet")
+            )
+            self.feature_summary_label.setVisible(point_selected and line_selected)
+            strict_feature_library = bool(values.require_feature_manifests)
+            production_profile = bool(
+                strict_feature_library and not values.allow_legacy_base_metadata
+            )
+            certified_body_profile = bool(
+                values.require_body_mesh_certification
+            )
+            if certified_body_profile:
+                qa_mode = (
+                    "Production — certified fine-mesh body, strict metadata, "
+                    "certified response manifests"
+                )
+            elif production_profile:
+                qa_mode = (
+                    "General body — strict metadata and response manifests"
+                )
+            else:
+                qa_mode = (
+                    "metadata advisory (no source certificate required)"
+                )
+            self.build_summary_label.setText(
+                (
+                    "; ".join(selected_parts)
+                    + f"; QA: {qa_mode}"
+                )
+                if selected_parts
+                else "Choose a point or line placement CSV."
+            )
+            shadow_state = "on" if values.shadow else "off"
+            normals_state = (
+                "flipped" if values.flip_surface_normals else "as stored"
+            )
+            self.effective_physics_label.setText(
+                "Effective settings — "
+                f"body shadowing: {shadow_state}; mesh normals: {normals_state}; "
+                f"skin distance ≤ {values.skin_tol_m / UNIT_SCALE_M['inches']:.6g} in; "
+                f"two-way phase error ≤ {values.skin_phase_tol_deg:.4g}°; "
+                f"normal mismatch ≤ {values.normal_tol_deg:.4g}°."
+            )
+            self.advanced_section.header.setText(
+                "Advanced placement checks"
+                + (
+                    " · certified BoR"
+                    if certified_body_profile
+                    else (
+                        ""
+                        if production_profile
+                        else " · metadata advisory"
+                    )
+                )
+            )
+
+            has_body = bool(values.base_grim)
+            base_preflight = preflight_base_grim(
+                values.base_grim, base_dir=values.base_dir
+            )
+            body_ready = base_preflight.valid
+            geometry_required = base_preflight.requires_surface_mesh and bool(
+                (point_selected and self.model.enabled_point_placement_ids != ())
+                or (line_selected and self.model.enabled_line_ids != ())
+            )
+            geometry_needed = bool(
+                (body_ready and base_preflight.requires_surface_mesh)
+                or values.surface_mesh or values.shadow
+            )
+            if geometry_needed != getattr(self, "_geometry_needed", False):
+                self.body_geometry_section.header.setChecked(geometry_needed)
+            self._geometry_needed = geometry_needed
+            self.body_geometry_section.header.setText(
+                "Body geometry (required for this response)"
+                if body_ready and geometry_required
+                else "Body geometry and shadowing (optional)"
+            )
+            self.body_preview_help.setText(base_preflight.summary)
+            self.body_response_summary.setText(response_summary(values.base_grim, base_dir=values.base_dir))
+            has_placements = point_selected or line_selected
+            has_enabled_features = bool(
+                self.model.enabled_point_placement_ids
+                or self.model.enabled_line_ids
+                or (
+                    not self.model.point_instances
+                    and not self.model.line_instances
+                    and has_placements
+                )
+            )
+            placement_files_ready = (
+                (not point_selected or existing_file(values.point_locations_csv))
+                and (not line_selected or existing_file(values.line_locations_csv))
+            )
+            scans_current = (
+                placement_files_ready
+                and (not point_selected or point_current)
+                and (not line_selected or line_current)
+            )
+            mappings_complete = not point_missing and not line_missing
+            response_files_ready = (
+                mappings_complete and not point_unusable and not line_unusable
+            )
+            surface_selected = bool(values.surface_mesh)
+            surface_units_ready = bool(
+                not surface_selected or values.surface_units in UNIT_SCALE_M
+            )
+            surface_file_ready = existing_surface_file(values.surface_mesh)
+            surface_required = bool(
+                body_ready
+                and has_enabled_features
+                and (base_preflight.requires_surface_mesh or (self.shadow.isChecked() and not base_preflight.embedded_bor))
+            )
+            surface_ready = (
+                surface_file_ready
+                if surface_required
+                else not surface_selected or surface_file_ready
+            )
+            self._update_surface_dimensions_display(base_preflight)
+            binding_status = assess_surface_binding_readiness(
+                base_grim=values.base_grim,
+                surface_mesh=values.surface_mesh,
+                surface_units=values.surface_units,
+                production_profile=production_profile,
+                base_dir=values.base_dir,
+                checked_key=self._surface_binding_checked_key,
+                checked_binding=self._surface_binding_checked,
+                error_key=self._surface_binding_error_key,
+                check_error=self._surface_binding_error,
+                tools_available=bool(
+                    adapter is not None
+                    and callable(adapter.check_surface_binding)
+                ),
+            )
+            self.surface_binding_status.setText(binding_status.message)
+            self.surface_binding_status.setProperty(
+                "bindingState", binding_status.code
+            )
+            if self.surface_binding_status.property("styledBindingState") != binding_status.code:
+                self.surface_binding_status.setProperty(
+                    "styledBindingState", binding_status.code
+                )
+                style = self.surface_binding_status.style()
+                style.unpolish(self.surface_binding_status)
+                style.polish(self.surface_binding_status)
+            binding_action_ready = bool(
+                not self.job_is_running()
+                and binding_status.external_body
+                and surface_file_ready
+                and surface_units_ready
+            )
+            self.check_surface_binding_button.setEnabled(
+                binding_action_ready
+                and adapter is not None
+                and callable(adapter.check_surface_binding)
+                and binding_status.sidecar_path is not None
+                and binding_status.sidecar_path.is_file()
+            )
+            self.bind_surface_button.setEnabled(
+                binding_action_ready
+                and adapter is not None
+                and callable(adapter.write_surface_binding)
+            )
+            self.bind_surface_button.setText(
+                "Refresh binding…"
+                if binding_status.sidecar_path is not None
+                and binding_status.sidecar_path.is_file()
+                else "Bind body to mesh…"
+            )
+            has_output = bool(values.output_grim)
+            output_ready = has_output
+            if has_output:
+                try:
+                    self.model._validate_output_target()
+                except (OSError, ValueError):
+                    output_ready = False
+            bias_text = self.shadow_bias.text().strip()
+            settings_ready = True
+            if bias_text:
+                try:
+                    bias_value = float(bias_text)
+                    settings_ready = math.isfinite(bias_value) and bias_value >= 0.0
+                except ValueError:
+                    settings_ready = False
+            self.build_summary_label.setVisible(
+                has_placements and (point_current or line_current)
+            )
+            full_ready = all(
+                (
+                    service_ready,
+                    body_ready,
+                    scans_current,
+                    response_files_ready,
+                    output_ready,
+                    surface_ready,
+                    placement_units_ready,
+                    surface_units_ready,
+                    binding_status.ready or not has_enabled_features,
+                    settings_ready,
+                )
+            )
+            validation_current = bool(
+                self._validated_plan_current
+                and service_ready
+                and adapter is not None
+                and self.model.validated_plan_is_current(adapter)
+            )
+            if not validation_current:
+                self._validated_plan_current = False
+            self._refresh_work_estimate(
+                base_preflight,
+                validation_current=validation_current,
+            )
+
+            checks = [
+                (service_ready, "GHOST backend"),
+                (body_ready, "valid body GRIM"),
+                (True, "features enabled" if has_enabled_features else "body-only baseline"),
+                (scans_current, "CSV read"),
+                (
+                    scans_current and response_files_ready,
+                    "response files",
+                ),
+            ]
+            if surface_selected or surface_required:
+                checks.append((surface_ready, "surface mesh"))
+            if surface_selected:
+                checks.append((surface_units_ready, "mesh units"))
+            if has_placements:
+                checks.append((placement_units_ready, "placement units"))
+            if binding_status.external_body and production_profile:
+                checks.append((binding_status.ready, "reviewed body binding"))
+            if certified_body_profile:
+                checks.append((validation_current, "body mesh certificate"))
+            if not settings_ready:
+                checks.append((False, "advanced settings"))
+            checks.append((output_ready, "output"))
+            self.readiness_label.setText(
+                "   ".join(("✓" if ok else "○") + " " + label for ok, label in checks)
+            )
+            warnings_reviewed = bool(
+                not self._validation_warning_count
+                or self.validation_warning_ack.isChecked()
+            )
+            self._set_readiness_checklist(
+                (
+                    (
+                        "Body",
+                        (
+                            ("GHOST feature backend", service_ready, True),
+                            ("Clean-body response", body_ready, True),
+                            (
+                                "Surface mesh",
+                                surface_ready,
+                                bool(surface_selected or surface_required),
+                            ),
+                            (
+                                "Surface mesh units",
+                                surface_units_ready,
+                                bool(surface_selected),
+                            ),
+                            (
+                                "Reviewed solve ↔ mesh binding",
+                                binding_status.ready,
+                                bool(binding_status.required and has_enabled_features),
+                            ),
+                        ),
+                    ),
+                    (
+                        "Point and Line Features",
+                        (
+                            ("Placement CSV selected", has_placements, has_placements),
+                            ("Placement coordinate units", placement_units_ready, has_placements),
+                            ("Placement CSV read", scans_current, has_placements),
+                            ("Body-only baseline when no features enabled", True, not has_enabled_features),
+                            ("Every dataset_id mapped", mappings_complete, True),
+                            ("Mapped response files available", response_files_ready, True),
+                        ),
+                    ),
+                    (
+                        "Review",
+                        (
+                            ("Advanced settings valid", settings_ready, True),
+                            ("Output response selected", output_ready, True),
+                            ("Placements validated", validation_current, True),
+                            (
+                                "Body mesh certificate",
+                                validation_current,
+                                bool(certified_body_profile),
+                            ),
+                            (
+                                "Validation warnings reviewed",
+                                warnings_reviewed,
+                                bool(self._validation_warning_count),
+                            ),
+                        ),
+                    ),
+                )
+            )
+
+            if not service_ready:
+                next_step = (
+                    "GHOST feature backend unavailable; repair the integration "
+                    "to continue."
+                )
+            elif not has_body:
+                next_step = "Next: choose the clean-body .grim response."
+            elif not body_ready:
+                next_step = "Next: " + base_preflight.summary
+            elif not surface_ready:
+                next_step = (
+                    "Next: choose the matching .stl or .facet surface mesh required "
+                    "for this external 3-D body or shadowing."
+                )
+            elif surface_selected and not surface_units_ready:
+                next_step = (
+                    "Next: choose the physical units stored in the selected "
+                    "surface mesh."
+                )
+            elif has_placements and not placement_units_ready:
+                next_step = (
+                    "Next: choose the coordinate units used by the selected "
+                    "placement CSV(s)."
+                )
+            elif has_enabled_features and binding_status.required and not binding_status.ready:
+                next_step = "Next: " + binding_status.message.lstrip("✗⚠○ ")
+            elif not scans_current:
+                next_step = "Next: refresh the selected CSV and correct any format error."
+            elif not mappings_complete:
+                next_step = "Next: map every dataset_id to its OPN − FRD response."
+            elif not response_files_ready:
+                next_step = "Next: map each response to an existing .grim file."
+            elif not settings_ready:
+                next_step = "Next: enter a finite, non-negative shadow ray bias or leave it blank."
+            elif not has_output:
+                next_step = "Next: choose the assembled output file."
+            elif not output_ready:
+                next_step = "Next: choose an output that does not alias an Assembly input."
+            elif not validation_current:
+                next_step = (
+                    "Ready to review: run Validate placements. Assembly is locked "
+                    "until that current validation succeeds."
+                )
+            elif self._validation_warning_count and not self.validation_warning_ack.isChecked():
+                next_step = (
+                    "Validation passed with warnings. Review every warning and check "
+                    "the one-time waiver before assembly."
+                )
+            else:
+                next_step = "Validated and reviewed — ready to assemble and save."
+            self.next_step_label.setText(next_step)
+
+            busy = self.job_is_running()
+            input_preview_supported = bool(
+                service_ready
+                and adapter is not None
+                and callable(adapter.preview_inputs)
+            )
+            preview_possible = bool(
+                (not has_body or body_ready)
+                and placement_units_ready
+                and surface_units_ready
+                and any(
+                    (
+                        body_ready,
+                        surface_file_ready,
+                        point_selected and existing_file(values.point_locations_csv),
+                        line_selected and existing_file(values.line_locations_csv),
+                    )
+                )
+            )
+            self.scan_button.setEnabled(not busy and service_ready and has_placements)
+            self.input_preview_button.setEnabled(
+                not busy
+                and input_preview_supported
+                and preview_possible
+            )
+            self.preview_button.setEnabled(not busy and full_ready)
+            self.build_button.setEnabled(
+                not busy and full_ready and validation_current and warnings_reviewed
+            )
+            primary_action = (
+                self.build_button
+                if self.build_button.isEnabled()
+                else (
+                    self.preview_button
+                    if self.preview_button.isEnabled()
+                    else (
+                        self.input_preview_button
+                        if self.input_preview_button.isEnabled()
+                        else None
+                    )
+                )
+            )
+            for action_button in (
+                self.input_preview_button,
+                self.preview_button,
+                self.build_button,
+            ):
+                should_be_primary = action_button is primary_action
+                if bool(action_button.property("primaryAction")) != should_be_primary:
+                    action_button.setProperty("primaryAction", should_be_primary)
+                    style = action_button.style()
+                    style.unpolish(action_button)
+                    style.polish(action_button)
+            self.point_clear_button.setEnabled(not busy and point_selected)
+            self.line_clear_button.setEnabled(not busy and line_selected)
+
+        def job_is_running(self) -> bool:
+            return bool(self._thread is not None and self._thread.isRunning())
+
+        def is_busy(self) -> bool:
+            """Return whether discovery, validation, or assembly is active."""
+
+            return self.job_is_running()
+
+        def busy_operation(self) -> str:
+            return str(self._active_kind)
+
+        def can_close(self) -> bool:
+            """Closing is safe after any active worker reaches a safe boundary."""
+
+            return not self.is_busy() and all(editor._thread is None for editor in self._placement_editors.values())
+
+        @Slot()
+        def request_cancel(self) -> None:
+            """Request cooperative cancellation of validation or assembly."""
+
+            if self._active_kind not in {"preview", "build"} or self._worker is None:
+                return
+            self._worker.request_cancel()
+            self.cancel_operation_button.setEnabled(False)
+            if self._active_kind == "preview":
+                self.operation_progress.setFormat("Cancelling validation safely…")
+                self.status_changed.emit(
+                    "Validation cancellation requested. Finishing the current safe "
+                    "check; no reviewed plan will be retained."
+                )
+            else:
+                self.operation_progress.setFormat("Cancelling assembly safely…")
+                self.status_changed.emit(
+                    "Assembly cancellation requested. Finishing the current safe "
+                    "numerical step; no partial output will be published."
+                )
+
+        def closeEvent(self, event: Any) -> None:
+            if not self.request_close(self):
+                event.ignore()
+                return
+            super().closeEvent(event)
+
+        def _base_path_changed(self) -> None:
+            base = self.base_picker.path()
+            previous = self.model.values.base_grim
+            if base and base != previous and not self._loading_recipe and preflight_base_grim(base, base_dir=self.model.values.base_dir).embedded_bor:
+                self.shadow.setChecked(True)
+            self._mark_preview_stale()
+            if base and not self.output_picker.path():
+                source = Path(base)
+                suggestion = source.with_name(source.stem + "_features.grim")
+                self.output_picker.set_path(str(suggestion))
+            self.model.values.base_grim = base
+            self._refresh_spatial_feature_tree()
+            self._update_workflow_readiness()
+
+
+        def _surface_path_changed(self) -> None:
+            """Default a newly selected mesh to physically safer shadowing."""
+
+            selected = self.surface_picker.path()
+            previous = _clean_path(self.model.values.surface_mesh)
+            newly_selected = bool(selected and selected != previous)
+            if newly_selected and not self._loading_recipe:
+                self.shadow.blockSignals(True)
+                try:
+                    self.shadow.setChecked(True)
+                finally:
+                    self.shadow.blockSignals(False)
+            self.model.values.surface_mesh = selected
+            self._mark_preview_stale()
+
+        def _output_path_changed(self) -> None:
+            self._mark_preview_stale()
+
+        @Slot()
+        def _mark_preview_stale(self, *_args: Any) -> None:
+            if self._loading_recipe:
+                return
+            had_current_review = bool(
+                self._preview_is_current or self._validated_plan_current
+            )
+            self.model.invalidate_prepared_plan()
+            self._preview_is_current = False
+            self._validated_plan_current = False
+            self._clear_validation_qa(
+                "Inputs changed. Run Validate placements to refresh per-instance QA."
+            )
+            self._set_recipe_dirty()
+            self._update_workflow_readiness()
+            if not had_current_review:
+                return
+            message = (
+                "Inputs changed — the 3-D preview is out of date. Preview "
+                "inputs again, or validate placements for an authoritative preview."
+            )
+            self.status_changed.emit(message)
+            self.preview_stale.emit(message)
+
+        def _placement_csv_changed(self, kind: str) -> None:
+            selected_path = (
+                self.point_csv_picker.path()
+                if kind == "point"
+                else self.line_csv_picker.path()
+            )
+            if self.model.feature_selection_source_changed(kind, selected_path):
+                self.model.clear_feature_selection(kind)
+            if kind == "point":
+                self.model.values.point_locations_csv = selected_path
+            else:
+                self.model.values.line_locations_csv = selected_path
+
+            if self.model.requirements_look_current(kind):
+                self._update_workflow_readiness()
+                return
+
+            self._mark_preview_stale()
+            self.model.invalidate_dataset_requirements(kind)
+            if kind == "point":
+                self.point_mapping.set_dataset_ids(())
+            else:
+                self.line_mapping.set_dataset_ids(())
+            self._refresh_spatial_feature_tree()
+            picker = self.point_csv_picker if kind == "point" else self.line_csv_picker
+            if picker.path():
+                self.refresh_dataset_ids()
+            else:
+                self.status_changed.emit(
+                    f"{kind.capitalize()} placements removed from this build."
+                )
+                self._update_workflow_readiness()
+
+        def _clear_placement_csv(self, kind: str) -> None:
+            picker = self.point_csv_picker if kind == "point" else self.line_csv_picker
+            picker.set_path("")
+            self.model.clear_feature_selection(kind)
+            self._placement_csv_changed(kind)
+
+        def _mapping_changed(self) -> None:
+            self.model.values.point_datasets = self.point_mapping.mapping()
+            self.model.values.line_datasets = self.line_mapping.mapping()
+            self._refresh_spatial_feature_tree()
+            self._mark_preview_stale()
+            missing = [
+                f"point:{dataset_id}" for dataset_id in self.point_mapping.missing_ids()
+            ]
+            missing.extend(
+                f"line:{dataset_id}" for dataset_id in self.line_mapping.missing_ids()
+            )
+            if missing:
+                self.status_changed.emit(
+                    "Response mapping incomplete — choose an OPN-FRD .grim for: "
+                    + ", ".join(missing)
+                )
+            elif self.point_mapping.dataset_ids or self.line_mapping.dataset_ids:
+                self.status_changed.emit(
+                    "All discovered dataset IDs are mapped. Next, validate "
+                    "placements and inspect them in the 3-D Assembly view."
+                )
+            self._update_workflow_readiness()
+
+        def _toggle_schema_help(self, kind: str, checked: bool) -> None:
+            if kind == "point":
+                button = self.point_format_button
+                label = self.point_schema_label
+                help_label = self.point_help_label
+            else:
+                button = self.line_format_button
+                label = self.line_schema_label
+                help_label = self.line_help_label
+            label.setVisible(bool(checked))
+            help_label.setVisible(bool(checked))
+            button.setText("Hide guide" if checked else "CSV guide")
+
+        def _remember_surface_dimensions(self, preview: Any) -> None:
+            """Cache physical mesh spans only for the exact previewed selection."""
+
+            geometry = getattr(preview, "preview_geometry", preview)
+            triangles = getattr(geometry, "surface_triangles_cad_m", None)
+            text = _surface_dimensions_summary(
+                triangles,
+                surface_units=self.model.values.surface_units,
+            )
+            try:
+                key = _surface_preview_identity_key(
+                    self.model.values.surface_mesh,
+                    self.model.values.surface_units,
+                    base_dir=self.model.values.base_dir,
+                )
+            except OSError:
+                key = None
+            self._surface_dimensions_key = key if text else None
+            self._surface_dimensions_text = text
+
+        def _update_surface_dimensions_display(
+            self,
+            base_preflight: BaseGrimPreflight | None = None,
+        ) -> None:
+            values = self.model.values
+            if not _clean_path(values.surface_mesh):
+                preflight = base_preflight or preflight_base_grim(
+                    values.base_grim, base_dir=values.base_dir
+                )
+                if preflight.embedded_bor:
+                    text = (
+                        "Embedded BoR geometry is authoritative and already "
+                        "stored in meters in the clean-body response."
+                    )
+                elif preflight.valid and preflight.requires_surface_mesh:
+                    text = (
+                        "No external mesh selected; choose the matching mesh "
+                        "before physical body dimensions can be interpreted."
+                    )
+                else:
+                    text = (
+                        "No external mesh selected; physical mesh dimensions "
+                        "are not available yet."
+                    )
+                self.surface_dimensions_label.setText(text)
+                return
+            if values.surface_units not in UNIT_SCALE_M:
+                self.surface_dimensions_label.setText(
+                    "Not interpreted: choose the physical units stored in this "
+                    "mesh before previewing, binding, or building."
+                )
+                return
+            if (
+                self._surface_dimensions_key is None
+                or not self._surface_dimensions_text
+            ):
+                self.surface_dimensions_label.setText(
+                    "Not interpreted yet: click Preview geometry to confirm the "
+                    "selected units and physical x/y/z dimensions in inches."
+                )
+                return
+            try:
+                current_key = _surface_preview_identity_key(
+                    values.surface_mesh,
+                    values.surface_units,
+                    base_dir=values.base_dir,
+                )
+            except OSError:
+                current_key = None
+            if (
+                current_key is not None
+                and current_key == self._surface_dimensions_key
+                and self._surface_dimensions_text
+            ):
+                self.surface_dimensions_label.setText(
+                    self._surface_dimensions_text
+                )
+                return
+            self.surface_dimensions_label.setText(
+                "Not interpreted yet: click Preview geometry to confirm the "
+                "selected units and physical x/y/z dimensions in inches."
+            )
+
+        def _save_template(self, kind: str) -> None:
+            default_name = (
+                "point_features_template.csv"
+                if kind == "point"
+                else "line_features_template.csv"
+            )
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                f"Save blank {kind} placement CSV template",
+                default_name,
+                "CSV placement file (*.csv);;All files (*)",
+            )
+            if not path:
+                return
+            try:
+                saved = write_placement_csv_template(kind, path)
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+            self.status_changed.emit(
+                f"Saved blank {kind} template: {saved}. Add placement rows, "
+                "then choose that CSV above to validate it."
+            )
+
+        def _edit_placements(self, kind: str) -> None:
+            """Open a modeless editor so existing 3-D selection stays usable."""
+            try:
+                existing = self._placement_editors.get(kind)
+                if existing is not None:
+                    existing.show()
+                    existing.raise_()
+                    return
+                self._pull_values()
+                values = self.model.values
+                if values.coordinate_units not in UNIT_SCALE_M:
+                    raise ValueError("Choose placement coordinate units before authoring geometry.")
+                adapter = coerce_feature_workflow(self._service)
+                from GRIM_Backend.assembly.placement_editor import PlacementEditor
+                preview_arguments = {
+                    "base_grim": values.base_grim or None,
+                    "surface_mesh": values.surface_mesh or None,
+                    "surface_units": values.surface_units or None,
+                    "base_dir": values.base_dir,
+                }
+                scale = UNIT_SCALE_M[values.coordinate_units]
+                flip = values.flip_surface_normals
+                def surface_loader():
+                    if adapter.preview_inputs is None:
+                        raise ValueError("Surface helper requires the current GHOST preview service.")
+                    preview = adapter.preview_inputs(**preview_arguments)
+                    from ghost_backend.geometry.surface import TriangleSurface
+                    triangles = preview.surface_triangles_cad_m
+                    surface = None if triangles is None else TriangleSurface(triangles, flip_normals=flip)
+                    return surface, preview.body_profile_rho_z_m, scale
+                def validate_csv(path):
+                    adapter.discover(**{f"{kind}_locations_csv": path})
+                editor = PlacementEditor(kind,
+                    columns=POINT_PLACEMENT_COLUMNS if kind == "point" else LINE_PLACEMENT_COLUMNS,
+                    units=values.coordinate_units,
+                    path=values.point_locations_csv if kind == "point" else values.line_locations_csv,
+                    base_dir=values.base_dir, surface_loader=surface_loader,
+                    validator=validate_csv, parent=self)
+                editor.instance_selected.connect(self.feature_instance_selected.emit)
+                editor.saved.connect(self.set_point_csv if kind == "point" else self.set_line_csv)
+                editor.finished.connect(lambda _result: self._placement_editors.pop(kind, None))
+                editor.finished.connect(editor.deleteLater)
+                self._placement_editors[kind] = editor
+                editor.show()
+            except Exception as exc:
+                self._show_error(str(exc))
+
+        def select_feature_instance(self, kind: str, identifier: str) -> None:
+            """Select the matching authoring row after a 3-D pick."""
+            editor = self._placement_editors.get(kind)
+            if editor is not None:
+                for index, row in enumerate(editor.rows()):
+                    if row[0] == identifier:
+                        editor.table.selectRow(index)
+                        editor.table.scrollToItem(editor.table.item(index, 0))
+                        break
+            self.status_changed.emit(f"Selected {kind} {identifier}. Use Create / edit to change its placement.")
+
+        def _host_changed(self) -> None:
+            try:
+                self._pull_host_values()
+            except ValueError as exc:
+                self._show_error(str(exc))
+                return
+            self._mark_preview_stale()
+
+        def _pull_host_values(self) -> None:
+            values = self.model.values
+            values.host_material = self.host_material.text().strip()
+            values.host_stack_id = self.host_stack.text().strip()
+            raw = self.host_radius.text().strip()
+            values.host_minimum_radius_m = None if not raw else _require_finite_nonnegative(raw, "Host minimum principal radius (in)") * UNIT_SCALE_M["inches"]
+
+        def _study_changed(self) -> None:
+            try:
+                for key, control in self.study_fields.items():
+                    setattr(self.model.values, key, parse_study_samples(control.text()))
+                self._mark_preview_stale()
+            except ValueError as exc:
+                self._show_error(str(exc))
+
+        def _pull_values(self) -> None:
+            for key, control in self.study_fields.items():
+                setattr(self.model.values, key, parse_study_samples(control.text()))
+            self._pull_host_values()
+            values = self.model.values
+            values.base_grim = self.base_picker.path()
+            values.output_grim = self.output_picker.path()
+            values.coordinate_units = str(self.coordinate_units.currentData())
+            values.surface_mesh = self.surface_picker.path()
+            values.surface_units = str(self.surface_units.currentData())
+            values.flip_surface_normals = self.flip_normals.isChecked()
+            values.shadow = self.shadow.isChecked()
+            bias = self.shadow_bias.text().strip()
+            try:
+                values.shadow_bias_m = None if not bias else float(bias) * UNIT_SCALE_M["inches"]
+            except ValueError as exc:
+                raise ValueError("Shadow bias must be a number in inches or blank.") from exc
+            values.point_locations_csv = self.point_csv_picker.path()
+            values.line_locations_csv = self.line_csv_picker.path()
+            values.point_datasets = self.point_mapping.mapping()
+            values.line_datasets = self.line_mapping.mapping()
+            values.skin_tol_m = self.skin_tol.value() * UNIT_SCALE_M["inches"]
+            values.skin_phase_tol_deg = self.phase_tol.value()
+            values.normal_tol_deg = self.normal_tol.value()
+            (
+                values.allow_legacy_base_metadata,
+                values.require_feature_manifests,
+                values.require_body_mesh_certification,
+            ) = self._validation_profile_flags()
+
+        def _show_error(self, text: str) -> None:
+            message = str(text).strip() or "Feature assembly failed."
+            self.status_changed.emit(message)
+            self.build_failed.emit(message)
+            self._update_workflow_readiness()
+
+        @Slot()
+        def refresh_dataset_ids(self) -> None:
+            if self.job_is_running():
+                self.status_changed.emit("A feature operation is already running.")
+                return
+            try:
+                self._pull_values()
+                if not (
+                    self.model.values.point_locations_csv
+                    or self.model.values.line_locations_csv
+                ):
+                    self.model.update_dataset_requirements(
+                        {"point_dataset_ids": (), "line_dataset_ids": ()}
+                    )
+                    self._apply_requirements_to_tables()
+                    self.status_changed.emit("Select a placement CSV to discover IDs.")
+                    return
+                adapter = coerce_feature_workflow(self._service)
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+            self._discovery_paths = (
+                self.model.values.point_locations_csv,
+                self.model.values.line_locations_csv,
+            )
+            self._start_operation(
+                "discover",
+                lambda: self.model.query_dataset_ids(adapter),
+            )
+
+        def _apply_requirements_to_tables(self) -> None:
+            self.point_mapping.set_dataset_ids(
+                self.model.point_dataset_ids,
+                self.model.values.point_datasets,
+            )
+            self.line_mapping.set_dataset_ids(
+                self.model.line_dataset_ids,
+                self.model.values.line_datasets,
+            )
+            self._refresh_spatial_feature_tree()
+
+        def _refresh_spatial_feature_tree(self) -> None:
+            self.spatial_feature_tree.set_configuration(self.model)
+            self.point_mapping.set_required_dataset_ids(
+                self.model.active_point_dataset_ids()
+            )
+            self.line_mapping.set_required_dataset_ids(
+                self.model.active_line_dataset_ids()
+            )
+            self._update_spatial_selection_summary()
+
+        def _clear_validation_qa(self, message: str) -> None:
+            self._validated_plan_current = False
+            self._validation_warning_count = 0
+            self.validation_qa_table.setRowCount(0)
+            self.validation_qa_table.setVisible(False)
+            self.validation_qa_label.setText(str(message))
+            self.validation_warning_label.clear()
+            self.validation_warning_label.setVisible(False)
+            self.validation_warning_ack.blockSignals(True)
+            self.validation_warning_ack.setChecked(False)
+            self.validation_warning_ack.blockSignals(False)
+            self.validation_warning_ack.setVisible(False)
+
+        def _show_validation_qa(self, plan: Any) -> None:
+            """Present backend-produced pass records without redoing physics."""
+
+            validation_warnings = tuple(
+                str(value).strip()
+                for value in (getattr(plan, "validation_warnings", ()) or ())
+                if str(value).strip()
+            )
+            review_required = bool(self.model.values.require_feature_manifests or self.model.values.require_body_mesh_certification or any(message.startswith(WORKLOAD_REVIEW_WARNING_PREFIX) for message in validation_warnings))
+            self._validation_warning_count = len(validation_warnings) if review_required else 0
+            self.validation_warning_ack.blockSignals(True)
+            self.validation_warning_ack.setChecked(False)
+            self.validation_warning_ack.blockSignals(False)
+            self.validation_warning_ack.setVisible(bool(self._validation_warning_count))
+            if validation_warnings:
+                self.validation_warning_label.setText(
+                    ("⚠ VALIDATION PASSED WITH RELEASE WARNINGS:\n• " if review_required else "Placement checks passed. Metadata/model advisories:\n• ")
+                    + "\n• ".join(validation_warnings)
+                    + ("\nReview the warnings and use the one-time waiver below before assembly." if review_required else "\nAdvisories are recorded with the output and do not block Build.")
+                )
+                self.validation_warning_label.setVisible(True)
+            else:
+                self.validation_warning_label.clear()
+                self.validation_warning_label.setVisible(False)
+
+            raw_rows: list[tuple[str, Mapping[str, Any]]] = []
+            for kind, attribute in (
+                ("line", "line_records"),
+                ("point", "point_records"),
+            ):
+                records = getattr(plan, attribute, ()) or ()
+                for record in records:
+                    if isinstance(record, Mapping):
+                        raw_rows.append((kind, record))
+            self.validation_qa_table.setRowCount(len(raw_rows))
+            self.validation_qa_table.setVisible(bool(raw_rows))
+            skin_limit = getattr(plan, "skin_limit_m", None)
+            try:
+                skin_limit_value = float(skin_limit)
+            except (TypeError, ValueError):
+                skin_limit_value = float("nan")
+            normal_limit = float(self.model.values.normal_tol_deg)
+            offsets: list[float] = []
+            normal_errors: list[float] = []
+            not_illuminated_count = 0
+            for row, (kind, record) in enumerate(raw_rows):
+                identifier_key = "line_id" if kind == "line" else "placement_id"
+                identifier = str(record.get(identifier_key, "")).strip()
+                dataset_id = str(record.get("dataset_id", "")).strip()
+                offset_raw = record.get(
+                    "max_skin_offset_m" if kind == "line" else "skin_offset_m"
+                )
+                try:
+                    offset = float(offset_raw)
+                except (TypeError, ValueError):
+                    offset = float("nan")
+                if math.isfinite(offset):
+                    offsets.append(offset)
+                    ratio = (
+                        0.0
+                        if skin_limit_value == 0.0 and offset == 0.0
+                        else (
+                            100.0 * offset / skin_limit_value
+                            if math.isfinite(skin_limit_value)
+                            and skin_limit_value > 0.0
+                            else float("nan")
+                        )
+                    )
+                    offset_text = f"{offset / UNIT_SCALE_M['inches']:.4g} in"
+                    if math.isfinite(ratio):
+                        offset_text += f" ({ratio:.1f}%)"
+                else:
+                    offset_text = "checked"
+                normal_raw = record.get("max_normal_error_deg")
+                try:
+                    normal_error = float(normal_raw)
+                except (TypeError, ValueError):
+                    normal_error = float("nan")
+                if math.isfinite(normal_error):
+                    normal_errors.append(normal_error)
+                    normal_text = f"{normal_error:.3g}° / {normal_limit:.3g}°"
+                else:
+                    normal_text = "outward ✓"
+                illumination_raw = record.get(
+                    "illuminated_requested_look_count"
+                )
+                requested_raw = record.get("requested_look_count")
+                try:
+                    illuminated_looks = int(illumination_raw)
+                except (TypeError, ValueError):
+                    illuminated_looks = -1
+                try:
+                    requested_looks = int(requested_raw)
+                except (TypeError, ValueError):
+                    requested_looks = -1
+                not_illuminated = (
+                    "illuminated_requested_look_count" in record
+                    and illuminated_looks == 0
+                )
+                if not_illuminated:
+                    not_illuminated_count += 1
+                result_text = (
+                    "WARN: not illuminated" if not_illuminated else "PASS"
+                )
+                values = (
+                    "Line" if kind == "line" else "Point",
+                    identifier,
+                    dataset_id,
+                    offset_text,
+                    normal_text,
+                    result_text,
+                )
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    if column == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, (kind, identifier))
+                    if column == 5:
+                        if not_illuminated:
+                            requested_text = (
+                                str(requested_looks)
+                                if requested_looks >= 0
+                                else "the"
+                            )
+                            item.setToolTip(
+                                "Not illuminated: 0 of " + requested_text
+                                + " requested looks illuminate this enabled "
+                                "feature, so it contributes zero on this radar "
+                                "grid. Physical placement checks passed; review "
+                                "the normal/aperture or accept the one-time "
+                                "release-warning waiver if this is intentional."
+                            )
+                        else:
+                            item.setToolTip(
+                                "Passed the authoritative skin, outward-normal, "
+                                "frame, response-mapping, illumination, and "
+                                "source-integrity checks."
+                            )
+                    self.validation_qa_table.setItem(row, column, item)
+
+            if not raw_rows:
+                self.validation_qa_label.setText(
+                    "Validation completed, but this service returned no per-instance "
+                    "QA records."
+                )
+                return
+            point_count = sum(kind == "point" for kind, _record in raw_rows)
+            line_count = len(raw_rows) - point_count
+            summary = (
+                f"✓ {len(raw_rows)} enabled placement(s) passed physical checks: "
+                f"{point_count} point, {line_count} line."
+            )
+            if not_illuminated_count:
+                summary += (
+                    f" ⚠ {not_illuminated_count} WARN/not illuminated and "
+                    "contributes zero on this radar grid."
+                )
+            if validation_warnings:
+                summary += (
+                    f" ⚠ {len(validation_warnings)} production QA warning(s) "
+                    "require review."
+                )
+            if offsets:
+                summary += f" Worst skin offset {max(offsets) / UNIT_SCALE_M['inches']:.4g} in."
+            if normal_errors:
+                summary += f" Worst recorded normal error {max(normal_errors):.3g}°."
+            summary += " Click a row to find that instance above."
+            self.validation_qa_label.setText(summary)
+
+        @Slot(int, int)
+        def _qa_row_clicked(self, row: int, _column: int) -> None:
+            item = self.validation_qa_table.item(int(row), 0)
+            payload = None if item is None else item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(payload, (tuple, list)) and len(payload) == 2:
+                kind = str(payload[0])
+                identifier = str(payload[1])
+                # A QA result is an explicit navigation request. Clear a
+                # display-only filter so the selected authoritative row cannot
+                # remain hidden behind stale search text.
+                self.spatial_feature_filter.clear()
+                found_in_tree = self.spatial_feature_tree.select_instance(
+                    kind, identifier
+                )
+                self.feature_instance_selected.emit(kind, identifier)
+                self.workflow_tabs.setCurrentWidget(self.review_step_page)
+                if found_in_tree:
+                    self.feature_selection_section.header.setChecked(True)
+                self.status_changed.emit(
+                    f"Selected validated {kind} feature {identifier!r} for "
+                    "configuration and 3-D QA focus."
+                )
+
+        def _update_spatial_selection_summary(self) -> None:
+            excluded_count = (
+                len(self.model.values.excluded_point_placement_ids)
+                + len(self.model.values.excluded_line_ids)
+            )
+            self.feature_selection_section.header.setText(
+                f"Feature selection ({excluded_count} excluded)"
+                if excluded_count else "Feature selection (all included by default)"
+            )
+            self.spatial_selection_summary.setText(
+                self.model.feature_selection_summary(
+                    max_disabled_ids_per_kind=FEATURE_SELECTION_DISPLAY_ID_LIMIT
+                )
+            )
+            self.copy_spatial_selection_button.setEnabled(
+                bool(self.model.point_instances or self.model.line_instances)
+            )
+
+        @Slot()
+        def _copy_full_spatial_selection_summary(self) -> None:
+            summary = self.model.feature_selection_summary()
+            QApplication.clipboard().setText(summary)
+            self.status_changed.emit(
+                "Copied the full spatial feature selection summary to the clipboard."
+            )
+
+        @Slot()
+        def _spatial_selection_changed(self) -> None:
+            point_ids, line_ids = self.spatial_feature_tree.excluded_ids()
+            try:
+                self.model.set_excluded_feature_instances(
+                    point_ids=point_ids,
+                    line_ids=line_ids,
+                )
+            except Exception as exc:
+                self._show_error(str(exc))
+                self._refresh_spatial_feature_tree()
+                return
+            self._update_spatial_selection_summary()
+            self.point_mapping.set_required_dataset_ids(
+                self.model.active_point_dataset_ids()
+            )
+            self.line_mapping.set_required_dataset_ids(
+                self.model.active_line_dataset_ids()
+            )
+            self._mark_preview_stale()
+            if not (
+                self.model.enabled_point_placement_ids
+                or self.model.enabled_line_ids
+            ):
+                self.status_changed.emit(
+                    "Body-only baseline selected. Validate and build to save the clean-body comparison."
+                )
+
+        @Slot()
+        def preview_inputs(self) -> None:
+            """Show geometry/locations without requiring response mappings."""
+
+            if self.job_is_running():
+                self.status_changed.emit("A feature operation is already running.")
+                return
+            try:
+                self._pull_values()
+                adapter = coerce_feature_workflow(self._service)
+                if not callable(adapter.preview_inputs):
+                    raise RuntimeError(
+                        "This GHOST backend does not support staged input preview. "
+                        "Use Validate placements after mapping responses."
+                    )
+                if not any(
+                    (
+                        self.model.values.base_grim,
+                        self.model.values.surface_mesh,
+                        self.model.values.point_locations_csv,
+                        self.model.values.line_locations_csv,
+                    )
+                ):
+                    raise ValueError(
+                        "Choose a clean-body GRIM, body mesh, or placement CSV "
+                        "to preview."
+                    )
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+            self._start_operation(
+                "input_preview", lambda: self.model.prepare_input_preview(adapter)
+            )
+
+        @Slot()
+        def validate_and_preview(self) -> None:
+            if self.job_is_running():
+                self.status_changed.emit("A feature operation is already running.")
+                return
+            try:
+                self._pull_values()
+                adapter = coerce_feature_workflow(self._service)
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+            self._clear_validation_qa(
+                "Validation is running. Assembly remains locked until it succeeds."
+            )
+            self.model.invalidate_prepared_plan()
+            self.workflow_tabs.setCurrentWidget(self.review_step_page)
+            self._update_workflow_readiness()
+            self._start_operation(
+                "preview",
+                lambda cancel_check, progress_callback: self.model.prepare_preview(
+                    adapter,
+                    cancel_check=cancel_check,
+                    progress_callback=progress_callback,
+                ),
+                cooperative=True,
+            )
+
+        def _validated_build_work_estimate(self) -> AssemblyWorkEstimate:
+            plan = self.model.prepared_plan
+            if plan is None:
+                return AssemblyWorkEstimate(available=False)
+            return estimate_validated_assembly_plan_workload(plan)
+
+        @Slot()
+        def assemble_and_save(self) -> None:
+            if self.job_is_running():
+                self.status_changed.emit("A feature operation is already running.")
+                return
+            try:
+                self._pull_values()
+                adapter = coerce_feature_workflow(self._service)
+                if not self._validated_plan_current:
+                    raise ValueError(
+                        "Run Validate placements and review its current QA result "
+                        "before assembling."
+                    )
+                if not self.model.validated_plan_is_current(
+                    adapter, verify_sources=True
+                ):
+                    self._validated_plan_current = False
+                    raise ValueError(
+                        "An Assembly input changed after validation. Validate and "
+                        "review the current configuration again."
+                    )
+                if (
+                    self._validation_warning_count
+                    and not self.validation_warning_ack.isChecked()
+                ):
+                    raise ValueError(
+                        "Review the validation warnings and check the one-time "
+                        "warning waiver before assembling."
+                    )
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+            output = _normalized_grim_output_path(
+                self.model.values.output_grim,
+                base_dir=self.model.values.base_dir,
+            )
+            features_only_output = _features_only_grim_output_path(
+                self.model.values.output_grim,
+                base_dir=self.model.values.base_dir,
+            )
+            existing_outputs = [
+                path for path in (output, features_only_output) if path.exists()
+            ]
+            if existing_outputs:
+                listed = "\n".join(f"• {path.name}" for path in existing_outputs)
+                answer = QMessageBox.question(
+                    self,
+                    "Replace Assembly output files?",
+                    "Assembly publishes the body-plus-features response and a "
+                    "feature-only delta sibling. The following existing file(s) "
+                    "will be replaced together:\n\n"
+                    + listed
+                    + "\n\nContinue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    self.status_changed.emit(
+                        "Assembly cancelled; existing output files kept."
+                    )
+                    return
+            build_estimate = self._validated_build_work_estimate()
+            prepared_plan = self.model.prepared_plan
+            plan_warnings = tuple(
+                str(value)
+                for value in (
+                    getattr(prepared_plan, "validation_warnings", ()) or ()
+                )
+            )
+            sealed_workload_warning = any(
+                value.startswith(WORKLOAD_REVIEW_WARNING_PREFIX)
+                for value in plan_warnings
+            )
+            if (
+                assembly_build_confirmation_required(build_estimate)
+                and not sealed_workload_warning
+            ):
+                answer = QMessageBox.warning(
+                    self,
+                    "Review large Assembly workload",
+                    format_assembly_work_estimate(build_estimate)
+                    + "\n\nThese are operation counts, not an elapsed-time "
+                    "prediction. Continue with this reviewed plan? You can "
+                    "cancel cooperatively without publishing a partial output.",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    self.status_changed.emit(
+                        "Large Assembly workload cancelled before computation; "
+                        "existing output files kept."
+                    )
+                    return
+            acknowledged_plan_sha256 = (
+                str(getattr(prepared_plan, "prepared_plan_sha256", "")).strip()
+                if self._validation_warning_count
+                and self.validation_warning_ack.isChecked()
+                else None
+            )
+            self._start_operation(
+                "build",
+                lambda cancel_check, progress_callback: self.model.assemble_validated(
+                    adapter,
+                    acknowledged_plan_sha256=acknowledged_plan_sha256,
+                    cancel_check=cancel_check,
+                    progress_callback=progress_callback,
+                ),
+                cooperative=True,
+            )
+
+        def _set_busy(self, busy: bool) -> None:
+            # Keep step navigation, progress, and cooperative cancellation live
+            # while preventing edits that would invalidate the running plan.
+            for widget in self._busy_form_widgets:
+                widget.setEnabled(not busy)
+            self.load_recipe_button.setEnabled(not busy)
+            self.save_recipe_as_button.setEnabled(not busy)
+            self.create_variant_button.setEnabled(not busy)
+            if busy:
+                self.scan_button.setEnabled(False)
+                self.input_preview_button.setEnabled(False)
+                self.preview_button.setEnabled(False)
+                self.build_button.setEnabled(False)
+                self.save_recipe_button.setEnabled(False)
+                self.operation_progress.setVisible(True)
+                if self._active_kind in {"preview", "build"}:
+                    self.operation_progress.setRange(0, 100)
+                    self.operation_progress.setValue(0)
+                    if self._active_kind == "preview":
+                        self.operation_progress.setFormat(
+                            "0% · Checking Assembly inputs"
+                        )
+                        self.cancel_operation_button.setText("Cancel validation")
+                    else:
+                        self.operation_progress.setFormat("0% · Preparing assembly")
+                        self.cancel_operation_button.setText("Cancel assembly")
+                    self.cancel_operation_button.setVisible(True)
+                    self.cancel_operation_button.setEnabled(True)
+                else:
+                    self.operation_progress.setRange(0, 0)
+                    self.operation_progress.setFormat("Working…")
+                    self.cancel_operation_button.setVisible(False)
+                    self.cancel_operation_button.setEnabled(False)
+            else:
+                self.operation_progress.setVisible(False)
+                self.operation_progress.setRange(0, 100)
+                self.cancel_operation_button.setVisible(False)
+                self.cancel_operation_button.setEnabled(False)
+                self._update_recipe_status()
+                self._update_workflow_readiness()
+
+        def _start_operation(
+            self,
+            kind: str,
+            operation: Callable[..., Any],
+            *,
+            cooperative: bool = False,
+        ) -> None:
+            if self.job_is_running():
+                raise RuntimeError("A feature operation is already running.")
+            thread = QThread(self)
+            worker = _OperationWorker(operation, cooperative=cooperative)
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.succeeded.connect(self._operation_succeeded)
+            worker.failed.connect(self._operation_failed)
+            worker.cancelled.connect(self._operation_cancelled)
+            worker.progress.connect(self._operation_progress)
+            worker.succeeded.connect(thread.quit)
+            worker.failed.connect(thread.quit)
+            worker.cancelled.connect(thread.quit)
+            worker.succeeded.connect(worker.deleteLater)
+            worker.failed.connect(worker.deleteLater)
+            worker.cancelled.connect(worker.deleteLater)
+            thread.finished.connect(thread.deleteLater)
+            thread.finished.connect(self._operation_thread_finished)
+            self._thread = thread
+            self._worker = worker
+            self._active_kind = kind
+            self._set_busy(True)
+            status = {
+                "discover": "Reading placement CSV schemas…",
+                "binding_check": "Checking exact body-to-mesh binding integrity…",
+                "binding_write": "Writing and integrity-checking reviewed body binding…",
+                "input_preview": (
+                    "Loading body geometry and placement locations for visual preview…"
+                ),
+                "preview": "Validating placements and preparing preview…",
+                "build": "Assembling coherent feature responses…",
+            }[kind]
+            self.status_changed.emit(status)
+            thread.start()
+
+        @Slot(int, str)
+        def _operation_progress(self, percent: int, message: str) -> None:
+            if self._active_kind not in {"preview", "build"}:
+                return
+            value = max(0, min(100, int(percent)))
+            self.operation_progress.setRange(0, 100)
+            self.operation_progress.setValue(value)
+            self.operation_progress.setFormat(f"{value}% · {message}")
+
+        @Slot(str)
+        def _operation_cancelled(self, text: str) -> None:
+            if self._active_kind == "preview":
+                self.model.invalidate_prepared_plan()
+                self._preview_is_current = False
+                stale_message = (
+                    "Validation cancelled — the Assembly preview is not a current "
+                    "authoritative review."
+                )
+                self._clear_validation_qa(
+                    "Validation cancelled. Assembly remains locked; run Validate "
+                    "placements again when ready."
+                )
+                self.status_changed.emit(
+                    text
+                    or "Placement validation cancelled; no reviewed plan was retained."
+                )
+                self.preview_stale.emit(stale_message)
+                return
+            self.status_changed.emit(text or "Assembly cancelled; existing output kept.")
+
+        @Slot(object)
+        def _operation_succeeded(self, result: Any) -> None:
+            kind = self._active_kind
+            if kind in {"binding_check", "binding_write"}:
+                try:
+                    values = self.model.values
+                    current_base = _resolved_user_path(
+                        self.base_picker.path(), base_dir=values.base_dir
+                    )
+                    current_surface = _resolved_user_path(
+                        self.surface_picker.path(), base_dir=values.base_dir
+                    )
+                    current_units = str(self.surface_units.currentData())
+                    current_key = _surface_binding_identity_key(
+                        current_base, current_surface, current_units
+                    )
+                    result_key = result.get("identity_key")
+                    same_selection = (
+                        _path_key(current_base) == _path_key(Path(result["base"]))
+                        and _path_key(current_surface)
+                        == _path_key(Path(result["surface"]))
+                        and current_units == str(result["surface_units"])
+                    )
+                    if not same_selection or current_key != result_key:
+                        raise RuntimeError(
+                            "Body binding inputs changed while the operation was "
+                            "finishing. Check the current selection again."
+                        )
+                    binding = result["binding"]
+                    if not isinstance(binding, Mapping):
+                        raise RuntimeError(
+                            "The backend returned an invalid binding result."
+                        )
+                except Exception as exc:
+                    self._surface_binding_error_key = None
+                    self._surface_binding_error = str(exc)
+                    self.status_changed.emit(str(exc))
+                    self._update_workflow_readiness()
+                    return
+                self._surface_binding_checked_key = current_key
+                self._surface_binding_checked = dict(binding)
+                self._surface_binding_error_key = None
+                self._surface_binding_error = ""
+                if kind == "binding_write":
+                    self.model.invalidate_prepared_plan()
+                    self._preview_is_current = False
+                    self._clear_validation_qa(
+                        "Body binding refreshed. Validate placements again so the "
+                        "reviewed plan includes the new exact sidecar."
+                    )
+                    self.preview_stale.emit(
+                        "The body binding changed; the prior Assembly review is stale."
+                    )
+                    verb = "Created and integrity-checked"
+                else:
+                    verb = "Integrity-checked"
+                self.status_changed.emit(
+                    f"✓ {verb} reviewed body-binding record: geometry "
+                    f"{binding.get('geometry_id')!r}; attested registration case "
+                    f"{binding.get('attestation_case_id')!r}. The hash check does "
+                    "not independently prove solve-to-CAD registration."
+                )
+                self._update_workflow_readiness()
+            elif kind == "discover":
+                current_paths = (
+                    self.point_csv_picker.path(),
+                    self.line_csv_picker.path(),
+                )
+                if current_paths != self._discovery_paths:
+                    self.model.invalidate_dataset_requirements()
+                    self._apply_requirements_to_tables()
+                    self.status_changed.emit(
+                        "CSV paths changed during discovery; re-scan them."
+                    )
+                    return
+                recipe_state_before = (
+                    dict(self.model.values.point_datasets),
+                    dict(self.model.values.line_datasets),
+                    set(self.model.values.excluded_point_placement_ids),
+                    set(self.model.values.excluded_line_ids),
+                )
+                self.model.update_dataset_requirements(result)
+                recipe_state_after = (
+                    dict(self.model.values.point_datasets),
+                    dict(self.model.values.line_datasets),
+                    set(self.model.values.excluded_point_placement_ids),
+                    set(self.model.values.excluded_line_ids),
+                )
+                if recipe_state_after != recipe_state_before:
+                    self._set_recipe_dirty()
+                self._apply_requirements_to_tables()
+                point_count = len(self.model.point_dataset_ids)
+                line_count = len(self.model.line_dataset_ids)
+                missing = self.model.missing_dataset_mappings()
+                if missing:
+                    self.status_changed.emit(
+                        f"✓ CSV schema valid: found {point_count} point and "
+                        f"{line_count} line dataset ID(s). Next, choose an "
+                        "OPN-FRD .grim response for: " + ", ".join(missing)
+                    )
+                else:
+                    self.status_changed.emit(
+                        f"✓ CSV schema valid: found {point_count} point and "
+                        f"{line_count} line dataset ID(s); every response is mapped. "
+                        "Next, validate placements and preview in 3-D."
+                    )
+                self._update_workflow_readiness()
+            elif kind == "input_preview":
+                preview_result = (
+                    result.preview
+                    if isinstance(result, _VerifiedInputPreview)
+                    else result
+                )
+                requirements = (
+                    result.discovery
+                    if isinstance(result, _VerifiedInputPreview)
+                    else getattr(preview_result, "dataset_requirements", None)
+                )
+                if requirements is not None:
+                    self.model.update_dataset_requirements(requirements)
+                    self._apply_requirements_to_tables()
+                point_groups = getattr(preview_result, "point_locations_cad_m", {})
+                line_groups = getattr(preview_result, "line_paths_cad_m", {})
+                try:
+                    point_total = sum(len(group) for group in point_groups.values())
+                    line_total = sum(len(group) for group in line_groups.values())
+                    count_text = (
+                        f" ({point_total} point placement(s), "
+                        f"{line_total} line path(s))"
+                    )
+                except (AttributeError, TypeError):
+                    count_text = ""
+                self._preview_is_current = True
+                self._clear_validation_qa(
+                    "Geometry preview only — physical placement QA has not run."
+                )
+                self.status_changed.emit(
+                    "Geometry preview prepared"
+                    + count_text
+                    + ". Visual QA only: physical placement and response checks "
+                    "have not run. Preview Layers → Show only displays or hides "
+                    "artists; Spatial Feature Configuration → Use controls "
+                    "preview, validation, response loading, and build membership."
+                )
+                self._remember_surface_dimensions(preview_result)
+                self.preview_ready.emit(preview_result)
+                self._update_workflow_readiness()
+            elif kind == "preview":
+                self._preview_is_current = True
+                self._show_validation_qa(result)
+                self._validated_plan_current = True
+                warning_count = len(
+                    getattr(result, "validation_warnings", ()) or ()
+                )
+                warning_text = (
+                    f" ⚠ Review {warning_count} production QA warning(s) below."
+                    if warning_count
+                    else ""
+                )
+                skin_limit = getattr(result, "skin_limit_m", None)
+                skin_text = (
+                    f" Effective skin limit: {float(skin_limit) / UNIT_SCALE_M['inches']:.6g} in."
+                    if skin_limit is not None
+                    else ""
+                )
+                self.status_changed.emit(
+                    "Enabled placements validated and every enabled dataset ID is mapped. "
+                    "Showing the body and feature groups in the 3-D Assembly "
+                    "view."
+                    + skin_text
+                    + " Build will reuse this validation while inputs remain unchanged."
+                    + warning_text
+                )
+                self._remember_surface_dimensions(result)
+                self.preview_ready.emit(result)
+                self._update_workflow_readiness()
+            elif kind == "build":
+                dispatch = result
+                self._preview_is_current = True
+                self._show_validation_qa(dispatch.plan)
+                self._validated_plan_current = True
+                self._remember_surface_dimensions(dispatch.plan)
+                self.preview_ready.emit(dispatch.plan)
+                self.feature_built.emit(str(dispatch.output_path))
+                features_only_path = str(
+                    dispatch.features_only_output_path or ""
+                ).strip()
+                features_only_saved = bool(
+                    dispatch.features_only_output_published
+                    and features_only_path
+                    and _path_key(Path(features_only_path))
+                    != _path_key(Path(dispatch.output_path))
+                    and Path(features_only_path).is_file()
+                )
+                if features_only_saved:
+                    # Preserve the existing one-path signal contract while
+                    # routing both published artifacts through GRIM's normal
+                    # dataset loader for immediate before/after plotting.
+                    self.feature_built.emit(features_only_path)
+                self.comparison_ready.emit(str(getattr(dispatch.plan, "base_path", self.model.values.base_grim)), features_only_path if features_only_saved else "", str(dispatch.output_path))
+                features_status = (
+                    f" Saved reusable feature-only delta: {features_only_path}."
+                    if features_only_saved
+                    else " No feature-only delta was published by this workflow service."
+                )
+                reuse_text = (
+                    " Reused the unchanged validated preview."
+                    if dispatch.reused_validated_plan
+                    else ""
+                )
+                warning_count = len(
+                    getattr(dispatch.plan, "validation_warnings", ()) or ()
+                )
+                warning_text = (
+                    f" ⚠ Output saved with {warning_count} recorded production "
+                    "QA warning(s); review them before release."
+                    if warning_count
+                    else ""
+                )
+                self.status_changed.emit(
+                    f"Saved body-plus-features response: {dispatch.output_path}."
+                    + features_status
+                    + reuse_text
+                    + warning_text
+                    + " The result is ready in GRIM for plotting or further "
+                    "dataset assembly."
+                )
+                self._update_workflow_readiness()
+
+        @Slot(str)
+        def _operation_failed(self, text: str) -> None:
+            if self._active_kind in {"binding_check", "binding_write"}:
+                try:
+                    self._surface_binding_error_key = (
+                        _surface_binding_identity_key(
+                            self.base_picker.path(),
+                            self.surface_picker.path(),
+                            str(self.surface_units.currentData()),
+                            base_dir=self.model.values.base_dir,
+                        )
+                    )
+                except OSError:
+                    self._surface_binding_error_key = None
+                self._surface_binding_error = str(text)
+            elif self._active_kind == "discover":
+                changed = False
+                for kind, picker in (
+                    ("point", self.point_csv_picker),
+                    ("line", self.line_csv_picker),
+                ):
+                    if picker.path() and not self.model.requirements_look_current(kind):
+                        self.model.invalidate_dataset_requirements(kind)
+                        changed = True
+                if changed:
+                    self._apply_requirements_to_tables()
+            elif self._active_kind in {"input_preview", "preview", "build"}:
+                # A worker invalidates only the CSV rows whose bytes changed
+                # during its operation. Mirror that safe model state into the
+                # mapping tables before readiness is recomputed.
+                self._apply_requirements_to_tables()
+                if self._active_kind in {"preview", "build"}:
+                    self._validated_plan_current = False
+                    self.validation_qa_label.setText(
+                        "Validation stopped at the reported error. Correct that "
+                        "instance, then validate again."
+                    )
+            self._show_error(text)
+
+        @Slot()
+        def _operation_thread_finished(self) -> None:
+            self._thread = None
+            self._worker = None
+            self._active_kind = ""
+            self._set_busy(False)
+
+
+else:
+
+    class FeatureAssemblyPanel:  # pragma: no cover - exercised only without Qt
+        """Placeholder that preserves an actionable import-time API."""
+
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError(
+                "FeatureAssemblyPanel requires PySide6. "
+                f"Original import error: {_GUI_IMPORT_ERROR}"
+            )
+
+
+__all__ = [
+    "GUI_AVAILABLE",
+    "ASSEMBLY_REVIEW_LARGE_MESH_SHADOW_RAYS",
+    "ASSEMBLY_REVIEW_LARGE_MESH_TRIANGLES",
+    "ASSEMBLY_REVIEW_LINE_FIELD_CELLS",
+    "ASSEMBLY_REVIEW_POINT_FIELD_CELLS",
+    "ASSEMBLY_REVIEW_RADAR_GRID_CELLS",
+    "ASSEMBLY_REVIEW_SHADOW_RAYS",
+    "WORKLOAD_REVIEW_WARNING_PREFIX",
+    "FEATURE_RECIPE_SCHEMA",
+    "FEATURE_RECIPE_SUFFIX",
+    "FEATURE_RECIPE_VERSION",
+    "LINE_PLACEMENT_COLUMNS",
+    "LINE_PLACEMENT_EXAMPLE",
+    "POINT_PLACEMENT_COLUMNS",
+    "POINT_PLACEMENT_EXAMPLE",
+    "UNIT_CHOICES",
+    "VALIDATION_PROFILES",
+    "BaseGrimPreflight",
+    "AssemblyWorkEstimate",
+    "SurfaceBindingReadiness",
+    "FeatureAssemblyFormModel",
+    "FeatureAssemblyPanel",
+    "FeatureAssemblyValues",
+    "FeatureBuildDispatch",
+    "FeatureWorkflowAdapter",
+    "LoadedDatasetEntry",
+    "LoadedFeatureAssemblyRecipe",
+    "coerce_feature_workflow",
+    "assess_surface_binding_readiness",
+    "assembly_build_confirmation_required",
+    "estimate_assembly_workload",
+    "estimate_validated_assembly_plan_workload",
+    "feature_assembly_recipe_payload",
+    "format_assembly_work_estimate",
+    "placement_csv_template_text",
+    "preflight_base_grim",
+    "read_feature_assembly_recipe",
+    "surface_mesh_triangle_hint",
+    "write_feature_assembly_recipe",
+    "write_placement_csv_template",
+]

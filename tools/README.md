@@ -11,7 +11,7 @@ not become mixed into the GRIM plotting implementation.
 
 An embedded tab must call the tool's authoritative implementation from its own
 subtree. Do not make a second copy of solver or feature physics inside
-`GRIM_Revised_2`.
+`GRIM_Backend`.
 
 Both tools retain standalone launchers. FREDDY exports IBC and material CSV
 files for GHOST; it does not produce `.grim` RCS datasets.

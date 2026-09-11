@@ -21,56 +21,19 @@ memory = ["psutil>=5.9"]
 powerpoint = ["pywin32>=306; sys_platform == 'win32'"]
 
 [project.scripts]
-grim = "grim_cut_gui:main"
-grim-diagnose = "grim_diagnostics:main"
-grim-headless = "grim_backend.cli:main"
-ppt-image-imprinter = "ppt_image_imprinter:main"
+grim = "GRIM_Backend.ui.app:main"
+grim-diagnose = "GRIM_Backend.execution.diagnostics:main"
+grim-headless = "GRIM_Backend.scripting.cli:main"
+ppt-image-imprinter = "GRIM_Backend.reports.image_imprinter:main"
 
 [tool.setuptools]
-package-dir = {"" = "GRIM_Revised_2"}
-py-modules = [
-  "dataset_dialogs",
-  "dataset_jobs",
-  "feature_assembly_model",
-  "feature_assembly_values",
-  "feature_assembly_recipe",
-  "dataset_plot_style",
-  "dataset_sidebar",
-  "assembly_tree",
-  "assembly_workspace",
-  "assembly_response_comparison",
-  "assembly_interference",
-  "assembly_placement_editor",
-  "feature_assembly_panel",
-  "freddy_integration",
-  "grim_cut_dataset_mixin",
-  "grim_cut_gui",
-  "grim_cut_plot_mixin",
-  "grim_dataset",
-  "grim_diagnostics",
-  "grim_headless",
-  "grim_palette",
-  "grim_theme",
-  "grim_widgets",
-  "grim_python",
-  "ghost_integration",
-  "hpc_remote",
-  "isar_artifact",
-  "isar_bpde",
-  "isar_repeats",
-  "ppt_image_imprinter",
-  "ppt_plot_data",
-  "ppt_report",
-  "ppt_workspace",
-  "ppt_workflow",
-  "assembly_workflow",
-  "plot_models",
-  "runs_workspace",
-]
+py-modules = []
 
 [tool.setuptools.packages.find]
-where = ["GRIM_Revised_2"]
-include = ["plot_modes*", "grim_backend*"]
+where = ["."]
+include = ["GRIM_Backend*"]
+exclude = ["GRIM_Backend.tests*", "GRIM_Backend.examples*"]
+namespaces = true
 
 [tool.setuptools.package-data]
-grim_backend = ["README.md"]
+GRIM_Backend = ["docs/*.md", "ui/assets/*.png", "reports/templates/*.pptx"]

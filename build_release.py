@@ -34,7 +34,7 @@ import zipfile
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-from GRIM_Revised_2.grim_diagnostics import (
+from GRIM_Backend.execution.diagnostics import (
     DiagnosticResult,
     FREDDY_SENTINELS,
     GHOST_SENTINELS,
@@ -106,45 +106,47 @@ REQUIRED_FILES = (
     "Launch_GRIM_GUI.bat",
     "Launch_GRIM_Diagnostics.bat",
     "Launch_PowerPoint_Image_Imprinter.bat",
-    "GRIM_Revised_2/GRIM.png",
-    "GRIM_Revised_2/ppt_image_imprinter.py",
-    "GRIM_Revised_2/grim_backend/io/csv.py",
-    "GRIM_Revised_2/grim_backend/io/ptm.py",
-    "GRIM_Revised_2/grim_backend/io/xpatch.py",
-    "GRIM_Revised_2/templates/GRIM_Report_Template.pptx",
+    "GRIM_Backend/ui/assets/GRIM.png",
+    "GRIM_Backend/reports/image_imprinter.py",
+    "GRIM_Backend/io/csv.py",
+    "GRIM_Backend/io/ptm.py",
+    "GRIM_Backend/io/xpatch.py",
+    "GRIM_Backend/reports/templates/GRIM_Report_Template.pptx",
     *(
-        f"GRIM_Revised_2/{Path(relative).as_posix()}"
+        f"GRIM_Backend/{Path(relative).as_posix()}"
         for relative in GRIM_STARTUP_FILES
     ),
     "tools/GHOST/Launch_GHOST_GUI.bat",
     *(
-        f"tools/GHOST/Backend/{Path(relative).as_posix()}"
+        f"tools/GHOST/ghost_backend/{Path(relative).as_posix()}"
         for relative in GHOST_SENTINELS
     ),
-    "tools/GHOST/Backend/build_bor_stream_kernel.py",
-    "tools/GHOST/Backend/DATACLASSES_LICENSE.txt",
-    "tools/GHOST/Backend/THIRD_PARTY.md",
-    "tools/GHOST/Backend/README.md",
-    "tools/GHOST/Backend/IMPORTS.md",
-    "tools/GHOST/Backend/DEAD_FILES.md",
-    "tools/GHOST/Backend/create_feature_manifest.py",
-    "tools/GHOST/Backend/grim_compat.py",
-    "tools/GHOST/Backend/ghost_backend/io/naming.py",
-    "tools/GHOST/Backend/import_3d_reference.py",
-    "tools/GHOST/Backend/ghost_backend/geometry/quality.py",
-    "tools/GHOST/Backend/place_features.py",
-    "tools/GHOST/Backend/run_local_bor.py",
-    "tools/GHOST/Backend/run_local_monostatic.py",
-    "tools/GHOST/Backend/validate_feature_reconstruction.py",
-    "tools/GHOST/tests/test_assembly_workload.py",
-    "tools/GHOST/tests/benchmark_execution.py",
+    "tools/GHOST/ghost_backend/bor/native/build_kernel.py",
+    "tools/GHOST/ghost_backend/bor/native/bor_stream_kernel.c",
+    "tools/GHOST/ghost_backend/execution/DATACLASSES_LICENSE.txt",
+    "tools/GHOST/THIRD_PARTY.md",
+    "tools/GHOST/BACKEND.md",
+    "tools/GHOST/IMPORTS.md",
+    "tools/GHOST/DEAD_FILES.md",
+    "tools/GHOST/ghost_backend/assembly/create_feature_manifest.py",
+    "tools/GHOST/ghost_backend/io/viewer_bridge.py",
+    "tools/GHOST/ghost_backend/io/naming.py",
+    "tools/GHOST/ghost_backend/io/import_3d_reference.py",
+    "tools/GHOST/ghost_backend/geometry/quality.py",
+    "tools/GHOST/ghost_backend/assembly/place_features.py",
+    "tools/GHOST/ghost_backend/run_local_bor.py",
+    "tools/GHOST/ghost_backend/run_local_monostatic.py",
+    "tools/GHOST/ghost_backend/validation/reconstruction.py",
+    "tools/GHOST/ghost_backend/tests/test_assembly_workload.py",
+    "tools/GHOST/ghost_backend/tests/benchmark_execution.py",
     "tools/GHOST/RUN_PROFILES.md",
-    "tools/GHOST/CEM_Tools/README.md",
-    "tools/GHOST/CEM_Tools/pyproject.toml",
-    "tools/GHOST/CEM_Tools/requirements.txt",
-    "tools/GHOST/CEM_Tools/run_gui.py",
+    "tools/GHOST/DATA_TOOLS.md",
+    "tools/GHOST/ghost_backend/data_tools/pyproject.toml",
+    "tools/GHOST/ghost_backend/data_tools/requirements.txt",
+    "tools/GHOST/ghost_backend/data_tools/run_gui.py",
+    "tools/GHOST/ghost_backend/data_tools/run_cli.py",
     *(
-        f"tools/GHOST/CEM_Tools/cem_tools/{name}.py"
+        f"tools/GHOST/ghost_backend/data_tools/cem_tools/{name}.py"
         for name in (
             "__init__",
             "__main__",
@@ -159,8 +161,8 @@ REQUIRED_FILES = (
             "solver_pairing",
         )
     ),
-    "tools/GHOST/point_features_template.csv",
-    "tools/GHOST/line_features_template.csv",
+    "tools/GHOST/ghost_backend/geometry/templates/point_features_template.csv",
+    "tools/GHOST/ghost_backend/geometry/templates/line_features_template.csv",
     "tools/FREDDY/Launch_FREDDY_GUI.bat",
     "tools/FREDDY/impedance_gui.py",
     *(
@@ -177,15 +179,15 @@ REQUIRED_FILES = (
 # published source distribution.  Static REQUIRED_FILES still detects absence
 # of the core contract files themselves.
 REQUIRED_INVENTORY_GLOBS = (
-    "GRIM_Revised_2/*.py",
-    "GRIM_Revised_2/plot_modes/*.py",
-    "GRIM_Revised_2/templates/*",
+    "GRIM_Backend/*.py",
+    "GRIM_Backend/**/*.py",
+    "GRIM_Backend/reports/templates/*",
     "requirements/test*.py",
-    "tools/GHOST/Backend/*.py",
-    "tools/GHOST/Backend/ghost_backend/**/*.py",
-    "tools/GHOST/tests/test*.py",
-    "tools/GHOST/CEM_Tools/cem_tools/*.py",
-    "tools/GHOST/CEM_Tools/tests/test*.py",
+    "tools/GHOST/ghost_backend/*.py",
+    "tools/GHOST/ghost_backend/**/*.py",
+    "tools/GHOST/ghost_backend/tests/test*.py",
+    "tools/GHOST/ghost_backend/data_tools/cem_tools/*.py",
+    "tools/GHOST/ghost_backend/data_tools/tests/test*.py",
     "tools/FREDDY/ibc/*.py",
     "tools/FREDDY/tests/test*.py",
     "tools/FREDDY/materials/*.csv",
@@ -836,8 +838,8 @@ def _payload_diagnostics(root: Path) -> list[DiagnosticResult]:
     """Check the staged source and libraries in a fresh interpreter."""
     code = (
         "import sys,json; from pathlib import Path; from dataclasses import asdict; "
-        "root=Path(sys.argv[1]); sys.path[:0]=[str(root),str(root/'GRIM_Revised_2')]; "
-        "from GRIM_Revised_2.grim_diagnostics import collect_diagnostics; "
+        "root=Path(sys.argv[1]); sys.path[:0]=[str(root),str(root/'GRIM_Backend')]; "
+        "from GRIM_Backend.execution.diagnostics import collect_diagnostics; "
         "print(json.dumps([asdict(r) for r in collect_diagnostics(root)]))"
     )
     environment = dict(os.environ)
@@ -860,10 +862,10 @@ def _prepare_release_native(root: Path, policy: str) -> tuple[FileRecord, ...]:
         raise ReleaseBuildError(f'Unknown native acceleration policy {policy!r}.')
     if policy == 'ignore':
         return ()
-    backend = root / 'tools/GHOST/Backend'
+    backend = root / 'tools/GHOST/ghost_backend'
     try:
         result = subprocess.run(
-            [sys.executable, '-I', str(backend / 'build_bor_stream_kernel.py')],
+            [sys.executable, '-I', str(backend / 'bor/native/build_kernel.py')],
             cwd=root, capture_output=True, text=True, encoding='utf-8',
             errors='replace', timeout=300, check=False,
         )
@@ -871,7 +873,7 @@ def _prepare_release_native(root: Path, policy: str) -> tuple[FileRecord, ...]:
             raise ReleaseBuildError((result.stdout + result.stderr).strip())
         extension = '.dll' if platform.system().lower() == 'windows' else '.so'
         name = f'bor_stream_kernel.{platform.system().lower()}-{platform.machine().lower()}{extension}'
-        library = backend / name
+        library = backend / 'bor/native' / name
         digest, size = _hash_file(library)
         return (FileRecord(library.relative_to(root).as_posix(), size, digest),)
     except (OSError, subprocess.SubprocessError, ReleaseBuildError) as exc:

@@ -2,7 +2,7 @@
 
 Follow-up: [hardening, faster streamed assembly, and native-material limits](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/experiments/ghost_hardening_20260910/REPORT.md). The measurements below preserve this earlier implementation's baseline.
 
-The measured assembly, sweep, compression-scan and residual improvements are now in the production Backend. A separate working experiment also assembles the airfoil directly into compressed storage without first allocating global dense A. That experimental path has passed both polarizations at 1 and 2 GHz; it is not yet selected by the GUI or public solver.
+The measured assembly, sweep, compression-scan and residual improvements are now in the production ghost_backend. A separate working experiment also assembles the airfoil directly into compressed storage without first allocating global dense A. That experimental path has passed both polarizations at 1 and 2 GHz; it is not yet selected by the GUI or public solver.
 
 **Production measurements**
 
@@ -31,7 +31,7 @@ The ownership, norm and sweep changes apply to the shared CPU pipeline. Screened
 
 **Using the updated code**
 
-Restart GHOST so it imports the changed Backend modules. For the measured kernel improvements, select the experimental CPU solver and Double LU precision. The lower-memory hierarchical factor is selected in the environment before starting the GUI or driver:
+Restart GHOST so it imports the changed ghost_backend modules. For the measured kernel improvements, select the experimental CPU solver and Double LU precision. The lower-memory hierarchical factor is selected in the environment before starting the GUI or driver:
 
 ```powershell
 $env:GHOST_DENSE_BACKEND = 'cpu'
@@ -39,7 +39,7 @@ $env:GHOST_CPU_FACTORIZATION = 'hierarchical'
 $env:GHOST_CPU_RHS_COMPRESSION = 'auto'
 ```
 
-An already-running GUI does not inherit later environment changes. `hierarchical` refuses a case that exceeds its rank/storage/accuracy limits; `auto` reserves capacity for dense fallback. Keep planning and worker environments consistent on HPC. Existing source fingerprints automatically invalidate results made with an earlier Backend. Copy the full Backend when updating another installation.
+An already-running GUI does not inherit later environment changes. `hierarchical` refuses a case that exceeds its rank/storage/accuracy limits; `auto` reserves capacity for dense fallback. Keep planning and worker environments consistent on HPC. Existing source fingerprints automatically invalidate results made with an earlier ghost_backend. Copy the full ghost_backend when updating another installation.
 
 **Direct compressed assembly experiment**
 
@@ -75,9 +75,9 @@ This does not make distance 32 a universal production tolerance. The bound is ca
 
 Production full-sweep comparisons cover 14 fixture families: PEC, IBC, PEC+IBC, lossless/lossy/magnetic dielectric, coated/layered bodies, dielectric+PEC, sheet, sheet+PEC, thin and magnetic thin layers, and transparent thin layers. Every discrete quality gate passed; the maximum field difference from earlier independent fixture results was 1.86e-14 with dense LU. All 14 families also passed with hierarchical factorization selected; their maximum field difference was 2.69e-11. The original 1e-12 backward-error release limit remains unchanged. Fixture coverage does not imply support for combinations the solver explicitly rejects.
 
-All **135 production regression tests and two experimental tests passed**. They exercise destination ownership/accumulation, exact residual evidence and lifetimes, incremental basis reuse/extension, per-column fallback, zero illuminations, partial-domain kernel fallback, storage limits, cancellation, transpose/adjoint solves and existing material/physical acceptance cases. The final test log and [validated benchmark results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/experiments/ghost_implementation_20260910/validated-results.json) are in the experiment directory. The local runtime was Python 3.12.14, NumPy 2.5.2 and SciPy 1.18.1. Changed Backend files also passed Python 3.6 syntax parsing. Legacy-compatible APIs were retained; an actual remote Python 3.6 HPC deployment was not exercised.
+All **135 production regression tests and two experimental tests passed**. They exercise destination ownership/accumulation, exact residual evidence and lifetimes, incremental basis reuse/extension, per-column fallback, zero illuminations, partial-domain kernel fallback, storage limits, cancellation, transpose/adjoint solves and existing material/physical acceptance cases. The final test log and [validated benchmark results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/experiments/ghost_implementation_20260910/validated-results.json) are in the experiment directory. The local runtime was Python 3.12.14, NumPy 2.5.2 and SciPy 1.18.1. Changed ghost_backend files also passed Python 3.6 syntax parsing. Legacy-compatible APIs were retained; an actual remote Python 3.6 HPC deployment was not exercised.
 
-`baseline_backend/` is a local ignored copy taken before edits; `baseline-hashes.json` records it. Each production benchmark includes the Backend source hashes it used. `benchmark.py` runs a fresh process against either saved or updated sources. The experimental compressed path is invoked with:
+`baseline_backend/` is a local ignored copy taken before edits; `baseline-hashes.json` records it. Each production benchmark includes the ghost_backend source hashes it used. `benchmark.py` runs a fresh process against either saved or updated sources. The experimental compressed path is invoked with:
 
 ```powershell
 # Run from experiments/ghost_implementation_20260910.

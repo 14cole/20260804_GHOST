@@ -26,6 +26,8 @@ def local_import_closure(root: Path, entrypoints) -> set[Path]:
     found = set()
 
     def candidates(parts):
+        if parts and parts[0] == root.name:
+            parts = parts[1:]
         for end in range(1, len(parts) + 1):
             package = Path(*parts[:end]) / '__init__.py'
             if (root / package).is_file():
@@ -65,12 +67,12 @@ def local_import_closure(root: Path, entrypoints) -> set[Path]:
 
 
 def check_source_inventories(root: Path) -> None:
-    from GRIM_Revised_2 import grim_diagnostics as diagnostics
+    from GRIM_Backend.execution import diagnostics
     import tomllib
 
     groups = (
-        ('GRIM', root / 'GRIM_Revised_2', diagnostics.GRIM_STARTUP_FILES),
-        ('GHOST', root / 'tools/GHOST/Backend', diagnostics.GHOST_SENTINELS),
+        ('GRIM', root / 'GRIM_Backend', diagnostics.GRIM_STARTUP_FILES),
+        ('GHOST', root / 'tools/GHOST/ghost_backend', diagnostics.GHOST_SENTINELS),
         ('FREDDY', root / 'tools/FREDDY', diagnostics.FREDDY_SENTINELS),
     )
     failures = []
@@ -87,19 +89,13 @@ def check_source_inventories(root: Path) -> None:
             failures.append(f'{name}: imports absent from inventory: ' +
                             ', '.join(sorted(path.as_posix() for path in omitted)))
     project = tomllib.loads((root / 'pyproject.toml').read_text(encoding='utf-8'))
-    modules = project['tool']['setuptools']['py-modules']
-    if len(modules) != len(set(modules)):
-        failures.append('Packaging: duplicate py-modules')
-    grim_root = root / 'GRIM_Revised_2'
-    for name in modules:
-        if not (grim_root / f'{name}.py').is_file():
-            failures.append(f'Packaging: missing module {name}')
-    required = {Path(path).stem for path in diagnostics.GRIM_STARTUP_FILES
-                if Path(path).parent == Path('.')}
-    missing_modules = required - set(modules)
-    if missing_modules:
-        failures.append('Packaging: runtime modules absent from wheel: ' +
-                        ', '.join(sorted(missing_modules)))
+    from setuptools import find_namespace_packages
+    config = project['tool']['setuptools']['packages']['find']
+    packages = set(find_namespace_packages(str(root), include=config['include'], exclude=config['exclude']))
+    for relative in diagnostics.GRIM_STARTUP_FILES:
+        package = '.'.join(('GRIM_Backend', *Path(relative).parent.parts))
+        if package not in packages:
+            failures.append('Packaging: runtime package absent from wheel: ' + package)
     if failures:
         raise ValueError('\n'.join(failures))
 
@@ -114,30 +110,30 @@ def acceptance_suites(source_root: Path):
         ('offline wheelhouse tests', source_root / 'requirements',
          ('-m', 'unittest', 'discover', '-s', '.', '-p', 'test*.py', '-v')),
         ('GRIM tests', source_root,
-         ('-m', 'unittest', 'discover', '-s', 'GRIM_Revised_2', '-p', 'test*.py', '-v')),
-        ('GHOST tests', source_root / 'tools/GHOST', discover),
-        ('GHOST CEM tools tests', source_root / 'tools/GHOST/CEM_Tools', discover),
-        ('GHOST HPC scheduling integration', source_root / 'tools/GHOST',
+         ('-m', 'unittest', 'discover', '-s', 'GRIM_Backend/tests', '-p', 'test*.py', '-v')),
+        ('GHOST tests', source_root / 'tools/GHOST/ghost_backend', discover),
+        ('GHOST CEM tools tests', source_root / 'tools/GHOST/ghost_backend/data_tools', discover),
+        ('GHOST HPC scheduling integration', source_root / 'tools/GHOST/ghost_backend',
          ('tests/test_hpc_scheduling.py',)),
-        ('GHOST local-driver integration', source_root / 'tools/GHOST',
+        ('GHOST local-driver integration', source_root / 'tools/GHOST/ghost_backend',
          ('tests/test_local_drivers.py',)),
-        ('GHOST ASCII-transfer compatibility', source_root / 'tools/GHOST',
+        ('GHOST ASCII-transfer compatibility', source_root / 'tools/GHOST/ghost_backend',
          ('tests/test_source_is_ascii.py',)),
         ('FREDDY tests', source_root / 'tools/FREDDY', discover),
     )
 
 
 def development_suites(root: Path, mode: str):
-    startup = ('startup diagnostics', root, ('-m', 'GRIM_Revised_2.grim_diagnostics'))
+    startup = ('startup diagnostics', root, ('-m', 'GRIM_Backend.execution.diagnostics'))
     if mode == 'full':
         return (startup, *acceptance_suites(root))
     return (
         startup,
         acceptance_suites(root)[0],
-        ('development smoke tests', root / 'GRIM_Revised_2',
-         ('-m', 'unittest', '-v', 'test_module_boundaries', 'test_verification',
-          'test_grim_diagnostics', 'test_wheel_installation', 'test_release_builder')),
-        ('GHOST ASCII-transfer compatibility', root / 'tools/GHOST',
+        ('development smoke tests', root,
+         ('-m', 'unittest', '-v', 'GRIM_Backend.tests.test_module_boundaries', 'GRIM_Backend.tests.test_verification',
+          'GRIM_Backend.tests.test_grim_diagnostics', 'GRIM_Backend.tests.test_wheel_installation', 'GRIM_Backend.tests.test_release_builder')),
+        ('GHOST ASCII-transfer compatibility', root / 'tools/GHOST/ghost_backend',
          ('tests/test_source_is_ascii.py',)),
     )
 

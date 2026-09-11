@@ -1,9 +1,10 @@
 # Saved 2D execution settings
 
-The GHOST solver tab shows solver, solver units, a geometry preset, frequency
-and azimuth inputs, scattering mode, the geometry/setup check, and output controls.
-**Advanced Settings** starts collapsed and contains geometry-file overrides,
-accuracy, mesh certification, quality thresholds, kernel evaluation, factorization,
+The GHOST solver tab shows Geometry Source, solver, solver units, a geometry
+preset, frequency and azimuth inputs, scattering mode, the geometry/setup check,
+and output controls. Geometry Source selects a .geo file or the current Geometry
+tab. **Advanced Settings** starts collapsed and contains accuracy, mesh
+certification, quality thresholds, kernel evaluation, factorization,
 resource limits, saved setups, and boundary-density/report tools. Frequency and
 azimuth inputs display either a list or a sweep, according to the selected mode.
 BoR uses aspect angles from +z in place of the 2D azimuth input.
@@ -153,8 +154,8 @@ limiting and a complex LU solve without importing Qt.
 From the repository root:
 
 ```powershell
-.venv/Scripts/python.exe tools/GHOST/tests/benchmark_execution.py --output baseline.json
-.venv/Scripts/python.exe tools/GHOST/tests/benchmark_execution.py --output candidate.json --baseline baseline.json
+.venv/Scripts/python.exe tools/GHOST/ghost_backend/tests/benchmark_execution.py --output baseline.json
+.venv/Scripts/python.exe tools/GHOST/ghost_backend/tests/benchmark_execution.py --output candidate.json --baseline baseline.json
 ```
 
 The suite uses PEC and mixed PEC/dielectric geometries, both polarizations,

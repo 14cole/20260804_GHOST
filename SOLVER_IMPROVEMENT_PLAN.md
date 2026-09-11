@@ -94,7 +94,7 @@ performance claim follows from these fixes.
 - A 512 by 512 TE thin-layer matrix with four RHSs used 2 MiB for mixed LU factors
   versus 4 MiB for double factors; the original 4 MiB matrix remains necessary.
   Relative solution error was 7e-14 with one correction. Factor/RHS timings are
-  recorded by `tools/GHOST/tests/benchmark_refined_lu.py`; they are not end-to-end
+  recorded by `tools/GHOST/ghost_backend/tests/benchmark_refined_lu.py`; they are not end-to-end
   performance measurements.
 - New BoR material tests compare transmitting sheets to independent radial
   boundary matching and uniform reactive IBC to Mie theory, including ka=4.4934.

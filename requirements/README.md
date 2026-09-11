@@ -42,7 +42,7 @@ py -3.12 -m venv .venv
   -r requirements\windows-py312.txt
 .venv\Scripts\python.exe -m pip install --no-index --find-links ..\wheelhouse `
   --no-build-isolation -c requirements\constraints-windows-py312.txt -e .
-.venv\Scripts\python.exe -m grim_diagnostics
+.venv\Scripts\python.exe -m GRIM_Backend.execution.diagnostics
 ```
 
 Archive and checksum the wheelhouse whenever the lock changes. Because the

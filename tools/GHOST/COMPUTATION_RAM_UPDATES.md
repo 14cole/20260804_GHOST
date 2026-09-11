@@ -1,6 +1,6 @@
 # Further 2D solve time and RAM reductions
 
-The subsequent [efficiency implementation](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/tools/GHOST/EFFICIENCY_IMPLEMENTATION.md)
+The subsequent [efficiency implementation](EFFICIENCY_IMPLEMENTATION.md)
 replaces batch SVD with shared bounded QR, extends direct assembly to other
 formulations, and reduces kernel, compression and residual work. The measurements
 and SVD description below document the earlier implementation.
@@ -86,7 +86,7 @@ $env:GHOST_CPU_RHS_COMPRESSION = 'auto'
 
 An already-running GUI does not inherit later environment changes. For an HPC
 run, use the same environment at planning/submission and in the worker jobs.
-Copy the complete updated Backend to separate installations. These settings
+Copy the complete updated ghost_backend to separate installations. These settings
 are environment options; they are not new GUI controls or driver JSON keys.
 
 `GHOST_CPU_FACTORIZATION` accepts:
@@ -165,7 +165,7 @@ physical coupling models.
 [Comparison results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-next-updates-2026-09-10/comparison-results.json),
 [10 GHz resource plans](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-next-updates-2026-09-10/resource-results.json),
 [regression log](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-next-updates-2026-09-10/regression-tests.log),
-[compression tests](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/tools/GHOST/tests/test_solver_compression.py).
+[compression tests](ghost_backend/tests/test_solver_compression.py).
 
 Algorithm background: the low-rank block/recursive inverse approach follows
 the general family described in SIAM's

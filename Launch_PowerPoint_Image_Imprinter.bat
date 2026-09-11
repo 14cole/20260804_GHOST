@@ -2,8 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist "GRIM_Revised_2\ppt_image_imprinter.py" (
-    echo ERROR: GRIM_Revised_2\ppt_image_imprinter.py was not found.
+if not exist "GRIM_Backend\run_image_imprinter.py" (
+    echo ERROR: GRIM_Backend\run_image_imprinter.py was not found.
     pause
     exit /b 1
 )
@@ -45,18 +45,18 @@ exit /b %ERRORLEVEL%
 :launch_python
 for %%I in ("%PPT_PYTHON%") do set "PPT_PYTHONW=%%~dpIpythonw.exe"
 if exist "%PPT_PYTHONW%" (
-    start "" "%PPT_PYTHONW%" "%~dp0GRIM_Revised_2\ppt_image_imprinter.py"
+    start "" "%PPT_PYTHONW%" "%~dp0GRIM_Backend\run_image_imprinter.py"
 ) else (
-    start "" "%PPT_PYTHON%" "%~dp0GRIM_Revised_2\ppt_image_imprinter.py"
+    start "" "%PPT_PYTHON%" "%~dp0GRIM_Backend\run_image_imprinter.py"
 )
 exit /b 0
 
 :launch_py
 where pyw.exe >nul 2>&1
 if errorlevel 1 (
-    start "" py.exe -3 "%~dp0GRIM_Revised_2\ppt_image_imprinter.py"
+    start "" py.exe -3 "%~dp0GRIM_Backend\run_image_imprinter.py"
 ) else (
-    start "" pyw.exe -3 "%~dp0GRIM_Revised_2\ppt_image_imprinter.py"
+    start "" pyw.exe -3 "%~dp0GRIM_Backend\run_image_imprinter.py"
 )
 exit /b 0
 

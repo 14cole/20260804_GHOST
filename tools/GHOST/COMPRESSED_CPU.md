@@ -22,7 +22,7 @@ require relaunching the application with environment variables.
 
 API callers can pass `execution_options` to the certified solver entry point.
 Environment-based selection remains available to callers without a profile.
-Copy the complete updated Backend and install the updated requirements on
+Copy the complete updated ghost_backend and install the updated requirements on
 separate installations; HPC workers apply the profile stored in the manifest.
 
 `GHOST_COMPRESSED_STORAGE_MIB` defaults to 2048 and must be an integer of at least
@@ -126,6 +126,6 @@ Revert to the default with `GHOST_CPU_FACTORIZATION=dense`. The separate
 `hierarchical` selection retains dense A, while `auto` may fall back to global
 dense LU. The strict `compressed` selection does neither.
 
-Regression entry points include `tests/test_compressed_path.py` and the
+Regression entry points include `ghost_backend/tests/test_compressed_path.py` and the
 qualification folder's `test_native_queries.py`. The implementation imports only
-Backend modules; it does not import the experiments folder.
+ghost_backend modules; it does not import the experiments folder.

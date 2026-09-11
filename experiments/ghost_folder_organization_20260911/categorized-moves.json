@@ -1,0 +1,32 @@
+{
+  "moves": {
+    "ghost_gui.py": "run_gui.py",
+    "paths.py": "execution/paths.py",
+    "_ghost_dataclasses.py": "execution/_dataclasses.py",
+    "DATACLASSES_LICENSE.txt": "execution/DATACLASSES_LICENSE.txt",
+    "build_bor_stream_kernel.py": "bor/native/build_kernel.py",
+    "bor_stream_kernel.c": "bor/native/bor_stream_kernel.c",
+    "bor_stream_kernel.windows-amd64.dll": "bor/native/bor_stream_kernel.windows-amd64.dll",
+    "check_hpc_environment.py": "hpc/check_environment.py",
+    "create_feature_manifest.py": "assembly/create_feature_manifest.py",
+    "place_features.py": "assembly/place_features.py",
+    "feature_family_validation.py": "validation/feature_family.py",
+    "validate_feature_reconstruction.py": "validation/reconstruction.py",
+    "import_3d_reference.py": "io/import_3d_reference.py"
+  },
+  "removed": [
+    "bor_dispatch.py",
+    "bor_solver.py",
+    "feature_sum.py",
+    "feature_workflow.py",
+    "geometry_io.py",
+    "grim_compat.py",
+    "grim_io.py",
+    "rcs_solver.py",
+    "workflow_provenance.py",
+    "hpc_bundle.py",
+    "cpu_checked_lu.py",
+    "cpu_streaming.py",
+    "__init__.py"
+  ]
+}

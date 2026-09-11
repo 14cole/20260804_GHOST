@@ -16,7 +16,7 @@ responses; production use requires reference validation covering those features
 and their actual parameter range. The 13 new corner/termination/curvature/pair
 studies still await independent full-wave artifacts. Their templates and passing
 software tests do not establish feature-family accuracy. See
-[the validation scope](tools/GHOST/geometry_tests/feature_family_studies/README.md).
+[the validation scope](tools/GHOST/ghost_backend/validation/feature_family_studies/README.md).
 
 Length inputs and displays default to inches: GHOST/Runs geometry, thin-layer
 thickness, FREDDY thickness sweeps, ISAR range axes, Assembly display/tolerance
@@ -48,7 +48,23 @@ variants, and reusable PowerPoint report recipes.
 
 ```text
 GRIM/
-  GRIM_Revised_2/       GRIM application, plotting, ISAR, PPT, and Assembly
+  Launch_GRIM_GUI.bat   Open the integrated application
+  GRIM_Backend/         Categorized application code and runnable entry points
+    run_*.py            GUI, diagnostics, headless, and image-imprinter launchers
+    datasets/           Data model and dataset operations
+    io/                 Data loaders, readers, writers, and format references
+    ui/                 Application, dialogs, widgets, and assets
+    plotting/           Plot controls and rendering modes
+    isar/               ISAR processing and artifacts
+    assembly/           Models, recipes, editors, and assembly workflows
+    integrations/       GHOST and FREDDY embedding
+    execution/          Background jobs and diagnostics
+    runs/               Remote jobs and Runs workspace
+    reports/            PowerPoint tools and templates
+    scripting/          Python API, CLI, and recorded scripts
+    docs/               Usage and backend navigation guides
+    examples/           Runnable examples
+    tests/              Automated tests
   tools/
     GHOST/              GHOST solver, workflows, tests, and documentation
     FREDDY/             FREDDY planar material and impedance tool
@@ -57,8 +73,10 @@ GRIM/
   README.md
 ```
 
+See the [backend folder map](GRIM_Backend/docs/BACKEND.md) to locate a service or entry point.
+
 Keep this tree together when copying it to another machine. Do not copy only
-`GRIM_Revised_2`; the embedded tabs discover their authoritative tools under
+`GRIM_Backend`; the embedded tabs discover their authoritative tools under
 `tools/GHOST` and `tools/FREDDY`.
 
 ## Build a copy-ready release
@@ -162,7 +180,7 @@ py -3.12 -m venv .venv
   -r requirements\windows-py312.txt
 .venv\Scripts\python.exe -m pip install --no-build-isolation `
   -c requirements\constraints-windows-py312.txt -e .
-.venv\Scripts\python.exe -m grim_cut_gui
+.venv\Scripts\python.exe -m GRIM_Backend.ui.app
 ```
 
 For repeatable offline team installation, prepare the locked wheelhouse once
@@ -187,7 +205,7 @@ presentation, never issues PowerPoint's application-wide **Quit** command, and
 leaves presentations already open in PowerPoint running.
 
 GRIM ships an editable temporary template at
-`GRIM_Revised_2/templates/GRIM_Report_Template.pptx`. When present, the PPT tab
+`GRIM_Backend/reports/templates/GRIM_Report_Template.pptx`. When present, the PPT tab
 selects it automatically and applies **GRIM Azimuth 3x2** or **GRIM Frequency
 Sweep** from **GRIM Report Master** to the corresponding report slides. Layout
 selectors are editable and accept `Master :: Layout` to disambiguate repeated
@@ -205,7 +223,7 @@ has the required dependencies.
 
 After copying the folder to a machine, run `Launch_GRIM_Diagnostics.bat` for a
 read-only installation check. After an editable install, the equivalent text
-commands are `grim-diagnose` or `py -3 -m grim_diagnostics`. The report checks
+commands are `grim-diagnose` or `py -3 -m GRIM_Backend.execution.diagnostics`. The report checks
 the authoritative GRIM, GHOST, and FREDDY paths and the required GUI/solver
 dependencies. It labels PowerPoint export and platform-native GHOST
 acceleration as optional. It starts neither a solver nor PowerPoint, changes no
@@ -217,7 +235,7 @@ Standalone tool windows remain available. On Windows, use
 
 ```powershell
 cd tools\GHOST
-py Backend\ghost_gui.py
+py ghost_backend\run_gui.py
 
 cd ..\FREDDY
 py impedance_gui.py
@@ -252,7 +270,7 @@ py impedance_gui.py
   the same saved session once from interactive Plink to identify the prompt;
   configure a verified host key plus Pageant/key authentication, or reuse an
   authenticated PuTTY session with SSH connection sharing enabled. The detailed
-  commands are in `GRIM_Revised_2/README.md`.
+  commands are in `GRIM_Backend/docs/README.md`.
 - Use **Assembly → Body / Point Features / Line Features** to load the same strict placement CSV used
   by local/HPC feature workflows, map each dataset ID to an OPN-FRD GRIM, and
   preview an STL/facet or embedded BoR body with point/line locations before
@@ -351,15 +369,15 @@ enable or disable a feature in the electromagnetic assembly.
 
 ## Component documentation
 
-- GRIM usage and data conventions: `GRIM_Revised_2/README.md`
+- GRIM usage and data conventions: `GRIM_Backend/docs/README.md`
 - GHOST solver and workflow guide: `tools/GHOST/README.md`
 - HPC/local solver operation: `tools/GHOST/HPC.md`
 - Geometry input format: `tools/GHOST/GEOMETRY_INPUT_CHEATSHEET.md`
 - Point and line-feature validation: `tools/GHOST/FEATURE_VALIDATION_GUIDE.md`
 - Non-BoR clean/featured validation ladder:
-  `tools/GHOST/geometry_tests/non_bor_feature_validation/README.md`
+  `tools/GHOST/ghost_backend/validation/non_bor_feature_validation/README.md`
 - Curved non-BoR and shared-facet placement regression:
-  `tools/GHOST/geometry_tests/non_bor_curved_feature_placement/README.md`
+  `tools/GHOST/ghost_backend/validation/non_bor_curved_feature_placement/README.md`
 - FREDDY scope, formats, and validation: `tools/FREDDY/README.md`
 
 ## Development checks
@@ -371,7 +389,7 @@ cd requirements
 py -m unittest discover -s . -p "test*.py" -v
 cd ..
 
-py -m unittest discover -s GRIM_Revised_2 -p "test*.py" -v
+py -m unittest discover -s GRIM_Backend/tests -p "test*.py" -v
 
 cd tools\GHOST
 py -m unittest discover -s tests -p "test*.py" -v

@@ -80,7 +80,7 @@ This smaller measurement is not a full-size peak-memory or speed guarantee.
 
 ## Validation
 
-`tests/test_compact_multi_region.py` checks compact/full coefficient equality,
+`ghost_backend/tests/test_compact_multi_region.py` checks compact/full coefficient equality,
 weighted and equal-wavenumber requests, the absence of global dense operator
 and mass allocations, operator lifetime at factorization, phase budgeting,
 configurable angle batches with one factorization, bounded checks, and mixed

@@ -6,50 +6,50 @@ operations or numerical work.
 
 | Module | Responsibility |
 | --- | --- |
-| `GRIM_Revised_2/grim_cut_gui.py` | Create the application window and tabs, wire user actions, coordinate the active plot context, and manage application preferences. |
-| `GRIM_Revised_2/dataset_sidebar.py` | Own the dataset table, action layout, parameter selectors, and drag/drop presentation. Emit export intentions for the shell to connect. |
-| `GRIM_Revised_2/grim_widgets.py` | Reusable presentation widgets, searchable settings popup, collapsible sections, and initial window sizing. |
-| `GRIM_Revised_2/grim_palette.py` | Palette names, descriptions, semantic color tokens, and preference normalization. |
-| `GRIM_Revised_2/grim_theme.py` | Convert palette tokens into Qt stylesheets and branch indicators. |
-| `GRIM_Revised_2/grim_cut_dataset_mixin.py` | Coordinate dataset operations, background jobs, saves, undo, and publication into the catalog. |
-| `GRIM_Revised_2/grim_dataset.py` | `RcsGrid` data representation, numerical operations, and existing dataset APIs. |
-| `GRIM_Revised_2/grim_dataset_audit.py` | Non-mutating dataset health diagnostics, with bounded array scans and the existing `RcsGrid.audit()` API. |
-| `GRIM_Revised_2/grim_format_io.py`, `grim_cst_io.py`, `grim_sentri_io.py`, `grim_legacy_io.py`, `grim_pio_io.py` | Native archive loading and format-specific adapters inherited by `RcsGrid`. Preserve classmethod dispatch, allocation checks, metadata, and existing reader/writer signatures. |
-| `GRIM_Revised_2/dataset_dialogs.py` | Dataset operation dialogs and input-unit presentation. |
-| `GRIM_Revised_2/dataset_jobs.py` | Background workers, loader memory admission, and bounded parallel loading. |
-| `GRIM_Revised_2/dataset_publication.py` | Atomic GRIM/CSV staging, rollback, and compression policy. |
-| `GRIM_Revised_2/feature_assembly_values.py` | Shared Qt-free form values and loaded recipe records. |
-| `GRIM_Revised_2/feature_assembly_model.py` | Qt-free Assembly form state, workload estimates, preflight, and backend adaptation. |
-| `GRIM_Revised_2/feature_assembly_recipe.py` | Portable recipe serialization and atomic recipe publication. |
-| `GRIM_Revised_2/feature_assembly_panel.py` | Qt controls and worker lifecycle, with compatibility exports for the form/recipe APIs. |
-| `GRIM_Revised_2/plot_modes/isar_render.py` | ISAR GUI selection capture and image presentation; numerical formation and caches remain in `isar_mode.py`. |
-| `GRIM_Revised_2/grim_metadata.py` | Inspect scalar metadata evidence and normalize convention declarations without Qt or dataset-object dependencies. |
-| `GRIM_Revised_2/grim_cut_plot_mixin.py` and `plot_modes/` | Plot orchestration and mode-specific rendering. |
-| `GRIM_Revised_2/ghost_integration.py` and `freddy_integration.py` | Discover and embed the authoritative tools and relay their artifacts/signals. |
-| `tools/GHOST/Backend/solver_tab.py` | Solver form, execution controls, and progress. Its form scrolls separately from its action footer. |
-| `tools/GHOST/Backend/rcs_solver.py` | 2-D solve orchestration, formulations, quality gates, resource admission, and compatibility imports for existing callers. |
-| `tools/GHOST/Backend/rcs_constants.py`, `rcs_special.py` | Shared physical/default constants and trusted Bessel/Hankel backends. |
-| `tools/GHOST/Backend/rcs_geometry.py` | Material tables, geometry validation, and panel/linear-mesh construction. |
-| `tools/GHOST/Backend/rcs_operators.py` | Quadrature, boundary operators, field evaluation, and operator tuning state. |
-| `tools/GHOST/Backend/driver_io.py` | Shared geometry-input verification, cache-aware snapshot loading, and durable submission journals. Each local driver supplies its own cache. |
-| `tools/GHOST/Backend/driver_config.py` | Typed JSON setting validation, unchanged driver staging, desktop 2-D recipe adaptation, and configuration provenance. |
-| `tools/GHOST/Backend/feature_preparation.py` | Capture source/output identities and prepare surface, line, and point placements in explicit stage records. |
-| `tools/GHOST/Backend/feature_library_contracts.py` | Bind feature manifests, applicability limits, and component identities to an Assembly plan. |
-| `tools/GHOST/Backend/material_models.py` | Material explanations and thin-layer input dialog. Numerical material semantics remain in the backend. |
-| `tools/GHOST/Backend/thin_sheet.py` | Thin-layer validity checks, jump operators and field evaluation. Reuses 2D quadrature and linear-solve primitives. |
-| `tools/GHOST/Backend/refined_lu.py` | Opt-in factor/refinement policy, double residual checks and fallback signaling. No Qt dependencies. |
-| `tools/GHOST/Backend/solver_metrics.py` | Scoped timing and sampled memory collection shared with worker callbacks. |
-| `tools/GHOST/Backend/mesh_guidance.py` | Pure snapshot-based refinement suggestions and density transformations. |
-| `tools/GHOST/Backend/solver_quality.py` | Accuracy policies, evidence interpretation and report summary. |
-| `tools/GHOST/Backend/assembly_inspector.py` | Source-verified complex contribution evaluation, bounded sample cache and interference algebra. |
-| `GRIM_Revised_2/assembly_interference.py` | Inspector presentation and worker lifecycle; delegates numerical evaluation to the backend service. |
-| `tools/GHOST/Backend/feature_family_validation.py` | Reference-study definitions, convergence/reconstruction checks and evidence reports. Never generates purported full-wave truth. |
+| `GRIM_Backend/ui/app.py` | Create the application window and tabs, wire user actions, coordinate the active plot context, and manage application preferences. |
+| `GRIM_Backend/ui/dataset_sidebar.py` | Own the dataset table, action layout, parameter selectors, and drag/drop presentation. Emit export intentions for the shell to connect. |
+| `GRIM_Backend/ui/widgets.py` | Reusable presentation widgets, searchable settings popup, collapsible sections, and initial window sizing. |
+| `GRIM_Backend/ui/palette.py` | Palette names, descriptions, semantic color tokens, and preference normalization. |
+| `GRIM_Backend/ui/theme.py` | Convert palette tokens into Qt stylesheets and branch indicators. |
+| `GRIM_Backend/ui/dataset_actions.py` | Coordinate dataset operations, background jobs, saves, undo, and publication into the catalog. |
+| `GRIM_Backend/datasets/api.py` | `RcsGrid` data representation, numerical operations, and existing dataset APIs. |
+| `GRIM_Backend/datasets/audit.py` | Non-mutating dataset health diagnostics, with bounded array scans and the existing `RcsGrid.audit()` API. |
+| `GRIM_Backend/io/native.py`, `cst.py`, `sentri.py`, `out.py`, `pioneer.py`, `ptm.py`, `xpatch.py` | Native archive loading and format-specific adapters inherited by `RcsGrid`. Preserve classmethod dispatch, allocation checks, metadata, and existing reader/writer signatures. |
+| `GRIM_Backend/ui/dataset_dialogs.py` | Dataset operation dialogs and input-unit presentation. |
+| `GRIM_Backend/execution/dataset_jobs.py` | Background workers, loader memory admission, and bounded parallel loading. |
+| `GRIM_Backend/io/batch.py` | Atomic GRIM/CSV staging, rollback, and compression policy. |
+| `GRIM_Backend/assembly/values.py` | Shared Qt-free form values and loaded recipe records. |
+| `GRIM_Backend/assembly/model.py` | Qt-free Assembly form state, workload estimates, preflight, and backend adaptation. |
+| `GRIM_Backend/assembly/recipe.py` | Portable recipe serialization and atomic recipe publication. |
+| `GRIM_Backend/assembly/panel.py` | Qt controls and worker lifecycle, with compatibility exports for the form/recipe APIs. |
+| `GRIM_Backend/plotting/modes/isar_render.py` | ISAR GUI selection capture and image presentation; numerical formation and caches remain in `isar_mode.py`. |
+| `GRIM_Backend/datasets/metadata.py` | Inspect scalar metadata evidence and normalize convention declarations without Qt or dataset-object dependencies. |
+| `GRIM_Backend/plotting/actions.py` and `GRIM_Backend/plotting/modes/` | Plot orchestration and mode-specific rendering. |
+| `GRIM_Backend/integrations/ghost.py` and `GRIM_Backend/integrations/freddy.py` | Discover and embed the authoritative tools and relay their artifacts/signals. |
+| `tools/GHOST/ghost_backend/ui/solver.py` | Solver form, execution controls, and progress. Its form scrolls separately from its action footer. |
+| `tools/GHOST/ghost_backend/twod/solver.py` | 2-D solve orchestration, formulations, quality gates, resource admission, and compatibility imports for existing callers. |
+| `tools/GHOST/ghost_backend/twod/constants.py`, `special.py` | Shared physical/default constants and trusted Bessel/Hankel backends. |
+| `tools/GHOST/ghost_backend/twod/geometry.py` | Material tables, geometry validation, and panel/linear-mesh construction. |
+| `tools/GHOST/ghost_backend/twod/operators.py` | Quadrature, boundary operators, field evaluation, and operator tuning state. |
+| `tools/GHOST/ghost_backend/runs/inputs.py` | Shared geometry-input verification, cache-aware snapshot loading, and durable submission journals. Each local driver supplies its own cache. |
+| `tools/GHOST/ghost_backend/runs/config.py` | Typed JSON setting validation, unchanged driver staging, desktop 2-D recipe adaptation, and configuration provenance. |
+| `tools/GHOST/ghost_backend/assembly/preparation.py` | Capture source/output identities and prepare surface, line, and point placements in explicit stage records. |
+| `tools/GHOST/ghost_backend/assembly/contracts.py` | Bind feature manifests, applicability limits, and component identities to an Assembly plan. |
+| `tools/GHOST/ghost_backend/geometry/materials.py` | Material explanations and thin-layer input dialog. Numerical material semantics remain in the backend. |
+| `tools/GHOST/ghost_backend/twod/formulations/thin_layer.py` | Thin-layer validity checks, jump operators and field evaluation. Reuses 2D quadrature and linear-solve primitives. |
+| `tools/GHOST/ghost_backend/linalg/refined_lu.py` | Opt-in factor/refinement policy, double residual checks and fallback signaling. No Qt dependencies. |
+| `tools/GHOST/ghost_backend/execution/metrics.py` | Scoped timing and sampled memory collection shared with worker callbacks. |
+| `tools/GHOST/ghost_backend/geometry/guidance.py` | Pure snapshot-based refinement suggestions and density transformations. |
+| `tools/GHOST/ghost_backend/runs/quality.py` | Accuracy policies, evidence interpretation and report summary. |
+| `tools/GHOST/ghost_backend/assembly/inspector.py` | Source-verified complex contribution evaluation, bounded sample cache and interference algebra. |
+| `GRIM_Backend/assembly/interference.py` | Inspector presentation and worker lifecycle; delegates numerical evaluation to the backend service. |
+| `tools/GHOST/ghost_backend/validation/feature_family.py` | Reference-study definitions, convergence/reconstruction checks and evidence reports. Never generates purported full-wave truth. |
 | `tools/FREDDY/ibc/design_search.py` | Qt-free inverse-stack and bounded material-recipe searches over captured request data; callbacks provide cancellation, progress, and numerical adapters. |
 | `tools/FREDDY/ibc/mix_analysis.py` | Qt-free material recipe curves, target comparisons, and stack-performance evaluation. |
 | `tools/FREDDY/ibc/search_checkpoint.py` | Atomic recovery archives with completed scores, search/source identity, size checks, and content checksums. |
 | `tools/FREDDY/ibc/ui_controls.py`, `ui_dialogs.py`, `ui_options.py` | Shared bindings, layer/material editors, and stable form option values. |
 | `tools/FREDDY/ibc/project_state.py` | Project capture/restoration between controls and portable dictionaries; path and file semantics remain in `ibc/io.py`. |
-| `GRIM_Revised_2/examples/_folder_common.py` | Shared folder discovery and axis-limit validation for the separate editable sweep examples. |
+| `GRIM_Backend/examples/_folder_common.py` | Shared folder discovery and axis-limit validation for the separate editable sweep examples. |
 | `tools/FREDDY/ibc/ghost_coating.py` | Planar reflection assessment of the scalar PEC-backed IBC approximation and frequency interpolation; no file writes, GUI dependencies or finite-body accuracy claims. |
 
 ## Dependency rules
@@ -57,11 +57,10 @@ operations or numerical work.
 - A presentation component may construct widgets and emit user intentions; it
   must not write datasets, launch a solver, or calculate fields.
 - The shell connects intentions to operation handlers. `DatasetSidebar` owns
-  its widgets; the shell retains aliases for the existing controllers while
-  they are migrated incrementally. `DatasetTable`, `build_qss`, and the shared
-  widgets remain importable from `grim_cut_gui` for existing callers.
-- Put palette additions in `grim_palette`, and stylesheet behavior in
-  `grim_theme`. Views consume those definitions rather than creating new
+  its widgets; the shell retains aliases for the existing controllers for workspace controllers. `DatasetTable`, `build_qss`, and the shared
+  widgets remain importable from `GRIM_Backend.ui.app` for existing callers.
+- Put palette additions in `GRIM_Backend.ui.palette`, and stylesheet behavior in
+  `GRIM_Backend.ui.theme`. Views consume those definitions rather than creating new
   palette registries.
 - Metadata inspection reports `missing`, `consistent`, `conflicting`, or
   `malformed`, retaining declarations and their source containers. The legacy
@@ -129,7 +128,7 @@ the compatibility adapter. Existing shell, dataset, plot, and integration suites
 cover the unchanged controller interfaces.
 
 New eagerly imported modules must also appear in the `pyproject.toml`
-`py-modules` list and `grim_diagnostics.GRIM_STARTUP_FILES`, so installed and
+package discovery and `GRIM_Backend.execution.diagnostics.GRIM_STARTUP_FILES`, so installed and
 copy-ready distributions include the same runtime contract.
 
 `verify_project.py --mode quick` checks the declared inventories against local

@@ -134,7 +134,7 @@ publishes one `results/<geometry>.grim`; its primary arrays are the requested
 radar-frame monostatic VV, HH, and VH response, and it embeds the body-aspect
 field and `(rho,z)` profile required for downstream placement.
 
-Edit and run `Backend/place_features.py` to coherently add:
+Edit and run `ghost_backend/assembly/place_features.py` to coherently add:
 
 - a door, seam, or other perimeter from a 2-D `featured - clean` complex delta;
 - a compact cavity or similar installed feature from a calibrated 3-D
@@ -167,7 +167,7 @@ A standalone cavity field is not a valid compact delta: adding it to the body
 would retain the unbroken skin response and omit installation coupling. Solve
 the installed feature and clean reference with the same surrounding skin, then
 coherently subtract them. Mesh certification is optional for all of these
-datasets. Selecting a base or feature in `place_features.py` supplies semantic
+datasets. Selecting a base or feature in `assembly/place_features.py` supplies semantic
 tags a GUI may have dropped; normalization, finite-field, coordinate, angular
 support, and the explicit power-only role check remain enforced.
 

@@ -1,7 +1,7 @@
 # Running GHOST sweeps on HPC
 
 This describes how the 2-D RCS solver and the SLURM drivers are set up for
-throughput on nodes with 64–96 cores and 375–750 GB, across 0–50 nodes, and
+throughput on nodes with 64â€“96 cores and 375â€“750 GB, across 0â€“50 nodes, and
 what to turn when a sweep is not filling the machine.
 
 The short version: **units are costed and packed by cost, claimed atomically at
@@ -15,10 +15,10 @@ cancelled, or is preempted cannot strand work.
 
 | Solver | SLURM entry point | Same sweep, one machine | Output |
 |---|---|---|---|
-| 2-D arbitrary geometry | `Backend/run_hpc_monostatic.py` | `Backend/run_local_monostatic.py` | `<OUTPUT_DIR>/run_*/results/{FRD,OPN}/` |
-| Body of revolution | `Backend/run_hpc_bor_monostatic.py` | `Backend/run_local_bor.py` | immediate `results/by_frequency/` VV/HH units plus final monostatic `results/<geometry>.grim` |
+| 2-D arbitrary geometry | `ghost_backend/run_hpc_monostatic.py` | `ghost_backend/run_local_monostatic.py` | `<OUTPUT_DIR>/run_*/results/{FRD,OPN}/` |
+| Body of revolution | `ghost_backend/run_hpc_bor_monostatic.py` | `ghost_backend/run_local_bor.py` | immediate `results/by_frequency/` VV/HH units plus final monostatic `results/<geometry>.grim` |
 
-Every driver in the table shares `Backend/hpc_scheduler.py`, so the tuning
+Every driver in the table shares `ghost_backend/hpc/scheduler.py`, so the tuning
 knobs below mean the same thing in each.
 
 For the opt-in 2D CPU streaming method, set `SOLVER_METHOD="experimental_cpu"`
@@ -38,7 +38,7 @@ Windows Python 3.12 release environment; installing the desktop package is
 not required on the cluster.
 
 The backend bundles its Python 3.6 dataclasses support. Copy the **complete
-updated Backend**, including `ghost_runtime.py` and `_ghost_dataclasses.py`;
+updated ghost_backend**, including `ghost_runtime.py` and `execution/_dataclasses.py`;
 do not add your own `dataclasses.py`. The compatibility changes also cover
 annotations, nested/threaded solver settings, file cleanup, bundle CLI
 operations, and older NumPy sorting, visibility, and read-only buffer behavior.
@@ -51,7 +51,7 @@ From the repository root, check the environment using the same interpreter
 you will use to launch the driver:
 
 ```bash
-python tools/GHOST/Backend/check_hpc_environment.py
+python tools/GHOST/ghost_backend/hpc/check_environment.py
 ```
 
 It reports the interpreter, compiler, loaded backend, dependency versions, and
@@ -70,15 +70,15 @@ Windows wheels cannot be used on Linux.
 
 You can keep a copy of `run_hpc_monostatic.py` or
 `run_hpc_bor_monostatic.py` in your study folder. Make the complete matching
-`Backend` available on shared storage, and add this before the driver's
+`ghost_backend` available on shared storage, and add this before the driver's
 backend imports (replace the example with your absolute Linux path):
 
 ```python
 import sys
-sys.path.insert(0, "/shared/path/to/GHOST/Backend")
+sys.path.insert(0, "/shared/path/to/GHOST/ghost_backend")
 ```
 
-`sys.path.insert` needs both the index and the path. A relative `"Backend"`
+`sys.path.insert` needs both the index and the path. A relative `"ghost_backend"`
 path is resolved against the current working directory; it can stop working
 when a worker starts in the generated run directory. The drivers export the
 absolute backend path into their SLURM scripts after `JOB_PROLOGUE`, so workers
@@ -99,7 +99,7 @@ does not change the Python already interpreting the submitting script.
 
 ### First cluster acceptance test
 
-1. Run `check_hpc_environment.py` on the login node and in your usual compute
+1. Run `hpc/check_environment.py` on the login node and in your usual compute
    allocation. Both must pass and identify the same interpreter, backend, and
    numerical dependency versions. Native BoR acceleration additionally requires
    a Linux build on the target environment.
@@ -110,7 +110,7 @@ does not change the Python already interpreting the submitting script.
    your site's partition, account, memory, and module settings.
 3. Submit that generated script with `sbatch /absolute/path/to/submit_job0.slurm`.
    Check the job logs for `failed=0` and the results for both VV and HH. Verify
-   the run with `python /path/to/Backend/hpc_bundle.py run-status /path/to/run`;
+   the run with `python /path/to/ghost_backend/hpc/bundle.py run-status /path/to/run`;
    expect `complete: true` and `attestation_verified: true` in its JSON output.
 4. Submit the **same generated SLURM script** again. It should verify and skip
    the existing outputs with `wrote=0`, without changing the result files. Do
@@ -126,9 +126,9 @@ from the repository root; they execute real worker solves locally without
 calling `sbatch`:
 
 ```bash
-python tools/GHOST/tests/test_hpc_runtime.py
-python tools/GHOST/tests/test_hpc_scheduling.py
-python tools/GHOST/tests/test_local_drivers.py
+python tools/GHOST/ghost_backend/tests/test_hpc_runtime.py
+python tools/GHOST/ghost_backend/tests/test_hpc_scheduling.py
+python tools/GHOST/ghost_backend/tests/test_local_drivers.py
 ```
 
 Development validation used actual CPython 3.6.8 on Windows with NumPy 1.14.3
@@ -153,15 +153,15 @@ own inputs and records solver settings and source hashes in `manifest.json`.
 | Mixed-precision LU | Set `LU_PRECISION = "mixed"` in the **2D** driver/request. Each worker selects CPU mixed LU with double-precision residual refinement and fallback. Default is `"double"`. BoR's `TABLE_PRECISION` controls assembly tables, a separate option. |
 | Mesh refinement | Save segment refinement in `.geo`. Headless solves retain it; Tight changes acceptance limits and does not automatically repair an insufficient mesh. |
 | Runtime evidence | Timing and available sampled process RSS are embedded in the exported `.grim` solver metadata. |
-| Assembly | Configure and run `Backend/place_features.py`, or call `feature_workflow.prepare_feature_assembly` / `execute_feature_assembly`. The contribution calculations are available through `assembly_inspector.ContributionInspector.evaluate`. |
-| Feature-family validation | Run `Backend/feature_family_validation.py --study study.json --report new_report.json`. Missing reference data remain unvalidated. |
+| Assembly | Configure and run `ghost_backend/assembly/place_features.py`, or call `feature_workflow.prepare_feature_assembly` / `execute_feature_assembly`. The contribution calculations are available through `assembly_inspector.ContributionInspector.evaluate`. |
+| Feature-family validation | Run `ghost_backend/validation/feature_family.py --study study.json --report new_report.json`. Missing reference data remain unvalidated. |
 
 `ACCURACY_TARGET` accepts `"standard"` or `"tight"` in both local and HPC
 drivers. With `MESH_CERTIFICATION = False`, the run uses the base mesh and
 does not apply mesh-comparison thresholds. Numerical certification does not
 certify the scalar coating approximation, its oblique-incidence accuracy, or
 Assembly's physical assumptions. See the
-[PEC-backed coating guide](geometry_tests/pec_backed_ibc/README.md).
+[PEC-backed coating guide](ghost_backend/validation/pec_backed_ibc/README.md).
 
 FREDDY's material calculation and coating assessment are also scriptable:
 use `ibc.compute.compute_stack_impedance_many`, `ibc.io.write_output`, and
@@ -198,8 +198,8 @@ and time for your actual study and cluster. The three frequencies above are
 only an example grid. Material tables must cover all requested frequencies.
 
 ```bash
-python tools/GHOST/Backend/hpc_bundle.py create --solver 2d --output coated_request --settings settings.json --geometry FRD=/path/to/coated_body.geo
-python tools/GHOST/Backend/hpc_bundle.py verify coated_request
+python tools/GHOST/ghost_backend/hpc/bundle.py create --solver 2d --output coated_request --settings settings.json --geometry FRD=/path/to/coated_body.geo
+python tools/GHOST/ghost_backend/hpc/bundle.py verify coated_request
 ```
 
 For BoR, use `--solver bor`, `--geometry BOR=/path/to/coated_bor.geo`, remove
@@ -233,7 +233,7 @@ provenance must describe the Linux login/compute environment, not Windows.
 After uploading the complete folder, the one-command Linux form is:
 
 ```bash
-python3 /path/to/GHOST/Backend/hpc_bundle.py stage /path/to/request_folder \
+python3 /path/to/GHOST/ghost_backend/hpc/bundle.py stage /path/to/request_folder \
   --workspace-root /scratch/$USER/grim --run-driver --submit
 ```
 
@@ -257,7 +257,7 @@ driver's compute-node `PYTHON_EXE`.
 The same read-only recovery can be inspected manually:
 
 ```bash
-python3 /path/to/GHOST/Backend/hpc_bundle.py recover \
+python3 /path/to/GHOST/ghost_backend/hpc/bundle.py recover \
   /scratch/$USER/grim/grim_<bundle-id>
 ```
 
@@ -298,7 +298,7 @@ and `WORKERS = None` means *all but one core* rather than *every core*.
 Run one with no arguments:
 
 ```bash
-python Backend/run_local_monostatic.py
+python ghost_backend/run_local_monostatic.py
 ```
 
 ### Polarization outputs
@@ -356,7 +356,7 @@ MEMORY_SAFETY   = 1.35    # multiplier on the solver's own peak estimate
 ```
 
 Leave `MEM_PER_NODE = "0"` with `--exclusive`. Omitting the directive lets the
-cluster default (often `DefMemPerCPU` ≈ 3.5 GB × CPUs) apply, which on a 750 GB
+cluster default (often `DefMemPerCPU` â‰ˆ 3.5 GB Ã— CPUs) apply, which on a 750 GB
 node is a fraction of what is there and will OOM-kill workers.
 
 ### Memory-heavy geometries
@@ -389,7 +389,7 @@ Memory-limited : at most 2 concurrent solve(s); heaviest planned unit 45.3 GB
 
 A unit larger than the whole budget still runs, alone, rather than deadlocking
 the node -- verified, along with the table above, in
-`tests/test_hpc_scheduling.py`.
+`ghost_backend/tests/test_hpc_scheduling.py`.
 
 Beyond that the solver has its own last-resort gate and refuses to allocate
 before it starts, so an impossible unit fails with a number instead of being
@@ -437,7 +437,7 @@ To check what a compute node reports before committing a long run:
 
 ```bash
 srun --mem=0 --exclusive python -c \
-  "import sys; sys.path.insert(0,'Backend'); import rcs_solver as r; \
+  "from ghost_backend.twod import solver as r; \
    print(r._detect_available_gb(), '->', r._solve_memory_limit_gb())"
 ```
 
@@ -479,19 +479,19 @@ frequency sweep can move from four large solves to dozens of small solves; a
 fixed 24-thread setting would otherwise multiply into hundreds of runnable
 threads when the small solves began.
 
-Scaling is real but sub-linear — only the tiled far-field pass is threaded, and
+Scaling is real but sub-linear â€” only the tiled far-field pass is threaded, and
 the scatter into the global matrices is serialized behind a lock. Measured on a
 contended 4-core test host (1299 elements, S + K):
 
 | Threads | Speedup |
 |---:|---:|
-| 1 | 1.00× |
-| 2 | 1.78× |
-| 3 | 2.09× |
+| 1 | 1.00Ã— |
+| 2 | 1.78Ã— |
+| 3 | 2.09Ã— |
 
 Beyond that the host was oversubscribed. Treat a few threads per solve as a way
 to use cores that would otherwise idle, not as a substitute for running more
-units at once — processes are always the better parallelism when you have the
+units at once â€” processes are always the better parallelism when you have the
 units to fill them.
 
 ---
@@ -501,8 +501,8 @@ units to fill them.
 ### Cost-aware planning
 
 Assembly cost grows as the square of the boundary-node count, and node count
-grows linearly with frequency, so across a 2–18 GHz sweep the most expensive
-unit is roughly **80×** the cheapest.
+grows linearly with frequency, so across a 2â€“18 GHz sweep the most expensive
+unit is roughly **80Ã—** the cheapest.
 
 At submit time each `(geometry, frequency)` unit is meshed with the solver's
 own rule, costed for both physical channels, and dealt out
@@ -517,7 +517,7 @@ Submission prints the predicted balance:
 Plan balance  : 1.00x the best any schedule could do (1.00 = optimal)
 ```
 
-That is the plan's makespan against `max(total / slots, dearest unit)` — not
+That is the plan's makespan against `max(total / slots, dearest unit)` â€” not
 against the mean load. The mean is the wrong yardstick when one unit costs more
 than an even share, or when you ask for more nodes than you have units: a
 perfect plan still shows a large max/mean ratio there, and reading that as
@@ -527,7 +527,7 @@ initial plan; those workers can still join the steal pool and completion
 barrier if Slurm starts them.
 
 For comparison, index round-robin on a four-frequency sweep across four slots
-lands at 2.13× optimal — roughly twice the node-hours for the same sweep.
+lands at 2.13Ã— optimal â€” roughly twice the node-hours for the same sweep.
 
 ### Work stealing
 
@@ -549,7 +549,7 @@ left to other tasks=40.  0.2 s elapsed
 ```
 
 Every unit still gets solved, but on one node instead of ten.
-`tests/test_hpc_scheduling.py::test_no_task_starvation` covers it.
+`ghost_backend/tests/test_hpc_scheduling.py::test_no_task_starvation` covers it.
 
 Claims live in `<run_dir>/claims/`. Creation and replacement are serialized by
 a stable, kernel-owned advisory operation lock and fenced by an owner token
@@ -558,7 +558,7 @@ whose advisory locks and atomic same-directory replacement are coherent across
 nodes; no separate scheduler daemon is needed.
 
 A claim carries a heartbeat. If a task dies, its claims go quiet and become
-stealable after `CLAIM_STALE_SECONDS` (default 3600 for 2-D, 7200 for BoR — set
+stealable after `CLAIM_STALE_SECONDS` (default 3600 for 2-D, 7200 for BoR â€” set
 it comfortably above your longest single unit). A Slurm requeue of the exact
 same job/array task may recover its own fresh orphan immediately when
 `SLURM_RESTART_COUNT` advances; a different task remains fenced until the
@@ -577,12 +577,11 @@ geometry role required by strict coherent subtraction. Each file already
 contains canonical VV and HH. The sole production delta-building path is:
 
 ```bash
-python 1c_build_deltas/subtract_datasets.py
+python ghost_backend/data_tools/run_cli.py subtract results/OPN results/FRD Deltas
 ```
 
-With no paths it selects the newest complete 2-D run containing both roles.
-Explicit `OPN`, `FRD`, and output folders may be passed to enter the workflow
-from any compatible dataset library. Geometry/result stems must follow the
+Supply the `OPN`, `FRD`, and output folders for the completed run or compatible
+dataset library. Geometry/result stems must follow the
 canonical final `_OPN` and `_FRD` role markers so clean/featured cases can be
 paired unambiguously. The command joins compatible frequency files, validates
 the embedded VV/HH pair, and subtracts the preserved float64 complex
@@ -602,7 +601,7 @@ dead publisher is recoverable like a solve unit. Publication can be rerun
 explicitly with:
 
 ```bash
-python Backend/run_hpc_bor_monostatic.py --publish /path/to/run_dir
+python ghost_backend/run_hpc_bor_monostatic.py --publish /path/to/run_dir
 ```
 
 Each result is bound to its run -- source build, runtime, geometry inputs,
@@ -634,7 +633,7 @@ overhead.
 
 A unit whose result already exists is re-dispatched for its attestation check
 rather than skipped on filename alone, but only by the task that owns it in the
-plan — so the first restart pass distributes that work rather than making each
+plan â€” so the first restart pass distributes that work rather than making each
 node repeat it. Before a worker reports success, the manifest-exact set and
 embedded attestations are checked again. A mismatch fails loudly instead of
 silently reusing a file produced from different inputs or a different solver
@@ -667,13 +666,13 @@ Measured on `body.geo`, solve time only:
 
 | | Certified | Survey | |
 |---|---:|---:|---|
-| 6 GHz, 135 panels | 1.02 s | 0.34 s | 3.00× |
-| 18 GHz, 328 panels | 3.86 s | 1.34 s | 2.88× |
-| 30 GHz, 520 panels | 7.52 s | 2.54 s | 2.96× |
+| 6 GHz, 135 panels | 1.02 s | 0.34 s | 3.00Ã— |
+| 18 GHz, 328 panels | 3.86 s | 1.34 s | 2.88Ã— |
+| 30 GHz, 520 panels | 7.52 s | 2.54 s | 2.96Ã— |
 
-End to end through the driver, small units see less (1.8× on a two-unit run)
-because per-unit overhead — import, preflight, provenance — stops being
-negligible. Big units get close to the 3×.
+End to end through the driver, small units see less (1.8Ã— on a two-unit run)
+because per-unit overhead â€” import, preflight, provenance â€” stops being
+negligible. Big units get close to the 3Ã—.
 
 Memory follows the same shape: the reservation is built on the **fine** mesh,
 so survey mode usually cuts it substantially and more units fit per node. The
@@ -682,7 +681,7 @@ system DOFs and retained operators rather than applying one 2N model to every
 geometry.
 
 The algebraic quality gate still runs
-— a badly conditioned or non-converged solve still fails closed — but nothing
+â€” a badly conditioned or non-converged solve still fails closed â€” but nothing
 establishes that the discretization is fine enough, which is the error that
 biases an RCS number quietly rather than announcing itself. On the shipped
 geometry the base mesh happened to land within 0.04 dB of the certified one;
@@ -725,16 +724,16 @@ the large solve retains its full reservation.
 ## 5. "Solver source ... differ from the HPC run manifest"
 
 Every unit re-checks that the solver source still matches what the run
-recorded at submit time — a hash over every top-level `.py`/`.so`/`.c`/... in
-`Backend/`, plus the driver being executed. If it fires, the run and the code
+recorded at submit time â€” a hash over every top-level `.py`/`.so`/`.c`/... in
+`ghost_backend/`, plus the driver being executed. If it fires, the run and the code
 on disk have diverged.
 
 The message now names the files:
 
 ```
 Solver source/native artifacts differ from the HPC run manifest ...
-(changed: Backend/rcs_solver.py; added: Backend/my_patch.py;
- removed: Backend/occluder.py). Either restore the recorded source or submit
+(changed: ghost_backend/twod/solver.py; added: ghost_backend/my_patch.py;
+ removed: ghost_backend/occluder.py). Either restore the recorded source or submit
 a new run with the code you actually want to execute.
 ```
 
@@ -742,20 +741,20 @@ For a run submitted before per-file inventories existed, or to check a compute
 node directly:
 
 ```bash
-python tests/diagnose_provenance.py <run_dir> [--backend /path/to/Backend]
+python ghost_backend/tests/diagnose_provenance.py <run_dir> [--backend /path/to/ghost_backend]
 ```
 
 Usual causes, in order of likelihood:
 
 1. **Code edited after submitting.** The manifest froze the old source; the
-   worker sees the new one. Resubmit — the existing run's finished results
+   worker sees the new one. Resubmit â€” the existing run's finished results
    stay valid, because they were produced by the source that run recorded.
 2. **A partially updated tree.** A file copied to the cluster and one missed,
    so the file *set* differs. `removed:` and `added:` entries point straight
    at it.
-3. **Login node and compute node see different trees** — different mount,
+3. **Login node and compute node see different trees** â€” different mount,
    different `PYTHONPATH`, a stale copy under a different prefix. The
-   diagnostic prints the Backend directory it actually checked, which is
+   diagnostic prints the ghost_backend directory it actually checked, which is
    usually enough to spot this.
 
 Note that `.so` artifacts count: rebuilding `bor_stream_kernel.so` on a different host
@@ -783,15 +782,15 @@ What changed is the cost of doing it:
 - **The solver is imported in the parent** before the pool forks. It used to be
   imported inside the worker function with `maxtasksperchild=1`, so every unit
   paid a fresh import of numpy, SciPy, and an 8 000-line module. Worker
-  recycling is kept (`TASKS_PER_CHILD`, default 4) — a respawn now costs a fork.
+  recycling is kept (`TASKS_PER_CHILD`, default 4) â€” a respawn now costs a fork.
 
 ---
 
 ## 7. Solver performance
 
 Everything below is bit-comparable with the previous solver to floating-point
-reassociation; `tests/test_assembly_equivalence.py` and
-`tests/test_solver_equivalence.py` check that against a pristine copy.
+reassociation; `ghost_backend/tests/test_assembly_equivalence.py` and
+`ghost_backend/tests/test_solver_equivalence.py` check that against a pristine copy.
 
 ### Operator assembly
 
@@ -803,15 +802,15 @@ complex temporaries.
 
 Measured on `body.geo` (single-layer + adjoint double-layer, one core):
 
-| Elements | Before | After | Speedup | Extra peak RAM before → after |
+| Elements | Before | After | Speedup | Extra peak RAM before â†’ after |
 |---:|---:|---:|---:|---|
-| 338 | 2.7 s | 2.0 s | 1.4× | 17 MB → ~0 |
-| 670 | 9.7 s | 5.7 s | 1.7× | 62 MB → ~0 |
-| 1299 | 37.1 s | 17.3 s | 2.1× | 232 MB → ~0 |
+| 338 | 2.7 s | 2.0 s | 1.4Ã— | 17 MB â†’ ~0 |
+| 670 | 9.7 s | 5.7 s | 1.7Ã— | 62 MB â†’ ~0 |
+| 1299 | 37.1 s | 17.3 s | 2.1Ã— | 232 MB â†’ ~0 |
 
 The speedup grows with mesh size, and the memory column matters as much as the
 time one: the old formulation held eight complex `N^2` accumulators plus about
-six `N^2` temporaries live at once — 3.2 GB + 1.2 GB at 5 000 elements — which
+six `N^2` temporaries live at once â€” 3.2 GB + 1.2 GB at 5 000 elements â€” which
 capped how many solves fit on a node far more tightly than the matrices
 themselves do.
 
@@ -819,14 +818,14 @@ themselves do.
 
 A coated or multi-region body assembles one operator per (region, interface
 side). Both sides of a region share its wavenumber and differ only in which
-elements are active — and masks are applied *after* the quadrature, so
+elements are active â€” and masks are applied *after* the quadrature, so
 assembling them separately repeated the whole element-pair sweep. Two changes:
 
 - **One traversal per wavenumber.** The multi-region solver now prefetches
   every (wavenumber, mask) the matrix build will ask for, groups them, and
   assembles each group once.
-- **Compacted source axis.** A mask selecting a minority of the mesh — normal
-  for a thin coating — no longer pays a full-width sweep that is then masked
+- **Compacted source axis.** A mask selecting a minority of the mesh â€” normal
+  for a thin coating â€” no longer pays a full-width sweep that is then masked
   away. Below 50% active the source axis compacts, making the work
   proportional to what is actually wanted. Above that the transposed-pair
   shortcut wins instead, so the threshold is where the two break even.
@@ -836,32 +835,32 @@ the pre-optimization solver:
 
 | Elements | Before | After | Speedup |
 |---:|---:|---:|---:|
-| 234 | 6.8 s | 2.7 s | 2.5× |
-| 691 | 51.2 s | 14.8 s | 3.5× |
-| 1147 | 153.6 s | 36.8 s | 4.2× |
+| 234 | 6.8 s | 2.7 s | 2.5Ã— |
+| 691 | 51.2 s | 14.8 s | 3.5Ã— |
+| 1147 | 153.6 s | 36.8 s | 4.2Ã— |
 
-Compaction is a pure optimization: `tests/test_assembly_equivalence.py` checks
+Compaction is a pure optimization: `ghost_backend/tests/test_assembly_equivalence.py` checks
 the compacted result against the full-width sweep, and grouped masks against
 one-at-a-time assembly, for both real and lossy wavenumbers.
 
 ### Hypersingular operator (TE sheet / dielectric paths)
 
-This was an O(N²) interpreted loop calling a per-pair quadrature routine. The
-pairs that the recursion resolves with a plain tensor-Gauss box — all but O(N)
-of them — are now batched over the same tiles at the same order:
+This was an O(NÂ²) interpreted loop calling a per-pair quadrature routine. The
+pairs that the recursion resolves with a plain tensor-Gauss box â€” all but O(N)
+of them â€” are now batched over the same tiles at the same order:
 
 | Elements | Before (measured/extrapolated) | After | Speedup |
 |---:|---:|---:|---:|
-| 88 | 30 s | 0.7 s | 42× |
-| 228 | 199 s | 2.8 s | 72× |
-| 430 | 709 s | 7.3 s | 97× |
-| 820 | 2579 s | 18.8 s | 137× |
+| 88 | 30 s | 0.7 s | 42Ã— |
+| 228 | 199 s | 2.8 s | 72Ã— |
+| 430 | 709 s | 7.3 s | 97Ã— |
+| 820 | 2579 s | 18.8 s | 137Ã— |
 
 ### Graded far quadrature (on by default)
 
 The far pass used a fixed order 8 for every well-separated pair. Measuring the
-order actually needed to hold a Galerkin block to 1e-12 relative — against an
-order-24 reference, worst case over five pair orientations — gives:
+order actually needed to hold a Galerkin block to 1e-12 relative â€” against an
+order-24 reference, worst case over five pair orientations â€” gives:
 
 | kL \ r | 3 | 5 | 10 | 25 |
 |---:|---:|---:|---:|---:|
@@ -876,18 +875,18 @@ radians. Two things fall out:
 - **Separation barely matters** once a pair is far at all. What sets the order
   is how many wavelengths the element spans, because that is what the
   integrand oscillates over.
-- **At kL ≥ 4 the fixed order 8 is *under*-resolved** — that mesh needs 9. A
-  λ/20 mesh is kL ≈ 0.31, so this only bites on deliberately coarse meshes.
+- **At kL â‰¥ 4 the fixed order 8 is *under*-resolved** â€” that mesh needs 9. A
+  Î»/20 mesh is kL â‰ˆ 0.31, so this only bites on deliberately coarse meshes.
 
-Each tile now picks its order from its own worst far pair. Measured 1.24–1.43×
+Each tile now picks its order from its own worst far pair. Measured 1.24â€“1.43Ã—
 depending on wavenumber and mask, with results matching the ungraded sweep to
-~5e-16 — it is a free speedup, not an accuracy trade, because it only drops
+~5e-16 â€” it is a free speedup, not an accuracy trade, because it only drops
 orders the calibration says are unnecessary.
 
 Grading never raises the order above what the caller configured. Raising it
 where the table says it is needed would improve coarse-mesh accuracy but change
 published values, which is not something to do silently. `set_far_quadrature_grading(False)`
-forces the flat order; `tests/test_assembly_equivalence.py` checks the two agree.
+forces the flat order; `ghost_backend/tests/test_assembly_equivalence.py` checks the two agree.
 
 ### Optional: far-pair quadrature order
 
@@ -899,17 +898,17 @@ rule; across a far pair the integrand is smooth and it is over-resolved.
 export GHOST_FAR_QUAD_ORDER=5     # or rcs_solver.set_far_quadrature_order(5)
 ```
 
-**This is off by default because it changes computed values** — a different
+**This is off by default because it changes computed values** â€” a different
 quadrature rule, not a faster evaluation of the same one. Measured on
-`body.geo` at 40 GHz (670 elements) with `tests/measure_far_quadrature.py`:
+`body.geo` at 40 GHz (670 elements) with `ghost_backend/tests/measure_far_quadrature.py`:
 
 | Order | Speedup | Max RCS shift |
 |---:|---:|---:|
-| 8 (default) | 1.00× | — |
-| 6 | 1.35× | 2.7e-13 dB |
-| 5 | 1.69× | 2.9e-11 dB |
-| 4 | 1.94× | 4.1e-09 dB |
-| 3 | 2.29× | 6.3e-07 dB |
+| 8 (default) | 1.00Ã— | â€” |
+| 6 | 1.35Ã— | 2.7e-13 dB |
+| 5 | 1.69Ã— | 2.9e-11 dB |
+| 4 | 1.94Ã— | 4.1e-09 dB |
+| 3 | 2.29Ã— | 6.3e-07 dB |
 
 Measured again on a coated multi-region body (24 in PEC trapezoid with a
 0.1 in lossy dielectric layer, 3 GHz), where the payoff is larger because that
@@ -918,20 +917,20 @@ evaluation ~10x dearer than a real one:
 
 | Configuration | Speedup | Max RCS shift |
 |---|---:|---:|
-| certified, order 8 (default) | 1.00× | — |
-| certified, order 4 | 3.09× | 0.000 dB |
-| survey, order 8 | 3.11× | 0.017 dB |
-| survey, order 4 | 8.49× | 0.017 dB |
+| certified, order 8 (default) | 1.00Ã— | â€” |
+| certified, order 4 | 3.09Ã— | 0.000 dB |
+| survey, order 8 | 3.11Ã— | 0.017 dB |
+| survey, order 4 | 8.49Ã— | 0.017 dB |
 
 Those shifts are far below anything physically meaningful, but they were
-measured on specific geometries at specific frequencies — run the script on
+measured on specific geometries at specific frequencies â€” run the script on
 your own before relying on it.
 
 Why the order matters so much: linear Galerkin with an 8x8 rule spends 64
 kernel evaluations per element pair, and the assembly is ~88% of a solve
 (every quality gate, the condition estimate, the preflight, and the
 mesh-convergence comparison together come to under 1.5%). Order 4 is 16
-evaluations per pair — a quarter of the dominant cost. Near-field and singular quadrature are untouched. A solve
+evaluations per pair â€” a quarter of the dominant cost. Near-field and singular quadrature are untouched. A solve
 that used the override records it in its warnings, so the fact travels with the
 published `.grim`.
 
@@ -956,7 +955,7 @@ shared L3 is thrashing; grow it for a few large solves with threads.
 ## 8. Source encoding
 
 Every Python file in this repo is **pure ASCII**, and
-`tests/test_source_is_ascii.py` enforces it.
+`ghost_backend/tests/test_source_is_ascii.py` enforces it.
 
 The reason is a failure mode that only shows up after a file has been copied
 somewhere. UTF-8 source that passes through a Windows editor, an FTP client in
@@ -982,16 +981,16 @@ encoding and are yours, not ours.
 ## 9. Tests
 
 ```bash
-python tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
-python tests/test_local_drivers.py                        # the run_local drivers, end to end
-python tests/test_rcs_physics_regression.py               # 2-D analytic/reciprocity gates
-python tests/test_bor_physics_regression.py               # BoR Mie/streaming/workflow gates
-python tests/test_solver_equivalence.py  <pristine rcs_solver.py>
-python tests/test_assembly_equivalence.py <pristine rcs_solver.py>
-python tests/benchmark_assembly.py      [pristine rcs_solver.py]
-python tests/measure_far_quadrature.py  [geometry.geo ...]
-python tests/diagnose_provenance.py     <run_dir>       # why a source check failed
-python tests/test_source_is_ascii.py                    # source stays copy-safe
+python ghost_backend/tests/test_hpc_scheduling.py                       # scheduler + a real 2-task sweep
+python ghost_backend/tests/test_local_drivers.py                        # the run_local drivers, end to end
+python ghost_backend/tests/test_rcs_physics_regression.py               # 2-D analytic/reciprocity gates
+python ghost_backend/tests/test_bor_physics_regression.py               # BoR Mie/streaming/workflow gates
+python ghost_backend/tests/test_solver_equivalence.py  <pristine rcs_solver.py>
+python ghost_backend/tests/test_assembly_equivalence.py <pristine rcs_solver.py>
+python ghost_backend/tests/benchmark_assembly.py      [pristine rcs_solver.py]
+python ghost_backend/tests/measure_far_quadrature.py  [geometry.geo ...]
+python ghost_backend/tests/diagnose_provenance.py     <run_dir>       # why a source check failed
+python ghost_backend/tests/test_source_is_ascii.py                    # source stays copy-safe
 ```
 
 The two equivalence tests need a copy of the solver from before these changes
@@ -1021,4 +1020,4 @@ requests and manifests. Workers apply the captured settings independently of
 their launch environment. See [run profiles](RUN_PROFILES.md) for JSON examples,
 temporary directory portability, CPU reservations, and performance checks.
 Install the updated HPC requirements, including `threadpoolctl==2.2.0` for the
-Python 3.6 stack, and run `Backend/check_hpc_environment.py` before submitting.
+Python 3.6 stack, and run `ghost_backend/hpc/check_environment.py` before submitting.

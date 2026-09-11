@@ -1,0 +1,10 @@
+Root layout: four run scripts, categorized folders, no nested backend.
+Isolated bootstrap: GRIM_Backend\run_diagnostics.py
+Isolated bootstrap: GRIM_Backend\run_gui.py
+Isolated bootstrap: GRIM_Backend\run_headless.py
+Isolated bootstrap: GRIM_Backend\run_image_imprinter.py
+Isolated bootstrap: GRIM_Backend\examples\join_folder.py
+Isolated bootstrap: GRIM_Backend\examples\plot_folder_azimuth_sweeps.py
+Isolated bootstrap: GRIM_Backend\examples\plot_folder_frequency_sweeps.py
+Isolated bootstrap: GRIM_Backend\examples\query_dataset.py
+Documentation links: valid.

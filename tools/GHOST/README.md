@@ -1,12 +1,32 @@
 # GHOST solver and feature workflows
 
-GHOST is bundled inside the GRIM distribution. This folder is a complete
-solver project so its backend, tests, geometry studies, CEM utilities, and
-launchers retain their established relative paths.
+Open `Launch_GHOST_GUI.bat` to start GHOST. The top level contains the launcher,
+Markdown guides, and one `ghost_backend` folder.
 
-Use the [backend source guide](Backend/README.md) to find solvers, data I/O,
+| Folder | Contents |
+| --- | --- |
+| `ghost_backend/twod/`, `bor/` | 2-D and body-of-revolution solvers. |
+| `ghost_backend/linalg/`, `compressed/` | Factorization, sweep reuse, matrix compression, and RAM forecasts. |
+| `ghost_backend/assembly/` | Feature placement, field combination, and assembly validation. |
+| `ghost_backend/io/` | Dataset loading, export, and filename operations. |
+| `ghost_backend/runs/`, `execution/`, `hpc/` | Run configuration, CPU resources, provenance, and batch scheduling. |
+| `ghost_backend/ui/` | Desktop geometry and solver controls. |
+| `ghost_backend/data_tools/` | Dataset subtraction, joining, renaming, conversion, and their GUI/CLI. |
+| `ghost_backend/geometry/` | Geometry loading, materials, mesh checks, rotation, sample geometries, and placement CSV templates. |
+| `ghost_backend/validation/` | Material and geometry validation studies with their fixtures. |
+| `ghost_backend/tests/` | Solver tests and performance benchmarks. |
+
+Only `run_gui.py` and the four local/HPC run scripts are directly inside
+`ghost_backend`. Native source, libraries, and build tools are under
+`ghost_backend/bor/native/`; runtime support is under `ghost_backend/execution/`.
+
+Batch drivers save new runs under `ghost_backend/results/rcs_runs` or
+`ghost_backend/results/rcs_runs_bor` by default. Explicit output paths and saved
+configurations keep their selected destinations.
+
+Use the [backend source guide](BACKEND.md) to find solvers, data I/O,
 geometry operations, feature assembly, and run management. The
-[file-removal audit](Backend/DEAD_FILES.md) identifies cleanup candidates.
+[file-removal audit](DEAD_FILES.md) identifies cleanup candidates.
 
 New 2D monostatic GUI and local/HPC runs default to the
 [CPU streaming (experimental) solver method](EXPERIMENTAL_CPU.md) for lower
@@ -35,8 +55,8 @@ They also automatically load an adjacent file with the same stem and the
   "version": 1,
   "driver": "2d",
   "settings": {
-    "FRD_DIR": "geometries/FRD",
-    "OPN_DIR": "geometries/OPN",
+    "FRD_DIR": "ghost_backend/geometry/geometries/FRD",
+    "OPN_DIR": "ghost_backend/geometry/geometries/OPN",
     "OUTPUT_DIR": "rcs_runs",
     "FREQUENCIES_GHZ": [2.0, 4.0],
     "AZIMUTHS_DEG": [0.0, 90.0],
@@ -59,7 +79,7 @@ workers reject changes to the settings that produced an existing run.
 New source/configuration versions should use a fresh staging directory.
 
 The recommended desktop workflow is the top-level GRIM application. Its
-**GHOST** tab embeds the same `Backend/ghost_gui.py` workspace and the same
+**GHOST** tab embeds the same `ghost_backend/run_gui.py` workspace and the same
 2-D/BoR numerical implementation found here; no solver is duplicated.
 
 The 2-D diagnostic API accepts `auto` and `direct` for reference kernels and
@@ -76,7 +96,7 @@ exports with newly generated results.
 Build the native BoR sampler on the worker machine with:
 
 ```powershell
-py Backend\build_bor_stream_kernel.py
+py ghost_backend/bor/native/build_kernel.py
 ```
 
 On Windows, install MSYS2 in its default `C:\msys64` location, open the
@@ -90,7 +110,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-gcc
 If the first update asks you to close the terminal, reopen **MSYS2 UCRT64**
 and run both commands again. The build script discovers the default UCRT64
 compiler automatically; no global PATH change is required. Verify from this
-folder with `py Backend\build_bor_stream_kernel.py` and restart Python workers.
+folder with `py ghost_backend/bor/native/build_kernel.py` and restart Python workers.
 
 The build enables OpenMP outer-loop parallelism when the compiler supports it
 and automatically retries a portable serial build otherwise. Use
@@ -134,7 +154,7 @@ and any fallback reason.
 Run commands from this folder:
 
 ```powershell
-py Backend\ghost_gui.py
+py ghost_backend/run_gui.py
 ```
 
 On Windows, `Launch_GHOST_GUI.bat` first changes to this folder and then opens
@@ -145,10 +165,10 @@ the same workspace.
 Edit the configuration block in the relevant driver, then run:
 
 ```powershell
-py Backend\run_local_monostatic.py
-py Backend\run_local_bor.py
-py Backend\run_hpc_monostatic.py
-py Backend\run_hpc_bor_monostatic.py
+py ghost_backend/run_local_monostatic.py
+py ghost_backend/run_local_bor.py
+py ghost_backend/run_hpc_monostatic.py
+py ghost_backend/run_hpc_bor_monostatic.py
 ```
 
 The 2-D production path co-solves VV/TE and HH/TM and writes them into one
@@ -164,19 +184,19 @@ See:
   phasor, loss, and RCS conventions.
 - [FEATURE_VALIDATION_GUIDE.md](FEATURE_VALIDATION_GUIDE.md) for point and
   line-feature dataset and placement requirements.
-- [geometry_tests/non_bor_feature_validation/README.md](geometry_tests/non_bor_feature_validation/README.md)
+- [ghost_backend/validation/non_bor_feature_validation/README.md](ghost_backend/validation/non_bor_feature_validation/README.md)
   for the independent four-artifact clean/featured validation ladder and
   manifest-driven complex-field gates.
-- [geometry_tests/non_bor_line_reconstruction/README.md](geometry_tests/non_bor_line_reconstruction/README.md)
+- [ghost_backend/validation/non_bor_line_reconstruction/README.md](ghost_backend/validation/non_bor_line_reconstruction/README.md)
   for the checked-in finite-plate, door-outline, and folded-panel line tests.
-- [geometry_tests/non_bor_curved_feature_placement/README.md](geometry_tests/non_bor_curved_feature_placement/README.md)
+- [ghost_backend/validation/non_bor_curved_feature_placement/README.md](ghost_backend/validation/non_bor_curved_feature_placement/README.md)
   for the triaxial-ellipsoid point/line regression and shared-facet normal-tie
   controls.
 
 ## Feature assembly service
 
 The GRIM Assembly form and automation wrapper both call
-`Backend/feature_workflow.py`. `Backend/place_features.py` remains a thin
+`ghost_backend/assembly/workflow.py`. `ghost_backend/assembly/place_features.py` remains a thin
 settings-based wrapper for unattended work. It defaults to advisory metadata:
 source certificates, version tags, convention labels, and feature/surface
 manifests do not gate ordinary use. Numerical units, fields, axes, and placement
@@ -201,10 +221,10 @@ from nominal material tables.
 Create and check a reviewed feature-response sidecar with:
 
 ```powershell
-py Backend\create_feature_manifest.py create --help
-py Backend\create_feature_manifest.py check --help
-py Backend\create_feature_manifest.py create-surface-binding --help
-py Backend\create_feature_manifest.py check-surface-binding --help
+py ghost_backend/assembly/create_feature_manifest.py create --help
+py ghost_backend/assembly/create_feature_manifest.py check --help
+py ghost_backend/assembly/create_feature_manifest.py create-surface-binding --help
+py ghost_backend/assembly/create_feature_manifest.py check-surface-binding --help
 ```
 
 For `validated` libraries this is now an evidence-binding and integrity tool:
@@ -216,21 +236,22 @@ independence or mesh convergence. See
 manifest fields, headless settings, reduced-order limitations, and required
 independent full-wave evidence.
 
-Use `1c_build_deltas/subtract_datasets.py` for canonical OPN-FRD 2-D deltas.
-General CEM joins and coherent subtraction are under `CEM_Tools`.
+Use `python ghost_backend/data_tools/run_cli.py subtract OPN FRD Deltas` for
+canonical OPN-FRD 2-D deltas. General joins and dataset conversion use the same
+CLI. See [Data Tools](DATA_TOOLS.md).
 
 ## Tests
 
 From this folder:
 
 ```powershell
-py -m unittest discover -s tests -p "test*.py" -v
+py -m unittest discover -s ghost_backend/tests -p "test*.py" -v
 ```
 
 ## Material and IBC files
 
 Use headered, comma-separated `.csv` files with frequency in Hz, following the
-[shared GHOST/FREDDY file format](../../MATERIAL_CSV_FORMAT.md). FREDDY material
+[shared GHOST/FREDDY file format](MATERIAL_CSV_FORMAT.md). FREDDY material
 and nominal IBC exports can be used directly. The geometry editor validates
 CSV selections before adding them. Space/tab-separated tables, headerless
 CSVs, and implicit `mat.<flag>` references are not accepted.

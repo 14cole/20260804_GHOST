@@ -24,8 +24,8 @@ Both CPU modes now share bounded solves and checked density diagnostics;
 the experimental selector additionally enables screened kernel tables and
 analytic far-field projection.
 
-For either `Backend/run_local_monostatic.py` or
-`Backend/run_hpc_monostatic.py`, add these settings to the existing driver
+For either `ghost_backend/run_local_monostatic.py` or
+`ghost_backend/run_hpc_monostatic.py`, add these settings to the existing driver
 configuration's `settings` object:
 
 ```json
@@ -104,11 +104,11 @@ solver metadata, including factor/batch counts, kernel checks and fallbacks.
 The method also enters local/HPC manifests and resume fingerprints, so results
 from the two methods cannot be reused as the same run specification.
 
-The implementation uses ordinary Backend modules, including `cpu_execution.py`,
+The implementation uses ordinary ghost_backend modules, including `cpu_execution.py`,
 `cpu_kernels.py`, `dense_factor.py`, `boundary_fields.py`, `assembly_session.py`
 and the formulation assemblers. It does not import the
 `experiments` folder or replace module functions at runtime. Install/copy the
-complete updated Backend when using a separate headless installation.
+complete updated ghost_backend when using a separate headless installation.
 
 Qualification covers desktop Python 3.12 and actual Python 3.6.8 environments
 with NumPy 1.19.5/SciPy 1.5.4 and NumPy 1.14.3/SciPy 1.0.0. HPC worker execution,
@@ -118,7 +118,7 @@ establish performance on a remote cluster or across multiple nodes.
 Regression entry points:
 
 ```text
-tests/test_experimental_cpu.py
-tests/test_experimental_gui.py
-tests/test_experimental_headless.py
+ghost_backend/tests/test_experimental_cpu.py
+ghost_backend/tests/test_experimental_gui.py
+ghost_backend/tests/test_experimental_headless.py
 ```

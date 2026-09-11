@@ -2,8 +2,8 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist "GRIM_Revised_2\grim_diagnostics.py" (
-    echo ERROR: GRIM_Revised_2\grim_diagnostics.py was not found.
+if not exist "GRIM_Backend\run_diagnostics.py" (
+    echo ERROR: GRIM_Backend\run_diagnostics.py was not found.
     echo Keep the complete combined GRIM folder structure together.
     pause
     exit /b 1
@@ -37,17 +37,13 @@ pause
 exit /b 1
 
 :run_python
-pushd "GRIM_Revised_2"
-"%GRIM_DIAG_PYTHON%" -m grim_diagnostics
+"%GRIM_DIAG_PYTHON%" "%~dp0GRIM_Backend\run_diagnostics.py"
 set "GRIM_DIAG_STATUS=%ERRORLEVEL%"
-popd
 goto finished
 
 :run_py
-pushd "GRIM_Revised_2"
-py.exe -3 -m grim_diagnostics
+py.exe -3 "%~dp0GRIM_Backend\run_diagnostics.py"
 set "GRIM_DIAG_STATUS=%ERRORLEVEL%"
-popd
 
 :finished
 echo.

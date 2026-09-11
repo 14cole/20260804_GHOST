@@ -111,7 +111,7 @@ why one azimuth still needs nearly as much memory as a sweep.
 
 ## Validation
 
-- Saved the complete pre-update Backend and ran separate-process comparisons.
+- Saved the complete pre-update ghost_backend and ran separate-process comparisons.
 - Compared 14 material configurations at 361 angles, TE/TM, monostatic and
   bistatic. Maximum peak-scaled complex-field differences were 1.37×10⁻¹³
   and 9.21×10⁻¹⁴ respectively. Experimental CPU also passed the material
@@ -132,14 +132,14 @@ why one azimuth still needs nearly as much memory as a sweep.
 Evidence: [comparison results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-wide-updates-2026-09-10/comparison-results.json),
 [resource results](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-wide-updates-2026-09-10/resource-results.json),
 [comparison runner](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/solver-wide-updates-2026-09-10/verify.py),
-[regression tests](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/tools/GHOST/tests/test_solver_matrix_pipeline.py).
+[regression tests](ghost_backend/tests/test_solver_matrix_pipeline.py).
 
 ## Subsequent implementation
 
 The next update adds direct regional scatter, packing of both element axes,
 checked RHS compression, and an optional hierarchical factorization. See
-[implementation and measurements](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/tools/GHOST/COMPUTATION_RAM_UPDATES.md)
+[implementation and measurements](COMPUTATION_RAM_UPDATES.md)
 for selection, validation, and the remaining dense-matrix storage limit.
 
-See [CPU method usage](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/tools/GHOST/EXPERIMENTAL_CPU.md)
-and [memory/batch settings](C:/Users/14col/Documents/ChatGPT/GHOST_FREDDY_GRIM/grim-integrated/tools/GHOST/COMPACT_2D_MEMORY.md).
+See [CPU method usage](EXPERIMENTAL_CPU.md)
+and [memory/batch settings](COMPACT_2D_MEMORY.md).

@@ -20,3 +20,5 @@ results/
 # Platform-specific optional native kernels are rebuilt locally.
 **/Backend/bor_stream_kernel*.so
 **/Backend/bor_stream_kernel*.dll
+**/ghost_backend/bor/native/bor_stream_kernel*.so
+**/ghost_backend/bor/native/bor_stream_kernel*.dll

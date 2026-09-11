@@ -7,7 +7,7 @@ must be checked on complex far-field amplitude, not only RCS magnitude.
 For a staged non-axisymmetric validation ladder, a four-artifact manifest
 template, and a validator that separately grades the clean baseline, featured
 total, and isolated feature delta, see
-`geometry_tests/non_bor_feature_validation/README.md`. The isolated delta gate
+`ghost_backend/validation/non_bor_feature_validation/README.md`. The isolated delta gate
 is required because a dominant clean-body return can conceal a badly phased or
 sign-reversed feature in whole-field metrics.
 
@@ -138,8 +138,8 @@ The embedded **GHOST** tab calls the same numerical backend as standalone
 GHOST. Its solver exports load automatically into GRIM; embedding changes the
 application workflow, not the electromagnetic implementation.
 
-For unattended studies, `Backend/place_features.py` remains a settings wrapper
-and `Backend/feature_workflow.py` exposes the Qt-free
+For unattended studies, `ghost_backend/assembly/place_features.py` remains a settings wrapper
+and `ghost_backend/assembly/workflow.py` exposes the Qt-free
 `FeatureAssemblyRequest` service. Both call the same validation and placement
 implementation used by the GUI; they are automation alternatives, not a
 second physics path. The wrapper defaults to `VALIDATION_PROFILE =
@@ -171,7 +171,7 @@ full-wave report. A `validated` manifest cannot be created from typed case IDs
 alone:
 
 ```bash
-python Backend/create_feature_manifest.py create door_seam.grim \
+python ghost_backend/assembly/create_feature_manifest.py create door_seam.grim \
   --dataset-id door_seam --feature-kind line \
   --host-material "PEC outer skin" \
   --frequency-min-ghz 1 --frequency-max-ghz 12 \
@@ -185,7 +185,7 @@ python Backend/create_feature_manifest.py create door_seam.grim \
   --phase-calibration-case-id door-seam-flat-pec-v3 \
   --attest-reviewed-evidence
 
-python Backend/create_feature_manifest.py check door_seam.grim \
+python ghost_backend/assembly/create_feature_manifest.py check door_seam.grim \
   --dataset-id door_seam --feature-kind line
 ```
 
@@ -397,13 +397,13 @@ fixed CAD frame, a team-controlled geometry revision, and the reviewed
 solve-to-surface registration case:
 
 ```bash
-python Backend/create_feature_manifest.py create-surface-binding \
+python ghost_backend/assembly/create_feature_manifest.py create-surface-binding \
   clean_vehicle.grim vehicle.stl --surface-units inches \
   --geometry-id vehicle-mesh-r7 \
   --attestation-case-id solver-registration-042 \
   --attest-reviewed-registration
 
-python Backend/create_feature_manifest.py check-surface-binding \
+python ghost_backend/assembly/create_feature_manifest.py check-surface-binding \
   clean_vehicle.grim vehicle.stl --surface-units inches \
   --geometry-id vehicle-mesh-r7
 ```
@@ -454,7 +454,7 @@ are usable. Convention annotations need no validation in the default profile.
 For a 2-D line feature, use only the repository's strict CEM entry point:
 
 ```bash
-python 1c_build_deltas/subtract_datasets.py OPN FRD Deltas
+python ghost_backend/data_tools/run_cli.py subtract OPN FRD Deltas
 ```
 
 It reads the solver's preserved float64 complex fields, joins the compatible
@@ -588,7 +588,7 @@ For the 2-D cross-section pair:
 1. Use the same clean host stack and feature-centered origin.
 2. Run the production 2-D sweep on the required frequency and angular grid;
    every solve automatically stores both VV/TE and HH/TM.
-3. Run `python 1c_build_deltas/subtract_datasets.py OPN FRD Deltas`. This is
+3. Run `python ghost_backend/data_tools/run_cli.py subtract OPN FRD Deltas`. This is
    the production OPN-FRD path and joins compatible solver units internally.
 4. Draw the 3-D perimeter head-to-tail in the fixed line-placement CSV and
    supply the outward normal at both endpoints of every segment.
@@ -604,18 +604,18 @@ that a locally two-dimensional expansion cannot contain.
 
 1. Export the external complex monostatic field in a format supported by GRIM
    (`.out`, `.ss`, `.pio`, or theta/phi CSV/TXT).
-2. Edit `Backend/import_3d_reference.py`, including its polarization map.
+2. Edit `ghost_backend/io/import_3d_reference.py`, including its polarization map.
 3. Complete the convention checklist above, set
    `ATTEST_GLOBAL_ORIGIN_EXP_PLUS_JWT_RADAR_VH = True`, and run it. The script
    stamps metadata but intentionally performs no fitted correction.
 4. Copy
-   `geometry_tests/non_bor_feature_validation/feature_cases.template.json`,
+   `ghost_backend/validation/non_bor_feature_validation/feature_cases.template.json`,
    enter the four paths for each case, and keep them on exactly the same grid.
 5. Run the manifest validator so the clean baseline, featured total, and
    isolated complex feature delta are all graded:
 
    ```bash
-   python Backend/validate_feature_reconstruction.py --manifest geometry_tests/non_bor_feature_validation/feature_cases.json --report geometry_tests/non_bor_feature_validation/report.json
+   python ghost_backend/validation/reconstruction.py --manifest ghost_backend/validation/non_bor_feature_validation/feature_cases.json --report ghost_backend/validation/non_bor_feature_validation/report.json
    ```
 
 The report includes normalized complex RMS error, 95th-percentile magnitude
@@ -638,7 +638,7 @@ should be fitted away.
 
 For the deterministic rounded-enclosure, wedge/ramp, swept-wing, and vehicle-
 door handoff, in that execution order, use
-`geometry_tests/non_bor_feature_validation/external_case_plan.json` with
+`ghost_backend/validation/non_bor_feature_validation/external_case_plan.json` with
 `prepare_external_cases.py`. It generates 14 case specifications and one
 existing-schema validator manifest without generating any solver result. Its
 preflight checks all four files against the exact 8/10/12 GHz, angle,
@@ -647,7 +647,7 @@ gates are uncalibrated engineering targets until independent converged
 full-wave fields exist.
 
 The always-run all-GHOST circumferential PEC-groove fixture in
-`tests/test_feature_reconstruction_physics.py` now checks the direct BoR delta
+`ghost_backend/tests/test_feature_reconstruction_physics.py` now checks the direct BoR delta
 against the placed 2-D delta for one controlled geometry. It is useful evidence
 for coordinate, polarization, normalization, and phase-placement regressions,
 but it is not an independent full-3-D platform reference. The default 3.5 dB

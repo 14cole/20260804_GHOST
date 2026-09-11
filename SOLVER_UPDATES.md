@@ -10,12 +10,12 @@ It is separate from the freestanding TYPE 1 thin-sheet feature below.
 FREDDY now includes **Check GHOST coating approximation**, comparing the scalar
 IBC with the complete planar stack over TE/TM incidence angles and checking
 CSV frequency interpolation. GHOST includes **Apply IBC to selected TYPE 2
-segments**. See the [workflow and 30 mil examples](tools/GHOST/geometry_tests/pec_backed_ibc/README.md)
+segments**. See the [workflow and 30 mil examples](tools/GHOST/ghost_backend/validation/pec_backed_ibc/README.md)
 for the 1-18 GHz setup, reference-plane requirements and approximation limits.
 
 ## Thin dielectric layer in 2D
 
-Load [thin_strip.geo](tools/GHOST/geometry_tests/thin_dielectric_sheet/thin_strip.geo)
+Load [thin_strip.geo](tools/GHOST/ghost_backend/validation/thin_dielectric_sheet/thin_strip.geo)
 in GHOST Geometry, set geometry units to **meters**, then run the 2D solver at
 1 GHz. The example is a 100 mm long, 0.5 mm thick free dielectric strip with
 relative epsilon 3 - j0.02 and mu 1. The drawn line represents its midsurface.
@@ -111,9 +111,9 @@ bytes must be decompressed. Field reads use bounded chunks rather than loading
 the complete response into memory.
 
 **Check corner / termination / curvature / pair study** evaluates a study JSON.
-The supplied [13-case template](tools/GHOST/geometry_tests/feature_family_studies/study.template.json)
+The supplied [13-case template](tools/GHOST/ghost_backend/validation/feature_family_studies/study.template.json)
 is ready for reference datasets, but **none of these new cases is physically
-validated yet**. Follow the [study instructions](tools/GHOST/geometry_tests/feature_family_studies/README.md).
+validated yet**. Follow the [study instructions](tools/GHOST/ghost_backend/validation/feature_family_studies/README.md).
 
 See [implementation and validation results](SOLVER_IMPROVEMENT_PLAN.md) for
 measured gains, tests and remaining work.

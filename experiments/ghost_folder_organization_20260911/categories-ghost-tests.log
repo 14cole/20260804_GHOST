@@ -1,0 +1,13 @@
+======================================================================
+FAIL: test_create_is_relative_complete_and_self_documenting (test_hpc_bundle.PortableBundleTests.test_create_is_relative_complete_and_self_documenting)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "C:\Users\14col\Documents\ChatGPT\GHOST_FREDDY_GRIM\grim-integrated\tools\GHOST\ghost_backend\tests\test_hpc_bundle.py", line 305, in test_create_is_relative_complete_and_self_documenting
+    self.assertIn("hpc_bundle.py stage", readme)
+AssertionError: 'hpc_bundle.py stage' not found in 'GRIM / GHOST portable HPC request\n=================================\n\nThis folder is a declarative request, not a completed HPC run. It has\nno Windows paths or Windows solver/runtime provenance. Keep the whole\nfolder together when uploading it to the Linux login node.\n\nFrom the Linux login node, with the matching GHOST checkout available,\nthe one-command submit form is:\n\n  python3 /path/to/GHOST/ghost_backend/hpc/bundle.py stage /path/to/THIS_FOLDER --workspace-root /scratch/$USER/grim --run-driver --submit\n\nReplace both example paths for your cluster. Omit --submit to build the\nrun folder and SLURM scripts without calling sbatch. Omit --run-driver\nas well to verify and stage inputs only. The command prints one JSON\nobject containing the stage path, run path, log path, and any detected\nSLURM job IDs. Compute jobs continue after the SSH session closes.\n\nDo not edit request.json or payload files after export; the Linux\nstager verifies their exact sizes and SHA-256 hashes.\n'
+
+----------------------------------------------------------------------
+Ran 284 tests in 76.336s
+
+FAILED (failures=1, skipped=1)
+GHOST GUI dependencies: OK
