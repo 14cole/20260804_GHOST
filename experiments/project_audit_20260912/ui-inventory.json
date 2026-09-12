@@ -1,0 +1,6212 @@
+{
+  "ghost_error": "",
+  "freddy_error": "",
+  "pages": [
+    {
+      "page": "Plotting",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Dataset Operations",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Plot Settings",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the plot legend"
+        },
+        {
+          "text": "Hold",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Azimuth (Rect)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Azimuth (Polar)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Frequency",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Elevation Sweep",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Waterfall",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "RF Compare",
+          "enabled": true,
+          "tooltip": "RF-aware agreement for exactly two datasets. For an azimuth sweep, Min/Max controls define the statistics sector; Show all azimuths expands only the displayed traces. Reports concordance, linear and dB error, peak alignment, and local-sector agreement."
+        },
+        {
+          "text": "Delta Map",
+          "enabled": true,
+          "tooltip": "Signed A - B level differences for two datasets over two selected axes; choose the fixed third coordinate in the plot controls."
+        },
+        {
+          "text": "Fit X",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Fit Y",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Fit Both",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Zoom Box",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Auto Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Auto Scale",
+          "enabled": true,
+          "tooltip": "Fit the current data after plotting. Turn off to keep fixed comparison limits."
+        },
+        {
+          "text": "PbP",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Phase",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Parameters",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Datasets",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Load\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Save All",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Export\u2026",
+          "enabled": false,
+          "tooltip": "Export selected rows to solver interchange (.pio/.ptm) or flat CSV. Native .grim storage uses Save."
+        },
+        {
+          "text": "Delete",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Undo Delete",
+          "enabled": false,
+          "tooltip": "Restore the most recently deleted batch of dataset rows, including their stable identities, unsaved changes, and provenance."
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "ISAR",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "\u25be  Parameters",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Datasets",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Load\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Save All",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Export\u2026",
+          "enabled": false,
+          "tooltip": "Export selected rows to solver interchange (.pio/.ptm) or flat CSV. Native .grim storage uses Save."
+        },
+        {
+          "text": "Delete",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Undo Delete",
+          "enabled": false,
+          "tooltip": "Restore the most recently deleted batch of dataset rows, including their stable identities, unsaved changes, and provenance."
+        },
+        {
+          "text": "Dataset Operations",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export ISAR Result",
+          "enabled": false,
+          "tooltip": "Save the latest completed full-resolution ISAR arrays and a source-bound formation manifest. Disabled while a render is running or when the current settings have not completed."
+        },
+        {
+          "text": "Export Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "ISAR Settings",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Plan image",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Cancel",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Open result",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compare result",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save recipe",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Load recipe",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Workflow",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Quality",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the plot legend"
+        },
+        {
+          "text": "Hold",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "ISAR Image",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Az. vs D.R.",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Fit X",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Fit Y",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Fit Both",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Zoom Box",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Auto Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Auto Scale",
+          "enabled": true,
+          "tooltip": "Fit the current data after plotting. Turn off to keep fixed comparison limits."
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Enable analyzed tolerance corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check GHOST coating approximation...",
+          "enabled": true,
+          "tooltip": "Compare the PEC-backed stack with its normal-incidence scalar IBC for TE/TM at 0-85 degrees. Uses the frequency sweep above; does not write a CSV or certify finite-body RCS."
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "pec",
+            "air"
+          ],
+          "current": "pec"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Impedance",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Enable analyzed tolerance corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check GHOST coating approximation...",
+          "enabled": true,
+          "tooltip": "Compare the PEC-backed stack with its normal-incidence scalar IBC for TE/TM at 0-85 degrees. Uses the frequency sweep above; does not write a CSV or certify finite-body RCS."
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "pec",
+            "air"
+          ],
+          "current": "pec"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Impedance - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Enable analyzed tolerance corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check GHOST coating approximation...",
+          "enabled": true,
+          "tooltip": "Compare the PEC-backed stack with its normal-incidence scalar IBC for TE/TM at 0-85 degrees. Uses the frequency sweep above; does not write a CSV or certify finite-body RCS."
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "pec",
+            "air"
+          ],
+          "current": "pec"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Impedance - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show comparison table",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Export comparison CSV",
+          "enabled": false,
+          "tooltip": "Export all sampled reflection choices, band metrics, passing margin, and captured run context."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Resistance",
+            "Reactance",
+            "Frequency curves",
+            "Tolerance envelope",
+            "Power balance"
+          ],
+          "current": "Resistance"
+        },
+        {
+          "name": "",
+          "values": [
+            "PEC reflection (dB)",
+            "PEC reflection phase (deg)",
+            "PEC absorbed power (dB)",
+            "Air reflection (dB)",
+            "Air reflection phase (deg)",
+            "Air absorbed power (dB)",
+            "Transmission (dB)",
+            "Transmission phase (deg)"
+          ],
+          "current": "PEC reflection (dB)"
+        },
+        {
+          "name": "",
+          "values": [
+            "Nominal",
+            "Upper analyzed bound",
+            "Lower analyzed bound",
+            "Tolerance span"
+          ],
+          "current": "Nominal"
+        },
+        {
+          "name": "",
+          "values": [
+            "TE"
+          ],
+          "current": "TE"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - IBC Batch",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export IBC batch",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [
+            "in",
+            "mm"
+          ],
+          "current": "in"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - IBC Batch - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export IBC batch",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [
+            "in",
+            "mm"
+          ],
+          "current": "in"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - IBC Batch - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show comparison table",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use selected IBC for GHOST",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Export comparison CSV",
+          "enabled": false,
+          "tooltip": "Export all sampled reflection choices, band metrics, passing margin, and captured run context."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Frequency curves",
+            "Heatmap",
+            "Bandwidth",
+            "Band coverage",
+            "Resistance",
+            "Reactance",
+            "Frequency of minimum"
+          ],
+          "current": "Frequency curves"
+        },
+        {
+          "name": "",
+          "values": [
+            "PEC reflection (dB)",
+            "PEC reflection phase (deg)",
+            "PEC absorbed power (dB)",
+            "Air reflection (dB)",
+            "Air reflection phase (deg)",
+            "Air absorbed power (dB)",
+            "Transmission (dB)",
+            "Transmission phase (deg)"
+          ],
+          "current": "PEC reflection (dB)"
+        },
+        {
+          "name": "",
+          "values": [
+            "Nominal",
+            "Upper analyzed bound",
+            "Lower analyzed bound",
+            "Tolerance span"
+          ],
+          "current": "Nominal"
+        },
+        {
+          "name": "",
+          "values": [
+            "TE"
+          ],
+          "current": "TE"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Off Angle",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute TE and TM comparison (adds a second polarization solve)",
+          "enabled": true,
+          "tooltip": "Oblique TM is unavailable for the directional two-axis model. In that case a valid TE run is retained without a TM comparison."
+        },
+        {
+          "text": "Enable analyzed tolerance corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM"
+          ],
+          "current": "TE"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Off Angle - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute TE and TM comparison (adds a second polarization solve)",
+          "enabled": true,
+          "tooltip": "Oblique TM is unavailable for the directional two-axis model. In that case a valid TE run is retained without a TM comparison."
+        },
+        {
+          "text": "Enable analyzed tolerance corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM"
+          ],
+          "current": "TE"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Off Angle - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show comparison table",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Export comparison CSV",
+          "enabled": false,
+          "tooltip": "Export all sampled reflection choices, band metrics, passing margin, and captured run context."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Heatmap",
+            "Frequency curves",
+            "TE/TM comparison",
+            "Bandwidth",
+            "Band coverage",
+            "Tolerance envelope",
+            "At selected frequency",
+            "Power balance"
+          ],
+          "current": "Heatmap"
+        },
+        {
+          "name": "",
+          "values": [
+            "PEC reflection (dB)",
+            "PEC reflection phase (deg)",
+            "PEC absorbed power (dB)",
+            "Air reflection (dB)",
+            "Air reflection phase (deg)",
+            "Air absorbed power (dB)",
+            "Transmission (dB)",
+            "Transmission phase (deg)"
+          ],
+          "current": "PEC reflection (dB)"
+        },
+        {
+          "name": "",
+          "values": [
+            "Nominal",
+            "Upper analyzed bound",
+            "Lower analyzed bound",
+            "Tolerance span"
+          ],
+          "current": "Nominal"
+        },
+        {
+          "name": "",
+          "values": [
+            "TE"
+          ],
+          "current": "TE"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Thickness",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Enable analyzed tolerance corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM"
+          ],
+          "current": "TE"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Thickness - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Enable analyzed tolerance corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Compute",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM"
+          ],
+          "current": "TE"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Thickness - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show comparison table",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Export comparison CSV",
+          "enabled": false,
+          "tooltip": "Export all sampled reflection choices, band metrics, passing margin, and captured run context."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Heatmap",
+            "Frequency curves",
+            "Bandwidth",
+            "Band coverage",
+            "Tolerance envelope",
+            "Frequency of minimum",
+            "At selected frequency",
+            "Power balance"
+          ],
+          "current": "Heatmap"
+        },
+        {
+          "name": "",
+          "values": [
+            "PEC reflection (dB)",
+            "PEC reflection phase (deg)",
+            "PEC absorbed power (dB)",
+            "Air reflection (dB)",
+            "Air reflection phase (deg)",
+            "Air absorbed power (dB)",
+            "Transmission (dB)",
+            "Transmission phase (deg)"
+          ],
+          "current": "PEC reflection (dB)"
+        },
+        {
+          "name": "",
+          "values": [
+            "Nominal",
+            "Upper analyzed bound",
+            "Lower analyzed bound",
+            "Tolerance span"
+          ],
+          "current": "Nominal"
+        },
+        {
+          "name": "",
+          "values": [
+            "TE"
+          ],
+          "current": "TE"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Inverse Design",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Fixed / variable layers\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check setup",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Frequency target",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Angle target",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Analyze all combinations",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Objective and tolerances",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Enable uncertainty corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Analyze all combinations",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Stop and keep best",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Choose / save...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Load checkpoint...",
+          "enabled": true,
+          "tooltip": "Open the matching project first. Resume validates the setup and material contents before reusing scores."
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Band sweep",
+            "Discrete list"
+          ],
+          "current": "Band sweep"
+        },
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM"
+          ],
+          "current": "TE"
+        },
+        {
+          "name": "",
+          "values": [
+            "Worst-corner mean PEC reflection |\u0393| (dB)",
+            "Average-corner mean PEC reflection |\u0393| (dB)",
+            "Whole-band PEC reflection requirement (worst point)"
+          ],
+          "current": "Worst-corner mean PEC reflection |\u0393| (dB)"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Inverse Design - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Fixed / variable layers\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check setup",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Frequency target",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Angle target",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Analyze all combinations",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Objective and tolerances",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Enable uncertainty corners",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Analyze all combinations",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Stop and keep best",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Choose / save...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Load checkpoint...",
+          "enabled": true,
+          "tooltip": "Open the matching project first. Resume validates the setup and material contents before reusing scores."
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Band sweep",
+            "Discrete list"
+          ],
+          "current": "Band sweep"
+        },
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM"
+          ],
+          "current": "TE"
+        },
+        {
+          "name": "",
+          "values": [
+            "Worst-corner mean PEC reflection |\u0393| (dB)",
+            "Average-corner mean PEC reflection |\u0393| (dB)",
+            "Whole-band PEC reflection requirement (worst point)"
+          ],
+          "current": "Worst-corner mean PEC reflection |\u0393| (dB)"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Inverse Design - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show candidate table",
+          "enabled": true,
+          "tooltip": "Compare metrics, sort candidates, and choose which curves to overlay. Hide the table for a larger plot."
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Apply Selected",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save selected stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Resume remaining",
+          "enabled": false,
+          "tooltip": "Finish an interrupted analysis without repeating completed combinations. Inputs and material files must still match."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Reflection curves",
+            "Depth vs bandwidth",
+            "Analysis history",
+            "Selected candidate angle map",
+            "Selected candidate tolerance"
+          ],
+          "current": "Reflection curves"
+        },
+        {
+          "name": "",
+          "values": [
+            "Worst analyzed case",
+            "Point percentile"
+          ],
+          "current": "Worst analyzed case"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Material Mix",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Update Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Auto color scale",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save Heatmap Only",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  2. Add measured materials and volume recipe",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add measured material\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit selected\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  3. Choose prediction band",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Results and candidate recipes",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Calculate recipe",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Stop search",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Add selected as layer\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export selected CSV\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "PEC-backed reflection |\u0393| (dB)",
+            "PEC reflection phase (deg)",
+            "PEC absorbed power (dB)",
+            "Air-backed reflection |\u0393| (dB)",
+            "Air reflection phase (deg)",
+            "Air absorbed power (dB)",
+            "Transmission |S21| (dB)",
+            "Transmission phase (deg)"
+          ],
+          "current": "PEC-backed reflection |\u0393| (dB)"
+        },
+        {
+          "name": "",
+          "values": [
+            "Nominal",
+            "Min",
+            "Max",
+            "Span (max-min)"
+          ],
+          "current": "Nominal"
+        },
+        {
+          "name": "",
+          "values": [
+            "Predict properties from a known recipe",
+            "Find a recipe for target properties",
+            "Find a recipe for target stack performance"
+          ],
+          "current": "Predict properties from a known recipe"
+        },
+        {
+          "name": "",
+          "values": [
+            "Bruggeman \u2014 symmetric particles",
+            "Looyenga \u2014 random heterogeneous mix",
+            "Lichtenecker \u2014 logarithmic empirical",
+            "Maxwell-Garnett \u2014 particles in material 1 host",
+            "Wiener parallel \u2014 arithmetic laminate",
+            "Wiener series \u2014 harmonic laminate"
+          ],
+          "current": "Bruggeman \u2014 symmetric particles"
+        },
+        {
+          "name": "",
+          "values": [
+            "Band sweep",
+            "Discrete list"
+          ],
+          "current": "Band sweep"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Material Mix - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Update Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Auto color scale",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save Plot",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save Heatmap Only",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  2. Add measured materials and volume recipe",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add measured material\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit selected\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  3. Choose prediction band",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "\u25be  Results and candidate recipes",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Calculate recipe",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Stop search",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Add selected as layer\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export selected CSV\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Sheet",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Up",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Move Down",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "PEC-backed reflection |\u0393| (dB)",
+            "PEC reflection phase (deg)",
+            "PEC absorbed power (dB)",
+            "Air-backed reflection |\u0393| (dB)",
+            "Air reflection phase (deg)",
+            "Air absorbed power (dB)",
+            "Transmission |S21| (dB)",
+            "Transmission phase (deg)"
+          ],
+          "current": "PEC-backed reflection |\u0393| (dB)"
+        },
+        {
+          "name": "",
+          "values": [
+            "Nominal",
+            "Min",
+            "Max",
+            "Span (max-min)"
+          ],
+          "current": "Nominal"
+        },
+        {
+          "name": "",
+          "values": [
+            "Predict properties from a known recipe",
+            "Find a recipe for target properties",
+            "Find a recipe for target stack performance"
+          ],
+          "current": "Predict properties from a known recipe"
+        },
+        {
+          "name": "",
+          "values": [
+            "Bruggeman \u2014 symmetric particles",
+            "Looyenga \u2014 random heterogeneous mix",
+            "Lichtenecker \u2014 logarithmic empirical",
+            "Maxwell-Garnett \u2014 particles in material 1 host",
+            "Wiener parallel \u2014 arithmetic laminate",
+            "Wiener series \u2014 harmonic laminate"
+          ],
+          "current": "Bruggeman \u2014 symmetric particles"
+        },
+        {
+          "name": "",
+          "values": [
+            "Band sweep",
+            "Discrete list"
+          ],
+          "current": "Band sweep"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Material Mix - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show candidate table",
+          "enabled": true,
+          "tooltip": "Compare metrics, sort candidates, and choose which curves to overlay. Hide the table for a larger plot."
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Apply Selected",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save selected stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Resume remaining",
+          "enabled": false,
+          "tooltip": "Finish an interrupted analysis without repeating completed combinations. Inputs and material files must still match."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Reflection curves",
+            "Depth vs bandwidth",
+            "Analysis history",
+            "Selected candidate angle map",
+            "Selected candidate tolerance"
+          ],
+          "current": "Reflection curves"
+        },
+        {
+          "name": "",
+          "values": [
+            "Worst analyzed case",
+            "Point percentile"
+          ],
+          "current": "Worst analyzed case"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Sensitivity & Yield",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Workflow help",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Copy inverse frequency band, angles and requirement",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run sensitivity study",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Stop study",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM",
+            "Both"
+          ],
+          "current": "Both"
+        },
+        {
+          "name": "",
+          "values": [
+            "Sensitivity only",
+            "Sensitivity + statistical trials"
+          ],
+          "current": "Sensitivity only"
+        },
+        {
+          "name": "",
+          "values": [
+            "16",
+            "32",
+            "64",
+            "128",
+            "256",
+            "512",
+            "1024",
+            "2048",
+            "4096",
+            "8192",
+            "16384",
+            "32768",
+            "65536"
+          ],
+          "current": "1024"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Sensitivity & Yield - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Workflow help",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Copy inverse frequency band, angles and requirement",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run sensitivity study",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Stop study",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM",
+            "Both"
+          ],
+          "current": "Both"
+        },
+        {
+          "name": "",
+          "values": [
+            "Sensitivity only",
+            "Sensitivity + statistical trials"
+          ],
+          "current": "Sensitivity only"
+        },
+        {
+          "name": "",
+          "values": [
+            "16",
+            "32",
+            "64",
+            "128",
+            "256",
+            "512",
+            "1024",
+            "2048",
+            "4096",
+            "8192",
+            "16384",
+            "32768",
+            "65536"
+          ],
+          "current": "1024"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Sensitivity & Yield - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show candidate table",
+          "enabled": true,
+          "tooltip": "Compare metrics, sort candidates, and choose which curves to overlay. Hide the table for a larger plot."
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Apply Selected",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save selected stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Resume remaining",
+          "enabled": false,
+          "tooltip": "Finish an interrupted analysis without repeating completed combinations. Inputs and material files must still match."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Reflection curves",
+            "Depth vs bandwidth",
+            "Analysis history",
+            "Selected candidate angle map",
+            "Selected candidate tolerance"
+          ],
+          "current": "Reflection curves"
+        },
+        {
+          "name": "",
+          "values": [
+            "Worst analyzed case",
+            "Point percentile"
+          ],
+          "current": "Worst analyzed case"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Sensitivity & Yield - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Edit stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Workflow help",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Copy inverse frequency band, angles and requirement",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run sensitivity study",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Stop study",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "TE",
+            "TM",
+            "Both"
+          ],
+          "current": "Both"
+        },
+        {
+          "name": "",
+          "values": [
+            "Sensitivity only",
+            "Sensitivity + statistical trials"
+          ],
+          "current": "Sensitivity only"
+        },
+        {
+          "name": "",
+          "values": [
+            "16",
+            "32",
+            "64",
+            "128",
+            "256",
+            "512",
+            "1024",
+            "2048",
+            "4096",
+            "8192",
+            "16384",
+            "32768",
+            "65536"
+          ],
+          "current": "1024"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Sensitivity & Yield - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export study JSON\u2026",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Sensitivity ranking",
+            "Parameter tolerance sweep",
+            "Margin distribution",
+            "Failure map",
+            "Yield convergence"
+          ],
+          "current": "Sensitivity ranking"
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Material Explorer",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add material files...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add current stack materials",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Material Mix inputs",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Air reference",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Reload selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - Material Explorer - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add material files...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add current stack materials",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Material Mix inputs",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Air reference",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Reload selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - Material Explorer - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show candidate table",
+          "enabled": true,
+          "tooltip": "Compare metrics, sort candidates, and choose which curves to overlay. Hide the table for a larger plot."
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Apply Selected",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save selected stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Resume remaining",
+          "enabled": false,
+          "tooltip": "Finish an interrupted analysis without repeating completed combinations. Inputs and material files must still match."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Reflection curves",
+            "Depth vs bandwidth",
+            "Analysis history",
+            "Selected candidate angle map",
+            "Selected candidate tolerance"
+          ],
+          "current": "Reflection curves"
+        },
+        {
+          "name": "",
+          "values": [
+            "Worst analyzed case",
+            "Point percentile"
+          ],
+          "current": "Worst analyzed case"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "FREDDY - Material Explorer - Property curves",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add material files...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add current stack materials",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Material Mix inputs",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Air reference",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Reload selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - Material Explorer - Compare at frequency",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add material files...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add current stack materials",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Material Mix inputs",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Air reference",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Reload selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Update comparison",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use shared midpoint",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - Material Explorer - File summary",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add material files...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add current stack materials",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Material Mix inputs",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Air reference",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Reload selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - Material Explorer - Raw values",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add material files...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add current stack materials",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Material Mix inputs",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Add Air reference",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Reload selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Remove selected",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Clear",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - About & Guide",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - About & Guide - Setup",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "FREDDY - About & Guide - Results",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Export and attach to current GHOST geometry",
+          "enabled": false,
+          "tooltip": "First compute a nominal PEC-backed IBC or export a nominal mixed material CSV. This action copies that exact solver artifact beside the active saved .geo file and adds the appropriate GHOST row."
+        },
+        {
+          "text": "Impedance",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "IBC Batch",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Off Angle",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Thickness",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Inverse Design",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Mix",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Sensitivity && Yield",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Material Explorer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "About && Guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run details\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Explain view",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show candidate table",
+          "enabled": true,
+          "tooltip": "Compare metrics, sort candidates, and choose which curves to overlay. Hide the table for a larger plot."
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Save plot",
+          "enabled": true,
+          "tooltip": "Save plot"
+        },
+        {
+          "text": "Apply Selected",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save selected stack\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Resume remaining",
+          "enabled": false,
+          "tooltip": "Finish an interrupted analysis without repeating completed combinations. Inputs and material files must still match."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Reflection curves",
+            "Depth vs bandwidth",
+            "Analysis history",
+            "Selected candidate angle map",
+            "Selected candidate tolerance"
+          ],
+          "current": "Reflection curves"
+        },
+        {
+          "name": "",
+          "values": [
+            "Worst analyzed case",
+            "Point percentile"
+          ],
+          "current": "Worst analyzed case"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        }
+      ]
+    },
+    {
+      "page": "GHOST",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Load",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Validate",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show Normals",
+          "enabled": true,
+          "tooltip": "Draw the normal of every primitive, coloured by the material it points into (blue = air, grey = PEC, green = dielectric), with a label at each segment midpoint showing 'facing | behind'."
+        },
+        {
+          "text": "Show Impedance",
+          "enabled": true,
+          "tooltip": "Colour segments by IBC impedance. Tapered segments show a gradient; start = green dot, end = red dot."
+        },
+        {
+          "text": "Fill Materials",
+          "enabled": true,
+          "tooltip": "Fill enclosed regions with their material colour (grey = PEC, green tints = dielectrics, white = air) as implied by each segment's winding. A region whose boundary segments disagree about the enclosed material is hatched red."
+        },
+        {
+          "text": "Material models and boundary sides...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Find corners / junctions",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Refine selected 2x",
+          "enabled": true,
+          "tooltip": "Increase N only on selected segments. Auto N becomes 40 panels per material wavelength. Fine geometry can already be denser; mesh certification still compares realized meshes."
+        },
+        {
+          "text": "+",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+ CSV",
+          "enabled": true,
+          "tooltip": "Comma-separated CSV with header: frequency_hz,resistance_ohm,reactance_ohm. Frequency in Hz; impedance in ohms."
+        },
+        {
+          "text": "+ Thin layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "-",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Apply IBC to selected TYPE 2 segments",
+          "enabled": true,
+          "tooltip": "Select an impedance material row and the conductor segments above. For a FREDDY PEC-backed stack, draw the outer coating envelope. This assigns its scalar IBC without adding bulk layers or offsetting geometry."
+        },
+        {
+          "text": "+",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+ CSV",
+          "enabled": true,
+          "tooltip": "Comma-separated CSV with header: frequency_hz,eps_real,eps_imag,mu_real,mu_imag. Frequency in Hz; relative epsilon and mu."
+        },
+        {
+          "text": "-",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "GHOST - Geometry",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Load",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Validate",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show Normals",
+          "enabled": true,
+          "tooltip": "Draw the normal of every primitive, coloured by the material it points into (blue = air, grey = PEC, green = dielectric), with a label at each segment midpoint showing 'facing | behind'."
+        },
+        {
+          "text": "Show Impedance",
+          "enabled": true,
+          "tooltip": "Colour segments by IBC impedance. Tapered segments show a gradient; start = green dot, end = red dot."
+        },
+        {
+          "text": "Fill Materials",
+          "enabled": true,
+          "tooltip": "Fill enclosed regions with their material colour (grey = PEC, green tints = dielectrics, white = air) as implied by each segment's winding. A region whose boundary segments disagree about the enclosed material is hatched red."
+        },
+        {
+          "text": "Material models and boundary sides...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Find corners / junctions",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Refine selected 2x",
+          "enabled": true,
+          "tooltip": "Increase N only on selected segments. Auto N becomes 40 panels per material wavelength. Fine geometry can already be denser; mesh certification still compares realized meshes."
+        },
+        {
+          "text": "+",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+ CSV",
+          "enabled": true,
+          "tooltip": "Comma-separated CSV with header: frequency_hz,resistance_ohm,reactance_ohm. Frequency in Hz; impedance in ohms."
+        },
+        {
+          "text": "+ Thin layer",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "-",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Apply IBC to selected TYPE 2 segments",
+          "enabled": true,
+          "tooltip": "Select an impedance material row and the conductor segments above. For a FREDDY PEC-backed stack, draw the outer coating envelope. This assigns its scalar IBC without adding bulk layers or offsetting geometry."
+        },
+        {
+          "text": "+",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+ CSV",
+          "enabled": true,
+          "tooltip": "Comma-separated CSV with header: frequency_hz,eps_real,eps_imag,mu_real,mu_imag. Frequency in Hz; relative epsilon and mu."
+        },
+        {
+          "text": "-",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        }
+      ],
+      "combos": []
+    },
+    {
+      "page": "GHOST - Solver",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        },
+        {
+          "text": "Browse...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use Geometry Tab",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check geometry and run setup",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export .grim automatically after solve",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Advanced Settings",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Run Solver",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Cancel",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Export Last Result",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "RCS",
+            "Boundary density magnitude",
+            "Boundary density phase"
+          ],
+          "current": "RCS"
+        },
+        {
+          "name": "",
+          "values": [
+            "2D (cylindrical, dBke)",
+            "BoR (axisymmetric, dBsm)"
+          ],
+          "current": "2D (cylindrical, dBke)"
+        },
+        {
+          "name": "",
+          "values": [
+            "inches",
+            "meters"
+          ],
+          "current": "inches"
+        },
+        {
+          "name": "",
+          "values": [
+            "Discrete List",
+            "Start / Stop / Step"
+          ],
+          "current": "Discrete List"
+        },
+        {
+          "name": "",
+          "values": [
+            "Discrete List",
+            "Start / Stop / Step"
+          ],
+          "current": "Discrete List"
+        },
+        {
+          "name": "",
+          "values": [
+            "Monostatic",
+            "Bistatic"
+          ],
+          "current": "Monostatic"
+        },
+        {
+          "name": "",
+          "values": [
+            "Small Geometry (No RAM Optimization)",
+            "Large Geometry (RAM Optimization)",
+            "Automatic (RAM-aware)",
+            "Balanced"
+          ],
+          "current": "Large Geometry (RAM Optimization)"
+        }
+      ]
+    },
+    {
+      "page": "Assembly",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use loaded\u2026",
+          "enabled": true,
+          "tooltip": "No usable saved .grim dataset is loaded. Save unsaved derived datasets first, or use Browse\u2026."
+        },
+        {
+          "text": "Body geometry and shadowing (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "Assembly - 3-D placement",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use loaded\u2026",
+          "enabled": true,
+          "tooltip": "No usable saved .grim dataset is loaded. Save unsaved derived datasets first, or use Browse\u2026."
+        },
+        {
+          "text": "Body geometry and shadowing (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "Assembly - Response comparison",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "Add saved variant / family\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Show total minus body RCS (dB) on right axis",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Home",
+          "enabled": true,
+          "tooltip": "Reset original view"
+        },
+        {
+          "text": "Back",
+          "enabled": false,
+          "tooltip": "Back to previous view"
+        },
+        {
+          "text": "Forward",
+          "enabled": false,
+          "tooltip": "Forward to next view"
+        },
+        {
+          "text": "Pan",
+          "enabled": true,
+          "tooltip": "Left button pans, Right button zooms\nx/y fixes axis, CTRL fixes aspect"
+        },
+        {
+          "text": "Zoom",
+          "enabled": true,
+          "tooltip": "Zoom to rectangle\nx/y fixes axis"
+        },
+        {
+          "text": "Subplots",
+          "enabled": true,
+          "tooltip": "Configure subplots"
+        },
+        {
+          "text": "Customize",
+          "enabled": true,
+          "tooltip": "Edit axis, curve and image parameters"
+        },
+        {
+          "text": "Save",
+          "enabled": true,
+          "tooltip": "Save the figure"
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use loaded\u2026",
+          "enabled": true,
+          "tooltip": "No usable saved .grim dataset is loaded. Save unsaved derived datasets first, or use Browse\u2026."
+        },
+        {
+          "text": "Body geometry and shadowing (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "Assembly - Interference inspector",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "Inspect validated assembly",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check corner / termination / curvature / pair study...",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use loaded\u2026",
+          "enabled": true,
+          "tooltip": "No usable saved .grim dataset is loaded. Save unsaved derived datasets first, or use Browse\u2026."
+        },
+        {
+          "text": "Body geometry and shadowing (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [
+            "VV",
+            "HH",
+            "VH"
+          ],
+          "current": "VV"
+        },
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "Assembly - Body",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use loaded\u2026",
+          "enabled": true,
+          "tooltip": "No usable saved .grim dataset is loaded. Save unsaved derived datasets first, or use Browse\u2026."
+        },
+        {
+          "text": "Body geometry and shadowing (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "Assembly - Point Features",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Create / edit\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "CSV guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save template\u2026",
+          "enabled": true,
+          "tooltip": "Write the exact required point header to a new .csv file."
+        },
+        {
+          "text": "Remove",
+          "enabled": false,
+          "tooltip": "Remove the point CSV and its response mappings from this build."
+        },
+        {
+          "text": "Suggest files from library folder\u2026",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "Assembly - Line Features",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Create / edit\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "CSV guide",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save template\u2026",
+          "enabled": true,
+          "tooltip": "Write the exact required line header to a new .csv file."
+        },
+        {
+          "text": "Remove",
+          "enabled": false,
+          "tooltip": "Remove the line CSV and its response mappings from this build."
+        },
+        {
+          "text": "Suggest files from library folder\u2026",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "Assembly - Review",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Legend",
+          "enabled": true,
+          "tooltip": "Show or hide the semantic color key for display-only geometry."
+        },
+        {
+          "text": "View",
+          "enabled": true,
+          "tooltip": "Adjust display units, body appearance, detail, and orientation arrows."
+        },
+        {
+          "text": "Layers",
+          "enabled": true,
+          "tooltip": "Open advanced whole-dataset combination and preview visibility without interrupting the feature workflow."
+        },
+        {
+          "text": "Fit",
+          "enabled": true,
+          "tooltip": "Refit the 3-D camera to the body, points, and lines whose Show boxes are checked. This changes the view only."
+        },
+        {
+          "text": "+  Reusable recipe (optional)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Feature selection (all included by default)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Advanced placement checks \u00b7 metadata advisory",
+          "enabled": true,
+          "tooltip": "The displayed defaults remain active while this section is collapsed."
+        },
+        {
+          "text": "+  How to read the 3-D preview",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+  Study scope (all samples by default)",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+  Input checklist",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "+  Workload estimate",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Preview geometry",
+          "enabled": false,
+          "tooltip": "Show available body geometry and enabled CSV locations without requiring response mappings or an output path. This is visual QA only."
+        },
+        {
+          "text": "Validate placements",
+          "enabled": false,
+          "tooltip": "Validate body skin, normals, and response mapping completeness, then show the prepared body and features in the 3-D Assembly view."
+        },
+        {
+          "text": "Assemble && save",
+          "enabled": false,
+          "tooltip": "Publish the exact current validation: coherently add every enabled mapped feature and atomically save the selected output .grim file."
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Choose coordinate units...",
+            "inches (in)",
+            "millimeters (mm)",
+            "meters (m)",
+            "feet (ft)"
+          ],
+          "current": "Choose coordinate units..."
+        }
+      ]
+    },
+    {
+      "page": "PPT",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "\u2039 Previous",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Next \u203a",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Use main selection",
+          "enabled": true,
+          "tooltip": "Check exactly the datasets selected in GRIM's main Plotting table."
+        },
+        {
+          "text": "All",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "None",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "First 60",
+          "enabled": true,
+          "tooltip": "Select up to the first 60 common frequencies (10 angular slides). Create additional reports for larger frequency sets."
+        },
+        {
+          "text": "None",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Series overrides\u2026",
+          "enabled": true,
+          "tooltip": "Optionally override thickness or pattern for one loaded dataset."
+        },
+        {
+          "text": "Browse\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Template and layouts\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save recipe\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Load recipe\u2026",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Use current PPT datasets when loading",
+          "enabled": true,
+          "tooltip": "Apply the saved report definition to the current selection. Missing cuts and channels are reported before the setup is changed."
+        },
+        {
+          "text": "Use current Plotting setup",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Check PowerPoint and template",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Open exported presentation",
+          "enabled": false,
+          "tooltip": ""
+        },
+        {
+          "text": "Build preview",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Export PowerPoint",
+          "enabled": false,
+          "tooltip": ""
+        }
+      ],
+      "combos": [
+        {
+          "name": "",
+          "values": [
+            "Azimuth \u2014 rectangular",
+            "Azimuth \u2014 polar",
+            "Elevation / pitch sweep",
+            "Frequency sweep"
+          ],
+          "current": "Azimuth \u2014 rectangular"
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [],
+          "current": ""
+        },
+        {
+          "name": "",
+          "values": [
+            "Automatic",
+            "Fixed and uniform"
+          ],
+          "current": "Automatic"
+        },
+        {
+          "name": "",
+          "values": [
+            "Shared automatic",
+            "Fixed and uniform"
+          ],
+          "current": "Shared automatic"
+        },
+        {
+          "name": "",
+          "values": [
+            "Master across slide",
+            "Inside each plot",
+            "None"
+          ],
+          "current": "Master across slide"
+        },
+        {
+          "name": "",
+          "values": [
+            "Solid",
+            "Dashed",
+            "Dotted",
+            "Dash-dot"
+          ],
+          "current": "Solid"
+        }
+      ]
+    },
+    {
+      "page": "Python",
+      "size": [
+        1280,
+        720
+      ],
+      "buttons": [
+        {
+          "text": "Clear",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Copy",
+          "enabled": true,
+          "tooltip": ""
+        },
+        {
+          "text": "Save As\u2026",
+          "enabled": true,
+          "tooltip": ""
+        }
+      ],
+      "combos": []
+    }
+  ],
+  "errors": []
+}

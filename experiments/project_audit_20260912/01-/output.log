@@ -1,0 +1,32 @@
+GRIM integrated installation diagnostic
+No files are changed and no solver or PowerPoint instance is started.
+
+[PASS] [required] Python runtime: 3.12.14 (.\.venv\Scripts\python.exe); requires 3.10 or newer
+[PASS] [required] GRIM authoritative source: complete source-checkout module path
+       Repository root: .
+       GRIM modules: .\GRIM_Backend
+[PASS] [required] GHOST workspace files: all required backend sentinels are present
+       Selected: .\tools\GHOST\ghost_backend
+       Source: bundled tools/GHOST backend
+[PASS] [required] GHOST authoritative module path: module resolution is confined to the selected backend
+       ghost_gui resolves to: .\tools\GHOST\ghost_backend\run_gui.py
+       Expected: .\tools\GHOST\ghost_backend\run_gui.py
+[PASS] [required] FREDDY workspace files: all required package sentinels are present
+       Selected: .\tools\FREDDY
+       Source: bundled tools/FREDDY package
+[PASS] [required] FREDDY authoritative module path: private package source resolves from the selected FREDDY root
+       ibc resolves to: .\tools\FREDDY\ibc\__init__.py
+       Expected: .\tools\FREDDY\ibc\__init__.py
+       GRIM loads this package under its private _grim_embedded_freddy_ibc namespace.
+[PASS] [required] NumPy: 2.5.2; required by every GRIM dataset and solver path
+[PASS] [required] PySide6 Qt widgets: 6.11.2; imported during combined-GUI startup
+[PASS] [required] Matplotlib Qt backend: 3.11.1; imported during combined-GUI startup and plot preview
+[PASS] [required] SciPy solver support: 1.18.1; required by the bundled GHOST BoR/feature solvers and FREDDY inverse-design paths
+[PASS] [required] BLAS thread control: 3.6.0; applies the saved GHOST CPU thread limits
+[PASS] [optional] PowerPoint export: pywin32 311; PowerPoint.Application is registered as {91493441-5A91-11CF-8700-00AA0060263B}. PowerPoint was not launched.
+       Registration was checked without rendering or opening a report.
+[PASS] [optional] GHOST BoR streaming acceleration: native library loaded: bor_stream_kernel.windows-amd64.dll
+
+FUNCTIONAL READINESS: READY
+RESULT: READY - no required startup blockers were found.
+SOLVER PERFORMANCE: ACCELERATED - native libraries are available.

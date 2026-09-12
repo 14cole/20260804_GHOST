@@ -1,0 +1,52 @@
+Plotting
+experiments/project_audit_20260912\inspect_ui.py:32: UserWarning: constrained_layout not applied because axes sizes collapsed to zero.  Try making figure larger or Axes decorations smaller.
+  app.processEvents()
+ISAR
+FREDDY
+FREDDY - Impedance
+FREDDY - Impedance - Setup
+FREDDY - Impedance - Results
+FREDDY - IBC Batch
+FREDDY - IBC Batch - Setup
+FREDDY - IBC Batch - Results
+FREDDY - Off Angle
+FREDDY - Off Angle - Setup
+FREDDY - Off Angle - Results
+FREDDY - Thickness
+FREDDY - Thickness - Setup
+FREDDY - Thickness - Results
+FREDDY - Inverse Design
+FREDDY - Inverse Design - Setup
+FREDDY - Inverse Design - Results
+FREDDY - Material Mix
+FREDDY - Material Mix - Setup
+FREDDY - Material Mix - Results
+FREDDY - Sensitivity & Yield
+FREDDY - Sensitivity & Yield - Setup
+FREDDY - Sensitivity & Yield - Results
+FREDDY - Sensitivity & Yield - Setup
+FREDDY - Sensitivity & Yield - Results
+FREDDY - Material Explorer
+FREDDY - Material Explorer - Setup
+FREDDY - Material Explorer - Results
+FREDDY - Material Explorer - Property curves
+FREDDY - Material Explorer - Compare at frequency
+FREDDY - Material Explorer - File summary
+FREDDY - Material Explorer - Raw values
+FREDDY - About & Guide
+FREDDY - About & Guide - Setup
+FREDDY - About & Guide - Results
+GHOST
+GHOST - Geometry
+GHOST - Solver
+Assembly
+Assembly - 3-D placement
+Assembly - Response comparison
+Assembly - Interference inspector
+Assembly - Body
+Assembly - Point Features
+Assembly - Line Features
+Assembly - Review
+PPT
+Python
+COMPLETE 49 pages; callback errors: 0

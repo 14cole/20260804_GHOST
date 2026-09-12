@@ -1,0 +1,18 @@
+test_dist_info_identity_must_match_filename (test_wheelhouse_manifest.WheelhouseManifestTests.test_dist_info_identity_must_match_filename) ... ok
+test_extension_abi_with_platform_any_is_rejected (test_wheelhouse_manifest.WheelhouseManifestTests.test_extension_abi_with_platform_any_is_rejected) ... ok
+test_generate_and_verify_exact_locked_wheels (test_wheelhouse_manifest.WheelhouseManifestTests.test_generate_and_verify_exact_locked_wheels) ... ok
+test_linux_wheel_is_rejected_for_windows_release (test_wheelhouse_manifest.WheelhouseManifestTests.test_linux_wheel_is_rejected_for_windows_release) ... ok
+test_manifest_is_bound_to_exact_constraints_file (test_wheelhouse_manifest.WheelhouseManifestTests.test_manifest_is_bound_to_exact_constraints_file) ... ok
+test_metadata_identity_must_match_filename (test_wheelhouse_manifest.WheelhouseManifestTests.test_metadata_identity_must_match_filename) ... ok
+test_newer_cpython_wheel_is_rejected (test_wheelhouse_manifest.WheelhouseManifestTests.test_newer_cpython_wheel_is_rejected) ... ok
+test_older_abi3_windows_wheel_is_accepted (test_wheelhouse_manifest.WheelhouseManifestTests.test_older_abi3_windows_wheel_is_accepted) ... ok
+test_older_pure_python_wheel_is_accepted (test_wheelhouse_manifest.WheelhouseManifestTests.test_older_pure_python_wheel_is_accepted) ... ok
+test_supported_filename_tag_must_also_be_in_wheel_metadata (test_wheelhouse_manifest.WheelhouseManifestTests.test_supported_filename_tag_must_also_be_in_wheel_metadata) ... ok
+test_tampered_wheel_fails_sha256_verification (test_wheelhouse_manifest.WheelhouseManifestTests.test_tampered_wheel_fails_sha256_verification) ... ok
+test_unlocked_extra_wheel_is_rejected (test_wheelhouse_manifest.WheelhouseManifestTests.test_unlocked_extra_wheel_is_rejected) ... ok
+test_wrong_wheel_version_is_rejected_before_manifest (test_wheelhouse_manifest.WheelhouseManifestTests.test_wrong_wheel_version_is_rejected_before_manifest) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.122s
+
+OK

@@ -1,0 +1,2576 @@
+{
+  "revision": "2c53ead5834ab9514eaf407a8a543a40c4ac7ed9",
+  "scope": "Root text files, GRIM_Backend, tools/FREDDY, tools/GHOST, requirements; excludes old experiment snapshots and environments",
+  "files": [
+    {
+      "path": "ARCHITECTURE.md",
+      "bytes": 12403,
+      "sha256": "0e1926de3c2413e2daa27ba1a4e24f4ec14e66e3febbdf6120e8d72f873b9819"
+    },
+    {
+      "path": "Build_GRIM_Release.bat",
+      "bytes": 953,
+      "sha256": "8a0fe1678aa076ac5e506acca65987228af372cec65084db0e8511227dd07438"
+    },
+    {
+      "path": "build_release.py",
+      "bytes": 58974,
+      "sha256": "6677541d70a2e6f261677b2cfa830bb66a88df6823277aeb47ecaa7a33f28359"
+    },
+    {
+      "path": "clean_utf8.py",
+      "bytes": 29015,
+      "sha256": "45d8481aef4e3c01a35f21ebcc55dcc090988a6675bfed2c7f87af60e1f640c6"
+    },
+    {
+      "path": "GRIM_Backend/assembly/__init__.py",
+      "bytes": 31,
+      "sha256": "5fd6718ef8937213820aa3ff5b0547248e779ade8c58a03682e2592484370c7d"
+    },
+    {
+      "path": "GRIM_Backend/assembly/interference.py",
+      "bytes": 13233,
+      "sha256": "ce520b1214a895c5693b865d87cb55db447f28cb0456e3f247edfd025a280110"
+    },
+    {
+      "path": "GRIM_Backend/assembly/model.py",
+      "bytes": 106006,
+      "sha256": "10ff1a1c43d6e3ff7ca5973a76322507e0f17b8ad98c4f9f4bf5a6adf6bc5c60"
+    },
+    {
+      "path": "GRIM_Backend/assembly/panel.py",
+      "bytes": 214687,
+      "sha256": "1072d5e99b67f3d13975b69bd7ff53b9e490b09cfb7122b5f11804ca2812f96e"
+    },
+    {
+      "path": "GRIM_Backend/assembly/placement_editor.py",
+      "bytes": 21631,
+      "sha256": "bab87bb2ee3af1b5e92ba90416775c6b6f5ae28cd923b6b2c15e3487e10b4454"
+    },
+    {
+      "path": "GRIM_Backend/assembly/recipe.py",
+      "bytes": 20300,
+      "sha256": "a5b586560caab5ed0a9c8b97f79a5b553c8618961c6973c9df956418c21a5eaf"
+    },
+    {
+      "path": "GRIM_Backend/assembly/response_comparison.py",
+      "bytes": 11875,
+      "sha256": "a2452165ce5d8a8e15002b86fd2a1f0f74bacddb94fdf7d20b2713762cfa7f5d"
+    },
+    {
+      "path": "GRIM_Backend/assembly/tree.py",
+      "bytes": 156544,
+      "sha256": "afb98027c9fc1c8276621d59c93a1aaa2485c28a8ae2155b903edeb051ab6c88"
+    },
+    {
+      "path": "GRIM_Backend/assembly/values.py",
+      "bytes": 1959,
+      "sha256": "a9e2414fb05c046d42e7cc74cdf34a9f06b25505af6994cd0695507acd2f2a5d"
+    },
+    {
+      "path": "GRIM_Backend/assembly/workflow.py",
+      "bytes": 8832,
+      "sha256": "f771c35fd4a640858014e1ecea009cadb611f57a451f8e9cba490d196a3c47c5"
+    },
+    {
+      "path": "GRIM_Backend/assembly/workspace.py",
+      "bytes": 139193,
+      "sha256": "40ace3bd7849d55b5e538c1f15c75f3beeb91105ddf95239730aade99c86de69"
+    },
+    {
+      "path": "GRIM_Backend/datasets/__init__.py",
+      "bytes": 47,
+      "sha256": "0152636e1653cb2003132c7d80d18631b00213301d70c916bbefa583adc9b43c"
+    },
+    {
+      "path": "GRIM_Backend/datasets/api.py",
+      "bytes": 2060,
+      "sha256": "c1b37a2f929adb6d54eb16d58439b50b703b62376327637d62c7358007c63355"
+    },
+    {
+      "path": "GRIM_Backend/datasets/arithmetic.py",
+      "bytes": 32983,
+      "sha256": "dcf69d35055e50d5d2489f8f87585b2462c4561cac5831bef55324fc15e1ca51"
+    },
+    {
+      "path": "GRIM_Backend/datasets/audit.py",
+      "bytes": 33546,
+      "sha256": "f12588ee0b6f1457148e0083c1ceb061fd86cf7daf5db0503ab23ad76b3913a5"
+    },
+    {
+      "path": "GRIM_Backend/datasets/axes.py",
+      "bytes": 53709,
+      "sha256": "b439b1a3b683fede7f73f73293be4e3d1fbcf87a84447a1cba07212f5c0004e5"
+    },
+    {
+      "path": "GRIM_Backend/datasets/calibration.py",
+      "bytes": 22922,
+      "sha256": "54d88f5d3e64ae82609ca84756fd4371784e9b40becf0f2f0269bbb081f822d4"
+    },
+    {
+      "path": "GRIM_Backend/datasets/combine.py",
+      "bytes": 60481,
+      "sha256": "d86eae11b710711a5e1c4d54ea7e4b38f5474e1c25e87b0583ea0b17c1143358"
+    },
+    {
+      "path": "GRIM_Backend/datasets/constants.py",
+      "bytes": 3851,
+      "sha256": "baf4f3808ad3fc1c367c12b7b2af91c87672a83b3f68b2b2d0948df79ae216fe"
+    },
+    {
+      "path": "GRIM_Backend/datasets/coordinates.py",
+      "bytes": 49517,
+      "sha256": "16e47e01e4693d8893bbd9048499c69b3d9297a6588e90214e1d462baf57524c"
+    },
+    {
+      "path": "GRIM_Backend/datasets/grid.py",
+      "bytes": 27186,
+      "sha256": "c7db7b564f2f640fd91d523ee1c19ce1f368048bcf82876ac089465db76c1ecd"
+    },
+    {
+      "path": "GRIM_Backend/datasets/memory.py",
+      "bytes": 15226,
+      "sha256": "783e03e9205b65ead8887681ad2e55b5c492dc9545838beb0d0400594a0df900"
+    },
+    {
+      "path": "GRIM_Backend/datasets/metadata.py",
+      "bytes": 46353,
+      "sha256": "a3a2d48abb8a80943ca87f25cc5fac4effa5914ade7e86d40d1ef38227555665"
+    },
+    {
+      "path": "GRIM_Backend/datasets/transforms.py",
+      "bytes": 34291,
+      "sha256": "6a337590195688afbc4ada63a1a3ae6c606a0d02fa111ed2300e01c13eb5e0f5"
+    },
+    {
+      "path": "GRIM_Backend/docs/BACKEND.md",
+      "bytes": 6079,
+      "sha256": "e82741570fc83c3361751a5bb0142e1ce1a12706e14528fd4c79ab4dace0aaad"
+    },
+    {
+      "path": "GRIM_Backend/docs/README.md",
+      "bytes": 69870,
+      "sha256": "e18154fdcc09e25626b39ebe9a029c9b082dc2d2420fdeb236b8dbd285abb19c"
+    },
+    {
+      "path": "GRIM_Backend/docs/WEDGE_TO_CONIC_CONVENTION.md",
+      "bytes": 2754,
+      "sha256": "6c985a1b63924ec3c6f1cc3a4f85b0965a06415ef41c92db8f4ef534d9e45b1d"
+    },
+    {
+      "path": "GRIM_Backend/examples/__init__.py",
+      "bytes": 69,
+      "sha256": "851bf8ae94fabbcff970735f249fcb3c2741f700d787074f046d42069fbcf67f"
+    },
+    {
+      "path": "GRIM_Backend/examples/_folder_common.py",
+      "bytes": 1983,
+      "sha256": "fb33e64374673c380fd13bda914cbaf912645a6e273232e777cc4f447050c339"
+    },
+    {
+      "path": "GRIM_Backend/examples/join_folder.py",
+      "bytes": 7291,
+      "sha256": "e3233e9b4d7535a46c63125b56f846ef1a88541f6fd78eff83fbe6e751a12e14"
+    },
+    {
+      "path": "GRIM_Backend/examples/plot_folder_azimuth_sweeps.py",
+      "bytes": 8811,
+      "sha256": "97ef8a4a856c20ae39017dc9a166beaa64126520e7e8033bd88bca08de576f5a"
+    },
+    {
+      "path": "GRIM_Backend/examples/plot_folder_frequency_sweeps.py",
+      "bytes": 10357,
+      "sha256": "98bd14e4bcccce4b10849a0383f632d54392d18cddaa30ed1c394ad27882dabd"
+    },
+    {
+      "path": "GRIM_Backend/examples/query_dataset.py",
+      "bytes": 11124,
+      "sha256": "6c8080b8c64f786f932e7133d32fa4cb0df16f5053cee93cb92402620f05e8b8"
+    },
+    {
+      "path": "GRIM_Backend/examples/README.md",
+      "bytes": 5793,
+      "sha256": "86500a6ba9472dbdd14a4d5239ed9a37b0c3f5f01d8eee3a586e240fec2f0277"
+    },
+    {
+      "path": "GRIM_Backend/execution/__init__.py",
+      "bytes": 32,
+      "sha256": "e76f87acc344c98e97e09176eeeba61b125e0923a0683076a5ee8338ac1704e7"
+    },
+    {
+      "path": "GRIM_Backend/execution/dataset_jobs.py",
+      "bytes": 19812,
+      "sha256": "56165c87a7634f7623db7bc7d7791b35bd5c07a63ef0060412540c6f589a3f0c"
+    },
+    {
+      "path": "GRIM_Backend/execution/diagnostics.py",
+      "bytes": 40321,
+      "sha256": "ad66fd92b8be73aa948f12ef0db734c43f6820d86992143017597fea379f99b1"
+    },
+    {
+      "path": "GRIM_Backend/integrations/__init__.py",
+      "bytes": 35,
+      "sha256": "ef86d1640f8f68be0f85c42ae312b96fdb220f0d915fc0866b39b14fe4029f2d"
+    },
+    {
+      "path": "GRIM_Backend/integrations/freddy.py",
+      "bytes": 14366,
+      "sha256": "6b75590f2ccb13218ffa5b23a7d9e8a78f47ccc7bde380cf8b634bb0dc14f53d"
+    },
+    {
+      "path": "GRIM_Backend/integrations/ghost.py",
+      "bytes": 11127,
+      "sha256": "d73c7b9e8e78983c0390e2f0b4212ef94d8ab4faabe7379f6379bfa41775fb67"
+    },
+    {
+      "path": "GRIM_Backend/io/__init__.py",
+      "bytes": 56,
+      "sha256": "a74535ab4edd36f5d56b5a69e354540bdf779a2ae2c395d666fa8f6ff2cacf77"
+    },
+    {
+      "path": "GRIM_Backend/io/batch.py",
+      "bytes": 18078,
+      "sha256": "b4e334528b9551ba371fbf0acb00c745d856a9d6af622ce8c921660e42c40699"
+    },
+    {
+      "path": "GRIM_Backend/io/cst.py",
+      "bytes": 51686,
+      "sha256": "32eb8f0650fbca64e45c7d172e04da85c7e269069f274dd404f762fcadcabf83"
+    },
+    {
+      "path": "GRIM_Backend/io/csv.py",
+      "bytes": 41909,
+      "sha256": "26a15a1047394536edcb2f93ec798afa47365a93bd907841c33b40fe16012d83"
+    },
+    {
+      "path": "GRIM_Backend/io/inspect_ss.py",
+      "bytes": 5671,
+      "sha256": "1e2791f63e71fdfbe3201a9a3fb266ae1ad8d07b1cb68370e9b604f5cf235152"
+    },
+    {
+      "path": "GRIM_Backend/io/loaders.py",
+      "bytes": 4554,
+      "sha256": "44166589a584a996903ba9e2851f1786f7a2ff83c24add5260af738f9eebc79e"
+    },
+    {
+      "path": "GRIM_Backend/io/mapped_table.py",
+      "bytes": 4414,
+      "sha256": "6e043aa2355db835c83acb046fa9a33f2e67e3486072558c3987e31bfbd95161"
+    },
+    {
+      "path": "GRIM_Backend/io/native.py",
+      "bytes": 29551,
+      "sha256": "bab31221aae293c3919b350f4459b0a56a233d0992b626b8417732f5f74daee3"
+    },
+    {
+      "path": "GRIM_Backend/io/out.py",
+      "bytes": 7058,
+      "sha256": "6444863b1aca384083c3634d0d24b3cfa896d5fc012e3e22a73f1185a66f5aeb"
+    },
+    {
+      "path": "GRIM_Backend/io/pioneer.py",
+      "bytes": 37484,
+      "sha256": "78f16f0a1f41cbea872da41939eae6d2e0ebd7c1a437103eed90e9e58639e19b"
+    },
+    {
+      "path": "GRIM_Backend/io/ptm.py",
+      "bytes": 33079,
+      "sha256": "96c3d6fd4e927f04ad37447d253ea8611b69beba09f09bf5c901d62c580688f9"
+    },
+    {
+      "path": "GRIM_Backend/io/reference/CString.h",
+      "bytes": 1665,
+      "sha256": "638ed92cdc15ed3d40be2841d0dce062e23a0702b46391d8c86e637f1279c4d4"
+    },
+    {
+      "path": "GRIM_Backend/io/reference/SsFileIO.cpp",
+      "bytes": 520,
+      "sha256": "25a6799c447c05e88d525ac14dc4872634270d721b5f21c57376c44923838b22"
+    },
+    {
+      "path": "GRIM_Backend/io/samples.py",
+      "bytes": 858,
+      "sha256": "3c075b18586285460880e44f348c720c81d450267b35930408eb709988854751"
+    },
+    {
+      "path": "GRIM_Backend/io/sentri.py",
+      "bytes": 22912,
+      "sha256": "c50bdcbaf50aad97bc183a7095f19c297ba0006f9cbb9ed3f96a81e56613d657"
+    },
+    {
+      "path": "GRIM_Backend/io/xpatch.py",
+      "bytes": 29708,
+      "sha256": "08aec58000e7ae400f050ad4279b75afd9af9d3b9425beb8764d8fa8e1faf920"
+    },
+    {
+      "path": "GRIM_Backend/isar/__init__.py",
+      "bytes": 27,
+      "sha256": "c8b6ec1e8682a3eb2ec86fa7a99d5233a8c135c03ab973329c6fa78f10b228ec"
+    },
+    {
+      "path": "GRIM_Backend/isar/artifact.py",
+      "bytes": 41382,
+      "sha256": "236959ced70417954aa6aefe7ddedb6bc8701af29e5f62eaf4484cadb6a5dc13"
+    },
+    {
+      "path": "GRIM_Backend/isar/bpde.py",
+      "bytes": 73316,
+      "sha256": "7d66ce82a937e672402283bc8f65e5f9ebbd62c12542e5f2890e43ad3f9b26fa"
+    },
+    {
+      "path": "GRIM_Backend/isar/comparison.py",
+      "bytes": 8416,
+      "sha256": "21bcb838feba735c9593d0b5cbf89b53b58e589d69b36b45708c2ac8aa53704e"
+    },
+    {
+      "path": "GRIM_Backend/isar/geometry.py",
+      "bytes": 4071,
+      "sha256": "1b5e445d914d59af5ea1e826b9c8cf796cb7154830777cb644cdf6833e256e1c"
+    },
+    {
+      "path": "GRIM_Backend/isar/interpolation.py",
+      "bytes": 4749,
+      "sha256": "6c46a760060063df50bffc8522ebd16043636c8401d90aab66e34e88df4d8f7f"
+    },
+    {
+      "path": "GRIM_Backend/isar/operators.py",
+      "bytes": 6803,
+      "sha256": "25ed0b68012f09aae0b003ff811889c9779e27755140cd82ea5ab901352ed405"
+    },
+    {
+      "path": "GRIM_Backend/isar/quality.py",
+      "bytes": 9698,
+      "sha256": "98184277b4c25282bd80b30084fcdd1cada06bc4550c038981b645f714b1dd77"
+    },
+    {
+      "path": "GRIM_Backend/isar/recipes.py",
+      "bytes": 7063,
+      "sha256": "b959b13c24129055c23e62159e5c05f3fe3e7903004d3808a1b56f71afff4f0d"
+    },
+    {
+      "path": "GRIM_Backend/isar/repeats.py",
+      "bytes": 33408,
+      "sha256": "7084dc572e1a9445ebe2e182e32b3c94a36bac35ed1f2df4f7420724c2e78b86"
+    },
+    {
+      "path": "GRIM_Backend/plotting/__init__.py",
+      "bytes": 31,
+      "sha256": "43e6834066e21119f012aeaa96e3a598e326e7ea050af226820b0c5873b3dc1b"
+    },
+    {
+      "path": "GRIM_Backend/plotting/actions.py",
+      "bytes": 106852,
+      "sha256": "6c70a65f448e09873ad9aa94944f78bbd30d4b9c362932e11b5be916e58ad11a"
+    },
+    {
+      "path": "GRIM_Backend/plotting/dataset_style.py",
+      "bytes": 9627,
+      "sha256": "24508a95959219ed3d96a17e7650425099e91bdaf156061e3db5876f1816035e"
+    },
+    {
+      "path": "GRIM_Backend/plotting/models.py",
+      "bytes": 2717,
+      "sha256": "50a0d981dc05823399bdc7071acb93d275bfcf0809031b7b9f355948de05bc47"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/__init__.py",
+      "bytes": 507,
+      "sha256": "490e8841eaa8faba414c92bf3281db71626f7ef24e9205b863be5470eb5a9916"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/az_vs_range_mode.py",
+      "bytes": 11853,
+      "sha256": "7952c8ab40a0c19e878b614a14c7ee528d07c5aa843808de5fd97d64520be9c8"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/azimuth_polar_mode.py",
+      "bytes": 5304,
+      "sha256": "688c71efe47a4bd60bab272acc2896babe00ae837c11daf22ab84e93ef6aa5e4"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/azimuth_rect_mode.py",
+      "bytes": 6807,
+      "sha256": "3f636e388add33366cd286b35ccb812b478b84fa5211ee05819a190460a9b28c"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/common.py",
+      "bytes": 29896,
+      "sha256": "2107e979a52cb2643f09d808ed279b6e4802dbd50857ff007fb36fe493779543"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/compare_mode.py",
+      "bytes": 27597,
+      "sha256": "074ae34ad7e0b8aa7e816178aa782e3d1d2044fea10556b337caa1461c45c982"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/delta_map_mode.py",
+      "bytes": 13582,
+      "sha256": "72edcc6372a032204c074988dc81b9f2b400022a082ad70307d52d33ce9e26eb"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/elevation_sweep_mode.py",
+      "bytes": 6922,
+      "sha256": "b06d042be3ebc9a6b4760cece2a594d4ea00e22b2d4efd2fd3c5772d6b7520cc"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/frequency_mode.py",
+      "bytes": 9516,
+      "sha256": "f7d5b08241db295499c73264d9f70c558309524d91e7e0b5b8af48188f35168d"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/isar_mode.py",
+      "bytes": 129962,
+      "sha256": "7df80d1b7d2af84cf45331fc78ab82dccfeda26417da27a4c5cabf7f33a7fd05"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/isar_render.py",
+      "bytes": 30616,
+      "sha256": "9b0a388177c0cb77249ff7073f2d4191dd1954d0238de24bf8f337ab7fb3330e"
+    },
+    {
+      "path": "GRIM_Backend/plotting/modes/waterfall_mode.py",
+      "bytes": 9903,
+      "sha256": "da50a4d715f4887da9c06ae4d8390e822723ed3a088b5335bf0f5be3def5c565"
+    },
+    {
+      "path": "GRIM_Backend/reports/__init__.py",
+      "bytes": 30,
+      "sha256": "8ab01b1bd4b5b1f0c89dc2b409e9eefb5556adc1ccf1f4c44dbc9525fd3fff00"
+    },
+    {
+      "path": "GRIM_Backend/reports/image_imprinter.py",
+      "bytes": 20049,
+      "sha256": "770c2ef56326aab47f23668f747cfe288c3a8b50c2bbb2c877c0b8da79bd2e0d"
+    },
+    {
+      "path": "GRIM_Backend/reports/plot_data.py",
+      "bytes": 48051,
+      "sha256": "3db95a55f9f57de1ab659998b9febcd3c898045f0bdfa945ea77344e6e01108d"
+    },
+    {
+      "path": "GRIM_Backend/reports/report.py",
+      "bytes": 59708,
+      "sha256": "09d28bd020424d2d10d3e873162bc501fb48233ac9b5db5f0d2b3d2f553cd0f8"
+    },
+    {
+      "path": "GRIM_Backend/reports/workflow.py",
+      "bytes": 23990,
+      "sha256": "376d7c95680d438a1512dce840956f48b825158d9bdda6ce496d00b1f4f2eaef"
+    },
+    {
+      "path": "GRIM_Backend/reports/workspace.py",
+      "bytes": 122607,
+      "sha256": "a423de99b674bc1475c4f8ef09e065fffc60d9bd542c85a57a1467b81a40bdc3"
+    },
+    {
+      "path": "GRIM_Backend/run_diagnostics.py",
+      "bytes": 387,
+      "sha256": "03febb406fc4dd524f8733b63a0f4f854a077eaa64c66c8c39b8ba7bf3738c23"
+    },
+    {
+      "path": "GRIM_Backend/run_gui.py",
+      "bytes": 357,
+      "sha256": "fa60e7593b332e42c9cee33587acfa21a34bd26d5648172da2b71d5257aeece6"
+    },
+    {
+      "path": "GRIM_Backend/run_headless.py",
+      "bytes": 371,
+      "sha256": "021a09f2556be9f0071aefdd17fc1b14859721ba3be2ef5c023498abaa81f001"
+    },
+    {
+      "path": "GRIM_Backend/run_image_imprinter.py",
+      "bytes": 391,
+      "sha256": "5b1f6a85eb9a4185b6e24ef0955e15722fd63893d4217292ba7bcf92e5244086"
+    },
+    {
+      "path": "GRIM_Backend/scripting/__init__.py",
+      "bytes": 46,
+      "sha256": "0467fbbdaa944fcba1386e616d7b474b3621a49d6a7a24b83e44d439bc91225f"
+    },
+    {
+      "path": "GRIM_Backend/scripting/api.py",
+      "bytes": 895,
+      "sha256": "58a6427677bc3bfa682dec5ef4a5a937b5562c204ec6d36662d69d0627e51f7e"
+    },
+    {
+      "path": "GRIM_Backend/scripting/cli.py",
+      "bytes": 6412,
+      "sha256": "745519ffcf342f2faa57b552b41f5825a49f3afd64cd5bed8b654c8e8bdbb530"
+    },
+    {
+      "path": "GRIM_Backend/scripting/plotting.py",
+      "bytes": 30184,
+      "sha256": "03e8febfeb19639d58173a520b2ae602fc49df5a24676d48a79adc7eaf8e33b0"
+    },
+    {
+      "path": "GRIM_Backend/scripting/recorder.py",
+      "bytes": 17218,
+      "sha256": "664f6ec733187763436c6e535a9c0376d4e95f6d98468e49259b19f9cee8b7a1"
+    },
+    {
+      "path": "GRIM_Backend/scripting/workspace.py",
+      "bytes": 1464,
+      "sha256": "a6dbca3f44c33509ab7730482b0ea88ea54ac04d066ad9279775134639a20088"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_angular_coordinates.py",
+      "bytes": 11854,
+      "sha256": "e9e057935d8066a352feeb9ccf1bea0985cb320e890031e39e28ba32fa8428ff"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_assembly_authoring_updates.py",
+      "bytes": 9275,
+      "sha256": "fb6ee51ac02c1681eb0557da71a5fab86f3520d1081e17fce38333e44381de1c"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_assembly_interference.py",
+      "bytes": 3241,
+      "sha256": "47f48d3535384c00d54ae5a3a1f3723fdcef784262959ca4142f7efdfcfbbbdc"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_assembly_tree_safety.py",
+      "bytes": 35695,
+      "sha256": "f04a5f259473aed084ac3e87c8d9cd4fdc6e54f47ad9d71f05ab398b525ce186"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_assembly_visibility.py",
+      "bytes": 13533,
+      "sha256": "5dba002990f7c7e7ed6c1befbc45f3dc6f0934c9dfcce186b7ba20153df685d9"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_assembly_workspace.py",
+      "bytes": 61138,
+      "sha256": "33aae944b984058e0ad112382eaef375a168f7dbd46e479f5942c131cc84aa28"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_az_vs_range_safety.py",
+      "bytes": 1875,
+      "sha256": "51be63de0b2fd8d716cd6d6f008da106785fbc1fa4f6f60867446389d68fbc80"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_bor_profiles_ui.py",
+      "bytes": 3587,
+      "sha256": "37a8d7d51e677d97af89c97565c572b53e6a7009a3e6acf55ff2b9a3aa4df805"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_compact_layout.py",
+      "bytes": 6637,
+      "sha256": "21bef4ea90294593f99141d6f1270850228e94523512aa4f2f555d23d16ce877"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_coordinate_declarations.py",
+      "bytes": 5984,
+      "sha256": "efe9f4a5e6075c4ed17b20ed9b82af605d50717e745b2fd49ca5c6839468ee73"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_cst_io.py",
+      "bytes": 22276,
+      "sha256": "a0118df4e40b68aaa1b271a8da8f386354b0e7fe32167912642afdbd94ceb7cd"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_csv_export.py",
+      "bytes": 10345,
+      "sha256": "27f519ce21aab7fc2034dce099c23b3548ba0ad184207f78ad69a826fabc198f"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_dataset_core_repairs.py",
+      "bytes": 50556,
+      "sha256": "f7ee6358f6106a49ccda92aceccca3d29bed01f52a07512bb35f2379ef462352"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_dataset_correctness.py",
+      "bytes": 35249,
+      "sha256": "c8dc92fa70d3b8e2d5d9b665d4652e260a243626cc4ff20e0be6efc16e1d3a0b"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_dataset_extended_operations.py",
+      "bytes": 23191,
+      "sha256": "fd3ec53fc007d7ba927c585b18ecc512c316142a23e2f44f2dba1afe50a4722c"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_dataset_plot_style.py",
+      "bytes": 11156,
+      "sha256": "ae39f7868f2bddfa5f35f35552185b07649f8dfe5a8e4edfaf335a400d751115"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_delta_map.py",
+      "bytes": 16910,
+      "sha256": "a9d294f8ffb96c290cc815a240bc9e8a06c427c431c5affda71b7d5e7eb22e41"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_examples_join_query.py",
+      "bytes": 10317,
+      "sha256": "975f4fe649ddd84f81edf701792cfd19e4db6840949b4d8bde521ca56bbefc38"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_execution_profiles_ui.py",
+      "bytes": 14356,
+      "sha256": "937740e1c6726c4505877e26b80ee56ee6635b1f342c93d358df29af5fe1509b"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_feature_assembly_panel.py",
+      "bytes": 130679,
+      "sha256": "ee75edad8dfa148fcba4620f5b14181272e5b4a7d72526e97870f87d89e14299"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_flat_csv_schema.py",
+      "bytes": 15509,
+      "sha256": "9e6dc515cf8122c91563232d1d29d094beda9a6b57d058b92b3888eae381bb11"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_format_dispatch.py",
+      "bytes": 4442,
+      "sha256": "e3520bb261aff77257163ccac040bbda88da3b39ed816d1dbab709fc49759602"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_freddy_integration.py",
+      "bytes": 8327,
+      "sha256": "681ce9a6cb4b2d33c6ed620547df83590481d69f51c74c3b32bd652e31323a44"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_ghost_integration.py",
+      "bytes": 5762,
+      "sha256": "9351a722a66fc17b1e4f43ca1778d62f5de88768a241a3b4231d0107024be418"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_grim_diagnostics.py",
+      "bytes": 14958,
+      "sha256": "554a7dd41b9ab76f87afc1d63d6bc2d04e7342b232b3c5a5c431f352d86d71d5"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_grim_metadata.py",
+      "bytes": 2290,
+      "sha256": "99be4956d685507a15c6196efa235efabc3dae348ecdfdb1571dbf354684715a"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_gui_dataset_workflows.py",
+      "bytes": 70596,
+      "sha256": "63abd24239e9a898fce5222d8bc30bf146cee77df706cfe2a20f4af3812fe1f4"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_gui_shell.py",
+      "bytes": 98956,
+      "sha256": "7c788676ada2c43e2bf1a82ed0e58be645522b9c60e148fb44e0f404a7d1c97c"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar.py",
+      "bytes": 15457,
+      "sha256": "2edc0c8bf443e7679935ebf908b614970993152ecef01e697140e502ba429d78"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar_artifact.py",
+      "bytes": 18031,
+      "sha256": "611690f313740d997d619525b22d27d3edc6799e00db7b36f0c43949d2fe7c2f"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar_bpde.py",
+      "bytes": 28643,
+      "sha256": "d81a06b1261679255a3a23570ce3ca99e5bc8efc0a90846a373a6bb15cc21298"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar_improvements.py",
+      "bytes": 18344,
+      "sha256": "f762a76e8141455df20088d1710beb9828fd2388ccd3a7a846cda09277ad4cb1"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar_performance.py",
+      "bytes": 8048,
+      "sha256": "e5e5fda466ac751b71835d29a61e7219d08d5e95d2c76b390b9947f7733ac021"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar_repeats.py",
+      "bytes": 15641,
+      "sha256": "e3ec2ec71a17ba41bd102d9d53718fafe6119782c5ad4b9dcca23c14e2ebda33"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar_safety_regressions.py",
+      "bytes": 16133,
+      "sha256": "d49892870d0b2ff10a02db03756af52bcc9917c35c47afcf024bfea64c5ac818"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_isar_sparse.py",
+      "bytes": 5517,
+      "sha256": "32e496694f41b1dff6568926430d6752beb437b7ad84aaf8eb5311644171ecb5"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_module_boundaries.py",
+      "bytes": 5076,
+      "sha256": "31265e1a570d71dc4a0f0b27f16aec6402ecf859bef08c4eecbfcaf6060869bd"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_physics_io.py",
+      "bytes": 10948,
+      "sha256": "4133e5756faf5524b928200d04e534d73711a665172c754c2c091cf6954f4e4f"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_plot_examples.py",
+      "bytes": 6017,
+      "sha256": "5d961f1e2427e70fbd2c098c494d330db5b08c534fa96682ef00aa543c217323"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_plot_renderer_correctness.py",
+      "bytes": 52719,
+      "sha256": "97f30679ffdc4ee67bbc8fb7dbe2e65a3c12b21db2138034377e113d0a205d90"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_plot_settings_ui.py",
+      "bytes": 8520,
+      "sha256": "fe2c9bc6a48f76add318fe053b64ac19247bf10c81c08b711aa46352c97e2cfb"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_portable_launchers.py",
+      "bytes": 1812,
+      "sha256": "b3c6e96445de3ffdf634c478176046f2d054a1e651a3022834c2b66185eaf1e4"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_ppt_image_imprinter.py",
+      "bytes": 9262,
+      "sha256": "7867877007df3e7a8797be08478cc392a7c4158b59781c4f02d51b42bec25043"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_ppt_plot_data.py",
+      "bytes": 22500,
+      "sha256": "523eda03381c5e4849c5313ab82f9b3f0c08b82f0e2fe6aa8f92e39e06a39bbd"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_ppt_report.py",
+      "bytes": 60863,
+      "sha256": "0ef377098ac10500b0dd593c6233f31f330f5857615d0a83189283a24bbd41ee"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_ppt_workspace.py",
+      "bytes": 44104,
+      "sha256": "76d811b800e6e4819bdb773a6e100251b73241957f1cd12a207581f9f2f1084c"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_ptm.py",
+      "bytes": 21240,
+      "sha256": "79a722c00ddb3ff1d216c626cb178908e466ac3737be7633da22a7d87172957e"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_python_dataset_helpers.py",
+      "bytes": 18079,
+      "sha256": "c8110550e7d40318818c71b8b602ab1d12469bc7a9bd2a0c4fabd07fe5f2c2e8"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_python_recorder.py",
+      "bytes": 20464,
+      "sha256": "cc47cba0ca1cfd660d4a721074e0397e632305a03b8e91e84af7a5f14790543a"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_python_workflow_helpers.py",
+      "bytes": 15783,
+      "sha256": "66210a667e3b6868ce46a50b10896080598e777ab2a18a587511987dc62c3041"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_range_calibration.py",
+      "bytes": 16152,
+      "sha256": "4148e39c4ee26be8314fda34c99d8aad7b0a91b36a839cd474b1201cf43d23f6"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_release_builder.py",
+      "bytes": 28209,
+      "sha256": "a008e7fa3c6048c67529f26bf3788c87f86c85d043ebf8f5ddcca0139eea59c8"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_release_readiness.py",
+      "bytes": 1790,
+      "sha256": "5b45e94042cc9b5653c8aab866f060f313ca321eb2c62b198d4ed0826e68b3f6"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_sentri_io.py",
+      "bytes": 26349,
+      "sha256": "65a70935ad1eaa6a5b9d891591ec85e5d297650c69f2d64e55c9bba1ac0113c6"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_solver_interchange.py",
+      "bytes": 4990,
+      "sha256": "8d0c5b8ce83c01e743b00feaafeb34af9e1dd7e4b41fce63c406f29dc37230c6"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_ss.py",
+      "bytes": 19803,
+      "sha256": "7a69d51466d9e7c6cde5f40e1b51b30d422ffed5fe66d7bdcaec622742c756f8"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_support_reference_difference.py",
+      "bytes": 18241,
+      "sha256": "a3c85e87ba29caa772012e0b05c88ba4b9a130db7cf8a9e23714caeb74eb3e1a"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_table_import.py",
+      "bytes": 11052,
+      "sha256": "b1e1cf7b171ece3151d4fe70941ee405607acdb715ab26b4f9426e1fd7c30229"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_verification.py",
+      "bytes": 2769,
+      "sha256": "af1505fb9bf172ae96c3608f63cc88004ffa21e7739f73fc0ce112ec467b6c52"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_wedge_conversion.py",
+      "bytes": 7767,
+      "sha256": "2f7743f853287309b0f26774ede0f81e3747840ce905df8c63bced1f5c7a056b"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_wheel_installation.py",
+      "bytes": 4803,
+      "sha256": "8b18702abef4fe1ce35ba45bc5e0e36c890701604c912bd6ae8f82e1051ff1e7"
+    },
+    {
+      "path": "GRIM_Backend/tests/test_workflow_updates.py",
+      "bytes": 14100,
+      "sha256": "b717bc404da3decc5a188d2197cdaaf83cea1850d9eb4a435c272895f76588dc"
+    },
+    {
+      "path": "GRIM_Backend/ui/__init__.py",
+      "bytes": 25,
+      "sha256": "5d9039fdd098f2e512f64551dafe193b674ce82f0027daf37ce3817dab20166e"
+    },
+    {
+      "path": "GRIM_Backend/ui/app.py",
+      "bytes": 115048,
+      "sha256": "72db8cf6a72ba0afc23f1cb69fe01977e7fc451037f38070514599fd399ac89d"
+    },
+    {
+      "path": "GRIM_Backend/ui/dataset_actions.py",
+      "bytes": 239353,
+      "sha256": "fe5a1ca9c8e366b6821d29ca31611ec2a6ee66619e2d25701b916d26a83f1a0f"
+    },
+    {
+      "path": "GRIM_Backend/ui/dataset_dialogs.py",
+      "bytes": 67534,
+      "sha256": "10842dc636dcba07b504c693ad11648ac25120630908a9eaa4ad6b5cf91d24fe"
+    },
+    {
+      "path": "GRIM_Backend/ui/dataset_sidebar.py",
+      "bytes": 14202,
+      "sha256": "192543999791befe842fca2c16c677e1f9dcb5fa4f46945e4374644f6455f218"
+    },
+    {
+      "path": "GRIM_Backend/ui/delta_map_controls.py",
+      "bytes": 5582,
+      "sha256": "23d2d26e556b9cb36276db09f0e5d5466e9e25c4ee783eb85b03e0864e22c9d9"
+    },
+    {
+      "path": "GRIM_Backend/ui/isar_controls.py",
+      "bytes": 10448,
+      "sha256": "e69a51a0672a5569c7ea536c556396dbca3f854562e0ec85897010f343486153"
+    },
+    {
+      "path": "GRIM_Backend/ui/isar_workflow.py",
+      "bytes": 20461,
+      "sha256": "36b6408a69f6440e687c23543514eea5fbbbd27b05dab0374a45ff543b3d14cd"
+    },
+    {
+      "path": "GRIM_Backend/ui/palette.py",
+      "bytes": 5166,
+      "sha256": "0d5a6b657c2e3d2f6c9895f8ce56cc58fafd3a9300f9e4967b12e952ddef99c6"
+    },
+    {
+      "path": "GRIM_Backend/ui/table_import.py",
+      "bytes": 4836,
+      "sha256": "07865a6de9f4a19b0eb69c4889e446060308cbcfe0dcd10e40afd5e60ad42ce7"
+    },
+    {
+      "path": "GRIM_Backend/ui/theme.py",
+      "bytes": 13461,
+      "sha256": "584ea9b764b50f93c59995111b03f39c988299875678f01f0f3531a095cc149b"
+    },
+    {
+      "path": "GRIM_Backend/ui/widgets.py",
+      "bytes": 8368,
+      "sha256": "21245ef9823a3cec875de664e21eadcba3603c609ee1a156cf9d0589bf238d41"
+    },
+    {
+      "path": "Launch_GRIM_Diagnostics.bat",
+      "bytes": 1367,
+      "sha256": "7a3472e3ff44ec98b8e0a2b8ade64717610bf597d289e2bb29dfd52e8c1fe918"
+    },
+    {
+      "path": "Launch_GRIM_GUI.bat",
+      "bytes": 2162,
+      "sha256": "188b963870c2c3883378c6a4776818f21f2edccab6e81e140837aa76d57a20c8"
+    },
+    {
+      "path": "Launch_PowerPoint_Image_Imprinter.bat",
+      "bytes": 2021,
+      "sha256": "d58537fc63ce3506125d2a40fd32bba4111319bc550012c3096aad49a3db9895"
+    },
+    {
+      "path": "pyproject.toml",
+      "bytes": 1039,
+      "sha256": "d7c9ac8aa1400d68034e8e706672999648cf451eac961f704ee2053a9cb22a5e"
+    },
+    {
+      "path": "README.md",
+      "bytes": 21703,
+      "sha256": "13174cc2ac12d86bcded5317fda70e934753068e8b4cd3901d9215daaa2f1c93"
+    },
+    {
+      "path": "requirements/constraints-windows-py312.txt",
+      "bytes": 885,
+      "sha256": "2f1adb6a70d7f4c669677fa085827a1b777cf8b3eaba0c3a653e7a45d02ca6c4"
+    },
+    {
+      "path": "requirements/hpc-py36.txt",
+      "bytes": 212,
+      "sha256": "d9133c947f6e33438b078362c1265ab8a25472e423c550784cbb5561060759b8"
+    },
+    {
+      "path": "requirements/README.md",
+      "bytes": 2475,
+      "sha256": "ac69a0d816922d4f0ba615915170cfc01e54ee9e07462ec0f9a86d37ecfa7d48"
+    },
+    {
+      "path": "requirements/test_wheelhouse_manifest.py",
+      "bytes": 8994,
+      "sha256": "296ed5f4daf897f4a1a6ddf834fd68b0168efd25fad651d3910067aa9a55e750"
+    },
+    {
+      "path": "requirements/wheelhouse_manifest.py",
+      "bytes": 17125,
+      "sha256": "9d9db72fcecb7752b56f88c9c3d31f1c4d6e330c61e120d97f2770837385503e"
+    },
+    {
+      "path": "requirements/windows-py312.txt",
+      "bytes": 147,
+      "sha256": "9729c5275a77f849ab84495037c29e3c89712ca2007311279148529dc2a7c71d"
+    },
+    {
+      "path": "SOLVER_IMPROVEMENT_PLAN.md",
+      "bytes": 9229,
+      "sha256": "51619d1df2c47cb39aea8d41dabe1d58c6739d71c59dc2944586b66a4bc826ee"
+    },
+    {
+      "path": "SOLVER_UPDATES.md",
+      "bytes": 7139,
+      "sha256": "1637ecfce2ab42b7e2d3ec3c5ce668c9ca5a35901a6c429e7429358996349cf9"
+    },
+    {
+      "path": "test_clean_utf8.py",
+      "bytes": 9853,
+      "sha256": "8b15e077fa4ce6b596fcb45edc3d63cb0fe9c590042fa5c174004772390bf96f"
+    },
+    {
+      "path": "tools/FREDDY/ibc/__init__.py",
+      "bytes": 65,
+      "sha256": "008e581b398617414f03620f0a12260892229af5e22b77772eeb528401d5da35"
+    },
+    {
+      "path": "tools/FREDDY/ibc/analysis_data.py",
+      "bytes": 8960,
+      "sha256": "ca24560c4c7216404be6c3fff7e47a20fc49da6b0b87e538e3e5de4eddab363a"
+    },
+    {
+      "path": "tools/FREDDY/ibc/analysis_workflow.py",
+      "bytes": 3809,
+      "sha256": "f208ff2335475f7b4ea1ad7bf8d73fb4941d08422e10f8330049699b0979f5e4"
+    },
+    {
+      "path": "tools/FREDDY/ibc/batch.py",
+      "bytes": 9854,
+      "sha256": "3a1aa3631459492c3c016b483cee1529f064cc14fafd2069f1499a5ce6b4ec6a"
+    },
+    {
+      "path": "tools/FREDDY/ibc/compute.py",
+      "bytes": 66133,
+      "sha256": "62299b076712747432b3f71e63b0f6166483ecd7cbf7803978f7b4aec0b6d50f"
+    },
+    {
+      "path": "tools/FREDDY/ibc/converter_dialog.py",
+      "bytes": 14606,
+      "sha256": "52114a9166a98faaa5d90ecf93d016f36e21ae15b285da970d7579e87282188d"
+    },
+    {
+      "path": "tools/FREDDY/ibc/design_search.py",
+      "bytes": 29983,
+      "sha256": "163c1b4994caf16465d4cfda27ae4dc7ebd1720535f604414fad6debee3de1b0"
+    },
+    {
+      "path": "tools/FREDDY/ibc/ghost_coating.py",
+      "bytes": 6153,
+      "sha256": "25359f80b7cad6870ba4772d2c5775d2d7539d371c5e7e02a25188a364925aa0"
+    },
+    {
+      "path": "tools/FREDDY/ibc/guide.py",
+      "bytes": 32800,
+      "sha256": "afafb5dd3ec87db46237c9d2f5362762b80b1554c67c353cd509bb32b73a21ab"
+    },
+    {
+      "path": "tools/FREDDY/ibc/inverse_grid.py",
+      "bytes": 3353,
+      "sha256": "e45acdd9031be180c810499f2e7b9608a00acdbc1d34c3caa8a1c39b9b0e2c70"
+    },
+    {
+      "path": "tools/FREDDY/ibc/inverse_performance.py",
+      "bytes": 4086,
+      "sha256": "c527add524d1bf78ed2692bd577ff53b4ac8acf4e8c71d2665b4439b4d953565"
+    },
+    {
+      "path": "tools/FREDDY/ibc/inverse_results.py",
+      "bytes": 28707,
+      "sha256": "5ca4999d3ecaf2035a5e0eb655228692a329d753d4c21b23722b3f98049b482e"
+    },
+    {
+      "path": "tools/FREDDY/ibc/inverse_workflow.py",
+      "bytes": 23532,
+      "sha256": "6ddbd00237dac658f046049692a61ac13722681ca2e1eb8d9222fd7cea77d76a"
+    },
+    {
+      "path": "tools/FREDDY/ibc/io.py",
+      "bytes": 39382,
+      "sha256": "7cefda3fd4c12dff483e465a9682efd118209a4778e5504b049995a044f5c210"
+    },
+    {
+      "path": "tools/FREDDY/ibc/material_explorer.py",
+      "bytes": 53764,
+      "sha256": "d9ce5fc0b5265d0f4df71c516817769a2f37bae6d19fa0c0e08405e7cdf9c589"
+    },
+    {
+      "path": "tools/FREDDY/ibc/mix_analysis.py",
+      "bytes": 6741,
+      "sha256": "374fe9b90592dc1cfec4abaf2c9527b82c75b09055727c41598086f613f1ae0a"
+    },
+    {
+      "path": "tools/FREDDY/ibc/plot.py",
+      "bytes": 1071,
+      "sha256": "18728ec5ccfdf81d43fe23dff2f01738755c117823186a82a98f8c40927c7d38"
+    },
+    {
+      "path": "tools/FREDDY/ibc/project_state.py",
+      "bytes": 19551,
+      "sha256": "79dba83b1684537dd1c73c303cfe754237aceee955e3882476774384a4eef192"
+    },
+    {
+      "path": "tools/FREDDY/ibc/search_checkpoint.py",
+      "bytes": 6158,
+      "sha256": "2daa599ee9bbf33a4344d926d9a50f8955b292ad4baec7785f4446ae40ed5f52"
+    },
+    {
+      "path": "tools/FREDDY/ibc/sweep_results.py",
+      "bytes": 34269,
+      "sha256": "a95b945eee070917c4ca5714bdb8a0e4d28d45be7b7d62d19a9050d03b7ede4e"
+    },
+    {
+      "path": "tools/FREDDY/ibc/table_conversion.py",
+      "bytes": 9142,
+      "sha256": "539ee24507721c4885446fb26238934fcdbbc4f78a45c5e833abca69715c713d"
+    },
+    {
+      "path": "tools/FREDDY/ibc/tolerance_analysis.py",
+      "bytes": 14890,
+      "sha256": "cff8f46d2fe8e1228e12208e3faf0e724971de28b9bddced3c7e216c8049cbfc"
+    },
+    {
+      "path": "tools/FREDDY/ibc/tolerance_config.py",
+      "bytes": 4458,
+      "sha256": "0d0689895936a6847393c90c5ea85d228a4e87f0bbcfaefc8abadab4c09b0bb3"
+    },
+    {
+      "path": "tools/FREDDY/ibc/tolerance_ui.py",
+      "bytes": 24709,
+      "sha256": "b688c5cf4455f944557e95f17118e9b6722a4b52dd866c490495dfa77fe61450"
+    },
+    {
+      "path": "tools/FREDDY/ibc/ui.py",
+      "bytes": 265773,
+      "sha256": "b1f4a4bc344bcda888e476bfb0498aa5d7629e9a812807851efffa40669524e0"
+    },
+    {
+      "path": "tools/FREDDY/ibc/ui_controls.py",
+      "bytes": 7553,
+      "sha256": "c2d245108d995ffac9a597f81973a488b42f6c474313614daa303c2fbeaefd7a"
+    },
+    {
+      "path": "tools/FREDDY/ibc/ui_dialogs.py",
+      "bytes": 25356,
+      "sha256": "6dbafa4f1a3eada48e7e7d1c84392d791e1082c33f1fc2f115fa83265fcd7f85"
+    },
+    {
+      "path": "tools/FREDDY/ibc/ui_options.py",
+      "bytes": 2289,
+      "sha256": "6f3cd63f20399931c0d326099e3b388d5aee42bf6052cbe09f3a240a7b446af7"
+    },
+    {
+      "path": "tools/FREDDY/impedance_gui.py",
+      "bytes": 2756,
+      "sha256": "c1d0a61818d669d35b9d5ce934f426d0ebc8cbfa93f2c68a02b59443b3c96a30"
+    },
+    {
+      "path": "tools/FREDDY/Launch_FREDDY_GUI.bat",
+      "bytes": 2328,
+      "sha256": "0a5304e8cd9ba11c7a2a82e01ca7e377a90f72d7c9074783c79fdd793d01e449"
+    },
+    {
+      "path": "tools/FREDDY/materials/validation/nist_bam_pdms/manifest.json",
+      "bytes": 2070,
+      "sha256": "51dcdad118c8fa0fe8b8ca85d60daf966936e141b14e4be906200a1aded57ea5"
+    },
+    {
+      "path": "tools/FREDDY/materials/validation/nist_bam_pdms/README.md",
+      "bytes": 3524,
+      "sha256": "2a1b6aaa1143594cf0e99afd2441f3d0550223cf9907633630a8607cd9043372"
+    },
+    {
+      "path": "tools/FREDDY/materials/validation/nist_bam_pdms/source/README.txt",
+      "bytes": 7829,
+      "sha256": "19467fd7cb303ecf1f5cb702be162705c391418305fba18286b27ff8fac1a319"
+    },
+    {
+      "path": "tools/FREDDY/materials/validation/README.md",
+      "bytes": 1281,
+      "sha256": "f22b897b9c1e2372b1497f08526076dba12e3528cc4325243608691fd8d9639b"
+    },
+    {
+      "path": "tools/FREDDY/README.md",
+      "bytes": 26661,
+      "sha256": "8f837858d32ef01784a4bfabe1c7b72d4b05d69d5e632f70293a0666ee329280"
+    },
+    {
+      "path": "tools/FREDDY/requirements.txt",
+      "bytes": 53,
+      "sha256": "c5341858202755d5de26d24320da6f5e4b2c96436d0d35267c4920bac32d1a4a"
+    },
+    {
+      "path": "tools/FREDDY/tests/__init__.py",
+      "bytes": 32,
+      "sha256": "0d04716b897b0848f7bb0c1ef28a7343f3f7b1e6f744b4357e4a00be1a1522da"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_analysis_results.py",
+      "bytes": 15291,
+      "sha256": "210a0c59fb66fc48ff109679c4ffd4d80bba30d40eccad040fb58166048858ed"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_ghost_coating.py",
+      "bytes": 2806,
+      "sha256": "c805c2de455ddae4a810e3e6272ac23efd996ccbc7f15da250766db84f4755b0"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_guide_and_sweep_efficiency.py",
+      "bytes": 12578,
+      "sha256": "e4d592dc55a80cf50d33bfff8e93ad23a29ad9139f53620fd93c6e9d0c25589b"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_ibc_batch.py",
+      "bytes": 12676,
+      "sha256": "a77eff11743255a2e201ef8724c06e436ae94c8f33572d8a3e6af86ec72610e8"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_inverse_grid.py",
+      "bytes": 2051,
+      "sha256": "3611f7b7daa9064c282a9f8c7bdcada0ac7695648d2c7dd240b75510975bb325"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_inverse_performance.py",
+      "bytes": 3458,
+      "sha256": "7c0382d0edae0ebbb4f872b0e6748c10624d9a901b36f334040b1b69144ef084"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_inverse_requirement_constant_layers.py",
+      "bytes": 16341,
+      "sha256": "616123081719ce1ea1dfb19938d832cc874a77a203d1996fb1575f466c49ee65"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_inverse_results.py",
+      "bytes": 9812,
+      "sha256": "001cabba9c1ccf5810ce99c146b993fce982e8b6ae09ca86da6dfe7fa732cfb1"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_inverse_workflow.py",
+      "bytes": 13253,
+      "sha256": "84ee422175ce99b4e911fead1013b901d241fff4b7d0d2d7a1be1c1cd156ac57"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_material_explorer.py",
+      "bytes": 12890,
+      "sha256": "6f8a4f52ec60284ff487cd8f99a3bf3b11794498cc9b2b905b7190838babbb44"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_material_validation.py",
+      "bytes": 2934,
+      "sha256": "b6b0b032624bd08f1f1b816599faf1133162df41e9d3f722211fa809d5bbf488"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_physics_and_io.py",
+      "bytes": 17320,
+      "sha256": "4456c2bf10c7058a9bd637c16d7d1cfba227c033f2f7c654fff3aca9020d74ac"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_project_portability.py",
+      "bytes": 14068,
+      "sha256": "50de955c5f60a7e51c23a3be1e8c4e78d86fbe2b82cadf09c90693a70f922a5c"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_release_readiness.py",
+      "bytes": 8181,
+      "sha256": "7ee1f140d8bb303612aceaf546a9120a451ef5a877c478206b98a209e5a3b36d"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_search_checkpoint.py",
+      "bytes": 5314,
+      "sha256": "5163c51bff7e44045979a3b22988e24960968fb7aa3707906d82e8fd7a25e284"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_table_conversion.py",
+      "bytes": 7689,
+      "sha256": "98bea9f0cd0152176943716554b6df4ef31b2adb54ac97a259e478c6bea4b68b"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_tolerance_analysis.py",
+      "bytes": 17543,
+      "sha256": "32e752648c645bf2fcfb6bcb8287dae4f36bc8744ba31da87f476bedd210754d"
+    },
+    {
+      "path": "tools/FREDDY/tests/test_ui_regressions.py",
+      "bytes": 29197,
+      "sha256": "e7c075ddbec56b6098f361c71779c85942d8e688f55ed7187f96224cc942fd84"
+    },
+    {
+      "path": "tools/FREDDY/tools/__init__.py",
+      "bytes": 73,
+      "sha256": "0fb1383bf9a15be17ebceaea52a1a752e71a95ae1de8a64c501bbc80e755c83e"
+    },
+    {
+      "path": "tools/FREDDY/tools/convert_nist_bam_pdms.py",
+      "bytes": 12551,
+      "sha256": "1671aa134d36504e968d64a1d5a0ef1fca018ddee3765361368df98161ec0c14"
+    },
+    {
+      "path": "tools/FREDDY/tools/validate_material_mix.py",
+      "bytes": 8574,
+      "sha256": "7ce289bb29c0534a694ac52a3d1f4e761c9cdd4886caa3ac3616b3b2f2df3231"
+    },
+    {
+      "path": "tools/GHOST/BACKEND.md",
+      "bytes": 5305,
+      "sha256": "49966fab4cdcdbd03dcabf498ac560f3d8c62eb43235f8fe149c8cec6d847264"
+    },
+    {
+      "path": "tools/GHOST/BOR_CONVENTIONS.md",
+      "bytes": 9999,
+      "sha256": "e946c6a691fefe7bfef06500897e0a4adcab09aecf6556ae6650fc10d18ec270"
+    },
+    {
+      "path": "tools/GHOST/BOR_PERFORMANCE.md",
+      "bytes": 6976,
+      "sha256": "34b79153023fc906f8c949eb3e74f31c42b0e4f73b470383b4b4f6714d83328a"
+    },
+    {
+      "path": "tools/GHOST/COMPACT_2D_MEMORY.md",
+      "bytes": 5233,
+      "sha256": "28e4175a8aac8321a17a3bec7c8c4a6aea94743821a2e0517854ebdc9f5b5016"
+    },
+    {
+      "path": "tools/GHOST/COMPRESSED_CPU.md",
+      "bytes": 8332,
+      "sha256": "dd82132fc45a7114e9e9fca6f9c4ab8f65f1fb5312dcf649b72b175b0cc30cfe"
+    },
+    {
+      "path": "tools/GHOST/COMPUTATION_RAM_UPDATES.md",
+      "bytes": 10202,
+      "sha256": "a0ea1680420e40c0324d0c63f03934e5f22d8ad526dd6f1a19e74a013e0ded60"
+    },
+    {
+      "path": "tools/GHOST/DATA_TOOLS.md",
+      "bytes": 6726,
+      "sha256": "ee07dfe61f7fe6569d008f1fa0977d973ce0fa4c23a87499b7d3a1c180f16fde"
+    },
+    {
+      "path": "tools/GHOST/DEAD_FILES.md",
+      "bytes": 1550,
+      "sha256": "2dcae05bfd0c724178aaad138571a695052623fd0c629c5569ce2288814dbac6"
+    },
+    {
+      "path": "tools/GHOST/EFFICIENCY_IMPLEMENTATION.md",
+      "bytes": 12756,
+      "sha256": "4a61fe50c457b13aad1c09b95461be7be782f640434361c69cbacc05b7c7dd5d"
+    },
+    {
+      "path": "tools/GHOST/EXPERIMENTAL_CPU.md",
+      "bytes": 6577,
+      "sha256": "a1223677416fc4fe3277cf34f2b73742e2a13648611969b128f9f4973766c7b6"
+    },
+    {
+      "path": "tools/GHOST/FEATURE_VALIDATION_GUIDE.md",
+      "bytes": 36246,
+      "sha256": "4bd46b52d4a518031db78b8081e8b48b9a80e8ee8574d94eced9f8d19f7922aa"
+    },
+    {
+      "path": "tools/GHOST/GEOMETRY_INPUT_CHEATSHEET.md",
+      "bytes": 24087,
+      "sha256": "cd55f868d631d6b596d26d8bca87b192e0328bc4b4bfb0bdca126d17079532aa"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/__init__.py",
+      "bytes": 32,
+      "sha256": "a63a2b10f750a27edc747a33d4262831806e7a06aad6a19061f59a1e08eee51a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/components.py",
+      "bytes": 7972,
+      "sha256": "aaab8b3bcbb2782abc1f0fb3ee40895a38f11d7625b48fe3b3c497ed3dd7c4d6"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/contracts.py",
+      "bytes": 23686,
+      "sha256": "32b5d966f0d133d80df9e55858e41485d6209885df8b8dba8ae19fb04e0953fc"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/create_feature_manifest.py",
+      "bytes": 35906,
+      "sha256": "79d0e3bcd039ba93b266714bce1b89d48516d4976b2b6b5bc3d4870b5725937a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/fields.py",
+      "bytes": 246241,
+      "sha256": "2bea3da5e46e1ab71be4d58e91f90a0f1859d7591505f9af912e1c88b899c178"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/inspector.py",
+      "bytes": 6825,
+      "sha256": "38d71631fb13532203c33630df0daa1bde265bea7e78cd8f2f28d7c274ed8975"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/line_expansion.py",
+      "bytes": 43074,
+      "sha256": "86fd9641618348cacffab83bac27a6fe76d990801c2c3f9cc4840a8e5bef1ec6"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/place_features.py",
+      "bytes": 13613,
+      "sha256": "8b9ec7ed8f4b0ff947629b1c729a41990e357f4c36ae2f84c9985bf7b0dd6615"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/preparation.py",
+      "bytes": 14211,
+      "sha256": "8a0efbfc056e0834ca8718c181b27a0eccdf4e59d852330b7f6f0fc98b8b75f6"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/workflow.py",
+      "bytes": 186113,
+      "sha256": "53e4f0419e69967772bdb9de161d39c716578ab7ea5033993551cc225d67560a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/assembly/workload.py",
+      "bytes": 6618,
+      "sha256": "6ef879bed407978b93a57fc57237b993f48e4ff7e8d6c23b925ffe0301258277"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/__init__.py",
+      "bytes": 27,
+      "sha256": "327bf3d20cdf3b6e8e763b29c871aa7a5c121cb86dae574f1ef682fad9d009fc"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/cache.py",
+      "bytes": 1776,
+      "sha256": "b8fb06c208c3d1b1573a4541ce367850f1468860ed1ed2bc2cf30ed1d232ec04"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/dispatch.py",
+      "bytes": 99141,
+      "sha256": "27529e213a7e49464dccca03cd4db5f3be6a6935ba043117841074a6e51fb618"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/factor.py",
+      "bytes": 6670,
+      "sha256": "4094eee749bcc842066555ab5d2fac01f46001361314548773b8e86de3e6e2ac"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/kernels.py",
+      "bytes": 29321,
+      "sha256": "9f8f4136053c1036099260430fee9faec69619125aade0a9cb82045d29cb149d"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/native/__init__.py",
+      "bytes": 52,
+      "sha256": "5aef1746d7c3c8afbec12283506304f2c817885bb4bdb4a8f4070b4800a15590"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/native/bor_stream_kernel.c",
+      "bytes": 7097,
+      "sha256": "caf15f0652d97b8216d7cd048739a7569324bdaa77ec04edc8194e15c806b8a7"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/native/build_kernel.py",
+      "bytes": 6181,
+      "sha256": "0540228a170ac5832fcc40ab6984d48d90c7cb4dac0e43c12daa2cfa529a9bbb"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/options.py",
+      "bytes": 4864,
+      "sha256": "1aedbb0e823cf2a78debdca751114f5a363ade82bd8646225eb1d52b9b7b4507"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/solver.py",
+      "bytes": 196670,
+      "sha256": "607534d993d190155b33dcbd99b3bbd185368955ab288ea074d7da0b6df7dd89"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/streaming.py",
+      "bytes": 44224,
+      "sha256": "ba279d8f2888868645c04485ea2d809a24f792b1bb063eef912ae86a5fd3d452"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/bor/tiled.py",
+      "bytes": 15422,
+      "sha256": "d8e25ffacea64e3d29b29a9cbd396f4dc2625a7fadd4b6219e34eef588d0a6a7"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/__init__.py",
+      "bytes": 34,
+      "sha256": "f83caa4e030d60445c1acfc3be79623adef1691c25fce1e1b67441b0f54b70e8"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/coefficients.py",
+      "bytes": 8876,
+      "sha256": "fca3865304f35b199950a108e533bcccddbc80d9e530a238967127a891f75790"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/factor.py",
+      "bytes": 8433,
+      "sha256": "e045663d82f55b480fbcd0347de9f34de6c609431548bf4708b75f6522ff012c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/inverse.py",
+      "bytes": 10854,
+      "sha256": "5fe268747b1c826387fade87d010136212e0089af2fa65641db61dcd96b957ed"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/memory.py",
+      "bytes": 10023,
+      "sha256": "0ffeddb111c553f096ff3e27a05a435a39c9eef8ddaa14ce6e635f2075bcfbe2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/operator.py",
+      "bytes": 10626,
+      "sha256": "bbc0777d2dda807fd8371e070adc1537a47c472ae0a7e3c77187ffdaf1ae73bf"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/polarization_cache.py",
+      "bytes": 4650,
+      "sha256": "4ea8c47367eae77ecf0672e52dc701938d6f4cfb0c19220c67b61aaf5d0d5b08"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/regional_coefficients.py",
+      "bytes": 9368,
+      "sha256": "02d28254b4e0e66a49333d594e768d7c7bbbeb8ca91f66ec95494cf3b0f423f3"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/compressed/runtime.py",
+      "bytes": 5700,
+      "sha256": "dc4bf0dec2581ff1371ae5c7a02541412946fdf6577495f9e921cdeeb6d02d76"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/__init__.py",
+      "bytes": 414,
+      "sha256": "568ef4d88d04632265fef4cb4b642dd4ae0fcf5a8b677d451bd99a102bf47582"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/__main__.py",
+      "bytes": 57,
+      "sha256": "ecc77a301390d36bd5f8fbdaefc930fc25314570a618f51bff4ffe2d0b5dcc5a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/cli.py",
+      "bytes": 2298,
+      "sha256": "d4377400717243e2e19ec39c01ce4f317ac33f7c527f52afca9aafecb9e18796"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/errors.py",
+      "bytes": 133,
+      "sha256": "04e228e5aa42375e8cef18ee4e8fd753729fec13f8eaaedf4537667e890517a8"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/grim_bridge.py",
+      "bytes": 10286,
+      "sha256": "f66961b22a3be30a8a39a6b56e70dcdacfd4d9df57741a30040dd9ee7992205e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/grim_native.py",
+      "bytes": 40711,
+      "sha256": "c533273b9d8fbf702725b6aa2411cc426a95ae6ac510df8acaee123b00fe3e90"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/gui.py",
+      "bytes": 13458,
+      "sha256": "ba3c7c82656479fc02a4a8230980e9a5ea6541a9fdd11f7b4381847e375ed123"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/naming.py",
+      "bytes": 1597,
+      "sha256": "7c578211913819d340f626ea0ade0e487e59b19a25abcb4416e7916c30e3eeda"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/operations.py",
+      "bytes": 13535,
+      "sha256": "3b5a0043a9e9c289b0808cf5a2efd8c30ff90b01bb94bf2aba914695a655d243"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/registry.py",
+      "bytes": 4192,
+      "sha256": "f1753d65b1d6a279e7744a30373490b27d3d94adae811229d16c085e8196e337"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/cem_tools/solver_pairing.py",
+      "bytes": 2194,
+      "sha256": "39a6f004e47bef65447ff39895c2e3d1c36964ade8ff98c13754d77999b5271a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/pyproject.toml",
+      "bytes": 99,
+      "sha256": "4c0134f744dfc898f6df21925d1f0b93384767ac53b8dd3ac04c7c81e92798b0"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/requirements.txt",
+      "bytes": 241,
+      "sha256": "6414060ccb814389a3d57a6af4aced8b8b46cd83b080a6c61ec1760b28d53d99"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/run_cli.py",
+      "bytes": 188,
+      "sha256": "f650124b774dbaaca21091bf4f2cf094d4b771fc1640bd7eb9807734c82e3b99"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/run_gui.py",
+      "bytes": 90,
+      "sha256": "92eadc5a7a7e063b132484f9be82dc2be8bee1f3de4ee1fa3eb7a9f27a5f7996"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/setup.py",
+      "bytes": 879,
+      "sha256": "8d15dc03323bb3d407e62854bb1ddcd988c5c83c1a473650bc5453a08822566a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/tests/test_grim_bridge_csv.py",
+      "bytes": 6512,
+      "sha256": "48fb93c1f26b89e474e6137b1e3f5af27a5d99a5a6631b6b04c8332c56ba787d"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/tests/test_gui_progress.py",
+      "bytes": 4754,
+      "sha256": "fe0bec8c3983905cfe5a4ab14cffb7c34a8e832d36be5e2d4fe1dc2675dfa161"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/data_tools/tests/test_operations.py",
+      "bytes": 31256,
+      "sha256": "44d31c23987b2493e2ce3596a8409378b9d20b8811343d1e35a91acfb7ddbb03"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/__init__.py",
+      "bytes": 33,
+      "sha256": "e35bd164c795a25b7fc93fa78a74546381bbff7faa6a922b50f2cb22fc799dc2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/_dataclasses.py",
+      "bytes": 46683,
+      "sha256": "eb1ff01fac739696c9c763fab4ecc6a651e7bc2cdf171858672318ef73fdb69c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/cpu.py",
+      "bytes": 7455,
+      "sha256": "bf4f459636955e0289436e2586d7452332e4d1cbad4dc58c561b2cb89e048c23"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/DATACLASSES_LICENSE.txt",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/metrics.py",
+      "bytes": 6381,
+      "sha256": "ab259ed3eb5152f4b5014d16f3ef1579cb04212f9cf913f95739680348aff5cd"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/options.py",
+      "bytes": 11821,
+      "sha256": "d19cda18497845fb4b35c8f576aaefc76f2a0944e0a06c0187f02a793193e651"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/paths.py",
+      "bytes": 397,
+      "sha256": "ccc212300bcb45832e6e5aec639cf7b203690c24bfde7a72f4599333020b72eb"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/provenance.py",
+      "bytes": 27852,
+      "sha256": "e3f20e5fa2b5ffd3383f8cc4d1be6c6959fcb158dea1b6426c0144039f73760c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/runtime.py",
+      "bytes": 1777,
+      "sha256": "13885972d8fe194e530ab24dd42807655c361b4c88059884a8e3be4005b1fac2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/execution/selection.py",
+      "bytes": 4632,
+      "sha256": "2835e53af1d9b79c3ec97e58ab7616c939ee78b6ddc0508af15751121a47cf04"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/__init__.py",
+      "bytes": 32,
+      "sha256": "56024a8b66299917a2390699a708923897f58940a73c9128de4bf2c84ff14924"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/frames.py",
+      "bytes": 893,
+      "sha256": "b1d70c195e574b9ccdee418a334803573ba5967e93c75262b285d289f9c4067c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/guidance.py",
+      "bytes": 2216,
+      "sha256": "b48377d27682b8da03a97da2c0014fe410a91ef1843a1ad8442697323e3d481e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/io.py",
+      "bytes": 35012,
+      "sha256": "034dadc960ef33048a37dfb2c1effad0dc4328b5ad5c4533a48f0d3f90f80b6a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/materials.py",
+      "bytes": 5947,
+      "sha256": "380e92ae8ed9ea56fc8e02685fffd38c99da11e3f28f864070d65632674d497a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/occlusion.py",
+      "bytes": 26506,
+      "sha256": "c0b08432f3a58599b129212a950659444169e19d4015cb9c3e0487a8b4d34981"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/quality.py",
+      "bytes": 11436,
+      "sha256": "d3baf9513567eb0fdd1cff1b0b58d4acda9a7e6dff05382d9042049b4825b2f9"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/rotate_geo.py",
+      "bytes": 8340,
+      "sha256": "ea89ec5da32f49a517e7cdc502160caaf2f5e0b6837d667cc73a8067c71d1ec5"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/spatial.py",
+      "bytes": 1762,
+      "sha256": "280dfe065d017c24c29ea4ec9e1945d17b106fa80c0b065422c9753abae68752"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/surface.py",
+      "bytes": 13874,
+      "sha256": "6ab94fb95fd62ef401750e24d7fd7e9e2b9c368f20df94cbb934e6469aa2a752"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/geometry/validation.py",
+      "bytes": 17301,
+      "sha256": "cc16d5828da3a5df763b5b8c7df1c32daa1d9ec30b8a5bcbc7939822bd4bf0b4"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/hpc/__init__.py",
+      "bytes": 27,
+      "sha256": "e5401eb2b8a30cc8c9bb3c848196465a61626f608d875bbb26bac2d4d95a45ec"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/hpc/bundle.py",
+      "bytes": 72520,
+      "sha256": "1593bfbeefeae5671279097a22f751f8f1ea6a43796eace086c50ff1fe5b8bba"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/hpc/check_environment.py",
+      "bytes": 3237,
+      "sha256": "79b5a01b075cc415707bedeb9cbc6fdce204f7f7387810f580506c8d31e9940a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/hpc/common.py",
+      "bytes": 38878,
+      "sha256": "2fb06238593fb4508ae2521d5fd0d7438b9894edaef6f4653fa2313de56c11f4"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/hpc/scheduler.py",
+      "bytes": 60869,
+      "sha256": "ce6d8397ea51876ba3e966c51123d390030d04ff3f466f6261af5bd9781fac4e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/io/__init__.py",
+      "bytes": 26,
+      "sha256": "0a5f86d675c011c8bf6fe674cc4405cc36b72b5fe0d9c8731db621a09b2ab7a3"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/io/grim.py",
+      "bytes": 42307,
+      "sha256": "3242183d50b37a7eae57f0efaeda2423063216f98332638c7e3b87c20fcb0f77"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/io/import_3d_reference.py",
+      "bytes": 5029,
+      "sha256": "3094351fca5b93583c54e9e24ab9675367a0dbc927887897afba024586224604"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/io/naming.py",
+      "bytes": 15725,
+      "sha256": "4df9e686a55651e79cb7cab0958cb121c7303ddec5f898ea837543b092391ec9"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/io/viewer_bridge.py",
+      "bytes": 10488,
+      "sha256": "0d9c1e4516bae00cc6b0c42f5d54e55e050ed2ec60fd4a461495e99ccc59deaf"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/linalg/__init__.py",
+      "bytes": 30,
+      "sha256": "e1b002c3e2c60f71f6fcf0213690473294ce32f74c99b0a263598cf39831bc81"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/linalg/dense.py",
+      "bytes": 11465,
+      "sha256": "e5ec4f726da3906b5d72282f382368d7aa6fb62ed7b6d58cc9ecec030ef8247e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/linalg/hierarchical.py",
+      "bytes": 11119,
+      "sha256": "8f5eeb549cb25a6cdfc40f362f62c77487dc94ee5cbc3affd2f54d9ef5cad04a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/linalg/refined_lu.py",
+      "bytes": 2767,
+      "sha256": "008485bfc42fd7cc1bb2f5d910e01fdd3f2c1efedac72dae0f31cc09930c19f2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/linalg/sweep.py",
+      "bytes": 11115,
+      "sha256": "9f86b0b425e1796d048937dc327ca6c85b01b48c65469187f037002fd3ea179b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/linalg/workspace.py",
+      "bytes": 1370,
+      "sha256": "27227b80e7d3f6ea40b2990d05887b6dc79795e45f0a6fc234f8938375526c2e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/run_gui.py",
+      "bytes": 441,
+      "sha256": "6ef02dcfee22dcc9c04de60c26a9d0948a24112ec764389e1acfe3b1f16af461"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/run_hpc_bor_monostatic.py",
+      "bytes": 55221,
+      "sha256": "8df060f805c5d579b87ad20ce090604db4a69cc862888e00c4e19dbad66ac144"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/run_hpc_monostatic.py",
+      "bytes": 56884,
+      "sha256": "2566cb2a6e56bb860cd6706b359147a3f1a524471ff05f0f05bbc859e6fa479b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/run_local_bor.py",
+      "bytes": 32439,
+      "sha256": "aed0c703205a6f52b0a0f989fb7a94e3484f57003274a5e5510b7204ee79a613"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/run_local_monostatic.py",
+      "bytes": 30877,
+      "sha256": "4069a5ac4e7e8fbc7b268185c582ff1c5170c8ff2a41a300b509b7074a6d2ffc"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/runs/__init__.py",
+      "bytes": 28,
+      "sha256": "8724bb65a37cfeb60bf39403008218864e473d6b0748c4c81c16887b6c13473a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/runs/bor_setup.py",
+      "bytes": 6438,
+      "sha256": "efb811e690b3b45ee8ed3e3783c17711710d93a52e1bbe4cc82a878b0198153a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/runs/config.py",
+      "bytes": 10999,
+      "sha256": "55c5df31b3f88cc53ac50b2635fcb3cfab1897ff5c9088dc9b9177b5bd7dfb63"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/runs/execution.py",
+      "bytes": 4106,
+      "sha256": "a36cd2b1e42042ac1dedadbfe7f830ebd8a05ac93cadaf270863cdd98f52c2c4"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/runs/inputs.py",
+      "bytes": 2402,
+      "sha256": "18d0d4a96bca0cd636ad1314266a22aca5375a2c694efc8d994b14b0765fa2e3"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/runs/quality.py",
+      "bytes": 18670,
+      "sha256": "df85bc7f8278924523fa78c3b77adffc25596676588e4876fae29c8bcea3233b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/runs/setup.py",
+      "bytes": 28098,
+      "sha256": "e32466b252675aca28ebf61982eb5450780be6d43d3747c2296f4c18866ff973"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/benchmark_assembly.py",
+      "bytes": 5835,
+      "sha256": "9a41d24338e534bf6757e1001e8ee9351f6cb09d5e2547a40467e38af50fde63"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/benchmark_execution.py",
+      "bytes": 10745,
+      "sha256": "7b2ecafe13435a56757718303bb5f2c0a4bb963d39f907290a61dc71e48410fe"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/benchmark_refined_lu.py",
+      "bytes": 2796,
+      "sha256": "31aaed7fb3be24db9011c2822dd5a9856f5af8e5d4f5d7902d8156382717632a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/diagnose_provenance.py",
+      "bytes": 4646,
+      "sha256": "79f993d14916be5bb3e7cd0dcb7ce120369cc11daf4f71f81f41986ea37c401b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/measure_far_quadrature.py",
+      "bytes": 4213,
+      "sha256": "43b9d3032bb357d78fdf389a7626bb22704559558dca0f0da4358df3aa3dcf87"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_2d_capability_acceptance.py",
+      "bytes": 22948,
+      "sha256": "3bb9b908669b9e77d329ca9c75d2b2bb1687d2abdab9cbe780c1dd4be597d05f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_2d_co_polarized.py",
+      "bytes": 23481,
+      "sha256": "095240925bc06c82636579d5d945e780d36d2aeb86b3411c55bed1186b5f69f9"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_assembly_audit_updates.py",
+      "bytes": 14069,
+      "sha256": "886af7008b9f4b884a9f25f382b97695dd408a43342eb860586dd1e40aa20283"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_assembly_equivalence.py",
+      "bytes": 10965,
+      "sha256": "3e86a6c043e6a3703db9ca63ef16a39625b4bbe07bca61a86d46e3be28534170"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_assembly_inspector.py",
+      "bytes": 9302,
+      "sha256": "ac01b5b869f1cbb69f4f3558e1d2ca9b91e681c8f8c08b053ff7656f1eb2278e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_assembly_workload.py",
+      "bytes": 2992,
+      "sha256": "8748a40c6b3cf7bf1c2808405a8028e32bb8fbe18eafa761ce048380915ac382"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_audit_release_safety.py",
+      "bytes": 5058,
+      "sha256": "6e99bd81cd785922c02ee85f106c8365ead8a5d4d34e275e6d620f48b5986e65"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_backend_safety.py",
+      "bytes": 8314,
+      "sha256": "a79fdda4460a1bb146cb33275049b903c888df1f202e16e4e19052b2f35622f9"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_capability_acceptance.py",
+      "bytes": 5240,
+      "sha256": "169d40dc1b69df7a226e617cc69b2d0a9afc16e7870179eb6e4855e1e59423af"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_execution.py",
+      "bytes": 8678,
+      "sha256": "11611d92c360f116a2a0d64ef9bc1989560ce214908fc5afa2a1ea859bc0a33e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_execution_config.py",
+      "bytes": 4611,
+      "sha256": "062f3c946400332c1d789b8967e026a8be0129e5e01f78aef3ce2461185da306"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_execution_gui.py",
+      "bytes": 1835,
+      "sha256": "8601f993290464f40f9a08e1cfe38c6a53a0247cfec82dd1d70d3e90c20b37f3"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_material_updates.py",
+      "bytes": 4001,
+      "sha256": "d6bca0a268cdb5a2a3facdbc922894945d3c8fd1c99a80deb4d66bf9fa62b13b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_physics_regression.py",
+      "bytes": 91479,
+      "sha256": "af70da4785928591b6e7c3a4d9fa2a55c80efc9c7e8050de11130191a54fc5c9"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_run_setup.py",
+      "bytes": 4137,
+      "sha256": "de8f27be0cca87e9aba0bc1b8b6b3026846163dfbc51ea7b256220c377687be4"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_bor_tile_cache.py",
+      "bytes": 4357,
+      "sha256": "077e2adff5bb29d6865f305d1fe40d6e536af9d2924e11556f278322433a18c2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_boundary_density_view.py",
+      "bytes": 5924,
+      "sha256": "4f4946fa0295c0bd6dc299e68db7cba982a7259ac70ec4c9e8e742858fc29727"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_compact_multi_region.py",
+      "bytes": 10895,
+      "sha256": "209be1956cb9b6d81f8bb8f9dafea8d5039275706c49725049510477c9ba5754"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_compressed_memory.py",
+      "bytes": 8165,
+      "sha256": "318061313134e4e719e5d33da1b8c472514bbced84d2dbaca48e36c4a689aaf2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_compressed_path.py",
+      "bytes": 16030,
+      "sha256": "5f5d9695339d61c69ae5a9f57a3578877c12a2a2fd0dd7857069d1e3788862d1"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_direct_solver_methods.py",
+      "bytes": 3601,
+      "sha256": "7788d32e39bdff16cf0b3c37b5742a87f317a5b5927d78a68e8fa82f03c24b0f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_driver_config.py",
+      "bytes": 4904,
+      "sha256": "c0a8c6ed140ff3a1b64a25ce5c42ad2c5c0cf693e8ff8912a4125f0b15b3a327"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_efficient_defaults.py",
+      "bytes": 4424,
+      "sha256": "1b9d4c9990571ec377fedb28f444526faf692b8747af8f0c482b2ad5d9bb2131"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_execution_benchmark.py",
+      "bytes": 1298,
+      "sha256": "c785f55a91a69aa4c73266f83b3efe81515bc077303d70970d8a4b8194ac23e2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_execution_options.py",
+      "bytes": 11443,
+      "sha256": "129c06b23bb6aed6c8bdb0774afdd1b2e2f8e7fbdd8c027367de1758b4aa703c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_experimental_cpu.py",
+      "bytes": 9418,
+      "sha256": "c0d144f5ed08d26ccf3402db9383d0ab340e990d9ffffab97ad99339d5590d87"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_experimental_gui.py",
+      "bytes": 6411,
+      "sha256": "d1a0ffbf703ce306c81bd5e523cc09b47856835b2edf7e858208ffcfc7b40afe"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_experimental_headless.py",
+      "bytes": 7475,
+      "sha256": "4a29888b54559ccc733317cc9814394e062bb20c22555deaf5be61cc6bd83f49"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_external_feature_case_harness.py",
+      "bytes": 9897,
+      "sha256": "1ebb02aff7eb674518f257db9712ac2840d7ba31f4849219c7c3473b1e472724"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_capacity.py",
+      "bytes": 8419,
+      "sha256": "9fe0938734a371bf1595412514cd967a501675db13ee17ab4e0f802ac900efe5"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_family_validation.py",
+      "bytes": 2742,
+      "sha256": "c3965064484d27e3c6a7a2d017a9c55f8ddaff62b2da84e73fa24880f26317c9"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_job_control.py",
+      "bytes": 36317,
+      "sha256": "a6c58739ecc6dec5f230669ee359c9d2d8868708d1280a2b9ef2537bf7da8046"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_manifest_cli.py",
+      "bytes": 19955,
+      "sha256": "7297e328496e6e3ab648bbfb5eab3d2c9a21269481220820b723c91d15538eaf"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_production_contracts.py",
+      "bytes": 35212,
+      "sha256": "9ad16e7226a343a474146f3c9a1e332f1e400571c09136258b9cb06fbca74c01"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_reconstruction_physics.py",
+      "bytes": 14431,
+      "sha256": "7f21c703131d57d1e43aacfb11c8c1ad0280b8eb36b6bfbc45e2fb8a64c5ff74"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_validation_cases.py",
+      "bytes": 8279,
+      "sha256": "294d3e9cc8fe39aae0b96ed92579df38632bc034401f55329f1a881c68c0b408"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_feature_workflow.py",
+      "bytes": 89158,
+      "sha256": "b5f6267f1296a01a456c16153fac01d64b95fdfe7906ba3b0f067fa93e9499c3"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_freddy_material_handoff.py",
+      "bytes": 24071,
+      "sha256": "b3d0928bd1f36f3d8115e42f19adeb861504bbe0939d04a6cd3ffb47cd061d75"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_galerkin_sweeps.py",
+      "bytes": 7301,
+      "sha256": "84f16040e8c694eba95eb3cb2757f875bafbf749c8a4f1dd463588c61a71b629"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_geometry_fixtures.py",
+      "bytes": 1228,
+      "sha256": "f1d7aa0fa584fa61fcb96192b29005135ef21f6fb17b7e8a97c5a02db05b6a57"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_geometry_material_transactions.py",
+      "bytes": 6278,
+      "sha256": "beb31be249c758daaa3da5bdd66af766e795618cee893eaf5f83ac1d1fb55583"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_gui_entrypoint.py",
+      "bytes": 24495,
+      "sha256": "e8ee3393024d82b967c06661c36eea744a20a13460082b363d9f9c22f59fd0fd"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_hpc_bundle.py",
+      "bytes": 45898,
+      "sha256": "8b3d78027e3b8cd3f3f2298d53d69966f98a5414665b6face278fc033ec1fbb4"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_hpc_runtime.py",
+      "bytes": 10864,
+      "sha256": "2ce36743c6db350c1e08e4294f23c3df39847981d67829631b1b5b245ba87031"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_hpc_scheduling.py",
+      "bytes": 51062,
+      "sha256": "8b4b24e8b9c041a5d182c88adcfe8fb9931bd5f6b4f09a4ddf76a1ced9513494"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_hpc_solver_options.py",
+      "bytes": 13641,
+      "sha256": "4cef80aa758df1b23842b66dceb5affe13ccfac3639e5d38032a53324d4a5338"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_hpc_submission_journal.py",
+      "bytes": 4263,
+      "sha256": "3e48875cce48aba0098a686bade38b73c0c178ba1ef434db5f5d11ba6c7f9536"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_line_expand_batching.py",
+      "bytes": 8084,
+      "sha256": "bb06cb2ae53281c3ff327c99055304b3bfcd5cbfad86ed88041f527d94df2191"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_line_feature_non_bor_physics.py",
+      "bytes": 31178,
+      "sha256": "9cc94f72cacef6b3e08618219e6adb53a36496d1ebc3a0ac57cead8240b625ff"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_line_feature_placement.py",
+      "bytes": 19258,
+      "sha256": "22b756bd7f8bfd0905c2c2711d66b9cbf58bd8559beeaa889b4b9b450e404ac3"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_line_shadow_caching.py",
+      "bytes": 12607,
+      "sha256": "7a0efad54801b45a2b950d57916f1f733d3f90ca7a27c868ce1bc64b0a640dec"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_local_drivers.py",
+      "bytes": 15487,
+      "sha256": "7bd17256cbddabf4f784b875c66985ef2ce2dc704c43e52015fd714372e77022"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_material_interoperability.py",
+      "bytes": 11433,
+      "sha256": "97e74004c5944f349b7a304ccb097f5f1e9e56c74c6b3cda4de0e3ceb7258eb1"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_memory_safety.py",
+      "bytes": 18871,
+      "sha256": "4f4c2074a91b6e2689f53517a578d887090233ec42cbc77070fae9a3072c3f44"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_mesh_quality.py",
+      "bytes": 5461,
+      "sha256": "7b52d6fc34a2b489d1ce1dbc2d3b671b287dcf9a4028cf551b363e2a5a3c3b98"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_metadata_interoperability.py",
+      "bytes": 11165,
+      "sha256": "1ce4d3534d970eea3802b443d9b8f5a22e99776364c3fc660cbb06dcb1f20917"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_non_bor_combined_features.py",
+      "bytes": 14564,
+      "sha256": "9cb724961128dba5d55363f6e3175fe611a095002bc60c1b014ca16c9bb674f4"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_occluder_acceleration.py",
+      "bytes": 8255,
+      "sha256": "d0eb9f5a32304d4b62ba8b16ccef40fc0badc9d2280b2e115b2e7c30407ce63f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_package_layout.py",
+      "bytes": 6079,
+      "sha256": "1cb9873beb4a67621f3323723bd1a52d164bd524141c0bb7b96d06b8c20ccab5"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_pec_stack_ibc.py",
+      "bytes": 3027,
+      "sha256": "b98a17aae72868b06145d4a59866d2477fb24b39c1908d6a3ecc2c9a2c8ee3b8"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_pipeline_gui.py",
+      "bytes": 6092,
+      "sha256": "858086a5143b9f120e71de417358d691720b92e96f18d4dd8c340cc9d4a87fe7"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_pipeline_performance.py",
+      "bytes": 14349,
+      "sha256": "9efd1c6ca479a975d8e66a8ee60749bbe623a4810e8063aba96160ab05da810f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_point_feature_placement.py",
+      "bytes": 7818,
+      "sha256": "9e37842a096fc788b61e774c9a6655d364e4b7b5db3b02a27f68831bd7dd9d9b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_point_scatter_physics.py",
+      "bytes": 25835,
+      "sha256": "427bc2b655838acda02131ae19f75e913caf45e96d44e88e063fa6e7590dcb99"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_point_shadow_packing.py",
+      "bytes": 10159,
+      "sha256": "ef66ccb28ea14b72da368d2baf67f7d65d901ddb214fc3da9b823200366d6c91"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_rcs_physics_regression.py",
+      "bytes": 37814,
+      "sha256": "93e19c3dbd5f519d51262bdb79f6ea6fac1a791c30bc14dac2cff5185c1a195f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_rotate_geo.py",
+      "bytes": 2402,
+      "sha256": "88deb4894d0ab0a7b3c8a1314a28bfd27662a6f9d9bba5732bb893fe7bc73093"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_sentri_assembly.py",
+      "bytes": 9987,
+      "sha256": "6dedd724933df189eb5e4898459a58df1806f9960489ca8a451b3adaf959971f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_audit_fixes.py",
+      "bytes": 11899,
+      "sha256": "07300d534dd16e7b9d53c98fa626ed4811e1beca356f88d531adecc7a808571b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_compression.py",
+      "bytes": 11769,
+      "sha256": "2b9f6218adacbb7211fa80f35122348e738827b6632a0c8e80a1757aedafdadb"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_efficiency.py",
+      "bytes": 12087,
+      "sha256": "5d4f7d2b0a266884886e26a0b21dd0986c52d54df0be3d53188d9cb68aeb0e17"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_equivalence.py",
+      "bytes": 5539,
+      "sha256": "7ffb73900c249e8b48b06e0d8bbab0416f2964a09f7e1bbde2f0a5022745d62d"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_improvements.py",
+      "bytes": 5317,
+      "sha256": "128b43c8ff65e287016565cb5acb41eb52330179c0c403ea6d68ae15d0f70113"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_matrix_pipeline.py",
+      "bytes": 9301,
+      "sha256": "ef04cd5150a36a3d92acd0b966bd64e60c05fdc6ff9fcd82ebe349ab39b77cdd"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_output_safety.py",
+      "bytes": 8606,
+      "sha256": "ab3fd1384656d279d0afe8e0422616a56a593ee4473d8759c160d0284000190b"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_solver_quality.py",
+      "bytes": 2469,
+      "sha256": "8bbca3d84d67cfb9a174b4b80ce1b25775c8331198c57106e4c68ac915f72438"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_source_is_ascii.py",
+      "bytes": 3136,
+      "sha256": "1ce2156e19d064bfd830545e61ed234545961aa98bc6e5b4453bfb7de9502e02"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_thin_sheet.py",
+      "bytes": 13433,
+      "sha256": "691864b9f72247ef433fefcd7ea721944f0bb09e910fadf8c9a552957278ea94"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_triaxial_ellipsoid_features.py",
+      "bytes": 35850,
+      "sha256": "09dd1ab1568bdc78b58c4e588b81ae58780491407714f34ba8160ce175bcf04c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/tests/test_wedge_wing_feature_assemblies.py",
+      "bytes": 19145,
+      "sha256": "3d3d432be901cab083da8989ced0df71f3d9162e2fda06847141d7580f25c26c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/__init__.py",
+      "bytes": 28,
+      "sha256": "1a62261ff87ec2f423401dca59d77eba3011e13bd60de0805bb4f16c7f850928"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/assembly/__init__.py",
+      "bytes": 32,
+      "sha256": "a63a2b10f750a27edc747a33d4262831806e7a06aad6a19061f59a1e08eee51a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/assembly/compact.py",
+      "bytes": 3283,
+      "sha256": "30de052cf7eebee76cfec401403674bb572b80b011770c8fb291fe4d6e55b2e0"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/assembly/geometry_plan.py",
+      "bytes": 1364,
+      "sha256": "c975bdfb954fa898e4e4810071fad7beebebd2c393b4d209c3a707d1ed0c0b99"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/assembly/kernels.py",
+      "bytes": 11837,
+      "sha256": "e3f8c140898815606c7cec2a92036ffac7d6298d02b1468c4fc2d9789f382902"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/assembly/mass.py",
+      "bytes": 1249,
+      "sha256": "5d4bcec6d7235098f44d05e76200b4b6f2260c1ad4f128b45c7a32f46e9a0802"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/assembly/scatter.py",
+      "bytes": 7390,
+      "sha256": "fba70ce84490724e97d36e51dad45318562aa7ba637fe2ea37dbbf297d60af79"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/assembly/session.py",
+      "bytes": 2291,
+      "sha256": "d61286d5cb08b62385603753061bee6904d721c1ca41a8ed801c7626e6e9a9c8"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/checkpoints.py",
+      "bytes": 10443,
+      "sha256": "5bca1a5466383170f75f643bc6a7e2949c2cb719127fe67ae15d2930baa1a76f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/constants.py",
+      "bytes": 797,
+      "sha256": "8c898cc3d08cb07b1ce8cb6b9eb26c7045791b824af51a9a3eb0ec9678b21086"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/fields.py",
+      "bytes": 4758,
+      "sha256": "95a288215256a5cf98f9543a71826cba52fb233bb777240bf4d44598944cdc16"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/formulations/__init__.py",
+      "bytes": 36,
+      "sha256": "4b8e3bf113e71a80aab3dc5f16b4db1511d855e83356673f14e6099b82c871ae"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/formulations/dielectric.py",
+      "bytes": 2659,
+      "sha256": "b92d5c96875f141b0897279ac87b5a6d6587367c69bea21ef826a454dfc33f97"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/formulations/regions.py",
+      "bytes": 21531,
+      "sha256": "3964bda71c1a5ede1621236b3a347dfa6b33105967f1dad1fdeb8ad705c4c06e"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/formulations/robin.py",
+      "bytes": 3350,
+      "sha256": "f8e7fe2c1dbd9ef7049e601221cd2b2af3d38d09b08b35862d5ff32c0b6295de"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/formulations/sheet.py",
+      "bytes": 1807,
+      "sha256": "f90c3fc0cda6116d7034fddcf767569da2d2fdafe15356e22a3f2e16c1cbd1bf"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/formulations/thin_layer.py",
+      "bytes": 12441,
+      "sha256": "19a6801f340ad384e0900d1297d9fac43d1aa2442bb1399671d0b9789b30f485"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/geometry.py",
+      "bytes": 76586,
+      "sha256": "e8cc8f404eb7a35b339fe394d040d83e37a62ebb201bea4838eec0f33eb63774"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/meshing.py",
+      "bytes": 2235,
+      "sha256": "3529fe1a1f984bfba56093b412c5bf38bd58d032d92f57e45fc270ef8875b16f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/operators.py",
+      "bytes": 110514,
+      "sha256": "05cf9c44299fa79737d1fd0aed000aaab4e43e08e0421132740a1fde1cda9e8f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/preparation.py",
+      "bytes": 3934,
+      "sha256": "d08644b0edaf6e31264c10051cbea1d881d4cff04107cc7936b6619876f0e9ad"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/solver.py",
+      "bytes": 173928,
+      "sha256": "19533cf0abf1b684dfa39cd141d08d34ca222f2692f0156d10250890c231c8df"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/twod/special.py",
+      "bytes": 8526,
+      "sha256": "2e93584dce28b7db3a471eb962e333bbf59c77d909fc12f511da438bf060b0aa"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/ui/__init__.py",
+      "bytes": 26,
+      "sha256": "05953d4662b089adbdd514f6a2f28efbdbb08110a8ef496f4fdb0898559e9b15"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/ui/app.py",
+      "bytes": 4934,
+      "sha256": "f28587bf661ea5c3c1b9c929ecd0a3b224251bc73bf6a173f52be6d620120008"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/ui/bor_options.py",
+      "bytes": 3037,
+      "sha256": "0de37a80c5b56aa0598e7645450741ea93bb88845e4e3cf671cda15b88e0cd96"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/ui/execution.py",
+      "bytes": 7853,
+      "sha256": "e292eb184f5d9d24ae6119f545caaf5364f954f374eb47e0f288bba2d59f5596"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/ui/geometry.py",
+      "bytes": 88467,
+      "sha256": "b1b7a2f6a638b4c3dd4a69a2b995978a0073bbb842589178149a216946c65a44"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/ui/solver.py",
+      "bytes": 103629,
+      "sha256": "636098910a8750703fcac7ebea9039226557eed507e596be57226a56959abeac"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/__init__.py",
+      "bytes": 34,
+      "sha256": "75bfd0e83368abce20af6b5a7fce9d6f83100ff0d320a776074a644055dbf560"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/cylinder.py",
+      "bytes": 14171,
+      "sha256": "ba2e1f5937f1d2710695d9c8ff69670d16eb44231911a82e9397905f4b3a72c5"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/feature_family.py",
+      "bytes": 7491,
+      "sha256": "b1b3c5fd803f384a83acf7c90b22ea64751698eab8360274b432ec1f6529c6e9"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/feature_family_studies/README.md",
+      "bytes": 2125,
+      "sha256": "b80e746ea7a9c8b59c94146c642b63ac8e1dbe076a4207716c7e1924d5a04777"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/feature_family_studies/study.template.json",
+      "bytes": 12992,
+      "sha256": "823466d5ac0dd68db070ac9b1567f3dfc453c5d93d277a7f091a85e5fc28cf33"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/gap_feature_isolation/generate_gap_geometry_study.py",
+      "bytes": 14050,
+      "sha256": "2594ce18a1d95bcf8347a3481fa6e6576adb7dc054e003950b6e0e5c3c2680da"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/gap_feature_isolation/README.md",
+      "bytes": 3056,
+      "sha256": "a28313113edeb2c6b9c97e48076741066b3f425fb126a5c0ec2bb2f3b914421c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/gap_feature_isolation/validate_gap_geometry_study.py",
+      "bytes": 4490,
+      "sha256": "dd1e62fb4cabe23507ab5a8d120552adbbc77503a1edc0a141e35808af424cb8"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/material_examples/README.md",
+      "bytes": 3393,
+      "sha256": "db5189dfe6e003745e54b134468f6ef7e589e60594a296399ae8aa638bd758f0"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_curved_feature_placement/README.md",
+      "bytes": 2218,
+      "sha256": "a1c705fd1487281e39fca07892cd887e3606075cd89d803724709f641b0b1f88"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/cases/swept_wing_panel/case_spec.json",
+      "bytes": 3847,
+      "sha256": "469197250b71c04085f30adb3ae68dfe1a0353b3a33718cd314192544fbef758"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/cases/swept_wing_panel/feature_case.template.json",
+      "bytes": 642,
+      "sha256": "d5b56c0ea3b88414aa07463256240859c3b14ffcd7f5f2f22ea7b3a579d243c3"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/cases/swept_wing_panel/README.md",
+      "bytes": 1568,
+      "sha256": "8899705b2ea44659d1d6900d05866b0a270d40bc35de40e3dd73c62cdd8aab73"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/cases/wedge_ramp/case_spec.json",
+      "bytes": 3968,
+      "sha256": "cec6ac320603bdf34fcf0256aeab2e79fa6113ada9fa759db704df791f5562d0"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/cases/wedge_ramp/feature_case.template.json",
+      "bytes": 644,
+      "sha256": "92ab9a094e27cfad1e8e9be3530653939660c058d94b04d5649f0b6896216369"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/cases/wedge_ramp/README.md",
+      "bytes": 1883,
+      "sha256": "4fe6e1b6a7c277effd0d30e614051030482c7a659c435b8e3c7b3e659b8435f1"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/external_case_plan.json",
+      "bytes": 30184,
+      "sha256": "c88fa4d24722354adebbef6600afa9a910668445becb8abd438468e9342f49bb"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/feature_cases.template.json",
+      "bytes": 1080,
+      "sha256": "524813e12e2d5cf1674dbf1f79dab5fb34a2b34100d7bf3c6213494c18ce2ded"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/prepare_external_cases.py",
+      "bytes": 21592,
+      "sha256": "03544c2f52850b676f9f1f8458c3ef5d1bdef2902305957a503105853cc9701d"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_feature_validation/README.md",
+      "bytes": 7500,
+      "sha256": "46fcbffa3e59df4d3b2c5ddb585e61eeff6b377b7397a9293f7a135c1a9c0368"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/non_bor_line_reconstruction/README.md",
+      "bytes": 9440,
+      "sha256": "a531b86d018052a4f4137842e2bc095eec3724cb3abc862e6961bc12a4f9871f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/pec_backed_ibc/example/planar_assessment.json",
+      "bytes": 4682,
+      "sha256": "5e7de71ded11325aa5fb27d9d76bf90e7ae6daa972972dcc442359ed50a5783f"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/pec_backed_ibc/generate_examples.py",
+      "bytes": 2531,
+      "sha256": "547340a30f74b62c9c12d1f3894693d37dbda20b491ad8c9804a11c19405d42c"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/pec_backed_ibc/README.md",
+      "bytes": 5935,
+      "sha256": "242edb56e717b1801ca05bbe27cd37fa68064a9600a749bc0c352477ccf0366d"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/reconstruction.py",
+      "bytes": 28260,
+      "sha256": "ac46fcae31aa5d65aa859ae2afbc1d35f1c9b63e00a3dc8fa571f545d4c40c48"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/ring_gap_reconstruction/README.md",
+      "bytes": 2471,
+      "sha256": "be1474a08121b29454b10caef0378df79715e383e5ac7a3905334360623de6f2"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/sphere.py",
+      "bytes": 14623,
+      "sha256": "8e4805cfd607103513790aa3bfdcae95bd7b9f1a1c0a610ac27ff6db6a4e805a"
+    },
+    {
+      "path": "tools/GHOST/ghost_backend/validation/thin_dielectric_sheet/README.md",
+      "bytes": 933,
+      "sha256": "16d5401d9a056bae52a70f2191cfa197b11c84beef8ed0fe60e4f20383323b93"
+    },
+    {
+      "path": "tools/GHOST/HPC.md",
+      "bytes": 50883,
+      "sha256": "d84568d6f6e9077a86e109f535ccf260c1e42ed93ff75a274b326822292a5013"
+    },
+    {
+      "path": "tools/GHOST/IMPORTS.md",
+      "bytes": 4068,
+      "sha256": "b5da2d6284a38898bc6e65faced9f0f8bdc69b0d8bd5f0180533e72aebcb3086"
+    },
+    {
+      "path": "tools/GHOST/Launch_GHOST_GUI.bat",
+      "bytes": 1988,
+      "sha256": "c3010eb1f60866a634372028ae6dab9979d9b4bdb1cc2a7e15537f39a34881bc"
+    },
+    {
+      "path": "tools/GHOST/MATERIAL_CSV_FORMAT.md",
+      "bytes": 2681,
+      "sha256": "cfa4d1d7c4f1d43d6312eedabc9eb19840a042f45f2007686b00abcdc2710617"
+    },
+    {
+      "path": "tools/GHOST/MATRIX_PIPELINE_UPDATES.md",
+      "bytes": 8104,
+      "sha256": "05de1ce124df4c46cf29afae1c8e6ecbe85f4253e364e525b2c0607b865b7fbc"
+    },
+    {
+      "path": "tools/GHOST/README.md",
+      "bytes": 13517,
+      "sha256": "e2bae028d3d25910f159d8ab73a40873529cb2d85cc116da182fe4105ed5ab7e"
+    },
+    {
+      "path": "tools/GHOST/RUN_PROFILES.md",
+      "bytes": 10525,
+      "sha256": "c8e533f5047dac804ef60b2ddae16e19b4107848e65f6c8379a05bb12d66fa6e"
+    },
+    {
+      "path": "tools/GHOST/SOLVER_AUDIT_UPDATES.md",
+      "bytes": 6716,
+      "sha256": "7af51eda19094558b72bdaad056a946644bc23cf82c32fef0807bcdab351d71e"
+    },
+    {
+      "path": "tools/GHOST/THIRD_PARTY.md",
+      "bytes": 788,
+      "sha256": "64c11f588bcee0602f7feacd7751bb449b0bf1044e0e6b2c7de25e4abdce4849"
+    },
+    {
+      "path": "tools/GHOST/TWOD_PIPELINE.md",
+      "bytes": 5964,
+      "sha256": "0f3fbd79a502be4bfab555be9597a75ac48b02829eba6023c0db81d4e65e2f15"
+    },
+    {
+      "path": "verify_project.py",
+      "bytes": 8610,
+      "sha256": "a6da8ec3f69b8e377b5320991078be561ac61669baabefa691c91982c0d659c8"
+    },
+    {
+      "path": "WORKFLOW_GUIDE.md",
+      "bytes": 22818,
+      "sha256": "7f0f5698eba815439226b98cadaf68a4b570399e0d6790ed4a2cdbe51d0ed7b4"
+    }
+  ]
+}

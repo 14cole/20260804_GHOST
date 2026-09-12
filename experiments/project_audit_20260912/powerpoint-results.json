@@ -1,0 +1,12 @@
+{
+  "output": "experiments/project_audit_20260912\\powerpoint-audit.pptx",
+  "bytes": 127704,
+  "slides": 1,
+  "zip_crc_error": null,
+  "size_emu": {
+    "cx": "12192000",
+    "cy": "6858000"
+  },
+  "reopened_slide_count": 1,
+  "status": "PASS"
+}

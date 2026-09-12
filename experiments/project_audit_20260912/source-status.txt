@@ -1,0 +1,220 @@
+ M ARCHITECTURE.md
+ M GRIM_Backend/docs/BACKEND.md
+ M GRIM_Backend/docs/README.md
+ M GRIM_Backend/execution/dataset_jobs.py
+ M GRIM_Backend/execution/diagnostics.py
+ M GRIM_Backend/io/loaders.py
+ M GRIM_Backend/isar/artifact.py
+ M GRIM_Backend/plotting/actions.py
+ M GRIM_Backend/plotting/models.py
+ M GRIM_Backend/plotting/modes/__init__.py
+ M GRIM_Backend/plotting/modes/isar_mode.py
+ M GRIM_Backend/plotting/modes/isar_render.py
+ D GRIM_Backend/runs/__init__.py
+ D GRIM_Backend/runs/remote.py
+ D GRIM_Backend/runs/workspace.py
+ M GRIM_Backend/scripting/api.py
+ M GRIM_Backend/scripting/plotting.py
+ M GRIM_Backend/scripting/recorder.py
+ M GRIM_Backend/tests/test_dataset_plot_style.py
+ M GRIM_Backend/tests/test_execution_profiles_ui.py
+ M GRIM_Backend/tests/test_gui_dataset_workflows.py
+ M GRIM_Backend/tests/test_gui_shell.py
+ D GRIM_Backend/tests/test_hpc_remote.py
+ D GRIM_Backend/tests/test_runs_workspace.py
+ M GRIM_Backend/tests/test_workflow_updates.py
+ M GRIM_Backend/ui/app.py
+ M GRIM_Backend/ui/dataset_actions.py
+ M GRIM_Backend/ui/dataset_dialogs.py
+ M GRIM_Backend/ui/theme.py
+ M README.md
+ M WORKFLOW_GUIDE.md
+ M tools/FREDDY/README.md
+ M tools/FREDDY/ibc/analysis_data.py
+ M tools/FREDDY/ibc/analysis_workflow.py
+ M tools/FREDDY/ibc/compute.py
+ M tools/FREDDY/ibc/design_search.py
+ M tools/FREDDY/ibc/inverse_results.py
+ M tools/FREDDY/ibc/inverse_workflow.py
+ M tools/FREDDY/ibc/io.py
+ M tools/FREDDY/ibc/project_state.py
+ M tools/FREDDY/ibc/search_checkpoint.py
+ M tools/FREDDY/ibc/sweep_results.py
+ M tools/FREDDY/ibc/ui.py
+ M tools/FREDDY/ibc/ui_dialogs.py
+ M tools/FREDDY/ibc/ui_options.py
+ M tools/FREDDY/tests/test_release_readiness.py
+ M tools/FREDDY/tests/test_ui_regressions.py
+ M tools/GHOST/COMPRESSED_CPU.md
+ M tools/GHOST/EXPERIMENTAL_CPU.md
+ M tools/GHOST/HPC.md
+ M tools/GHOST/MATERIAL_CSV_FORMAT.md
+ M tools/GHOST/README.md
+ M tools/GHOST/RUN_PROFILES.md
+ M tools/GHOST/ghost_backend/bor/dispatch.py
+ M tools/GHOST/ghost_backend/bor/solver.py
+ M tools/GHOST/ghost_backend/compressed/factor.py
+ M tools/GHOST/ghost_backend/compressed/memory.py
+ M tools/GHOST/ghost_backend/compressed/operator.py
+ M tools/GHOST/ghost_backend/execution/metrics.py
+ M tools/GHOST/ghost_backend/execution/options.py
+ M tools/GHOST/ghost_backend/geometry/guidance.py
+ M tools/GHOST/ghost_backend/hpc/bundle.py
+ M tools/GHOST/ghost_backend/hpc/scheduler.py
+ M tools/GHOST/ghost_backend/linalg/sweep.py
+ M tools/GHOST/ghost_backend/run_hpc_bor_monostatic.py
+ M tools/GHOST/ghost_backend/run_local_bor.py
+ M tools/GHOST/ghost_backend/runs/config.py
+ M tools/GHOST/ghost_backend/runs/quality.py
+ M tools/GHOST/ghost_backend/runs/setup.py
+ M tools/GHOST/ghost_backend/tests/test_experimental_headless.py
+ M tools/GHOST/ghost_backend/twod/geometry.py
+ M tools/GHOST/ghost_backend/twod/solver.py
+ M tools/GHOST/ghost_backend/ui/execution.py
+ M tools/GHOST/ghost_backend/ui/geometry.py
+ M tools/GHOST/ghost_backend/ui/solver.py
+?? GRIM_Backend/io/mapped_table.py
+?? GRIM_Backend/isar/comparison.py
+?? GRIM_Backend/isar/geometry.py
+?? GRIM_Backend/isar/interpolation.py
+?? GRIM_Backend/isar/operators.py
+?? GRIM_Backend/isar/quality.py
+?? GRIM_Backend/isar/recipes.py
+?? GRIM_Backend/plotting/modes/delta_map_mode.py
+?? GRIM_Backend/tests/test_bor_profiles_ui.py
+?? GRIM_Backend/tests/test_delta_map.py
+?? GRIM_Backend/tests/test_isar_improvements.py
+?? GRIM_Backend/tests/test_table_import.py
+?? GRIM_Backend/ui/delta_map_controls.py
+?? GRIM_Backend/ui/isar_controls.py
+?? GRIM_Backend/ui/isar_workflow.py
+?? GRIM_Backend/ui/table_import.py
+?? airfoil_rcs_20260910_142842.grim
+?? airfoil_rcs_20260910_165229.grim
+?? airfoil_rcs_20260911_112637.grim
+?? airfoil_rcs_20260911_131836.grim
+?? experiments/bor_performance_20260911/
+?? experiments/bor_workflow_20260911/
+?? experiments/cpu_allocation_20260912/
+?? experiments/dataset_operations_audit_20260912/
+?? experiments/dataset_operations_consolidation_20260912/
+?? experiments/delta_map_20260911/
+?? experiments/file_converter_20260912/
+?? experiments/freddy_inverse_constant_20260911/
+?? experiments/freddy_tolerance_20260911/
+?? experiments/freddy_workflow_20260911/
+?? experiments/galerkin_sweeps_20260912/
+?? experiments/ghost_backend_organization/documentation.py
+?? experiments/ghost_backend_organization/final_documentation.py
+?? experiments/ghost_backend_organization/reorganize.py
+?? experiments/ghost_backend_organization/source/
+?? experiments/ghost_certification_20260910/.gitignore
+?? experiments/ghost_certification_20260910/certification.diff
+?? experiments/ghost_efficient_defaults_20260911/update_defaults.py
+?? experiments/ghost_final_20260910/.gitignore
+?? experiments/ghost_final_20260910/final.diff
+?? experiments/ghost_folder_organization_20260911/FLAT_LAYOUT.md
+?? experiments/ghost_folder_organization_20260911/REPORT.md
+?? experiments/ghost_folder_organization_20260911/categories-initial-tests.log
+?? experiments/ghost_folder_organization_20260911/categorize_root.py
+?? experiments/ghost_folder_organization_20260911/check_flat_layout.py
+?? experiments/ghost_folder_organization_20260911/document_categories.py
+?? experiments/ghost_folder_organization_20260911/final-tests.log
+?? experiments/ghost_folder_organization_20260911/finish_categories.py
+?? experiments/ghost_folder_organization_20260911/finish_flat_paths.py
+?? experiments/ghost_folder_organization_20260911/finish_flattening.py
+?? experiments/ghost_folder_organization_20260911/finish_launch_paths.py
+?? experiments/ghost_folder_organization_20260911/flat-benchmark-smoke.json
+?? experiments/ghost_folder_organization_20260911/flat-ghost-tests.log
+?? experiments/ghost_folder_organization_20260911/flat-grim-tests.log
+?? experiments/ghost_folder_organization_20260911/flat-hpc-scheduling.log
+?? experiments/ghost_folder_organization_20260911/flat-initial-tests.log
+?? experiments/ghost_folder_organization_20260911/flat-layout-check.json
+?? experiments/ghost_folder_organization_20260911/flat-local-drivers.log
+?? experiments/ghost_folder_organization_20260911/flat-python36-tests.log
+?? experiments/ghost_folder_organization_20260911/flatten_backend.py
+?? experiments/ghost_folder_organization_20260911/ghost-tests.log
+?? experiments/ghost_folder_organization_20260911/grim-tests.log
+?? experiments/ghost_folder_organization_20260911/hpc-scheduling.log
+?? experiments/ghost_folder_organization_20260911/initial-tests.log
+?? experiments/ghost_folder_organization_20260911/local-drivers.log
+?? experiments/ghost_folder_organization_20260911/moves.json
+?? experiments/ghost_folder_organization_20260911/native-check/
+?? experiments/ghost_folder_organization_20260911/python36-tests.log
+?? experiments/ghost_folder_organization_20260911/update_paths.py
+?? experiments/ghost_geometry_presets_20260911/code-commit-message.txt
+?? experiments/ghost_geometry_presets_20260911/evidence-commit-message.txt
+?? experiments/ghost_geometry_presets_20260911/push-code-paths.nul
+?? experiments/ghost_geometry_presets_20260911/push-paths.nul
+?? experiments/ghost_hardening_20260910/.gitignore
+?? experiments/ghost_hardening_20260910/hardening.diff
+?? experiments/ghost_implementation_20260910/.gitignore
+?? experiments/ghost_implementation_20260910/implementation.diff
+?? experiments/ghost_methods_20260911/
+?? experiments/ghost_pipeline_20260911/
+?? experiments/ghost_ram_time_20260910/.gitignore
+?? experiments/ghost_ram_time_followup_20260910/.gitignore
+?? experiments/ghost_run_profiles_20260911/baseline_backend/
+?? experiments/ghost_run_profiles_20260911/fix_allocations.py
+?? experiments/ghost_run_profiles_20260911/integrate_drivers.py
+?? experiments/ghost_run_profiles_20260911/integrate_progress.py
+?? experiments/ghost_run_profiles_20260911/integrate_runtime.py
+?? experiments/ghost_run_profiles_20260911/integrate_ui.py
+?? experiments/ghost_run_profiles_20260911/threadpoolctl-2.2.0-py3-none-any.whl
+?? experiments/ghost_run_profiles_20260911/update_docs.py
+?? experiments/ghost_run_profiles_20260911/write_report.py
+?? experiments/grim_backend_organization/finish_organization.py
+?? experiments/grim_backend_organization/reorganize.py
+?? experiments/grim_backend_organization/source/
+?? experiments/grim_folder_organization_20260911/finish.py
+?? experiments/grim_folder_organization_20260911/ghost-import-check.log
+?? experiments/grim_folder_organization_20260911/ghost-tests-verbose.log
+?? experiments/grim_folder_organization_20260911/initial-tests.log
+?? experiments/grim_folder_organization_20260911/publish-commit-message.txt
+?? experiments/grim_folder_organization_20260911/publish-paths.nul
+?? experiments/grim_folder_organization_20260911/reorganize.py
+?? experiments/grim_folder_organization_20260911/traceback-control.log
+?? experiments/isar_audit_20260912/
+?? experiments/isar_implementation_20260912/
+?? experiments/runs_tab_removal_20260912/
+?? experiments/sliced_sphere_20260912/
+?? experiments/sliced_sphere_accuracy_20260912/
+?? experiments/sliced_sphere_materials_20260912/
+?? tools/FREDDY/ibc/converter_dialog.py
+?? tools/FREDDY/ibc/guide.py
+?? tools/FREDDY/ibc/table_conversion.py
+?? tools/FREDDY/ibc/tolerance_analysis.py
+?? tools/FREDDY/ibc/tolerance_config.py
+?? tools/FREDDY/ibc/tolerance_ui.py
+?? tools/FREDDY/tests/test_guide_and_sweep_efficiency.py
+?? tools/FREDDY/tests/test_inverse_requirement_constant_layers.py
+?? tools/FREDDY/tests/test_table_conversion.py
+?? tools/FREDDY/tests/test_tolerance_analysis.py
+?? tools/GHOST/BOR_PERFORMANCE.md
+?? tools/GHOST/TWOD_PIPELINE.md
+?? tools/GHOST/ghost_backend/bor/cache.py
+?? tools/GHOST/ghost_backend/bor/factor.py
+?? tools/GHOST/ghost_backend/bor/options.py
+?? tools/GHOST/ghost_backend/bor/tiled.py
+?? tools/GHOST/ghost_backend/execution/selection.py
+?? tools/GHOST/ghost_backend/geometry/spatial.py
+?? tools/GHOST/ghost_backend/geometry/validation.py
+?? tools/GHOST/ghost_backend/runs/bor_setup.py
+?? tools/GHOST/ghost_backend/tests/test_bor_execution.py
+?? tools/GHOST/ghost_backend/tests/test_bor_execution_config.py
+?? tools/GHOST/ghost_backend/tests/test_bor_execution_gui.py
+?? tools/GHOST/ghost_backend/tests/test_bor_run_setup.py
+?? tools/GHOST/ghost_backend/tests/test_bor_tile_cache.py
+?? tools/GHOST/ghost_backend/tests/test_galerkin_sweeps.py
+?? tools/GHOST/ghost_backend/tests/test_pipeline_gui.py
+?? tools/GHOST/ghost_backend/tests/test_pipeline_performance.py
+?? tools/GHOST/ghost_backend/twod/checkpoints.py
+?? tools/GHOST/ghost_backend/twod/meshing.py
+?? tools/GHOST/ghost_backend/twod/preparation.py
+?? tools/GHOST/ghost_backend/ui/bor_options.py
+?? tools/GHOST/ghost_backend/validation/gap_feature_isolation/generated/05.000GHz/OPN/C3p500lambda/gap_C3p500lambda_05.000GHz_OPN_rcs_20260830_162726.grim
+?? tools/GHOST/ghost_backend/validation/pec_backed_ibc/example/2d_outer_envelope_rcs_20260906_132102.grim
+?? tools/GHOST/ghost_backend/validation/pec_backed_ibc/example/2d_outer_envelope_rcs_20260906_132111.grim
+?? tools/GHOST/ghost_backend/validation/pec_backed_ibc/example/2d_outer_envelope_rcs_20260906_132145.grim
+?? tools/GHOST/ghost_backend/validation/pec_backed_ibc/example/2d_outer_envelope_rcs_20260906_132201.grim
+?? tools/GHOST/ghost_backend/validation/pec_backed_ibc/example/2d_outer_envelope_rcs_20260906_132232.grim

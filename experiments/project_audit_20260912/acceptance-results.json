@@ -1,0 +1,165 @@
+[
+  {
+    "name": "startup diagnostics",
+    "cwd": ".",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "-m",
+      "GRIM_Backend.execution.diagnostics"
+    ],
+    "returncode": 0,
+    "seconds": 0.58,
+    "log": "experiments/project_audit_20260912\\01-\\output.log"
+  },
+  {
+    "name": "source inventory checks",
+    "cwd": ".",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "verify_project.py",
+      "--inventory-only"
+    ],
+    "returncode": 0,
+    "seconds": 1.91,
+    "log": "experiments/project_audit_20260912\\02-\\output.log"
+  },
+  {
+    "name": "UTF-8 cleaner tests",
+    "cwd": ".",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "-W",
+      "error",
+      "-m",
+      "unittest",
+      "-v",
+      "test_clean_utf8.py"
+    ],
+    "returncode": 0,
+    "seconds": 0.3,
+    "log": "experiments/project_audit_20260912\\03-\\output.log"
+  },
+  {
+    "name": "offline wheelhouse tests",
+    "cwd": ".\\requirements",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      ".",
+      "-p",
+      "test*.py",
+      "-v"
+    ],
+    "returncode": 0,
+    "seconds": 0.23,
+    "log": "experiments/project_audit_20260912\\04-\\output.log"
+  },
+  {
+    "name": "GRIM tests",
+    "cwd": ".",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "GRIM_Backend/tests",
+      "-p",
+      "test*.py",
+      "-v"
+    ],
+    "returncode": 0,
+    "seconds": 80.81,
+    "log": "experiments/project_audit_20260912\\05-\\output.log"
+  },
+  {
+    "name": "GHOST tests",
+    "cwd": ".\\tools\\GHOST\\ghost_backend",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-p",
+      "test*.py",
+      "-v"
+    ],
+    "returncode": 1,
+    "seconds": 1059.72,
+    "log": "experiments/project_audit_20260912\\06-\\output.log"
+  },
+  {
+    "name": "GHOST CEM tools tests",
+    "cwd": ".\\tools\\GHOST\\ghost_backend\\data_tools",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-p",
+      "test*.py",
+      "-v"
+    ],
+    "returncode": 0,
+    "seconds": 1.75,
+    "log": "experiments/project_audit_20260912\\07-\\output.log"
+  },
+  {
+    "name": "GHOST HPC scheduling integration",
+    "cwd": ".\\tools\\GHOST\\ghost_backend",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "tests/test_hpc_scheduling.py"
+    ],
+    "returncode": 0,
+    "seconds": 8.75,
+    "log": "experiments/project_audit_20260912\\08-\\output.log"
+  },
+  {
+    "name": "GHOST local-driver integration",
+    "cwd": ".\\tools\\GHOST\\ghost_backend",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "tests/test_local_drivers.py"
+    ],
+    "returncode": 0,
+    "seconds": 37.78,
+    "log": "experiments/project_audit_20260912\\09-\\output.log"
+  },
+  {
+    "name": "GHOST ASCII-transfer compatibility",
+    "cwd": ".\\tools\\GHOST\\ghost_backend",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "tests/test_source_is_ascii.py"
+    ],
+    "returncode": 0,
+    "seconds": 0.09,
+    "log": "experiments/project_audit_20260912\\10-\\output.log"
+  },
+  {
+    "name": "FREDDY tests",
+    "cwd": ".\\tools\\FREDDY",
+    "command": [
+      ".\\.venv\\Scripts\\python.exe",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-p",
+      "test*.py",
+      "-v"
+    ],
+    "returncode": 0,
+    "seconds": 46.14,
+    "log": "experiments/project_audit_20260912\\11-\\output.log"
+  }
+]
